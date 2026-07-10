@@ -9,17 +9,46 @@
 //! so `tm` keeps re-attaching to the wrong/stale one. #2001/#2004 (zombie
 //! reconcile) and #2148 (non-destructive resume) are single-record and do not
 //! cover this.
+//!
+//! **Grouping caveat (post-review, #2306):** `source_id` is derived from the
+//! git remote and is per-REPOSITORY
+//! ([`super::adopt::derive_source_id_for_record`]), not per-workspace — every
+//! concurrent worktree session of one repo shares the same `source_id`. A
+//! naive "keep only the newest per group" policy would therefore collapse
+//! *legitimate concurrent sessions*, and worse: an in-project worktree record
+//! is `workspace_owned = false` BY DESIGN, yet `decommission` still runs
+//! `git worktree remove --force` (+ branch delete) for such a path via
+//! [`super::decommission::is_session_worktree`] — so a naive policy would
+//! destroy real, possibly-uncommitted work. See the eligibility rule below,
+//! which is the actual fix for that danger.
+//!
 //! What: groups non-`Decommissioned` records by `source_id` (fallback: resolved
-//! `workspace_path`); for a group of >1 records in which NO member has a live
-//! tmux session, keeps the best (resolved `workspace_path` beats `/unknown`;
-//! tie-break most-recent `last_activity_at`, then `created_at`) and
-//! decommissions the rest via the existing safe path (adopted `/unknown`
-//! records are `workspace_owned = false`, so no disk removal happens). A group
-//! with ANY live tmux member is left untouched — the live one is authoritative.
-//! Test: `plan_dedup_*` and `reconcile_dedup_*` in `dedup_tests.rs`.
+//! `workspace_path`). Within a quiesced group (no member has a live tmux
+//! session — see the live-group guard), a record is only ever a dedup
+//! **loser** when it is unresolved-or-dead: [`is_resolved_existing`] is
+//! `false` for it (no `workspace_path`, the `/unknown` sentinel, or a path
+//! that no longer exists on disk). A record with a resolved, still-existing
+//! `workspace_path` is NEVER a loser — regardless of group size or recency —
+//! because such records are the concurrent-session case the naive policy got
+//! wrong. Consequently:
+//! - a group with 2+ resolved-existing members collapses nothing among them;
+//!   only its unresolved/dead members (if any) are decommissioned, and only
+//!   because a resolved-existing (or live) member supersedes them;
+//! - a group with ZERO resolved-existing members (e.g. `/unknown`-only or
+//!   all-dead) keeps the most-recently-active/created member and
+//!   decommissions the rest — there is nothing on disk to lose in that case.
+//!
+//! An unresolved/dead loser is additionally rechecked against the SAME
+//! [`is_resolved_existing`] predicate immediately before decommission runs
+//! (belt-and-suspenders against a TOCTOU race); a loser that fails the
+//! recheck is skipped with a `warn!`, never decommissioned.
+//!
+//! Test: `plan_dedup_*`, `is_resolved_existing_*`, and `reconcile_dedup_*` in
+//! `dedup_tests.rs`.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use tracing::{info, warn};
 
@@ -31,14 +60,19 @@ impl SessionManager {
     ///
     /// Why: see the module docs — quiesced projects with a canonical record AND
     /// a stale `/unknown` adopted record must converge on the canonical one so
-    /// resume/re-attach stops targeting the dead record.
-    /// What: re-derives the live managed-tmux name set, reads all records, plans
-    /// the losers via [`plan_dedup`], removes any planned loser from `to_resume`
-    /// (never auto-resume a record about to be decommissioned), then
-    /// decommissions each loser through the standard `decommission` path (safe:
-    /// `/unknown` losers are `workspace_owned = false` → no disk mutation).
-    /// Decommission failures are logged, not fatal. Returns the ids selected for
-    /// decommission.
+    /// resume/re-attach stops targeting the dead record, WITHOUT ever touching
+    /// a resolved, still-existing workspace (the review-fixed danger: naively
+    /// collapsing by `source_id` alone would destroy legitimate concurrent
+    /// worktree sessions of one repo).
+    /// What: re-derives the live managed-tmux name set, reads all records,
+    /// plans the losers via [`plan_dedup`] (which already excludes every
+    /// resolved-existing record categorically), logs the full plan at `info`
+    /// level, removes any planned loser from `to_resume` (never auto-resume a
+    /// record about to be decommissioned), then for each loser: re-fetches it
+    /// and reruns [`is_resolved_existing`] as a belt-and-suspenders recheck
+    /// (skips + `warn!`s if the path has reappeared since planning) before
+    /// decommissioning through the standard `decommission` path. Decommission
+    /// failures are logged, not fatal. Returns the ids actually decommissioned.
     /// Test: `reconcile_dedup_collapses_stopped_duplicates` and siblings.
     pub(crate) async fn dedup_stale_duplicates(
         &self,
@@ -56,19 +90,54 @@ impl SessionManager {
         if losers.is_empty() {
             return Ok(losers);
         }
+
+        info!(
+            count = losers.len(),
+            ids = ?losers.iter().map(ManagedSessionId::to_string).collect::<Vec<_>>(),
+            "dedup: plan computed stale duplicate(s) to decommission (#2306)"
+        );
+
         // Never auto-resume a record we are about to decommission.
         to_resume.retain(|id| !losers.contains(id));
+
+        let mut decommissioned = Vec::new();
         for id in &losers {
-            match self.decommission(id).await {
-                Ok((rec, _removed)) => info!(
+            // Belt-and-suspenders (#2306 review fix): re-fetch and rerun the
+            // EXACT safety predicate used during planning immediately before
+            // acting, guarding a TOCTOU race between the plan snapshot above
+            // and this decommission call. A loser is only ever planned when
+            // unresolved/dead; if its workspace_path now resolves to an
+            // existing directory, refuse to decommission rather than risk
+            // deleting live work.
+            let current = match self.get(id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(id = %id, "dedup: loser vanished before decommission: {e}");
+                    continue;
+                }
+            };
+            if is_resolved_existing(&current) {
+                warn!(
                     id = %id,
-                    name = %rec.tmux_name,
-                    "dedup: decommissioned stale duplicate session record (#2306)"
-                ),
+                    workspace = ?current.workspace_path,
+                    "dedup: belt-and-suspenders skip — loser's workspace_path now \
+                     resolves to an existing directory; refusing to decommission (#2306)"
+                );
+                continue;
+            }
+            match self.decommission(id).await {
+                Ok((rec, _removed)) => {
+                    info!(
+                        id = %id,
+                        name = %rec.tmux_name,
+                        "dedup: decommissioned stale duplicate session record (#2306)"
+                    );
+                    decommissioned.push(*id);
+                }
                 Err(e) => warn!(id = %id, "dedup: decommission of stale duplicate failed: {e}"),
             }
         }
-        Ok(losers)
+        Ok(decommissioned)
     }
 }
 
@@ -77,12 +146,15 @@ impl SessionManager {
 /// Why: two records for the SAME project must land in the same group so a
 /// quiesced duplicate can be collapsed; a record with neither a `source_id`
 /// nor a `workspace_path` (a bare `/unknown` with no provenance) is not safely
-/// attributable to any project and is therefore left alone.
+/// attributable to any project and is therefore left alone. NOTE: `source_id`
+/// is per-repository, not per-workspace (see module docs) — the safety
+/// boundary against over-grouping is [`is_resolved_existing`] at selection
+/// time, not this key.
 /// What: prefers `source_id`; falls back to the `workspace_path` string. The
 /// key is namespaced (`src:` / `ws:`) so a source id can never collide with a
 /// path.
 /// Test: covered indirectly by `plan_dedup_distinct_source_ids_untouched` and
-/// `plan_dedup_unknown_only_group`.
+/// `plan_dedup_unknown_only_group_keeps_most_recent`.
 fn group_key(record: &SessionRecord) -> Option<String> {
     if let Some(sid) = &record.source_id {
         return Some(format!("src:{sid}"));
@@ -93,33 +165,61 @@ fn group_key(record: &SessionRecord) -> Option<String> {
         .map(|ws| format!("ws:{}", ws.display()))
 }
 
-/// Order two records so the greater one is the preferred survivor.
+/// True when `record.workspace_path` is a resolved, real, currently-existing
+/// directory on disk.
 ///
-/// Why: within a quiesced group the survivor must be the most authoritative
-/// record — a resolved on-disk workspace over a `/unknown` stub, then the most
-/// recently active/created.
-/// What: ranks by `workspace_path.is_some()` (resolved beats `/unknown`), then
-/// `last_activity_at` (`None` sorts earliest), then `created_at`.
-/// Test: `plan_dedup_prefers_resolved_over_unknown`,
-/// `plan_dedup_unknown_only_group`.
-fn survivor_pref(a: &SessionRecord, b: &SessionRecord) -> Ordering {
-    a.workspace_path
-        .is_some()
-        .cmp(&b.workspace_path.is_some())
-        .then(a.last_activity_at.cmp(&b.last_activity_at))
+/// Why (#2306 review fix): this is THE safety boundary for dedup. A record
+/// that passes this check represents a legitimate on-disk workspace — which
+/// may be one of several concurrent sessions of the SAME repo, since
+/// `source_id` groups by repository, not by workspace. Such a record must
+/// never be treated as a stale duplicate, no matter the group size or its
+/// recency relative to siblings — an in-project worktree record is
+/// `workspace_owned = false` by design, so the `workspace_owned` flag alone
+/// cannot distinguish "safe to decommission" from "real work that would be
+/// `git worktree remove --force`'d". Only a record that FAILS this check (no
+/// `workspace_path`, the literal `/unknown` sentinel, or a path that no
+/// longer exists — e.g. already removed by other means) is eligible to be a
+/// dedup loser.
+/// What: `true` iff `workspace_path` is `Some(p)`, `p != Path::new("/unknown")`,
+/// and `p.exists()`.
+/// Test: `is_resolved_existing_true_for_real_dir`,
+/// `is_resolved_existing_false_for_missing_dir`,
+/// `is_resolved_existing_false_for_none_and_unknown_sentinel`.
+pub(crate) fn is_resolved_existing(record: &SessionRecord) -> bool {
+    match &record.workspace_path {
+        Some(p) => p.as_path() != Path::new("/unknown") && p.exists(),
+        None => false,
+    }
+}
+
+/// Order two records by recency only (greater = more recently active/created).
+///
+/// Why: used ONLY to break a tie among unresolved/dead candidates in a group
+/// with zero resolved-existing members — there is nothing on disk to lose in
+/// that case, so "most recently touched" is a reasonable survivor heuristic.
+/// What: ranks by `last_activity_at` (`None` sorts earliest), then
+/// `created_at`.
+/// Test: `plan_dedup_unknown_only_group_keeps_most_recent`.
+fn by_recency(a: &SessionRecord, b: &SessionRecord) -> Ordering {
+    a.last_activity_at
+        .cmp(&b.last_activity_at)
         .then(a.created_at.cmp(&b.created_at))
 }
 
 /// Plan which records to decommission to dedup stale duplicates (#2306).
 ///
-/// Why: the decision must be a pure function of the current record set and the
-/// live-tmux name set so it is trivially unit-testable without a real store or
-/// tmux (the #1790 no-real-tmux guard).
-/// What: groups non-`Decommissioned` records via [`group_key`]; for each group
-/// of size >1 that has NO live-tmux member, selects the best survivor via
-/// [`survivor_pref`] and returns every OTHER member's id as a loser. Groups of
-/// size 1, ungroupable records, and any group with a live-tmux member yield no
-/// losers.
+/// Why: the decision must be a pure function of the current record set, disk
+/// state (via [`is_resolved_existing`]'s `exists()` check), and the live-tmux
+/// name set so it is trivially unit-testable without a real store or tmux
+/// driver (the #1790 no-real-tmux guard).
+/// What: groups non-`Decommissioned` records via [`group_key`]; skips any
+/// group of size <2 or with a live-tmux member. For the remaining (quiesced,
+/// size>1) groups, partitions members into resolved-existing vs.
+/// unresolved/dead via [`is_resolved_existing`]. If ANY member is
+/// resolved-existing, every unresolved/dead member is a loser (the
+/// resolved-existing members are NEVER touched, even if there are several).
+/// If NONE are resolved-existing, the most-recent member (by [`by_recency`])
+/// survives and every other member is a loser.
 /// Test: the `plan_dedup_*` tests in `dedup_tests.rs`.
 pub(crate) fn plan_dedup(
     records: &[SessionRecord],
@@ -145,13 +245,32 @@ pub(crate) fn plan_dedup(
         if members.iter().any(|r| live_names.contains(&r.tmux_name)) {
             continue;
         }
-        let Some(survivor) = members.iter().copied().max_by(|a, b| survivor_pref(a, b)) else {
-            continue;
-        };
-        for record in members {
-            if record.id != survivor.id {
-                losers.push(record.id);
+
+        // Safety partition (#2306 review fix): a resolved-existing member can
+        // NEVER be a loser. Only unresolved/dead members are candidates.
+        let (resolved_existing, candidates): (Vec<&SessionRecord>, Vec<&SessionRecord>) = members
+            .iter()
+            .copied()
+            .partition(|r| is_resolved_existing(r));
+
+        if resolved_existing.is_empty() {
+            // Nothing in this group is resolved-existing (an /unknown-only or
+            // all-dead group): nothing on disk to lose. Keep the most
+            // recently active/created candidate, decommission the rest.
+            if let Some(survivor) = candidates.iter().copied().max_by(|a, b| by_recency(a, b)) {
+                losers.extend(
+                    candidates
+                        .iter()
+                        .filter(|r| r.id != survivor.id)
+                        .map(|r| r.id),
+                );
             }
+        } else {
+            // At least one resolved-existing (or live-checked-clean) member
+            // supersedes every unresolved/dead candidate. The
+            // resolved-existing members themselves are left untouched — even
+            // if there are 2+ of them (legitimate concurrent sessions).
+            losers.extend(candidates.iter().map(|r| r.id));
         }
     }
     losers
