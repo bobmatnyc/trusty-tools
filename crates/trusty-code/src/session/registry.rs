@@ -98,6 +98,13 @@ struct SessionEntry {
     /// ends, regardless of outcome, so the NEXT run continues from exactly
     /// where this one left off.
     pm_transcript: Option<Transcript>,
+    /// (#2345) The session's durable turn-recorder sink — `None` until the
+    /// session's first `task.run` lazily constructs it via
+    /// [`SessionRegistry::memory_sink_for`] (the project directory, needed to
+    /// derive the palace id, is only known once a run starts). Built once and
+    /// reused for the life of the session (see `memory_sink` module docs for
+    /// why its background drain task must outlive any single run).
+    memory_sink: Option<Arc<super::memory_sink::TurnMemorySink>>,
 }
 
 /// #2056: bookkeeping for one in-flight background task execution.
@@ -189,6 +196,7 @@ impl SessionRegistry {
                     usage: TokenUsage::default(),
                     cost_usd: None,
                     pm_transcript: None,
+                    memory_sink: None,
                 },
             );
         }
@@ -890,6 +898,11 @@ fn spawn_forwarder(session_id: String, notify: NotifySender, cancel_rx: oneshot:
 /// exactly the same way as if they lived here.
 #[path = "registry_events.rs"]
 mod events;
+
+/// #2345 turn-recorder sink lazy-init/lookup, split out into its own file for
+/// the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_memory_sink.rs"]
+mod memory_sink_ext;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]
