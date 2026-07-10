@@ -13,6 +13,7 @@
 //! Test: each submodule carries its own unit-test section; an end-to-end render
 //! lives in `crates/trusty-review/tests/report_e2e.rs`.
 
+pub mod benchmark;
 pub mod error;
 pub mod fill;
 pub mod git_info;
@@ -27,6 +28,10 @@ pub mod template;
 
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
+pub use benchmark::{
+    BenchmarkReport, BenchmarkStatus, CorpusSnapshot, LoadedCorpus, MetricPlacement,
+    RepositoryBenchmark, build_benchmark_report, corpus_dir, load_corpus, write_snapshot,
+};
 pub use error::{ManifestError, ReportError, Result};
 pub use fill::{HONESTY_MARKER, Scope, render};
 pub use git_info::{GitInfo, gather_git_info};

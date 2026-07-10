@@ -52,6 +52,11 @@ pub struct ReportSection {
     /// Optional analyst name recorded in the report metadata section.
     #[serde(default)]
     pub analyst: Option<String>,
+    /// Optional benchmark corpus directory (M3).  Precedence: `--corpus` CLI flag
+    /// wins over this; this wins over the per-user XDG default.  A relative path
+    /// is resolved against the manifest directory.
+    #[serde(default)]
+    pub corpus: Option<String>,
 }
 
 /// One validated repository entry mapping to a single per-application block.

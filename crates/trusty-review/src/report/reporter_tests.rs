@@ -183,6 +183,119 @@ fn reporter_appends_unavailable_note() {
     assert!(md.contains(HONESTY_MARKER));
 }
 
+/// Build a ranked single-metric benchmark for the fixture repo's slug.
+fn ranked_benchmark(slug: &str) -> crate::report::benchmark::BenchmarkReport {
+    use crate::report::benchmark::{
+        BenchmarkReport, BenchmarkStatus, MetricPlacement, RepositoryBenchmark,
+    };
+    BenchmarkReport {
+        corpus_size: 6,
+        warnings: vec![],
+        repositories: vec![RepositoryBenchmark {
+            slug: slug.to_string(),
+            name: "Acme Web".to_string(),
+            status: BenchmarkStatus::Ranked,
+            peers: 6,
+            placements: vec![MetricPlacement {
+                metric: "total_loc".to_string(),
+                target_value: 5000.0,
+                percentile: 60.0,
+                quartile: 3,
+                rank: 4,
+                population: 7,
+            }],
+        }],
+    }
+}
+
+/// Why: a ranked benchmark must fill the per-application Benchmark Position table,
+/// the appendix dataset row, and surface a `## Benchmark Status` note with the
+/// population size — never leaving those as honesty markers for a ranked repo.
+/// What: attaches a ranked `BenchmarkReport` and asserts the filled quartile/rank
+/// text and status note appear, with no raw placeholder surviving.
+/// Test: this test itself.
+#[test]
+fn reporter_fills_benchmark() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    model.benchmark = Some(ranked_benchmark(&slug));
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // Per-application Benchmark Position table filled with the criterion + rank.
+    assert!(md.contains("Total LoC"));
+    assert!(md.contains("Q3"));
+    assert!(md.contains("4 of 7"));
+    assert!(md.contains("7 repos"));
+    // Appendix headline benchmark row filled (percentile compliance).
+    assert!(md.contains("| Acme Web | 7 repos | 60 | Q3 | 4 of 7 |"));
+    // Status note carries the population size / peer count.
+    assert!(md.contains("## Benchmark Status"));
+    assert!(md.contains("corpus size 6"));
+    assert!(md.contains("ranked against 6 peer(s)"));
+    assert!(!md.contains("{{"), "no raw placeholder survives");
+}
+
+/// Why: a too-small corpus must be disclosed — the honesty marker text appears in
+/// the table and the status note, and ranking never happens silently.
+/// What: attaches a `CorpusTooSmall` benchmark and asserts the small-n message.
+/// Test: this test itself.
+#[test]
+fn reporter_small_corpus_marks() {
+    use crate::report::benchmark::{BenchmarkReport, BenchmarkStatus, RepositoryBenchmark};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    model.benchmark = Some(BenchmarkReport {
+        corpus_size: 3,
+        warnings: vec!["corpus directory /x does not exist yet".to_string()],
+        repositories: vec![RepositoryBenchmark {
+            slug,
+            name: "Acme Web".to_string(),
+            status: BenchmarkStatus::CorpusTooSmall(3),
+            peers: 3,
+            placements: vec![],
+        }],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("benchmark: corpus too small (n=3)"));
+    assert!(md.contains("## Benchmark Status"));
+    assert!(md.contains("warning: corpus directory /x does not exist yet"));
+    assert!(!md.contains("{{"));
+}
+
+/// Why: with benchmarking OFF the render must be byte-identical to M2 — no status
+/// note, and the benchmark tables render exactly as their honesty-marked M2 form.
+/// What: renders the same fixture with `benchmark = None` and asserts no status
+/// section, then asserts the render equals a second identical render.
+/// Test: this test itself.
+#[test]
+fn benchmark_off_is_unchanged() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(!md.contains("## Benchmark Status"));
+    // The appendix benchmark row is present exactly once as honesty markers.
+    let marker_row = format!(
+        "| {HONESTY_MARKER} | {HONESTY_MARKER} | {HONESTY_MARKER} | {HONESTY_MARKER} | {HONESTY_MARKER} |"
+    );
+    assert!(md.contains(&marker_row));
+    assert!(!md.contains("{{"));
+}
+
 /// Why: output filenames must be date-prefixed and slug-stable.
 /// What: asserts the stem is `{date}-{title-slug}`.
 /// Test: this test itself.

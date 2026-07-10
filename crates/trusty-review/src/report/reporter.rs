@@ -52,6 +52,7 @@ impl Reporter {
         let scope = build_scope(model);
         let mut out = render(template, &scope);
         append_synthesis_note(&mut out, model);
+        append_benchmark_note(&mut out, model);
         out
     }
 
@@ -143,9 +144,22 @@ fn build_scope(model: &ReportModel) -> Scope {
         root.set("applications_list", apps.join(", "));
     }
 
-    // One per_application block repetition per repository.
+    // One per_application block repetition per repository.  When benchmarking is
+    // active, the matching per-repo placement is threaded into the scope so its
+    // Benchmark Position table fills; without it the table stays honesty-marked.
     for repo in &model.repositories {
-        root.push_block("per_application", per_application_scope(repo));
+        let bench = model
+            .benchmark
+            .as_ref()
+            .and_then(|b| b.repositories.iter().find(|r| r.slug == repo.slug));
+        root.push_block("per_application", per_application_scope(repo, bench));
+    }
+
+    // M3: fill the graph-appendix benchmark dataset (one headline row per ranked
+    // application).  Absent benchmarking leaves the block to render once empty,
+    // byte-identical to the M2 honesty-marked output.
+    if let Some(bench) = &model.benchmark {
+        inject_benchmark_dataset(&mut root, model, bench);
     }
 
     // M2: inject verified LLM synthesis into the narrative placeholders/blocks.
@@ -271,10 +285,15 @@ fn append_synthesis_note(out: &mut String, model: &ReportModel) {
 /// the per-application placeholders; git fields are also emitted so a custom
 /// template can surface provenance, while the bundled templates carry it in JSON.
 /// What: sets app identity, tech stack / LoC / counts from metrics (when
-/// present), and git branch/SHA/remote/dirty scalars; leaves scoring/health
-/// factors unset (M1 has no scoring) so they render as honesty markers.
-/// Test: `reporter_tests.rs::render_contains_expected`.
-fn per_application_scope(repo: &RepositoryReport) -> Scope {
+/// present), git branch/SHA/remote/dirty scalars, and — when `bench` is supplied
+/// — one `bench_row` block per comparable-metric placement (or a single small-n
+/// honesty row).  Leaves scoring/health factors unset (M1 has no scoring) so they
+/// render as honesty markers.
+/// Test: `reporter_tests.rs::{render_contains_expected, reporter_fills_benchmark}`.
+fn per_application_scope(
+    repo: &RepositoryReport,
+    bench: Option<&super::benchmark::RepositoryBenchmark>,
+) -> Scope {
     let mut scope = Scope::new();
     scope.set("app_name", repo.name.clone());
     scope.set("app_slug", repo.slug.clone());
@@ -307,7 +326,130 @@ fn per_application_scope(repo: &RepositoryReport) -> Scope {
         );
     }
 
+    if let Some(rb) = bench {
+        push_bench_rows(&mut scope, rb);
+    }
+
     scope
+}
+
+/// Push the per-application `bench_row` blocks for one repository's placement.
+///
+/// Why: the Benchmark Position table is a repeatable row block; a ranked repo
+/// contributes one row per comparable metric, a held-back repo contributes a
+/// single explicit small-n honesty row so a reader is never left to infer that
+/// ranking silently did not happen.
+/// What: for `Ranked`, one row per placement (criterion, percentile compliance,
+/// quartile, `rank of n`, and the population size as the peer set); for
+/// `CorpusTooSmall`, one row whose criterion carries the small-n marker.
+/// Test: `reporter_tests.rs::{reporter_fills_benchmark, reporter_small_corpus_marks}`.
+fn push_bench_rows(scope: &mut Scope, rb: &super::benchmark::RepositoryBenchmark) {
+    use super::benchmark::{BenchmarkStatus, metric_label};
+    match &rb.status {
+        BenchmarkStatus::CorpusTooSmall(peers) => {
+            let mut row = Scope::new();
+            row.set(
+                "bench_criterion",
+                format!("benchmark: corpus too small (n={peers})"),
+            );
+            scope.push_block("bench_row", row);
+        }
+        BenchmarkStatus::Ranked => {
+            for p in &rb.placements {
+                let mut row = Scope::new();
+                row.set("bench_criterion", metric_label(&p.metric));
+                row.set("bench_compliance", format!("{:.0}th pct", p.percentile));
+                row.set("bench_quartile", format!("Q{}", p.quartile));
+                row.set("bench_rank", format!("{} of {}", p.rank, p.population));
+                row.set("bench_peer_set", format!("{} repos", p.population));
+                scope.push_block("bench_row", row);
+            }
+        }
+    }
+}
+
+/// Fill the graph-appendix `benchmark_position` dataset — one row per ranked app.
+///
+/// Why: the mandated dataset appendix expects one benchmark row per application;
+/// a single headline placement (Total LoC) keys that row, while the full
+/// per-metric breakdown lives in each application's Benchmark Position table.
+/// What: for each ranked repository with a Total-LoC placement, pushes a root
+/// `benchmark_position` child carrying both the generic (`peer_set`,
+/// `compliance_pct`, `quartile`, `rank`) and CAST (`tqi_*`) placeholder aliases,
+/// so either bundled template fills from the same data.  Held-back / metric-less
+/// repos are skipped (the block renders once empty → honesty markers).
+/// Test: `reporter_tests.rs::reporter_fills_benchmark`.
+fn inject_benchmark_dataset(
+    root: &mut Scope,
+    model: &ReportModel,
+    bench: &super::benchmark::BenchmarkReport,
+) {
+    use super::benchmark::BenchmarkStatus;
+    for repo in &model.repositories {
+        let Some(rb) = bench.repositories.iter().find(|r| r.slug == repo.slug) else {
+            continue;
+        };
+        if !matches!(rb.status, BenchmarkStatus::Ranked) {
+            continue;
+        }
+        let Some(p) = rb.placements.iter().find(|p| p.metric == "total_loc") else {
+            continue;
+        };
+        let mut row = Scope::new();
+        row.set("app_name", repo.name.clone());
+        row.set("peer_set", format!("{} repos", p.population));
+        row.set("compliance_pct", format!("{:.0}", p.percentile));
+        row.set("quartile", format!("Q{}", p.quartile));
+        row.set("rank", format!("{} of {}", p.rank, p.population));
+        // CAST template aliases (same headline placement).
+        row.set("tqi_comp", format!("{:.0}", p.percentile));
+        row.set("tqi_q", format!("Q{}", p.quartile));
+        row.set("tqi_rank", p.rank.to_string());
+        row.set("tqi_rank_total", p.population.to_string());
+        root.push_block("benchmark_position", row);
+    }
+}
+
+/// Append the visible `benchmark:` status note to the rendered markdown.
+///
+/// Why: like the synthesis note, a reader must see the benchmark provenance —
+/// the corpus size, how many peers each app ranked against, any small-n gating,
+/// and any corpus load warnings — so placement is never mistaken for absolute
+/// truth and small/absent corpora are disclosed.
+/// What: when `model.benchmark` is present, appends a `## Benchmark Status`
+/// section listing the corpus size, one line per repository (ranked-against-N or
+/// the small-n marker), and one line per load warning.  Absent benchmarking
+/// appends nothing (output byte-identical to M2).
+/// Test: `reporter_tests.rs::{reporter_fills_benchmark, reporter_small_corpus_marks}`.
+fn append_benchmark_note(out: &mut String, model: &ReportModel) {
+    use super::benchmark::BenchmarkStatus;
+    let Some(bench) = &model.benchmark else {
+        return;
+    };
+    out.push_str("\n\n## Benchmark Status\n\n");
+    out.push_str(&format!(
+        "- benchmark: corpus size {} snapshot(s)\n",
+        bench.corpus_size
+    ));
+    for rb in &bench.repositories {
+        match &rb.status {
+            BenchmarkStatus::Ranked => {
+                out.push_str(&format!(
+                    "- {}: ranked against {} peer(s)\n",
+                    rb.name, rb.peers
+                ));
+            }
+            BenchmarkStatus::CorpusTooSmall(peers) => {
+                out.push_str(&format!(
+                    "- {}: benchmark: corpus too small (n={peers})\n",
+                    rb.name
+                ));
+            }
+        }
+    }
+    for w in &bench.warnings {
+        out.push_str(&format!("- warning: {w}\n"));
+    }
 }
 
 #[cfg(test)]

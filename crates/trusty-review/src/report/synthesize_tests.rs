@@ -111,6 +111,7 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
             metrics: Some(metrics),
         }],
         synthesis: None,
+        benchmark: None,
     }
 }
 

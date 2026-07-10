@@ -231,8 +231,8 @@ Summary: {{total_components}} components detected; {{critical_cve_components}} w
 
 <!-- dataset: tqi_benchmark_position | chart: bar | x: application | y: tqi_rank -->
 | Application | Peer set | Compliance % | Quartile | Rank | Rank total |
-|---|---|---|---|---|---|
-| {{app_name}} | {{peer_set}} | {{tqi_comp}} | {{tqi_q}} | {{tqi_rank}} | {{tqi_rank_total}} |
+|---|---|---|---|---|---|<!-- BEGIN benchmark_position -->
+| {{app_name}} | {{peer_set}} | {{tqi_comp}} | {{tqi_q}} | {{tqi_rank}} | {{tqi_rank_total}} |<!-- END benchmark_position -->
 
 <!-- dataset: violations_by_iso_domain | chart: stacked-bar | x: application | y: violation_count, group: domain -->
 | Application | Domain | Violation count | Compliance % |

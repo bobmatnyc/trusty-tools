@@ -11,7 +11,7 @@
 //! Test: `tests::report_args_parse_defaults` verifies clap parsing; the render
 //! path is covered end to end by `tests/report_e2e.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
@@ -19,8 +19,8 @@ use clap::Parser;
 use trusty_review::config::ReviewConfig;
 use trusty_review::llm::build_provider;
 use trusty_review::report::{
-    Reporter, TemplateLoader, load_manifest, model::ReportModel, synthesize::Synthesis,
-    synthesize::Synthesizer, template::DEFAULT_TEMPLATE,
+    CorpusSnapshot, Reporter, TemplateLoader, benchmark, load_manifest, manifest::Manifest,
+    model::ReportModel, synthesize::Synthesis, synthesize::Synthesizer, template::DEFAULT_TEMPLATE,
 };
 
 // ─── Report args ──────────────────────────────────────────────────────────────
@@ -53,6 +53,23 @@ pub struct ReportArgs {
     /// deterministic output and records a visible `synthesis:` note.
     #[arg(long)]
     pub synthesize: bool,
+
+    /// Benchmark corpus directory (M3).  Overrides the manifest `[report].corpus`
+    /// key and the per-user XDG default (`~/.local/share/trusty-review/benchmark/`).
+    #[arg(long, value_name = "DIR")]
+    pub corpus: Option<PathBuf>,
+
+    /// After a successful run, append each analyzed repository's metrics snapshot
+    /// to the corpus (one `<slug>-<sha-or-date>.json` per repo; overwrites the
+    /// same key).  Repos without metrics contribute nothing.
+    #[arg(long)]
+    pub corpus_add: bool,
+
+    /// Compute cross-repo percentile/quartile placement against the corpus and
+    /// fill the benchmark tables.  Requires a resolvable corpus directory; a
+    /// corpus with fewer than five peers is disclosed, never silently ranked.
+    #[arg(long)]
+    pub benchmark: bool,
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
@@ -109,10 +126,63 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         model.synthesis = Some(synthesis);
     }
 
+    // M3: resolve the corpus directory once (shared by --benchmark and
+    // --corpus-add).  A `--corpus` flag with neither consumer is a no-op — warn.
+    let corpus_dir = if args.benchmark || args.corpus_add {
+        Some(resolve_corpus_dir(&args, &manifest)?)
+    } else {
+        if args.corpus.is_some() {
+            eprintln!(
+                "[trusty-review report] --corpus given without --benchmark or --corpus-add; ignoring"
+            );
+        }
+        None
+    };
+
+    // M3: compute placement BEFORE writing so it renders into the report.  The
+    // target's fresh snapshot is always included in the population; loading the
+    // corpus here (before any --corpus-add write) avoids double-counting a stale
+    // copy of the target.
+    if args.benchmark {
+        let dir = corpus_dir.as_ref().expect("resolved when --benchmark");
+        eprintln!(
+            "[trusty-review report] Benchmarking against corpus: {}",
+            dir.display()
+        );
+        let corpus = benchmark::load_corpus(dir).context("failed to load benchmark corpus")?;
+        let targets = target_snapshots(&model);
+        let report = benchmark::build_benchmark_report(&corpus, &targets);
+        eprintln!(
+            "[trusty-review report] Benchmark: corpus size {}, {} target(s)",
+            report.corpus_size,
+            report.repositories.len()
+        );
+        model.benchmark = Some(report);
+    }
+
     let reporter = Reporter::new(&args.out);
     let written = reporter
         .write(&model, &template)
         .context("failed to write report output")?;
+
+    // M3: persist snapshots only after a successful write.
+    if args.corpus_add {
+        let dir = corpus_dir.as_ref().expect("resolved when --corpus-add");
+        let mut added = 0usize;
+        for snap in target_snapshots(&model) {
+            let path = benchmark::write_snapshot(dir, &snap)
+                .with_context(|| format!("failed to write corpus snapshot for {}", snap.slug))?;
+            eprintln!(
+                "[trusty-review report] Corpus += {}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+            );
+            added += 1;
+        }
+        eprintln!(
+            "[trusty-review report] Added {added} snapshot(s) to {}",
+            dir.display()
+        );
+    }
 
     eprintln!("[trusty-review report] Wrote {} file(s):", written.len());
     for path in &written {
@@ -121,6 +191,47 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the benchmark corpus directory or fail with a clear message.
+///
+/// Why: `--benchmark` / `--corpus-add` both require a corpus directory; the
+/// resolution precedence (CLI flag > manifest `[report].corpus` > XDG default)
+/// lives in the library, and the only failure is a platform with no data dir and
+/// no explicit source — which must be a clear CLI error, not a panic.
+/// What: delegates to [`benchmark::corpus_dir`] with the manifest directory as
+/// the base for a relative manifest key; maps `None` to an actionable error.
+/// Test: covered by `tests::report_args_parse_benchmark` (parse) and the corpus
+/// resolver unit tests in `benchmark_tests.rs`.
+fn resolve_corpus_dir(args: &ReportArgs, manifest: &Manifest) -> Result<PathBuf> {
+    let manifest_dir = args.manifest.parent().unwrap_or_else(|| Path::new("."));
+    benchmark::corpus_dir(
+        args.corpus.as_deref(),
+        manifest.report.corpus.as_deref(),
+        manifest_dir,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "no benchmark corpus directory: pass --corpus <dir> or set [report].corpus (the per-user default is unavailable on this platform)"
+        )
+    })
+}
+
+/// Build one corpus snapshot per analyzed repository that has metrics.
+///
+/// Why: both benchmarking (the target population) and `--corpus-add` (persisted
+/// records) need the same identity+metrics snapshots derived from this run; the
+/// run timestamp is the model's generated date (kept out of the core for
+/// testability).
+/// What: maps each repository with metrics to a [`CorpusSnapshot`]; metric-less
+/// repos are skipped.
+/// Test: exercised end to end by `tests/report_e2e.rs`.
+fn target_snapshots(model: &ReportModel) -> Vec<CorpusSnapshot> {
+    model
+        .repositories
+        .iter()
+        .filter_map(|r| CorpusSnapshot::from_repository(r, &model.generated_date))
+        .collect()
 }
 
 /// Build the LLM provider and run one synthesis pass, failing closed.
@@ -165,5 +276,43 @@ mod tests {
         assert_eq!(args.manifest, PathBuf::from("m.toml"));
         assert_eq!(args.template.as_deref(), Some("report-technical-dd-cast"));
         assert_eq!(args.out, PathBuf::from("./reports"));
+        // M3 flags default off / unset.
+        assert!(!args.benchmark);
+        assert!(!args.corpus_add);
+        assert!(args.corpus.is_none());
+    }
+
+    /// Why: the M3 corpus/benchmark flags must parse and resolve a corpus dir.
+    /// What: parses `--corpus`, `--corpus-add`, `--benchmark` and asserts the
+    /// resolver honours the explicit `--corpus` directory (CLI precedence).
+    /// Test: this test itself.
+    #[test]
+    fn report_args_parse_benchmark() {
+        let args = ReportArgs::try_parse_from([
+            "report",
+            "--manifest",
+            "m.toml",
+            "--corpus",
+            "/tmp/corpus",
+            "--corpus-add",
+            "--benchmark",
+        ])
+        .expect("parse");
+        assert!(args.benchmark);
+        assert!(args.corpus_add);
+        assert_eq!(args.corpus.as_deref(), Some(Path::new("/tmp/corpus")));
+
+        // The resolver prefers the explicit --corpus directory.
+        let manifest = load_manifest_from_str(
+            "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        );
+        let dir = resolve_corpus_dir(&args, &manifest).expect("resolve");
+        assert_eq!(dir, PathBuf::from("/tmp/corpus"));
+    }
+
+    /// Parse a manifest from an in-memory string for CLI validation tests.
+    fn load_manifest_from_str(toml: &str) -> Manifest {
+        trusty_review::report::manifest::parse_manifest(toml, Path::new("m.toml"))
+            .expect("manifest parses")
     }
 }
