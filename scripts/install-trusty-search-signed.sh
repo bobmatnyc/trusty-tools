@@ -70,10 +70,17 @@ TRUSTY_CODESIGN_DRY_RUN="${TRUSTY_CODESIGN_DRY_RUN:-0}"
 # Helpers
 # ---------------------------------------------------------------------------
 
-info()    { printf '\033[0;32m[install-signed] %s\033[0m\n' "$*"; }
+# All log helpers write to stderr (issue #2322). This is not cosmetic: several
+# functions below (detect_identity, detect_repo_root) are called via command
+# substitution (`identity="$(detect_identity)"`), and anything these helpers
+# print to stdout gets silently concatenated into the captured value. That
+# previously corrupted the --sign identity string with log text, so codesign
+# failed with "no identity found" even though a valid Developer ID cert was
+# present.
+info()    { printf '\033[0;32m[install-signed] %s\033[0m\n' "$*" >&2; }
 warn()    { printf '\033[0;33m[install-signed] WARNING: %s\033[0m\n' "$*" >&2; }
 error()   { printf '\033[0;31m[install-signed] ERROR: %s\033[0m\n' "$*" >&2; }
-section() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+section() { printf '\n\033[1;34m==> %s\033[0m\n' "$*" >&2; }
 
 # Detect repo root (script may be called from anywhere)
 # Why: cargo install --path needs an absolute path to the workspace root.
@@ -155,7 +162,13 @@ detect_identity() {
 
 # Sign a single binary with the Developer ID identity.
 # Why: Encapsulates codesign flags so they are applied identically to both binaries.
-# What: Runs codesign --force --options runtime --timestamp --identifier <id> --sign <identity>.
+# What: Runs codesign --force --options runtime --timestamp --identifier <id> --sign <identity>,
+# then immediately verifies the resulting signature (issue #2322) so a corrupted
+# --sign identity (e.g. from a stdout-capture bug) can never pass silently —
+# `set -e` means codesign itself already aborts on an outright invalid identity,
+# but this extra, explicit check fails loudly and immediately after each binary
+# is signed rather than deferring all verification to the later Step 4, and
+# guards against subtler corruption that codesign alone might not catch.
 # The --options runtime flag enables the Hardened Runtime, required for notarization.
 # The fixed --identifier keeps the DR stable across rebuilds.
 sign_binary() {
@@ -174,6 +187,16 @@ sign_binary() {
         --identifier "$identifier" \
         --sign "$identity" \
         "$binary"
+
+    local verify_output
+    if ! verify_output="$(codesign --verify --deep --strict "$binary" 2>&1)"; then
+        error "Post-sign verification FAILED for $binary"
+        error "codesign --verify --deep --strict output:"
+        printf '%s\n' "$verify_output" >&2
+        error "The signature is invalid or corrupted — refusing to continue."
+        exit 1
+    fi
+    info "Post-sign verification passed for $binary"
 }
 
 # Verify the signature on a binary and print the Authority/TeamIdentifier/Identifier.
