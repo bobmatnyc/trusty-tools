@@ -506,6 +506,127 @@ async fn lazy_handle_idle_shutdown_waits_for_inflight_request() {
     let _ = wd.await;
 }
 
+/// Real-path race test (reviewer-required, issue #2315): drives the
+/// kill-mid-request race through `embed_via` itself — not a hand-seeded
+/// `in_flight` counter — with an `op` that genuinely blocks past the idle
+/// deadline. This is the test that actually exercises the fixed lock
+/// ordering: `embed_via` must increment `in_flight` while still holding
+/// `self.state`, in the same critical section `idle_watchdog` re-checks
+/// under, or this test fails by observing the state reclaimed while `op` is
+/// still running.
+///
+/// Why: `lazy_handle_idle_shutdown_waits_for_inflight_request` above seeds
+/// `in_flight = 1` by hand, so it would pass even with the original buggy
+/// ordering (increment after the lock was released) — it does not exercise
+/// the TOCTOU window at all. Only a test that puts a real, slow `op` through
+/// `embed_via` can catch a regression in the lock ordering.
+///
+/// What:
+///   1. Construct a `LazyEmbedderHandle`, then seed `handle.state` directly
+///      with a synthetic `SpawnedState` (bypassing `do_spawn`, which needs a
+///      real `trusty-embedderd` binary) and mark `last_use` as already well
+///      past a 1s idle threshold.
+///   2. Manually spawn `idle_watchdog` against the handle's own internal
+///      `state` / `app_pid_slot` / `last_use` / `in_flight` Arcs — exactly
+///      what `do_spawn` would have wired up after a real spawn.
+///   3. Call `handle.embed_via(op)` where `op` signals it has started, then
+///      blocks on a `Notify` until the test releases it — spanning well past
+///      the 1s idle deadline.
+///   4. Assert the state survives multiple watchdog ticks while `op` is
+///      genuinely still executing.
+///   5. Release `op`, let it complete, then assert the watchdog reclaims the
+///      state on a subsequent tick.
+///
+/// Test: this test.
+#[tokio::test]
+async fn embed_via_defers_watchdog_eviction_while_request_in_flight() {
+    use tokio::sync::{Notify, RwLock};
+
+    let handle = Arc::new(LazyEmbedderHandle::new(
+        PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig {
+            idle_shutdown_secs: 1,
+            ..SupervisorConfig::default()
+        },
+    ));
+
+    // Seed a live SpawnedState directly (bypassing do_spawn, which would try
+    // to exec a real trusty-embedderd binary) so embed_via finds
+    // `state = Some(..)` and proceeds straight to the in-flight registration
+    // and `op` call — the real code path under test.
+    let client: Arc<dyn trusty_common::embedder_client::EmbedderClient> = Arc::new(StubClient);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut guard = handle.state.lock().await;
+        *guard = Some(SpawnedState {
+            client_slot: Arc::new(RwLock::new(client)),
+            shutdown_tx,
+            pid_slot: Arc::new(AtomicU32::new(0)),
+        });
+    }
+    // Mark last_use as already well past the 1s idle deadline so the
+    // watchdog is eligible to evict on its very first tick.
+    {
+        let mut last_use = handle.last_use.lock().await;
+        *last_use = Some(Instant::now() - Duration::from_secs(30));
+    }
+
+    // Manually arm the watchdog against the SAME internal Arcs `embed_via`
+    // uses — `do_spawn` would normally do this after a real spawn.
+    let wd = tokio::spawn(idle_watchdog(
+        1, // idle_secs → poll interval == 1s
+        Arc::clone(&handle.state),
+        Arc::clone(&handle.app_pid_slot),
+        Arc::clone(&handle.last_use),
+        Arc::clone(&handle.in_flight),
+        shutdown_rx,
+    ));
+
+    // Drive a genuinely in-flight request THROUGH embed_via itself.
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let handle_for_call = Arc::clone(&handle);
+    let started_for_op = Arc::clone(&started);
+    let release_for_op = Arc::clone(&release);
+    let call = tokio::spawn(async move {
+        handle_for_call
+            .embed_via(|_client| async move {
+                started_for_op.notify_one();
+                release_for_op.notified().await;
+                Ok::<Vec<Vec<f32>>, trusty_common::embedder_client::EmbedderError>(vec![])
+            })
+            .await
+    });
+
+    // Wait until `op` is actually executing — `in_flight` was incremented by
+    // `embed_via` itself under `self.state`, not hand-seeded by this test.
+    started.notified().await;
+
+    // Let two watchdog ticks pass while the request is still blocked in `op`,
+    // well past the 1s idle deadline.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        handle.state.lock().await.is_some(),
+        "watchdog must not evict while embed_via's op is genuinely in flight"
+    );
+
+    // Let the request complete.
+    release.notify_one();
+    let result = call.await.expect("embed_via task must not panic");
+    assert!(result.is_ok(), "op must succeed: {result:?}");
+
+    // The request refreshed last_use on completion, so the watchdog needs a
+    // fresh idle window before it reclaims. Give it enough ticks.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        handle.state.lock().await.is_none(),
+        "watchdog must reclaim the state once the in-flight request has \
+         completed and a fresh idle window has elapsed"
+    );
+
+    let _ = wd.await;
+}
+
 // ── Helper ──────────────────────────────────────────────────────────────
 
 /// RAII guard that restores an env var to its original state on drop.

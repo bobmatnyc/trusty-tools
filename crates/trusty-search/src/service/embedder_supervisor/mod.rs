@@ -335,20 +335,42 @@ impl LazyEmbedderHandle {
     ///
     /// What:
     ///   1. Lock `self.state`.
-    ///   2. If `state` is `None`, call `do_spawn` to start the child and
-    ///      store a `SpawnedState`.
-    ///   3. Clone the `client_slot` Arc, drop the lock.
-    ///   4. Read-lock the client slot, clone the `Arc<dyn EmbedderClient>`,
+    ///   2. If `state` is `None` (never spawned, or the watchdog just reaped
+    ///      a previous sidecar), call `do_spawn` to start the child and store
+    ///      a `SpawnedState`.
+    ///   3. **While still holding the lock**, construct the `InFlightGuard`
+    ///      (increments `in_flight`) and clone the `client_slot` Arc.
+    ///   4. Release the lock.
+    ///   5. Read-lock the client slot, clone the `Arc<dyn EmbedderClient>`,
     ///      release that lock.
-    ///   5. Bump `last_use` at request START and hold an `InFlightGuard` so the
-    ///      idle watchdog cannot SIGKILL the child mid-request (issue #2315).
-    ///   6. Call `op(client)` — the actual embed request.
-    ///   7. Update `last_use` again on success so a burst just before the idle
-    ///      deadline defers shutdown; the guard drops here, decrementing the
-    ///      in-flight count (on success, error, or panic).
+    ///   6. Bump `last_use` at request START (a burst arriving just before the
+    ///      idle deadline defers shutdown even before the first request
+    ///      returns).
+    ///   7. Call `op(client)` — the actual embed request.
+    ///   8. Update `last_use` again on success; the `InFlightGuard` drops at
+    ///      the end of this function's scope, decrementing `in_flight` on
+    ///      success, error return, or panic unwind.
+    ///
+    /// Step 3 is the load-bearing fix for a kill-mid-request TOCTOU (issue
+    /// #2315, reviewer-caught): incrementing `in_flight` *after* releasing
+    /// `self.state` left a window where a watchdog tick could observe
+    /// `in_flight == 0` under its own `state` lock while this request had
+    /// already grabbed a `client_slot` clone and was about to use it —
+    /// exactly the scenario the guard exists to prevent. Doing the increment
+    /// inside the same critical section the watchdog re-checks under
+    /// (`idle_watchdog`'s `state_cell.lock()`) makes the two sides fully
+    /// serialised on one mutex: whichever acquires it first is completely
+    /// visible to the other before it proceeds. If the watchdog wins the
+    /// race and evicts (clearing `state` to `None`), this method's *next*
+    /// lock acquisition (on a fresh call) observes `None` and respawns rather
+    /// than reusing a stale `client_slot` captured before the kill — there is
+    /// no in-progress call that could observe a stale slot, because the
+    /// increment and the clone happen in the same locked step.
     ///
     /// Test: `lazy_handle_defers_spawn`, `lazy_handle_single_flight_concurrent`,
-    /// `lazy_handle_idle_shutdown_waits_for_inflight_request`.
+    /// `lazy_handle_idle_shutdown_waits_for_inflight_request` (hand-seeded
+    /// counter), `embed_via_defers_watchdog_eviction_while_request_in_flight`
+    /// (drives the race through this method itself with a blocking `op`).
     pub async fn embed_via<F, Fut, T>(
         &self,
         op: F,
@@ -357,13 +379,18 @@ impl LazyEmbedderHandle {
         F: FnOnce(Arc<dyn EmbedderClient>) -> Fut,
         Fut: std::future::Future<Output = Result<T, trusty_common::embedder_client::EmbedderError>>,
     {
-        // Acquire the state lock for single-flight spawn.
-        let client_slot = {
+        // Acquire the state lock for single-flight spawn AND to serialise the
+        // in-flight increment against the watchdog's kill decision. Both the
+        // increment below and the watchdog's re-check happen under this same
+        // `self.state` mutex — see the doc comment above for why this
+        // ordering (not just the atomic increment) is what closes the race.
+        let (client_slot, _in_flight_guard) = {
             let mut guard = self.state.lock().await;
             if guard.is_none() {
-                // First caller wins the race to spawn. All others are
-                // serialised on the lock and will find `state = Some` when
-                // they acquire it after this block completes.
+                // First caller wins the race to spawn — or the watchdog just
+                // reaped a previous sidecar and reset the gate. Either way we
+                // (re)spawn while holding the lock so nobody downstream ever
+                // observes a `client_slot` from an already-killed process.
                 let spawned = do_spawn(
                     &self.binary_path,
                     &self.config,
@@ -381,9 +408,13 @@ impl LazyEmbedderHandle {
                 })?;
                 *guard = Some(spawned);
             }
+            // Register this request as in-flight WHILE still holding `state`.
+            // This ordering — not the atomic ordering on the counter itself —
+            // is what closes the #2315 TOCTOU: see the doc comment above.
+            let in_flight_guard = InFlightGuard::new(Arc::clone(&self.in_flight));
             // Safety: we just set it to Some if it was None.
             let spawned = guard.as_ref().expect("state is Some after spawn");
-            Arc::clone(&spawned.client_slot)
+            (Arc::clone(&spawned.client_slot), in_flight_guard)
         };
 
         // Read the live client from the slot (the supervisor may swap it on
@@ -396,13 +427,6 @@ impl LazyEmbedderHandle {
             let mut last_use = self.last_use.lock().await;
             *last_use = Some(Instant::now());
         }
-
-        // Mark the request in-flight for the whole duration of `op`. The guard
-        // decrements on drop — on the success path below, on an error return,
-        // and on panic unwind — so the counter can never leak and strand the
-        // watchdog into never evicting. While it is > 0 the watchdog skips the
-        // kill (issue #2315 in-flight race).
-        let _in_flight = InFlightGuard::new(Arc::clone(&self.in_flight));
 
         let result = op(client).await;
 
@@ -426,11 +450,19 @@ impl LazyEmbedderHandle {
 /// scope exit — success, error, and unwind — so the count is always exact.
 ///
 /// What: increments the shared `AtomicU32` on construction and decrements it
-/// in `Drop`. Uses `AcqRel` ordering so the watchdog's `Acquire` load observes
-/// a consistent value relative to the request lifecycle.
+/// in `Drop`. The safety guarantee against the kill-mid-request race does
+/// **not** come from the `AcqRel` ordering on the atomic itself — it comes
+/// from *where* `embed_via` constructs this guard: inside the same
+/// `self.state` mutex critical section that `idle_watchdog` re-checks
+/// `in_flight` under (issue #2315, reviewer-caught TOCTOU). `AcqRel` here
+/// only ensures the increment/decrement pair is itself atomic and visible
+/// across threads once observed; the mutex is what serialises "did the
+/// request register before the watchdog decided to kill".
 ///
 /// Test: `in_flight_guard_decrements_on_drop` and
-/// `in_flight_guard_decrements_on_panic` in the `tests` submodule.
+/// `in_flight_guard_decrements_on_panic` in the `tests` submodule;
+/// `embed_via_defers_watchdog_eviction_while_request_in_flight` exercises the
+/// full race through `embed_via` itself.
 struct InFlightGuard {
     counter: Arc<AtomicU32>,
 }
