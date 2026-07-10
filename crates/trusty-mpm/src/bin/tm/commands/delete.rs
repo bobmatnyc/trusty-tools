@@ -20,12 +20,14 @@
 /// operator to stop it first (or force it).
 /// What: delegates to [`super::picker_delete::delete_managed_then_local`], which
 /// POSTs `/api/v1/sessions/managed/{id}/delete?force=<bool>` and, on a managed
-/// 404, falls back to the project-session `DELETE /sessions/{id}` path so the
-/// verb behaves the same whether the id names a managed or a local session
-/// (#2304). A not-found in BOTH stores prints "not found"; a 409 (the
-/// running-session guard) prints the daemon's actionable reason and returns an
-/// `Err` so scripts see a non-zero exit; success prints a confirmation naming the
-/// pre-deletion name and state.
+/// 404, falls back to the project-session `DELETE /sessions/{id}` path — guarded
+/// client-side by [`super::picker_delete::local_session_needs_force`], since that
+/// legacy route has no server-side running guard of its own — so the verb
+/// refuses a running session whether the id names a managed or a local session
+/// (#2304). A not-found in BOTH stores prints "not found"; a running-session
+/// refusal (the managed daemon's 409, or the local guard's own message) prints
+/// the actionable reason and returns an `Err` so scripts see a non-zero exit;
+/// success prints a confirmation naming the pre-deletion name and state.
 /// Test: HTTP path covered by `delete_route_*` in tests/session_manager_mvp.rs;
 /// CLI parse by `cli_parses_session_delete`; the shared routing seam is
 /// unit-tested via `classify_managed_delete_*`.

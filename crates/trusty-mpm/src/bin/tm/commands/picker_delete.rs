@@ -9,22 +9,36 @@
 //! confirm prompt — kept out of `session_picker.rs` so that file stays under the
 //! 500-SLOC production cap.
 //!
-//! What: [`delete_needs_force`] is the running-session guard (persisted-state
-//! heuristic — the daemon does the real tmux probe); [`classify_managed_delete`]
-//! is the family-routing seam (managed 200/404/409 → keep / fall back to the
-//! project-session store / surface the guard refusal); [`delete_managed_then_local`]
-//! is the shared I/O helper both the picker and `tm session delete` call so the
-//! deletion endpoints are never duplicated; [`confirm_and_delete`] is the picker's
-//! TTY confirm-then-delete driver.
+//! What: [`delete_needs_force`] is the MANAGED-family running-session guard
+//! (persisted-state heuristic — the daemon does the real tmux probe);
+//! [`local_session_needs_force`] is the analogous guard for the LOCAL
+//! (project-session) family, enforced client-side because `DELETE
+//! /sessions/{id}` has no server-side running guard of its own;
+//! [`classify_managed_delete`] is the family-routing seam (managed 200/404/409
+//! → keep / fall back to the project-session store / surface the guard
+//! refusal); [`delete_managed_then_local`] is the shared I/O helper both the
+//! picker and `tm session delete` call so the deletion endpoints are never
+//! duplicated; [`confirm_and_delete`] is the picker's TTY confirm-then-delete
+//! driver.
 //!
-//! Test: `delete_needs_force_*`, `classify_managed_delete_*`, and
-//! `confirm_line_*` in `tests_behavior_d_tests.rs`. The stdin/HTTP I/O path
-//! (`confirm_and_delete`, `delete_managed_then_local`) is inherently
-//! side-effect-only and is exercised by manual smoke tests + the e2e suite.
+//! IMPORTANT — reachability: the `tm ls` picker only ever lists MANAGED
+//! sessions (`list_managed_sessions` is sourced solely from
+//! `SessionManager::list()`), so [`delete_managed_then_local`]'s `FallbackLocal`
+//! branch is effectively unreachable from the picker (barring a delete-after-list
+//! race). The branch exists for the non-interactive `tm session delete
+//! <free-text-id>` verb, which accepts ANY id/name and must behave correctly
+//! when that id names a project-only (local) session instead of a managed one.
+//!
+//! Test: `delete_needs_force_*`, `local_session_needs_force_*`,
+//! `classify_managed_delete_*`, `confirm_line_*`, and the real-HTTP
+//! `local_delete_*` round-trip tests in `tests_behavior_d_tests.rs`. The
+//! stdin-driven half of `confirm_and_delete` is inherently side-effect-only and
+//! is exercised by manual smoke tests + the e2e suite.
 
 use std::io::Write as _;
 
 use trusty_mpm::client::ManagedSessionSummary;
+use trusty_mpm::core::session::{Session, SessionStatus};
 
 /// Outcome of rendering a routed delete — what the caller should print/return.
 ///
@@ -34,7 +48,9 @@ use trusty_mpm::client::ManagedSessionSummary;
 /// keeps the deletion routing in one place while letting each surface own its UX.
 /// What: `Deleted` carries the pre-deletion identity and whether it came from the
 /// local (project-session) store; `NotFound` means neither store had the id;
-/// `Refused` carries the daemon's running-guard message (409).
+/// `Refused` carries the running-guard message — either the daemon's managed
+/// 409 body, or the CLI-side local-session guard's own message (there is no
+/// server-side guard for the legacy `DELETE /sessions/{id}` route).
 /// Test: constructed by `delete_managed_then_local`; rendering covered by the
 /// callers' behaviour.
 #[derive(Debug, PartialEq, Eq)]
@@ -96,10 +112,12 @@ pub(crate) fn delete_needs_force(state: &str) -> bool {
 /// Map a managed-delete HTTP status to the next routing step.
 ///
 /// Why: pure seam for the family routing so 200/404/409/other are testable
-/// without HTTP. A 404 specifically means the selected entry is NOT a managed
-/// record — the picker can still list a project-only session, which is deleted
-/// through the project-session store — so 404 routes to the local fallback rather
-/// than reporting failure.
+/// without HTTP. A 404 specifically means the id is NOT a managed record. The
+/// `tm ls` picker never surfaces this branch in practice (every entry it offers
+/// IS a managed record — see the module doc); it exists for the non-interactive
+/// `tm session delete <id>`, which accepts free-text ids that may name a
+/// project-only (local) session instead, so 404 routes to the local fallback
+/// rather than reporting failure.
 /// What: 200→`Deleted`, 404→`FallbackLocal`, 409→`Refused`, else→`Error`.
 /// Test: `classify_managed_delete_ok`, `classify_managed_delete_not_found`,
 /// `classify_managed_delete_conflict`, `classify_managed_delete_other` in
@@ -140,23 +158,47 @@ pub(crate) fn confirm_is_force(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case("force")
 }
 
+/// Decide whether hard-deleting a LOCAL (project) session requires `--force`.
+///
+/// Why: `DELETE /sessions/{id}` (`remove_session` in `daemon/api.rs`)
+/// unconditionally kills the tmux host for ANY status — unlike the managed
+/// family, there is NO server-side running guard on this route (this was the
+/// CRITICAL gap: a bare `tm session delete <local-id>` used to 404 harmlessly
+/// before this module existed, and after this module's first cut it silently
+/// force-killed a live local session). The CLI must therefore enforce the same
+/// fail-closed contract client-side, by probing the session's status before
+/// ever issuing the DELETE.
+/// What: returns `true` for every [`SessionStatus`] except [`SessionStatus::Stopped`]
+/// — i.e. `Starting`/`Active`/`AwaitingApproval`/`Detached`/`Paused` all mean a
+/// live process still backs the session and require an explicit `--force`
+/// (or the picker's force-confirm) to delete.
+/// Test: `local_session_needs_force_stopped_false`,
+/// `local_session_needs_force_active_and_others_true` in
+/// `tests_behavior_d_tests.rs`.
+pub(crate) fn local_session_needs_force(status: SessionStatus) -> bool {
+    !matches!(status, SessionStatus::Stopped)
+}
+
 /// Try the managed hard-delete, falling back to the project-session delete on 404.
 ///
 /// Why: the picker and `tm session delete` must route a delete to the correct
 /// store WITHOUT re-implementing either deletion endpoint. Both call this one
-/// helper: it POSTs the managed hard-delete first (all `tm ls` entries come from
-/// the managed store, so this is the common path) and, only when the record is
-/// absent there (404), issues the project-session `DELETE /sessions/{id}` — the
-/// exact path `tm session stop` uses for a local session.
+/// helper: it POSTs the managed hard-delete first (every `tm ls` picker entry IS
+/// a managed record, so this is the common — in practice only — path there) and,
+/// only when the record is absent there (404 — reached in practice by the
+/// non-interactive `tm session delete <free-text-id>` when the id names a
+/// project-only session), issues the guarded local delete.
 /// What: POSTs `/api/v1/sessions/managed/{id}/delete?force=<force>`, classifies
 /// the status via [`classify_managed_delete`], and returns a [`DeleteReport`]. A
 /// 409 returns `Refused` (never auto-escalates to force); a 200 parses the
-/// flattened pre-deletion summary; a 404 issues the local DELETE and reports
-/// `Deleted { local: true }` or `NotFound`. Non-success statuses on either leg
-/// propagate as an `Err`.
+/// flattened pre-deletion summary; a 404 delegates to [`delete_local`] (which
+/// applies its OWN running guard) with the same `force` flag threaded through —
+/// so a picker force-confirm (`force = true`) still bypasses the local guard,
+/// while a plain non-interactive call without `--force` does not. Non-success
+/// statuses on the managed leg propagate as an `Err`.
 /// Test: side-effect-only HTTP driver — the status→route decision is unit-tested
-/// via [`classify_managed_delete`]; the round-trip is covered by manual smoke
-/// tests and the session-manager integration suite.
+/// via [`classify_managed_delete`]; the local guard's real-HTTP round trip is
+/// covered by `local_delete_*` in `tests_behavior_d_tests.rs`.
 pub(crate) async fn delete_managed_then_local(
     client: &reqwest::Client,
     url: &str,
@@ -190,29 +232,60 @@ pub(crate) async fn delete_managed_then_local(
         ManagedDeleteNext::Refused => {
             Ok(DeleteReport::Refused(resp.text().await.unwrap_or_default()))
         }
-        ManagedDeleteNext::FallbackLocal => delete_local(client, url, id).await,
+        ManagedDeleteNext::FallbackLocal => delete_local(client, url, id, force).await,
         ManagedDeleteNext::Error => {
-            // Surface a real daemon 5xx rather than masking it as "not found".
-            resp.error_for_status()?;
-            Ok(DeleteReport::NotFound)
+            // `resp` is guaranteed non-2xx here (every 2xx/404/409 status is
+            // handled by the arms above), so build the error directly instead
+            // of relying on `error_for_status()` — using it here would make the
+            // success path that follows unreachable dead code.
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("managed delete failed with HTTP {status}: {body}")
         }
     }
 }
 
-/// Delete a project-session record via `DELETE /sessions/{id}` (the local path).
+/// Delete a project-session record via `DELETE /sessions/{id}` (the local path),
+/// refusing a still-running session unless `force` is set (#2304 CRITICAL fix).
 ///
-/// Why: a session the managed store does not know is a project-session record;
-/// this is the same full-removal path `tm session stop` uses for a local session,
-/// reused rather than duplicated.
-/// What: issues the DELETE, maps 404→`NotFound`, propagates other non-success
-/// statuses, and reports `Deleted { local: true }` on success (the local endpoint
-/// returns no body, so name falls back to the id and prior state is `?`).
-/// Test: side-effect-only HTTP; reached only from the 404 branch above.
+/// Why: a session the managed store does not know is a project-session record —
+/// reached in practice only via the non-interactive `tm session delete
+/// <free-text-id>` (see the module doc: the picker never lists local sessions).
+/// `DELETE /sessions/{id}` itself has no server-side running guard (unlike the
+/// managed family's 409), so this function is the ONLY place that stands between
+/// an operator and force-killing a live local session by accident — it must
+/// check liveness BEFORE issuing the DELETE, not rely on the daemon to refuse.
+/// What: GETs `/sessions/{id}` first (a 404 there is `NotFound` — nothing to
+/// delete, no guard to apply). When [`local_session_needs_force`] finds the
+/// fetched status is not `Stopped` and `force` is `false`, returns `Refused`
+/// WITHOUT ever issuing the DELETE. Otherwise (force is `true`, or the session
+/// is already `Stopped`) issues `DELETE /sessions/{id}` — the same full-removal
+/// path `tm session stop` uses for a local session, reused rather than
+/// duplicated — and reports `Deleted { local: true }` (name falls back to the
+/// id; the local endpoint returns no body to read a display name from).
+/// Test: `local_delete_refuses_running_session_without_force`,
+/// `local_delete_allows_stopped_session_without_force`,
+/// `local_delete_force_bypasses_guard_on_running_session` (real-HTTP round trip
+/// against a loopback daemon) in `tests_behavior_d_tests.rs`.
 async fn delete_local(
     client: &reqwest::Client,
     url: &str,
     id: &str,
+    force: bool,
 ) -> anyhow::Result<DeleteReport> {
+    let get_resp = client.get(format!("{url}/sessions/{id}")).send().await?;
+    if get_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(DeleteReport::NotFound);
+    }
+    let session: Session = get_resp.error_for_status()?.json().await?;
+    let prior_state = format!("{:?}", session.status).to_lowercase();
+    if !force && local_session_needs_force(session.status) {
+        return Ok(DeleteReport::Refused(format!(
+            "session is {prior_state} — stop it first with `tm session stop {id}`, \
+             or pass --force to delete anyway"
+        )));
+    }
+
     let resp = client.delete(format!("{url}/sessions/{id}")).send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(DeleteReport::NotFound);
@@ -220,7 +293,7 @@ async fn delete_local(
     resp.error_for_status()?;
     Ok(DeleteReport::Deleted {
         name: id.to_string(),
-        prior_state: "?".to_string(),
+        prior_state,
         local: true,
     })
 }
