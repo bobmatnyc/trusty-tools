@@ -583,7 +583,10 @@ mod tests {
 
         let mut t = Transcript::seed("s", "task");
         for i in 0..10 {
-            t.push_assistant(Some(format!("assistant turn {i}: {}", "x".repeat(200))), &[]);
+            t.push_assistant(
+                Some(format!("assistant turn {i}: {}", "x".repeat(200))),
+                &[],
+            );
             t.push_tool_result(&format!("c{i}"), "bash", &"output ".repeat(50));
         }
 
