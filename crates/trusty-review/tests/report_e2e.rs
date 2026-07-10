@@ -64,8 +64,8 @@ fn end_to_end_two_repo_report() {
     let template = TemplateLoader::new()
         .load("report-technical-dd")
         .expect("template loads");
-    let model =
-        ReportModel::build(&manifest, &manifest_path, "report-technical-dd").expect("model builds");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
 
     let out_dir = dir.join("reports");
     let reporter = Reporter::new(&out_dir);
@@ -80,8 +80,12 @@ fn end_to_end_two_repo_report() {
     assert!(md.contains("8200"));
     assert!(md.contains("TypeScript"));
     assert!(md.contains("120 files, 640 functions"));
-    // Honesty rule: unmapped scoring fields are marked, never left as {{...}}.
-    assert!(md.contains("not stated in source data"));
+    // Wave 2 (#2342): unmapped fields are omitted, not rendered as marker walls;
+    // the compact Data gaps list carries them instead.
+    assert!(!md.contains("not stated in source data"));
+    assert!(md.contains("Data gaps:"));
+    // Self-derived vendor/methodology is filled from the tool itself.
+    assert!(md.contains("trusty-review report (repository inspection) v"));
     assert!(!md.contains("{{"));
     // Live-QA defect #3: the template's leading instructional comment header
     // must never reach the generated report — output starts at the title.
@@ -173,7 +177,7 @@ fn end_to_end_corpus_benchmark() {
         .load("report-technical-dd")
         .expect("template");
     let mut model =
-        ReportModel::build(&manifest, &manifest_path, "report-technical-dd").expect("model");
+        ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("model");
 
     // Render OFF first (deterministic baseline).
     let reporter = Reporter::new(dir.join("reports"));

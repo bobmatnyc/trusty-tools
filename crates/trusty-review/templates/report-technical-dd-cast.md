@@ -37,6 +37,10 @@
 
 # CAST Technical Due-Diligence Analysis: {{target_codename}}
 
+{{provenance_legend}}
+
+{{analyst_instructions_block}}
+
 ## 1. Report Metadata
 
 | Field | Value |
@@ -96,6 +100,7 @@ expected >3.40; 2–5yr >3.20; 5–10yr >3.00; >10yr >2.70.
 | Field | Value |
 |---|---|
 | Technology stack | {{app_tech_stack}} |
+| Frameworks / manifests | {{app_frameworks}} |
 | Technical size (LoC) | {{app_loc}} |
 | Files / classes / DB artifacts | {{app_file_counts}} |
 | Application age (est.) | {{app_age}} |

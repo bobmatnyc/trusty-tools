@@ -16,8 +16,25 @@ use serde::Serialize;
 
 use super::error::Result;
 use super::git_info::{GitInfo, gather_git_info};
+use super::instructions::Instructions;
 use super::manifest::{Manifest, RepositoryEntry, RepositorySource};
 use super::metrics::{AnalyzeMetrics, load_metrics};
+use super::scan::{RepoScan, scan_repo};
+
+/// The self-describing vendor/methodology string (#2342.2).
+///
+/// Why: the tool KNOWS its own vendor and method — it must never honesty-mark
+/// this; the value is the crate's own identity plus its version so a reader can
+/// tell which generator produced the report.
+/// What: prefixes the fixed methodology phrase with the crate version at compile
+/// time via `CARGO_PKG_VERSION`.
+/// Test: `reporter_tests.rs` asserts the vendor row is self-filled, not marked.
+pub fn vendor_methodology() -> String {
+    format!(
+        "trusty-review report (repository inspection) v{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// The fully assembled, render-ready report model.
 ///
@@ -34,6 +51,16 @@ pub struct ReportModel {
     pub template: String,
     /// Optional analyst name recorded in the metadata section.
     pub analyst: Option<String>,
+    /// Optional client / deal-side name (declared in the manifest).
+    pub client: Option<String>,
+    /// Self-derived vendor/methodology string (never honesty-marked, #2342.2).
+    pub vendor_methodology: String,
+    /// Verbatim analyst instructions brief, if one was supplied (#2340).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// The source path the instructions were loaded from, if any (#2340).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions_source: Option<String>,
     /// Report date (ISO-8601, generation day).
     pub report_date: String,
     /// Generation timestamp date (ISO-8601, generation day).
@@ -85,6 +112,10 @@ pub struct RepositoryReport {
     pub git_ref: Option<String>,
     /// Git provenance for local checkouts (`None` for remote or non-git paths).
     pub git_info: Option<GitInfo>,
+    /// Baseline metrics computed directly from a local checkout (`measured`,
+    /// #2342.3).  `None` for remote entries or unreadable/empty local paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<RepoScan>,
     /// Pre-produced trusty-analyze metrics for this repo, if a path was given.
     pub metrics: Option<AnalyzeMetrics>,
 }
@@ -99,7 +130,12 @@ impl ReportModel {
     /// manifest directory when relative).  `report_date`/`generated_date` are the
     /// current local date.  No network, no LLM.
     /// Test: `reporter_tests.rs::build_model_from_manifest`.
-    pub fn build(manifest: &Manifest, manifest_path: &Path, template: &str) -> Result<Self> {
+    pub fn build(
+        manifest: &Manifest,
+        manifest_path: &Path,
+        template: &str,
+        instructions: Option<&Instructions>,
+    ) -> Result<Self> {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -112,6 +148,10 @@ impl ReportModel {
             title: manifest.report.title.clone(),
             template: template.to_string(),
             analyst: manifest.report.analyst.clone(),
+            client: manifest.report.client.clone(),
+            vendor_methodology: vendor_methodology(),
+            instructions: instructions.map(|i| i.text.clone()),
+            instructions_source: instructions.map(|i| i.source.display().to_string()),
             report_date: today.clone(),
             generated_date: today,
             manifest_path: manifest_path.display().to_string(),
@@ -129,12 +169,17 @@ impl ReportModel {
 /// loads metrics (relative paths resolved against `manifest_dir`).
 /// Test: exercised by `reporter_tests.rs::build_model_from_manifest`.
 fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<RepositoryReport> {
-    let (source_kind, git_info) = match &entry.source {
+    let (source_kind, git_info, scan) = match &entry.source {
         RepositorySource::LocalPath { path } => {
             let resolved = resolve(manifest_dir, path);
-            ("local_path", gather_git_info(&resolved))
+            let git_info = gather_git_info(&resolved);
+            // Built-in repo scanning (#2342.3): compute the measured baseline
+            // directly from the checkout so a bare run is substantive.  An empty
+            // scan (non-existent path, no source files) is dropped to `None`.
+            let scan = scan_repo(&resolved).filter(|s| !s.is_empty());
+            ("local_path", git_info, scan)
         }
-        RepositorySource::Remote { .. } => ("remote", None),
+        RepositorySource::Remote { .. } => ("remote", None, None),
     };
 
     let metrics = match &entry.metrics {
@@ -150,6 +195,7 @@ fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<Repo
         username: entry.username.clone(),
         git_ref: entry.git_ref.clone(),
         git_info,
+        scan,
         metrics,
     })
 }

@@ -58,15 +58,17 @@ fn block_repeats_per_scope() {
     assert_eq!(out, "[one][two]");
 }
 
-/// Why: a block with no provided scope must render exactly once with markers
-/// (never zero-and-silent, never invented data).
-/// What: renders a block absent from the scope and asserts a single marker copy.
+/// Why: a block with no provided scope must render NOTHING (#2342 omit-empty) —
+/// an unfilled repeatable section is empty scaffolding the polish pass collapses,
+/// not a wall of honesty markers.
+/// What: renders a block absent from the scope and asserts the block expands to
+/// the empty string (surrounding text outside the block is unaffected).
 /// Test: this test itself.
 #[test]
-fn absent_block_renders_once_with_marker() {
-    let template = "<!-- BEGIN app -->[{{n}}]<!-- END app -->";
+fn absent_block_renders_nothing() {
+    let template = "before<!-- BEGIN app -->[{{n}}]<!-- END app -->after";
     let out = render(template, &Scope::new());
-    assert_eq!(out, format!("[{HONESTY_MARKER}]"));
+    assert_eq!(out, "beforeafter");
 }
 
 /// Why: templates nest a findings list inside a per-application block.

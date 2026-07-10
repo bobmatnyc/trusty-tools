@@ -87,8 +87,9 @@ impl Scope {
 /// What: compiles the placeholder regex once, then recursively expands blocks
 /// and substitutes scalars.  Unknown scalars → [`HONESTY_MARKER`]; blocks with
 /// provided scopes repeat once per scope; blocks with no provided scope render
-/// exactly once with an empty scope (so their placeholders also become markers,
-/// never invented data).  `<!-- dataset: … -->` comments are preserved verbatim.
+/// NOTHING (#2342 omit-empty — the polish pass collapses the empty section and
+/// records it under Gaps & Caveats, never a wall of markers).  `<!-- dataset: …
+/// -->` comments are preserved verbatim.
 /// Test: `fill_tests.rs` — all cases.
 pub fn render(template: &str, scope: &Scope) -> String {
     // A compile-time-constant pattern; a failure here is a programmer error.
@@ -112,10 +113,13 @@ fn render_scope(text: &str, scope: &Scope, re: &Regex) -> String {
                     }
                 }
                 _ => {
-                    // Absent/empty block → render once with an empty scope so its
-                    // placeholders become honesty markers (never invented).
-                    let empty = Scope::new();
-                    out.push_str(&render_scope(inner, &empty, re));
+                    // Absent/empty block → render NOTHING (#2342 omit-empty): an
+                    // unfilled repeatable section (risk register, findings band,
+                    // benchmark row) is empty scaffolding, not data.  The post-
+                    // render polish pass collapses the now-empty section to a
+                    // single line and records it under Gaps & Caveats — no wall of
+                    // honesty markers.  (Pre-wave-2 this rendered once with
+                    // markers; the change is deliberate — see the omit-empty spec.)
                 }
             }
 
