@@ -119,7 +119,13 @@ pub fn strip_template_comments(text: &str) -> String {
 /// and leak the remainder into the output.
 /// What: `rest` must start with `<!--`; depth-balances to the outer close.
 /// Test: `polish_tests.rs::strips_comment_with_embedded_close`.
-fn balanced_comment_len(rest: &str) -> Option<usize> {
+///
+/// `pub(crate)` (not private): `template::parse_section_instructions` (#2357
+/// layered instructions) reuses this exact balancing logic to find the end of
+/// an `<!-- instruct:<id> ... -->` override block, so a documentation example
+/// embedded in the instruction body doesn't end the scan early — the same
+/// problem this function already solves for instructional comments generally.
+pub(crate) fn balanced_comment_len(rest: &str) -> Option<usize> {
     let mut depth = 1i32;
     let mut cur = 4usize; // past the opening "<!--"
     loop {
@@ -171,20 +177,43 @@ fn collapse_blank_runs(text: &str) -> String {
 /// the honesty marker, and — when a table loses every body row — replaces it with
 /// a single collapse line; drops marker-only bullets; records every dropped
 /// field/section label as a gap.  The Gaps & Caveats section is left untouched
-/// here (it is regenerated wholesale afterwards).  Returns the rewritten body and
-/// the ordered, de-duplicated gap labels.
-/// Test: `polish_tests.rs::{drops_marker_rows, collapses_empty_section}`.
+/// here (it is regenerated wholesale afterwards).  A fenced code block
+/// (``` … ```) is OPAQUE to every check in this pass (#2357 wave-3.2 defect #3):
+/// a blank line, a bullet-looking line, or anything else inside a fence is
+/// copied straight through, never interpreted as a marker row/bullet and never
+/// triggering a spliced "No data available" line mid-quote — a live-QA
+/// regression previously caused by a multi-line evidence quote's own blank line
+/// being read as a section boundary. Returns the rewritten body and the
+/// ordered, de-duplicated gap labels.
+/// Test: `polish_tests.rs::{drops_marker_rows, collapses_empty_section,
+/// fenced_code_with_blank_line_untouched}`.
 fn omit_empty(text: &str) -> (String, Vec<String>) {
     let mut out: Vec<String> = Vec::new();
     let mut gaps: Vec<String> = Vec::new();
     let mut section = String::new();
     let mut in_gaps_section = false;
+    let mut in_fence = false;
 
     let lines: Vec<&str> = text.lines().collect();
     let mut idx = 0usize;
     while idx < lines.len() {
         let line = lines[idx];
         let trimmed = line.trim();
+
+        // Fenced code blocks are opaque here — toggle state and pass every
+        // fenced line (including the fence markers themselves) straight
+        // through untouched, before any heading/table/marker interpretation.
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out.push(line.to_string());
+            idx += 1;
+            continue;
+        }
+        if in_fence {
+            out.push(line.to_string());
+            idx += 1;
+            continue;
+        }
 
         if let Some(heading) = heading_text(trimmed) {
             section = heading.to_string();
@@ -350,17 +379,38 @@ fn collapse_empty_sections(lines: &[String], gaps: &mut Vec<String>) -> String {
 /// then either re-emits the child span (child had content — this also marks the
 /// parent as having content) or replaces it with [`COLLAPSE_LINE`] + a recorded
 /// gap (child was empty — does NOT count toward the parent's own content). The
-/// Gaps & Caveats section is copied through untouched (never collapsed here).
+/// Gaps & Caveats section is copied through untouched (never collapsed here). A
+/// fenced code block (``` … ```) is tracked and treated as OPAQUE content
+/// (#2357 wave-3.2 defect #3): every fenced line — including a `#`-prefixed
+/// code comment or a bare `**bold**` line that would otherwise match
+/// [`boundary`] — is copied through as non-boundary content, so an evidence
+/// snippet's own source text can never be misread as a heading and can never
+/// leave its enclosing section falsely collapsed.
 /// Test: `polish_tests.rs::{parent_with_populated_child_not_collapsed,
-/// collapses_orphaned_bold_pseudo_heading}`.
+/// collapses_orphaned_bold_pseudo_heading, fenced_code_with_blank_line_untouched}`.
 fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>, bool) {
     let mut out: Vec<String> = Vec::new();
     let mut has_content = false;
     let mut idx = 0usize;
+    let mut in_fence = false;
 
     while idx < lines.len() {
         let line = &lines[idx];
         let trimmed = line.trim();
+
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            has_content = true;
+            out.push(line.clone());
+            idx += 1;
+            continue;
+        }
+        if in_fence {
+            has_content = true;
+            out.push(line.clone());
+            idx += 1;
+            continue;
+        }
 
         if trimmed == "---" {
             out.push(line.clone());
@@ -380,9 +430,30 @@ fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>,
         out.push(line.clone());
         idx += 1;
 
+        // Find where this heading's body ends: the next `---`, or the next
+        // boundary at the same or a shallower level.  MUST track fence state
+        // here too (#2357 wave-3.2 follow-up) — without it, a `#`-prefixed
+        // code-comment line inside a fenced evidence quote (e.g. a `.env`
+        // file's own comments) is misread by `boundary()` as a real markdown
+        // heading terminating THIS span early, which then made the outer walk
+        // re-process that comment line as a spurious heading of its own with
+        // an empty body, collapsing it (and repeating for each subsequent
+        // comment line) — the actual root cause of the mid-evidence "No data
+        // available" splice, not the outer loop's own (already-correct) fence
+        // guard.
         let body_start = idx;
+        let mut scan_in_fence = false;
         while idx < lines.len() {
             let t = lines[idx].trim();
+            if t.starts_with("```") {
+                scan_in_fence = !scan_in_fence;
+                idx += 1;
+                continue;
+            }
+            if scan_in_fence {
+                idx += 1;
+                continue;
+            }
             if t == "---" {
                 break;
             }

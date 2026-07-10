@@ -73,6 +73,16 @@ pub struct ReportSection {
     /// is resolved against the manifest directory.
     #[serde(default)]
     pub corpus: Option<String>,
+    /// Optional cap on files sent per repository in the wave-3 investigation pass
+    /// (#2357).  The `--investigate-max-files` CLI flag takes precedence; when
+    /// neither is set the built-in default applies.
+    #[serde(default)]
+    pub investigate_max_files: Option<usize>,
+    /// Optional cap on total content bytes sent per repository in the wave-3
+    /// investigation pass (#2357).  The `--investigate-max-bytes` CLI flag takes
+    /// precedence; when neither is set the built-in default applies.
+    #[serde(default)]
+    pub investigate_max_bytes: Option<usize>,
 }
 
 /// One validated repository entry mapping to a single per-application block.

@@ -8,12 +8,23 @@
 //! What: [`TemplateLoader`] resolves a template name to its markdown source,
 //! trying extra dirs → XDG config dir → bundled defaults.  Two templates ship
 //! bundled: `report-technical-dd` and `report-technical-dd-cast`.
+//! [`parse_section_instructions`] (#2357 layered instructions) reads a
+//! template's `<!-- instruct:<section_id> ... -->` blocks into an override map
+//! consumed by the synthesis prompt builder — the template-override tier of the
+//! generic → template → analyst instruction layering (see
+//! `section_instructions.rs`).
 //! Test: `template.rs` tests cover bundled fallback for both templates, an XDG
-//! override via an injected extra dir, and the not-found error.
+//! override via an injected extra dir, the not-found error, and instruct-block
+//! parsing (single-line, multi-line, unknown-id, and non-instruct comments).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use tracing::warn;
+
 use super::error::ReportError;
+use super::polish::balanced_comment_len;
+use super::section_instructions::is_valid_section_id;
 
 /// The generic vendor-neutral technical-DD template, bundled at compile time.
 const BUNDLED_TECHNICAL_DD: &str = include_str!("../../templates/report-technical-dd.md");
@@ -124,6 +135,60 @@ impl TemplateLoader {
     }
 }
 
+/// Parse `<!-- instruct:<section_id> ... -->` override blocks from raw template
+/// source (#2357 layered instructions).
+///
+/// Why: a template may want its own methodology's voice for a synthesized
+/// section (e.g. CAST's health-factor language in its executive summary)
+/// without forking the whole prompt-building code; embedding the override AS
+/// A TEMPLATE COMMENT keeps it co-located with the template it belongs to and,
+/// since it is an ordinary HTML comment, it is automatically stripped from
+/// rendered output by [`super::polish::strip_template_comments`] (verified by
+/// `template_tests.rs::instruct_blocks_never_render`) with no special-casing
+/// needed there — this parser simply reads the override BEFORE that stripping
+/// discards it, from the raw template text returned by [`TemplateLoader::load`].
+/// What: scans for HTML comments whose inner content starts with `instruct:`;
+/// the token immediately after (up to the next whitespace) is the section id,
+/// and everything from there to the comment's balanced close is the
+/// instruction text (trimmed).  An id not recognised by
+/// [`super::section_instructions::is_valid_section_id`] is logged via
+/// `tracing::warn!` and ignored — a template typo must not abort the run.
+/// Nested `<!--`/`-->` pairs inside the instruction body are balanced (reusing
+/// [`balanced_comment_len`]) so an embedded documentation example does not
+/// truncate the override early.
+/// Test: `template.rs::{parses_instruct_override, multiline_instruct_override,
+/// unknown_section_id_warns_and_ignores, non_instruct_comments_ignored}`.
+pub fn parse_section_instructions(template: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut i = 0usize;
+    while let Some(rel_start) = template[i..].find("<!--") {
+        let abs_start = i + rel_start;
+        let rest = &template[abs_start..];
+        let Some(len) = balanced_comment_len(rest) else {
+            break; // unterminated comment — nothing further to parse
+        };
+        let inner = &rest[4..len - 3];
+        let trimmed = inner.trim_start();
+        if let Some(after) = trimmed.strip_prefix("instruct:") {
+            let after = after.trim_start();
+            let (id, text) = match after.find(char::is_whitespace) {
+                Some(sp) => (&after[..sp], after[sp..].trim()),
+                None => (after.trim_end(), ""),
+            };
+            if is_valid_section_id(id) {
+                out.insert(id.to_string(), text.to_string());
+            } else {
+                warn!(
+                    section_id = %id,
+                    "template `instruct:` override names an unknown section id; ignoring"
+                );
+            }
+        }
+        i = abs_start + len;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +238,79 @@ mod tests {
         let loader = TemplateLoader::bundled_only();
         assert!(loader.load("report-technical-dd").is_ok());
         assert!(loader.load("unknown").is_err());
+    }
+
+    // ── Section-instruction override parsing (#2357 layered instructions) ────
+
+    /// Why: a single-line override is the simplest authoring form.
+    /// What: `<!-- instruct:executive_summary Some text -->` yields one entry.
+    /// Test: this test itself.
+    #[test]
+    fn parses_instruct_override() {
+        let tpl = "# Title\n\n<!-- instruct:executive_summary Focus on health-factor language. -->\n\nBody";
+        let overrides = parse_section_instructions(tpl);
+        assert_eq!(
+            overrides.get("executive_summary").map(String::as_str),
+            Some("Focus on health-factor language.")
+        );
+    }
+
+    /// Why: authors will want multi-line, paragraph-style overrides too.
+    /// What: a multi-line body between the id line and the closing `-->` parses
+    /// with internal newlines preserved (only outer whitespace trimmed).
+    /// Test: this test itself.
+    #[test]
+    fn multiline_instruct_override() {
+        let tpl = "<!-- instruct:top_risks\nList at most 3 rows.\nBe terse.\n-->";
+        let overrides = parse_section_instructions(tpl);
+        assert_eq!(
+            overrides.get("top_risks").map(String::as_str),
+            Some("List at most 3 rows.\nBe terse.")
+        );
+    }
+
+    /// Why: a mistyped section id must warn and be ignored, never abort the run.
+    /// What: `instruct:executiv_summary` (typo) is absent from the result.
+    /// Test: this test itself.
+    #[test]
+    fn unknown_section_id_warns_and_ignores() {
+        let tpl = "<!-- instruct:executiv_summary Typo. -->";
+        let overrides = parse_section_instructions(tpl);
+        assert!(overrides.is_empty(), "typo'd id must not produce an entry");
+    }
+
+    /// Why: the parser must not mistake an ordinary instructional or dataset
+    /// comment for an override.
+    /// What: unrelated comments (including a `dataset:` marker) yield no entries.
+    /// Test: this test itself.
+    #[test]
+    fn non_instruct_comments_ignored() {
+        let tpl = "<!-- just some authoring guidance --><!-- dataset: x | chart: bar -->";
+        assert!(parse_section_instructions(tpl).is_empty());
+    }
+
+    /// Why: both bundled templates ship valid instruct syntax (or none) — a
+    /// regression here would mean a shipped template's own override silently
+    /// stopped parsing.
+    /// What: parses both bundled templates without panicking; the CAST template
+    /// carries its documented `executive_summary` demonstration override.
+    /// Test: this test itself.
+    #[test]
+    fn bundled_cast_template_carries_demo_override() {
+        let cast = TemplateLoader::bundled_only()
+            .load("report-technical-dd-cast")
+            .expect("bundled cast");
+        let overrides = parse_section_instructions(&cast);
+        assert!(
+            overrides.contains_key("executive_summary"),
+            "CAST template must ship its documented executive_summary override"
+        );
+        assert!(
+            overrides["executive_summary"]
+                .to_lowercase()
+                .contains("health-factor"),
+            "CAST override should reference health-factor language: {:?}",
+            overrides["executive_summary"]
+        );
     }
 }

@@ -33,6 +33,32 @@
   analytical detail. GREEN (positive/healthy) findings get NO analysis: list them
   as a single line per topic, nothing more. Do not editorialize or add root-cause
   narrative to a green item.
+
+  SECTION-INSTRUCTION OVERRIDES (#2357 layered instructions)
+  Under `--synthesize`, three narrative sections are LLM-written: the executive
+  summary, the top-risks rows, and per-finding elaboration prose. Each has a
+  generic built-in instruction (see `src/report/section_instructions.rs`) that
+  this template may override for its OWN methodology's voice by embedding a
+  `<!-- instruct:<section_id> ... -->` comment anywhere in this file, where
+  `<section_id>` is one of `executive_summary`, `top_risks`,
+  `finding_elaboration`. The override text REPLACES the generic default for
+  that section only; other sections keep their generic default. An analyst's
+  `--instructions` brief still applies ADDITIVELY on top of whichever
+  instruction (generic or template-overridden) is active — it steers emphasis,
+  never replaces the section instruction. `instruct:` comments are parsed at
+  template-load time and, like every other comment here, are stripped from
+  rendered output — they never appear in a generated report. This template
+  demonstrates one override below (`executive_summary`, CAST health-factor
+  voice).
+-->
+
+<!-- instruct:executive_summary
+Write ONE deal-analytic paragraph in CAST's health-factor voice: lead with the
+TQI (Technical Quality Index) posture and name which of the five health
+factors (Robustness, Efficiency, Security, Changeability, Transferability)
+drive the RED/AMBER findings, severity-weighted (RED first), tied to what an
+acquirer must act on. Reference a coverage gap ONLY if one is genuinely named
+in the coverage data provided — and name it specifically.
 -->
 
 # CAST Technical Due-Diligence Analysis: {{target_codename}}
@@ -93,7 +119,7 @@ expected >3.40; 2–5yr >3.20; 5–10yr >3.00; >10yr >2.70.
 ## 4. Per-Application Scorecard
 
 <!-- BEGIN per_application -->
-### 4.N. {{app_name}}
+### 4.{{app_index}}. {{app_name}}
 
 **Profile**
 
@@ -153,7 +179,12 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 **{{app_name}}:**
 
 <!-- BEGIN red_finding -->
-N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_evidence}}. Affected component: {{finding_component}}. Business impact: {{finding_business_impact}}. Root cause: {{finding_root_cause}}. Remediation: {{finding_remediation}} (cost/effort: {{finding_cost_effort}}).
+{{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Component:** {{finding_component}}
+- **Business impact:** {{finding_business_impact}}
+- **Root cause:** {{finding_root_cause}}
+- **Remediation:** {{finding_remediation}} (cost/effort: {{finding_cost_effort}})
+{{finding_evidence_block}}
 <!-- END red_finding -->
 <!-- END per_application_red -->
 
@@ -163,7 +194,9 @@ N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_eviden
 **{{app_name}}:**
 
 <!-- BEGIN amber_finding -->
-N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_evidence}}. Remediation: {{finding_remediation}}.
+{{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Remediation:** {{finding_remediation}}
+{{finding_evidence_block}}
 <!-- END amber_finding -->
 <!-- END per_application_amber -->
 

@@ -18,6 +18,7 @@ pub mod error;
 pub mod fill;
 pub mod git_info;
 pub mod instructions;
+pub mod investigate;
 pub mod manifest;
 pub mod metrics;
 pub mod model;
@@ -26,7 +27,9 @@ pub mod provenance;
 pub mod reporter;
 pub mod reporter_fill;
 pub mod scan;
+pub mod section_instructions;
 pub mod synthesize;
+pub mod synthesize_digest;
 pub mod synthesize_guard;
 pub mod synthesize_prompt;
 pub mod template;
@@ -41,6 +44,9 @@ pub use error::{ManifestError, ReportError, Result};
 pub use fill::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 pub use git_info::{GitInfo, gather_git_info};
 pub use instructions::{Instructions, load_instructions};
+pub use investigate::{
+    Budget, Investigation, InvestigationStatus, RepoInvestigation, run_investigation,
+};
 pub use manifest::{
     Manifest, ReportSection, RepositoryEntry, RepositorySource, load_manifest, parse_manifest,
     slugify,
@@ -52,4 +58,4 @@ pub use provenance::{Provenance, tag};
 pub use reporter::Reporter;
 pub use scan::{Framework, RepoScan, scan_repo};
 pub use synthesize::{FindingProse, RiskRow, Synthesis, SynthesisStatus, Synthesizer};
-pub use template::{DEFAULT_TEMPLATE, TemplateLoader};
+pub use template::{DEFAULT_TEMPLATE, TemplateLoader, parse_section_instructions};

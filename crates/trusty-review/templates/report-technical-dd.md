@@ -35,6 +35,22 @@
   list them as a single line per topic, nothing more. Do not editorialize,
   expand, or add root-cause narrative to a green item. This keeps the
   analysis focused on what the acquirer/reader actually needs to act on.
+
+  SECTION-INSTRUCTION OVERRIDES (#2357 layered instructions)
+  Under `--synthesize`, three narrative sections are LLM-written: the executive
+  summary, the top-risks rows, and per-finding elaboration prose. Each has a
+  generic built-in instruction (see `src/report/section_instructions.rs`) that
+  a template may override for its own methodology's voice by embedding a
+  `<!-- instruct:<section_id> ... -->` comment anywhere in the file, where
+  `<section_id>` is one of `executive_summary`, `top_risks`,
+  `finding_elaboration`. The override REPLACES the generic default for that
+  section only. This generic template ships no override (it uses the crate's
+  defaults for all three sections) — see `report-technical-dd-cast.md` for a
+  worked example overriding `executive_summary` with CAST health-factor
+  language. An analyst's `--instructions` brief still applies ADDITIVELY on top
+  of whichever instruction is active — it steers emphasis, never replaces it.
+  `instruct:` comments are parsed at template-load time and, like every other
+  comment here, are stripped from rendered output.
 -->
 
 # Technical Due-Diligence Analysis: {{target_codename}}
@@ -91,7 +107,7 @@ report against others normalized through this same template.
 ## 4. Per-Application Scorecard
 
 <!-- BEGIN per_application -->
-### 4.N. {{app_name}}
+### 4.{{app_index}}. {{app_name}}
 
 **Profile**
 
@@ -128,7 +144,11 @@ report against others normalized through this same template.
 **{{app_name}}:**
 
 <!-- BEGIN red_finding -->
-N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_evidence}}. Affected component: {{finding_component}}. Business impact: {{finding_business_impact}}. Remediation: {{finding_remediation}} (cost/effort: {{finding_cost_effort}}).
+{{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Component:** {{finding_component}}
+- **Business impact:** {{finding_business_impact}}
+- **Remediation:** {{finding_remediation}} (cost/effort: {{finding_cost_effort}})
+{{finding_evidence_block}}
 <!-- END red_finding -->
 <!-- END per_application_red -->
 
@@ -138,7 +158,9 @@ N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_eviden
 **{{app_name}}:**
 
 <!-- BEGIN amber_finding -->
-N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_evidence}}. Remediation: {{finding_remediation}}.
+{{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Remediation:** {{finding_remediation}}
+{{finding_evidence_block}}
 <!-- END amber_finding -->
 <!-- END per_application_amber -->
 
