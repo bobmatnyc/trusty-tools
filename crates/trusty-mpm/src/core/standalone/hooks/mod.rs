@@ -180,31 +180,83 @@ pub fn mpm_hook_additions() -> serde_json::Value {
     mpm_hook_additions_with_exe(None)
 }
 
-/// Binary names this crate ships as `[[bin]]` targets (`Cargo.toml`): the
-/// full name and the short everyday alias used by `tm run`/`tm load`/`tm login`.
+/// Canonical binary names this crate ships as `[[bin]]` targets (`Cargo.toml`):
+/// the full name and the short everyday alias used by `tm run`/`tm load`/`tm login`.
 const MPM_BIN_NAMES: &[&str] = &["trusty-mpm", "tm"];
+
+/// File-name STEMS that identify an mpm-owned binary once any Cargo
+/// build-artifact `-<hash>` suffix is stripped.
+///
+/// Why (#2235): managed hooks resolved from a debug/worktree build embed a
+/// `target/debug/deps/<stem>-<hash>` path whose file name is NOT one of
+/// [`MPM_BIN_NAMES`] — the Cargo dep artifact uses the underscore crate name
+/// (`trusty_mpm`) or the `[[bin]]` alias (`tm`) with a trailing content hash,
+/// and the long-defunct pre-rename binary was `session_manager_mvp`. All of
+/// these must be recognised as the SAME hook owner so stale entries collapse.
+/// What: the canonical stems (dash + underscore spellings) plus the retired MVP
+/// name. Matched by [`is_mpm_binary_filename`] against the hash-stripped stem.
+const MPM_BIN_STEMS: &[&str] = &["trusty-mpm", "trusty_mpm", "tm", "session_manager_mvp"];
+
+/// Recognise an mpm-owned binary by its file-name component, tolerating Cargo
+/// build-artifact hash suffixes and the defunct `session_manager_mvp` name.
+///
+/// Why (#2235): dedup that keyed identity on the exact file name ∈
+/// {`trusty-mpm`,`tm`} could never strip a stale entry whose command carried a
+/// build-artifact path (`.../deps/trusty_mpm-<hash> hook`, `.../tm-<hash> hook`)
+/// or the retired `session_manager_mvp-<hash>` name — those file names are not
+/// in the recognised set, so every managed launch appended a fresh entry beside
+/// the un-strippable stale ones and `settings.json` grew without bound. Matching
+/// the whole binary family (canonical names + hash-suffixed artifacts + the MVP
+/// name) makes the strip remove ALL prior managed variants before the merge, so
+/// exactly one canonical entry per (event, matcher) survives.
+/// What: returns `true` when `name` is a canonical [`MPM_BIN_NAMES`] entry, the
+/// bare defunct `session_manager_mvp` name, OR a Cargo build-artifact of the
+/// form `<stem>-<hexhash>` where `stem ∈ MPM_BIN_STEMS` and `<hexhash>` is an
+/// all-hex-digit suffix of length ≥ 8 (the shape Cargo emits under
+/// `target/*/deps/`). The hex-length guard keeps unrelated binaries that merely
+/// share a stem prefix (e.g. `tm-cli`) from being mis-identified.
+/// Test: `test_is_mpm_hook_command_recognises_tm_bin_name`,
+/// `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`.
+fn is_mpm_binary_filename(name: &str) -> bool {
+    if MPM_BIN_NAMES.contains(&name) || name == "session_manager_mvp" {
+        return true;
+    }
+    // Cargo build-artifact form: `<stem>-<hexhash>` (e.g. `trusty_mpm-1a2b3c4d`).
+    if let Some((stem, hash)) = name.rsplit_once('-')
+        && hash.len() >= 8
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return MPM_BIN_STEMS.contains(&stem);
+    }
+    false
+}
 
 /// Check if a command string is one of the trusty-mpm hook command variants.
 ///
-/// Why (#2015): the crate ships TWO `[[bin]]` targets that share one binary —
-/// `trusty-mpm` and the short alias `tm` (the everyday entry point for `tm
-/// run`/`tm load`/`tm login`). `mpm_hook_command` resolves whichever binary is
-/// currently running via `current_exe()`, so a hook group's command can be
+/// Why (#2015, #2235): the crate ships TWO `[[bin]]` targets that share one
+/// binary — `trusty-mpm` and the short alias `tm` (the everyday entry point for
+/// `tm run`/`tm load`/`tm login`). `mpm_hook_command` resolves whichever binary
+/// is currently running via `current_exe()`, so a hook group's command can be
 /// `.../tm hook` on one write and `.../trusty-mpm hook` on the next (or vice
-/// versa) purely from which entry point launched the process — not from any
-/// real difference in ownership. The original predicate only recognised the
-/// `trusty-mpm` name, so a stale `tm`-named group was invisible to the
-/// replace-by-identity strip in [`write_project_hooks`] and survived every
-/// merge: exactly the accumulation bug #2015 reports. Both names must be
-/// recognised as the SAME hook owner.
+/// versa) purely from which entry point launched the process. Worse, a
+/// debug/worktree build resolves to a hash-suffixed artifact
+/// (`.../deps/trusty_mpm-<hash> hook`) and legacy configs still carry the
+/// retired `session_manager_mvp-<hash>` name — none of which the original
+/// file-name-exact predicate recognised, so those stale groups were invisible
+/// to the replace-by-identity strip in [`write_project_hooks`] and survived
+/// every merge: exactly the unbounded-growth bug #2235 reports. The whole
+/// binary family must be recognised as the SAME hook owner.
 /// What: returns `true` when `cmd` ends with ` hook` (scoping the match to an
 /// actual MPM hook invocation, not just any binary that happens to share a
-/// name) AND the remaining prefix's file-name component is one of
-/// [`MPM_BIN_NAMES`] — covering both bare names (`"tm hook"`) and absolute
-/// paths (`"/opt/bin/tm hook"`, `"/opt/bin/trusty-mpm hook"`).
+/// name) AND the remaining prefix's file-name component is recognised by
+/// [`is_mpm_binary_filename`] — covering bare names (`"tm hook"`), absolute
+/// paths (`"/opt/bin/trusty-mpm hook"`), and hash-suffixed build artifacts
+/// (`".../deps/trusty_mpm-<hash> hook"`, `"session_manager_mvp-<hash> hook"`).
 /// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
 /// `test_is_mpm_hook_command_recognises_tm_bin_name`,
-/// `test_write_project_hooks_replaces_stale_exe_path_group`.
+/// `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
+/// `test_write_project_hooks_replaces_stale_exe_path_group`,
+/// `test_write_project_hooks_collapses_stale_hash_and_mvp_entries`.
 fn is_mpm_hook_command(cmd: &str) -> bool {
     // The command must end with " hook" (with exactly one trailing sub-command word).
     let Some(binary) = cmd.strip_suffix(" hook") else {
@@ -213,7 +265,7 @@ fn is_mpm_hook_command(cmd: &str) -> bool {
     Path::new(binary)
         .file_name()
         .and_then(|f| f.to_str())
-        .is_some_and(|name| MPM_BIN_NAMES.contains(&name))
+        .is_some_and(is_mpm_binary_filename)
 }
 
 /// Strip trusty-mpm hook entries from every global Claude settings file.
