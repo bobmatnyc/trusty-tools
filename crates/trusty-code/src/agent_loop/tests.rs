@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig, ToolEventSink};
+use super::{
+    AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig, ToolEventSink, Transcript,
+};
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
 
@@ -1807,5 +1809,188 @@ async fn build_request_sets_detailed_usage_for_openrouter() {
         bedrock_llm.usage_seen()[0],
         None,
         "Bedrock-routed requests must never carry the OpenRouter-only detailed-usage directive"
+    );
+}
+
+// ── #2344: persistent-session `run_with_transcript` ─────────────────────────────
+
+/// Build a transcript that looks like a session's FIRST `task.run` already
+/// completed: seeded, then one assistant text turn appended (the "run one"
+/// answer), mirroring what `SessionRegistry::begin_pm_transcript` +
+/// `AgentLoop::run_with_transcript` leave behind after a real run.
+fn transcript_after_one_completed_run() -> Transcript {
+    let mut t = Transcript::seed("system prompt", "first task");
+    t.push_assistant(Some("run one's answer".into()), &[]);
+    t
+}
+
+/// A second `run_with_transcript` call on an already-seeded transcript must
+/// NOT add a second system message — the original seed's system message
+/// stays authoritative across runs.
+///
+/// Why: This is #2344's explicit "system prompt on subsequent runs"
+/// contract — re-seeding on every run would duplicate the system message and
+/// waste tokens/confuse the model.
+/// What: Build a post-first-run transcript, append the second task as a user
+/// turn (mirroring `SessionRegistry::begin_pm_transcript`'s own append), run
+/// the loop again, and assert exactly ONE `system`-role message across the
+/// whole raw history.
+/// Test: this test.
+#[tokio::test]
+async fn run_with_transcript_does_not_reseed_system_message() {
+    let mut transcript = transcript_after_one_completed_run();
+    transcript.push_user("second task");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("run two's answer")]));
+    let agent = make_loop(
+        llm.clone(),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    );
+
+    agent
+        .run_with_transcript(&mut transcript, "second task")
+        .await
+        .expect("second run should complete");
+
+    let messages = transcript.messages();
+    assert_eq!(
+        messages.iter().filter(|m| m.role == "system").count(),
+        1,
+        "a continued run must never add a second system message: {messages:?}"
+    );
+    assert_eq!(messages[0].role, "system");
+    assert_eq!(messages[0].content.as_deref(), Some("system prompt"));
+}
+
+/// `run_with_transcript`'s reported `AgentOutput.content` is scoped to only
+/// the NEW turns this call produced, even though the underlying transcript
+/// keeps growing across runs.
+///
+/// Why: Without this scoping, a session's second `task.run` response would
+/// read as the first run's answer immediately followed by the second's —
+/// duplicated, ever-growing prose on every subsequent call. #2344's design
+/// deliberately keeps the CONVERSATION cumulative while keeping each run's
+/// OWN reported answer scoped to itself.
+/// What: Drive a second run on `transcript_after_one_completed_run()`;
+/// assert the returned `content` is EXACTLY the second run's text (not
+/// prefixed by "run one's answer"), while the transcript's own
+/// `assistant_text()` still contains both.
+/// Test: this test.
+#[tokio::test]
+async fn run_with_transcript_scopes_output_to_new_turns() {
+    let mut transcript = transcript_after_one_completed_run();
+    transcript.push_user("second task");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("run two's answer")]));
+    let agent = make_loop(
+        llm.clone(),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    );
+
+    let out = agent
+        .run_with_transcript(&mut transcript, "second task")
+        .await
+        .expect("second run should complete");
+
+    assert_eq!(
+        out.content, "run two's answer",
+        "the reported output must be scoped to just this run's new turns"
+    );
+    assert_eq!(
+        transcript.assistant_text(),
+        "run one's answer\n\nrun two's answer",
+        "the underlying transcript must still hold BOTH runs' assistant text"
+    );
+}
+
+/// The output-scoping rule also applies to a partial-abort outcome (turn cap
+/// exceeded), not just the success path.
+///
+/// Why: `AgentLoopError::partial_output_mut` is what makes this uniform —
+/// this test pins that the turn-cap abort variant is actually covered, not
+/// just the happy path.
+/// What: Cap `max_turns` at 1 and script only tool-call responses (no text)
+/// for the second run; assert the `TurnCapExceeded` partial's `content` does
+/// NOT contain "run one's answer" (i.e. it was scoped, not left as the whole
+/// transcript's joined text — which would be empty here anyway since run two
+/// never produced text, but a pre-#2344 bug would still surface as a
+/// non-empty `content` carrying run one's leftover text).
+/// Test: this test.
+#[tokio::test]
+async fn run_with_transcript_scopes_partial_output_on_turn_cap() {
+    let mut transcript = transcript_after_one_completed_run();
+    transcript.push_user("second task");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "a"),
+        tool_call_response("c2", "b"),
+    ]));
+    let agent = make_loop(
+        llm.clone(),
+        registry_with_echo(false),
+        AgentLoopConfig {
+            max_turns: 1,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let err = agent
+        .run_with_transcript(&mut transcript, "second task")
+        .await
+        .expect_err("turn cap should abort the second run");
+
+    let AgentLoopError::TurnCapExceeded { partial, .. } = err else {
+        panic!("expected TurnCapExceeded, got {err:?}");
+    };
+    assert!(
+        !partial.content.contains("run one's answer"),
+        "the partial output must be scoped to this run's new turns, got: {:?}",
+        partial.content
+    );
+}
+
+/// An explicit `finish_task` completion on a continued run must keep its
+/// structured summary — the output-scoping rewrite must NOT clobber it.
+///
+/// Why: `build_finish_output` deliberately overwrites `content` with a
+/// structured render and sets `summary`; `scope_output_to_new_turns` must
+/// detect that (`summary.is_some()`) and leave it alone, or every
+/// persistent-session run that finishes via `finish_task` would lose its
+/// structured completion report.
+/// What: Drive a second run that finishes via `finish_task`; assert
+/// `out.summary` and the structured `content` survive unchanged.
+/// Test: this test.
+#[tokio::test]
+async fn run_with_transcript_does_not_clobber_finish_task_summary() {
+    let mut transcript = transcript_after_one_completed_run();
+    transcript.push_user("second task");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[finish_task_call_response(
+        "call-finish",
+        r#"{"status": "completed", "summary": "run two done"}"#,
+    )]));
+    let agent = make_loop(
+        llm.clone(),
+        registry_with_finish_task(),
+        AgentLoopConfig::default(),
+    );
+
+    let out = agent
+        .run_with_transcript(&mut transcript, "second task")
+        .await
+        .expect("finish_task should terminate the loop");
+
+    assert_eq!(out.summary.as_deref(), Some("run two done"));
+    assert!(
+        out.content.contains("run two done"),
+        "the structured finish_task summary must survive the output-scoping rewrite: {:?}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("run one's answer"),
+        "a finish_task completion must not contain run one's leftover text either: {:?}",
+        out.content
     );
 }

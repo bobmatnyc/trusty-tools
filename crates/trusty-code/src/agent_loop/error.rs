@@ -135,3 +135,26 @@ pub enum AgentLoopError {
         partial: Box<AgentOutput>,
     },
 }
+
+impl AgentLoopError {
+    /// Mutable access to the partial `AgentOutput` carried by every abort
+    /// variant (#2344).
+    ///
+    /// Why: `AgentLoop::run_with_transcript` needs to rewrite `content` on
+    /// whichever `AgentOutput` a run produced — success or any partial-abort
+    /// variant — so a persistent-session run's reported output is scoped to
+    /// just its own new turns (see `Transcript::assistant_text_since`'s
+    /// docs), without duplicating that match arm-by-arm at the call site.
+    /// What: `Some(&mut partial)` for every abort variant; `None` for `Llm`,
+    /// which carries no partial output at all.
+    /// Test: `agent_loop::tests::run_with_transcript_scopes_partial_output_on_turn_cap`.
+    pub(crate) fn partial_output_mut(&mut self) -> Option<&mut AgentOutput> {
+        match self {
+            AgentLoopError::TurnCapExceeded { partial, .. }
+            | AgentLoopError::Timeout { partial, .. }
+            | AgentLoopError::Cancelled { partial }
+            | AgentLoopError::StoppedBySignal { partial } => Some(partial),
+            AgentLoopError::Llm(_) => None,
+        }
+    }
+}
