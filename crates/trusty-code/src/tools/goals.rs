@@ -9,7 +9,7 @@
 //! live session `Transcript` (see `agent_loop::transcript::Transcript::goals_handle`),
 //! rather than an `AgentRunner` or config dir as `delegate_to_agent`
 //! (`tools::delegate`) holds. Both tools write with `GoalSource::Model` — the
-//! future operator-facing `session.set_goal` RPC (#2348) writes the same
+//! future operator-facing `session.set_goal` RPC (#2350) writes the same
 //! `GoalSlots` with `GoalSource::Operator` through a different call path, not
 //! through these tools.
 //! What: [`SetGoalTool`] and [`ClearGoalTool`] each wrap an

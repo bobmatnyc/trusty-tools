@@ -111,6 +111,66 @@ async fn resolve_cadence_config_env_wins_over_settings_json() {
     .await;
 }
 
+/// #2350 acceptance criterion: a `.claude/settings.json` `code_harness.*`
+/// override changes cadence BEHAVIOUR end-to-end, not just the resolved
+/// config VALUE — extends `resolve_cadence_config_settings_json_override`
+/// (which only asserts the resolved struct's fields) and
+/// `task::executor::tests::settings_json_cadence_turns_override_reaches_resolver`
+/// (which proves the resolver reads the same `TaskRunParams.project` path a
+/// real `task.run` uses) one step further by actually driving
+/// `maybe_cadence_compress` with the resolved config and observing a
+/// DIFFERENT fire schedule than the built-in default would have produced.
+///
+/// Why: #2346 wired the settings.json -> `CadenceConfig` precedence chain;
+/// this ticket (#2350) is what plugs that resolved config into the session
+/// path's actual turn-boundary behaviour. Proving only that the config VALUE
+/// changes would miss a wiring bug where the resolved config is computed but
+/// never actually passed to `maybe_cadence_compress`.
+/// What: A project's `.claude/settings.json` sets `cadence_turns: 3`. Feed
+/// `resolve_cadence_config(project.path())`'s result into
+/// `maybe_cadence_compress` across 4 turns: with the override, cadence must
+/// have fired once (at turn 3) by turn 4. A second transcript run with the
+/// BUILT-IN DEFAULT (`cadence_turns: 8`) over the same 4 turns must NOT have
+/// fired at all — proving the settings.json override is what changed the
+/// observed behaviour, not some incidental default.
+/// Test: this test.
+#[test]
+fn settings_json_cadence_turns_override_changes_fire_schedule_end_to_end() {
+    let project = project_with_settings(Some(r#"{"code_harness": {"cadence_turns": 3}}"#));
+    let overridden_cfg = resolve_cadence_config(project.path());
+    assert_eq!(overridden_cfg.cadence_turns, 3);
+
+    let context_window = 1_000_000;
+    let mut overridden_transcript = Transcript::seed("s", "task");
+    for turn in 1..=4 {
+        push_sized_turn(&mut overridden_transcript, turn, 10);
+        maybe_cadence_compress(
+            &mut overridden_transcript,
+            &overridden_cfg,
+            1,
+            context_window,
+        );
+    }
+    assert_eq!(
+        overridden_transcript.cadence_fire_count(),
+        1,
+        "cadence_turns=3 from settings.json must have fired once by turn 4"
+    );
+
+    let default_cfg = CadenceConfig::default();
+    let mut default_transcript = Transcript::seed("s", "task");
+    for turn in 1..=4 {
+        push_sized_turn(&mut default_transcript, turn, 10);
+        maybe_cadence_compress(&mut default_transcript, &default_cfg, 1, context_window);
+    }
+    assert_eq!(
+        default_transcript.cadence_fire_count(),
+        0,
+        "the built-in default (cadence_turns=8) must NOT have fired by turn 4 — \
+         proving the settings.json override, not the default, drove the difference"
+    );
+}
+
 /// Cadence fires exactly every N turns (N=3 override) — not on any other
 /// turn.
 #[test]

@@ -5,15 +5,22 @@
 //! CLI (and later TUI/TELGUI/REST) never touch `SessionRegistry` directly.
 //! What: [`register`] wires `session.create`, `session.list`,
 //! `session.status`, `session.send`, `session.attach`, `session.detach`,
-//! `session.cancel`, and (#2058) `session.get_transcript` onto a [`Router`],
-//! all closed over the SAME `Arc<SessionRegistry>` so every method sees a
-//! consistent view. Each handler parses its typed `params`, forwards to the
-//! matching `SessionRegistry` method, and maps the result onto the JSON-RPC
-//! result shape the vision spec's §4.3 examples describe.
-//! Test: `protocol::tests::*` (parameter validation, error mapping); the
-//! full attach/detach streaming behaviour is covered by
-//! `session::registry_tests` (registry-level) and
-//! `tests/session_e2e.rs`/`tests/task_e2e.rs` (API-driven, real daemon).
+//! `session.cancel`, (#2058) `session.get_transcript`, and (#2350)
+//! `session.set_goal`/`session.clear_goal`/`session.get_goals` onto a
+//! [`Router`], all closed over the SAME `Arc<SessionRegistry>` so every
+//! method sees a consistent view. Each handler parses its typed `params`,
+//! forwards to the matching `SessionRegistry` method, and maps the result
+//! onto the JSON-RPC result shape the vision spec's §4.3 examples describe.
+//! The three goal methods' handler bodies live in the sibling
+//! `protocol_goals` module (kept out of this file purely for the 500-SLOC
+//! cap — see that module's docs), but are registered here alongside every
+//! other `session.*` method so this remains the one place listing the full
+//! surface.
+//! Test: `protocol::tests::*` (parameter validation, error mapping);
+//! `protocol_goals::tests::*` (the three goal methods); the full
+//! attach/detach streaming behaviour is covered by `session::registry_tests`
+//! (registry-level) and `tests/session_e2e.rs`/`tests/task_e2e.rs`
+//! (API-driven, real daemon).
 
 use std::sync::Arc;
 
@@ -102,6 +109,33 @@ pub fn register(router: &mut Router, registry: Arc<SessionRegistry>) {
         move |params: Value, ctx: ConnectionContext| {
             let r = r.clone();
             async move { get_transcript(&r, params, ctx).await }
+        },
+    );
+
+    let r = registry.clone();
+    router.register(
+        "session.set_goal",
+        move |params: Value, ctx: ConnectionContext| {
+            let r = r.clone();
+            async move { protocol_goals::set_goal(&r, params, ctx).await }
+        },
+    );
+
+    let r = registry.clone();
+    router.register(
+        "session.clear_goal",
+        move |params: Value, ctx: ConnectionContext| {
+            let r = r.clone();
+            async move { protocol_goals::clear_goal(&r, params, ctx).await }
+        },
+    );
+
+    let r = registry.clone();
+    router.register(
+        "session.get_goals",
+        move |params: Value, ctx: ConnectionContext| {
+            let r = r.clone();
+            async move { protocol_goals::get_goals(&r, params, ctx).await }
         },
     );
 }
@@ -309,6 +343,15 @@ async fn get_transcript(
     Ok(json!(registry.get_transcript(&p.session_id)?))
 }
 
+/// `session.set_goal`/`session.clear_goal`/`session.get_goals` (#2350),
+/// split into their own file purely to keep this production file under the
+/// crate's 500-SLOC cap — a child module of `protocol` (declared via
+/// `#[path = ...] mod protocol_goals;`), so it shares full access to this
+/// module's private `SessionIdParams`/`parse` helpers exactly as if these
+/// handlers were still defined here.
+#[path = "protocol_goals.rs"]
+mod protocol_goals;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +383,7 @@ mod tests {
             ("session.attach", json!({"session_id": session.id})),
             ("session.detach", json!({"session_id": session.id})),
             ("session.get_transcript", json!({"session_id": session.id})),
+            ("session.get_goals", json!({"session_id": session.id})),
         ];
         for (method, params) in cases {
             let req = Request {
@@ -369,6 +413,33 @@ mod tests {
             "session.cancel should succeed, got {:?}",
             resp.error
         );
+    }
+
+    /// `session.set_goal`/`session.clear_goal` must be reachable through the
+    /// `Router` (proving the wiring) even though a freshly-created session
+    /// with no `task.run` yet has no transcript to write into — the
+    /// documented #2350 "no transcript yet" error IS the proof the request
+    /// was routed to the real handler rather than `-32601 method not found`.
+    #[tokio::test]
+    async fn register_wires_set_goal_and_clear_goal() {
+        let registry = Arc::new(SessionRegistry::new());
+        let mut router = Router::new();
+        register(&mut router, registry.clone());
+        let session = registry.create("t".to_string(), None, None);
+
+        for method in ["session.set_goal", "session.clear_goal"] {
+            let req = Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({"session_id": session.id, "slot": 1, "text": "x"})),
+            };
+            let resp = router.dispatch(req, &test_ctx()).await;
+            let error = resp
+                .error
+                .unwrap_or_else(|| panic!("{method} must error (no transcript yet)"));
+            assert_eq!(error.code, -32003, "{method} wrong error code");
+        }
     }
 
     /// An empty `task` must map to `-32003 invalid_argument`, not silently

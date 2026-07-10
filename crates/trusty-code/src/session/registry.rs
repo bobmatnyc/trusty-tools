@@ -709,7 +709,8 @@ impl SessionRegistry {
     /// Test: `registry_tests::get_transcript_returns_stored_record`,
     /// `registry_tests::get_transcript_on_never_run_session_is_empty`,
     /// `registry_tests::get_transcript_unknown_session_errors`,
-    /// `registry_tests::get_transcript_reports_compaction_events`.
+    /// `registry_tests::get_transcript_reports_compaction_events`,
+    /// `registry_tests::get_transcript_round_trips_goal_state`.
     pub fn get_transcript(&self, id: &str) -> Result<TranscriptRecord, RpcError> {
         let sessions = self.lock();
         let entry = sessions
@@ -726,6 +727,7 @@ impl SessionRegistry {
                 .as_ref()
                 .map(Transcript::compaction_events)
                 .unwrap_or(0),
+            goals: goal_ops::goal_records(entry),
         })
     }
 
@@ -911,6 +913,12 @@ mod events;
 /// the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_memory_sink.rs"]
 mod memory_sink_ext;
+
+/// #2350 operator-facing goal-slot plumbing (`session.set_goal`/
+/// `clear_goal`/`get_goals`), split out into its own file for the same
+/// 500-SLOC-cap reason as `events`/`memory_sink_ext` above.
+#[path = "registry_goals.rs"]
+mod goal_ops;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]

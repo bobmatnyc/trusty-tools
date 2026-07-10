@@ -957,3 +957,213 @@ async fn finish_unknown_session_errors() {
         .unwrap_err();
     assert_eq!(err.code, -32007);
 }
+
+// ── #2350: operator-facing goal slots ───────────────────────────────────────
+
+/// Seed `id`'s `pm_transcript` the same way a real `task.run` would (via
+/// `begin_pm_transcript` + `store_pm_transcript`), without needing a real
+/// agent-loop execution — the shared setup every goal test in this section
+/// needs to get past the "no transcript yet" guard.
+fn seed_pm_transcript(registry: &SessionRegistry, id: &str) {
+    let transcript = registry
+        .begin_pm_transcript(id, "you are the pm", "first task")
+        .unwrap();
+    registry.store_pm_transcript(id, transcript);
+}
+
+/// `set_goal` on a session with a seeded transcript writes with
+/// `GoalSource::Operator`, visible via both `get_goals` and
+/// `get_transcript`.
+#[tokio::test]
+async fn set_goal_writes_operator_source() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    seed_pm_transcript(&registry, &session.id);
+
+    registry.set_goal(&session.id, 2, "ship it").unwrap();
+
+    let goals = registry.get_goals(&session.id).unwrap();
+    assert_eq!(goals.len(), 1);
+    assert_eq!(goals[0].slot, 2);
+    assert_eq!(goals[0].text, "ship it");
+    assert_eq!(goals[0].source, crate::agent_loop::GoalSource::Operator);
+}
+
+/// `set_goal` on a session that has never run a task (no `pm_transcript`
+/// yet) must return the documented `invalid_argument` "no transcript yet"
+/// error rather than panicking or silently no-op-ing.
+#[tokio::test]
+async fn set_goal_no_transcript_yet_errors() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let err = registry.set_goal(&session.id, 1, "x").unwrap_err();
+    assert_eq!(err.code, -32003);
+    assert!(err.message.contains("no transcript yet"));
+}
+
+/// `set_goal` with slot `0` or past `GOAL_SLOT_COUNT` must map to a clean
+/// `invalid_argument` error, not a panic.
+#[tokio::test]
+async fn set_goal_out_of_range_slot_errors() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    seed_pm_transcript(&registry, &session.id);
+
+    assert_eq!(
+        registry.set_goal(&session.id, 0, "x").unwrap_err().code,
+        -32003
+    );
+    assert_eq!(
+        registry.set_goal(&session.id, 6, "x").unwrap_err().code,
+        -32003
+    );
+}
+
+/// `set_goal` on an unknown session must map to `session_not_found`.
+#[tokio::test]
+async fn set_goal_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    assert_eq!(registry.set_goal("nope", 1, "x").unwrap_err().code, -32007);
+}
+
+/// `clear_goal` empties a previously-set slot.
+#[tokio::test]
+async fn clear_goal_clears_slot() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    seed_pm_transcript(&registry, &session.id);
+    registry.set_goal(&session.id, 3, "temp").unwrap();
+
+    registry.clear_goal(&session.id, 3).unwrap();
+
+    assert!(registry.get_goals(&session.id).unwrap().is_empty());
+}
+
+/// `clear_goal` on a session with no transcript yet must error the same way
+/// `set_goal` does.
+#[tokio::test]
+async fn clear_goal_no_transcript_yet_errors() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let err = registry.clear_goal(&session.id, 1).unwrap_err();
+    assert_eq!(err.code, -32003);
+}
+
+/// `clear_goal` with an out-of-range slot must map to a clean
+/// `invalid_argument` error.
+#[tokio::test]
+async fn clear_goal_out_of_range_slot_errors() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    seed_pm_transcript(&registry, &session.id);
+
+    assert_eq!(
+        registry.clear_goal(&session.id, 0).unwrap_err().code,
+        -32003
+    );
+}
+
+/// `get_goals` reports BOTH an operator-written slot (via `set_goal`) and a
+/// model-written slot (simulating what the `set_goal` tool writes directly
+/// onto the same shared `GoalSlots` handle) — and that a later operator
+/// write to the SAME slot the model wrote wins (last-write-wins).
+#[tokio::test]
+async fn get_goals_returns_operator_and_model_sources() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    seed_pm_transcript(&registry, &session.id);
+
+    registry.set_goal(&session.id, 2, "operator goal").unwrap();
+
+    // Simulate the model's own `set_goal` tool writing slot 1 directly onto
+    // the same shared handle `tools::goals::SetGoalTool` would hold.
+    {
+        let sessions = registry.lock();
+        let handle = sessions
+            .get(&session.id)
+            .unwrap()
+            .pm_transcript
+            .as_ref()
+            .unwrap()
+            .goals_handle();
+        handle
+            .lock()
+            .unwrap()
+            .set(1, "model goal", crate::agent_loop::GoalSource::Model)
+            .unwrap();
+    }
+
+    let goals = registry.get_goals(&session.id).unwrap();
+    assert_eq!(goals.len(), 2);
+    let slot1 = goals.iter().find(|g| g.slot == 1).expect("slot 1 present");
+    assert_eq!(slot1.source, crate::agent_loop::GoalSource::Model);
+    let slot2 = goals.iter().find(|g| g.slot == 2).expect("slot 2 present");
+    assert_eq!(slot2.source, crate::agent_loop::GoalSource::Operator);
+
+    // Last-write-wins: an operator write to the model's slot replaces it.
+    registry
+        .set_goal(&session.id, 1, "operator overwrites model")
+        .unwrap();
+    let goals = registry.get_goals(&session.id).unwrap();
+    let slot1 = goals.iter().find(|g| g.slot == 1).expect("slot 1 present");
+    assert_eq!(slot1.text, "operator overwrites model");
+    assert_eq!(slot1.source, crate::agent_loop::GoalSource::Operator);
+}
+
+/// `get_goals` on a session that has never run a task returns `[]`, not an
+/// error — mirrors `get_transcript`'s never-run convention.
+#[tokio::test]
+async fn get_goals_on_never_run_session_is_empty() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    assert!(registry.get_goals(&session.id).unwrap().is_empty());
+}
+
+/// `get_goals` on an unknown session must map to `session_not_found`.
+#[tokio::test]
+async fn get_goals_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    assert_eq!(registry.get_goals("nope").unwrap_err().code, -32007);
+}
+
+/// `session.get_transcript` round-trips goal state (#2350 acceptance
+/// criterion): a goal set via `set_goal` is visible on `TranscriptRecord.goals`
+/// with the same slot/text/source it was written with.
+#[tokio::test]
+async fn get_transcript_round_trips_goal_state() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    seed_pm_transcript(&registry, &session.id);
+    registry
+        .set_goal(&session.id, 4, "finish the migration")
+        .unwrap();
+
+    let record = registry.get_transcript(&session.id).unwrap();
+    assert_eq!(record.goals.len(), 1);
+    assert_eq!(record.goals[0].slot, 4);
+    assert_eq!(record.goals[0].text, "finish the migration");
+    assert_eq!(
+        record.goals[0].source,
+        crate::agent_loop::GoalSource::Operator
+    );
+
+    // Round-trip through JSON, exactly as a real client would.
+    let value = serde_json::to_value(&record).unwrap();
+    let back: TranscriptRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(back.goals.len(), 1);
+    assert_eq!(back.goals[0].text, "finish the migration");
+}
+
+/// `session.get_transcript` on a never-run session has an empty `goals`
+/// array, matching the empty `turns`/`usage`/`cost_usd` convention.
+#[tokio::test]
+async fn get_transcript_goals_empty_on_never_run_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let record = registry.get_transcript(&session.id).unwrap();
+    assert!(record.goals.is_empty());
+}
