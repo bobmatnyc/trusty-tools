@@ -106,3 +106,39 @@ async fn palace_dream_no_inference_returns_gracefully() {
     assert_eq!(result["summary_facts_created"], 0);
     assert_eq!(result["facts_evicted"], 0);
 }
+
+/// `palace_dream` surfaces the fading-memories resurface list (issue #2352).
+///
+/// Why: the resurface pass must reach the MCP surface so operators/agents can
+/// act on fading high-value memories. This asserts the response carries a
+/// `fading` array. It is empty here (a freshly-created palace has no aged,
+/// decayed drawers — created_at is "now"); the detection/ranking math is
+/// exhaustively covered by `trusty_common::memory_core::dream::fading::tests`.
+/// What: creates an empty palace, calls `palace_dream`, and asserts the
+/// `fading` field is present and is an (empty) array.
+#[tokio::test]
+async fn palace_dream_response_includes_fading() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = ready_state(&tmp);
+    let cwd = tmp.path().to_string_lossy().to_string();
+
+    dispatch_tool(
+        &state,
+        "palace_create",
+        json!({ "name": "fadingapp", "force": true, "cwd": cwd }),
+    )
+    .await
+    .expect("create palace");
+
+    let result = dispatch_tool(&state, "palace_dream", json!({ "palace": "fadingapp" }))
+        .await
+        .expect("palace_dream returns");
+
+    let fading = &result["fading"];
+    assert!(fading.is_array(), "response must carry a `fading` array");
+    assert_eq!(
+        fading.as_array().map(|a| a.len()),
+        Some(0),
+        "a fresh palace has no fading memories"
+    );
+}

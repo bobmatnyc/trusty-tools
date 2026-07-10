@@ -13,6 +13,7 @@ use super::cycle::{
     compact_pass, content_prune_pass, dedup_pass, prune_pass, refresh_closets,
     semantic_consolidation_pass,
 };
+use super::fading::detect_fading;
 use super::guard::CompactionGuard;
 use super::recall_benchmark::run_benchmark;
 use crate::memory_core::palace::PalaceId;
@@ -254,6 +255,12 @@ impl Dreamer {
         // ── Effectiveness metric: post-cycle snapshot (issue #1530) ───────────
         let drawers_after = handle.drawers.read().len() as u64;
 
+        // ── Fading-memories resurface pass (issue #2352) ──────────────────────
+        // Detect (do NOT boost) high-value memories that have decayed below the
+        // resurface threshold, so operators/agents can touch or forget them.
+        // Runs after consolidation so the list reflects the post-cycle state.
+        let fading = detect_fading(handle, &self.config.fading);
+
         // Recall benchmark after consolidation — skip silently on failure or when disabled.
         let recall_score_after = if self.config.recall_benchmark_enabled {
             run_benchmark(handle).await
@@ -276,6 +283,7 @@ impl Dreamer {
             compression_ratio: 0.0, // populated below
             recall_score_before,
             recall_score_after,
+            fading,
         };
         stats.update_compression_ratio();
 
@@ -340,6 +348,7 @@ fn log_cycle_outcome(palace_id: &PalaceId, outcome: Result<DreamStats>) {
             drawers_before = stats.drawers_before,
             drawers_after = stats.drawers_after,
             compression_ratio = stats.compression_ratio,
+            fading = stats.fading.len(),
             "dream cycle complete"
         ),
         Err(e) => tracing::warn!(palace = %palace_id, "dream cycle failed: {e:#}"),
