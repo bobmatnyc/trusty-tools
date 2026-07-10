@@ -86,17 +86,17 @@ impl TranscriptEntry {
 /// `maybe_compact` at its turn boundary.
 /// What: A thin wrapper over `Vec<TranscriptEntry>` with append helpers, a
 /// raw-history accessor, a compacted model-facing view, and an
-/// assistant-text accessor. `compaction_triggered` records whether ANY
-/// compaction has happened yet in this run — once `true`, `to_messages`
-/// starts appending the last-user-message replay (§5.4 item 3) on every
-/// subsequent call, re-anchoring the model on every following turn, not just
-/// the turn compaction fired on.
+/// assistant-text accessor. `last_compaction_len` records the entry count at
+/// the moment compaction most recently fired (`None` if it has never fired
+/// in this run) — `to_messages` compares it against the CURRENT entry count
+/// to append the last-user-message replay (§5.4 item 3) only on the turn
+/// compaction actually fired on, not on every subsequent call.
 /// Test: `transcript::tests::*`.
 #[derive(Debug, Default, Clone)]
 pub struct Transcript {
     entries: Vec<TranscriptEntry>,
     assistant_texts: Vec<String>,
-    compaction_triggered: bool,
+    last_compaction_len: Option<usize>,
 }
 
 impl Transcript {
@@ -116,7 +116,7 @@ impl Transcript {
                 TranscriptEntry::fresh(ChatMessage::user(task)),
             ],
             assistant_texts: Vec::new(),
-            compaction_triggered: false,
+            last_compaction_len: None,
         }
     }
 
@@ -197,14 +197,18 @@ impl Transcript {
     /// `compacted` entries is replaced by ONE synthetic `system`-role message
     /// (`super::compaction::summarize_span`'s one-line text) in its place;
     /// uncompacted entries pass through unchanged. After the walk, if
-    /// `compaction_triggered` is `true` (i.e. compaction has fired at least
-    /// once in this transcript's life), the LAST `user`-role entry's message
-    /// is cloned and appended again at the very end — §5.4 item 3's
-    /// "re-anchor the model" replay. A transcript with no `user` entry (never
-    /// happens via `seed`, but guarded rather than assumed) simply skips the
-    /// replay.
+    /// `last_compaction_len` equals the CURRENT entry count (i.e. this call
+    /// is happening on the very turn `maybe_compact` last fired on — the
+    /// loop calls `maybe_compact` then `to_messages` back-to-back before any
+    /// further entries are appended), the LAST `user`-role entry's message is
+    /// cloned and appended again at the very end — §5.4 item 3's "re-anchor
+    /// the model" replay. On every later call the entry count has grown past
+    /// `last_compaction_len`, so the replay does not repeat until compaction
+    /// fires again. A transcript with no `user` entry (never happens via
+    /// `seed`, but guarded rather than assumed) simply skips the replay.
     /// Test: `transcript::tests::to_messages_collapses_compacted_span`,
     /// `transcript::tests::to_messages_replays_last_user_message_after_compaction`,
+    /// `transcript::tests::to_messages_does_not_replay_on_every_subsequent_turn`,
     /// `transcript::tests::to_messages_is_passthrough_before_compaction`.
     pub fn to_messages(&self) -> Vec<ChatMessage> {
         let mut out = Vec::with_capacity(self.entries.len());
@@ -220,7 +224,7 @@ impl Transcript {
         }
         flush_span(&mut out, &mut compacted_span);
 
-        if self.compaction_triggered
+        if self.last_compaction_len == Some(self.entries.len())
             && let Some(last_user) = self.entries.iter().rev().find(|e| e.message.role == "user")
         {
             out.push(last_user.message.clone());
@@ -259,10 +263,12 @@ impl Transcript {
     /// as `compacted = true`, EXCEPT entries already compacted (a one-way
     /// transform), `pinned` entries (§5.4 item 5's skill-output half — see
     /// `push_tool_result`), and `system`/`user` role entries (§5.4 item 5's
-    /// "preserve... user requests forever" half). Sets `compaction_triggered`
-    /// and returns `true` only if at least one entry was newly marked (an
-    /// already-fully-compacted or entirely-preserved prefix is a no-op, not
-    /// a spurious trigger).
+    /// "preserve... user requests forever" half). Records `last_compaction_len
+    /// = Some(self.entries.len())` and returns `true` only if at least one
+    /// entry was newly marked (an already-fully-compacted or
+    /// entirely-preserved prefix is a no-op, not a spurious trigger) — this
+    /// marker is what lets `to_messages` replay the last user message
+    /// exactly once, on this turn, rather than on every subsequent call.
     /// Test: `transcript::tests::maybe_compact_is_noop_below_threshold`,
     /// `transcript::tests::maybe_compact_never_touches_system_or_user`,
     /// `transcript::tests::maybe_compact_never_compacts_pinned_skill_output`,
@@ -295,7 +301,7 @@ impl Transcript {
         }
 
         if newly_compacted {
-            self.compaction_triggered = true;
+            self.last_compaction_len = Some(self.entries.len());
         }
         newly_compacted
     }
@@ -788,6 +794,65 @@ mod tests {
         let last = compacted_view.last().expect("non-empty view");
         assert_eq!(last.role, "user");
         assert_eq!(last.content.as_deref(), Some("the original task"));
+    }
+
+    /// The last-user-message replay fires exactly once, on the turn
+    /// compaction happened, and does NOT re-anchor on every subsequent turn
+    /// (#2302 — the turn-explosion bug: without rate-limiting, every later
+    /// `to_messages()` call re-appended the original task, causing the model
+    /// to read it as "start over from scratch" repeatedly).
+    ///
+    /// Why: §5.4 item 3 only ever intended a one-time re-anchor right after
+    /// compaction fires, not a standing replay on every following turn.
+    /// What: Force compaction (as the existing replay test does) and confirm
+    /// the replay is present on that turn. Then push MORE assistant/tool
+    /// pairs WITHOUT calling `maybe_compact` again — simulating ordinary
+    /// turns after the compaction turn — and assert the task text appears
+    /// exactly ONCE in the new `to_messages()` view (only at its original
+    /// seeded position) and that the view's last message is NOT the task.
+    /// Test: this test.
+    #[test]
+    fn to_messages_does_not_replay_on_every_subsequent_turn() {
+        let mut t = Transcript::seed("s", "the original task");
+        for i in 0..10 {
+            t.push_assistant(Some(format!("turn {i}")), &[]);
+            t.push_tool_result(&format!("c{i}"), "bash", "output");
+        }
+        let cfg = CompactionConfig {
+            token_threshold: 1,
+            keep_last_messages: 2,
+        };
+        assert!(t.maybe_compact(&cfg));
+
+        // On the compaction turn itself, the replay is present at the tail.
+        let compaction_turn_view = t.to_messages();
+        let last = compaction_turn_view.last().expect("non-empty view");
+        assert_eq!(last.role, "user");
+        assert_eq!(last.content.as_deref(), Some("the original task"));
+
+        // Simulate further turns after the compaction turn, WITHOUT calling
+        // maybe_compact again — this is the normal steady state once the
+        // active zone is back under threshold.
+        for i in 10..15 {
+            t.push_assistant(Some(format!("turn {i}")), &[]);
+            t.push_tool_result(&format!("c{i}"), "bash", "output");
+        }
+
+        let later_view = t.to_messages();
+        let task_occurrences = later_view
+            .iter()
+            .filter(|m| m.content.as_deref() == Some("the original task"))
+            .count();
+        assert_eq!(
+            task_occurrences, 1,
+            "the original task must appear exactly once (its seeded position), not replayed on every later turn: {later_view:?}"
+        );
+        let last = later_view.last().expect("non-empty view");
+        assert_ne!(
+            last.content.as_deref(),
+            Some("the original task"),
+            "later turns must not re-anchor the model on the original task: {later_view:?}"
+        );
     }
 
     /// `maybe_compact` never panics on a minimal (seed-only) transcript, even
