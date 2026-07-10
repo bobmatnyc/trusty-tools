@@ -108,6 +108,29 @@ fn render_contains_expected() {
     assert!(!md.contains("{{"));
 }
 
+/// Why: the CAST template's demonstration `<!-- instruct:executive_summary
+/// ... -->` override (#2357 layered instructions) must NEVER leak into a real
+/// rendered report — a comment-stripping regression here would be a live
+/// prompt-injection-adjacent authoring leak, not just cosmetic noise.
+/// What: renders the CAST bundled template through the full pipeline and
+/// asserts neither the `instruct:` marker nor its body text appears anywhere
+/// in the output, while the report still renders substantively.
+/// Test: this test itself.
+#[test]
+fn cast_template_instruct_override_never_renders() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd-cast")
+        .expect("bundled cast template");
+    let reporter = Reporter::new(tmp.path());
+    let md = reporter.render(&model, &template);
+
+    assert!(!md.contains("instruct:"));
+    assert!(!md.contains("TQI (Technical Quality Index) posture"));
+    assert!(md.contains("Acme Due Diligence"), "report still renders");
+}
+
 /// Why: the model must assemble deterministically from the manifest.
 /// What: asserts repository count, metrics presence, and no git info for a
 /// non-existent local path.

@@ -99,6 +99,16 @@ pub struct ReportModel {
     /// = investigation did not run (no `--synthesize`, or remote-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub investigation: Option<super::investigate::Investigation>,
+    /// The active template's parsed `<!-- instruct:<section_id> ... -->`
+    /// section-instruction overrides (#2357 layered instructions), keyed by
+    /// section id.  Empty when the template declares none — the synthesis
+    /// prompt builder then uses the generic shipped defaults for every
+    /// section (see `section_instructions::resolve`).  Recorded on the model
+    /// (rather than only threaded through as a function argument) so the JSON
+    /// twin is a faithful record of which instruction variant produced the
+    /// narrative.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub section_instructions: std::collections::BTreeMap<String, String>,
 }
 
 /// Per-repository resolved data mapped to one `per_application` block.
@@ -181,6 +191,7 @@ impl ReportModel {
             synthesis: None,
             benchmark: None,
             investigation: None,
+            section_instructions: std::collections::BTreeMap::new(),
         })
     }
 }

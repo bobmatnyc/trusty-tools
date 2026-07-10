@@ -23,6 +23,25 @@ fn strips_instructional_comments() {
     assert!(out.contains("here."));
 }
 
+/// Why: a template's `<!-- instruct:<section_id> ... -->` section-instruction
+/// override (#2357 layered instructions) is an ordinary HTML comment to this
+/// pass — it must be stripped exactly like any other instructional comment,
+/// never leaking into a generated report even though `template::
+/// parse_section_instructions` reads it from the raw pre-strip text.
+/// What: a single-line and a multi-line `instruct:` block are both removed.
+/// Test: this test itself.
+#[test]
+fn strips_instruct_override_blocks() {
+    let input = "# Title\n<!-- instruct:executive_summary Lead with TQI. -->\nBody\n<!-- instruct:top_risks\nMulti-line\noverride body\n-->\nMore body.\n";
+    let out = strip_template_comments(input);
+    assert!(!out.contains("instruct:"));
+    assert!(!out.contains("Lead with TQI"));
+    assert!(!out.contains("Multi-line"));
+    assert!(out.contains("# Title"));
+    assert!(out.contains("Body"));
+    assert!(out.contains("More body."));
+}
+
 /// Why: `<!-- dataset: … -->` markers are semantic (downstream tooling lifts
 /// tables by them) and MUST survive stripping.
 /// What: asserts a dataset marker is preserved while a sibling comment is gone.

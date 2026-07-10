@@ -119,7 +119,13 @@ pub fn strip_template_comments(text: &str) -> String {
 /// and leak the remainder into the output.
 /// What: `rest` must start with `<!--`; depth-balances to the outer close.
 /// Test: `polish_tests.rs::strips_comment_with_embedded_close`.
-fn balanced_comment_len(rest: &str) -> Option<usize> {
+///
+/// `pub(crate)` (not private): `template::parse_section_instructions` (#2357
+/// layered instructions) reuses this exact balancing logic to find the end of
+/// an `<!-- instruct:<id> ... -->` override block, so a documentation example
+/// embedded in the instruction body doesn't end the scan early — the same
+/// problem this function already solves for instructional comments generally.
+pub(crate) fn balanced_comment_len(rest: &str) -> Option<usize> {
     let mut depth = 1i32;
     let mut cur = 4usize; // past the opening "<!--"
     loop {

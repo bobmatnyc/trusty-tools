@@ -24,7 +24,7 @@ use trusty_review::report::{
     load_instructions, load_manifest,
     manifest::Manifest,
     model::ReportModel,
-    run_investigation,
+    parse_section_instructions, run_investigation,
     synthesize::Synthesis,
     synthesize::Synthesizer,
     template::DEFAULT_TEMPLATE,
@@ -148,6 +148,24 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         instructions.as_ref(),
     )
     .context("failed to assemble report model")?;
+
+    // #2357 layered instructions: parse the active template's own
+    // `<!-- instruct:<section_id> ... -->` overrides (if any) BEFORE the render
+    // pipeline strips them as ordinary instructional comments; recorded on the
+    // model so the synthesis prompt builder resolves template-override-else-
+    // generic-default per section, and the JSON twin stays a faithful record.
+    model.section_instructions = parse_section_instructions(&template);
+    if !model.section_instructions.is_empty() {
+        eprintln!(
+            "[trusty-review report] Template section-instruction overrides: {}",
+            model
+                .section_instructions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     // M2 + wave-3: opt-in LLM synthesis plus the repo-evidence investigation.
     // Fails closed — on any provider/parse/guardrail failure the deterministic

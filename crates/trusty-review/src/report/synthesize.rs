@@ -216,14 +216,24 @@ impl Synthesizer {
     ///
     /// Why: the single entry point the CLI awaits; it NEVER fabricates and NEVER
     /// partial-trusts a malformed response — on any failure it returns an
-    /// `Unavailable` result and the deterministic output stands.
+    /// `Unavailable` result and the deterministic output stands.  A live-QA
+    /// acceptance run found that a large, real finding count could still hit the
+    /// output-token ceiling even with the #2357-follow-up compact digest and
+    /// bounded schema; a single cheap retry (mirroring the wave-3 batch
+    /// investigation's truncation retry) asks for a shorter response before
+    /// failing closed, rather than discarding the whole narrative on the first
+    /// truncation.
     /// What: builds the numeric allow-set from the deterministic model, calls the
-    /// provider under a timeout, rejects truncated/unparseable responses, then
-    /// applies the numeric guardrail field-by-field, dropping any field whose
-    /// prose cites a figure absent from the source.
+    /// provider under a timeout; on `finish_reason = length`/`max_tokens`, retries
+    /// ONCE with `retry_concise = true` (a smaller `top_risks` cap + a shorter-
+    /// paragraph directive); a still-truncated retry (or any other failure) fails
+    /// closed.  A parsed response is passed through the numeric guardrail
+    /// field-by-field, dropping any field whose prose cites a figure absent from
+    /// the source.
     /// Test: `synthesize_tests.rs::{synthesize_happy_path_injects,
     /// synthesize_malformed_json_fails_closed, synthesize_provider_error_fails_closed,
-    /// synthesize_rejects_unverified_figure}`.
+    /// synthesize_rejects_unverified_figure, synthesize_retry_recovers_from_truncation,
+    /// synthesize_still_truncated_after_retry_fails_closed}`.
     pub async fn synthesize(&self, model: &ReportModel) -> Synthesis {
         // Ground truth for the guardrail comes from the DETERMINISTIC model only.
         let allowed = match serde_json::to_value(model) {
@@ -234,15 +244,34 @@ impl Synthesizer {
             }
         };
 
-        let req = build_synthesis_prompt(model, &self.model);
+        match self.try_once(model, false).await {
+            Attempt::Ok(raw) => apply_guardrail(raw, &allowed),
+            Attempt::Truncated => {
+                warn!("synthesis: response truncated — retrying once, concise");
+                match self.try_once(model, true).await {
+                    Attempt::Ok(raw) => apply_guardrail(raw, &allowed),
+                    Attempt::Truncated => {
+                        warn!("synthesis: still truncated after retry — failing closed");
+                        Synthesis::unavailable("truncated response")
+                    }
+                    Attempt::Failed(reason) => Synthesis::unavailable(reason),
+                }
+            }
+            Attempt::Failed(reason) => Synthesis::unavailable(reason),
+        }
+    }
+
+    /// Make one provider call (initial or concise retry) and classify the result.
+    async fn try_once(&self, model: &ReportModel, retry_concise: bool) -> Attempt {
+        let req = build_synthesis_prompt(model, &self.model, retry_concise);
         let resp = match tokio::time::timeout(self.timeout, self.llm.complete(req)).await {
             Err(_) => {
                 warn!("synthesis: provider timed out — failing closed");
-                return Synthesis::unavailable("provider timeout");
+                return Attempt::Failed("provider timeout".to_string());
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "synthesis: provider error — failing closed");
-                return Synthesis::unavailable(format!("provider error: {e}"));
+                return Attempt::Failed(format!("provider error: {e}"));
             }
             Ok(Ok(r)) => r,
         };
@@ -252,15 +281,14 @@ impl Synthesizer {
             resp.finish_reason.as_deref(),
             Some("length") | Some("max_tokens")
         ) {
-            warn!("synthesis: response truncated at token ceiling — failing closed");
-            return Synthesis::unavailable("truncated response");
+            return Attempt::Truncated;
         }
 
         let raw = match parse_raw(&resp.text) {
             Some(r) => r,
             None => {
                 warn!("synthesis: unparseable response — failing closed");
-                return Synthesis::unavailable("unparseable response");
+                return Attempt::Failed("unparseable response".to_string());
             }
         };
 
@@ -269,9 +297,18 @@ impl Synthesizer {
             output_tokens = resp.output_tokens,
             "synthesis: provider call complete"
         );
-
-        apply_guardrail(raw, &allowed)
+        Attempt::Ok(raw)
     }
+}
+
+/// The outcome of one provider call attempt (pre-guardrail).
+enum Attempt {
+    /// Parsed cleanly; carries the raw (pre-guardrail) synthesis.
+    Ok(RawSynthesis),
+    /// The response was truncated at the output-token ceiling.
+    Truncated,
+    /// A provider/timeout/parse error — not a truncation.
+    Failed(String),
 }
 
 // ─── Raw (pre-guardrail) parse types ────────────────────────────────────────

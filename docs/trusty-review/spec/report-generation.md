@@ -82,6 +82,7 @@
 | **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | **Landed (#2314)** — `src/report/benchmark.rs`, opt-in `--corpus` / `--corpus-add` / `--benchmark` flags, deterministic percentile/quartile placement + small-n honesty gate (see [Benchmarking (M3)](#benchmarking-m3)) |
 | **Wave 2** | Inference-first output: analyst instructions doc, self-derived metadata, built-in repo scanning, provenance labels + omit-empty | Instructions loader + prompt injection; repo scanner; provenance model; post-render polish (comment strip + omit-empty + gaps) | **Landed (#2340 / #2342)** — `src/report/{instructions,scan,provenance,polish,reporter_fill}.rs`, `--instructions` flag (see [Inference-first output](#inference-first-output--analyst-instructions-wave-2-2340--2342)) |
 | **Wave 3** | Repo-evidence findings investigation: inspect the code and produce the findings, gated by a verifiable-evidence guardrail; deterministic dependency inventory; coverage honesty | Deterministic file selection + budgets; reviewer-role investigation LLM call; verbatim-evidence guardrail; manifest/lockfile dependency parsing; coverage section + prompt injection | **Landed (#2357)** — `src/report/investigate/`, runs under `--synthesize` for local checkouts, `--investigate-max-files` / `--investigate-max-bytes` (see [Repo-evidence investigation](#repo-evidence-investigation-wave-3-2357)) |
+| **Wave 3.1** | Follow-up hardening after live-QA acceptance: batch the investigation's own LLM calls so per-batch output truncation cannot collapse a whole repository's findings; bound the top-level synthesis call's input/output so a large verified-finding count cannot blank the executive summary; layer synthesized-section instructions (generic → template override → analyst overlay) | `investigate/batch.rs` (size-bounded batching + retry-once + merge/dedupe); `synthesize_digest.rs` (compact digest + capped elaboration targets); `section_instructions.rs` + `template::parse_section_instructions` | **Landed (#2357 follow-up)** — see [Repo-evidence investigation](#repo-evidence-investigation-wave-3-2357) (batching), [Compact findings digest](#compact-findings-digest--truncation-retry-2357-follow-up), and [Section instruction layering](#section-instruction-layering-2357-layered-instructions) |
 
 ### Explicit Non-Goals
 
@@ -284,12 +285,101 @@ LLM cannot elaborate a green even if asked. Greens remain the M1 one-line topic 
 
 The provider is forced into structured output via `ResponseSchema`
 (`report_synthesis`): a top-level object with `executive_summary` (string),
-`top_risks` (array of `{description, severity, cost, apps}`), and `findings`
-(array of `{app_slug, title, severity, description, evidence, component,
-business_impact, remediation, cost_effort}`). Each finding carries its `app_slug`
-and `severity` so the reporter routes prose back to the correct application
-section and band. The system prompt mandates: use ONLY provided values, never
-invent numbers, preserve any `(approx)` marker verbatim, RED/AMBER only.
+`top_risks` (array of `{description, severity, cost, apps}`, capped at 5 items —
+3 on the concise retry), and `findings` (array of `{app_slug, title, severity,
+description, evidence, component, business_impact, remediation, cost_effort}`,
+capped at 10 items). Each finding carries its `app_slug` and `severity` so the
+reporter routes prose back to the correct application section and band. The
+system prompt mandates: use ONLY provided values, never invent numbers,
+preserve any `(approx)` marker verbatim, RED/AMBER only.
+
+### Compact findings digest + truncation retry (#2357 follow-up)
+
+**Incident.** Once wave-3 investigation began verifying dozens of real findings
+per repository, a live-QA acceptance run found that this SAME top-level
+synthesis call — which historically asked for a full prose elaboration of
+EVERY RED/AMBER finding alongside the executive summary — hit its own
+output-token ceiling with 26 verified findings, failed closed (correctly, per
+the fail-closed posture above), and left the Executive Summary and Top Risks
+blank atop an otherwise-strong findings section. Honest, but a blank exec
+summary atop verified findings is a delivery defect, not a feature.
+
+**Fix (`synthesize_digest.rs`, structural — mirrors the wave-3 batch
+investigation's own output-cap fix):**
+
+- **Compact CONTEXT digest.** Every RED/AMBER finding across all repositories
+  is reduced to `title / severity / dimension / file / a ≤140-char truncated
+  one-line description` — never the full evidence quote, business impact, or
+  remediation prose, which already lives in the report body once verified.
+  Capped at the top 40 findings by severity (RED first); an overflow renders an
+  honest tail note ("… and N additional lower-severity finding(s) exist").
+  This is the ONLY findings data used to ground the executive summary and top
+  risks.
+- **Elaboration targets, separately bounded and verified-exclusive.** A finding
+  already wave-3-verified has authoritative, evidence-grounded prose that is
+  merged onto the report regardless of what this call produces (investigation
+  prose always wins — see `investigate::merge_investigation_prose`), so asking
+  the model to re-elaborate it would only spend output budget on discarded
+  text. The `findings` elaboration array therefore lists ONLY unverified
+  findings (capped separately at 10, RED first, with its own overflow note);
+  when investigation already verified everything the digest explicitly says
+  "none — every RED/AMBER finding already has verified evidence-grounded prose"
+  and the model must return `findings: []`.
+- **Structural output bounds.** `top_risks` and `findings` both carry a JSON
+  Schema `maxItems` (5/10 respectively, 3 for `top_risks` on the retry) —
+  bounding the SHAPE of the ask, not merely describing a preference in prose,
+  exactly as wave-3's `analyze.rs` bounds `maxItems`/`maxLength` on the
+  investigation schema.
+- **One-shot truncation retry.** On `finish_reason = length`/`max_tokens`,
+  `Synthesizer::synthesize` retries ONCE with `retry_concise = true` (shrinking
+  `top_risks_cap` to 3 and appending an explicit "be maximally concise"
+  directive) before falling back to the existing fail-closed
+  `Unavailable("truncated response")`.
+
+This keeps prompt INPUT size roughly linear (~200 bytes/finding × 40 ≈ 8 KB) and
+prompt OUTPUT size bounded regardless of how many findings a large repository's
+investigation verifies — the whole point being that "26 verified findings, hand-
+checked, no dupes" (the wave-3 investigation's own success) must also mean "and
+the exec summary is populated," not a second, unrelated failure mode.
+
+### Section instruction layering (#2357 layered instructions)
+
+The three synthesized sections — `executive_summary`, `top_risks`,
+`finding_elaboration` — are each governed by a **layered instruction**, the
+same generic → template → analyst-overlay shape the crate already uses for
+reviewer voice (stock rules → `principles` addendum → an optional custom
+`voice` package, see `src/voice/`), applied here to what each synthesized
+section is told to write:
+
+1. **Generic built-in default** (`section_instructions.rs`) — the tool's own
+   shipped instruction per section id, used when nothing overrides it. Structured
+   as string constants (`EXECUTIVE_SUMMARY`, `TOP_RISKS`, `FINDING_ELABORATION`)
+   plus a `default_instruction(id)` lookup and an `ALL_SECTION_IDS` validity list.
+2. **Template override** — a template may embed
+   `<!-- instruct:<section_id> ... -->` anywhere in its file (single- or
+   multi-line body), where `<section_id>` is one of the three ids above.
+   `template::parse_section_instructions` parses these from the RAW template
+   text (before the render pipeline ever runs) into a `section_id →
+   instruction` map, recorded on `ReportModel::section_instructions` for JSON
+   auditability. An unrecognised section id logs a `tracing::warn!` and is
+   ignored — a template typo must never abort the run. The override REPLACES
+   the generic default for that section only; other sections keep their
+   generic default (`section_instructions::resolve` performs this merge).
+   `instruct:` blocks are ordinary HTML comments to the render pipeline — like
+   every other non-`dataset:` comment, `polish::strip_template_comments` strips
+   them, so they NEVER reach rendered output regardless of where in the
+   template they're placed. Both bundled templates document this syntax in
+   their header comments; `report-technical-dd-cast.md` ships a worked
+   demonstration overriding `executive_summary` with CAST health-factor voice
+   ("lead with the TQI … name which of the five health factors … drive the
+   RED/AMBER findings").
+3. **Analyst `--instructions` overlay** — unchanged semantics from wave 2
+   (#2340): an ADDITIVE per-run focus brief injected into the digest
+   separately from the resolved section instructions. Precedence: analyst
+   overlay + (template override, else generic default) — the analyst brief
+   steers EMPHASIS on top of whichever section instruction is active; it never
+   replaces or relaxes it (and never relaxes the numeric guardrail or the
+   no-green exclusion either).
 
 ### Fail-closed posture (mirrors `Verdict::Unknown`)
 
@@ -585,22 +675,49 @@ truncated (marker reserved so the byte total never exceeds the cap). The selecti
 records what was chosen vs skipped and which dimensions were reached (coverage
 data).
 
-### Investigation LLM call (`analyze.rs`)
+### Investigation LLM call (`analyze.rs`, batched — `batch.rs`)
 
 Reuses the reviewer-role provider + forced-structured-output pattern
-(`ResponseSchema`). One request carries: the analyst brief, the DD-dimension
-checklist, and each selected file as a `path` + verbatim-content block. The prompt
-mandates: **cite only provided files, quote evidence verbatim, invent no figures,
-GREEN = title only.** Response schema (`repo_investigation`):
+(`ResponseSchema`). **Batched, not one request per repository** (wave-3.1,
+#2357 follow-up): a live-QA acceptance run reproduced a real collapse — a
+175-file repository's single unbatched request sent 282 KB of file content,
+the findings JSON hit the (then 4096-token) output ceiling mid-array,
+`finish_reason = length` correctly failed closed, and ALL findings for a fully
+readable repository were discarded. The fix is structural, not a bigger
+constant: `batch::partition_batches` splits the selection's files into
+size-bounded, order-preserving batches of at most `BATCH_MAX_BYTES` (90 KiB)
+content each; `analyze.rs` additionally bounds the OUTPUT shape per batch via
+`maxItems` (≤8 findings, 4 on retry) and `evidence_quote`'s `maxLength` (200
+chars), and `INVESTIGATION_MAX_TOKENS` is raised to 8192 (matching
+`pipeline/prompt.rs::GEMINI_MAX_TOKENS`, the crate's existing precedent for a
+demanding structured-output case) as a second line of defence. Each batch
+carries: its position ("batch N of M"), the analyst brief, the DD-dimension
+checklist, and its files as `path` + verbatim-content blocks. On
+`finish_reason = length`/`max_tokens` for a batch, `batch::run_one_batch`
+retries ONCE with a tighter cap (4 findings) and a concise directive before
+failing THAT BATCH closed — its files are recorded in coverage as "sent but
+analysis truncated/failed (batch N)"; **other batches' findings survive**.
+Verified findings are merged across batches, deduping by `(file, title)` and
+keeping the higher-severity (or first-seen, on a tie) copy. The prompt
+mandates: **cite only provided files** (batch-scoped; a system-prompt note
+warns the model it may be seeing only one batch of a larger repository), **quote
+evidence verbatim** (≤200 chars), **invent no figures, GREEN = title only.**
+Response schema (`repo_investigation`), per batch:
 
 ```jsonc
 { "findings": [ {
   "title": "...", "severity": "red|amber|green", "dimension": "...",
   "file": "src/...", "line": 42,               // approximate; corrected on verify
-  "evidence_quote": "<verbatim snippet>",      // required for RED/AMBER
+  "evidence_quote": "<verbatim snippet, ≤200 chars>", // required for RED/AMBER
   "description": "...", "business_impact": "...",
-  "remediation": "...", "cost_effort": "..." } ] }
+  "remediation": "...", "cost_effort": "..." } ] }  // maxItems: 8 (4 on retry)
 ```
+
+The Investigation Coverage section (`render.rs`) additionally reports batch
+accounting per repository — `batches: T total, S succeeded, F truncated/failed`
+— with a named bullet per failed batch (position, reason, affected files); the
+same fact is injected into the top-level synthesis digest's coverage summary
+so an exec summary can only claim a gap for a genuinely named failed batch.
 
 ### Verifiable-evidence guardrail (`verify.rs`, deterministic)
 
