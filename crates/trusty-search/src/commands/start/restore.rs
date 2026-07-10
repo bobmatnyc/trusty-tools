@@ -96,6 +96,17 @@ pub(super) async fn restore_indexes(
         .into_iter()
         .chain(colocated_entries)
         .collect();
+
+    // Issue #2305: collapse entries that resolve to the SAME on-disk redb corpus
+    // (colocated indexes sharing a root_path) down to one handle BEFORE the
+    // eager/cold split. redb is a single-open database; without this, the
+    // sequential restore below opens the file for the first entry, holds the
+    // corpus Arc for the daemon's lifetime, and every later entry sharing that
+    // file fails its open with DatabaseAlreadyOpen on every restart (the 50 ms
+    // retry can never clear an in-process holder). Deduping before the split
+    // also prevents a dropped duplicate from being parked in the cold store and
+    // re-triggering the double-open on first query.
+    let all_entries = crate::service::warm_boot::dedup_entries_by_corpus_path(all_entries);
     let total_discovered = all_entries.len();
 
     let (eager_entries, cold_entries) = select_warmboot_entries(all_entries, max_warmboot);
