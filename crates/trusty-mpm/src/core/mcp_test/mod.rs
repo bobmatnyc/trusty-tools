@@ -37,7 +37,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::core::mcp_config::{builtin_server_entry, managed_mcp_server_names};
+use crate::core::mcp_config::{
+    builtin_server_entry, managed_mcp_server_names, strip_arg_separator,
+};
 
 #[cfg(test)]
 mod tests;
@@ -377,8 +379,18 @@ fn rpc_error_message(err: &Value) -> String {
 }
 
 /// Pull the stdio `args` out of an entry as owned strings.
+///
+/// Why: entries written before the `tm mcp add` fix (or hand-edited) may carry a
+/// stray leading `--` separator as their first arg; spawned verbatim that breaks
+/// npx/uv-style servers. Stripping it here (via
+/// [`crate::core::mcp_config::strip_arg_separator`]) makes the probe exercise the
+/// SAME effective argv a fixed session would, so already-broken registries test
+/// green without manual repair.
+/// What: collects the entry's string `args`, then drops a single leading `--`.
+/// Test: `entry_args_strips_legacy_leading_separator`,
+/// `entry_args_preserves_deeper_separator`.
 fn entry_args(entry: &Value) -> Vec<String> {
-    entry
+    let raw: Vec<String> = entry
         .get("args")
         .and_then(Value::as_array)
         .map(|a| {
@@ -387,7 +399,8 @@ fn entry_args(entry: &Value) -> Vec<String> {
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    strip_arg_separator(&raw).to_vec()
 }
 
 /// Pull the stdio `env` out of an entry as `(key, value)` pairs.

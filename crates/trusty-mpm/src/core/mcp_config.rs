@@ -106,6 +106,31 @@ impl McpTransport {
     }
 }
 
+/// Strip a single leading `--` separator token from a stdio args slice.
+///
+/// Why: `tm mcp add <name> <command> -- <args…>` mirrors `claude mcp add`, where
+/// the `--` merely stops flag parsing so hyphen-led args pass through. But clap's
+/// `trailing_var_arg` keeps that `--` in the captured tail once the command
+/// positional has been consumed, so it was being persisted as the FIRST stored
+/// arg (`["--", "-y", "@scope/pkg"]`). Spawned verbatim that breaks every
+/// npx/uv-style server (`npx -- -y …` → npm ETARGET `undefined@-y`; `uv -- run …`
+/// → "unexpected argument 'run' … remove the '--'"). Normalising here — at both
+/// the write path (so new entries are correct at rest) and the spawn/display read
+/// path (so already-broken registries work without manual repair) — keeps the one
+/// stripping rule in a single place.
+/// What: returns `&args[1..]` when the FIRST element is exactly `--`, else `args`
+/// unchanged. Only the leading token is stripped and only once: a legitimate `--`
+/// appearing deeper in the args (some CLIs need their own inner separator) is
+/// preserved.
+/// Test: `strip_arg_separator_removes_only_leading`,
+/// `strip_arg_separator_preserves_deeper_and_absent`.
+pub fn strip_arg_separator(args: &[String]) -> &[String] {
+    match args.first() {
+        Some(first) if first == "--" => &args[1..],
+        _ => args,
+    }
+}
+
 /// Build a stdio MCP server entry.
 ///
 /// Why: hand-built `json!` literals for the entry shape risk drifting in field
@@ -340,6 +365,36 @@ mod tests {
     fn stdio(command: &str, args: &[&str]) -> Value {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         build_stdio_entry(command, &args, &Map::new())
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn strip_arg_separator_removes_only_leading() {
+        // The npx shape: a leading `--` is dropped exactly once.
+        let args = strings(&["--", "-y", "@modelcontextprotocol/server-github"]);
+        assert_eq!(
+            strip_arg_separator(&args),
+            &["-y", "@modelcontextprotocol/server-github"]
+        );
+        // Only the FIRST token is stripped — a second leading `--` survives.
+        let doubled = strings(&["--", "--", "-y"]);
+        assert_eq!(strip_arg_separator(&doubled), &["--", "-y"]);
+    }
+
+    #[test]
+    fn strip_arg_separator_preserves_deeper_and_absent() {
+        // A `--` that is not the first token is a real argument — keep it.
+        let deeper = strings(&["run", "--", "tool"]);
+        assert_eq!(strip_arg_separator(&deeper), &["run", "--", "tool"]);
+        // No separator at all → unchanged.
+        let clean = strings(&["-y", "pkg"]);
+        assert_eq!(strip_arg_separator(&clean), &["-y", "pkg"]);
+        // Empty slice → empty (no panic).
+        let empty: Vec<String> = Vec::new();
+        assert!(strip_arg_separator(&empty).is_empty());
     }
 
     #[test]
