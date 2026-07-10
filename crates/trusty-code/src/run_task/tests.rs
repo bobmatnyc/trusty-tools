@@ -46,6 +46,11 @@ struct ScriptedLlm {
     /// dropped in favour of the agent-loop default (the run_task max-tokens
     /// bug this test guards against).
     max_tokens: Mutex<Vec<Option<u32>>>,
+    /// Every request's advertised tool-schema names, in call order (#2348:
+    /// lets `run_task_registry_never_registers_recall_session` assert the
+    /// one-shot path's actual wire-level tool set, rather than re-deriving
+    /// the registration logic in the test).
+    tool_names: Mutex<Vec<Vec<String>>>,
 }
 
 impl ScriptedLlm {
@@ -59,6 +64,7 @@ impl ScriptedLlm {
             cursor: AtomicUsize::new(0),
             models: Mutex::new(Vec::new()),
             max_tokens: Mutex::new(Vec::new()),
+            tool_names: Mutex::new(Vec::new()),
         }
     }
 
@@ -76,6 +82,17 @@ impl ScriptedLlm {
             .copied()
             .expect("at least one request recorded")
     }
+
+    /// The tool-schema names advertised on the FIRST recorded request (the
+    /// PM's first turn, where its own `pm_registry` schemas are attached).
+    fn first_tool_names(&self) -> Vec<String> {
+        self.tool_names
+            .lock()
+            .expect("tool_names lock")
+            .first()
+            .cloned()
+            .expect("at least one request recorded")
+    }
 }
 
 #[async_trait]
@@ -89,6 +106,12 @@ impl LlmClientTrait for ScriptedLlm {
             .lock()
             .expect("max_tokens lock")
             .push(req.max_tokens);
+        let names = req
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().map(|t| t.function.name.clone()).collect())
+            .unwrap_or_default();
+        self.tool_names.lock().expect("tool_names lock").push(names);
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
@@ -1198,5 +1221,40 @@ async fn pm_finish_gate_trips_when_engineer_never_ran_named_tests() {
         "a gate rejection must be a recoverable retry, not a run failure; \
          task: {}",
         report.task
+    );
+}
+
+/// #2348: `run-task`'s one-shot/bake-off path (`execute_run_task`) must
+/// NEVER register `recall_session` — it has no session_id to scope a memory
+/// query to, and Parity mode requires byte-identical prompts to the
+/// pre-#2343 baseline (epic #2343 scope note: "run_task one-shot/bake-off
+/// path explicitly untouched"). Registration lives only in
+/// `task::executor::run_and_record`'s daemon-session `pm_registry`.
+///
+/// Why: asserts the ACTUAL wire-level tool schemas the PM's `AgentLoop`
+/// sends (via `ScriptedLlm::first_tool_names`), not a re-derivation of the
+/// registration logic, so this is a real regression guard against
+/// `recall_session` ever being wired into this module by mistake.
+/// What: Script [PM stop] only — no delegation needed to observe the PM's
+/// own advertised tool set on its first (only) turn.
+/// Test: this test.
+#[tokio::test]
+async fn run_task_registry_never_registers_recall_session() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
+    let _report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    let names = llm.first_tool_names();
+    assert!(
+        names.contains(&"finish_task".to_string()),
+        "sanity: finish_task must still be registered; got {names:?}"
+    );
+    assert!(
+        !names.contains(&"recall_session".to_string()),
+        "run_task's one-shot registry must never register recall_session; got {names:?}"
     );
 }

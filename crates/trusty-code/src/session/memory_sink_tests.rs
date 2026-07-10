@@ -119,6 +119,64 @@ async fn enqueue_drain_happy_path() {
             .unwrap_or_default()
             .contains("what is 2+2?")
     );
+    // #2363: every turn-recorder `memory_remember` write must pass
+    // `force: true` to bypass the dedup gate documented as hostile to
+    // sequential conversational turns.
+    assert_eq!(remember.1["force"], json!(true));
+}
+
+/// (#2363) A `"status":"skipped"` `memory_remember` response (e.g. tripped by
+/// a gate `force` does not bypass) must be observable via a `tracing::warn!`
+/// rather than silently swallowed like an ordinary success.
+///
+/// Why: this is the belt-and-braces half of #2363 — `force: true` handles
+/// the dedup gate specifically, but this detection covers any OTHER gate
+/// that still returns a skipped envelope.
+/// What: mock server always replies with a `status: skipped` envelope for
+/// `memory_remember`; the test only asserts the call still lands (no panic,
+/// no hang) — the warning itself is inspected via the tracing subscriber in
+/// a real deployment, not asserted on here (no test-local tracing capture
+/// exists in this crate yet), so this test's assertion is: the drain task
+/// tolerates a skipped envelope exactly like a stored one.
+#[tokio::test]
+async fn write_turn_warns_on_skipped_status() {
+    async fn handle_skipped(Json(body): Json<Value>) -> Json<Value> {
+        let method = body["method"].as_str().unwrap_or_default();
+        let result = if method == "memory_remember" {
+            json!({"palace": "test-palace", "status": "skipped", "reason": "content gate"})
+        } else {
+            json!({"ok": true})
+        };
+        Json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
+    }
+
+    let app = Router::new().route("/rpc", post(handle_skipped));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let sink = TurnMemorySink::new(format!("http://{addr}"), "test-palace".to_string());
+    sink.enqueue("sess-skip", "prompt", "response");
+    // The assertion is simply that this never panics/hangs; give the drain
+    // task a moment to run.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] must expose
+/// exactly the values passed at construction, so #2348's `recall_session`
+/// tool can reuse the same binding.
+#[test]
+fn base_url_and_palace_expose_construction_args() {
+    let (tx, _rx) = mpsc::channel(1);
+    let sink = TurnMemorySink {
+        tx,
+        base_url: "http://example.test:1234".to_string(),
+        palace: "a-palace".to_string(),
+    };
+    assert_eq!(sink.base_url(), "http://example.test:1234");
+    assert_eq!(sink.palace(), "a-palace");
 }
 
 /// An unreachable `base_url` must never panic or hang the drain task — the
@@ -142,7 +200,11 @@ async fn write_turn_is_fail_open_on_unreachable_daemon() {
 #[test]
 fn enqueue_drops_newest_when_queue_full() {
     let (tx, mut rx) = mpsc::channel(1);
-    let sink = TurnMemorySink { tx };
+    let sink = TurnMemorySink {
+        tx,
+        base_url: String::new(),
+        palace: String::new(),
+    };
 
     sink.enqueue("s1", "p1", "r1");
     sink.enqueue("s1", "p2", "r2"); // queue is full; this one must be dropped
