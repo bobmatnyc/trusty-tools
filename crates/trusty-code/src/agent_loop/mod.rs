@@ -620,14 +620,49 @@ impl AgentLoop {
     /// compacting would silently change what a Parity run sends after enough
     /// turns, breaking that guarantee. `HarnessMode::DailyDriver` is
     /// production's token-efficiency mode, so it is the only mode this method
-    /// ever calls `Transcript::maybe_compact` for.
+    /// ever calls `Transcript::maybe_compact` for. (#2349, epic #2343) Under
+    /// the #2346 cadence system a threshold fire is no longer expected in
+    /// steady state — it means cadence sizing / daemon-availability /
+    /// turn-size assumptions were violated — so this is also where that
+    /// regression signal is raised. Cadence-DISABLED contexts (`run_task`
+    /// one-shot, `Parity`, delegated sub-agent engineer loops — all
+    /// `cadence: None`) still use threshold compaction as their PRIMARY,
+    /// EXPECTED mechanism, so the error-level framing below must never apply
+    /// to them.
     /// What: No-op under `HarnessMode::Parity`; under `HarnessMode::DailyDriver`,
-    /// delegates to `transcript.maybe_compact(&self.config.compaction)`.
+    /// delegates to `transcript.maybe_compact(&self.config.compaction)`. When
+    /// that returns `true` (a fire actually happened), unconditionally calls
+    /// `transcript.record_threshold_compaction()` (#2349's fact counter,
+    /// exposed via `session::TranscriptRecord.compaction_events` —
+    /// increments regardless of cadence), then — ONLY when
+    /// `self.config.cadence.is_some()` — emits `tracing::error!` with the
+    /// current estimated token count, the configured `token_threshold`, and
+    /// `cadence_enabled = true` for context. `cadence: None` keeps today's
+    /// existing behaviour exactly as it was before this ticket: no log at
+    /// this call site at all.
     /// Test: `agent_loop::tests::daily_driver_mode_compacts_long_running_loop`,
-    /// `agent_loop::tests::parity_mode_never_compacts_even_past_threshold`.
+    /// `agent_loop::tests::parity_mode_never_compacts_even_past_threshold`,
+    /// `agent_loop::tests::forced_degradation_increments_counter_and_logs_error`,
+    /// `agent_loop::tests::cadence_none_threshold_fire_does_not_log_error`.
     fn maybe_compact_transcript(&self, transcript: &mut Transcript) {
-        if self.config.mode == HarnessMode::DailyDriver {
-            transcript.maybe_compact(&self.config.compaction);
+        if self.config.mode != HarnessMode::DailyDriver {
+            return;
+        }
+        if !transcript.maybe_compact(&self.config.compaction) {
+            return;
+        }
+        transcript.record_threshold_compaction();
+
+        if self.config.cadence.is_some() {
+            let estimated_tokens = compaction::estimate_total_tokens(&transcript.to_messages());
+            tracing::error!(
+                estimated_tokens,
+                token_threshold = self.config.compaction.token_threshold,
+                cadence_enabled = true,
+                "threshold compaction fired unexpectedly under cadence — this is a regression \
+                 signal: cadence sizing, daemon availability, or turn-size assumptions were \
+                 likely violated (epic #2343 expects compaction_events == 0 in steady state)"
+            );
         }
     }
 

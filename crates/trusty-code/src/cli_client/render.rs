@@ -251,6 +251,7 @@ mod tests {
             usage: TokenUsage::new(10, 5, 0, 0),
             cost_usd: Some(0.01),
             mode: Some(crate::mode::HarnessMode::DailyDriver),
+            compaction_events: 0,
         };
         let out = render_transcript_human(&record);
         assert!(out.contains("pm"));
@@ -267,6 +268,7 @@ mod tests {
             usage: TokenUsage::default(),
             cost_usd: None,
             mode: None,
+            compaction_events: 0,
         };
         let out = render_transcript_human(&record);
         assert!(out.contains("s-1"));

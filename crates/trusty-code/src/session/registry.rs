@@ -703,10 +703,13 @@ impl SessionRegistry {
     /// What: `Err(session_not_found)` if `id` is unknown; otherwise a clone of
     /// whatever is currently stored, wrapped in a self-describing
     /// [`TranscriptRecord`]. Never recomputes cost or usage — exposes exactly
-    /// what [`Self::set_run_outcome`] last stored.
+    /// what [`Self::set_run_outcome`] last stored. `compaction_events` (#2349)
+    /// reads `entry.pm_transcript`'s own cumulative counter — `0` when the
+    /// session has never run (`pm_transcript` still `None`).
     /// Test: `registry_tests::get_transcript_returns_stored_record`,
     /// `registry_tests::get_transcript_on_never_run_session_is_empty`,
-    /// `registry_tests::get_transcript_unknown_session_errors`.
+    /// `registry_tests::get_transcript_unknown_session_errors`,
+    /// `registry_tests::get_transcript_reports_compaction_events`.
     pub fn get_transcript(&self, id: &str) -> Result<TranscriptRecord, RpcError> {
         let sessions = self.lock();
         let entry = sessions
@@ -718,6 +721,11 @@ impl SessionRegistry {
             usage: entry.usage,
             cost_usd: entry.cost_usd,
             mode: entry.session.mode,
+            compaction_events: entry
+                .pm_transcript
+                .as_ref()
+                .map(Transcript::compaction_events)
+                .unwrap_or(0),
         })
     }
 
