@@ -162,7 +162,8 @@ impl IndexStages {
     /// Failed-dominates rule `lifecycle_status` uses so the two never diverge.
     /// What: `true` when lexical, semantic, or graph is `Failed`.
     /// Test: `any_failed_*` in this module + the health-handler regression
-    /// `health_reports_degraded_when_corpus_open_failed` in `tests_health`.
+    /// `health_reports_degraded_when_corpus_open_failed` in
+    /// `tests_health_degraded`.
     pub fn any_failed(&self) -> bool {
         self.lexical.status == StageStatus::Failed
             || self.semantic.status == StageStatus::Failed

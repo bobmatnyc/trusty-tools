@@ -1,8 +1,11 @@
 //! Health-honesty regression tests for issue #1870.
 //!
-//! Why: split out of `tests_health.rs` to keep that file under the 500-SLOC
-//! production cap (it is not classified as a test file by the line-cap gate
-//! because its basename does not end in `_test.rs`/`_tests.rs`).
+//! Why: these tests landed in their own module (rather than joining
+//! `tests_health.rs`) to keep that file under the 500-SLOC production cap —
+//! it is not classified as a test file by the line-cap gate because its
+//! basename does not end in `_test.rs`/`_tests.rs`, so adding these cases
+//! there would have pushed it over the limit. Nothing was moved out of
+//! `tests_health.rs`; this module is new.
 //! What: covers the `/health` degraded-status path when a registered index's
 //! durable corpus failed to open on warm-boot, plus the healthy-path guard.
 //! Test: these tests.

@@ -110,6 +110,10 @@ pub(crate) fn record_warm_boot_result(
             // recomputes it live every poll by scanning registry handles for a
             // failed lane, so its stored value is never read.
             indexes_corpus_failed: 0,
+            // Issue #1870 review follow-up: same rationale — the health
+            // handler recomputes this live every poll; the stored value here
+            // is never read.
+            indexes_health_scan_skipped: 0,
         };
     }
 

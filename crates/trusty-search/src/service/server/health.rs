@@ -246,19 +246,35 @@ pub(super) async fn health_handler(
     // rare; on the exceedingly-rare miss we skip that handle (undercount by one
     // for this poll) — the failure is stable across restarts and every
     // subsequent 2 s poll re-scans, so it is never lost.
+    //
+    // Issue #1870 review follow-up: failing open on a miss is the correct
+    // trade-off (never block the health handler), but a *persistently*
+    // contended handle would otherwise be silently skipped forever — the one
+    // remaining path that could stay invisibly degraded. Count every miss into
+    // `indexes_health_scan_skipped` and name the skipped index at `debug!` so a
+    // persistent miss is detectable (a healthy poll has this at 0; a handle
+    // stuck under write-lock contention shows up as a repeated non-zero count
+    // for the same id across consecutive polls) without changing the
+    // fail-open behavior itself.
+    let mut indexes_health_scan_skipped = 0usize;
     let indexes_corpus_failed = state
         .registry
         .list_handles()
         .iter()
-        .filter(|handle| {
-            handle
-                .stages
-                .try_read()
-                .map(|stages| stages.any_failed())
-                .unwrap_or(false)
+        .filter(|handle| match handle.stages.try_read() {
+            Ok(stages) => stages.any_failed(),
+            Err(_) => {
+                indexes_health_scan_skipped += 1;
+                tracing::debug!(
+                    index_id = %handle.id,
+                    "health: stages lock contended — skipping this handle for this poll (#1870)"
+                );
+                false
+            }
         })
         .count();
     warmboot_summary.indexes_corpus_failed = indexes_corpus_failed;
+    warmboot_summary.indexes_health_scan_skipped = indexes_health_scan_skipped;
     if indexes_corpus_failed > 0 {
         // Fold into the single machine-readable warm-boot health flag external
         // monitors already poll, so #1870 rides the existing degraded channel.
