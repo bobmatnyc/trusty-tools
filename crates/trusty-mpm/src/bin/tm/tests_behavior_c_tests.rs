@@ -74,6 +74,45 @@ fn guided_picker_bare_enter_stopped_session_requires_confirm() {
 }
 
 #[test]
+fn guided_picker_delete_parses_d_prefix() {
+    // #2304: `d<N>` / `d <N>` selects the Nth session (0-based) for deletion.
+    assert_eq!(
+        parse_picker_choice("d1", 1, false),
+        PickerDecision::Delete(0)
+    );
+    assert_eq!(
+        parse_picker_choice("d2", 3, true),
+        PickerDecision::Delete(1)
+    );
+    assert_eq!(
+        parse_picker_choice("D3\n", 3, false),
+        PickerDecision::Delete(2)
+    );
+    assert_eq!(
+        parse_picker_choice("d 2", 3, false),
+        PickerDecision::Delete(1)
+    );
+}
+
+#[test]
+fn guided_picker_delete_out_of_range_unrecognised() {
+    // A `d`-prefixed choice outside 1..=session_count (or non-numeric) is
+    // rejected — never falls through to the resume/launch branches.
+    assert_eq!(
+        parse_picker_choice("d4", 3, false),
+        PickerDecision::Unrecognised
+    );
+    assert_eq!(
+        parse_picker_choice("d0", 3, false),
+        PickerDecision::Unrecognised
+    );
+    assert_eq!(
+        parse_picker_choice("dx", 3, false),
+        PickerDecision::Unrecognised
+    );
+}
+
+#[test]
 fn guided_picker_q_returns_quit() {
     // Why: "q" must quit cleanly without touching tmux or the daemon.
     assert_eq!(parse_picker_choice("q", 0, false), PickerDecision::Quit);

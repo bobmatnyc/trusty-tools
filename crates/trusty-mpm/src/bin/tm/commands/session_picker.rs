@@ -58,6 +58,11 @@ pub(crate) enum PickerDecision {
     /// this is no longer an implicit default; the operator must type the
     /// number explicitly to confirm the restart.
     ConfirmRestart(usize),
+    /// Delete the session at this 0-based index (#2304). Entered as `d<N>`
+    /// (e.g. `d2`) or `d <N>`. The driver runs a confirm prompt — and, for a
+    /// running session, a force-confirm — before touching the store, so this
+    /// variant only signals intent, never an unconditional destructive action.
+    Delete(usize),
 }
 
 /// Scope describing which sessions the picker operates over and how to launch new.
@@ -180,6 +185,8 @@ pub(crate) async fn fetch_live_sessions(
 ///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index) — an EXPLICIT
 ///     numeric choice always restarts/resumes directly, confirm or not
 ///   • `session_count + 1` → `LaunchNew`
+///   • `d<N>` / `d <N>` (1..=session_count) → `Delete(N-1)` (#2304); the driver
+///     still runs a confirm/force-confirm prompt before deleting
 ///   • anything else → `Unrecognised`
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_live_session_resumes_first`,
@@ -196,6 +203,17 @@ pub(crate) fn parse_picker_choice(
     let choice = line.trim();
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
+    }
+    // #2304: `d<N>` / `d <N>` deletes the session at menu slot N. Parsed before
+    // the numeric-resume branch so the `d` prefix is unambiguous.
+    if let Some(rest) = choice.strip_prefix(['d', 'D']) {
+        if let Ok(n) = rest.trim().parse::<usize>()
+            && n >= 1
+            && n <= session_count
+        {
+            return PickerDecision::Delete(n - 1);
+        }
+        return PickerDecision::Unrecognised;
     }
     if choice.is_empty() {
         if session_count == 0 {
@@ -235,6 +253,9 @@ pub(crate) fn parse_picker_choice(
 ///     redisplays the menu (fleet-wide `tm ls` has no single launch target);
 ///   • `ConfirmRestart(i)` (#2148) → print a one-line "type the number to
 ///     confirm" notice and redisplay the SAME menu — no daemon round-trip;
+///   • `Delete(i)` (#2304) → [`super::picker_delete::confirm_and_delete`] runs a
+///     confirm (force-confirm for a running session) then the managed→local
+///     routed delete; redisplay the re-fetched menu afterwards;
 ///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
 /// Test: `parse_picker_choice` is the testable seam; I/O path is exercised by
 /// manual smoke tests and the e2e suite.
@@ -266,6 +287,7 @@ pub(crate) async fn run_tty_picker(
                 eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
             }
             eprintln!("tm:   [{new_idx}] launch new session");
+            eprintln!("tm:   [d<N>] delete session N (e.g. d1)");
             eprintln!("tm:   [q] quit");
             if first_needs_restart {
                 // #2148: no implicit destructive default — an explicit [1] is required.
@@ -322,6 +344,13 @@ pub(crate) async fn run_tty_picker(
                     i + 1
                 );
                 continue;
+            }
+            // #2304: delete the selected session. The confirm/force-confirm
+            // prompt and the managed→local routing live in `picker_delete`; this
+            // arm just runs it, then falls through to the re-fetch so the menu
+            // reflects the removal. A cancel/refusal is a no-op re-fetch.
+            PickerDecision::Delete(i) => {
+                super::picker_delete::confirm_and_delete(client, url, &sessions[i]).await?;
             }
             PickerDecision::Unrecognised => {
                 eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());

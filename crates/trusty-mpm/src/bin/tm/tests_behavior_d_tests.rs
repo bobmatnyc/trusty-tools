@@ -635,3 +635,243 @@ fn ls_connector_should_show_picker_flags_and_empty_static() {
         "0 sessions -> static"
     );
 }
+
+// ── #2304: picker delete — family routing + running-session force guard ─────
+
+use crate::commands::picker_delete::{
+    ManagedDeleteNext, classify_managed_delete, confirm_is_force, confirm_is_yes,
+    delete_needs_force,
+};
+
+/// A running (active/provisioning) session requires an explicit force-confirm.
+#[test]
+fn delete_needs_force_running_true() {
+    assert!(delete_needs_force("active"));
+    assert!(delete_needs_force("provisioning"));
+}
+
+/// A stopped/errored session has no live runtime — a plain confirm is enough.
+#[test]
+fn delete_needs_force_stopped_and_errored_false() {
+    assert!(!delete_needs_force("stopped"));
+    assert!(!delete_needs_force("errored"));
+}
+
+/// Family routing: 200 keeps the managed delete, 404 falls back to the local
+/// (project-session) store, 409 surfaces the running-guard refusal, and any
+/// other status is an error.
+#[test]
+fn classify_managed_delete_maps_each_family() {
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::OK),
+        ManagedDeleteNext::Deleted
+    );
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::NOT_FOUND),
+        ManagedDeleteNext::FallbackLocal,
+        "404 -> project-session fallback (the other family)"
+    );
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::CONFLICT),
+        ManagedDeleteNext::Refused,
+        "409 -> running guard, never auto-force"
+    );
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+        ManagedDeleteNext::Error
+    );
+}
+
+/// The safe (non-force) confirm accepts only `y`/`yes`; empty is the safe reject.
+#[test]
+fn confirm_is_yes_accepts_only_y_variants() {
+    assert!(confirm_is_yes("y"));
+    assert!(confirm_is_yes("Y"));
+    assert!(confirm_is_yes(" yes \n"));
+    assert!(!confirm_is_yes(""));
+    assert!(!confirm_is_yes("force"));
+    assert!(!confirm_is_yes("delete"));
+}
+
+/// The force confirm requires the exact word `force` — a bare `y` is NOT enough.
+#[test]
+fn confirm_is_force_requires_the_word_force() {
+    assert!(confirm_is_force("force"));
+    assert!(confirm_is_force(" FORCE \n"));
+    assert!(!confirm_is_force("y"));
+    assert!(!confirm_is_force("yes"));
+    assert!(!confirm_is_force(""));
+}
+
+// ── #2304 CRITICAL fix: local-session running guard ─────────────────────────
+//
+// `DELETE /sessions/{id}` (`remove_session` in `daemon/api.rs`) has NO
+// server-side running guard — it unconditionally kills the tmux host for any
+// status. Before this fix, `delete_local` issued that DELETE straight through
+// on a managed-store 404, which meant a bare `tm session delete <local-id>`
+// (previously a harmless "not found") could silently force-kill a LIVE local
+// session. These tests drive the real HTTP path (a loopback daemon), not just
+// the pure guard function, so a wiring mistake in `delete_local` itself would
+// be caught, not just a bug in the predicate.
+
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use trusty_mpm::core::session::{ControlModel, Session, SessionId, SessionStatus};
+use trusty_mpm::daemon::state::DaemonState;
+
+use crate::commands::picker_delete::{
+    DeleteReport, delete_managed_then_local, local_session_needs_force,
+};
+
+/// A hermetic daemon bound to a random loopback port, for real-HTTP round trips
+/// through `delete_managed_then_local`'s local-fallback guard.
+///
+/// Why: mirrors `tests/test_session_lifecycle.rs`'s `TestServer` — a real bind
+/// is the only way to prove the CLI-side guard actually runs BEFORE the DELETE
+/// reaches the daemon, not just that the predicate returns the right bool.
+struct LocalTestServer {
+    url: String,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl LocalTestServer {
+    /// Serve `state` (pre-seeded by the caller) on a fresh loopback port and
+    /// block until `/health` answers.
+    async fn spawn(state: std::sync::Arc<DaemonState>) -> Self {
+        let app = trusty_mpm::daemon::api::router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback port");
+        let addr: SocketAddr = listener.local_addr().expect("resolve bound addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let url = format!("http://{addr}");
+        Self::wait_for_health(&url).await;
+        Self { url, handle }
+    }
+
+    async fn wait_for_health(base: &str) {
+        let client = reqwest::Client::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let health = format!("{base}/health");
+        loop {
+            if let Ok(resp) = client.get(&health).send().await
+                && resp.status().is_success()
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("daemon at {base} did not become healthy within 2s");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+impl Drop for LocalTestServer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Spin up a hermetic daemon with exactly one local session pre-registered at
+/// `status`; returns the server (keep it alive for the test's duration) and the
+/// session's id string.
+async fn spawn_with_local_session(status: SessionStatus) -> (LocalTestServer, String) {
+    let state = DaemonState::shared();
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/2304-fixture", ControlModel::Tmux, None);
+    session.status = status;
+    state.register_session(session);
+    let server = LocalTestServer::spawn(state).await;
+    (server, id.0.to_string())
+}
+
+/// A RUNNING local session (`Active`) must be REFUSED without `--force` — never
+/// silently killed. This is the exact scenario the review flagged: before the
+/// fix, this call would have gone straight through with no guard at all.
+#[tokio::test]
+async fn local_delete_refuses_running_session_without_force() {
+    let (server, id) = spawn_with_local_session(SessionStatus::Active).await;
+    let client = reqwest::Client::new();
+
+    let report = delete_managed_then_local(&client, &server.url, &id, false)
+        .await
+        .expect("routing call must not error");
+    assert!(
+        matches!(report, DeleteReport::Refused(_)),
+        "running local session without --force must be Refused, got {report:?}"
+    );
+
+    // The guard must have fired BEFORE the DELETE — the session is still there.
+    let still_there = client
+        .get(format!("{}/sessions/{id}", server.url))
+        .send()
+        .await
+        .expect("get session")
+        .status();
+    assert_eq!(
+        still_there,
+        reqwest::StatusCode::OK,
+        "session must NOT have been deleted"
+    );
+}
+
+/// A STOPPED local session deletes cleanly WITHOUT `--force`.
+#[tokio::test]
+async fn local_delete_allows_stopped_session_without_force() {
+    let (server, id) = spawn_with_local_session(SessionStatus::Stopped).await;
+    let client = reqwest::Client::new();
+
+    let report = delete_managed_then_local(&client, &server.url, &id, false)
+        .await
+        .expect("routing call must not error");
+    match report {
+        DeleteReport::Deleted { local, .. } => assert!(local, "must report the local fallback"),
+        other => panic!("expected Deleted, got {other:?}"),
+    }
+
+    let gone = client
+        .get(format!("{}/sessions/{id}", server.url))
+        .send()
+        .await
+        .expect("get session")
+        .status();
+    assert_eq!(gone, reqwest::StatusCode::NOT_FOUND, "session must be gone");
+}
+
+/// `force = true` (as sent after the picker's type-`force` confirm, or
+/// `tm session delete --force`) bypasses the local guard even on a RUNNING
+/// session — proving the guard interoperates with the existing force plumbing
+/// rather than fighting it.
+#[tokio::test]
+async fn local_delete_force_bypasses_guard_on_running_session() {
+    let (server, id) = spawn_with_local_session(SessionStatus::Active).await;
+    let client = reqwest::Client::new();
+
+    let report = delete_managed_then_local(&client, &server.url, &id, true)
+        .await
+        .expect("routing call must not error");
+    match report {
+        DeleteReport::Deleted { local, .. } => assert!(local),
+        other => panic!("expected Deleted with force=true, got {other:?}"),
+    }
+}
+
+// ── local_session_needs_force — pure guard predicate ─────────────────────────
+
+#[test]
+fn local_session_needs_force_stopped_false() {
+    assert!(!local_session_needs_force(SessionStatus::Stopped));
+}
+
+#[test]
+fn local_session_needs_force_active_and_others_true() {
+    assert!(local_session_needs_force(SessionStatus::Starting));
+    assert!(local_session_needs_force(SessionStatus::Active));
+    assert!(local_session_needs_force(SessionStatus::AwaitingApproval));
+    assert!(local_session_needs_force(SessionStatus::Detached));
+    assert!(local_session_needs_force(SessionStatus::Paused));
+}
