@@ -86,8 +86,8 @@ boundary between the two precisely.
 |---|---|---|
 | `tm ls` picker, `tm sessions attach`, direct tmux attach | **L1 — Direct** | The user is IN the session's terminal. No proxy in the loop. Unaffected by this spec. |
 | `tm sessions <verb>` (list/launch/kill/resume/decommission/activity, §3.2) | **L1 — Direct** (the *deterministic* connection/lifecycle layer L1's picker relies on) | These verbs manage the connection and lifecycle; they do not proxy conversation content. |
-| SM proxy inject/summarize (#1440, channel-agnostic, PR pending) — MCP/Telegram/Slack `/send`, focused-session routing | **L2 — Session Manager as proxy** | Explicitly single-session-focused per the owner's framing, even though it spans external channels. Out of scope for this spec; consumes the same `session_send`/`session_activity` primitives §4 reuses. |
-| TELUI (epic #1272, DOC-19) | **L2** | A channel-specific rendering of the L2 proxy. |
+| SM proxy inject/summarize (#1440, channel-agnostic, SHIPPED PR #2372 squash 362cb72a) — MCP/Telegram/Slack managed-session HTTP endpoints (focus/unfocus/message/summary routes + ManagedBackend trait), focused-session routing | **L2 — Session Manager as proxy** | Explicitly single-session-focused per the owner's framing, even though it spans external channels. Out of scope for this spec; the HTTP contract is defined in `daemon/managed_routes/mod.rs`. |
+| TELUI (epic #1272 — STUI epic; DOC-19 TELUI cites it as feature parent) | **L2** | A channel-specific rendering of the L2 proxy. |
 | `tm projects`/`tm sessions` CLI (§3), daemon API (§4), multipane TUI (§5), configurator (§6), Deliverable/Milestone data model (§10) | **L3 substrate — deterministic control plane** | **This spec.** No LLM in the loop anywhere in this column — see §11. |
 | `tm manager` (epic #2109) — portfolio inference, agentic oversight, cross-session reasoning, external-channel oversight/notifications | **L3 brain — inference layer** | Consumes this spec's data/API as its deterministic substrate; adds the reasoning this spec explicitly does not do. |
 
@@ -98,6 +98,13 @@ project` exists so that when `tm manager` (L3's brain) is built, it inherits a d
 status surface that already spans the whole portfolio deterministically — it does not have to
 invent portfolio-wide state itself, and nothing in L3's substrate silently reintroduces L2's
 single-session framing.
+
+**Note on L2 HTTP contract (fix for PR #2372 merged 2026-07-10):** §1.1's mapping previously
+referenced #1440 as "PR pending"; it shipped in PR #2372. The L2 HTTP endpoints (#1440's managed-
+session routes) are defined in `daemon/managed_routes/mod.rs` (focus, unfocus, message, summary
+endpoints + ManagedBackend trait); they are NOT listed in §4 (which scopes only the L3 control-
+plane endpoints this epic defines). L3 consumes L2's session status primitives (activity, state)
+but does not reimplement L2's routing logic.
 
 ### 1.2 What this is
 
@@ -149,7 +156,7 @@ here has to account for all of them at once, not just `tm project` vs `tm sessio
 |---|---|---|---|---|---|
 | A | **Directory registration** | `core::project::ProjectInfo` (`crates/trusty-mpm/src/core/project.rs`) — `{path, name, registered_at}` | absolute filesystem path | `tm project init/list/info` (`bin/tm/commands/project.rs`) → `POST/GET /projects`, `/projects/current`, `/projects/discover` | **Implemented, in use — now DEPRECATED (§2.2)** |
 | B | **NL-routing / session-spawn registry** | `project::Project` (`crates/trusty-mpm/src/project/record.rs`) — `{name, repo_url, default_branch, stack_hint, tags, description, gh_user}` | git `repo_url` | **MCP-only**: `project_register`/`project_get`/`project_list` (`mcp/tools/project.rs`); no CLI, no HTTP route | **Implemented (DOC-22, #1517), MCP-only — becomes the backbone of `tm projects` (§2.2)** |
-| C | **Project Manager vision** (DOC-30) | Unbuilt `Project`/`Deliverable`/`Milestone` model | git repo, 1:1 | Proposes `tm project create/show/add-deliverable/spawn-session/status` | **0% implemented — design only** |
+| C | **Project Manager vision** (DOC-30) | **RETIRED 2026-07-10** — content absorbed into §10 and #2109 | N/A | N/A | **SUPERSEDED — DOC-30 closed (issue #1878); content salvaged to this epic and #2109, no standalone implementation** |
 | D | **This epic (#2108)** | Registry B (§2.2) | git `repo_url` | `tm projects <verb>` + sibling `tm sessions <verb>` (§2.2, §3) | **New** |
 
 Additionally, `tm session ...` (`bin/tm/commands/session.rs`, `SessionAction` in `cli.rs:1209`)
@@ -200,11 +207,12 @@ The owner resolved this as follows (supersedes the v1 "recommendation" below, wh
    `bin/tm/commands/project.rs:105`) is **carried forward** into the new surface as `tm projects
    config <name> --dir <path>` (§3, §6) — the scaffold logic itself is reused verbatim; only its
    entry point and identity key (registry-B `name` instead of a bare path) change.
-5. **DOC-30's future CLI namespace still yields, unchanged from the v1 recommendation.** DOC-30
-   is 0% implemented (`docs/specs/DOC-30-project-manager-vision.md:3`); when it is picked up it
-   should nest under `tm projects plan ...` (deliverables/milestones/estimation) rather than
-   colliding with this epic's `tm projects list/config/show/status`. This spec does not modify
-   DOC-30; it only carries the flag forward so DOC-30's next revision reserves the sub-namespace.
+5. **DOC-30 is RETIRED (issue #1878, closed 2026-07-10); no namespace reservation.** DOC-30's
+   Deliverable/Milestone content has been absorbed into §10 of this spec and the inference layer
+   (#2109 `tm manager`). The `tm projects plan ...` sub-namespace is NOT reserved; the
+   Deliverable/Milestone CLI lives under `tm projects` alongside the rest of the control plane
+   (§10.8), not under a separate `plan` namespace. This simplification reflects the completed
+   retirement of DOC-30.
 
 **Net naming result (canonical, use these going forward):**
 
@@ -557,10 +565,10 @@ actual issue numbers (filed 2026-07-06).
    project(s) session ...`; `tm projects` shows sessions read-only in its output/TUI, but the
    mutating session verbs live only at `tm sessions`. Today's singular `tm session` becomes a
    **deprecated alias** of `tm sessions` (confirmed: yes, alias + deprecation notice, per the
-   existing `ManagedStop`/`RuntimeStop` precedent). DOC-30, when picked up, still reserves `tm
-   projects plan ...` rather than colliding with this epic's verbs (carried forward unchanged
-   from the v1 recommendation — not separately contested by the owner). Filed as #2116 (session
-   rename/alias) and reflected throughout §2.2, §3.
+   existing `ManagedStop`/`RuntimeStop` precedent). DOC-30 is RETIRED (issue #1878, closed
+   2026-07-10) with its content absorbed into §10 and #2109 — no namespace reservation for `tm
+   projects plan ...` (see §2.2 item 5). Filed as #2116 (session rename/alias) and reflected
+   throughout §2.2, §3.
 2. **Registry A fold-in mechanics (§2.2, §8 slice 10) — RESOLVED.** DEPRECATE, do not merge, do
    not hard-cut: `tm project init/list/info` keeps working, prints a deprecation notice pointing
    at `tm projects register/list/show`, and is removed in a later release. Filed as #2123.
@@ -761,7 +769,7 @@ parallel. It is a contract, not aspiration — anything on the right-hand side b
 
 | `tm project` (#2108, this spec) WILL | `tm manager` (#2109) territory — this spec WILL NEVER |
 |---|---|
-| Poll and report already-computed state (session state, CI/review booleans, config flags) | Call an LLM/inference provider for any purpose |
+| Poll and report already-computed state (session state, CI/review booleans, config flags) — including opt-in-LLM-with-deterministic-fallback fields like activity.rs `summary` (see row 4 below) | Call an LLM/inference provider for new reasoning, new summaries, or decisions not already made elsewhere (surfacing an existing field is not calling an LLM) |
 | Store and mutate Deliverable/Milestone records via explicit CLI/API verbs (§10) | Infer a Deliverable's scope, status, or estimate from session content |
 | Roll up counts/histograms across sessions within ONE named project (§4.1) | Reason across MULTIPLE projects at once (portfolio-level synthesis) |
 | Surface the deterministic `activity.rs` status line (state/summary/pending_decision) as-is | Generate a new prose summary, digest, or narrative not already produced by an existing deterministic or opt-in-LLM-with-fallback field (DOC-16 D1) |
@@ -785,41 +793,67 @@ their §9 decisions were resolved). §13 lists the open questions that should be
 
 | # | Slice | Depends on | Notes |
 |---|---|---|---|
-| WI-12 | Deliverable/Milestone CRUD API — `POST/GET/PATCH /api/v1/projects/{name}/deliverables[/{id}]` and `.../milestones[/{id}]` (§10.2, §10.5) | #2114 (registry-B HTTP surface) | New `deliverables.json`/`milestones.json` stores (§10.7), same atomic-write pattern as `store.rs`. |
-| WI-13 | `SessionRecord.deliverable_id` field + `tm sessions launch --deliverable <id>` wiring (§10.6) | WI-12, existing `session_manager/record.rs` | Additive schema field; existing sessions without it default to `None`. |
-| WI-14 | Status state-machine enforcement — reject invalid `set-status` transitions per §10.3 | WI-12 | Unit tests: one per illegal transition (e.g. `proposed→complete`). |
-| WI-15 | `tm projects deliverables`/`tm projects milestones` CLI subtree (§10.8) | WI-12 | Thin HTTP client, mirrors §3.1's pattern exactly. |
-| WI-16 | Extend `GET /api/v1/projects/{name}/status` (#2117) with `DeliverableStatus`/`MilestoneStatus` histograms (§4.1 extension) | WI-12, #2117 | Additive response fields; existing consumers unaffected. |
-| WI-17 | TUI: Deliverable glyph in Sessions pane, Deliverable/Milestone view reachable from Projects pane (§10.8's `show`, read-only) | WI-12, #2118, #2119 | Extends, does not replace, the existing 4-pane layout (§5.1). |
+| #2378 | Deliverable/Milestone CRUD API — `POST/GET/PATCH /api/v1/projects/{name}/deliverables[/{id}]` and `.../milestones[/{id}]` (§10.2, §10.5) | #2114 (registry-B HTTP surface) | New `deliverables.json`/`milestones.json` stores (§10.7), same atomic-write pattern as `store.rs`. |
+| #2379 | `SessionRecord.deliverable_id` field + `tm sessions launch --deliverable <id>` wiring (§10.6) | #2378, existing `session_manager/record.rs` | Additive schema field; existing sessions without it default to `None`. |
+| #2380 | Status state-machine enforcement — reject invalid `set-status` transitions per §10.3 | #2378 | Unit tests: one per illegal transition (e.g. `proposed→complete`). |
+| #2381 | `tm projects deliverables`/`tm projects milestones` CLI subtree (§10.8) | #2378 | Thin HTTP client, mirrors §3.1's pattern exactly. |
+| #2382 | Extend `GET /api/v1/projects/{name}/status` (#2117) with `DeliverableStatus`/`MilestoneStatus` histograms (§4.1 extension) | #2378, #2117 | Additive response fields; existing consumers unaffected. |
+| #2383 | TUI: Deliverable glyph in Sessions pane, Deliverable/Milestone view reachable from Projects pane (§10.8's `show`, read-only) | #2378, #2118, #2119 | Extends, does not replace, the existing 4-pane layout (§5.1). |
 
 ---
 
-## 13. Open questions for the owner (2026-07-10 amendment)
+## 13. Resolved decisions for the owner (2026-07-10 amendment)
 
 1. **Does DOC-30 Decision #11 (DOC-22's NL-resolver feeding the portfolio surface) belong to
    #2108 or #2109?** §10.9 row 11 reassigns it to #2109 on the theory that resolving ambiguous
    natural-language intent to a project is inference-adjacent. Confirm, or pull a narrowly-scoped,
    purely-deterministic slice (e.g. exact-name/exact-`repo_url` matching only, no fuzzy NL) into
    #2108 instead.
+
+   **Decision (2026-07-10):** SPLIT. The deterministic resolver primitive (3-strategy, confidence-
+   scored, no LLM) remains available as a #2108 substrate API; ACTING on ambiguous/low-confidence
+   input (disambiguation choices) belongs to #2109. The L2/L3 line is inference, not lookup.
+
 2. **Where exactly does DOC-30 Decision #8's "prompt user to confirm" sit?** §10.3 keeps the gate
    *check* (poll CI/review booleans) in #2108 but flags that any future summarization of *why* a
    case is ambiguous is #2109's. Confirm this split, or state that the prompt itself (with no
    summarization) is acceptable to ship in #2108 as currently scoped.
+
+   **Decision (2026-07-10):** "Prompt user to confirm" gate: lives in #2108 as a deterministic CLI
+   confirmation; #2109 may later auto-answer via policy. Confirmation prompts are not inference.
+
 3. **File §12's WI-12–WI-17 now as children of #2108, or hold until this revision is reviewed?**
    This spec defaults to holding (matching the "resolve then file" convention §8 itself followed).
+
+   **Decision (2026-07-10):** FILE NOW as GitHub issues (see filing instructions below).
+
 4. **Does `tm projects deliverables`/`tm projects milestones` (§10.8) correctly supersede DOC-30's
    originally-reserved `tm projects plan ...` sub-namespace (§2.2 item 5), now that DOC-30 is
    retired?** This revision assumes yes (the content moved, so the reservation is moot) — confirm,
    or state a preference for the `plan` sub-namespace wording instead.
+
+   **Decision (2026-07-10):** `tm projects plan` namespace: NOT reserved. Deliverable/milestone CLI
+   stays nested under `tm projects` as drafted. DOC-30 is retired; no namespace reservations for
+   retired visions.
+
 5. **Storage placement:** §10.7 proposes `deliverables.json`/`milestones.json` as new daemon-owned
    sibling stores (central, cross-checkout). Confirm this over the alternative of nesting
    Deliverable/Milestone data inside a project's local `.trusty-mpm/config.toml` (§6's local-
    override precedence model) — the central placement was chosen because Deliverables/Milestones,
    like the Project record itself, need to be visible regardless of which checkout (if any) is
    currently open.
+
+   **Decision (2026-07-10):** Deliverables/Milestones storage: CENTRAL (siblings to projects.json,
+   keyed by repo_url), NOT local-checkout. Rationale: deliverables span many sessions and disposable
+   worktrees; consistent with registry-B identity.
+
 6. **Should `ticket_ref`/`spec_ref` (§10.2, §10.4) get the same opaque-placeholder treatment §6
    gave `jira_config`,** i.e. ship as a loosely-typed slot now with validation deferred, given
    #2082 (JIRA boards) is still open and may want to write through `ticket_ref` eventually?
+
+   **Decision (2026-07-10):** ticket_ref: YES opaque-placeholder treatment (gh-first today, JIRA
+   deferred, matching the repo's gh-only ticketing convention). spec_ref: NO abstraction — it is
+   a plain repo-relative path into docs/specs/.
 
 ---
 
