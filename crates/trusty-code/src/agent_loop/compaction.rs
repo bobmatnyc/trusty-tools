@@ -11,7 +11,9 @@
 //! `compacted` flags) can stay focused on state management. Splitting the
 //! policy (when / what to say) from the mechanism (marking entries, replaying
 //! the last user turn) keeps both halves independently testable.
-//! What: [`CompactionConfig`] (the tunable threshold + active-zone size),
+//! What: [`CompactionConfig`] (the tunable threshold + active-zone size —
+//! production code builds one via [`CompactionConfig::for_context_window`],
+//! #2308, rather than the legacy flat [`Default`] impl),
 //! [`estimate_tokens`] (a cheap chars/4 heuristic — no tokenizer dependency),
 //! [`should_compact`] (threshold check), and [`summarize_span`] (a
 //! deterministic one-line summary of a compacted message span, built from
@@ -41,11 +43,65 @@ pub struct CompactionConfig {
     pub keep_last_messages: usize,
 }
 
+/// Percentage of a model's context window at which compaction fires (#2308).
+///
+/// Why: A flat `token_threshold` (the old `6_000` constant) is model-blind —
+/// for a 200K-token Bedrock Claude Sonnet window that is ~3% utilisation,
+/// meaning ordinary coding turns (post-#2261 tool-call-arg counting) blow
+/// through it every couple of turns, destroying working context via
+/// "re-anchor thrash". Scaling the threshold to a fraction of the ACTUAL
+/// resolved context window (see [`crate::provider::resolve_context_window`])
+/// fixes this at the root: compaction now fires only once the transcript is
+/// genuinely close to exhausting the model's real budget. 75% leaves a
+/// generous headroom margin for the completion tokens of the turn that
+/// crosses the threshold, plus the summary/replay overhead compaction itself
+/// introduces.
+/// What: Used by [`CompactionConfig::for_context_window`] as
+/// `context_window * COMPACTION_THRESHOLD_FRACTION_PCT / 100`.
+/// Test: `compaction::tests::for_context_window_scales_threshold_proportionally`.
+pub const COMPACTION_THRESHOLD_FRACTION_PCT: usize = 75;
+
+impl CompactionConfig {
+    /// Derive a `CompactionConfig` proportional to a model's real context
+    /// window (#2308).
+    ///
+    /// Why: This is the production constructor — the flat, model-blind
+    /// `Default` threshold (see that impl's doc) is the root cause of #2308's
+    /// pathological re-compaction. Every production call site that knows its
+    /// model slug must resolve the model's real context window (via
+    /// [`crate::provider::resolve_context_window`]) and build its
+    /// `CompactionConfig` through this constructor instead.
+    /// What: `token_threshold` is `context_window * `
+    /// [`COMPACTION_THRESHOLD_FRACTION_PCT`]` / 100`; `keep_last_messages` is
+    /// unchanged from the previous default (6).
+    /// Test: `compaction::tests::for_context_window_scales_threshold_proportionally`,
+    /// `compaction::tests::should_compact_does_not_trigger_at_10k_tokens_against_200k_window`,
+    /// `compaction::tests::should_compact_triggers_near_75pct_of_200k_window`.
+    pub fn for_context_window(context_window: usize) -> Self {
+        Self {
+            token_threshold: context_window * COMPACTION_THRESHOLD_FRACTION_PCT / 100,
+            keep_last_messages: 6,
+        }
+    }
+}
+
 impl Default for CompactionConfig {
-    /// §5.4 gives no exact numbers; these defaults keep several full
+    /// LEGACY/TEST-ONLY default — a flat, model-blind `6_000`-token threshold.
+    ///
+    /// Why: This was the pre-#2308 production default; the root cause of
+    /// #2308's pathological re-compaction (roughly every 2 turns at
+    /// 4-13K estimated tokens) is exactly this hard-coded constant, which is
+    /// only ~3% of a real Bedrock Claude Sonnet 200K-token context window.
+    /// Kept for back-compat (tests that want a small, deterministic
+    /// threshold without wiring a model slug) but production code must call
+    /// [`CompactionConfig::for_context_window`] instead so the threshold
+    /// scales with the model actually in use.
+    /// What: §5.4 gives no exact numbers; these defaults keep several full
     /// tool-call round-trips (a handful of assistant+tool pairs) uncompacted
     /// while triggering well before a typical model's context window is at
-    /// risk.
+    /// risk — but ONLY for a small/unknown context window; see
+    /// [`CompactionConfig::for_context_window`] for the model-aware
+    /// production path.
     fn default() -> Self {
         Self {
             token_threshold: 6_000,
@@ -293,6 +349,122 @@ mod tests {
         let large = vec![ChatMessage::user("abcdefghijkl")];
         assert!(!should_compact(&small, &cfg));
         assert!(should_compact(&large, &cfg));
+    }
+
+    // ── #2308: model-aware compaction threshold ─────────────────────────────
+
+    /// `for_context_window` scales the threshold proportionally to the
+    /// window size, for both a large (Bedrock-sized) and a small window.
+    ///
+    /// Why: This is the direct regression guard for the fix itself — the
+    /// threshold must track [`COMPACTION_THRESHOLD_FRACTION_PCT`] of
+    /// whatever window is passed in, not a flat constant.
+    /// What: 200,000 -> threshold within the 70-80% band (140,000-160,000);
+    /// 8,000 -> threshold scales down proportionally (5,600-6,400) rather
+    /// than staying pinned at a large absolute number.
+    /// Test: this test.
+    #[test]
+    fn for_context_window_scales_threshold_proportionally() {
+        let large = CompactionConfig::for_context_window(200_000);
+        assert!(
+            (140_000..=160_000).contains(&large.token_threshold),
+            "expected ~75% of 200_000, got {}",
+            large.token_threshold
+        );
+
+        let small = CompactionConfig::for_context_window(8_000);
+        assert!(
+            (5_600..=6_400).contains(&small.token_threshold),
+            "expected ~75% of 8_000, got {}",
+            small.token_threshold
+        );
+    }
+
+    /// The exact #2308 failure case: a ~10K-estimated-token transcript must
+    /// NOT trigger compaction against a 200K-window model's config.
+    ///
+    /// Why: Under the old flat `token_threshold: 6_000` default, a transcript
+    /// this size compacted almost immediately even though it's only ~5% of a
+    /// real 200K-token Bedrock Claude Sonnet window — the exact
+    /// "re-anchor thrash" this issue reports.
+    /// What: Build a transcript whose `estimate_total_tokens` is ~10,000
+    /// (via a single large user message, well within chars/4 rounding) and
+    /// assert `should_compact` is `false` against
+    /// `CompactionConfig::for_context_window(200_000)`.
+    /// Test: this test.
+    #[test]
+    fn should_compact_does_not_trigger_at_10k_tokens_against_200k_window() {
+        // 40_000 chars / 4 == 10_000 estimated tokens.
+        let messages = vec![ChatMessage::user("x".repeat(40_000))];
+        assert_eq!(estimate_total_tokens(&messages), 10_000);
+
+        let cfg = CompactionConfig::for_context_window(200_000);
+        assert!(
+            !should_compact(&messages, &cfg),
+            "a 10K-token transcript must not compact against a 200K-window model"
+        );
+    }
+
+    /// Compaction still fires once a transcript crosses ~75% of a 200K
+    /// window — the fix must not disable compaction outright.
+    ///
+    /// Why: The fix scales the threshold; it must not remove it. A
+    /// transcript genuinely approaching the model's real context limit must
+    /// still trigger compaction.
+    /// What: Build a transcript just over 150,000 estimated tokens and assert
+    /// `should_compact` is `true` against
+    /// `CompactionConfig::for_context_window(200_000)`.
+    /// Test: this test.
+    #[test]
+    fn should_compact_triggers_near_75pct_of_200k_window() {
+        // 601_000 chars / 4 == 150_250 estimated tokens, just over the
+        // 150_000 (75% of 200_000) threshold.
+        let messages = vec![ChatMessage::user("x".repeat(601_000))];
+        let cfg = CompactionConfig::for_context_window(200_000);
+        assert!(
+            should_compact(&messages, &cfg),
+            "a transcript just over 75% of the window must trigger compaction"
+        );
+    }
+
+    /// `estimate_total_tokens` applies the SAME units to content and to
+    /// tool-call arguments — no hidden scaling bug between the two.
+    ///
+    /// Why: Directly guards the "units" invariant the research for #2308
+    /// verified but which this fix must not regress: a content-only message
+    /// and a tool-call-only message of identical string length must produce
+    /// identical estimates.
+    /// What: Build one message with `content: Some(s)` and one with
+    /// `content: None` plus a single tool call whose `arguments` is the same
+    /// string `s`; assert both totals are equal.
+    /// Test: this test.
+    #[test]
+    fn estimate_total_tokens_units_match_between_content_and_tool_args() {
+        use crate::llm::{FunctionCall, ToolCall};
+
+        let s = "y".repeat(1000);
+
+        let content_only = vec![ChatMessage::assistant(s.clone())];
+        let tool_call_only = vec![ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "write_file".into(),
+                    arguments: s.clone(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+            cache_control: None,
+        }];
+
+        assert_eq!(
+            estimate_total_tokens(&content_only),
+            estimate_total_tokens(&tool_call_only)
+        );
     }
 
     #[test]

@@ -37,14 +37,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
+use crate::agent_loop::{AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink};
 use crate::agents::AgentConfig;
 use crate::jsonrpc::RpcError;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
-use crate::provider::{resolve_deadline_secs, resolve_max_tokens, resolve_model};
+use crate::provider::{
+    resolve_context_window, resolve_deadline_secs, resolve_max_tokens, resolve_model,
+};
 use crate::run_task::{
     RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
 };
@@ -225,6 +227,11 @@ async fn run_and_record(
             max_tokens: resolve_max_tokens(&pm_config),
             mode: params.mode,
             timeout_secs: deadline_secs,
+            // #2308: model-aware compaction threshold — see
+            // `CompactionConfig::for_context_window`'s doc for why the
+            // struct-update `..AgentLoopConfig::default()` below must not be
+            // allowed to silently supply the flat, model-blind default here.
+            compaction: CompactionConfig::for_context_window(resolve_context_window(&pm_model)),
             ..AgentLoopConfig::default()
         },
         pm_llm,

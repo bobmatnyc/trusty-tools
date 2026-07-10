@@ -563,6 +563,45 @@ mod tests {
         assert_eq!(raw.len(), 2 + 20);
     }
 
+    /// Once `maybe_compact` fires, `estimate_total_tokens` over the
+    /// resulting `to_messages()` view is strictly smaller than the pre-fire
+    /// estimate (#2308).
+    ///
+    /// Why: Research for #2308 verified this reset bookkeeping is NOT the
+    /// bug (no feedback-loop regression) — this test locks that invariant in
+    /// as a regression guard alongside the model-aware threshold fix, so a
+    /// future change can't silently reintroduce a "compaction never actually
+    /// shrinks the estimate" bug.
+    /// What: Build a transcript with several sizeable assistant/tool turns,
+    /// force one compaction with a low threshold, and assert the post-fire
+    /// `estimate_total_tokens(&t.to_messages())` is strictly less than the
+    /// pre-fire estimate over the same view.
+    /// Test: this test.
+    #[test]
+    fn maybe_compact_estimate_drops_after_compaction_fires() {
+        use super::super::compaction::estimate_total_tokens;
+
+        let mut t = Transcript::seed("s", "task");
+        for i in 0..10 {
+            t.push_assistant(Some(format!("assistant turn {i}: {}", "x".repeat(200))), &[]);
+            t.push_tool_result(&format!("c{i}"), "bash", &"output ".repeat(50));
+        }
+
+        let cfg = CompactionConfig {
+            token_threshold: 1,
+            keep_last_messages: 2,
+        };
+
+        let pre_fire_estimate = estimate_total_tokens(&t.to_messages());
+        assert!(t.maybe_compact(&cfg));
+        let post_fire_estimate = estimate_total_tokens(&t.to_messages());
+
+        assert!(
+            post_fire_estimate < pre_fire_estimate,
+            "expected estimate to drop after compaction: pre={pre_fire_estimate} post={post_fire_estimate}"
+        );
+    }
+
     /// Assert every `tool` entry in a `to_messages()` view has its issuing
     /// assistant `tool_calls` entry present in the SAME view, and every
     /// assistant `tool_calls` entry has all its answers present too.

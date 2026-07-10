@@ -11,7 +11,9 @@
 //! its [`DEFAULT_MODEL`] constant, the [`resolve_max_tokens`] precedence
 //! function plus its [`DEFAULT_MAX_TOKENS`] constant, and (#2207) the
 //! [`resolve_deadline_secs`] precedence function plus its
-//! [`DEFAULT_RUN_DEADLINE_SECS`] constant and [`RUN_DEADLINE_ENV_VAR`] name.
+//! [`DEFAULT_RUN_DEADLINE_SECS`] constant and [`RUN_DEADLINE_ENV_VAR`] name,
+//! and (#2308) the [`resolve_context_window`] precedence function plus its
+//! [`DEFAULT_CONTEXT_WINDOW`] constant.
 //! Test: submodule `tests` in each file; routing/adapter coverage in
 //! `routing.rs` and `adapter.rs`.
 
@@ -25,7 +27,8 @@ pub use adapter::provider_for;
 pub use bedrock::BedrockProvider;
 pub use openrouter::OpenRouterProvider;
 pub use routing::{
-    DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_RUN_DEADLINE_SECS, RUN_DEADLINE_ENV_VAR,
-    resolve_deadline_secs, resolve_max_tokens, resolve_model,
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_RUN_DEADLINE_SECS,
+    RUN_DEADLINE_ENV_VAR, resolve_context_window, resolve_deadline_secs, resolve_max_tokens,
+    resolve_model,
 };
 pub use traits::{Provider, ToolChoice};

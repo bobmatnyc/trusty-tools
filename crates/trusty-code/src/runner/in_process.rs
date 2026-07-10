@@ -31,7 +31,7 @@ use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::mode::HarnessMode;
 use crate::prompt::assemble_system_prompt_for_mode;
-use crate::provider::{resolve_max_tokens, resolve_model};
+use crate::provider::{resolve_context_window, resolve_max_tokens, resolve_model};
 use crate::runner::error::RunnerError;
 use crate::tools::{AgentOutput, AgentRunner, RunContext, ToolRegistry};
 
@@ -349,13 +349,21 @@ impl InProcessAgentRunner {
         // sub-agent turn was silently capped at the agent-loop default.
         let max_tokens = resolve_max_tokens(&agent);
 
+        // #2308: derive the compaction threshold from this agent's ACTUAL
+        // resolved context window rather than the flat, model-blind
+        // `CompactionConfig::default()` — see that impl's doc for the root
+        // cause (a 6_000-token threshold is ~3% of a real 200K-token Bedrock
+        // Claude Sonnet window).
+        let compaction =
+            crate::agent_loop::CompactionConfig::for_context_window(resolve_context_window(&model));
+
         let loop_config = AgentLoopConfig {
             max_turns,
             timeout_secs: self.config.timeout_secs,
             model,
             max_tokens,
             mode: self.mode,
-            compaction: crate::agent_loop::CompactionConfig::default(),
+            compaction,
         };
 
         // Assemble the mode-branched system prompt (BASE + agent prompt +

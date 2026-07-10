@@ -125,6 +125,49 @@ pub fn resolve_model(agent_config: &AgentConfig, run_context: Option<&RunContext
     DEFAULT_MODEL.to_string()
 }
 
+/// Fallback context-window size (in tokens) for a model slug this resolver
+/// does not recognise.
+///
+/// Why: [`resolve_context_window`] must always return a usable number even
+/// for an unlisted/unknown slug (a new provider, a typo'd override, etc.) —
+/// 128,000 is a conservative, widely-supported floor shared by several
+/// mainstream hosted models (e.g. `gpt-4o`), so an unknown model is treated
+/// no more generously than that.
+/// What: The fallback tier of [`resolve_context_window`].
+/// Test: `routing::tests::resolve_context_window_falls_back_to_default_for_unknown_model`.
+pub const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
+
+/// Resolve the real context-window size (in tokens) for a model slug.
+///
+/// Why: #2308 — `CompactionConfig::default()`'s flat `token_threshold: 6_000`
+/// is model-blind: ~3% of Bedrock Claude Sonnet's real 200K-token window, so
+/// ordinary coding turns (post-#2261 tool-call-arg counting) blow through it
+/// constantly and trigger pathological re-compaction. Compaction must instead
+/// scale with the model actually in use, which means a resolver is needed
+/// alongside [`resolve_model`] to turn a slug into a window size before
+/// [`crate::agent_loop::CompactionConfig::for_context_window`] can compute a
+/// proportional threshold.
+/// What: A minimal substring/format table, checked in order: (1) any slug
+/// containing `claude-sonnet` or `claude-opus` (covers both the bare
+/// Anthropic slug and the Bedrock-routed
+/// `bedrock/us.anthropic.claude-sonnet-4-6` / `-opus-*` inference-profile
+/// format, see `crate::llm::bedrock::bedrock_model_id`) -> 200,000; (2) any
+/// slug containing `gpt-4o` -> 128,000; else (3) [`DEFAULT_CONTEXT_WINDOW`].
+/// Deliberately NOT a config file or per-agent override — the window size is
+/// a property of the model itself, not something an operator should need to
+/// tune per project.
+/// Test: `routing::tests::resolve_context_window_maps_bedrock_sonnet_to_200k`,
+/// `routing::tests::resolve_context_window_falls_back_to_default_for_unknown_model`.
+pub fn resolve_context_window(model: &str) -> usize {
+    if model.contains("claude-sonnet") || model.contains("claude-opus") {
+        200_000
+    } else if model.contains("gpt-4o") {
+        128_000
+    } else {
+        DEFAULT_CONTEXT_WINDOW
+    }
+}
+
 /// Resolve the per-turn completion-token cap for an invocation.
 ///
 /// Why: `[llm].max_tokens` is how an operator declares that an agent's turns
@@ -332,6 +375,45 @@ mod tests {
     fn resolve_max_tokens_falls_back_to_default() {
         let config = AgentConfig::default();
         assert_eq!(resolve_max_tokens(&config), DEFAULT_MAX_TOKENS);
+    }
+
+    // ── #2308: resolve_context_window ───────────────────────────────────────
+
+    /// The real Bedrock-routed Claude Sonnet slug maps to a 200K window.
+    ///
+    /// Why: This is the exact model whose flat 6,000-token compaction
+    /// threshold (#2308) was ~3% of its real context window; the resolver
+    /// must recognise the SAME slug format `resolve_model`/the Bedrock
+    /// dispatch layer actually produce
+    /// (`bedrock/us.anthropic.claude-sonnet-4-6`, see
+    /// `crate::llm::bedrock::bedrock_model_id`'s doctests), not just a bare
+    /// `claude-sonnet-*` slug.
+    /// What: Assert the real Bedrock dispatch slug resolves to 200,000.
+    /// Test: this test.
+    #[test]
+    fn resolve_context_window_maps_bedrock_sonnet_to_200k() {
+        assert_eq!(
+            resolve_context_window("bedrock/us.anthropic.claude-sonnet-4-6"),
+            200_000
+        );
+        assert_eq!(
+            resolve_context_window("bedrock/us.anthropic.claude-opus-4-6"),
+            200_000
+        );
+    }
+
+    /// An unrecognised model slug falls back to [`DEFAULT_CONTEXT_WINDOW`].
+    ///
+    /// Why: A resolver that panics or silently returns 0 on an unknown slug
+    /// would break every downstream compaction-threshold calculation.
+    /// What: Assert an arbitrary/unknown slug resolves to the default.
+    /// Test: this test.
+    #[test]
+    fn resolve_context_window_falls_back_to_default_for_unknown_model() {
+        assert_eq!(
+            resolve_context_window("some-vendor/unheard-of-model-v1"),
+            DEFAULT_CONTEXT_WINDOW
+        );
     }
 
     // ── #2207: resolve_deadline_secs precedence ─────────────────────────────
