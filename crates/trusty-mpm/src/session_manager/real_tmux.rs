@@ -100,6 +100,24 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_current_path(name)
     }
 
+    /// Report the runtime ready when the `claude` child PID has appeared under
+    /// the pane shell (overrides the trait's weaker `session_exists` default;
+    /// issue #1903 / #1299).
+    ///
+    /// Why: the pane exists the instant `create_session` returns, long before
+    /// `claude` has exec'd — typing the task then would lose it. The presence
+    /// of the `claude` child process is the same "runtime is up" signal the
+    /// PID-capture path relies on, so injection waits for it.
+    /// What: a SINGLE-shot probe (`max_attempts = 1`, no delay) of
+    /// [`crate::core::process::find_claude_pid_in_tmux`]; the retry/backoff loop
+    /// lives in [`crate::session_manager::SessionManager::inject_task_when_ready`],
+    /// so this stays a cheap yes/no the loop polls.
+    /// Test: exercised by the `#[ignore]` live integration test (requires a real
+    /// `tmux` + `claude`); the pure retry loop is unit-tested against the fake.
+    fn runtime_ready(&self, name: &str) -> bool {
+        crate::core::process::find_claude_pid_in_tmux(name, 1, std::time::Duration::ZERO).is_some()
+    }
+
     /// Overrides the no-op trait default so the production path actually calls
     /// `tmux set-environment` (#2157 item 1).
     fn set_environment(&self, name: &str, key: &str, value: &str) -> Result<(), ManagedError> {

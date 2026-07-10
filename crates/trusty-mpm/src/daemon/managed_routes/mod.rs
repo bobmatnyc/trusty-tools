@@ -83,6 +83,12 @@ pub struct SpawnRequest {
     /// → a normal durable session the automatic paths never touch.
     #[serde(default)]
     pub ephemeral: Option<bool>,
+    /// Optional turnkey-injection control (#1903/#1299): absent/null/`true` →
+    /// auto-inject `task` into the pane once the runtime is ready (the default,
+    /// so `tm session new`/`tm ticket` are turnkey); `false` → metadata-only
+    /// (the caller delivers the task via `POST .../{id}/send`).
+    #[serde(default)]
+    pub inject_task: Option<bool>,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -405,6 +411,9 @@ pub async fn spawn_session(
         // HTTP route == CLI-origin (`tm launch`/`tm ticket` client calls) —
         // never subject to the MCP spawn gate (#1836/#1837).
         mcp_initiated: false,
+        // Turnkey by default (#1903/#1299); a client sets `inject_task: false`
+        // to opt into the legacy metadata-only behavior (`--no-inject`).
+        inject_task: req.inject_task,
     };
 
     match spawn_managed(&state, params).await {

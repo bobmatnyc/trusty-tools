@@ -103,6 +103,28 @@ pub trait ManagedTmuxDriver: Send + Sync {
             .unwrap_or(false)
     }
 
+    /// Probe whether the runtime inside `name`'s pane is READY to accept typed
+    /// input (issue #1903 / #1299).
+    ///
+    /// Why: turnkey task injection (`SessionManager::inject_task_when_ready`)
+    /// must not type the task into the pane before the runtime (`claude`) has
+    /// actually launched — keystrokes sent to a pane whose shell is still
+    /// exec-ing the runtime are lost or mangled. This is the readiness signal
+    /// the injection loop polls (with bounded backoff) before delivering the
+    /// task, replacing the blind fixed sleep the meta-launch prototype used.
+    /// What: the default is `session_exists(name)` — sufficient for the test
+    /// doubles (a fake reports its created session as existing) and a safe
+    /// lower bound for any driver that cannot inspect the pane's process tree.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to the stronger
+    /// signal: the `claude` child PID has appeared under the pane shell (the
+    /// same probe `daemon::services::session_service::spawn_pid_capture` uses).
+    /// Test: `RealTmuxDriver`'s override is exercised by the `#[ignore]` live
+    /// integration test; the default is exercised via `FakeTmuxDriver` in
+    /// `session_manager::task_inject`'s tests.
+    fn runtime_ready(&self, name: &str) -> bool {
+        self.session_exists(name)
+    }
+
     /// Durably publish `key=value` into the named session's tmux environment
     /// (#2157 item 1) — belt-and-suspenders alongside the pane-shell `export …;`
     /// prefix `runtime::claude_code`/`runtime::tcode` already send.

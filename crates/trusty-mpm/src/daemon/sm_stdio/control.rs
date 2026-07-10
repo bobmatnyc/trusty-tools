@@ -140,6 +140,8 @@ impl SessionControl for DaemonSessionControl {
             // subsystem, not the standard MCP tool surface) — never subject to
             // the MCP spawn gate (#1836/#1837), matching `tm launch`/`tm ticket`.
             mcp_initiated: false,
+            // Turnkey by default (#1903/#1299): the SM driver launches to work.
+            inject_task: None,
         };
         let record = spawn_managed(&self.state, spawn)
             .await

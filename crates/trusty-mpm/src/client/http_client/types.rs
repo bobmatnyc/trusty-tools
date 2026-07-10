@@ -460,6 +460,11 @@ pub struct ManagedSpawnRequest {
     /// Optional runtime selector (`"claude-code"` | `"tcode"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Optional turnkey-injection control (#1903/#1299): `Some(false)` requests
+    /// the legacy metadata-only spawn (the daemon otherwise auto-injects the
+    /// task once the runtime is ready). Absent → the daemon default (inject).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inject_task: Option<bool>,
 }
 
 /// Response body for `POST /api/v1/sessions/managed` (spawn).

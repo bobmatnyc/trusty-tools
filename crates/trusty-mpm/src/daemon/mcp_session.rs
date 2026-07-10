@@ -78,6 +78,8 @@ pub async fn session_new(
         // This IS the MCP tool surface (#1836/#1837): every call here is
         // subject to the off-by-default gate + registry allowlist.
         mcp_initiated: true,
+        // Turnkey by default (#1903/#1299): an MCP `session_new` spawns to work.
+        inject_task: None,
     };
     let record = spawn_managed(state, params).await?;
     Ok(record_to_json(&record))

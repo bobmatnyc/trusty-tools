@@ -404,6 +404,7 @@ fn managed_spawn_request_serializes() {
         task: "do the thing".to_string(),
         name_hint: Some("tmpm-custom".to_string()),
         runtime: Some("tcode".to_string()),
+        inject_task: None,
     };
     let v = serde_json::to_value(&req).unwrap();
     assert_eq!(v["ref"], "main");
@@ -418,10 +419,15 @@ fn managed_spawn_request_serializes() {
         task: "t".to_string(),
         name_hint: None,
         runtime: None,
+        inject_task: None,
     };
     let v = serde_json::to_value(&bare).unwrap();
     assert!(v.get("name_hint").is_none(), "None name_hint is omitted");
     assert!(v.get("runtime").is_none(), "None runtime is omitted");
+    assert!(
+        v.get("inject_task").is_none(),
+        "None inject_task is omitted"
+    );
 }
 
 #[test]
