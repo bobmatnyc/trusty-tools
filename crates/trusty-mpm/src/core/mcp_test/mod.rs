@@ -17,7 +17,11 @@
 //! [`trusty_common::mcp::run_stdio_loop`], the loop each `serve --stdio` server
 //! runs, which reads with `BufReader::lines()` and writes `to_string(resp) +
 //! "\n"`. The `initialize` payload uses `protocolVersion` `"2024-11-05"`,
-//! matching [`trusty_common::mcp::initialize_response`].
+//! matching [`trusty_common::mcp::initialize_response`]. Unlike
+//! `run_stdio_loop`'s plain `BufReader::lines()`, the probe's line reader is
+//! byte-capped (see [`MAX_LINE_BYTES`]) — a misbehaving server that writes
+//! non-newline-terminated noise to stdout cannot grow the read buffer
+//! unbounded within the timeout window.
 //!
 //! Transport scope: `http`/`sse` servers get an HTTP *reachability* check (any
 //! HTTP response — even a 4xx — means the endpoint answered, so it passes); a
@@ -48,6 +52,20 @@ mod tests;
 /// on).
 /// Test: value asserted by `default_timeout_is_bounded`.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum bytes buffered while scanning for one stdio line terminator.
+///
+/// Why: `tokio::io::AsyncBufReadExt::lines()`/`read_until` has no built-in cap —
+/// a server that writes to stdout without a newline (stray `println!` debug
+/// output, a crash dump, …) would otherwise grow the line buffer for the entire
+/// [`DEFAULT_PROBE_TIMEOUT`] window. Capping the scan (via `AsyncReadExt::take`,
+/// see [`read_bounded_line`]) turns that into a bounded, reported
+/// `McpTestOutcome::Protocol("line too long")` instead of unbounded memory
+/// growth.
+/// What: 1 MiB — generous for any legitimate JSON-RPC response, tight enough to
+/// bound worst-case memory.
+/// Test: `read_bounded_line_rejects_oversized_line`.
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// The transport a server entry uses, as understood by the probe.
 ///
@@ -433,17 +451,20 @@ async fn probe_stdio(entry: &Value, timeout: Duration) -> McpTestOutcome {
 /// Drive `initialize` → `initialized` → `tools/list` over the child's stdio.
 ///
 /// Framing: newline-delimited JSON-RPC 2.0 (one compact object per line, `\n`
-/// terminated), matching `trusty_common::mcp::run_stdio_loop`. Returns the tool
+/// terminated), matching `trusty_common::mcp::run_stdio_loop`, with each line
+/// capped at [`MAX_LINE_BYTES`] (see [`read_bounded_line`]). Returns the tool
 /// count on success or an [`McpTestOutcome`] failure. The child is spawned with
-/// `kill_on_drop`, and explicitly killed on the success path, so no orphan
-/// process survives the probe.
+/// `kill_on_drop(true)`, so `child`'s `Drop` (run when this function returns,
+/// on every path — success, error, or the caller's `tokio::time::timeout`
+/// cancelling us mid-await) is what reaps the subprocess; no explicit kill is
+/// needed here.
 async fn stdio_handshake(
     command: &str,
     args: &[String],
     env: &[(String, String)],
 ) -> Result<usize, McpTestOutcome> {
     use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::BufReader;
     use tokio::process::Command;
 
     let mut cmd = Command::new(command);
@@ -467,7 +488,7 @@ async fn stdio_handshake(
         .stdout
         .take()
         .ok_or_else(|| McpTestOutcome::Protocol("child stdout unavailable".to_string()))?;
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
 
     // initialize → await response → validate.
     write_message(&mut stdin, &initialize_request(1)).await?;
@@ -482,8 +503,8 @@ async fn stdio_handshake(
     let list_resp = read_response(&mut reader, 2).await?;
     let count = parse_tool_count(&list_resp).map_err(McpTestOutcome::Protocol)?;
 
-    // Best-effort clean shutdown (kill_on_drop is the backstop).
-    let _ = child.start_kill();
+    // `child` drops here; `kill_on_drop(true)` (set above) reaps the
+    // subprocess so no orphan survives a successful probe.
     Ok(count)
 }
 
@@ -510,17 +531,15 @@ where
 ///
 /// Skips blank lines and any message whose `id` does not match (server-emitted
 /// notifications or unrelated responses). A non-JSON line is a protocol error; a
-/// closed stream before the wanted id is a protocol error.
-async fn read_response<R>(
-    reader: &mut tokio::io::Lines<R>,
-    want_id: i64,
-) -> Result<Value, McpTestOutcome>
+/// closed stream before the wanted id is a protocol error; a line exceeding
+/// [`MAX_LINE_BYTES`] is a protocol error (see [`read_bounded_line`]).
+async fn read_response<R>(reader: &mut R, want_id: i64) -> Result<Value, McpTestOutcome>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     loop {
-        match reader.next_line().await {
-            Ok(Some(line)) => {
+        match read_bounded_line(reader, MAX_LINE_BYTES).await? {
+            Some(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -533,14 +552,68 @@ where
                     _ => continue, // notification or unrelated response — keep reading
                 }
             }
-            Ok(None) => {
+            None => {
                 return Err(McpTestOutcome::Protocol(
                     "server closed stdout before responding".to_string(),
                 ));
             }
-            Err(e) => return Err(McpTestOutcome::Protocol(format!("read from server: {e}"))),
         }
     }
+}
+
+/// Read one `\n`-terminated line, capping the scan at `max_bytes`.
+///
+/// Why: plain `AsyncBufReadExt::read_until`/`lines()` buffers without limit
+/// while scanning for the delimiter — a server that emits non-newline-
+/// terminated stdout noise would grow that buffer for the whole probe timeout.
+/// Wrapping the reader in [`tokio::io::AsyncReadExt::take`] per call bounds a
+/// single `read_until` to at most `max_bytes`, so a missing terminator within
+/// that budget fails fast instead of growing unbounded.
+/// What: returns `Ok(None)` at true EOF with no bytes read; `Ok(Some(line))`
+/// with the `\n` (and a trailing `\r`, if present) stripped, on either finding
+/// the delimiter or hitting EOF with a non-empty trailing partial line (mirrors
+/// `tokio::io::Lines`' EOF behaviour); `Err(Protocol("line too long"))` when
+/// `max_bytes` is exhausted without finding `\n`.
+/// Test: `read_bounded_line_reads_terminated_line`,
+/// `read_bounded_line_rejects_oversized_line`,
+/// `read_bounded_line_returns_none_at_eof`.
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, McpTestOutcome>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    let mut buf: Vec<u8> = Vec::new();
+    let n = {
+        let mut limited = reader.take(max_bytes as u64);
+        limited
+            .read_until(b'\n', &mut buf)
+            .await
+            .map_err(|e| McpTestOutcome::Protocol(format!("read from server: {e}")))?
+    };
+
+    if n == 0 {
+        return Ok(None); // true EOF, nothing buffered
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+    }
+    if n >= max_bytes {
+        // Filled the cap without ever finding a terminator — bail rather than
+        // keep scanning an unbounded amount of server output.
+        return Err(McpTestOutcome::Protocol("line too long".to_string()));
+    }
+    // Read fewer bytes than the cap with no terminator: the stream reached
+    // real EOF mid-line. Return the trailing partial line, matching
+    // `tokio::io::Lines`' behaviour for an unterminated final line.
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 /// Reachability-check an http/sse endpoint, timeout-bounded.

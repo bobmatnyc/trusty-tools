@@ -216,6 +216,91 @@ fn parse_tool_count_rejects_error_and_missing() {
     assert!(parse_tool_count(&missing).is_err());
 }
 
+// ─── bounded line reader ──────────────────────────────────────────────────────
+
+#[test]
+fn max_line_bytes_is_one_mebibyte() {
+    assert_eq!(MAX_LINE_BYTES, 1024 * 1024);
+}
+
+#[tokio::test]
+async fn read_bounded_line_reads_terminated_lines() {
+    let data: &[u8] = b"{\"id\":1}\n{\"id\":2}\n";
+    let mut reader = tokio::io::BufReader::new(data);
+    assert_eq!(
+        read_bounded_line(&mut reader, MAX_LINE_BYTES)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("{\"id\":1}")
+    );
+    assert_eq!(
+        read_bounded_line(&mut reader, MAX_LINE_BYTES)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("{\"id\":2}")
+    );
+    // True EOF after the last terminated line.
+    assert!(
+        read_bounded_line(&mut reader, MAX_LINE_BYTES)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn read_bounded_line_strips_trailing_cr() {
+    let data: &[u8] = b"hello\r\n";
+    let mut reader = tokio::io::BufReader::new(data);
+    let line = read_bounded_line(&mut reader, MAX_LINE_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(
+        line.as_deref(),
+        Some("hello"),
+        "CRLF terminator strips both bytes"
+    );
+}
+
+#[tokio::test]
+async fn read_bounded_line_returns_none_at_immediate_eof() {
+    let data: &[u8] = b"";
+    let mut reader = tokio::io::BufReader::new(data);
+    assert!(
+        read_bounded_line(&mut reader, MAX_LINE_BYTES)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn read_bounded_line_returns_trailing_partial_line_at_eof() {
+    // No trailing newline: real EOF mid-line still yields the buffered content,
+    // matching `tokio::io::Lines`' behaviour for an unterminated final line.
+    let data: &[u8] = b"no newline here";
+    let mut reader = tokio::io::BufReader::new(data);
+    let line = read_bounded_line(&mut reader, MAX_LINE_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(line.as_deref(), Some("no newline here"));
+}
+
+#[tokio::test]
+async fn read_bounded_line_rejects_oversized_line() {
+    // 100 bytes with no terminator, capped at 16 -- must bail as "line too
+    // long" rather than buffer the rest looking for a `\n` that never comes.
+    let data: Vec<u8> = vec![b'a'; 100];
+    let mut reader = tokio::io::BufReader::new(&data[..]);
+    let err = read_bounded_line(&mut reader, 16).await.unwrap_err();
+    assert!(
+        matches!(&err, McpTestOutcome::Protocol(m) if m.contains("line too long")),
+        "expected a 'line too long' protocol error, got {err:?}"
+    );
+}
+
 // ─── result rendering + aggregation ──────────────────────────────────────────
 
 fn result(name: &str, transport: TestTransport, outcome: McpTestOutcome) -> McpTestResult {
@@ -357,5 +442,59 @@ async fn probe_stdio_missing_binary_reports_spawn_error() {
     assert!(
         matches!(outcome, McpTestOutcome::Spawn(_)),
         "expected a spawn error, got {outcome:?}"
+    );
+}
+
+/// A hung stdio server must time out promptly, and its process must not
+/// survive the probe.
+///
+/// Why: `probe_target` wraps the handshake in `tokio::time::timeout`; when the
+/// bound elapses first, the in-flight `stdio_handshake` future — and the
+/// `Child` it owns — is dropped. `kill_on_drop(true)` is what reaps the
+/// subprocess in that case; this test proves that actually happens, not merely
+/// that the API call returns `Timeout`. No external dependency (`sleep` is a
+/// POSIX coreutil), so this runs in CI, not gated behind `--ignored`.
+/// What: spawns `sleep <marker>` directly with no shell wrapper, so the tokio
+/// `Child`'s pid IS the `sleep` process's pid (nothing to fork/exec away).
+/// `<marker>` is a fractional-second duration derived from this test process's
+/// pid, unique enough that a stray unrelated `sleep` on the same host won't
+/// collide. Confirms `probe_target` returns `Timeout` in well under the 30s
+/// sleep duration, then polls `pgrep -f <marker>` (which self-excludes the
+/// pgrep invocation) until no matching process remains.
+#[cfg(unix)]
+#[tokio::test]
+async fn probe_stdio_timeout_kills_hung_child() {
+    let marker = format!("30.{:06}", std::process::id() % 1_000_000);
+    let entry = json!({ "type": "stdio", "command": "sleep", "args": [marker.clone()] });
+    let target = make_target("hang".to_string(), entry);
+
+    let start = std::time::Instant::now();
+    let outcome = probe_target(&target, Duration::from_millis(300)).await;
+    assert!(
+        matches!(outcome, McpTestOutcome::Timeout),
+        "expected Timeout for a hung server, got {outcome:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "must return promptly at the timeout bound, not wait out the 30s sleep"
+    );
+
+    // kill_on_drop reaps asynchronously; poll briefly rather than a single
+    // fixed sleep, to avoid flakiness on a loaded CI runner.
+    let mut still_running = true;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        still_running = std::process::Command::new("pgrep")
+            .args(["-f", &marker])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !still_running {
+            break;
+        }
+    }
+    assert!(
+        !still_running,
+        "hung child (sleep {marker}) must not survive past the probe timeout"
     );
 }
