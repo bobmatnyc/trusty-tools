@@ -234,30 +234,53 @@ impl Transcript {
     /// Why: (#2070) This is the turn-boundary hook the agent loop calls —
     /// gated by the caller on `HarnessMode::DailyDriver` (Parity must never
     /// compact, per §5.9's D2 reconciliation) — so growth is bounded without
-    /// the loop body needing to know compaction's internals.
+    /// the loop body needing to know compaction's internals. (#2278) A raw
+    /// entry-COUNT cutoff has no tool-call awareness: when it lands between
+    /// an assistant entry carrying `tool_calls` and one of its answering
+    /// `tool`-role entries, the assistant gets folded into the compacted
+    /// summary while the answering entry survives verbatim in the kept
+    /// zone — an orphaned tool result with no tool use, which providers
+    /// with a strict pairing invariant (Bedrock's Converse API) reject
+    /// outright.
     /// What: No-ops (returns `false`) unless the CURRENT model-facing view
     /// (`to_messages()`, not the ever-growing raw history — raw size would
     /// re-trigger every turn even after compaction shrank what's actually
-    /// sent) exceeds `cfg.token_threshold`. Otherwise, marks every entry
-    /// before the trailing `cfg.keep_last_messages` (the active work zone,
-    /// §5.4 item 4) as `compacted = true`, EXCEPT entries already compacted
-    /// (a one-way transform), `pinned` entries (§5.4 item 5's skill-output
-    /// half — see `push_tool_result`), and `system`/`user` role entries
-    /// (§5.4 item 5's "preserve... user requests forever" half). Sets
-    /// `compaction_triggered` and returns `true` only if at least one entry
-    /// was newly marked (an already-fully-compacted or entirely-preserved
-    /// prefix is a no-op, not a spurious trigger).
-    /// Test: `transcript::tests::maybe_compact_marks_middle_span_only`,
-    /// `transcript::tests::maybe_compact_is_noop_below_threshold`,
+    /// sent) exceeds `cfg.token_threshold`. Otherwise computes the naive
+    /// count-based cutoff `keep_from = len - cfg.keep_last_messages`, then
+    /// (#2278) [`turn_group_start`]/[`turn_group_end`] check whether that
+    /// cutoff falls INSIDE a turn group — an assistant entry carrying
+    /// `tool_calls` plus the maximal contiguous run of `tool`-role entries
+    /// immediately following it (naturally covering multi-tool-call turns:
+    /// N `tool_calls` followed by up to N `tool` entries). If so, the whole
+    /// group is pulled FORWARD into the kept zone by moving `keep_from` back
+    /// to the group's start — `cfg.keep_last_messages` becomes a soft floor
+    /// that may slightly enlarge the active zone rather than ever splitting
+    /// a group. Marks every entry before the (possibly adjusted) `keep_from`
+    /// as `compacted = true`, EXCEPT entries already compacted (a one-way
+    /// transform), `pinned` entries (§5.4 item 5's skill-output half — see
+    /// `push_tool_result`), and `system`/`user` role entries (§5.4 item 5's
+    /// "preserve... user requests forever" half). Sets `compaction_triggered`
+    /// and returns `true` only if at least one entry was newly marked (an
+    /// already-fully-compacted or entirely-preserved prefix is a no-op, not
+    /// a spurious trigger).
+    /// Test: `transcript::tests::maybe_compact_is_noop_below_threshold`,
     /// `transcript::tests::maybe_compact_never_touches_system_or_user`,
     /// `transcript::tests::maybe_compact_never_compacts_pinned_skill_output`,
-    /// `transcript::tests::maybe_compact_still_compacts_non_skill_tool_results`.
+    /// `transcript::tests::maybe_compact_still_compacts_non_skill_tool_results`,
+    /// `transcript::tests::maybe_compact_pulls_whole_multi_tool_call_group_forward`.
     pub fn maybe_compact(&mut self, cfg: &CompactionConfig) -> bool {
         if !should_compact(&self.to_messages(), cfg) {
             return false;
         }
 
-        let keep_from = self.entries.len().saturating_sub(cfg.keep_last_messages);
+        let mut keep_from = self.entries.len().saturating_sub(cfg.keep_last_messages);
+        if keep_from > 0
+            && keep_from < self.entries.len()
+            && let Some(group_start) = turn_group_start(&self.entries, keep_from - 1)
+            && turn_group_end(&self.entries, group_start) >= keep_from
+        {
+            keep_from = group_start;
+        }
         let mut newly_compacted = false;
 
         for entry in &mut self.entries[..keep_from] {
@@ -309,6 +332,51 @@ impl Transcript {
         let calls = resp.first_tool_calls().to_vec();
         self.push_assistant(text, &calls);
     }
+}
+
+/// If entry `idx` belongs to a turn group, return the group's assistant
+/// entry index (#2278 Fix A).
+///
+/// Why: `maybe_compact` needs to know whether its naive count-based cutoff
+/// lands inside an atomic assistant-`tool_calls` + answering-`tool`-entries
+/// group, so it can pull the whole group forward rather than splitting it.
+/// What: A turn group is one assistant entry with `tool_calls: Some(_)` plus
+/// the maximal contiguous run of `tool`-role entries immediately following
+/// it. Walks backward from `idx` through any contiguous `tool`-role entries;
+/// the walk stops at the first non-`tool` entry, which is the group's
+/// assistant entry IF it carries `tool_calls` — returns its index in that
+/// case, `None` otherwise (covers `idx` itself already being that assistant
+/// entry, when the backward walk takes zero steps).
+/// Test: `transcript::tests::maybe_compact_pulls_whole_multi_tool_call_group_forward`.
+fn turn_group_start(entries: &[TranscriptEntry], idx: usize) -> Option<usize> {
+    let mut i = idx;
+    while entries[i].message.role == "tool" {
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+    }
+    (entries[i].message.role == "assistant" && entries[i].message.tool_calls.is_some()).then_some(i)
+}
+
+/// Return the last index of the turn group starting at `group_start`
+/// (#2278 Fix A).
+///
+/// Why: Once [`turn_group_start`] confirms a group exists, `maybe_compact`
+/// must know where it ENDS to tell whether it straddles the naive cutoff —
+/// naturally spanning however many `tool` entries answer a multi-tool-call
+/// turn, not just one.
+/// What: Scans forward from `group_start` while the next entry is `tool`-role;
+/// returns the last such index (or `group_start` itself if no `tool` entry
+/// immediately follows, e.g. a `tool_calls` turn with no results recorded
+/// yet).
+/// Test: `transcript::tests::maybe_compact_pulls_whole_multi_tool_call_group_forward`.
+fn turn_group_end(entries: &[TranscriptEntry], group_start: usize) -> usize {
+    let mut i = group_start;
+    while i + 1 < entries.len() && entries[i + 1].message.role == "tool" {
+        i += 1;
+    }
+    i
 }
 
 /// Flush a pending compacted span into `out` as one summary message, if any.
@@ -487,6 +555,103 @@ mod tests {
         // Non-destructive: every original entry is still present in the raw
         // history even though some are now marked compacted internally.
         assert_eq!(raw.len(), 2 + 20);
+    }
+
+    /// Assert every `tool` entry in a `to_messages()` view has its issuing
+    /// assistant `tool_calls` entry present in the SAME view, and every
+    /// assistant `tool_calls` entry has all its answers present too.
+    ///
+    /// Why: Shared invariant check for the turn-group-atomic compaction
+    /// tests (#2278) — this is exactly the shape that produces Bedrock's
+    /// orphaned-toolResult `ValidationException` if compaction ever splits a
+    /// group across its cutoff.
+    fn assert_view_pairing_intact(view: &[ChatMessage]) {
+        let mut introduced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in view {
+            if let Some(calls) = &msg.tool_calls {
+                for call in calls {
+                    introduced.insert(call.id.clone());
+                }
+            }
+            if msg.role == "tool" {
+                let id = msg.tool_call_id.clone().unwrap_or_default();
+                assert!(
+                    introduced.contains(&id),
+                    "tool entry for {id:?} has no preceding assistant tool_calls entry in this view: {view:?}"
+                );
+                answered.insert(id);
+            }
+        }
+        for id in &introduced {
+            assert!(
+                answered.contains(id),
+                "assistant tool_calls id {id:?} has no answering tool entry in this view: {view:?}"
+            );
+        }
+    }
+
+    /// A naive count-based cutoff that would split a multi-tool-call turn
+    /// group is pulled forward atomically instead (#2278 Fix A).
+    ///
+    /// Why: This is the exact root cause of the Bedrock `ValidationException:
+    /// missing toolResult` bug — a raw entry-count cutoff has no tool-call
+    /// awareness, so it can land between an assistant's `tool_calls` entry
+    /// and one of its answering `tool` entries (here, a two-tool-call turn),
+    /// orphaning whichever half ends up in the compacted summary.
+    /// What: Five ordinary assistant/tool pairs (no tool_calls — plain text
+    /// turns), then ONE assistant entry with TWO `tool_calls` immediately
+    /// followed by their two answering `tool` entries. `keep_last_messages`
+    /// is tuned so the naive `len - keep_last_messages` cutoff lands between
+    /// the multi-call assistant entry and its second answer (i.e. splits the
+    /// group under the old count-only logic). Asserts compaction still
+    /// fires, the five ordinary pairs got compacted (soft floor enlarged,
+    /// not disabled), and — critically — `to_messages()` satisfies
+    /// [`assert_view_pairing_intact`]: the multi-call assistant entry and
+    /// BOTH its answers survive together, uncompacted.
+    /// Test: this test.
+    #[test]
+    fn maybe_compact_pulls_whole_multi_tool_call_group_forward() {
+        let mut t = Transcript::seed("s", "the task");
+        for i in 0..5 {
+            t.push_assistant(Some(format!("turn {i}")), &[]);
+            t.push_tool_result(&format!("c{i}"), "bash", "output");
+        }
+        // entries so far: [system, user, (assistant, tool) x5] = 12 entries,
+        // indices 0..12.
+        t.push_assistant(
+            None,
+            &[
+                sample_call("multi_1", "get_weather"),
+                sample_call("multi_2", "get_time"),
+            ],
+        );
+        t.push_tool_result("multi_1", "get_weather", "72F");
+        t.push_tool_result("multi_2", "get_time", "12:00 UTC");
+        // entries now: 15 total; the multi-call group is at indices 12..15.
+        assert_eq!(t.messages().len(), 15);
+
+        // len(15) - keep_last_messages(2) = 13: falls strictly between the
+        // multi-call assistant entry (12) and its second answer (14) — a
+        // naive cutoff would compact index 12 while keeping 13 and 14.
+        let cfg = CompactionConfig {
+            token_threshold: 1,
+            keep_last_messages: 2,
+        };
+        assert!(t.maybe_compact(&cfg));
+
+        // The five earlier ordinary pairs (indices 2..12, 10 entries) are
+        // still eligible and got compacted — the fix only protects the
+        // straddled group, it doesn't disable compaction entirely.
+        assert_eq!(t.compacted_count(), 10);
+
+        let view = t.to_messages();
+        assert_view_pairing_intact(&view);
+        assert!(
+            view.iter()
+                .any(|m| m.tool_calls.as_ref().is_some_and(|c| c.len() == 2)),
+            "the multi-tool-call assistant entry must survive uncompacted: {view:?}"
+        );
     }
 
     /// A `use_skill` tool result is pinned: it survives compaction even when
