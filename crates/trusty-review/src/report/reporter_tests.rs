@@ -118,6 +118,71 @@ fn write_emits_both() {
     assert_eq!(parsed["title"], "Acme Due Diligence");
 }
 
+/// Why: available synthesis must inject verified prose into the exec-summary and
+/// RED-finding placeholders and surface the `synthesis: available` note.
+/// What: attaches an available `Synthesis` (exec + one RED finding routed to the
+/// repo slug) to the model and asserts the prose and note appear in the markdown.
+/// Test: this test itself.
+#[test]
+fn reporter_injects_synthesis_prose() {
+    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: Some("A grounded acquirer-relevant summary.".to_string()),
+        top_risks: vec![],
+        findings: vec![FindingProse {
+            app_slug: slug,
+            title: "Injection risk".to_string(),
+            severity: "RED".to_string(),
+            description: "Raw query concatenation.".to_string(),
+            evidence: "one path".to_string(),
+            component: "auth".to_string(),
+            business_impact: "data loss".to_string(),
+            remediation: "parameterise".to_string(),
+            cost_effort: "moderate".to_string(),
+        }],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("A grounded acquirer-relevant summary."));
+    assert!(md.contains("Injection risk"));
+    assert!(md.contains("Raw query concatenation."));
+    assert!(md.contains("synthesis: available"));
+    assert!(!md.contains("{{"), "no raw placeholder survives");
+}
+
+/// Why: an unavailable synthesis must keep the deterministic output and surface
+/// the fail-closed reason verbatim.
+/// What: attaches `Synthesis::unavailable(..)`; asserts the note is present and
+/// the exec-summary placeholder still falls through to the honesty marker.
+/// Test: this test itself.
+#[test]
+fn reporter_appends_unavailable_note() {
+    use crate::report::synthesize::Synthesis;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    model.synthesis = Some(Synthesis::unavailable("provider timeout"));
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("synthesis: unavailable (provider timeout)"));
+    // Deterministic fallback: exec summary was never injected.
+    assert!(md.contains(HONESTY_MARKER));
+}
+
 /// Why: output filenames must be date-prefixed and slug-stable.
 /// What: asserts the stem is `{date}-{title-slug}`.
 /// Test: this test itself.

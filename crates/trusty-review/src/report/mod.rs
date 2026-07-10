@@ -20,6 +20,9 @@ pub mod manifest;
 pub mod metrics;
 pub mod model;
 pub mod reporter;
+pub mod synthesize;
+pub mod synthesize_guard;
+pub mod synthesize_prompt;
 pub mod template;
 
 // ── Re-exports for convenience ─────────────────────────────────────────────
@@ -34,4 +37,5 @@ pub use manifest::{
 pub use metrics::{AnalyzeMetrics, MetricFinding, Severity, load_metrics};
 pub use model::{ReportModel, RepositoryReport};
 pub use reporter::Reporter;
+pub use synthesize::{FindingProse, RiskRow, Synthesis, SynthesisStatus, Synthesizer};
 pub use template::{DEFAULT_TEMPLATE, TemplateLoader};
