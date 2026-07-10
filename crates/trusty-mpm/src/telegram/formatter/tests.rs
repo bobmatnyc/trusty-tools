@@ -587,3 +587,94 @@ fn error_escapes_html_significant_chars() {
         "Error prefix emoji must be preserved: {text}"
     );
 }
+
+#[test]
+fn focus_keyboard_has_a_button_per_session() {
+    // The `/fleet` list decorates every session (across all projects) with a
+    // `🎯 Focus` button whose callback data is `focus:<id>` (TELUI-6, #1440);
+    // empty projects contribute no buttons.
+    let fleet = vec![
+        ProjectFleetView {
+            project_name: "alpha".into(),
+            repo_url: "https://github.com/org/alpha".into(),
+            sessions: vec![
+                ManagedSessionView {
+                    id: "id-1".into(),
+                    name: "tmpm-a1".into(),
+                    state: "active".into(),
+                    workspace_path: None,
+                    repo_url: None,
+                    branch: None,
+                    pending_decision: None,
+                    proposed_default: None,
+                },
+                ManagedSessionView {
+                    id: "id-2".into(),
+                    name: "tmpm-a2".into(),
+                    state: "stopped".into(),
+                    workspace_path: None,
+                    repo_url: None,
+                    branch: None,
+                    pending_decision: None,
+                    proposed_default: None,
+                },
+            ],
+        },
+        ProjectFleetView {
+            project_name: "beta".into(),
+            repo_url: "https://github.com/org/beta".into(),
+            sessions: vec![],
+        },
+    ];
+    let keyboard =
+        TelegramFormatter::keyboard_for(&CommandResult::ManagedFleet(fleet)).expect("keyboard");
+    // One row per session, two sessions total.
+    assert_eq!(keyboard.inline_keyboard.len(), 2);
+    let data: Vec<&str> = keyboard
+        .inline_keyboard
+        .iter()
+        .flat_map(|row| row.iter())
+        .filter_map(|b| match &b.kind {
+            teloxide::types::InlineKeyboardButtonKind::CallbackData(d) => Some(d.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(data.contains(&"focus:id-1"), "callback data: {data:?}");
+    assert!(data.contains(&"focus:id-2"), "callback data: {data:?}");
+}
+
+#[test]
+fn focus_keyboard_empty_fleet_is_none() {
+    // A fleet with no sessions warrants no keyboard.
+    let fleet = vec![ProjectFleetView {
+        project_name: "beta".into(),
+        repo_url: "r".into(),
+        sessions: vec![],
+    }];
+    assert!(TelegramFormatter::keyboard_for(&CommandResult::ManagedFleet(fleet)).is_none());
+}
+
+#[test]
+fn session_detail_has_focus_button() {
+    // The `/get` detail card offers a single `🎯 Focus` button (TELUI-6, #1440).
+    let view = ManagedSessionView {
+        id: "id-9".into(),
+        name: "tmpm-solo".into(),
+        state: "active".into(),
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+    };
+    let keyboard =
+        TelegramFormatter::keyboard_for(&CommandResult::ManagedSession(view)).expect("keyboard");
+    assert_eq!(keyboard.inline_keyboard.len(), 1);
+    assert_eq!(keyboard.inline_keyboard[0].len(), 1);
+    match &keyboard.inline_keyboard[0][0].kind {
+        teloxide::types::InlineKeyboardButtonKind::CallbackData(d) => {
+            assert_eq!(d, "focus:id-9")
+        }
+        other => panic!("expected callback data, got {other:?}"),
+    }
+}

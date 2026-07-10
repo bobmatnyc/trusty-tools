@@ -7,9 +7,11 @@
 //! Telegram HTML message body grouped by project.
 //! Test: `format_fleet_by_project_*` tests in `tests.rs`.
 
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+
 use crate::client::{ProjectFleetView, fleet_state_glyph};
 
-use super::{html_escape, short_id};
+use super::{callback_fits, html_escape, short_id};
 
 /// Render managed sessions grouped by project as a Telegram HTML body.
 ///
@@ -55,4 +57,49 @@ pub fn format_fleet_by_project(fleet: &[ProjectFleetView]) -> String {
         }
     }
     text
+}
+
+/// Build a `🎯 Focus` button row for every session in the fleet (TELUI-6, #1440).
+///
+/// Why: tapping a session in the `/fleet` list is the "session click" from the
+/// TELUI-6 acceptance criteria — it focuses that session so plain messages route
+/// to it. One button per session across all projects gives that click target on
+/// a phone without typing an id.
+/// What: emits one `focus:<id>` button per session (label prefixed with the
+/// session name), skipping any id too long for Telegram's 64-byte callback-data
+/// budget. Returns `None` when the fleet has no sessions (no keyboard warranted).
+/// Test: `focus_keyboard_has_a_button_per_session` in `tests.rs`.
+pub fn focus_keyboard(fleet: &[ProjectFleetView]) -> Option<InlineKeyboardMarkup> {
+    let rows: Vec<Vec<InlineKeyboardButton>> = fleet
+        .iter()
+        .flat_map(|pf| pf.sessions.iter())
+        .filter(|s| callback_fits(&s.id))
+        .map(|s| {
+            vec![InlineKeyboardButton::callback(
+                format!("🎯 Focus — {}", s.name),
+                format!("focus:{}", s.id),
+            )]
+        })
+        .collect();
+    if rows.is_empty() {
+        None
+    } else {
+        Some(InlineKeyboardMarkup::new(rows))
+    }
+}
+
+/// Build a single `🎯 Focus` button for one managed session's detail view.
+///
+/// Why: the `/get` detail card also offers a one-tap focus so the operator can
+/// focus the session they just inspected without retyping its id.
+/// What: returns a one-button keyboard with `focus:<id>` callback data, or `None`
+/// when the id would overflow Telegram's callback-data budget.
+/// Test: `session_focus_keyboard_builds_button` in `tests.rs`.
+pub fn session_focus_keyboard(id: &str, name: &str) -> Option<InlineKeyboardMarkup> {
+    if !callback_fits(id) {
+        return None;
+    }
+    Some(InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback(format!("🎯 Focus — {name}"), format!("focus:{id}")),
+    ]]))
 }

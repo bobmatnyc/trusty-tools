@@ -119,9 +119,10 @@ pub use rpc::rpc_handler;
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
-    get_managed_session, get_session_activity, list_managed_sessions, prune_managed_route,
-    prune_worktrees_route, reactivate_managed_session, resume_managed_session, send_to_session,
-    spawn_session, stop_managed_session, stop_managed_session_runtime,
+    get_managed_session, get_session_activity, list_managed_sessions, proxy_focus, proxy_get_focus,
+    proxy_message, proxy_summary, proxy_unfocus, prune_managed_route, prune_worktrees_route,
+    reactivate_managed_session, resume_managed_session, send_to_session, spawn_session,
+    stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -290,6 +291,24 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/delete",
             post(delete_managed_session),
+        )
+        // TELUI-6 (#1440): the local session-manager PROXY surface — the SAME
+        // focus/inject/summarize state machine every channel (Telegram, Slack)
+        // binds to, exposed here as plain HTTP so it is `curl`-testable before
+        // any channel connects. Literal segments (`/focus`, `/unfocus`,
+        // `/message`) are registered as their own routes; the two GET routes
+        // take `conversation_key` as a path param, mirroring the `/{id}`
+        // convention used throughout this managed-session block.
+        .route("/api/v1/sessions/proxy/focus", post(proxy_focus))
+        .route(
+            "/api/v1/sessions/proxy/focus/{conversation_key}",
+            get(proxy_get_focus),
+        )
+        .route("/api/v1/sessions/proxy/unfocus", post(proxy_unfocus))
+        .route("/api/v1/sessions/proxy/message", post(proxy_message))
+        .route(
+            "/api/v1/sessions/proxy/summary/{conversation_key}",
+            get(proxy_summary),
         )
         // #1221: loopback-only JSON-RPC dispatch for the `serve --stdio` bridge.
         // The handler independently enforces the loopback gate via ConnectInfo.

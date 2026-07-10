@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod command;
 pub mod executor;
 pub mod http_client;
+pub mod proxy;
 pub mod resolver;
 pub mod result;
 
@@ -33,6 +34,10 @@ pub use http_client::{
     ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
     ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
     OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
+};
+pub use proxy::{
+    ActivityDigest, FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, ManagedBackend,
+    SessionProxy, SummarizeOutcome, route_free_text,
 };
 pub use resolver::{Resolvable, resolve_target};
 pub(crate) use result::fleet_state_glyph;

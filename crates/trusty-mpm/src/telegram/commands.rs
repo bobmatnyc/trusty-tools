@@ -114,6 +114,15 @@ pub enum TelegramCommand {
     /// Decommission a managed session — `/decommission <id|name>`.
     #[command(description = "Decommission a managed session (terminal)")]
     Decommission(String),
+    /// Focus a managed session so plain messages route to it — `/focus <id|name>`.
+    #[command(description = "Focus a session so plain messages route to it")]
+    Focus(String),
+    /// Clear the focused session, returning to coordinator chat — `/unfocus`.
+    #[command(description = "Clear the focused session")]
+    Unfocus,
+    /// Digest the focused session's recent activity back to the chat — `/summary`.
+    #[command(description = "Summarize the focused session's activity")]
+    Summary,
     /// Show all commands.
     #[command(description = "Show all commands")]
     Help,
@@ -188,6 +197,15 @@ impl From<TelegramCommand> for TrustyCommand {
             TelegramCommand::Decommission(target) => TrustyCommand::ManagedDecommission {
                 target: target.trim().to_string(),
             },
+            // `/focus`, `/unfocus`, and `/summary` drive the session-manager PROXY
+            // (per-chat focus + INJECT/SUMMARIZE), not the daemon command surface —
+            // they are intercepted in `telegram::on_message` before this conversion
+            // and never reach the executor. These arms only keep the exhaustive
+            // match total; mapping to the harmless `Help` command is a safe,
+            // non-destructive fallback should the interception ever be bypassed.
+            TelegramCommand::Focus(_) | TelegramCommand::Unfocus | TelegramCommand::Summary => {
+                TrustyCommand::Help
+            }
             TelegramCommand::Help => TrustyCommand::Help,
         }
     }
@@ -321,9 +339,10 @@ mod tests {
     #[test]
     fn bot_commands_lists_every_command() {
         // teloxide's generated descriptor must enumerate all commands: the 20
-        // legacy ones plus the 8 managed-fleet verbs added for the drive surface.
+        // legacy ones, the 8 managed-fleet verbs added for the drive surface, and
+        // the 3 proxy verbs (/focus, /unfocus, /summary) added for TELUI-6 (#1440).
         let descriptions = TelegramCommand::bot_commands();
-        assert_eq!(descriptions.len(), 28);
+        assert_eq!(descriptions.len(), 31);
         assert!(descriptions.iter().any(|c| c.command == "/health"));
         assert!(descriptions.iter().any(|c| c.command == "/sessions"));
         assert!(descriptions.iter().any(|c| c.command == "/connect"));
@@ -343,6 +362,31 @@ mod tests {
         assert!(descriptions.iter().any(|c| c.command == "/activity"));
         assert!(descriptions.iter().any(|c| c.command == "/resume"));
         assert!(descriptions.iter().any(|c| c.command == "/decommission"));
+        // The TELUI-6 proxy verbs.
+        assert!(descriptions.iter().any(|c| c.command == "/focus"));
+        assert!(descriptions.iter().any(|c| c.command == "/unfocus"));
+        assert!(descriptions.iter().any(|c| c.command == "/summary"));
+    }
+
+    #[test]
+    fn proxy_verbs_are_adapter_local() {
+        // `/focus`, `/unfocus`, and `/summary` drive the session-manager proxy in
+        // the adapter, not the daemon command surface. The From conversion is
+        // never invoked for them in practice (they are intercepted before
+        // dispatch); this documents the safe Help fallback the exhaustive match
+        // provides.
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Focus("api".into())),
+            TrustyCommand::Help
+        );
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Unfocus),
+            TrustyCommand::Help
+        );
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Summary),
+            TrustyCommand::Help
+        );
     }
 
     #[test]
