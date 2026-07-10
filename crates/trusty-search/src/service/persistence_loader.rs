@@ -502,4 +502,124 @@ mod tests {
         // Key invariant: no error. Corpus store presence is not asserted here:
         // app-data path may or may not resolve in a test environment.
     }
+
+    // ── Issue #2305 regression: shared-root redb double-open ───────────────────
+
+    /// Why (issue #2305 — the root cause behind #1870): two colocated
+    /// registrations of the SAME `root_path` resolve to one
+    /// `<root>/.trusty-search/index.redb`. redb is a single-open database, so
+    /// warm-booting both opens the file twice and the second fails with
+    /// `DatabaseAlreadyOpen` (surfaced as `corpus_open_failed`) — the 50 ms
+    /// retry can never clear an in-process holder, so it recurs every restart.
+    /// This test proves the hazard is real (a second, concurrently-held open of
+    /// the shared redb fails) and that `dedup_entries_by_corpus_path` collapses
+    /// the pair to exactly one entry so the warm-boot open path opens once.
+    /// What: opens `apex`, then — while that handle is still held — opens `mpm`
+    /// at the same root and asserts `mpm` reports `corpus_open_failed`; then runs
+    /// the pair through the dedup and asserts it collapses to a single survivor.
+    /// Only one *successful* corpus open is performed (the failing second open
+    /// returns immediately) so the test stays cheap. Data-survival across a
+    /// reopen is already covered by
+    /// `colocated_create_handler_path_survives_simulated_reload`, and survivor
+    /// selection by `dedup_by_corpus_path_keeps_most_recent`.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn warm_boot_shared_root_double_open_is_prevented_by_dedup() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let embedder = mock_embedder();
+
+        let apex = PersistedIndex {
+            id: "apex".to_string(),
+            root_path: root.clone(),
+            colocated: true,
+            last_indexed_unix: Some(100),
+            ..Default::default()
+        };
+        let mpm = PersistedIndex {
+            id: "trusty-mpm".to_string(),
+            root_path: root.clone(),
+            colocated: true,
+            last_indexed_unix: Some(50),
+            ..Default::default()
+        };
+
+        // Prove the hazard: the first open succeeds and holds the corpus; a
+        // second open of the same redb file — the exact shape of the sequential
+        // warm-boot restore over two shared-root slots — fails with
+        // DatabaseAlreadyOpen (surfaced as corpus_open_failed, the #1870 symptom).
+        let first = build_indexer_from_entry(&apex, &embedder).await.unwrap();
+        let second = build_indexer_from_entry(&mpm, &embedder).await.unwrap();
+        assert!(
+            first.has_corpus_store() && !first.corpus_open_failed,
+            "the first open of the shared redb must succeed"
+        );
+        assert!(
+            second.corpus_open_failed,
+            "#2305: a concurrent second open of the shared redb must fail \
+             (DatabaseAlreadyOpen) — this is the bug the dedup prevents"
+        );
+        drop(first);
+        drop(second);
+
+        // Apply the fix: dedup collapses the two shared-root entries to one, so
+        // the warm-boot restore opens the shared redb exactly once → zero
+        // DatabaseAlreadyOpen. (The survivor is the most recent, `apex`.)
+        let survivors = crate::service::warm_boot::dedup_entries_by_corpus_path(vec![apex, mpm]);
+        assert_eq!(
+            survivors.len(),
+            1,
+            "#2305: two entries sharing one redb corpus must collapse to one"
+        );
+        assert_eq!(
+            survivors[0].id, "apex",
+            "the most-recently-active shared-root entry must be the survivor"
+        );
+    }
+
+    /// Why: the fix must not merge indexes that live in different redb files.
+    /// Two colocated indexes at distinct roots must open independent corpora
+    /// simultaneously with zero `DatabaseAlreadyOpen`, and dedup must keep both.
+    /// What: builds two colocated indexers at distinct roots while both handles
+    /// are held; asserts both are healthy and dedup returns both entries.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn distinct_roots_open_independent_corpora() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let embedder = mock_embedder();
+
+        let ea = PersistedIndex {
+            id: "a".to_string(),
+            root_path: a.path().to_path_buf(),
+            colocated: true,
+            ..Default::default()
+        };
+        let eb = PersistedIndex {
+            id: "b".to_string(),
+            root_path: b.path().to_path_buf(),
+            colocated: true,
+            ..Default::default()
+        };
+
+        // Both held open at once — distinct redb files, so no double-open.
+        let ia = build_indexer_from_entry(&ea, &embedder).await.unwrap();
+        let ib = build_indexer_from_entry(&eb, &embedder).await.unwrap();
+        assert!(
+            ia.has_corpus_store() && !ia.corpus_open_failed,
+            "distinct-root corpus a must open cleanly"
+        );
+        assert!(
+            ib.has_corpus_store() && !ib.corpus_open_failed,
+            "distinct-root corpus b must open cleanly"
+        );
+
+        // Dedup must leave distinct roots untouched.
+        let kept = crate::service::warm_boot::dedup_entries_by_corpus_path(vec![ea, eb]);
+        assert_eq!(
+            kept.len(),
+            2,
+            "distinct roots resolve to distinct redb files and must both survive dedup"
+        );
+    }
 }

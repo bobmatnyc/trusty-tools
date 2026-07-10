@@ -320,3 +320,128 @@ async fn colocated_scan_dedup_uses_consistent_canonicalization() {
          dedup fires consistently (canonicalization-symmetry fix, #864); got: {results:?}"
     );
 }
+
+// ── dedup_entries_by_corpus_path (issue #2305) ────────────────────────────
+
+/// Build a minimal colocated `PersistedIndex` for the corpus-path dedup tests.
+fn colocated_entry(id: &str, root: &std::path::Path, last_indexed: Option<u64>) -> PersistedIndex {
+    PersistedIndex {
+        id: id.to_string(),
+        root_path: root.to_path_buf(),
+        colocated: true,
+        last_indexed_unix: last_indexed,
+        ..Default::default()
+    }
+}
+
+/// Why (issue #2305 — the regression): two colocated entries that share a
+/// `root_path` resolve to the SAME `<root>/.trusty-search/index.redb`. redb is a
+/// single-open database, so warm-booting both opens the file twice and the
+/// second fails with `DatabaseAlreadyOpen`. The dedup must collapse them to one
+/// entry before any open is attempted.
+/// What: two colocated entries with one shared root plus one distinct root;
+/// assert the shared pair collapses to exactly one survivor and the distinct
+/// root is untouched (2 entries out for 3 in).
+/// Test: this test.
+#[test]
+fn dedup_by_corpus_path_collapses_same_root() {
+    let shared = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+
+    let entries = vec![
+        colocated_entry("apex", shared.path(), Some(100)),
+        colocated_entry("trusty-mpm", shared.path(), Some(50)),
+        colocated_entry("distinct", other.path(), Some(10)),
+    ];
+
+    let deduped = dedup_entries_by_corpus_path(entries);
+
+    // Shared root collapses to one; distinct root survives → 2 total.
+    assert_eq!(
+        deduped.len(),
+        2,
+        "two entries sharing one redb corpus must collapse to one; got {deduped:?}"
+    );
+    // Exactly one of the shared-root ids survives, and the distinct one is kept.
+    let ids: HashSet<&str> = deduped.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains("distinct"),
+        "the entry with a distinct root must always survive; got {ids:?}"
+    );
+    let shared_survivors = ["apex", "trusty-mpm"]
+        .iter()
+        .filter(|id| ids.contains(**id))
+        .count();
+    assert_eq!(
+        shared_survivors, 1,
+        "exactly one of the shared-root entries must survive; got {ids:?}"
+    );
+}
+
+/// Why: the fix must not merge indexes that genuinely live in different redb
+/// files — distinct roots must keep independent corpora.
+/// What: two colocated entries with distinct roots; assert both survive.
+/// Test: this test.
+#[test]
+fn dedup_by_corpus_path_keeps_distinct_roots() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+
+    let entries = vec![
+        colocated_entry("a", a.path(), Some(1)),
+        colocated_entry("b", b.path(), Some(2)),
+    ];
+
+    let deduped = dedup_entries_by_corpus_path(entries);
+    assert_eq!(
+        deduped.len(),
+        2,
+        "entries at distinct roots resolve to distinct redb files and must both survive"
+    );
+}
+
+/// Why: legacy (non-colocated) corpora are keyed by unique `index_id` in the
+/// global data dir and can never collide, so the dedup must never merge them —
+/// even when they happen to share a `root_path`.
+/// What: two non-colocated entries sharing a root_path; assert both survive.
+/// Test: this test.
+#[test]
+fn dedup_by_corpus_path_keeps_non_colocated() {
+    let shared = tempfile::tempdir().unwrap();
+
+    let mut a = colocated_entry("legacy-a", shared.path(), Some(1));
+    a.colocated = false;
+    let mut b = colocated_entry("legacy-b", shared.path(), Some(2));
+    b.colocated = false;
+
+    let deduped = dedup_entries_by_corpus_path(vec![a, b]);
+    assert_eq!(
+        deduped.len(),
+        2,
+        "non-colocated entries are id-keyed and never collide, even sharing a root_path"
+    );
+}
+
+/// Why: when two entries collide, the survivor must be the most-recently-active
+/// one so warm boot keeps the freshest registration (matching the recency key
+/// used by `select_warmboot_entries`).
+/// What: two colocated entries sharing a root with different `last_indexed_unix`;
+/// assert the higher-recency id survives regardless of input order.
+/// Test: this test.
+#[test]
+fn dedup_by_corpus_path_keeps_most_recent() {
+    let shared = tempfile::tempdir().unwrap();
+
+    // Stale entry listed FIRST so we prove recency (not order) selects the winner.
+    let entries = vec![
+        colocated_entry("stale", shared.path(), Some(10)),
+        colocated_entry("fresh", shared.path(), Some(999)),
+    ];
+
+    let deduped = dedup_entries_by_corpus_path(entries);
+    assert_eq!(deduped.len(), 1, "shared root must collapse to one");
+    assert_eq!(
+        deduped[0].id, "fresh",
+        "the most-recently-active entry must be the survivor"
+    );
+}

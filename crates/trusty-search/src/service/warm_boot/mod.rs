@@ -170,6 +170,114 @@ pub fn is_on_inaccessible_volume(
     inaccessible_volumes.contains(&key)
 }
 
+/// Resolve the dedup key for `entry` — the identity of its on-disk redb corpus
+/// file — WITHOUT any filesystem side effect (issue #2305).
+///
+/// Why: `corpus_redb_path_for_entry` routes through `colocated_storage_dir`,
+/// which calls `create_dir_all` and would materialise a ghost `.trusty-search/`
+/// directory for a moved/dead root at collection time (the exact hazard the
+/// #484 relocation guard avoids). Deduplication must therefore key on a pure
+/// path formula. Only colocated entries can collide: their corpus lives at
+/// `<root_path>/.trusty-search/index.redb`, so two entries sharing a
+/// `root_path` share one redb file. Legacy (non-colocated) corpora are keyed by
+/// unique `index_id` in the global data dir and can never collide, so they are
+/// never merged (`None`).
+/// What: for a colocated entry returns `Some(canonicalize_best_effort(root_path))`
+/// (canonicalization resolves symlink / `/var`↔`/private/var` aliases so two
+/// aliased roots map to one key, matching the read-only canonicalization used
+/// for the `seen_root_paths` set in `restore_indexes`); returns `None` for a
+/// non-colocated entry. `canonicalize_best_effort` is read-only — it never
+/// creates directories.
+/// Test: `dedup_by_corpus_path_*` in `warm_boot_tests.rs`.
+fn corpus_dedup_key(entry: &PersistedIndex) -> Option<PathBuf> {
+    if !entry.colocated {
+        // Legacy corpora are id-keyed in the global data dir → never collide.
+        return None;
+    }
+    // Same root ⟺ same `<root>/.trusty-search/index.redb`, so keying on the
+    // canonical root is equivalent to keying on the redb path and avoids the
+    // create_dir_all side effect of resolving the redb path directly.
+    Some(canonicalize_best_effort(&entry.root_path))
+}
+
+/// Collapse warm-boot entries that resolve to the SAME on-disk redb corpus file
+/// down to a single entry, keeping the most-recently-active one (issue #2305).
+///
+/// Why: redb is a single-open database. When two colocated registry entries
+/// share a `root_path` they resolve to the same
+/// `<root_path>/.trusty-search/index.redb`. The sequential warm-boot restore
+/// opens the file for the first entry and holds the corpus `Arc` for the
+/// daemon's lifetime, so every later entry sharing that file fails its open
+/// with `DatabaseAlreadyOpen` — the 50 ms retry in `open_corpus_with_retry`
+/// can never clear an *in-process* holder, so the failure recurs on every
+/// restart (the #1870 root cause). Two live handles serving byte-identical data
+/// from one file is the anomaly, not a feature: trusty-search has no blue/green
+/// layout that needs independent handles to one file, so we collapse the
+/// duplicates to one healthy entry *before* any open is attempted, guaranteeing
+/// zero `DatabaseAlreadyOpen` on warm boot.
+/// What: groups entries by [`corpus_dedup_key`] (colocated only; non-colocated
+/// entries are always kept). Within a colliding group keeps the entry with the
+/// highest `warmboot_sort_key` (most recent query/index activity; ties break by
+/// `id` ascending for determinism) and drops the rest with a `warn` naming both
+/// ids and the shared path. Survivors keep their original input order so the
+/// downstream recency split (`select_warmboot_entries`) and the
+/// legacy/colocated partition are unaffected.
+/// Test: `dedup_by_corpus_path_collapses_same_root`,
+/// `dedup_by_corpus_path_keeps_distinct_roots`,
+/// `dedup_by_corpus_path_keeps_non_colocated`,
+/// `dedup_by_corpus_path_keeps_most_recent` in `warm_boot_tests.rs`.
+pub fn dedup_entries_by_corpus_path(entries: Vec<PersistedIndex>) -> Vec<PersistedIndex> {
+    use crate::service::persistence::warmboot_sort_key;
+    use std::collections::HashMap;
+
+    // First pass: pick the winning entry index per corpus-path key.
+    let mut winner_by_key: HashMap<PathBuf, usize> = HashMap::new();
+    // Entries with no dedup key (non-colocated) are always retained.
+    let mut always_keep: Vec<bool> = vec![false; entries.len()];
+
+    for (i, entry) in entries.iter().enumerate() {
+        let Some(key) = corpus_dedup_key(entry) else {
+            always_keep[i] = true;
+            continue;
+        };
+        match winner_by_key.get(&key).copied() {
+            None => {
+                winner_by_key.insert(key, i);
+            }
+            Some(prev) => {
+                let cur = &entries[i];
+                let old = &entries[prev];
+                let cur_key = warmboot_sort_key(cur);
+                let old_key = warmboot_sort_key(old);
+                // Keep the more-recently-active entry; tie → lower id wins.
+                let cur_wins = cur_key > old_key || (cur_key == old_key && cur.id < old.id);
+                let winner = if cur_wins { i } else { prev };
+                tracing::warn!(
+                    "warm-boot: indexes '{}' and '{}' both resolve to the same redb corpus \
+                     under {} — collapsing to '{}' to avoid an in-process double-open \
+                     (DatabaseAlreadyOpen, issue #2305). The dropped registration is a \
+                     duplicate of the same on-disk index; re-register it at a distinct \
+                     root_path if the two were meant to be separate indexes.",
+                    cur.id,
+                    old.id,
+                    key.display(),
+                    entries[winner].id,
+                );
+                winner_by_key.insert(key, winner);
+            }
+        }
+    }
+
+    // Second pass: rebuild in original order, keeping winners + non-colocated.
+    let kept: std::collections::HashSet<usize> = winner_by_key.values().copied().collect();
+    entries
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| always_keep[*i] || kept.contains(i))
+        .map(|(_, e)| e)
+        .collect()
+}
+
 /// Collect index entries from the durable `indexes.toml` registry only.
 ///
 /// Why (issue #718 Part 2): legacy entries live in `~/Library/Application
