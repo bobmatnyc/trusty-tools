@@ -213,6 +213,10 @@ pub(super) async fn patch_index_config_handler(
             domain_terms: existing.domain_terms.clone(),
             include_docs,
             respect_gitignore,
+            // The symlink policy is a create-time setting, not part of the
+            // hygiene PATCH surface; preserve the existing value across the
+            // rebuild so an unrelated config edit never flips it.
+            follow_links: existing.follow_links,
             extra_skip_dirs,
             data_file_max_bytes,
             path_filter: existing.path_filter.clone(),

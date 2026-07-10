@@ -269,6 +269,22 @@ pub struct IndexHandle {
     /// and the persistence-round-trip tests in `service::persistence`.
     pub respect_gitignore: bool,
 
+    /// Whether the reindex walker dereferences symlinks during traversal.
+    /// Default `false` for newly created indexes (the safe choice — symlinks
+    /// escaping the root, e.g. a self-referential link or links into unrelated
+    /// repos, would otherwise bloat / corrupt the index). Existing persisted
+    /// indexes load with `follow_links = true` via the persistence serde
+    /// default so their behaviour is unchanged on upgrade.
+    ///
+    /// Why: surfaced on the handle so the reindex orchestrator can thread the
+    /// operator's choice through to `WalkOptions::follow_links`. Set at
+    /// creation via `POST /indexes` (or the `create_index` MCP tool) and
+    /// persisted to `indexes.toml` so `reindex` honours it across restarts.
+    /// Test: `service::walker::test_does_not_follow_symlinked_subdirectory_by_default`
+    /// and `test_follows_symlinked_subdirectory_when_enabled`, plus the
+    /// persistence round-trip tests.
+    pub follow_links: bool,
+
     /// Issue #1372: extra directory basenames pruned during the reindex walk on
     /// top of the built-in `walker::SKIP_DIRS`. Default
     /// `walker::DEFAULT_EXTRA_SKIP_DIRS` (`data`, `exports`, `output`, `reports`,
@@ -495,6 +511,10 @@ impl IndexHandle {
             domain_terms: Vec::new(),
             include_docs: true,
             respect_gitignore: true,
+            // Bare handles mirror the legacy pre-`follow_links` behaviour
+            // (symlinks were followed unconditionally), matching the
+            // persistence serde default for indexes that predate the field.
+            follow_links: true,
             extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
             data_file_max_bytes: crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES,
             path_filter: Vec::new(),

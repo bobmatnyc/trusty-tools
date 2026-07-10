@@ -186,7 +186,11 @@ pub fn tool_descriptors() -> Value {
                 "required": ["id", "root_path"],
                 "properties": {
                     "id":        { "type": "string" },
-                    "root_path": { "type": "string" }
+                    "root_path": { "type": "string" },
+                    "follow_links": {
+                        "type": "boolean",
+                        "description": "Dereference symlinks during the index walk. Default false (do not follow) — the safe choice for roots containing symlinks that escape the tree. Set true to index vendored / monorepo-aliased subtrees reached via a symlink."
+                    }
                 }
             }
         },

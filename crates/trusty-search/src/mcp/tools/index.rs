@@ -101,14 +101,15 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(
-                server
-                    .post(
-                        "/indexes",
-                        &serde_json::json!({ "id": id, "root_path": root_path }),
-                    )
-                    .await,
-            )
+            let mut body = serde_json::json!({ "id": id, "root_path": root_path });
+            // Optional symlink policy. Omitted ⇒ the daemon default (`false`,
+            // do NOT follow symlinks — the safe default for new indexes). Pass
+            // `follow_links: true` to index vendored / monorepo-aliased subtrees
+            // reached through a symlink.
+            if let Some(follow) = args.get("follow_links").and_then(Value::as_bool) {
+                body["follow_links"] = Value::Bool(follow);
+            }
+            Some(server.post("/indexes", &body).await)
         }
         "delete_index" => {
             let index_id = match required_index_id(server, args) {

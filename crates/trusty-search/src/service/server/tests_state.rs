@@ -59,6 +59,7 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
             path_filter: None,
             include_docs: None,
             respect_gitignore: None,
+            follow_links: None,
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,

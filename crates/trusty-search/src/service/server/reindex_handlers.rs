@@ -143,6 +143,8 @@ pub(super) async fn reindex_handler(
                     domain_terms: handle.domain_terms.clone(),
                     include_docs: handle.include_docs,
                     respect_gitignore: handle.respect_gitignore,
+                    // Preserve the symlink policy across the root_path override.
+                    follow_links: handle.follow_links,
                     // Issue #1372: preserve the hygiene knobs across the
                     // root_path override — they are orthogonal to the path.
                     extra_skip_dirs: handle.extra_skip_dirs.clone(),

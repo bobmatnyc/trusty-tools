@@ -224,6 +224,22 @@ pub struct WalkOptions {
     /// the fix for issue #100; the opt-out exists for callers that need to
     /// index a vendored subtree on purpose.
     pub respect_gitignore: bool,
+    /// When `true`, the walker dereferences symlinks during traversal, so a
+    /// symlinked subdirectory inside the tree (vendored crates, monorepo
+    /// aliases) is descended into and indexed. When `false` (the
+    /// [`WalkOptions::default`] value), symlinks are NOT followed — the walker
+    /// sees a symlinked directory as a leaf and never traverses it.
+    ///
+    /// Why: following symlinks is dangerous for roots that contain links
+    /// escaping the tree (e.g. a self-referential symlink or links into
+    /// unrelated repos). Those escape links bloat and corrupt the index with
+    /// files that don't belong to the root. Newly created indexes default to
+    /// `false` (do not follow) as the safe choice; existing persisted indexes
+    /// keep following links via the persistence-layer serde default
+    /// (`follow_links = true`) so their behaviour is unchanged on upgrade.
+    /// Set at index creation via the `POST /indexes` / `create_index`
+    /// `follow_links` field.
+    pub follow_links: bool,
     /// Extra directory basenames pruned on top of the built-in [`SKIP_DIRS`]
     /// (issue #1372). Matched on basename only, identical to `SKIP_DIRS`.
     /// Default [`DEFAULT_EXTRA_SKIP_DIRS`] (`data`, `exports`, `output`,
@@ -239,7 +255,8 @@ pub struct WalkOptions {
 
 impl Default for WalkOptions {
     /// Default `include_docs: true` (issue #118), `respect_gitignore: true`
-    /// (issue #100), `extra_skip_dirs` = [`DEFAULT_EXTRA_SKIP_DIRS`] and
+    /// (issue #100), `follow_links: false` (safe default — do not dereference
+    /// symlinks), `extra_skip_dirs` = [`DEFAULT_EXTRA_SKIP_DIRS`] and
     /// `data_file_max_bytes` = [`DEFAULT_DATA_FILE_MAX_BYTES`] (issue #1372).
     /// The `code` vs `text` mode filter (`is_allowed_for_mode`) is the single
     /// source of truth for which file types appear in results, so the walker
@@ -248,6 +265,7 @@ impl Default for WalkOptions {
         Self {
             include_docs: true,
             respect_gitignore: true,
+            follow_links: false,
             extra_skip_dirs: default_extra_skip_dirs(),
             data_file_max_bytes: DEFAULT_DATA_FILE_MAX_BYTES,
         }
@@ -561,9 +579,14 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 ///   `.ignore`, `.rgignore`, plus parent-directory ignores. When `false`, the
 ///   walker behaves as it did before issue #100 — only the hardcoded
 ///   [`SKIP_DIRS`] / [`should_skip_path`] filters apply.
-/// - Follows symlinks during traversal so symlinked subdirectories inside the
-///   tree (vendored crates, monorepo aliases) are indexed instead of silently
-///   skipped.
+/// - Follows symlinks during traversal only when `opts.follow_links` is
+///   `true`, so symlinked subdirectories inside the tree (vendored crates,
+///   monorepo aliases) are indexed. When `false` (the default for newly
+///   created indexes), symlinked directories are treated as leaves and never
+///   traversed — this prevents links that escape the root (self-referential
+///   symlinks, links into unrelated repos) from bloating / corrupting the
+///   index. Existing persisted indexes keep `follow_links = true` via the
+///   persistence serde default, so their behaviour is unchanged on upgrade.
 /// - Filtered by [`SOURCE_EXTS`].
 /// - Belt-and-suspenders skip of any directory whose basename is in
 ///   [`SKIP_DIRS`] or `opts.extra_skip_dirs`, matched ONLY against path
@@ -579,7 +602,8 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 /// Test: `test_default_excludes_markdown_and_changelog`,
 /// `test_include_docs_keeps_markdown`,
 /// `test_canonicalizes_symlinked_root`,
-/// `test_follows_symlinked_subdirectory`,
+/// `test_follows_symlinked_subdirectory_when_enabled`,
+/// `test_does_not_follow_symlinked_subdirectory_by_default`,
 /// `test_walker_honors_gitignore`,
 /// `test_walker_respects_disable_flag`,
 /// `test_walker_honors_dot_ignore`,
@@ -609,7 +633,7 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
     // prunes `.venv` / `.cache` / `.aws-sam` on projects that gitignore them.
     let mut builder = ignore::WalkBuilder::new(&canonical_root);
     builder
-        .follow_links(true)
+        .follow_links(opts.follow_links)
         .hidden(false)
         .standard_filters(opts.respect_gitignore)
         .git_ignore(opts.respect_gitignore)
@@ -1557,13 +1581,12 @@ mod tests {
         }
     }
 
-    /// When a symlinked subdirectory inside the tree points at a directory of
-    /// source files, those files must be indexed. Historically `follow_links`
-    /// was disabled so vendored / monorepo-aliased subtrees were silently
-    /// skipped.
+    /// Build a temp root containing a plain `local.rs` plus a `vendored`
+    /// symlink pointing at an external directory holding `linked.rs`. Returns
+    /// `(root_tempdir, extern_tempdir, canonical_root)`; the tempdirs are
+    /// returned so the caller keeps them alive for the duration of the walk.
     #[cfg(unix)]
-    #[test]
-    fn test_follows_symlinked_subdirectory() {
+    fn make_symlinked_subdir_root() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1576,11 +1599,25 @@ mod tests {
 
         // Plain file inside the root so we have a baseline.
         fs::write(root.join("local.rs"), "fn local() {}").unwrap();
-        // Symlinked subdirectory: walking should descend into it.
+        // Symlinked subdirectory pointing outside the walked root.
         symlink(&extern_root, root.join("vendored")).expect("symlink subdir");
 
-        let result = walk_source_files(&root);
-        let names: Vec<String> = result
+        (tmp, extern_dir, root)
+    }
+
+    /// With `follow_links: true`, a symlinked subdirectory inside the tree that
+    /// points at a directory of source files must be descended into and its
+    /// files indexed (vendored / monorepo-aliased subtrees).
+    #[cfg(unix)]
+    #[test]
+    fn test_follows_symlinked_subdirectory_when_enabled() {
+        let (_tmp, _extern, root) = make_symlinked_subdir_root();
+
+        let opts = WalkOptions {
+            follow_links: true,
+            ..WalkOptions::default()
+        };
+        let names: Vec<String> = walk_source_files_with_options(&root, &opts)
             .files
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
@@ -1591,7 +1628,37 @@ mod tests {
         );
         assert!(
             names.contains(&"linked.rs".to_string()),
-            "file inside symlinked subdir was not indexed: {names:?}",
+            "file inside symlinked subdir was not indexed with follow_links=true: {names:?}",
+        );
+    }
+
+    /// With the default `follow_links: false`, a symlinked subdirectory that
+    /// escapes the walk root must NOT be traversed — its files stay out of the
+    /// index. This is the safe default for newly created indexes: escape links
+    /// (self-referential symlinks, links into unrelated repos) never bloat the
+    /// index. The baseline non-symlinked file is still indexed.
+    #[cfg(unix)]
+    #[test]
+    fn test_does_not_follow_symlinked_subdirectory_by_default() {
+        let (_tmp, _extern, root) = make_symlinked_subdir_root();
+
+        // `WalkOptions::default()` carries `follow_links: false`.
+        assert!(
+            !WalkOptions::default().follow_links,
+            "default follow_links must be false (safe do-not-follow default)",
+        );
+        let names: Vec<String> = walk_source_files(&root)
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.contains(&"local.rs".to_string()),
+            "baseline local file missing: {names:?}",
+        );
+        assert!(
+            !names.contains(&"linked.rs".to_string()),
+            "symlinked subdir was traversed despite follow_links=false: {names:?}",
         );
     }
 

@@ -96,6 +96,20 @@ pub struct CreateIndexRequest {
     /// the opt-out reachable for callers that need it.
     #[serde(default)]
     pub respect_gitignore: Option<bool>,
+    /// Dereference symlinks during the reindex walk. `None`/missing ⇒ `false`
+    /// (the safe default for new indexes — a symlinked directory is treated as
+    /// a leaf and never traversed, so links that escape the root cannot bloat
+    /// or corrupt the index). Set `true` to index vendored / monorepo-aliased
+    /// subtrees reached through a symlink.
+    ///
+    /// Why: roots such as a resources tree containing ~150 symlinks (a
+    /// self-symlink plus links into unrelated repos) previously had every
+    /// escape link indexed because the walker hardcoded `follow_links(true)`.
+    /// Exposing the toggle on the wire lets a caller create a do-not-follow
+    /// index in one `POST /indexes` call. Persisted to `indexes.toml` so
+    /// `reindex` honours it across daemon restarts.
+    #[serde(default)]
+    pub follow_links: Option<bool>,
     /// Staged-pipeline opt-out (issue #109, Phase 1). When `true`, the
     /// reindex pipeline returns after Stage 1 (lexical / BM25 / redb) and
     /// permanently skips the embedder + symbol-graph stages. Useful for
