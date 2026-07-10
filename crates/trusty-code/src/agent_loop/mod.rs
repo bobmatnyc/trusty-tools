@@ -36,6 +36,7 @@
 
 mod compaction;
 mod error;
+mod goals;
 mod sink;
 mod transcript;
 
@@ -62,6 +63,7 @@ pub use compaction::CompactionConfig;
 // instead of duplicating it.
 pub(crate) use compaction::estimate_tokens;
 pub use error::AgentLoopError;
+pub use goals::{GOAL_SLOT_COUNT, GoalSlot, GoalSlotError, GoalSlots, GoalSource};
 pub use sink::ToolEventSink;
 pub use transcript::Transcript;
 

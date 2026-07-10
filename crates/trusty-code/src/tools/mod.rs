@@ -13,11 +13,17 @@
 //! gate matches bash tool calls by this literal) from `bash`.
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
+//!
+//! (#2347) `goals` adds `set_goal`/`clear_goal` — the model-facing write path
+//! onto `agent_loop::GoalSlots`, registered only in the daemon-session PM
+//! registry (`task::executor::run_and_record`), never in `run_task`'s
+//! one-shot/bake-off path or a delegated engineer's registry.
 
 pub mod bash;
 pub mod delegate;
 pub mod finish_task;
 pub mod fs;
+pub mod goals;
 pub mod registry;
 pub mod skill;
 pub mod traits;
@@ -31,6 +37,7 @@ pub use finish_task::{
     FINISH_TASK_TOOL_NAME, FinishTaskArgs, FinishTaskTool, render_finish_summary,
 };
 pub use fs::{EditTool, ReadFileTool, WriteFileTool};
+pub use goals::{CLEAR_GOAL_TOOL_NAME, ClearGoalTool, SET_GOAL_TOOL_NAME, SetGoalTool};
 pub use registry::ToolRegistry;
 pub use skill::{USE_SKILL_TOOL_NAME, UseSkillTool};
 pub use traits::{

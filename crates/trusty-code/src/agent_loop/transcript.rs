@@ -24,10 +24,13 @@
 //! Test: `agent_loop::tests` build transcripts indirectly through the loop;
 //! `transcript::tests` cover the helpers and compaction directly.
 
+use std::sync::{Arc, Mutex};
+
 use crate::llm::{ChatMessage, ChatResponse, ToolCall};
 use crate::tools::USE_SKILL_TOOL_NAME;
 
 use super::compaction::{CompactionConfig, should_compact, summarize_span};
+use super::goals::GoalSlots;
 
 /// One stored conversation turn plus its compaction state (#2070).
 ///
@@ -90,13 +93,23 @@ impl TranscriptEntry {
 /// the moment compaction most recently fired (`None` if it has never fired
 /// in this run) — `to_messages` compares it against the CURRENT entry count
 /// to append the last-user-message replay (§5.4 item 3) only on the turn
-/// compaction actually fired on, not on every subsequent call.
+/// compaction actually fired on, not on every subsequent call. (#2347) `goals`
+/// holds the session's 5 fixed privileged goal slots behind an `Arc<Mutex<_>>`
+/// (rather than a bare `GoalSlots`) so `tools::goals::{SetGoalTool,
+/// ClearGoalTool}` — constructed and registered into the PM's tool registry
+/// BEFORE this `Transcript` value is handed to `AgentLoop::run_with_transcript`
+/// — can mutate the SAME live state `to_messages` reads on every call via
+/// `Self::goals_handle`'s cloned `Arc`. Deliberately NOT a real
+/// `TranscriptEntry`: it is rendered fresh into the model-facing view on every
+/// `to_messages` call rather than stored/compacted, so it can never be folded
+/// into a compaction summary and never drifts from the live tool-mutated state.
 /// Test: `transcript::tests::*`.
 #[derive(Debug, Default, Clone)]
 pub struct Transcript {
     entries: Vec<TranscriptEntry>,
     assistant_texts: Vec<String>,
     last_compaction_len: Option<usize>,
+    goals: Arc<Mutex<GoalSlots>>,
 }
 
 impl Transcript {
@@ -117,6 +130,7 @@ impl Transcript {
             ],
             assistant_texts: Vec::new(),
             last_compaction_len: None,
+            goals: Arc::new(Mutex::new(GoalSlots::new())),
         }
     }
 
@@ -188,30 +202,47 @@ impl Transcript {
     }
 
     /// Render the model-facing view: compacted spans collapsed to a summary,
-    /// plus a replayed last user message once compaction has occurred.
+    /// the live goal slots injected at position `[1]`, plus a replayed last
+    /// user message once compaction has occurred.
     ///
     /// Why: This is what `ChatRequest.messages` actually sends — it must
     /// shrink once compaction fires (the whole point of §5.4) while staying
-    /// a valid, coherently-ordered conversation.
+    /// a valid, coherently-ordered conversation. (#2347) The goals injection
+    /// happens HERE, fresh on every call, rather than being a stored
+    /// `TranscriptEntry` — that is what makes it immune to compaction (it
+    /// never exists as an entry `maybe_compact` could mark) and immune to
+    /// drift (it always reflects whatever `tools::goals::{SetGoalTool,
+    /// ClearGoalTool}` most recently wrote via the same `Arc<Mutex<_>>`).
     /// What: Walks entries in order; a run of one-or-more contiguous
     /// `compacted` entries is replaced by ONE synthetic `system`-role message
     /// (`super::compaction::summarize_span`'s one-line text) in its place;
-    /// uncompacted entries pass through unchanged. After the walk, if
-    /// `last_compaction_len` equals the CURRENT entry count (i.e. this call
-    /// is happening on the very turn `maybe_compact` last fired on — the
-    /// loop calls `maybe_compact` then `to_messages` back-to-back before any
-    /// further entries are appended), the LAST `user`-role entry's message is
-    /// cloned and appended again at the very end — §5.4 item 3's "re-anchor
-    /// the model" replay. On every later call the entry count has grown past
-    /// `last_compaction_len`, so the replay does not repeat until compaction
-    /// fires again. A transcript with no `user` entry (never happens via
-    /// `seed`, but guarded rather than assumed) simply skips the replay.
+    /// uncompacted entries pass through unchanged. (#2347) If
+    /// `self.goals.render()` returns `Some`, a synthetic `system`-role
+    /// message carrying that text is inserted at index `1` (immediately
+    /// after the real system message, which `Transcript::seed` always
+    /// places at index `0` and `maybe_compact` never touches) — or appended
+    /// if `out` is empty, a defensive case that never occurs via `seed`. A
+    /// poisoned goals lock degrades to "no goals block" rather than
+    /// panicking (mirrors `run_task::recorder`'s poisoned-lock convention).
+    /// After that insertion, if `last_compaction_len` equals the CURRENT
+    /// entry count (i.e. this call is happening on the very turn
+    /// `maybe_compact` last fired on — the loop calls `maybe_compact` then
+    /// `to_messages` back-to-back before any further entries are appended),
+    /// the LAST `user`-role entry's message is cloned and appended again at
+    /// the very end — §5.4 item 3's "re-anchor the model" replay. On every
+    /// later call the entry count has grown past `last_compaction_len`, so
+    /// the replay does not repeat until compaction fires again. A
+    /// transcript with no `user` entry (never happens via `seed`, but
+    /// guarded rather than assumed) simply skips the replay.
     /// Test: `transcript::tests::to_messages_collapses_compacted_span`,
     /// `transcript::tests::to_messages_replays_last_user_message_after_compaction`,
     /// `transcript::tests::to_messages_does_not_replay_on_every_subsequent_turn`,
-    /// `transcript::tests::to_messages_is_passthrough_before_compaction`.
+    /// `transcript::tests::to_messages_is_passthrough_before_compaction`,
+    /// `transcript::tests::to_messages_injects_goals_at_position_one`,
+    /// `transcript::tests::to_messages_omits_goals_message_when_all_empty`,
+    /// `transcript::tests::to_messages_goals_survive_aggressive_compaction`.
     pub fn to_messages(&self) -> Vec<ChatMessage> {
-        let mut out = Vec::with_capacity(self.entries.len());
+        let mut out = Vec::with_capacity(self.entries.len() + 1);
         let mut compacted_span: Vec<ChatMessage> = Vec::new();
 
         for entry in &self.entries {
@@ -223,6 +254,12 @@ impl Transcript {
             out.push(entry.message.clone());
         }
         flush_span(&mut out, &mut compacted_span);
+
+        let goals_text = self.goals.lock().ok().and_then(|g| g.render());
+        if let Some(text) = goals_text {
+            let insert_at = out.len().min(1);
+            out.insert(insert_at, ChatMessage::system(text));
+        }
 
         if self.last_compaction_len == Some(self.entries.len())
             && let Some(last_user) = self.entries.iter().rev().find(|e| e.message.role == "user")
@@ -379,6 +416,21 @@ impl Transcript {
     /// `transcript_tests::assistant_text_since_out_of_range_mark_is_empty_not_panicking`.
     pub fn assistant_text_since(&self, mark: usize) -> String {
         self.assistant_texts.get(mark..).unwrap_or(&[]).join("\n\n")
+    }
+
+    /// A cloned handle to this transcript's live goal slots (#2347).
+    ///
+    /// Why: `tools::goals::{SetGoalTool, ClearGoalTool}` need mutable access
+    /// to the EXACT SAME `GoalSlots` this `Transcript` renders in
+    /// `to_messages` — cloning the `Arc` (rather than copying the data)
+    /// means a tool's `set`/`clear` call is visible to `to_messages` on the
+    /// very next turn, with no separate sync step. Callers register the
+    /// goal tools with this handle BEFORE handing the `Transcript` to
+    /// `AgentLoop::run_with_transcript` (see `task::executor::run_and_record`).
+    /// What: `Arc::clone` of the internal `goals` field.
+    /// Test: `transcript_tests::goals_handle_mutation_visible_in_to_messages`.
+    pub fn goals_handle(&self) -> Arc<Mutex<GoalSlots>> {
+        Arc::clone(&self.goals)
     }
 }
 
