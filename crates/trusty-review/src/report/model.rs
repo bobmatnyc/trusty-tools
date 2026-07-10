@@ -42,6 +42,14 @@ pub struct ReportModel {
     pub manifest_path: String,
     /// One report per repository, in manifest order.
     pub repositories: Vec<RepositoryReport>,
+    /// Optional M2 LLM synthesis result (present only under `--synthesize`).
+    ///
+    /// Why: recording the synthesis outcome on the model keeps the JSON twin a
+    /// faithful record of what the LLM produced (and what the guardrail
+    /// rejected); the reporter reads this to inject narrative prose and to render
+    /// the visible `synthesis:` status note.  `None` = deterministic M1 output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis: Option<super::synthesize::Synthesis>,
 }
 
 /// Per-repository resolved data mapped to one `per_application` block.
@@ -99,6 +107,7 @@ impl ReportModel {
             generated_date: today,
             manifest_path: manifest_path.display().to_string(),
             repositories,
+            synthesis: None,
         })
     }
 }

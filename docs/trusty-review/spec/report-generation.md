@@ -78,7 +78,7 @@
 | Phase | Deliverable | Effort | Status |
 |---|---|---|---|
 | **M1** | Deterministic, manifest-driven fill (metrics → tables) from trusty-analyze output; no LLM synthesis | Manifest loader + validation; git enrichment; v0 metrics schema; template loader; placeholder fill engine; `report` subcommand | **Landed (#2313)** — `src/report/`, `report` Cargo feature (default-on), `trusty-review report --manifest` |
-| **M2** | LLM synthesis of exec summary + findings prose (RED/AMBER descriptive narratives) | Plug LLM backend (OpenRouter or Bedrock); implement synthesizer; validate output quality | Not started |
+| **M2** | LLM synthesis of exec summary + findings prose (RED/AMBER descriptive narratives) | Plug LLM backend (OpenRouter or Bedrock); implement synthesizer; validate output quality | **Landed (#2314)** — `src/report/synthesize*.rs`, opt-in `--synthesize` flag, fail-closed + numeric guardrail (see [Synthesis (M2)](#synthesis-m2)) |
 | **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | Not started |
 
 ### Explicit Non-Goals
@@ -102,7 +102,7 @@ names the target repositories and their sources; the earlier `--repo` flag is
 replaced by `--manifest`.
 
 ```bash
-trusty-review report --manifest <file> [--template <name>] [--out <dir>]
+trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--synthesize]
   --manifest <file>   Path to the report manifest TOML (required)
   --template <name>   Template override, e.g. report-technical-dd or
                       report-technical-dd-cast. Precedence:
@@ -110,6 +110,10 @@ trusty-review report --manifest <file> [--template <name>] [--out <dir>]
                       (report-technical-dd)
   --out <dir>         Output directory for the generated report pair
                       (default: ./reports)
+  --synthesize        Opt in to M2 LLM synthesis of the narrative sections
+                      (default OFF — deterministic M1 output). Spends LLM
+                      tokens; fails closed to deterministic output on any
+                      provider/parse/guardrail failure. See "Synthesis (M2)".
 ```
 
 Output is always the dual `{date}-{title-slug}.md` + `.json` pair written
@@ -222,6 +226,65 @@ the template needs but the metrics omit falls through to the honesty marker.
 `severity` is one of `red` / `amber` / `green` (unknown/absent → `green`).
 Scoring, health-factor, and benchmark placeholders have no deterministic M1
 source and therefore render as `not stated in source data` until M2/M3 land.
+
+## Synthesis (M2)
+
+M2 layers **opt-in** LLM prose on top of the M1 deterministic fill. It is OFF by
+default: without `--synthesize` the report is byte-for-byte the deterministic M1
+output. Synthesis is opt-in because it spends LLM tokens. It reuses the crate's
+existing provider layer (`src/llm/` — OpenRouter or Bedrock, selected from the
+**reviewer** role config exactly as the review pipeline does); it adds no new LLM
+client or dependency.
+
+### What the LLM writes — and does not
+
+The synthesizer produces **only** the narrative fields M1 leaves as honesty
+markers:
+
+- `{{executive_summary_paragraph}}` — one deal-analytic paragraph.
+- The **Top Risks** table rows (`{{risk_N_description}}` / `_severity` / `_cost`
+  / `_apps`).
+- Per-**RED/AMBER** finding elaboration (`per_application_red` / `_amber` blocks:
+  finding, evidence, affected component, business impact, remediation, cost/effort).
+
+**GREEN findings are never synthesized.** The no-green-analysis rule is enforced
+**structurally**, not by prompt text: the prompt digest (`synthesize_prompt.rs`)
+filters `severity == Green` out before the data ever reaches the model, so the
+LLM cannot elaborate a green even if asked. Greens remain the M1 one-line topic list.
+
+### JSON contract
+
+The provider is forced into structured output via `ResponseSchema`
+(`report_synthesis`): a top-level object with `executive_summary` (string),
+`top_risks` (array of `{description, severity, cost, apps}`), and `findings`
+(array of `{app_slug, title, severity, description, evidence, component,
+business_impact, remediation, cost_effort}`). Each finding carries its `app_slug`
+and `severity` so the reporter routes prose back to the correct application
+section and band. The system prompt mandates: use ONLY provided values, never
+invent numbers, preserve any `(approx)` marker verbatim, RED/AMBER only.
+
+### Fail-closed posture (mirrors `Verdict::Unknown`)
+
+Any failure keeps the deterministic honesty-marker output for the affected fields
+and records a **visible** `synthesis: unavailable (<reason>)` note in the rendered
+report's *Synthesis Status* section (and on the JSON twin's `synthesis` object). A
+malformed or incomplete response is never partial-trusted. Fail-closed reasons:
+`provider timeout` (120 s ceiling), `provider error: …`, `truncated response`
+(`finish_reason = length`), `unparseable response`, and `no verifiable content`.
+
+### Numeric guardrail
+
+After the model returns, a deterministic post-check (`synthesize_guard.rs`)
+verifies that **every number** (digit sequence) appearing in each synthesized
+field exists in the source `ReportModel` data. The allowed set is computed from
+the serialized deterministic model, so it captures every metric, count, LoC
+total, and date the report is derived from. Matching tolerates formatting
+variants — thousands separators (`8,200` = `8200`), `$`, `%`, and trailing-zero
+decimals (`8200.0` = `8200`, `3.50` = `3.5`). Any field citing an unverifiable
+figure is **rejected**: it falls back to the deterministic output and a
+`synthesis: rejected (unverified figure)` note is recorded. This is the
+report-side analogue of the crate's verdict-integrity posture — the guardrail,
+not the prompt, is the last line of defence against a fabricated figure.
 
 ## References & Related Docs
 

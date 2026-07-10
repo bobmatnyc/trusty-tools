@@ -17,8 +17,10 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 
 use trusty_review::config::ReviewConfig;
+use trusty_review::llm::build_provider;
 use trusty_review::report::{
-    Reporter, TemplateLoader, load_manifest, model::ReportModel, template::DEFAULT_TEMPLATE,
+    Reporter, TemplateLoader, load_manifest, model::ReportModel, synthesize::Synthesis,
+    synthesize::Synthesizer, template::DEFAULT_TEMPLATE,
 };
 
 // ─── Report args ──────────────────────────────────────────────────────────────
@@ -43,6 +45,14 @@ pub struct ReportArgs {
     /// Output directory for the generated report pair (`{slug}.md`/`.json`).
     #[arg(long, value_name = "DIR", default_value = "./reports")]
     pub out: PathBuf,
+
+    /// Opt in to M2 LLM synthesis of the narrative sections (executive summary,
+    /// top-risk rationale, RED/AMBER finding prose).  OFF by default: the report
+    /// is deterministic (M1) unless this flag is set, because synthesis spends
+    /// LLM tokens.  Fails closed — any provider/parse/guardrail failure keeps the
+    /// deterministic output and records a visible `synthesis:` note.
+    #[arg(long)]
+    pub synthesize: bool,
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
@@ -56,7 +66,7 @@ pub struct ReportArgs {
 /// the markdown + JSON pair.  Progress → STDERR; written paths → STDOUT.
 /// Test: arg parsing via `tests::report_args_parse_defaults`; full render via
 /// `tests/report_e2e.rs`.
-pub async fn cmd_report(_config: ReviewConfig, args: ReportArgs) -> Result<()> {
+pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
     eprintln!(
         "[trusty-review report] Loading manifest: {}",
         args.manifest.display()
@@ -79,8 +89,25 @@ pub async fn cmd_report(_config: ReviewConfig, args: ReportArgs) -> Result<()> {
         .load(&template_name)
         .with_context(|| format!("failed to load template '{template_name}'"))?;
 
-    let model = ReportModel::build(&manifest, &args.manifest, &template_name)
+    let mut model = ReportModel::build(&manifest, &args.manifest, &template_name)
         .context("failed to assemble report model")?;
+
+    // M2: opt-in LLM synthesis of narrative sections.  Fails closed — on any
+    // provider/parse/guardrail failure the deterministic output stands and the
+    // reason is recorded on the model (surfaced as a `synthesis:` note).
+    if args.synthesize {
+        eprintln!("[trusty-review report] Synthesis enabled — calling LLM provider...");
+        let synthesis = run_synthesis(&config, &model).await;
+        eprintln!(
+            "[trusty-review report] {}",
+            synthesis
+                .status_lines()
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        );
+        model.synthesis = Some(synthesis);
+    }
 
     let reporter = Reporter::new(&args.out);
     let written = reporter
@@ -94,6 +121,28 @@ pub async fn cmd_report(_config: ReviewConfig, args: ReportArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the LLM provider and run one synthesis pass, failing closed.
+///
+/// Why: keeps `cmd_report` readable and isolates the provider-build failure path
+/// — a build error (missing API key, bad model id) must NOT abort the report; it
+/// degrades to the deterministic output with an `Unavailable` synthesis, exactly
+/// like the runtime failure paths inside [`Synthesizer::synthesize`].
+/// What: resolves the reviewer role's provider/model (the same construction path
+/// the review pipeline uses), builds the provider, and runs synthesis; a build
+/// error returns `Synthesis::unavailable(reason)`.
+/// Test: build path is network-bound; the fail-closed decisions are covered by
+/// `report::synthesize::tests` with stub providers.
+async fn run_synthesis(config: &ReviewConfig, model: &ReportModel) -> Synthesis {
+    let role = &config.role_models.reviewer;
+    match build_provider(&role.model, &role.provider, &config.openrouter_api_key).await {
+        Ok(provider) => {
+            let synthesizer = Synthesizer::new(provider, role.model.clone());
+            synthesizer.synthesize(model).await
+        }
+        Err(e) => Synthesis::unavailable(format!("provider build failed: {e}")),
+    }
 }
 
 #[cfg(test)]

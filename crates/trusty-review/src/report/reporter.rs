@@ -50,7 +50,9 @@ impl Reporter {
     /// Test: `reporter_tests.rs::render_contains_expected`.
     pub fn render(&self, model: &ReportModel, template: &str) -> String {
         let scope = build_scope(model);
-        render(template, &scope)
+        let mut out = render(template, &scope);
+        append_synthesis_note(&mut out, model);
+        out
     }
 
     /// Render and write `{slug}.md` + `{slug}.json` atomically to `output_dir`.
@@ -146,7 +148,121 @@ fn build_scope(model: &ReportModel) -> Scope {
         root.push_block("per_application", per_application_scope(repo));
     }
 
+    // M2: inject verified LLM synthesis into the narrative placeholders/blocks.
+    // Absent or unavailable synthesis leaves every narrative field to the M1
+    // honesty marker (deterministic behaviour unchanged).
+    if let Some(syn) = &model.synthesis
+        && syn.is_available()
+    {
+        inject_synthesis(&mut root, model, syn);
+    }
+
     root
+}
+
+/// Inject verified synthesis prose into the narrative placeholders and blocks.
+///
+/// Why: M2 fills exactly the fields M1 leaves as honesty markers — executive
+/// summary, top-risk rows, and RED/AMBER finding elaborations — and only with
+/// prose that already passed the numeric guardrail.  Greens are never touched.
+/// What: sets the executive-summary scalar, the `risk_N_*` scalars, and pushes
+/// `per_application_red` / `per_application_amber` blocks (with nested
+/// `red_finding` / `amber_finding` blocks) for each application that has
+/// verified findings of that band.
+/// Test: `reporter_tests.rs::reporter_injects_synthesis_prose`.
+fn inject_synthesis(root: &mut Scope, model: &ReportModel, syn: &super::synthesize::Synthesis) {
+    if let Some(exec) = &syn.executive_summary {
+        root.set("executive_summary_paragraph", exec.clone());
+    }
+
+    for (i, risk) in syn.top_risks.iter().enumerate() {
+        let n = i + 1;
+        root.set(format!("risk_{n}_description"), risk.description.clone());
+        root.set(format!("risk_{n}_severity"), risk.severity.clone());
+        root.set(format!("risk_{n}_cost"), risk.cost.clone());
+        root.set(format!("risk_{n}_apps"), risk.apps.clone());
+    }
+
+    for repo in &model.repositories {
+        push_band_blocks(
+            root,
+            syn,
+            &repo.name,
+            &repo.slug,
+            "RED",
+            "per_application_red",
+            "red_finding",
+        );
+        push_band_blocks(
+            root,
+            syn,
+            &repo.name,
+            &repo.slug,
+            "AMBER",
+            "per_application_amber",
+            "amber_finding",
+        );
+    }
+}
+
+/// Push one per-application findings block for a single severity band.
+///
+/// Why: the RED and AMBER template sections share an identical shape (an app
+/// header block wrapping a repeated finding block); one helper covers both.
+/// What: collects this repo's verified findings of `band`, and if any exist,
+/// pushes an `app_block` scope carrying `app_name` plus one `finding_block`
+/// child per finding with all elaboration scalars set.
+/// Test: `reporter_tests.rs::reporter_injects_synthesis_prose`.
+fn push_band_blocks(
+    root: &mut Scope,
+    syn: &super::synthesize::Synthesis,
+    app_name: &str,
+    app_slug: &str,
+    band: &str,
+    app_block: &str,
+    finding_block: &str,
+) {
+    let matches: Vec<&super::synthesize::FindingProse> = syn
+        .findings
+        .iter()
+        .filter(|f| f.app_slug == app_slug && f.severity.to_uppercase() == band)
+        .collect();
+    if matches.is_empty() {
+        return;
+    }
+    let mut app_scope = Scope::new();
+    app_scope.set("app_name", app_name.to_string());
+    for f in matches {
+        let mut fs = Scope::new();
+        fs.set("finding_title", f.title.clone());
+        fs.set("finding_description", f.description.clone());
+        fs.set("finding_evidence", f.evidence.clone());
+        fs.set("finding_component", f.component.clone());
+        fs.set("finding_business_impact", f.business_impact.clone());
+        fs.set("finding_remediation", f.remediation.clone());
+        fs.set("finding_cost_effort", f.cost_effort.clone());
+        app_scope.push_block(finding_block, fs);
+    }
+    root.push_block(app_block, app_scope);
+}
+
+/// Append the visible `synthesis:` status note to the rendered markdown.
+///
+/// Why: a reader must never mistake deterministic fallback for synthesized
+/// analysis; the note makes the outcome (available / unavailable-with-reason /
+/// per-field guardrail rejections) explicit at the end of the report.
+/// What: when `model.synthesis` is present, appends a fenced status block whose
+/// lines come from `Synthesis::status_lines`.  Absent synthesis appends nothing
+/// (M1 output is byte-identical).
+/// Test: `reporter_tests.rs::reporter_appends_unavailable_note`.
+fn append_synthesis_note(out: &mut String, model: &ReportModel) {
+    let Some(syn) = &model.synthesis else {
+        return;
+    };
+    out.push_str("\n\n## Synthesis Status\n\n");
+    for line in syn.status_lines() {
+        out.push_str(&format!("- {line}\n"));
+    }
 }
 
 /// Build the per-application child scope for one repository.
