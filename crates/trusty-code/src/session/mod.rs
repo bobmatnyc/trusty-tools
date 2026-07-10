@@ -12,18 +12,22 @@
 //! What: [`model::Session`]/[`model::SessionStatus`] (the domain type),
 //! [`registry::SessionRegistry`] (storage + ring buffer + attach/detach +,
 //! since #2056, execution tracking), [`transcript::TranscriptRecord`]
-//! (#2058's `session.get_transcript` response DTO), and [`protocol::register`]
-//! (wires `session.create`/`list`/`status`/`send`/`attach`/`detach`/`cancel`/
+//! (#2058's `session.get_transcript` response DTO), [`memory_sink::TurnMemorySink`]
+//! (#2345's durable per-turn dual-write to trusty-memory, owned per-session
+//! by `registry::SessionRegistry`), and [`protocol::register`] (wires
+//! `session.create`/`list`/`status`/`send`/`attach`/`detach`/`cancel`/
 //! `get_transcript` onto a `Router`).
 //! Test: `model::tests::*`, `registry::registry_tests::*`,
 //! `protocol::tests::*`; end-to-end over the real daemon in
 //! `tests/session_e2e.rs` and (#2058) `tests/task_e2e.rs`.
 
+pub mod memory_sink;
 pub mod model;
 pub mod protocol;
 pub mod registry;
 pub mod transcript;
 
+pub use memory_sink::TurnMemorySink;
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;
 pub use transcript::TranscriptRecord;

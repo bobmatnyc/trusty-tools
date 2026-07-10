@@ -670,6 +670,42 @@ async fn begin_pm_transcript_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
+/// `memory_sink_for` (#2345) must construct exactly ONE sink for a session
+/// and return the SAME `Arc` on every subsequent call — proving the sink (and
+/// therefore its background drain task) survives across repeated
+/// `task.run`s on one session rather than being rebuilt per run.
+#[tokio::test]
+async fn memory_sink_for_reuses_the_same_sink_across_calls() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let project_dir = tempfile::TempDir::new().unwrap();
+
+    let first = registry
+        .memory_sink_for(&session.id, project_dir.path())
+        .expect("first call constructs a sink");
+    let second = registry
+        .memory_sink_for(&session.id, project_dir.path())
+        .expect("second call reuses the sink");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "memory_sink_for must return the SAME Arc across calls on one session"
+    );
+}
+
+/// `memory_sink_for` on an unknown session must return `None`, not panic
+/// (best-effort, mirrors `set_run_outcome`'s framing).
+#[tokio::test]
+async fn memory_sink_for_unknown_session_returns_none() {
+    let registry = SessionRegistry::new();
+    let project_dir = tempfile::TempDir::new().unwrap();
+    assert!(
+        registry
+            .memory_sink_for("nope", project_dir.path())
+            .is_none()
+    );
+}
+
 /// `set_run_outcome` must store the transcript/usage/cost verbatim, and must
 /// not panic when the session no longer exists.
 #[tokio::test]
