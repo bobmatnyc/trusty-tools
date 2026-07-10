@@ -635,3 +635,70 @@ fn ls_connector_should_show_picker_flags_and_empty_static() {
         "0 sessions -> static"
     );
 }
+
+// ── #2304: picker delete — family routing + running-session force guard ─────
+
+use crate::commands::picker_delete::{
+    ManagedDeleteNext, classify_managed_delete, confirm_is_force, confirm_is_yes,
+    delete_needs_force,
+};
+
+/// A running (active/provisioning) session requires an explicit force-confirm.
+#[test]
+fn delete_needs_force_running_true() {
+    assert!(delete_needs_force("active"));
+    assert!(delete_needs_force("provisioning"));
+}
+
+/// A stopped/errored session has no live runtime — a plain confirm is enough.
+#[test]
+fn delete_needs_force_stopped_and_errored_false() {
+    assert!(!delete_needs_force("stopped"));
+    assert!(!delete_needs_force("errored"));
+}
+
+/// Family routing: 200 keeps the managed delete, 404 falls back to the local
+/// (project-session) store, 409 surfaces the running-guard refusal, and any
+/// other status is an error.
+#[test]
+fn classify_managed_delete_maps_each_family() {
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::OK),
+        ManagedDeleteNext::Deleted
+    );
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::NOT_FOUND),
+        ManagedDeleteNext::FallbackLocal,
+        "404 -> project-session fallback (the other family)"
+    );
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::CONFLICT),
+        ManagedDeleteNext::Refused,
+        "409 -> running guard, never auto-force"
+    );
+    assert_eq!(
+        classify_managed_delete(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+        ManagedDeleteNext::Error
+    );
+}
+
+/// The safe (non-force) confirm accepts only `y`/`yes`; empty is the safe reject.
+#[test]
+fn confirm_is_yes_accepts_only_y_variants() {
+    assert!(confirm_is_yes("y"));
+    assert!(confirm_is_yes("Y"));
+    assert!(confirm_is_yes(" yes \n"));
+    assert!(!confirm_is_yes(""));
+    assert!(!confirm_is_yes("force"));
+    assert!(!confirm_is_yes("delete"));
+}
+
+/// The force confirm requires the exact word `force` — a bare `y` is NOT enough.
+#[test]
+fn confirm_is_force_requires_the_word_force() {
+    assert!(confirm_is_force("force"));
+    assert!(confirm_is_force(" FORCE \n"));
+    assert!(!confirm_is_force("y"));
+    assert!(!confirm_is_force("yes"));
+    assert!(!confirm_is_force(""));
+}
