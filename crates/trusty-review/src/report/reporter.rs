@@ -23,6 +23,9 @@ use super::model::{ReportModel, RepositoryReport};
 use super::polish::polish;
 use super::provenance::{self, Provenance, tag};
 use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_scoring_model};
+use super::reporter_graph_datasets::{
+    inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
+};
 
 /// Renders a [`ReportModel`] to markdown + JSON and writes them atomically.
 ///
@@ -240,6 +243,12 @@ fn build_scope(model: &ReportModel) -> Scope {
     if let Some(bench) = &model.benchmark {
         inject_benchmark_dataset(&mut root, model, bench);
     }
+
+    // #2366 follow-up (live-QA): the §7 graph appendix must produce REAL charts
+    // on a bare run, not empty scaffolding — these two datasets are wired to data
+    // the model already computes (scan/metrics), never fabricated.
+    inject_loc_by_technology_dataset(&mut root, model);
+    inject_complexity_distribution_dataset(&mut root, model);
 
     // Live-QA defect #2314: RED/AMBER finding blocks are deterministic, not
     // synthesis-gated — title/category/component come verbatim from

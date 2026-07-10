@@ -27,6 +27,7 @@ pub mod polish;
 pub mod provenance;
 pub mod reporter;
 pub mod reporter_fill;
+pub mod reporter_graph_datasets;
 pub mod scan;
 pub mod section_instructions;
 pub mod synthesize;

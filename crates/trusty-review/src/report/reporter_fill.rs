@@ -184,7 +184,12 @@ pub(super) fn format_language_breakdown(langs: &[super::metrics::LanguageLoc], n
 }
 
 /// Format a `u64` with comma thousands separators (e.g. `19568` → `"19,568"`).
-fn format_thousands(n: u64) -> String {
+///
+/// `pub(super)` (not private): the §7 graph-appendix `loc_by_technology` dataset
+/// fill (`reporter.rs::inject_loc_by_technology_dataset`, #2366 follow-up) reuses
+/// this exact formatting for its per-language LoC cells, so the appendix number
+/// matches the Profile section's tech-stack summary byte-for-byte.
+pub(super) fn format_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().rev().enumerate() {

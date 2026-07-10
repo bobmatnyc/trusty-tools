@@ -790,6 +790,35 @@ itself is preserved (it is semantic; downstream tooling still lifts tables by it
 | `heatmap` | *(none)* | **No native Mermaid support.** Fallback: emit NO block and a one-line note `_(heatmap: no Mermaid rendering; see table above)_` — the pipe table remains the authoritative artifact. |
 | unknown / absent | *(none)* | No block; a `debug!` log records the skip. Never panics. |
 
+### Dataset population: which §7 tables fill on a bare run (#2366 follow-up)
+
+**Problem.** Live-QA on a real bare `report` run (no `--synthesize`, no external
+metrics JSON) found EVERY §7 dataset table empty — nothing but bare `<!--
+dataset: … -->` markers, so nothing charted. Root cause: the mandated §7
+appendix names ten datasets, but only `tqi_benchmark_position` (gated on
+`--benchmark`) had a fill path; the rest — including `loc_by_technology`, whose
+data (per-language LoC) the built-in scan (#2342.3) ALREADY computes — had no
+wiring at all. A chart feature that never fires on the common case (a bare
+scan) is empty scaffolding, which the honesty rule exists to prevent. The fix is
+to wire every dataset whose data is already present in the model, and leave the
+rest empty **by design** — never fabricate data a bare run cannot produce.
+
+Per-dataset status:
+
+| Dataset | Populates from | On a bare scan-only run |
+|---|---|---|
+| `loc_by_technology` | `RepositoryReport::scan.by_language` (measured), or `metrics.loc.by_language` (declared) when an external metrics JSON is supplied — declared wins, same precedence as the Profile "Technology stack" line (`fill_profile`) | **Populates** — one row per (application, language), `tech_pct` computed against the breakdown's own total; a real `stacked-bar` chart renders |
+| `tqi_benchmark_position` | `ReportModel::benchmark` (only set under `--benchmark`) | Empty — correctly gated on `--benchmark`, not a bare-scan input |
+| `complexity_distribution` | `metrics.complexity.buckets` — **metrics-only**; `RepoScan` has no complexity analysis, so the bare scan can never supply this | Empty (omit-empty) — **requires an external trusty-analyze metrics JSON**; never fabricated |
+| `health_factors_by_app`, `violations_by_iso_domain` / `violations_by_domain`, `cve_by_component_severity`, `license_risk_tiers`, `cloud_maturity_by_tech`, `violations_by_horizon`, `remediation_cost_by_tier`, `green_deficiencies_top10` | Deal-specific DD findings (violations, CVEs, license tiers, remediation economics) that no deterministic scan or metrics schema currently captures | Empty (omit-empty) by design — populating these requires a future structured-findings source (see the Alternative/future source note above); NOT wired by #2366, and must not be force-populated from unrelated data |
+
+The same precedence rule applies throughout: an external metrics JSON is
+**enrichment**, not a prerequisite — where both the scan and metrics provide a
+figure, metrics (declared) wins; where only the scan has it, the measured figure
+still renders (and still charts). A dataset with genuinely no available
+deterministic source stays empty and chartless — that is the honest outcome, not
+a bug.
+
 ### Column resolution & numeric parsing
 
 The marker's `x`/`y`/`group` field names are semantic hints, not exact header
