@@ -85,6 +85,7 @@ fn repo(slug: &str, m: Option<AnalyzeMetrics>) -> RepositoryReport {
         username: None,
         git_ref: None,
         git_info: None,
+        local_path: None,
         scan: None,
         metrics: m,
     }

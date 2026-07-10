@@ -71,6 +71,10 @@ impl Reporter {
         // to omit-empty (they are always meaningful provenance, never markers).
         append_synthesis_note(&mut out, model);
         append_benchmark_note(&mut out, model);
+        // Wave-3 (#2357): the Dependency Inventory and Investigation Coverage
+        // sections, plus the rejected-evidence note, are appended after polish so
+        // their measured/inferred rows are never subject to omit-empty.
+        out.push_str(&super::investigate::report_sections(model));
         out
     }
 
@@ -343,7 +347,7 @@ impl FindingRow {
             category: None,
             component: dedupe_field(&f.component),
             description: prose_field(&f.description),
-            evidence: prose_field(&f.evidence),
+            evidence: evidence_field(&f.evidence, f.evidence_measured),
             business_impact: prose_field(&f.business_impact),
             remediation: prose_field(&f.remediation),
             cost_effort: prose_field(&f.cost_effort),
@@ -362,7 +366,7 @@ impl FindingRow {
     /// dedupe-only (untagged) fallback.
     fn merge_prose(&mut self, f: &super::synthesize::FindingProse) {
         self.description = prose_field(&f.description);
-        self.evidence = prose_field(&f.evidence);
+        self.evidence = evidence_field(&f.evidence, f.evidence_measured);
         self.business_impact = prose_field(&f.business_impact);
         self.remediation = prose_field(&f.remediation);
         self.cost_effort = prose_field(&f.cost_effort);
@@ -441,6 +445,26 @@ fn dedupe_field(s: &str) -> Option<String> {
 /// never applied to any synthesized content).
 fn prose_field(s: &str) -> Option<String> {
     dedupe_field(s).map(|v| tag(v, Provenance::Inferred))
+}
+
+/// Like [`prose_field`], but tags the value `measured` ⁽ᵐ⁾ when `measured` is
+/// true — for a wave-3 investigation evidence quote that was mechanically
+/// verified verbatim against the file (#2357).  When `measured` is false the
+/// value is LLM-claimed and tagged `inferred` ⁽ⁱ⁾, identical to [`prose_field`].
+///
+/// Why: an evidence quote proven to exist in the source is `measured` data, not
+/// an LLM judgement; tagging it ⁽ᵐ⁾ tells a reader the snippet is real code they
+/// can grep for, while the surrounding description/impact/remediation stay ⁽ⁱ⁾.
+/// What: dedupes trailing terminal punctuation, maps empty → `None`, and applies
+/// the `Measured` tag when `measured` else `Inferred`.
+/// Test: `reporter_tests::reporter_tags_investigation_evidence_measured`.
+fn evidence_field(s: &str, measured: bool) -> Option<String> {
+    let prov = if measured {
+        Provenance::Measured
+    } else {
+        Provenance::Inferred
+    };
+    dedupe_field(s).map(|v| tag(v, prov))
 }
 
 /// Fill one severity band's per-application finding blocks for one repository,

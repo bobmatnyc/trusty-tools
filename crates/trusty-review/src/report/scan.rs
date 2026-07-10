@@ -147,6 +147,19 @@ pub fn scan_repo(path: &Path) -> Option<RepoScan> {
     })
 }
 
+/// List a repository's tracked files relative to `root` (public entry point).
+///
+/// Why: the investigation pass (#2357) relevance-ranks the repository's file list
+/// to choose which sources to send to the LLM; it needs the same tracked-file
+/// enumeration the baseline scan uses (git-first, filtered-walk fallback) rather
+/// than re-deriving it, so both features agree on the corpus denominator.
+/// What: thin public wrapper over [`list_files`]; returns relative paths, or an
+/// empty vec for an unreadable/empty directory.
+/// Test: `investigate::select` tests build a fixture repo and assert selection.
+pub fn list_tracked_files(root: &Path) -> Vec<PathBuf> {
+    list_files(root)
+}
+
 /// List tracked repository files relative to `root`.
 ///
 /// Why: `git ls-files` honours `.gitignore` and records exactly the tracked

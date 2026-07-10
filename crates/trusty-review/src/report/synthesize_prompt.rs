@@ -191,6 +191,16 @@ fn build_digest(model: &ReportModel) -> String {
         msg.push('\n');
     }
 
+    // #2357: when the repo-evidence investigation ran, feed synthesis the real
+    // coverage so the exec summary can only claim a data gap that truly exists —
+    // and must name it.  The verified findings are already in the digest above
+    // (they were injected into each repo's `metrics.findings`).
+    if let Some(inv) = &model.investigation {
+        msg.push('\n');
+        msg.push_str(&inv.coverage_prompt_summary());
+        msg.push('\n');
+    }
+
     // #2340: analyst focus directives steer EMPHASIS only — they never relax the
     // grounding rules (the numeric guardrail and no-green exclusion still bind).
     if let Some(instructions) = &model.instructions {

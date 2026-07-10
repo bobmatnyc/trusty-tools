@@ -81,6 +81,7 @@
 | **M2** | LLM synthesis of exec summary + findings prose (RED/AMBER descriptive narratives) | Plug LLM backend (OpenRouter or Bedrock); implement synthesizer; validate output quality | **Landed (#2314)** — `src/report/synthesize*.rs`, opt-in `--synthesize` flag, fail-closed + numeric guardrail (see [Synthesis (M2)](#synthesis-m2)) |
 | **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | **Landed (#2314)** — `src/report/benchmark.rs`, opt-in `--corpus` / `--corpus-add` / `--benchmark` flags, deterministic percentile/quartile placement + small-n honesty gate (see [Benchmarking (M3)](#benchmarking-m3)) |
 | **Wave 2** | Inference-first output: analyst instructions doc, self-derived metadata, built-in repo scanning, provenance labels + omit-empty | Instructions loader + prompt injection; repo scanner; provenance model; post-render polish (comment strip + omit-empty + gaps) | **Landed (#2340 / #2342)** — `src/report/{instructions,scan,provenance,polish,reporter_fill}.rs`, `--instructions` flag (see [Inference-first output](#inference-first-output--analyst-instructions-wave-2-2340--2342)) |
+| **Wave 3** | Repo-evidence findings investigation: inspect the code and produce the findings, gated by a verifiable-evidence guardrail; deterministic dependency inventory; coverage honesty | Deterministic file selection + budgets; reviewer-role investigation LLM call; verbatim-evidence guardrail; manifest/lockfile dependency parsing; coverage section + prompt injection | **Landed (#2357)** — `src/report/investigate/`, runs under `--synthesize` for local checkouts, `--investigate-max-files` / `--investigate-max-bytes` (see [Repo-evidence investigation](#repo-evidence-investigation-wave-3-2357)) |
 
 ### Explicit Non-Goals
 
@@ -104,7 +105,8 @@ replaced by `--manifest`.
 
 ```bash
 trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--instructions <md>] \
-                     [--synthesize] [--corpus <dir>] [--corpus-add] [--benchmark]
+                     [--synthesize] [--investigate-max-files <n>] [--investigate-max-bytes <b>] \
+                     [--corpus <dir>] [--corpus-add] [--benchmark]
   --manifest <file>   Path to the report manifest TOML (required)
   --instructions <md> Free-form analyst instructions markdown (#2340). Recorded
                       verbatim as an "Analyst Instructions" section and, under
@@ -117,10 +119,18 @@ trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--inst
                       (report-technical-dd)
   --out <dir>         Output directory for the generated report pair
                       (default: ./reports)
-  --synthesize        Opt in to M2 LLM synthesis of the narrative sections
-                      (default OFF — deterministic M1 output). Spends LLM
-                      tokens; fails closed to deterministic output on any
-                      provider/parse/guardrail failure. See "Synthesis (M2)".
+  --synthesize        Opt in to M2 LLM synthesis of the narrative sections AND
+                      the wave-3 repo-evidence investigation (default OFF —
+                      deterministic M1 output). Spends LLM tokens; fails closed to
+                      deterministic output on any provider/parse/guardrail failure.
+                      See "Synthesis (M2)" and "Repo-evidence investigation".
+  --investigate-max-files <n>
+                      Wave-3 cap on files sent per repository (#2357). Precedence:
+                      this flag > manifest [report].investigate_max_files > 40.
+  --investigate-max-bytes <b>
+                      Wave-3 cap on total content bytes sent per repository.
+                      Precedence: this flag > [report].investigate_max_bytes >
+                      409600 (400 KiB).
   --corpus <dir>      Benchmark corpus directory (M3). Precedence:
                       --corpus flag > manifest [report].corpus > per-user XDG
                       default (~/.local/share/trusty-review/benchmark/ or the
@@ -533,6 +543,105 @@ metrics file) is rendered with its counts, not just language names —
 top 4 as `"{name} {loc}"` (thousands-grouped) with `" · "`, e.g.
 `TypeScript 19,568 · SQL 184 · CSS 43 ⁽ᵐ⁾`. Previously `{{app_tech_stack}}` dropped
 the LoC split entirely and rendered language names only.
+
+## Repo-evidence investigation (wave 3, #2357)
+
+**Problem.** A generated exec summary once declared that "no evidence-based
+conclusions can be drawn regarding authentication and secret handling, dependency
+freshness, state management complexity, or scalability … requiring a full manual
+code review" — while the repository sat readable on disk. A report that admits it
+did not look at available code is structurally unacceptable. Wave 3 makes that
+outcome impossible: when the code is available, the tool inspects it and produces
+the findings itself. Implementation lives in `src/report/investigate/`.
+
+**When it runs.** Only under `--synthesize`, and only for repositories whose
+source is a local checkout (`RepositoryReport::local_path` is `Some`). The
+deterministic base report is unchanged without `--synthesize`; remote entries are
+recorded `Skipped` with a reason. One reviewer-role LLM request is issued **per
+repository** — the selected file set and the evidence-verification corpus are
+inherently per-repo.
+
+### File selection (`select.rs`, deterministic)
+
+The tracked file list (`scan::list_tracked_files`, git-first with a filtered-walk
+fallback) is relevance-ranked against (a) keywords extracted from the analyst
+brief (#2340) and (b) standard DD dimensions via path/name heuristics:
+
+| Dimension | Path/name heuristics |
+|---|---|
+| authentication & secrets | `auth*` segment, `*token*`, `*secret*`, `*password*`, `*credential*`, `config` segment, `.env*`, `middleware` |
+| dependencies | `package.json`/lockfiles, `Cargo.toml`/`Cargo.lock`, `pyproject.toml`, `go.mod`/`go.sum` |
+| state management | `store*`/`reducer*`/`atom*` segment, `*/state/*`, `*_store*`, `context*` |
+| error handling | `error*`, `exception*`, `*_error*` |
+| scalability | `queue*`, `cache*`, `worker`, `pool`, `*/db/*`, `database*` |
+| test coverage | presence of a test dir/file (`/tests/`, `_test.rs`, `.spec.ts`, …) — presence-only |
+
+Ranking score = `3 × instruction-keyword hits + 2 × dimension matches + 1 (source
+file)`, sorted by score desc then path asc (fully deterministic). Files are added
+greedily until a **budget cap** is hit: default **40 files / 400 KiB** total,
+configurable via `[report].investigate_max_files` / `investigate_max_bytes`
+manifest keys and the matching CLI flags. An individual file over ~24 KiB is
+truncated (marker reserved so the byte total never exceeds the cap). The selection
+records what was chosen vs skipped and which dimensions were reached (coverage
+data).
+
+### Investigation LLM call (`analyze.rs`)
+
+Reuses the reviewer-role provider + forced-structured-output pattern
+(`ResponseSchema`). One request carries: the analyst brief, the DD-dimension
+checklist, and each selected file as a `path` + verbatim-content block. The prompt
+mandates: **cite only provided files, quote evidence verbatim, invent no figures,
+GREEN = title only.** Response schema (`repo_investigation`):
+
+```jsonc
+{ "findings": [ {
+  "title": "...", "severity": "red|amber|green", "dimension": "...",
+  "file": "src/...", "line": 42,               // approximate; corrected on verify
+  "evidence_quote": "<verbatim snippet>",      // required for RED/AMBER
+  "description": "...", "business_impact": "...",
+  "remediation": "...", "cost_effort": "..." } ] }
+```
+
+### Verifiable-evidence guardrail (`verify.rs`, deterministic)
+
+The analogue of the M2 numeric guardrail — the reason the output can be trusted.
+For each finding: (1) the cited `file` must be in the selected set; (2) the
+`evidence_quote` must **substring-match** the actual file content, ignoring
+whitespace differences; (3) the line number is **corrected** from the real match
+position. GREEN findings pass as bare titles (no evidence). Any RED/AMBER finding
+that fails is **REJECTED** (never softened), counted, and surfaced in the report as
+`investigation: N finding(s) rejected (unverifiable evidence)`.
+
+Verified findings flow through the **same `FindingRow` path** as trusty-analyze
+metric findings: each is injected as a `MetricFinding` (severity band placement;
+greens → topic list) and its prose is overlaid onto the row via
+`Synthesis::findings`, with the description/impact/remediation tagged `inferred`
+⁽ⁱ⁾ and the verbatim evidence quote tagged `measured` ⁽ᵐ⁾ (a `FindingProse`
+carries an `evidence_measured` flag the reporter honours).
+
+### Deterministic dependency inventory (`deps.rs`)
+
+Parses root manifests **and** lockfiles — `package.json` + `package-lock.json`,
+`Cargo.toml` + `Cargo.lock`, `pyproject.toml` (PEP 621 + poetry), `go.mod` — into a
+`measured` ⁽ᵐ⁾ table (name, declared spec, locked version where available),
+rendered in a new **Dependency Inventory** section. Rows are capped (30) with an
+`… and N more` line. **No network calls.** The LLM may reference these deps and
+flag staleness as an `inferred` ⁽ⁱ⁾ judgement.
+
+### Coverage honesty (`render.rs`)
+
+An **Investigation Coverage** section states, per repository: files examined /
+total tracked, bytes sent (with the budget), DD dimensions covered vs NOT
+investigated, and the rejected-finding count. The same coverage summary is injected
+into the synthesis prompt so the exec summary can only claim a data gap where one
+truly exists (remote-only, budget exhausted) — and must name it. When the
+investigation ran, the exec summary must synthesise from the actual findings.
+
+### Alternative / future source
+
+trusty-analyze daemon integration (deterministic findings) remains the future
+complement per the epic architecture; the findings schema already accepts both
+sources (a `MetricFinding` is source-agnostic).
 
 ## References & Related Docs
 

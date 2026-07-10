@@ -112,11 +112,13 @@ fn fixture_model(findings: Vec<MetricFinding>) -> ReportModel {
             username: None,
             git_ref: None,
             git_info: None,
+            local_path: None,
             scan: None,
             metrics: Some(metrics),
         }],
         synthesis: None,
         benchmark: None,
+        investigation: None,
     }
 }
 

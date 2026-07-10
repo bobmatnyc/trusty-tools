@@ -98,7 +98,7 @@ pub struct RiskRow {
 }
 
 /// Elaboration prose for one RED/AMBER finding, routed by `app_slug`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FindingProse {
     /// Application slug this finding belongs to (matches a repository slug).
     pub app_slug: String,
@@ -122,6 +122,13 @@ pub struct FindingProse {
     /// Remediation cost/effort framing.
     #[serde(default)]
     pub cost_effort: String,
+    /// True when `evidence` is a verbatim quote mechanically verified against the
+    /// actual file content (wave-3 investigation, #2357) — such evidence is
+    /// `measured` provenance and the reporter tags it ⁽ᵐ⁾.  False (the default,
+    /// and always so for M2 synthesis) means the evidence is LLM-claimed and is
+    /// tagged ⁽ⁱ⁾ inferred like the rest of the prose.
+    #[serde(default)]
+    pub evidence_measured: bool,
 }
 
 impl Synthesis {

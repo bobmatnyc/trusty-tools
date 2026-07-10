@@ -86,6 +86,19 @@ pub struct ReportModel {
     /// benchmarking requested (M2-identical output).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<super::benchmark::BenchmarkReport>,
+    /// Optional wave-3 repo-evidence investigation result (present only under
+    /// `--synthesize` when at least one repository is a local checkout, #2357).
+    ///
+    /// Why: recording the investigation on the model keeps the JSON twin a
+    /// faithful record of what code was actually inspected, what verifiable
+    /// findings it produced, how many were rejected for unverifiable evidence,
+    /// the deterministic dependency inventory, and the coverage honesty data.
+    /// The reporter reads this to render the Dependency Inventory / Investigation
+    /// Coverage sections and the synthesis prompt reads the coverage summary so
+    /// the exec summary can only claim a data gap where one truly exists.  `None`
+    /// = investigation did not run (no `--synthesize`, or remote-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub investigation: Option<super::investigate::Investigation>,
 }
 
 /// Per-repository resolved data mapped to one `per_application` block.
@@ -112,6 +125,15 @@ pub struct RepositoryReport {
     pub git_ref: Option<String>,
     /// Git provenance for local checkouts (`None` for remote or non-git paths).
     pub git_info: Option<GitInfo>,
+    /// The resolved absolute checkout path for a local source, else `None`.
+    ///
+    /// Why: the wave-3 investigation pass (#2357) reads actual source files from
+    /// the checkout and must verify quoted evidence against them; it needs the
+    /// resolved path (the `source` string may be a manifest-relative display
+    /// path).  Remote entries have no local path and are never investigated.
+    /// Test: `investigate` e2e wiring; `reporter_tests` build a local model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<std::path::PathBuf>,
     /// Baseline metrics computed directly from a local checkout (`measured`,
     /// #2342.3).  `None` for remote entries or unreadable/empty local paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +180,7 @@ impl ReportModel {
             repositories,
             synthesis: None,
             benchmark: None,
+            investigation: None,
         })
     }
 }
@@ -169,7 +192,7 @@ impl ReportModel {
 /// loads metrics (relative paths resolved against `manifest_dir`).
 /// Test: exercised by `reporter_tests.rs::build_model_from_manifest`.
 fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<RepositoryReport> {
-    let (source_kind, git_info, scan) = match &entry.source {
+    let (source_kind, git_info, scan, local_path) = match &entry.source {
         RepositorySource::LocalPath { path } => {
             let resolved = resolve(manifest_dir, path);
             let git_info = gather_git_info(&resolved);
@@ -177,9 +200,10 @@ fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<Repo
             // directly from the checkout so a bare run is substantive.  An empty
             // scan (non-existent path, no source files) is dropped to `None`.
             let scan = scan_repo(&resolved).filter(|s| !s.is_empty());
-            ("local_path", git_info, scan)
+            let local_path = resolved.is_dir().then_some(resolved);
+            ("local_path", git_info, scan, local_path)
         }
-        RepositorySource::Remote { .. } => ("remote", None, None),
+        RepositorySource::Remote { .. } => ("remote", None, None, None),
     };
 
     let metrics = match &entry.metrics {
@@ -195,6 +219,7 @@ fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<Repo
         username: entry.username.clone(),
         git_ref: entry.git_ref.clone(),
         git_info,
+        local_path,
         scan,
         metrics,
     })

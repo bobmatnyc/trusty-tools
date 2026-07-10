@@ -184,6 +184,7 @@ fn reporter_injects_synthesis_prose() {
             business_impact: "data loss".to_string(),
             remediation: "parameterise".to_string(),
             cost_effort: "moderate".to_string(),
+            evidence_measured: false,
         }],
         notes: vec![],
     });
@@ -327,6 +328,7 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
             business_impact: "customer data exposure".to_string(),
             remediation: "use parameterised queries".to_string(),
             cost_effort: "low".to_string(),
+            evidence_measured: false,
         }],
         notes: vec![],
     });

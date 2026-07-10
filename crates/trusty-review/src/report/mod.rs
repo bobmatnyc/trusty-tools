@@ -18,6 +18,7 @@ pub mod error;
 pub mod fill;
 pub mod git_info;
 pub mod instructions;
+pub mod investigate;
 pub mod manifest;
 pub mod metrics;
 pub mod model;
@@ -41,6 +42,9 @@ pub use error::{ManifestError, ReportError, Result};
 pub use fill::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 pub use git_info::{GitInfo, gather_git_info};
 pub use instructions::{Instructions, load_instructions};
+pub use investigate::{
+    Budget, Investigation, InvestigationStatus, RepoInvestigation, run_investigation,
+};
 pub use manifest::{
     Manifest, ReportSection, RepositoryEntry, RepositorySource, load_manifest, parse_manifest,
     slugify,

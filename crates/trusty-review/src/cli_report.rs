@@ -19,9 +19,15 @@ use clap::Parser;
 use trusty_review::config::ReviewConfig;
 use trusty_review::llm::build_provider;
 use trusty_review::report::{
-    CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark, load_instructions,
-    load_manifest, manifest::Manifest, model::ReportModel, synthesize::Synthesis,
-    synthesize::Synthesizer, template::DEFAULT_TEMPLATE,
+    Budget, CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark,
+    investigate::{apply_investigation, merge_investigation_prose},
+    load_instructions, load_manifest,
+    manifest::Manifest,
+    model::ReportModel,
+    run_investigation,
+    synthesize::Synthesis,
+    synthesize::Synthesizer,
+    template::DEFAULT_TEMPLATE,
 };
 
 // ─── Report args ──────────────────────────────────────────────────────────────
@@ -61,6 +67,17 @@ pub struct ReportArgs {
     /// deterministic output and records a visible `synthesis:` note.
     #[arg(long)]
     pub synthesize: bool,
+
+    /// Wave-3 investigation budget: max files sent per repository (#2357).
+    /// Precedence: this flag > manifest `[report].investigate_max_files` > default.
+    #[arg(long, value_name = "N")]
+    pub investigate_max_files: Option<usize>,
+
+    /// Wave-3 investigation budget: max total content bytes sent per repository
+    /// (#2357).  Precedence: this flag > manifest `[report].investigate_max_bytes`
+    /// > default.
+    #[arg(long, value_name = "BYTES")]
+    pub investigate_max_bytes: Option<usize>,
 
     /// Benchmark corpus directory (M3).  Overrides the manifest `[report].corpus`
     /// key and the per-user XDG default (`~/.local/share/trusty-review/benchmark/`).
@@ -132,12 +149,13 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
     )
     .context("failed to assemble report model")?;
 
-    // M2: opt-in LLM synthesis of narrative sections.  Fails closed — on any
-    // provider/parse/guardrail failure the deterministic output stands and the
-    // reason is recorded on the model (surfaced as a `synthesis:` note).
+    // M2 + wave-3: opt-in LLM synthesis plus the repo-evidence investigation.
+    // Fails closed — on any provider/parse/guardrail failure the deterministic
+    // output stands and the reason is recorded on the model.
     if args.synthesize {
         eprintln!("[trusty-review report] Synthesis enabled — calling LLM provider...");
-        let synthesis = run_synthesis(&config, &model).await;
+        let budget = resolve_budget(&args, &manifest);
+        let synthesis = run_synthesis(&config, &mut model, budget).await;
         eprintln!(
             "[trusty-review report] {}",
             synthesis
@@ -289,25 +307,72 @@ fn target_snapshots(model: &ReportModel) -> Vec<CorpusSnapshot> {
         .collect()
 }
 
-/// Build the LLM provider and run one synthesis pass, failing closed.
+/// Resolve the investigation file/byte budget by precedence (#2357).
+///
+/// Why: the wave-3 investigation caps how much of a repo is sent to the LLM;
+/// operators tune it via a CLI flag or a manifest key, falling back to sane
+/// defaults, in one place so both budget dimensions resolve consistently.
+/// What: CLI flag > manifest `[report].investigate_max_*` > [`Budget::default`].
+/// Test: `tests::report_args_parse_investigate_budget`.
+fn resolve_budget(args: &ReportArgs, manifest: &Manifest) -> Budget {
+    let default = Budget::default();
+    Budget {
+        max_files: args
+            .investigate_max_files
+            .or(manifest.report.investigate_max_files)
+            .unwrap_or(default.max_files),
+        max_bytes: args
+            .investigate_max_bytes
+            .or(manifest.report.investigate_max_bytes)
+            .unwrap_or(default.max_bytes),
+    }
+}
+
+/// Build the LLM provider, run the repo-evidence investigation, then synthesis.
 ///
 /// Why: keeps `cmd_report` readable and isolates the provider-build failure path
 /// — a build error (missing API key, bad model id) must NOT abort the report; it
-/// degrades to the deterministic output with an `Unavailable` synthesis, exactly
-/// like the runtime failure paths inside [`Synthesizer::synthesize`].
+/// degrades to the deterministic output with an `Unavailable` synthesis.  The
+/// investigation (#2357) runs FIRST so its verified findings are injected into the
+/// model before synthesis, and synthesis sees the coverage summary; its verified
+/// (measured-evidence) prose then wins over any synthesis prose for the same
+/// finding.
 /// What: resolves the reviewer role's provider/model (the same construction path
-/// the review pipeline uses), builds the provider, and runs synthesis; a build
-/// error returns `Synthesis::unavailable(reason)`.
+/// the review pipeline uses); on success runs `run_investigation` (local repos
+/// only), `apply_investigation`, `synthesize`, and `merge_investigation_prose`; a
+/// build error returns `Synthesis::unavailable(reason)`.
 /// Test: build path is network-bound; the fail-closed decisions are covered by
-/// `report::synthesize::tests` with stub providers.
-async fn run_synthesis(config: &ReviewConfig, model: &ReportModel) -> Synthesis {
+/// `report::synthesize::tests` and `tests/report_investigate.rs` with stubs.
+async fn run_synthesis(
+    config: &ReviewConfig,
+    model: &mut ReportModel,
+    budget: Budget,
+) -> Synthesis {
     let role = &config.role_models.reviewer;
-    match build_provider(&role.model, &role.provider, &config.openrouter_api_key).await {
-        Ok(provider) => {
-            let synthesizer = Synthesizer::new(provider, role.model.clone());
-            synthesizer.synthesize(model).await
-        }
-        Err(e) => Synthesis::unavailable(format!("provider build failed: {e}")),
+    let provider =
+        match build_provider(&role.model, &role.provider, &config.openrouter_api_key).await {
+            Ok(p) => p,
+            Err(e) => return Synthesis::unavailable(format!("provider build failed: {e}")),
+        };
+
+    // Wave-3 investigation (local checkouts only): select → LLM → verify, then
+    // inject verified findings so synthesis and the reporter render them.
+    if let Some(inv) = run_investigation(provider.clone(), &role.model, model, budget).await {
+        let verified: usize = inv.repos.iter().map(|r| r.findings.len()).sum();
+        eprintln!(
+            "[trusty-review report] Investigation: {verified} verified finding(s) across {} local repo(s)",
+            inv.repos.len()
+        );
+        apply_investigation(model, &inv);
+        let mut synthesis = Synthesizer::new(provider, role.model.clone())
+            .synthesize(model)
+            .await;
+        merge_investigation_prose(&mut synthesis, &inv);
+        synthesis
+    } else {
+        Synthesizer::new(provider, role.model.clone())
+            .synthesize(model)
+            .await
     }
 }
 
@@ -363,6 +428,35 @@ mod tests {
         );
         let dir = resolve_corpus_dir(&args, &manifest).expect("resolve");
         assert_eq!(dir, PathBuf::from("/tmp/corpus"));
+    }
+
+    /// Why: the wave-3 investigation budget resolves by CLI > manifest > default.
+    /// What: a CLI `--investigate-max-files` overrides the manifest key; the byte
+    /// cap falls back to the manifest; an unset dimension uses the default.
+    /// Test: this test itself.
+    #[test]
+    fn report_args_parse_investigate_budget() {
+        let args = ReportArgs::try_parse_from([
+            "report",
+            "--manifest",
+            "m.toml",
+            "--synthesize",
+            "--investigate-max-files",
+            "7",
+        ])
+        .expect("parse");
+        assert_eq!(args.investigate_max_files, Some(7));
+        assert!(args.investigate_max_bytes.is_none());
+
+        let manifest = load_manifest_from_str(
+            "[report]\ntitle = \"T\"\ninvestigate_max_files = 3\ninvestigate_max_bytes = 1024\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        );
+        let budget = resolve_budget(&args, &manifest);
+        assert_eq!(budget.max_files, 7, "CLI flag wins over the manifest key");
+        assert_eq!(
+            budget.max_bytes, 1024,
+            "manifest key fills the unset CLI flag"
+        );
     }
 
     /// Parse a manifest from an in-memory string for CLI validation tests.
