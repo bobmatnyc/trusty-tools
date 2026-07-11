@@ -148,6 +148,15 @@ pub(crate) enum Command {
     /// cover the L3-substrate work-tracking ledger (§10). Mutating session verbs
     /// deliberately live at `tm sessions`; `tm projects show` surfaces sessions
     /// read-only per the naming split.
+    ///
+    /// `action` stays a MANDATORY clap subcommand (#2118 does not relax this):
+    /// a bare, non-interactive `tm projects` must keep failing with clap's own
+    /// "requires a subcommand" usage error (exit code 2), unchanged. The
+    /// interactive case — bare `tm projects` on a TTY launches the 4-pane
+    /// project-control-plane TUI skeleton — is intercepted in `main.rs` BEFORE
+    /// `Cli::try_parse()` even runs (see `main.rs`'s module doc and
+    /// `commands::projects::launch_bare_tui`), so it never has to touch this
+    /// mandatory-subcommand shape at all.
     /// What: the `tm projects <action>` command group.
     /// Test: `cli_parses_projects_*` in `tests_projects.rs`.
     Projects {

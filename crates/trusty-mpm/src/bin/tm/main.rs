@@ -13,6 +13,8 @@ mod formatters;
 mod gh_identity;
 mod types;
 
+use std::io::IsTerminal as _;
+
 use clap::Parser;
 use cli::{Cli, Command};
 use commands::{
@@ -77,12 +79,31 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 /// tracing init, exit codes) while the handlers own the domain logic.
 /// What: tries to parse via `clap::Parser::try_parse`, prints a "did you
 /// mean?" hint on an unknown-subcommand error, then dispatches.
-/// Test: integration tests in `tests.rs` exercise every dispatch branch.
+///
+/// #2118: a bare `tm projects` (no verb) on an interactive TTY is intercepted
+/// HERE, before `Cli::try_parse()` even runs, and launches the 4-pane
+/// project-control-plane TUI skeleton. The interception happens this early —
+/// rather than by relaxing `ProjectsAction` to `Option` and branching inside
+/// the dispatcher — specifically so `tm projects <verb>` and a
+/// non-interactive bare `tm projects` both flow through the completely
+/// unmodified clap definition: the latter must keep failing with clap's own
+/// "requires a subcommand" usage error (exit code 2), byte-for-byte identical
+/// to the pre-#2118 behavior. See `commands::projects::is_bare_projects_argv`
+/// and `commands::projects::launch_bare_tui`.
+/// Test: integration tests in `tests.rs` exercise every dispatch branch; the
+/// argv-shape half of the #2118 interception is unit tested in
+/// `commands::projects::tests`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
+
+    // #2118: see this function's module doc for why this runs before parsing.
+    if commands::projects::is_bare_projects_argv(&argv) && std::io::stdout().is_terminal() {
+        return commands::projects::launch_bare_tui().await;
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

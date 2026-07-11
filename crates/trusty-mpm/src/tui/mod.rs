@@ -18,6 +18,7 @@ pub mod dashboard;
 mod event_loop;
 pub mod health;
 pub mod iterm2;
+pub mod project_ctl;
 
 use crossterm::{
     execute,

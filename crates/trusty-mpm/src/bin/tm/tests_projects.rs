@@ -25,6 +25,19 @@ fn projects_action(argv: &[&str]) -> ProjectsAction {
     }
 }
 
+/// #2118: `ProjectsAction` stays a MANDATORY clap subcommand — a bare
+/// `tm projects` (no verb) must still fail to parse with clap's own
+/// "requires a subcommand" error, unchanged from before #2118. The
+/// interactive-TTY TUI launch is intercepted in `main.rs` BEFORE
+/// `Cli::try_parse()` even runs (see `commands::projects::is_bare_projects_argv`),
+/// so it never reaches this parse path at all.
+#[test]
+fn cli_rejects_bare_projects_with_missing_subcommand() {
+    let err =
+        Cli::try_parse_from(["tm", "projects"]).expect_err("bare `projects` must fail to parse");
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingSubcommand);
+}
+
 // ───────────────────────── registry verbs (#2115) ─────────────────────────
 
 #[test]
