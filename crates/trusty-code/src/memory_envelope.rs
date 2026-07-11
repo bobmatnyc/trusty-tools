@@ -144,9 +144,7 @@ mod tests {
         ) -> Json<Value> {
             Json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
         }
-        let app = Router::new()
-            .route("/rpc", post(handle))
-            .with_state(result);
+        let app = Router::new().route("/rpc", post(handle)).with_state(result);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
