@@ -56,6 +56,7 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             name_hint,
             runtime,
             no_inject,
+            deliverable,
         } => TrustyCommand::ManagedNew {
             repo_url: repo.clone(),
             git_ref: git_ref.clone(),
@@ -70,6 +71,9 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             // (which builds a New action) posts the same minimal wire shape it
             // always has.
             inject_task: if *no_inject { Some(false) } else { None },
+            // `--deliverable <id>` (DOC-35 §10.6, #2379): omitted entirely when
+            // absent, same additive wire pattern as `inject_task` above.
+            deliverable_id: deliverable.clone(),
         },
         SessionAction::Ls { .. } => TrustyCommand::ManagedList,
         SessionAction::Send { id, text } => TrustyCommand::ManagedSend {
@@ -243,6 +247,7 @@ mod tests {
             name_hint: Some("api".to_string()),
             runtime: trusty_mpm::runtime::RuntimeKind::ClaudeCode,
             no_inject: false,
+            deliverable: None,
         };
         match to_command(&action) {
             Some(TrustyCommand::ManagedNew {
@@ -252,6 +257,7 @@ mod tests {
                 name_hint,
                 runtime,
                 inject_task,
+                deliverable_id,
             }) => {
                 assert_eq!(repo_url, "https://example/r.git");
                 assert_eq!(git_ref, "main");
@@ -261,6 +267,8 @@ mod tests {
                 // Default (no `--no-inject`) → field omitted so the daemon's
                 // turnkey default (inject) applies.
                 assert_eq!(inject_task, None);
+                // Default (no `--deliverable`) → no link (#2379).
+                assert_eq!(deliverable_id, None);
             }
             other => panic!("expected ManagedNew, got {other:?}"),
         }
@@ -276,10 +284,34 @@ mod tests {
             name_hint: None,
             runtime: trusty_mpm::runtime::RuntimeKind::ClaudeCode,
             no_inject: true,
+            deliverable: None,
         };
         match to_command(&action) {
             Some(TrustyCommand::ManagedNew { inject_task, .. }) => {
                 assert_eq!(inject_task, Some(false));
+            }
+            other => panic!("expected ManagedNew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_command_new_deliverable_maps_to_deliverable_id() {
+        // `--deliverable <id>` maps to `deliverable_id: Some(<id>)` (#2379).
+        let action = SessionAction::New {
+            repo: "https://example/r.git".to_string(),
+            git_ref: "main".to_string(),
+            task: "do it".to_string(),
+            name_hint: None,
+            runtime: trusty_mpm::runtime::RuntimeKind::ClaudeCode,
+            no_inject: false,
+            deliverable: Some("11111111-1111-1111-1111-111111111111".to_string()),
+        };
+        match to_command(&action) {
+            Some(TrustyCommand::ManagedNew { deliverable_id, .. }) => {
+                assert_eq!(
+                    deliverable_id,
+                    Some("11111111-1111-1111-1111-111111111111".to_string())
+                );
             }
             other => panic!("expected ManagedNew, got {other:?}"),
         }

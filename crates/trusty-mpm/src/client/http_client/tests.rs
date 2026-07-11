@@ -405,12 +405,17 @@ fn managed_spawn_request_serializes() {
         name_hint: Some("tmpm-custom".to_string()),
         runtime: Some("tcode".to_string()),
         inject_task: None,
+        deliverable_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
     };
     let v = serde_json::to_value(&req).unwrap();
     assert_eq!(v["ref"], "main");
     assert_eq!(v["repo_url"], "https://example.com/r.git");
     assert_eq!(v["name_hint"], "tmpm-custom");
     assert_eq!(v["runtime"], "tcode");
+    assert_eq!(
+        v["deliverable_id"], "11111111-1111-1111-1111-111111111111",
+        "Some(deliverable_id) must serialize as its string value"
+    );
     assert!(v.get("git_ref").is_none(), "must use wire key `ref`");
 
     let bare = ManagedSpawnRequest {
@@ -420,6 +425,7 @@ fn managed_spawn_request_serializes() {
         name_hint: None,
         runtime: None,
         inject_task: None,
+        deliverable_id: None,
     };
     let v = serde_json::to_value(&bare).unwrap();
     assert!(v.get("name_hint").is_none(), "None name_hint is omitted");
@@ -427,6 +433,10 @@ fn managed_spawn_request_serializes() {
     assert!(
         v.get("inject_task").is_none(),
         "None inject_task is omitted"
+    );
+    assert!(
+        v.get("deliverable_id").is_none(),
+        "None deliverable_id is omitted (#2379, same additive pattern as inject_task)"
     );
 }
 

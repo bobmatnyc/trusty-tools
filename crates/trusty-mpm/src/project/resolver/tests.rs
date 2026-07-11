@@ -66,6 +66,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         claude_session_id: None,
         scrollback_path: None,
         last_cwd: None,
+        deliverable_id: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn session_no_repo() -> SessionRecord {
         claude_session_id: None,
         scrollback_path: None,
         last_cwd: None,
+        deliverable_id: None,
     }
 }
 
@@ -379,6 +381,28 @@ fn resolver_session_project_binding() {
     let session = session_with_repo("https://github.com/org/trusty-tools");
     let bound = resolve_session_project(&session, &projects).expect("should bind");
     assert_eq!(bound.name, "trusty-tools");
+}
+
+#[test]
+fn resolver_by_repo_url_matches() {
+    // #2379: the pre-spawn Deliverable-linkage validation path binds a bare
+    // `repo_url` (no `SessionRecord` exists yet) the same way a live session
+    // would via `resolve_session_project`.
+    let projects = vec![
+        proj("trusty-tools", "https://github.com/org/trusty-tools"),
+        proj("other", "https://github.com/org/other"),
+    ];
+    let bound = resolve_project_by_repo_url("https://github.com/org/trusty-tools", &projects)
+        .expect("should match");
+    assert_eq!(bound.name, "trusty-tools");
+}
+
+#[test]
+fn resolver_by_repo_url_no_match() {
+    let projects = vec![proj("trusty-tools", "https://github.com/org/trusty-tools")];
+    assert!(
+        resolve_project_by_repo_url("https://github.com/org/unregistered", &projects).is_none()
+    );
 }
 
 #[test]

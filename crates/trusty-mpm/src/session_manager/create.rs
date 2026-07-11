@@ -223,6 +223,7 @@ impl SessionManager {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

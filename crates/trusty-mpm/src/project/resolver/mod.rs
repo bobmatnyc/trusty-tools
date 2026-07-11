@@ -338,16 +338,39 @@ pub fn resolve_project(
     })
 }
 
+/// Find the registered project whose `repo_url` matches `repo_url` exactly
+/// (case-insensitive, `.git`-suffix-normalised).
+///
+/// Why: both a live session ([`resolve_session_project`]) and a pre-spawn
+/// request that only carries a bare `repo_url` (the Deliverable-linkage
+/// validation in `daemon::managed_routes::spawn_session`, DOC-35 §10.6,
+/// #2379) need to bind a repo URL to its registry-B project name; extracting
+/// the shared match rule keeps the normalisation logic in exactly one place
+/// rather than duplicating it at the new call site.
+/// What: normalises both sides and returns the first exact match. Per #1532
+/// item 5, when the same `repo_url` is registered under multiple project
+/// names the first match in `projects` order wins.
+/// Test: `resolver_by_repo_url_matches`, `resolver_by_repo_url_no_match`
+/// (`resolve_session_project`'s own tests exercise this transitively).
+pub fn resolve_project_by_repo_url<'a>(
+    repo_url: &str,
+    projects: &'a [Project],
+) -> Option<&'a Project> {
+    let repo_lower = repo_url.to_lowercase();
+    let repo_norm = normalise_url(&repo_lower);
+    projects.iter().find(|p| {
+        let proj_lower = p.repo_url.to_lowercase();
+        normalise_url(&proj_lower) == repo_norm
+    })
+}
+
 /// Bind a live session to its registered project by `repo_url`.
 ///
 /// Why: `SessionRecord` carries `repo_url` but not a project name reference;
 /// this function performs the lookup so fleet grouping and focused-session
 /// routing do not need to replicate the matching logic.
-/// What: returns the first project whose `repo_url` (case-insensitive) equals
-/// the session's `repo_url`. Per #1532 item 5, when the same `repo_url` is
-/// registered under multiple project names the first match in `projects` order
-/// is returned — callers that need determinism should ensure `repo_url`
-/// uniqueness in the registry.
+/// What: delegates to [`resolve_project_by_repo_url`] once the session's
+/// `repo_url` is confirmed present.
 /// Test: `resolver_session_project_binding`, `resolver_session_no_repo`,
 /// `resolver_session_url_tie_break`.
 pub fn resolve_session_project<'a>(
@@ -355,14 +378,7 @@ pub fn resolve_session_project<'a>(
     projects: &'a [Project],
 ) -> Option<&'a Project> {
     let session_url = session.repo_url.as_ref()?;
-    let session_url_lower = session_url.to_lowercase();
-    // Normalise by stripping a trailing ".git" for comparison.
-    let session_norm = normalise_url(&session_url_lower);
-    projects.iter().find(|p| {
-        let proj_lower = p.repo_url.to_lowercase();
-        let proj_norm = normalise_url(&proj_lower);
-        proj_norm == session_norm
-    })
+    resolve_project_by_repo_url(session_url, projects)
 }
 
 /// Group a slice of session records by their bound project.

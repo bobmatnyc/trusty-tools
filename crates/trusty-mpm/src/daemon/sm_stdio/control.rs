@@ -142,6 +142,9 @@ impl SessionControl for DaemonSessionControl {
             mcp_initiated: false,
             // Turnkey by default (#1903/#1299): the SM driver launches to work.
             inject_task: None,
+            // The SM-STDIO adapter does not expose Deliverable linkage
+            // (#2379's CLI surface is `tm sessions new --deliverable`, HTTP-only).
+            deliverable_id: None,
         };
         let record = spawn_managed(&self.state, spawn)
             .await

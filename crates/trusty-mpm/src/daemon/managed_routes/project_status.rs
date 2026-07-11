@@ -273,6 +273,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         }
     }
 

@@ -19,6 +19,7 @@ pub mod manager;
 pub mod naming;
 pub mod prune;
 pub mod reactivate;
+mod reconcile;
 pub mod record;
 pub mod restart_ops;
 mod resume_workdir;
@@ -61,6 +62,9 @@ mod resume_reattach_tests;
 
 #[cfg(test)]
 mod set_source_id_tests;
+
+#[cfg(test)]
+mod set_deliverable_id_tests;
 
 #[cfg(test)]
 mod dedup_tests;
