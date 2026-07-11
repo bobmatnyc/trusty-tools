@@ -109,6 +109,22 @@ pub use origin_guard::origin_allowed;
 pub mod rpc;
 pub use rpc::rpc_handler;
 
+/// The Deliverable/Milestone CRUD routes (`/api/v1/projects/{name}/deliverables`
+/// and `.../milestones`, DOC-35 §10.2/§10.5; #2378 + #2380).
+///
+/// Why: the Deliverable/Milestone ledger is exposed over the same HTTP surface
+/// as every other subsystem so any consumer (CLI #2381, TUI #2383, `tm manager`
+/// #2109) reads and mutates it deterministically. Keeping the handlers in a
+/// sibling module mirrors `coordinator_routes` and keeps `api.rs` focused on
+/// routing. The §10.3 status state machine is enforced inside these handlers
+/// (#2380). The handlers are re-exported so `router` refers to them unqualified.
+/// Test: `deliverable_routes::tests`.
+pub mod deliverable_routes;
+pub use deliverable_routes::{
+    create_deliverable, create_milestone, get_deliverable, get_milestone, list_deliverables,
+    list_milestones, patch_deliverable, patch_milestone,
+};
+
 /// The managed session-manager routes (`/api/v1/sessions/managed/*`).
 ///
 /// Why: the managed-session API is a cohesive cluster (spawn, list, get,
@@ -314,6 +330,28 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/proxy/summary/{conversation_key}",
             get(proxy_summary),
+        )
+        // DOC-35 §10.2/§10.5 (#2378 + #2380): Deliverable/Milestone CRUD, nested
+        // under the projects namespace. The literal `/deliverables` and
+        // `/milestones` segments come before their `/{id}` param routes so a
+        // collection request is never captured as an id (mirroring the managed-
+        // session `/adopt` ordering above). PATCH on `/{id}` is the `set-status`
+        // seam that enforces the §10.3 state machine.
+        .route(
+            "/api/v1/projects/{name}/deliverables",
+            get(list_deliverables).post(create_deliverable),
+        )
+        .route(
+            "/api/v1/projects/{name}/deliverables/{id}",
+            get(get_deliverable).patch(patch_deliverable),
+        )
+        .route(
+            "/api/v1/projects/{name}/milestones",
+            get(list_milestones).post(create_milestone),
+        )
+        .route(
+            "/api/v1/projects/{name}/milestones/{id}",
+            get(get_milestone).patch(patch_milestone),
         )
         // #1221: loopback-only JSON-RPC dispatch for the `serve --stdio` bridge.
         // The handler independently enforces the loopback gate via ConnectInfo.

@@ -233,6 +233,20 @@ pub struct DaemonState {
     pub(super) project_registry:
         tokio::sync::OnceCell<std::sync::Arc<crate::project::ProjectRegistry>>,
 
+    /// Lazily-initialized Deliverable/Milestone manager (§10.7, #2378).
+    ///
+    /// Why: [`crate::deliverable::DeliverableManager::load`] is async (it reads
+    /// the two on-disk stores) and cannot run inside the synchronous
+    /// `DaemonState` constructors. A `OnceCell` defers construction to the first
+    /// deliverables/milestones request and caches the shared handle — the same
+    /// pattern as `project_registry` and `managed_sessions`.
+    /// What: holds `None` until [`Self::deliverable_manager`] first runs, then the
+    /// shared `Arc<DeliverableManager>` fronting the central `deliverables.json` /
+    /// `milestones.json` stores.
+    /// Test: the deliverable route tests exercise the accessor via the router.
+    pub(super) deliverable_manager:
+        tokio::sync::OnceCell<std::sync::Arc<crate::deliverable::DeliverableManager>>,
+
     /// SESSCTL control-plane session registry (WI-2, #1593).
     ///
     /// Why: every HTTP handler and CLI command for the SESSCTL surface needs a
@@ -342,6 +356,7 @@ impl DaemonState {
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
+            deliverable_manager: tokio::sync::OnceCell::new(),
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
@@ -400,6 +415,7 @@ impl DaemonState {
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
+            deliverable_manager: tokio::sync::OnceCell::new(),
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
@@ -729,6 +745,47 @@ impl DaemonState {
                     registry.auto_register_from_sessions(&records).await;
                 }
                 std::sync::Arc::new(registry)
+            })
+            .await
+            .clone()
+    }
+
+    /// Return the shared Deliverable/Milestone manager, building it on first
+    /// access (§10.7, #2378).
+    ///
+    /// Why: the Deliverable/Milestone CRUD handlers need one shared manager
+    /// backed by the central `deliverables.json` / `milestones.json` stores.
+    /// Because [`DeliverableManager::load`](crate::deliverable::DeliverableManager::load)
+    /// is async, it is built on first access and cached in a `OnceCell` so every
+    /// subsequent request reuses the same handle — identical to
+    /// [`Self::session_manager`] and [`Self::project_registry`].
+    /// What: on first call loads the two central stores directly under
+    /// `framework_root` (siblings to the registry, §10.7 / §13 Q5); falls back to
+    /// a temp dir if load fails so a transient I/O error never poisons the
+    /// `OnceCell` permanently.
+    /// Test: the deliverable route tests drive this via the router.
+    pub async fn deliverable_manager(
+        &self,
+    ) -> std::sync::Arc<crate::deliverable::DeliverableManager> {
+        self.deliverable_manager
+            .get_or_init(|| async {
+                let data_dir = self.framework_root.clone();
+                match crate::deliverable::DeliverableManager::load(&data_dir).await {
+                    Ok(mgr) => std::sync::Arc::new(mgr),
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to load deliverable stores at {}: {e}; using temp dir",
+                            data_dir.display()
+                        );
+                        let tmp = std::env::temp_dir().join("trusty-mpm-deliverables");
+                        let _ = std::fs::create_dir_all(&tmp);
+                        std::sync::Arc::new(
+                            crate::deliverable::DeliverableManager::load(&tmp)
+                                .await
+                                .expect("temp-dir deliverable stores must load"),
+                        )
+                    }
+                }
             })
             .await
             .clone()
