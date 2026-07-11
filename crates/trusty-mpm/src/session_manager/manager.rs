@@ -518,15 +518,32 @@ impl SessionManager {
             ));
         }
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
-        // #2453 review finding 1 (round 2): refresh `pane_id` — the pane
-        // survives this transition (never killed/recreated), so its id is not
-        // expected to change, but re-resolving it here heals legacy records
-        // that never had one captured at spawn time (created before this
-        // field existed). Only overwrite on a successful resolve — a
-        // transient tmux hiccup must not regress a previously-known-good id
-        // back to `None`.
-        if let Some(pane_id) = self.tmux.get_pane_id(&record.tmux_name) {
-            record.pane_id = Some(pane_id);
+        // #2453 review finding 1 (round 3 — round 2's re-derive-on-every-call
+        // approach was proven UNSOUND): `get_pane_id` shells out to `tmux
+        // display-message -t <SESSION_NAME> -p '#{pane_id}'`, which is
+        // SESSION-scoped — tmux resolves it to the session's CURRENTLY
+        // ACTIVE window's pane, not necessarily the pane this reconcile is
+        // about. Verified against a live tmux 3.6b: `display-message -t
+        // testsess` reads `%0` with one window, then reads `%1` after `tmux
+        // new-window -t testsess` (which auto-activates the new window) —
+        // the SAME session-scoped query now resolves to a DIFFERENT pane.
+        // Since this function runs on every runtime-exit reconcile (the
+        // periodic reaper, the #2455 SessionEnd hook, and the #2453
+        // reconcile-then-reactivate route), a sibling window merely being
+        // tmux-active at reconcile time would silently OVERWRITE a
+        // known-good `pane_id` with the active sibling's — reopening the
+        // cross-pane hijack via a new vector AND breaking the legitimate
+        // relaunch for the pane that actually exited. Backfill-only-when-
+        // `None` (chosen over re-verifying the stored pane_id via a
+        // pane-scoped `display-message -t <pane_id>` query, #2456 review's
+        // alternative option) is simpler and sufficient: it still heals a
+        // legacy record that never had a `pane_id` captured (created before
+        // this field existed, where session-scoped ambiguity does not yet
+        // matter — no earlier capture exists to protect), but a
+        // known-good id, once captured at spawn/adopt time, is NEVER
+        // re-derived here again.
+        if record.pane_id.is_none() {
+            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
         }
         record.state = ManagedSessionState::Stopped;
         guard.upsert(record.clone()).await?;
