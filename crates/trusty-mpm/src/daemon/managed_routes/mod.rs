@@ -47,8 +47,8 @@ pub use lifecycle::{
     spawn_runtime_for, write_task_md,
 };
 pub use project_status::{
-    ProjectConfigFlags, ProjectStatusResponse, SessionStateCounts, aggregate_project_status,
-    project_status_route,
+    DeliverableStatusCounts, MilestoneStatusCounts, ProjectConfigFlags, ProjectStatusResponse,
+    SessionStateCounts, aggregate_project_status, project_status_route,
 };
 pub use proxy::{
     DirectManagedBackend, ProxyFocusRequest, ProxyFocusResponse, ProxyMessageRequest,
