@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use super::{KeyStore, KeyStoreError};
 
 /// In-memory credential store. See module docs.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemoryKeyStore {
     inner: Mutex<HashMap<String, String>>,
 }
@@ -23,6 +23,30 @@ impl MemoryKeyStore {
     /// New, empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+/// Hand-written redacting `Debug` — provider names only, never values.
+///
+/// Why: a derived `Debug` would print the raw credential values (QA finding
+/// on PR #2427), and this type is public AND the production fallback when
+/// `$HOME` is unresolvable, so a stray `{:?}` in a log line would leak every
+/// stored key. Hand-writing it keeps the type debuggable (names + count)
+/// while making value leakage structurally impossible.
+/// What: renders as `MemoryKeyStore { providers: [..names..] }`.
+/// Test: `debug_output_never_contains_values`.
+impl std::fmt::Debug for MemoryKeyStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<String> = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        f.debug_struct("MemoryKeyStore")
+            .field("providers", &names)
+            .finish()
     }
 }
 
@@ -105,5 +129,24 @@ mod tests {
         );
         assert!(!names.contains(&"sk-ant-secret".to_string()));
         assert!(!names.contains(&"or-secret".to_string()));
+    }
+
+    /// Why: QA regression (PR #2427) — the previous derived `Debug` printed
+    /// raw credential values; `{:?}` after a `set` must never contain the
+    /// plaintext value (provider names are fine).
+    /// Test: itself.
+    #[test]
+    fn debug_output_never_contains_values() {
+        let store = MemoryKeyStore::new();
+        store.set("fireworks", "fw-super-secret-value").unwrap();
+        let dbg = format!("{store:?}");
+        assert!(
+            !dbg.contains("fw-super-secret-value"),
+            "Debug output leaked a credential value: {dbg}"
+        );
+        assert!(
+            dbg.contains("fireworks"),
+            "names should remain visible: {dbg}"
+        );
     }
 }

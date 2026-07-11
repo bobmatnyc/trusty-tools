@@ -35,13 +35,21 @@ const CREDENTIALS_FILE: &str = "credentials.toml";
 /// Why: a nested table (vs. a flat top-level table) leaves room for future
 /// non-key metadata (e.g. a schema-version stamp) without a breaking format
 /// change; documented here per the ticket's "pick simple, document" note.
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// Deliberately does NOT derive `Debug` (QA finding on PR #2427): the struct
+/// holds plaintext credential values and a derived `Debug` would print them.
+#[derive(Default, Serialize, Deserialize)]
 struct CredentialsFile {
     #[serde(default)]
     keys: BTreeMap<String, String>,
 }
 
 /// File-backed credential store. See module docs.
+///
+/// Deriving `Debug` is safe here (unlike `MemoryKeyStore`): the struct holds
+/// only the target path and a `Mutex<()>` — credential values never live in
+/// memory beyond a single call. Pinned by
+/// `tests::debug_output_never_contains_values`.
+#[derive(Debug)]
 pub struct FileKeyStore {
     path: PathBuf,
     // Serialises read-modify-write cycles within this process; the atomic
@@ -78,7 +86,7 @@ impl FileKeyStore {
         match std::fs::read_to_string(&self.path) {
             Ok(raw) => toml::from_str(&raw).map_err(|e| KeyStoreError::Toml {
                 path: self.path.clone(),
-                message: e.to_string(),
+                message: sanitize_toml_error(&e),
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CredentialsFile::default()),
             Err(e) => Err(KeyStoreError::Io {
@@ -100,11 +108,7 @@ impl FileKeyStore {
             message: e.to_string(),
         })?;
         let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &toml_str).map_err(|e| KeyStoreError::Io {
-            path: tmp.clone(),
-            source: e,
-        })?;
-        set_permissions_0600(&tmp)?;
+        write_owner_only(&tmp, &toml_str)?;
         std::fs::rename(&tmp, &self.path).map_err(|e| KeyStoreError::Io {
             path: self.path.clone(),
             source: e,
@@ -117,14 +121,90 @@ impl FileKeyStore {
     }
 }
 
+/// Strip file content from a TOML parse error, keeping only the error kind
+/// and byte-offset location.
+///
+/// Why (QA finding on PR #2427): `toml::de::Error`'s `Display` embeds an
+/// annotated snippet of the offending source line — for `credentials.toml`
+/// that line can BE a secret (e.g. a truncated `fireworks = "sk-…` from an
+/// interrupted write). The sanitized message keeps everything a human needs
+/// to diagnose the file (what went wrong, where) without ever echoing the
+/// content into an error that callers will log.
+/// What: `e.message()` (the kind string, no snippet) plus the byte span when
+/// available.
+/// Test: `tests::toml_error_never_contains_file_content`.
+fn sanitize_toml_error(e: &toml::de::Error) -> String {
+    match e.span() {
+        Some(span) => format!(
+            "{} (at byte offset {}..{})",
+            e.message(),
+            span.start,
+            span.end
+        ),
+        None => e.message().to_string(),
+    }
+}
+
+/// Write `content` to `path` such that the file is owner-read-write-only
+/// (`0600`) from the moment it exists.
+///
+/// Why (QA finding on PR #2427): the previous `fs::write` → `set_permissions`
+/// sequence left (a) a window where the file existed world-readable under the
+/// default umask and (b) — if the process died between the two calls — a
+/// *persistent* `0644` tmp file containing every key. Creating the file with
+/// `mode(0o600)` closes both. `set_permissions` is still called afterwards to
+/// handle a pre-existing tmp file (e.g. leftover from a crash before this fix
+/// shipped), since `mode()` applies only at creation.
+/// What: unix builds open with `OpenOptions::mode(0o600)`; non-unix builds
+/// fall back to `fs::write` (best-effort, no POSIX-mode equivalent — see
+/// module docs).
+/// Test: `tests::tmp_write_path_is_0600_from_birth`,
+/// `tests::preexisting_loose_tmp_file_is_tightened`.
+#[cfg(unix)]
+fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let io_err = |e: std::io::Error| KeyStoreError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(io_err)?;
+    // `mode()` only applies when the file is CREATED; a pre-existing loose
+    // tmp file (crash leftover) keeps its old mode, so tighten explicitly.
+    std::fs::set_permissions(path, {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::Permissions::from_mode(0o600)
+    })
+    .map_err(io_err)?;
+    file.write_all(content.as_bytes()).map_err(io_err)
+}
+
+/// Non-unix best-effort variant — see [`write_owner_only`] docs.
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, content: &str) -> Result<(), KeyStoreError> {
+    std::fs::write(path, content).map_err(|e| KeyStoreError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
 /// Set `path`'s permissions to owner-read-write-only (`0600`).
 ///
 /// Why: `credentials.toml` holds plaintext API keys; group/world-readable
-/// permissions would leak them to any other local user.
+/// permissions would leak them to any other local user. Used to re-assert
+/// `0600` on the final path after the rename (some platforms/filesystems
+/// don't preserve permissions across rename; an out-of-band writer could
+/// have loosened them).
 /// What: unix-only via `std::os::unix::fs::PermissionsExt`; on non-unix
 /// targets this is a documented best-effort no-op (see module docs — no
 /// portable POSIX-mode equivalent exists on Windows).
-/// Test: `file_store_tests::file_is_created_with_0600_perms` (unix only).
+/// Test: `tests::file_is_created_with_0600_perms` (unix only).
 #[cfg(unix)]
 fn set_permissions_0600(path: &Path) -> Result<(), KeyStoreError> {
     use std::os::unix::fs::PermissionsExt;
@@ -255,5 +335,84 @@ mod tests {
         let store = FileKeyStore::at(tmp.path());
         assert_eq!(store.list(), Vec::<String>::new());
         assert_eq!(store.get("anything"), None);
+    }
+
+    /// Why: QA regression (PR #2427) — `{:?}` after a `set` must never
+    /// contain the plaintext value. `FileKeyStore` holds no values in
+    /// memory, so its derived `Debug` is safe; this pins that property
+    /// against a future field addition.
+    /// Test: itself.
+    #[test]
+    fn debug_output_never_contains_values() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileKeyStore::at(tmp.path());
+        store.set("fireworks", "fw-super-secret-value").unwrap();
+        let dbg = format!("{store:?}");
+        assert!(
+            !dbg.contains("fw-super-secret-value"),
+            "Debug output leaked a credential value: {dbg}"
+        );
+    }
+
+    /// Why: QA regression (PR #2427) — a malformed `credentials.toml` (e.g.
+    /// truncated mid-value by an interrupted write) must not echo the file's
+    /// content — which includes secrets — into the error message that
+    /// callers will log.
+    /// Test: itself.
+    #[test]
+    fn toml_error_never_contains_file_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileKeyStore::at(tmp.path());
+        let dir = tmp.path().join(".trusty-tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A truncated write: unterminated string carrying the secret.
+        std::fs::write(
+            dir.join("credentials.toml"),
+            "[keys]\nfireworks = \"fw-truncated-secret",
+        )
+        .unwrap();
+        // `get` swallows read errors into None by contract…
+        assert_eq!(store.get("fireworks"), None);
+        // …but `set` surfaces the parse failure; its message must be
+        // sanitized (kind + offset only, no source snippet).
+        let err = store.set("openai", "sk-new").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("fw-truncated-secret"),
+            "TOML error leaked file content: {msg}"
+        );
+        assert!(matches!(err, KeyStoreError::Toml { .. }), "got {msg}");
+    }
+
+    /// Why: QA regression (PR #2427) — the tmp file must be `0600` from the
+    /// moment it exists (no `fs::write`-then-chmod read window, no
+    /// persistent loose tmp file if the process dies mid-write).
+    /// Test: itself (unix only).
+    #[cfg(unix)]
+    #[test]
+    fn tmp_write_path_is_0600_from_birth() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("fresh.toml");
+        write_owner_only(&target, "[keys]\n").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600 at creation, got {mode:o}");
+    }
+
+    /// Why: `OpenOptions::mode` applies only at creation — a loose tmp file
+    /// left over from a crash before this fix must still be tightened when
+    /// reused.
+    /// Test: itself (unix only).
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_loose_tmp_file_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("stale.toml");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_owner_only(&target, "[keys]\n").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected tightened 0600, got {mode:o}");
     }
 }

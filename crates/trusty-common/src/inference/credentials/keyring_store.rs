@@ -29,28 +29,40 @@ const SERVICE: &str = "trusty-tools";
 /// provider, so it can never collide with a stored credential.
 const PROBE_ACCOUNT: &str = "__trusty_probe__";
 
+/// Process-wide probe cache (QA fix, PR #2427).
+///
+/// Why: the cache was originally a per-instance field, but
+/// [`super::resolver::default_store`] constructs a fresh `KeyringStore` per
+/// call, so every `resolve_key` re-probed the OS keychain — needless cost
+/// and, worse, two calls could observe different availability (breaking the
+/// write-then-read consistency #2404's `config` verbs need). A `static`
+/// makes the probe truly once-per-process, matching the documented
+/// semantics.
+static PROBE_RESULT: OnceLock<bool> = OnceLock::new();
+
 /// OS-keychain credential store. See module docs.
-pub struct KeyringStore {
-    available: OnceLock<bool>,
-}
+///
+/// Deriving `Debug` is safe: the struct is stateless (the probe cache is a
+/// module `static`) and credential values never live in memory beyond a
+/// single call. Pinned by `tests::debug_output_never_contains_values`.
+#[derive(Debug)]
+pub struct KeyringStore;
 
 impl KeyringStore {
     /// New store. The probe does not run until first use (`get`/`set`/
-    /// `unset`/`list`/[`probe_available`](Self::probe_available)).
+    /// `unset`/[`probe_available`](Self::probe_available)).
     pub fn new() -> Self {
-        Self {
-            available: OnceLock::new(),
-        }
+        Self
     }
 
     /// Whether the keychain backend answered the probe successfully. Cached
-    /// after the first call for the lifetime of this store.
+    /// process-wide after the first call (see [`PROBE_RESULT`]).
     ///
     /// Why: exposed so [`super::resolver::default_store`] can decide whether
     /// to hand out this backend or fall back to `FileKeyStore` without
     /// duplicating the probe logic.
     pub fn probe_available(&self) -> bool {
-        *self.available.get_or_init(Self::probe)
+        *PROBE_RESULT.get_or_init(Self::probe)
     }
 
     /// Why: see module docs — any backend error other than "no such entry"
@@ -135,15 +147,15 @@ mod tests {
         let _ = store.probe_available();
     }
 
-    /// Why: probe result must be cached — a second call must not re-invoke
-    /// the backend (observable via `OnceLock` returning the same value both
-    /// times without panicking, whatever the environment's answer is).
+    /// Why: probe result must be cached process-wide — a second call (even
+    /// on a DIFFERENT instance, matching `default_store`'s
+    /// fresh-instance-per-call pattern) must observe the same answer without
+    /// re-invoking the backend.
     /// Test: itself.
     #[test]
-    fn probe_is_cached() {
-        let store = KeyringStore::new();
-        let first = store.probe_available();
-        let second = store.probe_available();
+    fn probe_is_cached_across_instances() {
+        let first = KeyringStore::new().probe_available();
+        let second = KeyringStore::new().probe_available();
         assert_eq!(first, second);
     }
 
@@ -154,5 +166,17 @@ mod tests {
     fn list_is_always_empty() {
         let store = KeyringStore::new();
         assert_eq!(store.list(), Vec::<String>::new());
+    }
+
+    /// Why: QA regression (PR #2427) — `{:?}` of every store type must
+    /// never contain a credential value. `KeyringStore` is stateless, so
+    /// this pins that the type stays value-free (no `set` here: writing to
+    /// a real keychain is forbidden in tests; statelessness makes the
+    /// property structural).
+    /// Test: itself.
+    #[test]
+    fn debug_output_never_contains_values() {
+        let dbg = format!("{:?}", KeyringStore::new());
+        assert_eq!(dbg, "KeyringStore");
     }
 }

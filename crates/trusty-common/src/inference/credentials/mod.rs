@@ -67,7 +67,9 @@ pub enum KeyStoreError {
     Toml {
         /// The path being parsed/serialised when the error occurred.
         path: PathBuf,
-        /// The `toml` crate's error message.
+        /// Sanitized error description: kind + byte offset only. Never
+        /// contains file content — the offending line of a credentials
+        /// file IS a secret (see `file_store::sanitize_toml_error`).
         message: String,
     },
 
