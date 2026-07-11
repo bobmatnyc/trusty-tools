@@ -176,6 +176,8 @@ impl From<TelegramCommand> for TrustyCommand {
                     inject_task: None,
                     // Telegram `/launch` has no `--deliverable` surface (#2379).
                     deliverable_id: None,
+                    // #2450: the Telegram `/launch` surface keeps the #1707 reconnect default.
+                    force_new: false,
                 }
             }
             TelegramCommand::Fleet => TrustyCommand::ManagedFleet,
@@ -429,6 +431,7 @@ mod tests {
                 runtime: None,
                 inject_task: None,
                 deliverable_id: None,
+                force_new: false,
             }
         );
     }

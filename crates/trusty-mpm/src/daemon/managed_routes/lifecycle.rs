@@ -93,6 +93,19 @@ pub struct SpawnParams {
     /// malformed or absent id is silently a no-op link (`None`) — never a
     /// reason to fail an otherwise-successful spawn.
     pub deliverable_id: Option<String>,
+    /// Whether to FORCE a brand-new session even when a live in-project session
+    /// for the same project already exists (#2450).
+    ///
+    /// Why: the #1707 in-project reconnect pre-flight silently ADOPTS an
+    /// existing live session for the same `source_id` (returning it instead of
+    /// spawning). A surface that explicitly means "launch a NEW session" — the
+    /// `tm` picker's "[N] launch new session" choice, `tm session new`/`session
+    /// start` — would otherwise have its `--task` injected into an unrelated
+    /// live session. `true` SKIPS the reconnect pre-flight (always spawns
+    /// fresh); `false` (the default, so programmatic/idempotent callers — MCP
+    /// `session_new`, the SM-STDIO adapter, the chat surfaces — keep
+    /// reconnecting) preserves #1707.
+    pub force_new: bool,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -301,6 +314,34 @@ async fn spawn_managed_routed(
         let local_path = std::path::Path::new(&params.repo_url);
         match try_inproject_spawn(local_path) {
             Ok(Some((base, owner, repo))) => {
+                // Reconnect pre-flight (#1707), HOISTED AHEAD of worktree
+                // reservation (#2450): the reconnect used to live inside
+                // `spawn_managed_inproject`, which meant `reserve_inproject_worktree`
+                // had already created (then left for pruning) a fresh
+                // `.worktrees/<name>` slice before the reconnect returned the
+                // existing session — worktree litter, including a locked orphan.
+                // Running the check here, before any worktree is reserved, means
+                // a reconnect creates ZERO worktrees. Gated by `force_new` so an
+                // explicit "launch new" surface always spawns fresh instead of
+                // adopting an unrelated live session for the same project.
+                {
+                    let mgr = state.session_manager().await;
+                    let existing = mgr.list().await;
+                    let source_id = format!("{owner}/{repo}");
+                    if let Some(live) = reconnect_candidate(
+                        params.force_new,
+                        &existing,
+                        &source_id,
+                        &*mgr.tmux_driver(),
+                    ) {
+                        info!(
+                            id = %live.id,
+                            source_id = %source_id,
+                            "spawn_managed (inproject): reconnecting to existing live session"
+                        );
+                        return Ok(live);
+                    }
+                }
                 match reserve_inproject_worktree(
                     state,
                     &session_id,
@@ -688,6 +729,34 @@ fn find_reusable_inproject_session(
         .cloned()
 }
 
+/// Decide whether an in-project spawn should RECONNECT to an existing live
+/// session rather than provision a fresh worktree (#1707 + `force_new` opt-out).
+///
+/// Why (issue #2450): the reconnect decision is exactly what the `force_new`
+/// opt-out gates — an explicit "launch new" surface (the `tm` picker's "launch
+/// new session" choice) must be able to bypass it, otherwise its task is
+/// injected into an unrelated live session for the same project. Keeping the
+/// decision a pure function (the `force_new` short-circuit composed with
+/// [`find_reusable_inproject_session`]) makes BOTH branches — skip-when-forced
+/// AND still-reconnect-when-not-forced — unit-testable without a live
+/// `DaemonState`, tmux, or git worktree.
+/// What: returns `None` immediately when `force_new` is set (never reconnect);
+/// otherwise delegates to [`find_reusable_inproject_session`] (the unchanged
+/// #1707 predicate).
+/// Test: `reconnect_candidate_none_when_force_new`,
+/// `reconnect_candidate_reconnects_when_not_forced`.
+fn reconnect_candidate(
+    force_new: bool,
+    records: &[SessionRecord],
+    source_id: &str,
+    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
+) -> Option<SessionRecord> {
+    if force_new {
+        return None;
+    }
+    find_reusable_inproject_session(records, source_id, tmux)
+}
+
 /// Spawn a managed session rooted at a per-session git worktree (#1706).
 ///
 /// Why: the in-project spawn path gives every managed session its own isolated
@@ -734,26 +803,12 @@ async fn spawn_managed_inproject(
     use crate::core::provisioning_stage::{ProvisioningStage, emit};
     use crate::session_manager::ManagedSessionState;
 
-    // Pre-flight reconnect check (#1707): if an Active managed session with the
-    // same source_id already exists and its tmux session is still live, return it
-    // directly instead of spawning a duplicate. This is the primary mechanism by
-    // which `tm` (bare or with a path) reconnects to an in-progress session for
-    // the same project without creating a second worktree.
-    let candidate_source_id = format!("{owner}/{repo}");
-    {
-        let mgr = state.session_manager().await;
-        let existing = mgr.list().await;
-        if let Some(live) =
-            find_reusable_inproject_session(&existing, &candidate_source_id, &*mgr.tmux_driver())
-        {
-            info!(
-                id = %live.id,
-                source_id = %candidate_source_id,
-                "spawn_managed (inproject): reconnecting to existing live session"
-            );
-            return Ok(live);
-        }
-    }
+    // NOTE (#2450): the #1707 reconnect pre-flight that used to run here has
+    // been hoisted into `spawn_managed_routed`, AHEAD of the worktree
+    // reservation, so a reconnect no longer creates-then-prunes a worktree and
+    // the `force_new` opt-out can skip it before any side effect. By the time
+    // this function runs, the caller has already decided a fresh session is
+    // wanted and reserved its worktree.
 
     info!(
         id = %session_id,
@@ -1683,6 +1738,54 @@ mod tests {
         );
     }
 
+    /// #2450: `force_new = true` must SKIP the reconnect entirely — even when a
+    /// perfectly reusable Active+live session for the same project exists. This
+    /// is the exact opt-out the picker's "launch new session" choice relies on
+    /// so it can never inject its task into an unrelated live session.
+    #[test]
+    fn reconnect_candidate_none_when_force_new() {
+        let records = vec![stub_record(
+            Some("bobmatnyc/trusty-tools"),
+            ManagedSessionState::Active,
+            "tmpm-trusty-tools-abc123",
+        )];
+        let tmux = StubTmux {
+            alive: vec!["tmpm-trusty-tools-abc123".to_owned()],
+        };
+
+        // Sanity: without force_new this same input DOES reconnect (below).
+        let forced = reconnect_candidate(true, &records, "bobmatnyc/trusty-tools", &tmux);
+
+        assert!(
+            forced.is_none(),
+            "force_new must skip the reconnect even when a live session exists"
+        );
+    }
+
+    /// #2450 companion: `force_new = false` must PRESERVE the #1707 reconnect —
+    /// `reconnect_candidate` delegates to the unchanged predicate, so an
+    /// Active+live session for the same project is still adopted. Guards against
+    /// the opt-out accidentally disabling reconnect for the default path.
+    #[test]
+    fn reconnect_candidate_reconnects_when_not_forced() {
+        let records = vec![stub_record(
+            Some("bobmatnyc/trusty-tools"),
+            ManagedSessionState::Active,
+            "tmpm-trusty-tools-abc123",
+        )];
+        let tmux = StubTmux {
+            alive: vec!["tmpm-trusty-tools-abc123".to_owned()],
+        };
+
+        let found = reconnect_candidate(false, &records, "bobmatnyc/trusty-tools", &tmux);
+
+        assert_eq!(
+            found.map(|r| r.tmux_name),
+            Some("tmpm-trusty-tools-abc123".to_owned()),
+            "without force_new the #1707 reconnect must still adopt a live session"
+        );
+    }
+
     /// #1913 regression guard: [`prepare_inproject_session`] — the call this fix
     /// adds to [`spawn_managed_inproject`] BEFORE `adapter.spawn` — must actually
     /// run the preparation pipeline and land its most visible symptom (the
@@ -1874,6 +1977,7 @@ mod tests {
             mcp_initiated: false,
             inject_task: None,
             deliverable_id: None,
+            force_new: false,
         };
 
         let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();

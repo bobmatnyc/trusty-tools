@@ -145,6 +145,10 @@ impl SessionControl for DaemonSessionControl {
             // The SM-STDIO adapter does not expose Deliverable linkage
             // (#2379's CLI surface is `tm sessions new --deliverable`, HTTP-only).
             deliverable_id: None,
+            // Keep the #1707 reconnect (#2450): the SM-STDIO adapter is a
+            // programmatic driver; an idempotent reconnect for a project that
+            // already has a live session is the safe default here too.
+            force_new: false,
         };
         let record = spawn_managed(&self.state, spawn)
             .await

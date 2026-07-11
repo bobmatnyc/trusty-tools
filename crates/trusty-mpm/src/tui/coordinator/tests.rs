@@ -1314,6 +1314,7 @@ fn route_new_builds_managed_new() {
             runtime: None,
             inject_task: None,
             deliverable_id: None,
+            force_new: false,
         })
     );
 }

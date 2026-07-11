@@ -55,6 +55,7 @@ impl CommandExecutor {
         runtime: Option<String>,
         inject_task: Option<bool>,
         deliverable_id: Option<String>,
+        force_new: bool,
     ) -> CommandResult {
         let req = ManagedSpawnRequest {
             repo_url,
@@ -64,6 +65,7 @@ impl CommandExecutor {
             runtime,
             inject_task,
             deliverable_id,
+            force_new,
         };
         match self.client().spawn_managed_session(&req).await {
             Ok(resp) => CommandResult::ManagedSpawned {

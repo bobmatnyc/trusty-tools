@@ -135,6 +135,7 @@ impl CommandExecutor {
                 runtime,
                 inject_task,
                 deliverable_id,
+                force_new,
             } => {
                 self.managed_new(
                     repo_url,
@@ -144,6 +145,7 @@ impl CommandExecutor {
                     runtime,
                     inject_task,
                     deliverable_id,
+                    force_new,
                 )
                 .await
             }

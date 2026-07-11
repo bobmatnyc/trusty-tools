@@ -213,6 +213,8 @@ impl From<SlackCommand> for TrustyCommand {
                     inject_task: None,
                     // Slack `/launch` has no `--deliverable` surface (#2379).
                     deliverable_id: None,
+                    // #2450: the Slack `/launch` surface keeps the #1707 reconnect default.
+                    force_new: false,
                 }
             }
             SlackCommand::Fleet => TrustyCommand::ManagedList,
@@ -386,6 +388,7 @@ mod tests {
                 runtime: None,
                 inject_task: None,
                 deliverable_id: None,
+                force_new: false,
             }
         );
     }

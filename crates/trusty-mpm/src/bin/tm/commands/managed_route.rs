@@ -74,6 +74,15 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             // `--deliverable <id>` (DOC-35 §10.6, #2379): omitted entirely when
             // absent, same additive wire pattern as `inject_task` above.
             deliverable_id: deliverable.clone(),
+            // #2450: the explicit `new`/`start` verb means "launch a NEW
+            // session" — force it so the daemon's in-project reconnect
+            // pre-flight (#1707) never adopts an existing live session for the
+            // same project (and injects this task into it). `session start`
+            // builds the same New action and is deliberately kept identical
+            // (#1916), so it forces new too; programmatic surfaces (MCP,
+            // SM-STDIO, chat, TUI) keep the reconnect by setting
+            // `force_new: false` at their own construction sites.
+            force_new: true,
         },
         SessionAction::Ls { .. } => TrustyCommand::ManagedList,
         SessionAction::Send { id, text } => TrustyCommand::ManagedSend {
@@ -258,6 +267,7 @@ mod tests {
                 runtime,
                 inject_task,
                 deliverable_id,
+                force_new,
             }) => {
                 assert_eq!(repo_url, "https://example/r.git");
                 assert_eq!(git_ref, "main");
@@ -269,6 +279,9 @@ mod tests {
                 assert_eq!(inject_task, None);
                 // Default (no `--deliverable`) → no link (#2379).
                 assert_eq!(deliverable_id, None);
+                // #2450: the explicit `new` verb forces a fresh session (never
+                // adopts an existing live one for the same project).
+                assert!(force_new, "session new must force a fresh session");
             }
             other => panic!("expected ManagedNew, got {other:?}"),
         }

@@ -471,6 +471,26 @@ pub struct ManagedSpawnRequest {
     /// `inject_task` established in #2361).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deliverable_id: Option<String>,
+    /// Force-new control (#2450): `true` requests a FRESH session even when a
+    /// live in-project session for the same project exists (the explicit `tm
+    /// session new`/`session start` verbs). Omitted from the wire when `false`
+    /// so the daemon's `#[serde(default)]` reconnect default (#1707) applies —
+    /// keeping the request byte-identical to the pre-#2450 shape for every
+    /// non-forcing caller.
+    #[serde(skip_serializing_if = "is_false")]
+    pub force_new: bool,
+}
+
+/// Whether a bool is `false` — the `skip_serializing_if` predicate that omits a
+/// defaulted `force_new` from the spawn request wire (#2450).
+///
+/// Why: `serde`'s `skip_serializing_if` needs a `fn(&T) -> bool`; there is no
+/// built-in for "skip when false" (`std::ops::Not::not` takes `bool` by value,
+/// not `&bool`), so this tiny predicate provides it.
+/// What: returns `!*v`.
+/// Test: exercised by `managed_spawn_request_serializes` (bare case omits it).
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Response body for `POST /api/v1/sessions/managed` (spawn).
