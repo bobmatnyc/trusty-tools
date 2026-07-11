@@ -262,6 +262,33 @@ async fn patch_same_status_is_noop() {
     assert_eq!(updated.status, DeliverableStatus::Proposed);
 }
 
+#[tokio::test]
+async fn patch_deliverable_rejects_blank_name() {
+    // #2395 review MEDIUM: create enforces non-empty trimmed name; PATCH must
+    // apply the same rule rather than allowing a record to end up blank.
+    let (st, _g) = state();
+    let d = create(&st, "p", "x").await;
+    let err = patch_deliverable(
+        State(Arc::clone(&st)),
+        Path(("p".into(), d.id.to_string())),
+        Ok(Json(PatchDeliverable {
+            name: Some("   ".into()),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("blank name on PATCH must be rejected");
+    assert!(matches!(err, DaemonError::InvalidRequest(_)));
+
+    // The rejection must happen before touching the store — the record is
+    // untouched.
+    let Json(unchanged) =
+        get_deliverable(State(Arc::clone(&st)), Path(("p".into(), d.id.to_string())))
+            .await
+            .expect("get ok");
+    assert_eq!(unchanged.name, "x");
+}
+
 // ───────────────────────── Milestones ────────────────────────────────
 
 #[tokio::test]
@@ -307,6 +334,43 @@ async fn milestone_create_get_list_patch() {
     .expect("patch milestone");
     assert_eq!(patched.name, "v1.0");
     assert_eq!(patched.status, MilestoneStatus::Shipped);
+}
+
+#[tokio::test]
+async fn patch_milestone_rejects_blank_name() {
+    // #2395 review MEDIUM: same rule as `patch_deliverable_rejects_blank_name`.
+    let (st, _g) = state();
+    let (_code, Json(m)) = create_milestone(
+        State(Arc::clone(&st)),
+        Path("p".into()),
+        Ok(Json(CreateMilestone {
+            name: "v1".into(),
+            description: String::new(),
+            target_date: Utc::now(),
+            deliverables: vec![],
+            status: MilestoneStatus::Proposed,
+        })),
+    )
+    .await
+    .expect("create milestone");
+
+    let err = patch_milestone(
+        State(Arc::clone(&st)),
+        Path(("p".into(), m.id.to_string())),
+        Ok(Json(PatchMilestone {
+            name: Some("".into()),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect_err("blank name on PATCH must be rejected");
+    assert!(matches!(err, DaemonError::InvalidRequest(_)));
+
+    let Json(unchanged) =
+        get_milestone(State(Arc::clone(&st)), Path(("p".into(), m.id.to_string())))
+            .await
+            .expect("get ok");
+    assert_eq!(unchanged.name, "v1");
 }
 
 #[tokio::test]

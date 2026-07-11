@@ -13,9 +13,19 @@
 //! their request/response DTOs, and small store-error → [`DaemonError`] mappers.
 //! Status-transition validation delegates to
 //! [`crate::deliverable::validate_transition`] (unit-tested exhaustively in
-//! `deliverable::status`), so the enforcement rule has ONE source of truth.
+//! `deliverable::status`), so the enforcement rule has ONE source of truth. Per
+//! the #2395 review HIGH, both PATCH handlers run their entire
+//! fetch→validate→mutate→persist sequence inside ONE closure passed to
+//! [`crate::deliverable::DeliverableManager::update_deliverable_with`] /
+//! [`update_milestone_with`](crate::deliverable::DeliverableManager::update_milestone_with) —
+//! a single write-lock guard held for the whole sequence, so two concurrent
+//! PATCHes can never interleave between a separate fetch-lock and a separate
+//! persist-lock (the two-lock shape this replaced).
 //! Test: `tests` submodule drives every handler in-process, including the full
-//! illegal-transition rejection path.
+//! illegal-transition rejection path and the blank-name-on-PATCH rejection. The
+//! concurrency regression itself is proven at the manager layer —
+//! `deliverable::manager::tests::update_deliverable_with_serializes_concurrent_transitions`
+//! and `..::read_then_upsert_pattern_reproduces_lost_update_pre_fix`.
 
 use std::sync::Arc;
 
@@ -27,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::daemon::error::DaemonError;
 use crate::daemon::state::DaemonState;
+use crate::deliverable::manager::UpdateError;
 use crate::deliverable::{
     Deliverable, DeliverableId, DeliverableKind, DeliverableStatus, EstimationTier, Milestone,
     MilestoneId, MilestoneStatus, StoreError, validate_transition,
@@ -68,6 +79,51 @@ fn milestone_lookup_err(e: StoreError, id: &str) -> DaemonError {
     }
 }
 
+/// Translate an atomic-update [`UpdateError`] into the right [`DaemonError`].
+///
+/// Why: [`crate::deliverable::DeliverableManager::update_deliverable_with`] (the
+/// #2395-review fix for the lost-update hazard) returns one error type covering
+/// both a store failure and a rejected §10.3 transition; the route layer must
+/// still map each to its own HTTP status — 404 for not-found/wrong-project, 409
+/// for an illegal transition — exactly as the pre-fix two-call path did.
+/// What: `UpdateError::Store(NotFound)` → [`DaemonError::DeliverableNotFound`];
+/// any other `Store` variant → 500; `UpdateError::Transition` →
+/// [`DaemonError::InvalidTransition`] carrying the legal next states.
+/// Test: `patch_illegal_transition_is_409_with_allowed_next`,
+/// `get_unknown_deliverable_is_404` (via `get_wrong_project_is_404`'s PATCH twin).
+fn update_err(e: UpdateError, id: &str) -> DaemonError {
+    match e {
+        UpdateError::Store(store_err) => deliverable_lookup_err(store_err, id),
+        UpdateError::Transition(te) => DaemonError::InvalidTransition {
+            from: te.from.to_string(),
+            to: te.to.to_string(),
+            allowed: te.allowed.iter().map(|s| s.as_str().to_string()).collect(),
+        },
+    }
+}
+
+/// Reject a PATCH `name` field that is present but blank after trimming.
+///
+/// Why: `create_deliverable`/`create_milestone` already enforce a non-empty
+/// trimmed name; PATCH left the same field settable to whitespace-only or empty
+/// (#2395 review MEDIUM) — the same rule must apply on both paths so a record
+/// can never end up with a blank name via an update that creation would have
+/// rejected outright.
+/// What: `None` (field absent from the PATCH body) is always fine — the caller
+/// is not touching `name`. `Some(name)` where `name.trim()` is empty is
+/// rejected with a 400; any other `Some` passes.
+/// Test: `patch_deliverable_rejects_blank_name`, `patch_milestone_rejects_blank_name`.
+fn reject_blank_patch_name(name: &Option<String>, resource: &str) -> Result<(), DaemonError> {
+    if let Some(n) = name
+        && n.trim().is_empty()
+    {
+        return Err(DaemonError::InvalidRequest(format!(
+            "{resource} name must not be empty"
+        )));
+    }
+    Ok(())
+}
+
 /// Unwrap a JSON body, mapping a deserialization rejection to a 400.
 ///
 /// Why: axum's default `JsonRejection` renders a bare 422 with a plain-text
@@ -89,6 +145,17 @@ fn body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, DaemonError> {
 /// `created_at` are server-assigned, so neither is accepted from the client.
 /// What: the required `name`, `kind`, and `estimated_effort` plus the optional
 /// description and opaque `ticket_ref`/`spec_ref`/`target_date` slots (§13 Q6).
+///
+/// **Referential integrity is deferred by design, not a bug:** `project_name`
+/// (taken from the URL path, not the body) is never checked against the
+/// registry-B project store — a Deliverable can be created under a
+/// `project_name` that does not (yet, or ever) exist as a registered `Project`.
+/// This matches §13 Q6's opaque-reference treatment of `ticket_ref`/`spec_ref`
+/// (validation deferred, gh-first / plain-path convention, no cross-store
+/// lookups added here) and keeps this endpoint's boundary strictly deterministic
+/// per §11 (no cross-store reasoning). A future consumer (the #2382 rollup
+/// endpoint, or `tm manager` #2109) can surface a dangling `project_name` as a
+/// read-only signal without this write path needing to enforce it.
 /// Test: `create_then_get_round_trips`.
 #[derive(Debug, Deserialize)]
 pub struct CreateDeliverable {
@@ -118,10 +185,21 @@ pub struct CreateDeliverable {
 /// the present fields are applied. A present `status` drives the §10.3 state
 /// machine (#2380) — a change to an illegal next state is rejected; setting
 /// `status` to the record's CURRENT value is a no-op (not an error), so echoing
-/// state alongside a field edit never spuriously fails.
+/// state alongside a field edit never spuriously fails. `name`, if present, must
+/// be non-blank after trimming (same rule `create_deliverable` enforces).
 /// What: all Deliverable-mutable fields as `Option`s.
+///
+/// **v1 limitation (deferred by design, not a bug):** because every field here
+/// is a single `Option`, there is no way to distinguish "absent from the JSON
+/// body" from "explicitly set to `null`" for `ticket_ref`/`spec_ref`/
+/// `target_date` — both deserialize to `None` and this handler treats `None` as
+/// "leave unchanged" (see `patch_deliverable`'s `if patch.ticket_ref.is_some()`
+/// guards). Clearing an already-set `ticket_ref`/`spec_ref`/`target_date` back to
+/// absent is therefore NOT supported in v1; that would require a double-`Option`
+/// (`Option<Option<String>>`, distinguishing "key omitted" from "key present with
+/// value `null`") which is deliberately deferred until a real caller needs it.
 /// Test: `patch_updates_fields`, `patch_illegal_transition_is_409_with_allowed_next`,
-/// `patch_same_status_is_noop`.
+/// `patch_same_status_is_noop`, `patch_deliverable_rejects_blank_name`.
 #[derive(Debug, Default, Deserialize)]
 pub struct PatchDeliverable {
     /// New name, if changing.
@@ -272,62 +350,72 @@ pub async fn get_deliverable(
 /// `PATCH /api/v1/projects/{name}/deliverables/{id}` — update a Deliverable.
 ///
 /// Why: the single mutation seam — field edits and the `set-status` transition
-/// both flow through here. This is where #2380 is enforced.
-/// What: fetches the (project-scoped) record, applies each present field, and —
-/// when `status` changes — validates the transition against the §10.3 machine
-/// via [`validate_transition`], rejecting an illegal change with a structured 409
-/// naming the legal next states. A `status` equal to the current value is a
-/// no-op. Persists and returns the updated record.
+/// both flow through here. This is where #2380 is enforced. Per the #2395
+/// review HIGH, the fetch, the transition validation, the field mutation, AND
+/// the persist all run inside ONE closure passed to
+/// [`DeliverableManager::update_deliverable_with`](crate::deliverable::DeliverableManager::update_deliverable_with),
+/// which holds a single write-lock guard across the whole sequence — no other
+/// concurrent PATCH can observe or clobber the intermediate state (see that
+/// method's doc for the exact hazard this closes).
+/// What: rejects a present-but-blank `name` before touching the store (MEDIUM
+/// fix — matches `create_deliverable`'s rule). Then atomically: fetches the
+/// project-scoped record, and — when `status` changes — validates the
+/// transition against the §10.3 machine via [`validate_transition`], rejecting
+/// an illegal change with a structured 409 naming the legal next states. A
+/// `status` equal to the current value is a no-op. Applies every other present
+/// field, persists, and returns the updated record — all under the manager's
+/// single lock.
 /// Test: `patch_updates_fields`, `patch_full_legal_lifecycle_succeeds`,
-/// `patch_illegal_transition_is_409_with_allowed_next`, `patch_same_status_is_noop`.
+/// `patch_illegal_transition_is_409_with_allowed_next`, `patch_same_status_is_noop`,
+/// `patch_deliverable_rejects_blank_name`.
 pub async fn patch_deliverable(
     State(state): State<Arc<DaemonState>>,
     Path((project, id)): Path<(String, String)>,
     body_in: Result<Json<PatchDeliverable>, JsonRejection>,
 ) -> Result<Json<Deliverable>, DaemonError> {
     let patch = body(body_in)?;
-    let mut d = fetch_scoped(&state, &project, &id).await?;
-
-    // #2380: enforce the status state machine BEFORE any mutation, so a rejected
-    // transition leaves the record untouched.
-    if let Some(new_status) = patch.status
-        && new_status != d.status
-    {
-        validate_transition(d.status, new_status).map_err(|te| DaemonError::InvalidTransition {
-            from: te.from.to_string(),
-            to: te.to.to_string(),
-            allowed: te.allowed.iter().map(|s| s.as_str().to_string()).collect(),
-        })?;
-        d.status = new_status;
-    }
-
-    if let Some(name) = patch.name {
-        d.name = name;
-    }
-    if let Some(description) = patch.description {
-        d.description = description;
-    }
-    if let Some(kind) = patch.kind {
-        d.kind = kind;
-    }
-    if let Some(effort) = patch.estimated_effort {
-        d.estimated_effort = effort;
-    }
-    if patch.ticket_ref.is_some() {
-        d.ticket_ref = patch.ticket_ref;
-    }
-    if patch.spec_ref.is_some() {
-        d.spec_ref = patch.spec_ref;
-    }
-    if patch.target_date.is_some() {
-        d.target_date = patch.target_date;
-    }
+    reject_blank_patch_name(&patch.name, "deliverable")?;
 
     let mgr = state.deliverable_manager().await;
-    mgr.upsert_deliverable(d.clone())
+    let updated = mgr
+        .update_deliverable_with(&id, &project, move |mut d| {
+            // #2380: enforce the status state machine BEFORE any other mutation,
+            // so a rejected transition leaves the record untouched. Validated
+            // against `d.status`, which was fetched and will be persisted under
+            // the SAME lock this closure runs inside — never a stale read.
+            if let Some(new_status) = patch.status
+                && new_status != d.status
+            {
+                validate_transition(d.status, new_status)?;
+                d.status = new_status;
+            }
+
+            if let Some(name) = patch.name {
+                d.name = name;
+            }
+            if let Some(description) = patch.description {
+                d.description = description;
+            }
+            if let Some(kind) = patch.kind {
+                d.kind = kind;
+            }
+            if let Some(effort) = patch.estimated_effort {
+                d.estimated_effort = effort;
+            }
+            if patch.ticket_ref.is_some() {
+                d.ticket_ref = patch.ticket_ref;
+            }
+            if patch.spec_ref.is_some() {
+                d.spec_ref = patch.spec_ref;
+            }
+            if patch.target_date.is_some() {
+                d.target_date = patch.target_date;
+            }
+            Ok(d)
+        })
         .await
-        .map_err(store_internal)?;
-    Ok(Json(d))
+        .map_err(|e| update_err(e, &id))?;
+    Ok(Json(updated))
 }
 
 // ───────────────────────── Milestone DTOs ────────────────────────────
@@ -337,6 +425,15 @@ pub async fn patch_deliverable(
 /// Why: creation fixes the immutable facts; `id`/`created_at` are server-assigned.
 /// What: required `name` and `target_date`, optional description, member
 /// Deliverable ids, and a rollup `status` (default `Proposed`).
+///
+/// **Referential integrity is deferred by design, not a bug:** neither
+/// `project_name` (URL path, not checked against the registry-B project store —
+/// same deferral as `CreateDeliverable`) nor each entry of `deliverables` (not
+/// checked against the deliverables store — a Milestone can reference a
+/// `DeliverableId` that does not exist, belongs to a different project, or is
+/// later deleted) is validated here. No cross-store lookups are added to this
+/// write path (§11 boundary); a dangling member id is a signal the #2382 rollup
+/// endpoint (or a future `tm manager` #2109 consumer) can surface read-only.
 /// Test: `milestone_create_then_get`.
 #[derive(Debug, Deserialize)]
 pub struct CreateMilestone {
@@ -360,9 +457,10 @@ pub struct CreateMilestone {
 /// Why: partial update. Milestone `status` is a rollup field (§10.3/§10.5), NOT
 /// a user-driven state machine, so — unlike Deliverable — it is set directly with
 /// no transition enforcement (the deterministic rollup that overwrites it is
-/// #2382 / the read-only status endpoint's job).
+/// #2382 / the read-only status endpoint's job). `name`, if present, must be
+/// non-blank after trimming (same rule `create_milestone` enforces).
 /// What: all Milestone-mutable fields as `Option`s.
-/// Test: `milestone_patch_updates_fields`.
+/// Test: `milestone_patch_updates_fields`, `patch_milestone_rejects_blank_name`.
 #[derive(Debug, Default, Deserialize)]
 pub struct PatchMilestone {
     /// New name, if changing.
@@ -460,31 +558,46 @@ pub async fn get_milestone(
 }
 
 /// `PATCH /api/v1/projects/{name}/milestones/{id}` — update a Milestone.
+///
+/// Why: mirrors `patch_deliverable`'s atomicity fix (#2395 review HIGH) even
+/// though Milestone has no state machine to invalidate — a read-then-upsert
+/// PATCH can still silently drop a concurrent field edit. The whole
+/// fetch-mutate-persist sequence runs inside one closure passed to
+/// [`DeliverableManager::update_milestone_with`](crate::deliverable::DeliverableManager::update_milestone_with),
+/// which holds a single write-lock guard across it.
+/// What: rejects a present-but-blank `name` before touching the store (MEDIUM
+/// fix). Then atomically fetches the project-scoped record, applies every
+/// present field, and persists — all under the manager's single lock.
+/// Test: `milestone_patch_updates_fields`, `patch_milestone_rejects_blank_name`.
 pub async fn patch_milestone(
     State(state): State<Arc<DaemonState>>,
     Path((project, id)): Path<(String, String)>,
     body_in: Result<Json<PatchMilestone>, JsonRejection>,
 ) -> Result<Json<Milestone>, DaemonError> {
     let patch = body(body_in)?;
-    let mut m = fetch_scoped_milestone(&state, &project, &id).await?;
-    if let Some(name) = patch.name {
-        m.name = name;
-    }
-    if let Some(description) = patch.description {
-        m.description = description;
-    }
-    if let Some(target_date) = patch.target_date {
-        m.target_date = target_date;
-    }
-    if let Some(status) = patch.status {
-        m.status = status;
-    }
-    if let Some(deliverables) = patch.deliverables {
-        m.deliverables = deliverables;
-    }
+    reject_blank_patch_name(&patch.name, "milestone")?;
+
     let mgr = state.deliverable_manager().await;
-    mgr.upsert_milestone(m.clone())
+    let updated = mgr
+        .update_milestone_with(&id, &project, move |mut m| {
+            if let Some(name) = patch.name {
+                m.name = name;
+            }
+            if let Some(description) = patch.description {
+                m.description = description;
+            }
+            if let Some(target_date) = patch.target_date {
+                m.target_date = target_date;
+            }
+            if let Some(status) = patch.status {
+                m.status = status;
+            }
+            if let Some(deliverables) = patch.deliverables {
+                m.deliverables = deliverables;
+            }
+            m
+        })
         .await
-        .map_err(store_internal)?;
-    Ok(Json(m))
+        .map_err(|e| milestone_lookup_err(e, &id))?;
+    Ok(Json(updated))
 }
