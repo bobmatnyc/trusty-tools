@@ -112,7 +112,7 @@ pub(crate) fn build_rows(data: &WelcomeData) -> Vec<String> {
     // ── Commands cheat-sheet ──────────────────────────────────────────────────
     rows.push(String::new());
     rows.push("commands".to_string());
-    rows.push("  tm session list      tm session resume <id>".to_string());
+    rows.push("  tm sessions list     tm sessions resume <id>".to_string());
     rows.push("  tm connect            tm stop".to_string());
     rows.push("  tm status             detach: ^b d".to_string());
 
@@ -397,7 +397,7 @@ mod tests {
     fn welcome_panel_contains_commands_cheatsheet() {
         let out = render_welcome_panel(&base_data());
         assert!(
-            out.contains("tm session list"),
+            out.contains("tm sessions list"),
             "expected sessions list command"
         );
         assert!(out.contains("tm connect"), "expected connect command");
