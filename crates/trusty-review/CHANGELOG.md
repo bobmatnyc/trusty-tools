@@ -5,6 +5,18 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.8.0] — 2026-07-10
+
+### Added
+
+- **Report wave 2 — analyst instructions + inference-first output** ([#2356](https://github.com/bobmatnyc/trusty-tools/pull/2356)) ([`24d9fb2`](https://github.com/bobmatnyc/trusty-tools/commit/24d9fb2ed2abe967d561cb644e53ebd6904ef1d4)): `--instructions <md>` analyst-brief flag (recorded verbatim + injected as synthesis focus directives); self-derived report metadata (vendor/methodology/dates never honesty-marked); built-in repository scanning (`src/report/scan.rs`) so a bare local-path run produces a measured LoC/file/dependency baseline without an external metrics file; four-kind provenance labels (measured/declared/inferred/not-stated) on every substantive value; omit-empty post-render polish (dropped marker rows, collapsed empty sections, consolidated Gaps list).
+- **Report wave 3 — repo-evidence findings investigation** ([#2371](https://github.com/bobmatnyc/trusty-tools/pull/2371)) ([`088b1e7`](https://github.com/bobmatnyc/trusty-tools/commit/088b1e7a17dd096766736b4378e960f3f3e1c72c)): under `--synthesize`, local-checkout repositories are directly inspected — deterministic relevance-ranked file selection, a batched reviewer-role LLM investigation with a verbatim-evidence guardrail (rejects any RED/AMBER finding whose quote doesn't substring-match the real file), a deterministic dependency inventory (manifest + lockfile parsing, no network), a compact findings digest with a one-shot truncation retry so a large verified-finding count can no longer blank the executive summary, and layered section-instruction overrides (generic default → template `<!-- instruct:<section_id> -->` comment → analyst `--instructions` overlay) for the three synthesized sections.
+- **Report wave 4 — Mermaid charts from dataset markers** ([#2389](https://github.com/bobmatnyc/trusty-tools/pull/2389)) ([`cc61a96`](https://github.com/bobmatnyc/trusty-tools/commit/cc61a9664f6d616516209b9c97075b05e52c517b)): every populated Graph-Ready Data Appendix table now renders a deterministic Mermaid chart beneath it (`bar`/`stacked-bar` → `xychart-beta`, `radar` → `radar-beta`, `heatmap` → table-only fallback); on by default, disable with `--no-mermaid` or manifest `[report] mermaid = false`; also wires dataset population (e.g. `loc_by_technology` from the wave-2 repo scan) for tables that previously had no fill path on a bare scan-only run.
+
+### Changed
+
+- Root workspace `[workspace.dependencies]` pin for `trusty-review` bumped 0.7.0 → 0.8.0 (consumed by `trusty-analyze`'s optional `review` feature).
+
 ## [Unreleased]
 
 ### Added
