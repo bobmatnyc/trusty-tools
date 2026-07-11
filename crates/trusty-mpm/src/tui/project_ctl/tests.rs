@@ -49,6 +49,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         task: Some("ship it".to_string()),
         cwd: None,
         claude_session_id: None,
+        pane_id: None,
     }
 }
 
@@ -109,18 +110,29 @@ fn seeded_state_renders_live_project_and_its_session() {
 }
 
 #[test]
-fn drilling_in_then_killing_targets_the_right_session() {
+fn drilling_in_then_killing_an_active_session_requires_confirmation() {
+    // The seeded session is "active", so DOC-35 §5.2's confirm gate applies:
+    // `k` alone must not fire — it takes drill-in, `k`, THEN `y` to reach the
+    // real PendingAction.
     let mut state = seeded_state();
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     assert!(handle_key(&mut state, enter).is_none());
     assert_eq!(state.focus, Pane::Sessions);
 
     let kill = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
-    let action = handle_key(&mut state, kill);
+    assert!(
+        handle_key(&mut state, kill).is_none(),
+        "kill on an Active session must open the confirm gate, not fire"
+    );
+    assert!(state.pending_confirm.is_some());
+
+    let confirm = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    let action = handle_key(&mut state, confirm);
     assert_eq!(
         action,
         Some(PendingAction::Kill("a1b2c3d4e5f6".to_string()))
     );
+    assert!(state.pending_confirm.is_none());
 }
 
 #[test]

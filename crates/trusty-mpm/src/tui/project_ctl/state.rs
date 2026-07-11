@@ -10,9 +10,12 @@
 //! [`SessionRow`]) and the [`Pane`] focus enum. Sessions are keyed by owning
 //! project name in [`ProjectCtlState::sessions_by_project`] so switching the
 //! Projects-pane selection never requires a new daemon round trip — the
-//! Sessions pane simply re-reads the already-polled map.
-//! Test: `super::tests` covers focus cycling, selection clamp/reset, and the
-//! notice/repoll flags.
+//! Sessions pane simply re-reads the already-polled map. [`ConfirmKind`] /
+//! [`PendingConfirm`] are the shared confirmation-gate mechanism DOC-35 §5.2
+//! requires before `k` (kill, when Active) or `d` (decommission, always) may
+//! execute.
+//! Test: `super::tests` covers focus cycling, selection clamp/reset, the
+//! notice/repoll flags, and the confirm-gate request/clear/override rules.
 
 use std::collections::BTreeMap;
 
@@ -113,6 +116,45 @@ pub struct SessionRow {
     pub proposed_default: Option<String>,
 }
 
+/// Which destructive verb a [`PendingConfirm`] is gating.
+///
+/// Why: DOC-35 §5.2 requires a confirmation gate before `k` (kill) executes
+/// on an Active session, and unconditionally before `d` (decommission)
+/// executes at all — a single keypress must never fire either. Sharing ONE
+/// confirmation mechanism for both (rather than two parallel modal types)
+/// keeps the gate/render/dispatch plumbing in one place.
+/// What: `Kill` and `Decommission` map 1:1 to [`super::events::PendingAction::Kill`]
+/// / [`super::events::PendingAction::Decommission`] once confirmed.
+/// Test: `super::events::tests` covers both confirm flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKind {
+    /// Confirming `k` (kill / runtime-stop) on an Active session.
+    Kill,
+    /// Confirming `d` (decommission) — always gated, any state (terminal action).
+    Decommission,
+}
+
+/// A destructive action awaiting operator confirmation (DOC-35 §5.2).
+///
+/// Why: holds everything [`super::panes::actions_bar`] needs to render the
+/// confirm prompt and everything [`super::events::handle_key`] needs to
+/// resolve it (confirm → the real [`super::events::PendingAction`]; cancel →
+/// discard) without re-deriving either from the current selection, which may
+/// have moved on by the time the operator answers.
+/// What: the verb ([`ConfirmKind`]), the target session's id (for dispatch),
+/// and a human-readable label (name or short id, for the prompt text).
+/// Test: `super::events::tests`, `super::panes::actions_bar::tests`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingConfirm {
+    /// Which verb is being confirmed.
+    pub kind: ConfirmKind,
+    /// The target session's full id — threaded into the eventual
+    /// [`super::events::PendingAction`] on confirmation.
+    pub session_id: String,
+    /// A human-readable label for the target session, shown in the prompt.
+    pub session_label: String,
+}
+
 /// Everything the `tm projects` TUI renders and mutates this frame.
 ///
 /// Why: a single owned struct (mirroring `CoordinatorState`) keeps the
@@ -142,6 +184,14 @@ pub struct ProjectCtlState {
     /// A transient notice (toast) shown in the action bar, e.g. the result of
     /// a launch/kill/resume/decommission/attach/config action.
     pub notice: Option<String>,
+    /// A destructive action (kill-on-Active / decommission) awaiting
+    /// operator confirmation (DOC-35 §5.2). While `Some`, [`handle_key`] in
+    /// `events.rs` routes EVERY key through the confirm/cancel gate instead
+    /// of normal dispatch — mirroring the spec's "`q`/`Ctrl-C` — not in a
+    /// modal" / "`Esc` — any modal/form — cancel" contract.
+    ///
+    /// [`handle_key`]: super::events::handle_key
+    pub pending_confirm: Option<PendingConfirm>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///
@@ -231,6 +281,34 @@ impl ProjectCtlState {
     /// Clear the transient action-bar notice (Esc).
     pub fn clear_notice(&mut self) {
         self.notice = None;
+    }
+
+    /// Open the confirmation gate for a destructive action (DOC-35 §5.2).
+    ///
+    /// Why: the single seam [`super::events`]'s `k`/`d` handlers call instead
+    /// of returning the real [`super::events::PendingAction`] directly — no
+    /// destructive verb may execute on the keypress that requested it.
+    /// What: sets [`Self::pending_confirm`], overriding any prior one (a new
+    /// request always wins — there is only ever one target at a time since
+    /// the modal captures all input while open).
+    /// Test: `super::events::tests`.
+    pub fn request_confirm(
+        &mut self,
+        kind: ConfirmKind,
+        session_id: impl Into<String>,
+        session_label: impl Into<String>,
+    ) {
+        self.pending_confirm = Some(PendingConfirm {
+            kind,
+            session_id: session_id.into(),
+            session_label: session_label.into(),
+        });
+    }
+
+    /// Close the confirmation gate without acting (`n`/`N`/Esc, or after `y`
+    /// resolves it).
+    pub fn clear_confirm(&mut self) {
+        self.pending_confirm = None;
     }
 
     /// Request an immediate daemon re-poll on the next run-loop tick.
@@ -347,5 +425,28 @@ mod tests {
         state.request_repoll();
         assert!(state.take_repoll());
         assert!(!state.take_repoll());
+    }
+
+    #[test]
+    fn confirm_request_set_and_clear() {
+        let mut state = ProjectCtlState::default();
+        assert!(state.pending_confirm.is_none());
+        state.request_confirm(ConfirmKind::Decommission, "sess-1", "my-session");
+        let confirm = state.pending_confirm.clone().expect("confirm requested");
+        assert_eq!(confirm.kind, ConfirmKind::Decommission);
+        assert_eq!(confirm.session_id, "sess-1");
+        assert_eq!(confirm.session_label, "my-session");
+        state.clear_confirm();
+        assert!(state.pending_confirm.is_none());
+    }
+
+    #[test]
+    fn confirm_request_overrides_a_prior_one() {
+        let mut state = ProjectCtlState::default();
+        state.request_confirm(ConfirmKind::Kill, "sess-1", "one");
+        state.request_confirm(ConfirmKind::Decommission, "sess-2", "two");
+        let confirm = state.pending_confirm.expect("confirm requested");
+        assert_eq!(confirm.kind, ConfirmKind::Decommission);
+        assert_eq!(confirm.session_id, "sess-2");
     }
 }

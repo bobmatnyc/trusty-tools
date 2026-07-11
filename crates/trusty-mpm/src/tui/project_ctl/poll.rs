@@ -209,6 +209,7 @@ mod tests {
             task: Some("do the thing".to_string()),
             cwd: None,
             claude_session_id: None,
+            pane_id: None,
         }
     }
 
