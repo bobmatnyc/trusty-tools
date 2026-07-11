@@ -134,6 +134,57 @@ pub enum TmuxCommand {
         /// Environment variable value.
         value: String,
     },
+    /// `set-option -g <name> <value>` — set a server-wide (global) tmux
+    /// option (#2398).
+    ///
+    /// Why: managed sessions need a generous scrollback (`history-limit`) and
+    /// mouse-wheel scrolling (`mouse`) applied to the SERVER before any pane
+    /// is created — `history-limit` is captured into a pane's ring buffer AT
+    /// CREATION TIME, so a per-session `set-option` issued after a pane
+    /// already exists would not retroactively grow it. trusty-mpm runs every
+    /// managed session on the ONE default tmux server (no dedicated `-S`
+    /// socket), so a single `-g` (global) `set-option` benefits every session
+    /// subsequently created on that server.
+    /// What: renders `set-option -g <name> <value>`.
+    SetGlobalOption {
+        /// tmux option name (e.g. `history-limit`, `mouse`).
+        name: String,
+        /// Option value (e.g. `"100000"`, `"on"`).
+        value: String,
+    },
+}
+
+/// tmux global option name for scrollback lines retained per pane (#2398).
+pub const HISTORY_LIMIT_OPTION: &str = "history-limit";
+
+/// tmux global option name for mouse-wheel scrolling / copy-mode (#2398).
+pub const MOUSE_OPTION: &str = "mouse";
+
+/// Build the `set-option -g` command sequence that applies the scrollback +
+/// mouse-scroll ergonomics to the tmux server (#2398).
+///
+/// Why: [`crate::daemon::tmux::TmuxDriver::apply_scrollback_options`] needs a
+/// pure, unit-testable builder for the exact commands it issues (and their
+/// order) — the resolved values come from
+/// `core::trusty_tools_config::resolve_tmux_options`, not from here, so this
+/// function stays free of any config/file-system dependency and is testable
+/// with plain arguments.
+/// What: two [`TmuxCommand::SetGlobalOption`] entries, `history-limit` then
+/// `mouse` (rendered `"on"`/`"off"`), in the order the caller must run them —
+/// both must land before the caller's subsequent `new-session`.
+/// Test: `scrollback_option_commands_uses_configured_values`,
+/// `scrollback_option_commands_mouse_off`.
+pub fn scrollback_option_commands(history_limit: u32, mouse: bool) -> Vec<TmuxCommand> {
+    vec![
+        TmuxCommand::SetGlobalOption {
+            name: HISTORY_LIMIT_OPTION.to_string(),
+            value: history_limit.to_string(),
+        },
+        TmuxCommand::SetGlobalOption {
+            name: MOUSE_OPTION.to_string(),
+            value: if mouse { "on" } else { "off" }.to_string(),
+        },
+    ]
 }
 
 /// tmux `-F` format string for `list-sessions`.
@@ -245,6 +296,14 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
                 "-t".to_string(),
                 session.clone(),
                 key.clone(),
+                value.clone(),
+            ]
+        }
+        TmuxCommand::SetGlobalOption { name, value } => {
+            vec![
+                "set-option".to_string(),
+                "-g".to_string(),
+                name.clone(),
                 value.clone(),
             ]
         }
@@ -369,5 +428,34 @@ mod tests {
                 "11111111-2222-3333-4444-555555555555"
             ]
         );
+    }
+
+    #[test]
+    fn set_global_option_argv() {
+        let argv = tmux_argv(&TmuxCommand::SetGlobalOption {
+            name: "history-limit".into(),
+            value: "100000".into(),
+        });
+        assert_eq!(argv, ["set-option", "-g", "history-limit", "100000"]);
+    }
+
+    #[test]
+    fn scrollback_option_commands_uses_configured_values() {
+        // Order matters: history-limit must precede mouse (both must land
+        // before the caller's subsequent new-session, but the internal order
+        // between the two is asserted here so it stays stable).
+        let cmds = scrollback_option_commands(50_000, true);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(
+            tmux_argv(&cmds[0]),
+            ["set-option", "-g", "history-limit", "50000"]
+        );
+        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
+    }
+
+    #[test]
+    fn scrollback_option_commands_mouse_off() {
+        let cmds = scrollback_option_commands(100_000, false);
+        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "off"]);
     }
 }

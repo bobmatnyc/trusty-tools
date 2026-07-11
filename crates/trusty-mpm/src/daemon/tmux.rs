@@ -19,6 +19,8 @@
 
 use std::process::Command;
 
+use tracing::warn;
+
 use crate::core::external_session::ExternalSession;
 use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
@@ -237,12 +239,59 @@ impl TmuxDriver {
     /// Idempotent: if a session with the same name already exists, the
     /// underlying `tmux new-session -A` attaches to it instead of failing
     /// with a "duplicate session" error.
+    ///
+    /// Why (#2398): the scrollback/mouse server options MUST be applied
+    /// before this method's `new-session` call — `history-limit` is captured
+    /// into a pane's ring buffer at creation time, so ordering here is load
+    /// bearing (see [`Self::apply_scrollback_options`]).
     pub fn create_session(&self, name: &str, workdir: Option<&str>) -> Result<()> {
+        self.apply_scrollback_options();
         self.run(&TmuxCommand::NewSession {
             name: name.to_string(),
             workdir: workdir.map(str::to_string),
         })?;
         Ok(())
+    }
+
+    /// Apply the configured scrollback + mouse ergonomics to the tmux
+    /// SERVER, before any pane is created (#2398).
+    ///
+    /// Why: tmux's own default `history-limit` is 2000 lines — a long-running
+    /// PM session scrolls off the top almost immediately. `history-limit` is
+    /// captured into a pane's ring buffer AT CREATION TIME; a per-session
+    /// `set-option` issued after a pane already exists does not retroactively
+    /// grow it (a tmux limitation — existing panes are unaffected by this
+    /// call; only NEW panes/sessions created after it benefit). Because
+    /// trusty-mpm runs every managed session on the ONE default tmux server
+    /// (no dedicated `-S` socket — confirmed: no call site in this crate
+    /// passes `-S`/`-L`), setting these as GLOBAL (`-g`) options once, right
+    /// before [`Self::create_session`]'s `new-session`, benefits every
+    /// session subsequently created without per-session bookkeeping. `mouse
+    /// on` additionally maps the wheel to pane-scroll/copy-mode entry, the
+    /// actual "scroll" gesture operators expect.
+    /// What: loads [`crate::core::trusty_tools_config::TrustyToolsConfig`],
+    /// resolves the `tmux:` section via
+    /// [`crate::core::trusty_tools_config::resolve_tmux_options`] (defaults:
+    /// 100,000-line history-limit, mouse on), and runs each
+    /// [`crate::core::tmux::scrollback_option_commands`] entry via
+    /// [`Self::run`]. Best-effort: `set-option -g` is idempotent (safe to
+    /// call before every session creation) and virtually never fails on a
+    /// tmux new enough to run trusty-mpm at all, but a failure here must
+    /// never block session creation/restart — each failure is logged and the
+    /// next option (or the caller's subsequent tmux call) still runs.
+    /// Test: argv construction is covered by `core::tmux`'s
+    /// `scrollback_option_commands_*` tests and config resolution by
+    /// `core::trusty_tools_config`'s `tmux_options_*` tests; this method's
+    /// live-server call site is exercised transitively by every
+    /// `create_session` caller with a real `tmux` binary (`#[ignore]` tests).
+    pub fn apply_scrollback_options(&self) {
+        let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+        let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
+        for cmd in crate::core::tmux::scrollback_option_commands(opts.history_limit, opts.mouse) {
+            if let Err(e) = self.run(&cmd) {
+                warn!("tmux scrollback/mouse option {cmd:?} failed (non-fatal): {e}");
+            }
+        }
     }
 
     /// Kill the tmux session named `name`.
