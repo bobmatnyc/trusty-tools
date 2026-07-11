@@ -13,8 +13,9 @@
 //! function [`aggregate_project_status`], and the axum handler
 //! [`project_status_route`] for `GET /api/v1/projects/{name}/status`.
 //! Test: `aggregate_project_status_*` unit tests in `tests()` below (pure-rollup
-//! contract) and `project_status_route_*` HTTP handler tests in
-//! `tests/session_manager_mvp.rs`.
+//! contract) and `status_route_returns_deterministic_rollup` /
+//! `status_route_unknown_project_is_404` HTTP handler tests in
+//! `tests/project_status_route.rs`.
 
 use std::sync::Arc;
 
@@ -189,8 +190,8 @@ pub fn aggregate_project_status(
 /// session records, and returns `Json(aggregate_project_status(..))`. A project
 /// store read error (other than not-found) degrades to 500 with a logged warning
 /// rather than a panic — the library never `unwrap`s a store result.
-/// Test: `project_status_route_rollup`, `project_status_route_unknown_project`
-/// in `tests/session_manager_mvp.rs`.
+/// Test: `status_route_returns_deterministic_rollup`,
+/// `status_route_unknown_project_is_404` in `tests/project_status_route.rs`.
 pub async fn project_status_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(name): AxumPath<String>,
