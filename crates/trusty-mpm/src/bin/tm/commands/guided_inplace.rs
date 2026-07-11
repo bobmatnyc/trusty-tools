@@ -59,14 +59,22 @@
 //!
 //! #2453: [`run_inplace_relaunch`] and [`InPlaceOutcome`] are `pub(crate)` so
 //! `super::guided::run_guided_default`'s nested-session guard can drive this
-//! SAME primitive for a second, distinct entry point — the operator's own
-//! current pane matched by tmux session/pane identity, independent of
+//! SAME primitive for a second, distinct entry point, independent of
 //! [`try_inplace_relaunch`]'s env-var + Stopped-state gate. This closes the
 //! bare-`tm` self-switch (no-op) bug: previously that call site trusted a
 //! possibly-stale `record.state == "active"` and unconditionally attached/
 //! switch-cliented, which is a guaranteed no-op when the operator is already
 //! sitting in that exact pane. See `run_inplace_relaunch`'s doc for the safety
 //! argument (the daemon's reactivate round-trip remains the sole authority).
+//! CORRECTION (#2456 review finding 1): the nested-session guard's OWN match
+//! is by tmux SESSION name alone — every window/pane in a tmux session
+//! shares the same session name, so that match is NOT pane-level identity.
+//! `guided.rs` therefore re-derives the SAME process-scoped
+//! `TM_MANAGED_SESSION_ID` signal this module's own primary gate
+//! ([`read_env_managed_session_id`]) uses and requires it to name the
+//! matched record before calling [`run_inplace_relaunch`] at all — a
+//! session-name-only match (a genuinely different pane/window) falls back to
+//! the pre-existing refuse+switch-client behavior instead.
 
 use anyhow::Context as _;
 
@@ -371,19 +379,30 @@ pub(crate) enum InPlaceOutcome {
 /// Why: separated from [`try_inplace_relaunch`] so the "should we take this
 /// path at all" decision and the "how do we execute it" mechanics are
 /// distinct, readable steps. `pub(crate)` (#2453): the nested-session guard in
-/// `guided.rs` matches a record by tmux session/pane identity BEFORE the
-/// record's `state` is known to be `Stopped` — its `record.state` field can
-/// lag reality by up to 60s (the same staleness race #2148 hardens
-/// [`fetch_managed_session_until_stopped`] against). Rather than duplicate the
-/// Stopped-only gate [`plan_inplace`] enforces for the env-var entry point,
-/// that call site drives this function directly with whatever record it
-/// matched (any state) and trusts the SAME safety boundary every caller of
-/// this function already relies on: [`reactivate_managed_session`]'s daemon
-/// round-trip (backed, as of #2453, by the daemon's own independent pane-idle
-/// reconciliation — see `daemon::managed_routes::reactivate::
-/// reconcile_stale_active_then_reactivate`) is the single source of truth,
-/// and a refused/failed reactivate here folds into [`InPlaceOutcome::FallThrough`]
-/// exactly as it does for the env-var path — never an unconditional exec.
+/// `guided.rs` matches a record by tmux SESSION name (or, when it is able to
+/// additionally confirm pane-level identity via the SAME process-scoped
+/// `TM_MANAGED_SESSION_ID` signal [`read_env_managed_session_id`] uses, drives
+/// this function ONLY in that confirmed case — see the `#2456 review finding
+/// 1` correction in this module's top doc comment; a session-name-only match
+/// never reaches here) BEFORE the record's `state` is known to be `Stopped` —
+/// its `record.state` field can lag reality by up to 60s (the same staleness
+/// race #2148 hardens [`fetch_managed_session_until_stopped`] against).
+/// Rather than duplicate the Stopped-only gate [`plan_inplace`] enforces for
+/// the env-var entry point, that call site drives this function directly
+/// with whatever record it matched (any state) and trusts the SAME safety
+/// boundary every caller of this function already relies on:
+/// [`reactivate_managed_session`]'s daemon round-trip (backed, as of #2453,
+/// by the daemon's own independent pane-idle reconciliation — see
+/// `daemon::managed_routes::reactivate::reconcile_stale_active_then_reactivate`)
+/// is the single source of truth, and a refused/failed reactivate here folds
+/// into [`InPlaceOutcome::FallThrough`] exactly as it does for the env-var
+/// path — never an unconditional exec. Note (#2456 review finding 2): unlike
+/// [`try_inplace_relaunch`]'s own contract (a command-build failure there is
+/// a deliberate hard error), the nested-guard caller treats EVERY
+/// `InPlaceOutcome::Result(Err(_))` from THIS call site — pre-mutation
+/// (cwd/binary resolution) or post-reactivate (`exec` itself failing) alike
+/// — as a fall-back-to-reconnect condition, matching that call site's
+/// pre-#2453 behavior of never hard-failing.
 /// What, IN ORDER (#2027 exec-ordering fix): (1) prints a one-line notice;
 /// (2) resolves the workdir and builds the resume argv via
 /// [`trusty_mpm::runtime::build_inplace_resume_command`] (the SAME

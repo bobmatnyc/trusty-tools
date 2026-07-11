@@ -470,15 +470,57 @@ impl SessionManager {
     /// Test: `stop_runtime_exited_transitions_active_to_stopped` (in
     /// `daemon::runtime_reap`) asserts the record becomes `Stopped`;
     /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
-    /// `kill_session` is never invoked on the fake driver.
+    /// `kill_session` is never invoked on the fake driver;
+    /// `mark_runtime_exited_stopped_rejects_concurrently_decommissioned`
+    /// (this module's tests) asserts the CAS guard below.
+    ///
+    /// CAS guard (#2453 review finding 3): the pre-fix implementation read
+    /// the record via [`Self::get`] (which acquires and releases the store's
+    /// write lock internally), then — AFTER that lock was released — did a
+    /// SECOND, separate `self.store.write().await` to upsert. A concurrent
+    /// `decommission`/`stop` landing in the gap between those two lock
+    /// acquisitions would be silently clobbered: this function would blindly
+    /// write back a `Stopped` record built from the stale pre-decommission
+    /// read, resurrecting a session that had just been torn down. This
+    /// implementation now holds ONE write-lock guard across the entire
+    /// read-check-write sequence and re-validates the record is STILL
+    /// `Active` immediately before mutating it — a state change that landed
+    /// while we were not holding the lock (there is no other window) is
+    /// therefore impossible to observe as anything but the CURRENT state,
+    /// and a record that is no longer `Active` (already reconciled,
+    /// decommissioned, or errored by a concurrent caller) is rejected
+    /// with [`ManagedError::InvalidState`] rather than overwritten. The
+    /// periodic `runtime_reap` tick and the `#2453` reconcile-then-reactivate
+    /// path both call this SAME function, so the guard protects both.
     pub async fn mark_runtime_exited_stopped(
         &self,
         id: &ManagedSessionId,
     ) -> Result<SessionRecord, ManagedError> {
-        let mut record = self.get(id).await?;
+        let mut guard = self.store.write().await;
+        if let Err(e) = guard.reload_if_changed().await {
+            // Reload failed (transient I/O): do NOT surface as "not found" —
+            // fall through to the last-known in-memory record, mirroring
+            // `Self::get`'s own tolerance for a transient reload error.
+            warn!(id = %id, "mark_runtime_exited_stopped: reload failed: {e}; using last-known record");
+        }
+        let mut record = guard.cached_get(id).map_err(|e| match e {
+            StoreError::NotFound(k) => ManagedError::SessionNotFound(k),
+            other => ManagedError::Store(other),
+        })?;
+        if record.state != ManagedSessionState::Active {
+            return Err(ManagedError::InvalidState(
+                id.to_string(),
+                format!(
+                    "cannot mark runtime-exited-stopped: session is '{}', not 'active' — \
+                     a concurrent operation already changed its state",
+                    record.state
+                ),
+            ));
+        }
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
         record.state = ManagedSessionState::Stopped;
-        self.store.write().await.upsert(record.clone()).await?;
+        guard.upsert(record.clone()).await?;
+        drop(guard);
         info!(
             id = %id,
             name = %record.tmux_name,

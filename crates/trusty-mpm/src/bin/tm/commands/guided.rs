@@ -71,28 +71,80 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
         // `resume_guided_session`, which — because the tmux SESSION is
         // (correctly) still alive — always resolved to a `switch-client`
         // no-op: the operator was already inside the very session being
-        // "reconnected" to. Try the SAME in-place-relaunch primitive #2023
-        // component C uses instead: its daemon reactivate call independently
-        // reconciles a stale-`Active` record whose pane is confirmed idle
-        // (#2453 daemon-side fix, `daemon::managed_routes::reactivate::
-        // reconcile_stale_active_then_reactivate`) and refuses — falling
-        // through to the notice + reconnect below — when the runtime, or a
-        // genuinely different sibling pane in the same tmux session (#2157),
-        // is still live. Safe to attempt unconditionally: a hard failure
-        // (e.g. no `claude` binary) still surfaces as `Err` below rather than
-        // silently falling through.
-        match super::guided_inplace::run_inplace_relaunch(client, url, &record.id, record.clone())
+        // "reconnected" to.
+        //
+        // #2456 review finding 1 (CRITICAL): `nested_session_guard` matches
+        // on EITHER the tmux SESSION name (shared by every window/pane in
+        // that session) OR the process-level `TM_MANAGED_SESSION_ID` env var
+        // (pane/process-scoped — only ever set in the exact shell that ran
+        // the spawn/resume export prefix, see `runtime::claude_code::
+        // session_id_export_prefix`). A session-name-only match is NOT proof
+        // this is the pane bound to `record` — a genuinely different, idle
+        // window in the SAME tmux session (e.g. window 1, while window 0
+        // holds the just-exited `claude` pane) matches on session name
+        // alone. Driving the destructive `run_inplace_relaunch` (which
+        // `exec`s `claude` into WHATEVER pane this process is literally
+        // running in, chdir'd to `record`'s workspace) off that weaker
+        // signal would silently discard the invoking pane's shell and drop
+        // the operator into a DIFFERENT pane's conversation. Re-derive the
+        // SAME process-env signal `nested_session_guard` / `try_inplace_
+        // relaunch`'s primary gate already uses (never the looser,
+        // session-wide `tmux show-environment` fallback, which cannot
+        // discriminate between panes either) and require it to name THIS
+        // exact record before attempting the in-place path; a
+        // session-name-only match falls back to the pre-existing, harmless
+        // refuse+switch-client behavior.
+        let env_session_id = std::env::var("TM_MANAGED_SESSION_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+
+        if pane_identity_confirmed(env_session_id.as_deref(), &record.id) {
+            // Safe to attempt: its daemon reactivate call independently
+            // reconciles a stale-`Active` record whose pane is confirmed
+            // idle (#2453 daemon-side fix, `daemon::managed_routes::
+            // reactivate::reconcile_stale_active_then_reactivate`) and
+            // refuses — falling through to the notice + reconnect below —
+            // when the runtime is still genuinely live.
+            match super::guided_inplace::run_inplace_relaunch(
+                client,
+                url,
+                &record.id,
+                record.clone(),
+            )
             .await
-        {
-            super::guided_inplace::InPlaceOutcome::Result(r) => return r,
-            super::guided_inplace::InPlaceOutcome::FallThrough => {
-                eprintln!(
-                    "tm: in-place relaunch unavailable for '{}' (state={}) — \
-                     this tmux session is already a managed session; \
-                     refusing to launch a nested session here.",
-                    record.name, record.state
-                );
+            {
+                super::guided_inplace::InPlaceOutcome::Result(Ok(())) => return Ok(()),
+                super::guided_inplace::InPlaceOutcome::Result(Err(e)) => {
+                    // #2456 review finding 2: a failure here — whether it
+                    // happened BEFORE any daemon mutation (cwd resolution,
+                    // resolving the `claude` binary) or the `exec` syscall
+                    // itself failing AFTER a successful reactivate — must
+                    // not hard-fail this call site the way it correctly does
+                    // for `try_inplace_relaunch`'s OWN env-var entry point
+                    // (component C). Pre-#2453 this whole branch always fell
+                    // back to `resume_guided_session`'s switch-client
+                    // reconnect for every one of these scenarios; regressing
+                    // that to a hard non-zero exit — e.g. simply because
+                    // `claude` is not on THIS pane's `PATH` — would be worse
+                    // than the original bug. Report the concrete error and
+                    // fall back exactly like a daemon-refused reactivate.
+                    eprintln!("tm: in-place relaunch failed ({e}) — falling back to reconnect…");
+                }
+                super::guided_inplace::InPlaceOutcome::FallThrough => {
+                    eprintln!(
+                        "tm: in-place relaunch unavailable for '{}' (state={}) — \
+                         this tmux session is already a managed session; \
+                         refusing to launch a nested session here.",
+                        record.name, record.state
+                    );
+                }
             }
+        } else {
+            eprintln!(
+                "tm: this tmux session ('{}') is already a managed session (state={}) — \
+                 refusing to launch a nested session here.",
+                record.name, record.state
+            );
         }
         eprintln!("tm: reconnecting to '{}' instead…", record.name);
         return super::guided_resume::resume_guided_session(client, url, &record).await;
@@ -298,6 +350,37 @@ pub(crate) fn nested_managed_match<'a>(
         current_session_name.is_some_and(|n| n == r.name)
             || env_session_id.is_some_and(|id| id == r.id)
     })
+}
+
+/// Pure predicate (#2456 review finding 1): does the CURRENT pane's own
+/// process-level `TM_MANAGED_SESSION_ID` env var confirm THIS pane is the
+/// one bound to `record_id` — as opposed to [`nested_managed_match`] having
+/// matched purely on tmux SESSION name (a signal every window/pane in that
+/// session shares)?
+///
+/// Why: [`nested_managed_match`] deliberately matches on session name alone
+/// as a fallback (a pane that never got the durable env-var publish, #2157
+/// item 2) — correct for the ORIGINAL harmless refuse+switch-client
+/// behavior, but NOT sufficient to justify driving [`super::guided_inplace::
+/// run_inplace_relaunch`]'s destructive `exec`, which lands in WHATEVER pane
+/// this process is literally running in. Isolating the confirmation check
+/// from the `std::env::var` read makes the exact cross-pane hijack scenario
+/// (two idle panes in the same tmux session, `tm` invoked from the one that
+/// is NOT bound to the matched record) unit-testable without mutating
+/// process env or spawning tmux.
+/// What: `true` only when `env_session_id` is `Some` and equals `record_id`
+/// exactly — this is the SAME process-scoped signal
+/// `guided_inplace::read_env_managed_session_id` uses as its primary gate,
+/// never the looser, session-wide `tmux show-environment` fallback (which
+/// cannot discriminate between panes either). `false` for a missing env var
+/// OR one that names a DIFFERENT session — including the two-idle-panes
+/// case — meaning the caller must fall back to refuse+switch-client rather
+/// than attempt the in-place relaunch.
+/// Test: `pane_identity_confirmed_true_when_env_matches_record`,
+/// `pane_identity_confirmed_false_when_env_absent`,
+/// `pane_identity_confirmed_false_when_env_names_different_session`.
+pub(crate) fn pane_identity_confirmed(env_session_id: Option<&str>, record_id: &str) -> bool {
+    env_session_id.is_some_and(|id| id == record_id)
 }
 
 /// Fetch EVERY managed session, unfiltered — `GET /api/v1/sessions/managed`

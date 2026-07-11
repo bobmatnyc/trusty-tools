@@ -27,7 +27,8 @@ use crate::commands::first_run::needs_first_run_clone;
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     derive_project, fallback_protected, github_host, is_github_remote, nested_managed_match,
-    non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
+    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
+    tty_gate,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -1364,4 +1365,43 @@ fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
         matched.is_some(),
         "must match by session name regardless of source_id"
     );
+}
+
+// ── pane_identity_confirmed (#2456 review finding 1) ─────────────────────────
+// The cross-pane-hijack guard: `nested_managed_match` alone only proves the
+// tmux SESSION matches (every window/pane in that session shares the same
+// session name) — it is NOT proof the CURRENT pane is the one bound to the
+// matched record. `pane_identity_confirmed` is the additional predicate that
+// must independently confirm pane-level identity before the caller may drive
+// the destructive `run_inplace_relaunch`.
+
+#[test]
+fn pane_identity_confirmed_true_when_env_matches_record() {
+    // THIS pane's own process env names the SAME record nested_managed_match
+    // found — genuinely the pane bound to that record; safe to relaunch.
+    assert!(pane_identity_confirmed(
+        Some("tm-proj-01-id"),
+        "tm-proj-01-id"
+    ));
+}
+
+#[test]
+fn pane_identity_confirmed_false_when_env_absent() {
+    // No process-level env var at all — e.g. a plain shell window that was
+    // never used to spawn claude for this session (or a pre-durable-publish
+    // pane, #2157). Must refuse to drive the in-place relaunch here.
+    assert!(!pane_identity_confirmed(None, "tm-proj-01-id"));
+}
+
+#[test]
+fn pane_identity_confirmed_false_when_env_names_different_session() {
+    // #2456 review finding 1's exact hijack scenario: TWO idle panes share
+    // one tmux session (so `nested_managed_match` matches on session name
+    // for either), but `tm` is invoked from the pane bound to a DIFFERENT
+    // managed session than the one the guard matched. The env var is
+    // present, but for the wrong id — must still refuse.
+    assert!(!pane_identity_confirmed(
+        Some("some-other-session-id"),
+        "tm-proj-01-id"
+    ));
 }

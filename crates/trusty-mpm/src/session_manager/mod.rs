@@ -69,6 +69,9 @@ mod set_deliverable_id_tests;
 #[cfg(test)]
 mod dedup_tests;
 
+#[cfg(test)]
+mod runtime_exit_reconcile_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]
