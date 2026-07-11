@@ -175,6 +175,11 @@ pub enum TrustyCommand {
         /// Optional Deliverable id to bind this session to (`--deliverable`,
         /// DOC-35 §10.6, #2379). `None` → no link, the common case.
         deliverable_id: Option<String>,
+        /// Force-new control (#2450): `true` → skip the daemon's in-project
+        /// reconnect pre-flight and always spawn a FRESH session (the explicit
+        /// `tm session new`/`session start` verbs); `false` → the reconnect
+        /// default (#1707), so chat/TUI surfaces adopt an existing live session.
+        force_new: bool,
     },
     /// List every managed session (`sessions.list`).
     ManagedList,
@@ -312,6 +317,7 @@ mod tests {
             runtime: Some("tcode".into()),
             inject_task: None,
             deliverable_id: None,
+            force_new: false,
         };
         assert_eq!(spawn.clone(), spawn);
         let answer = TrustyCommand::ManagedAnswer {

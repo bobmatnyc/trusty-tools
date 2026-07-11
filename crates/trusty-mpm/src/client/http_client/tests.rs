@@ -406,6 +406,7 @@ fn managed_spawn_request_serializes() {
         runtime: Some("tcode".to_string()),
         inject_task: None,
         deliverable_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+        force_new: false,
     };
     let v = serde_json::to_value(&req).unwrap();
     assert_eq!(v["ref"], "main");
@@ -426,6 +427,7 @@ fn managed_spawn_request_serializes() {
         runtime: None,
         inject_task: None,
         deliverable_id: None,
+        force_new: false,
     };
     let v = serde_json::to_value(&bare).unwrap();
     assert!(v.get("name_hint").is_none(), "None name_hint is omitted");
@@ -437,6 +439,10 @@ fn managed_spawn_request_serializes() {
     assert!(
         v.get("deliverable_id").is_none(),
         "None deliverable_id is omitted (#2379, same additive pattern as inject_task)"
+    );
+    assert!(
+        v.get("force_new").is_none(),
+        "false force_new is omitted (#2450) so the wire matches the pre-existing shape"
     );
 }
 

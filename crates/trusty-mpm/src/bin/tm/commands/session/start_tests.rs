@@ -275,11 +275,16 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
     // default omits it and lets the daemon default — semantically identical
     // (both resolve to `claude-code`), just spelled differently on the wire,
     // so it is asserted separately below rather than folded into `expected`.
+    // #2450: both `session start` (this request) and the picker's "launch new
+    // session" (`launch_new_session_and_attach`) now send `force_new: true` —
+    // an explicit launch verb must never adopt an existing live session for the
+    // same project. The two surfaces stay identical on this field too (#1916).
     let expected = serde_json::json!({
         "repo_url": repo.to_string_lossy(),
         "ref": "HEAD",
         "task": "",
         "runtime": "claude-code",
+        "force_new": true,
     });
     assert_eq!(
         body, expected,

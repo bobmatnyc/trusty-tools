@@ -220,6 +220,8 @@ fn route_new(args: &str) -> Dispatch {
         // The TUI `/new` chat command has no `--deliverable` surface (#2379;
         // TUI Deliverable affordances are #2383's scope).
         deliverable_id: None,
+        // #2450: the TUI `/new` verb keeps the #1707 reconnect default.
+        force_new: false,
     })
 }
 

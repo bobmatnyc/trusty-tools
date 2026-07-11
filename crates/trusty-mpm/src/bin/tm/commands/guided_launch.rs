@@ -127,6 +127,11 @@ pub(crate) async fn launch_new_session_and_attach(
             "repo_url": repo_url,
             "ref": "HEAD",
             "task": "",
+            // #2450: this is the picker's EXPLICIT "launch new session" choice —
+            // force a fresh session so the daemon's in-project reconnect
+            // pre-flight (#1707) never adopts an unrelated live session for the
+            // same project (which would inject this launch into it).
+            "force_new": true,
         }))
         .send()
         .await;

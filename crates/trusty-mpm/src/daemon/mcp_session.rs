@@ -83,6 +83,11 @@ pub async fn session_new(
         // The MCP `session_new` tool does not expose Deliverable linkage
         // (#2379's CLI surface is `tm sessions new --deliverable`, HTTP-only).
         deliverable_id: None,
+        // Keep the #1707 reconnect (#2450): an MCP `session_new` re-issued for a
+        // project that already has a live session should ADOPT it, not spawn a
+        // duplicate — idempotent reconnect is the safe default for automated
+        // callers (prevents LLM-driven session proliferation).
+        force_new: false,
     };
     let record = spawn_managed(state, params).await?;
     Ok(record_to_json(&record))

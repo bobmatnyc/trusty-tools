@@ -116,6 +116,14 @@ pub struct SpawnRequest {
     /// never a silently-dropped link. Absent/null → no link (the common case).
     #[serde(default)]
     pub deliverable_id: Option<String>,
+    /// Optional force-new control (#2450): `true` SKIPS the in-project reconnect
+    /// pre-flight so an explicit "launch new session" surface (the `tm` picker's
+    /// "launch new session" choice, `tm session new`) always spawns a FRESH
+    /// session + worktree instead of adopting an existing live one for the same
+    /// project. Absent/null/`false` → the reconnect default (#1707), so
+    /// programmatic/idempotent callers are unaffected.
+    #[serde(default)]
+    pub force_new: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -462,6 +470,10 @@ pub async fn spawn_session(
         // to opt into the legacy metadata-only behavior (`--no-inject`).
         inject_task: req.inject_task,
         deliverable_id: req.deliverable_id,
+        // Force-new opt-out (#2450): a client (the picker's "launch new
+        // session", `tm session new`) sets `force_new: true` to skip the
+        // in-project reconnect pre-flight and always spawn fresh.
+        force_new: req.force_new,
     };
 
     match spawn_managed(&state, params).await {
