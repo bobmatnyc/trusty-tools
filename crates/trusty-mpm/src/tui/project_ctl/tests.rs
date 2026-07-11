@@ -13,9 +13,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::events::{PendingAction, handle_key};
 use super::panes::{actions_bar, projects, sessions};
-use super::poll::{project_to_row, session_to_row};
-use super::state::{Pane, ProjectCtlState};
-use crate::client::{FleetProjectGroupWire, ManagedSessionSummary};
+use super::poll::{project_ctl_poll_daemon, project_to_row, session_to_row};
+use super::state::{ConfirmKind, Pane, ProjectCtlState};
+use crate::client::{DaemonClient, FleetProjectGroupWire, ManagedSessionSummary};
 use crate::project::Project;
 
 fn project(name: &str) -> Project {
@@ -151,4 +151,41 @@ fn action_bar_reflects_daemon_reachability_by_default() {
     // Freshly seeded state (no poll ran) starts unreachable, matching the
     // real poller's default until the first health probe succeeds.
     assert!(actions_bar::bar_text(&state).contains(actions_bar::DAEMON_UNREACHABLE));
+}
+
+/// A `127.0.0.1` URL bound to an ephemeral port, then immediately dropped so
+/// a later connect is refused — mirrors
+/// `tui::coordinator::tests::dead_loopback_url` / `poll::tests::dead_loopback_url`.
+fn dead_loopback_url() -> String {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
+    let port = listener.local_addr().expect("read bound local addr").port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A daemon poll racing with an open confirmation gate must never reassign or
+/// clear it (DOC-35 §5.2) — the gate pins its target session id at the moment
+/// it opens, and a refresh (even one that clears the whole fleet, as a
+/// daemon-down poll does) must leave that pin untouched. This is the
+/// regression test the #2119 task explicitly calls for on any change that
+/// touches the refresh path.
+#[tokio::test]
+async fn poll_never_touches_pending_confirm() {
+    let mut state = seeded_state();
+    state.request_confirm(
+        ConfirmKind::Decommission,
+        "a1b2c3d4e5f6",
+        "trusty-tools-session",
+    );
+    let before = state.pending_confirm.clone().expect("confirm requested");
+
+    let mut client = DaemonClient::new(dead_loopback_url());
+    project_ctl_poll_daemon(&mut state, &mut client).await;
+
+    assert_eq!(
+        state.pending_confirm,
+        Some(before),
+        "a poll must never mutate an open confirmation gate's pinned target"
+    );
 }

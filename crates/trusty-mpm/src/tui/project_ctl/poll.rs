@@ -1,29 +1,48 @@
-//! Live daemon polling for the `tm projects` TUI (#2118).
+//! Live daemon polling for the `tm projects` TUI (#2118, live-refresh + activity
+//! wiring #2119).
 //!
 //! Why: the run loop repeats one async step on its `--interval-ms` cadence —
 //! probe daemon health, self-heal the URL on failure, pull the registry-B
-//! project list plus the fleet-by-project session groups, and project both
-//! into the pure row shapes [`super::state`] renders. Mirrors
-//! `tui::coordinator::poll::coord_poll_daemon` so every TUI screen self-heals
-//! the daemon URL identically. Fetching the fleet ONCE per tick (rather than
-//! per-project) keeps this to two HTTP calls regardless of project count.
+//! project list plus the fleet-by-project session groups, fetch the selected
+//! session's live activity, and project all three into the pure shapes
+//! [`super::state`] renders. Mirrors `tui::coordinator::poll::coord_poll_daemon`
+//! so every TUI screen self-heals the daemon URL identically. Fetching the
+//! fleet ONCE per tick (rather than per-project) keeps the project/session
+//! refresh to two HTTP calls regardless of project count; the activity fetch
+//! is a third call, made only when a session is selected (DOC-35 §5.4).
 //! What: [`project_ctl_poll_daemon`] (health → rediscover-on-fail → registry
-//! list + fleet → map; on daemon-down clears both) plus the pure projections
-//! [`project_to_row`] and [`session_to_row`].
-//! Test: `tests` covers the pure projections; the async glue mirrors the
-//! coordinator's poller and is exercised by launching the TUI.
+//! list + fleet → map → selected-session activity via [`refresh_activity`];
+//! on daemon-down clears the project/session state — which in turn clears
+//! `activity` too, since a daemon-down poll has no session left selected to
+//! attribute it to; see [`refresh_activity`]'s own doc for the narrower
+//! "fetch failed but the daemon is otherwise up" case that DOES keep the
+//! last-known activity, marked stale) plus the pure projections
+//! [`project_to_row`], [`session_to_row`], and [`activity_from_response`].
+//! Test: `tests` covers the pure projections and the daemon-down branches
+//! against a guaranteed-dead client (mirroring
+//! `tui::coordinator::poll::tests::poll_marks_unreachable_clears_sessions`);
+//! the daemon-UP path is exercised manually / by launching the TUI.
 
-use crate::client::{DaemonClient, FleetProjectGroupWire, ManagedSessionSummary};
+use crate::client::{
+    DaemonClient, FleetProjectGroupWire, ManagedActivityResponse, ManagedSessionSummary,
+};
 use crate::project::Project;
 use crate::tui::coordinator::rows::session_short_id;
 
-use super::state::{ProjectCtlState, ProjectRow, SessionRow};
+use super::state::{ActivityInfo, ProjectCtlState, ProjectRow, SessionRow};
+
+/// How many trailing lines of a session's raw tmux pane the Activity pane
+/// previews (DOC-35 §5.1 mockup: "last 3 lines of raw_pane").
+const RAW_PANE_TAIL_LINES: usize = 3;
 
 /// Refresh [`ProjectCtlState`] from one daemon poll.
 ///
 /// Why: keeps the poll logic out of the key-driven run loop so the loop can
 /// re-poll on its timer (and, after a mutating action, on demand) without
-/// duplicating the health/rediscover/fetch sequence.
+/// duplicating the health/rediscover/fetch sequence. Note this function never
+/// touches [`ProjectCtlState::pending_confirm`] — the confirmation gate pins a
+/// target session id at the moment it opens (DOC-35 §5.2) and a poll racing
+/// with an open confirm modal must not reassign or clear it.
 /// What: probes health; if the daemon looks down, re-resolves the URL from
 /// the lock file via [`rediscover`] and retries one health probe. When
 /// reachable it pulls `GET /api/v1/projects` and
@@ -33,9 +52,13 @@ use super::state::{ProjectCtlState, ProjectRow, SessionRow};
 /// navigation models so a shrunk list never leaves a selection past the end;
 /// the Sessions-pane selection is PRESERVED across a refresh (only an
 /// explicit project switch resets it — see
-/// [`ProjectCtlState::on_project_selection_changed`]).
-/// Test: `poll_marks_unreachable_clears_state` drives the daemon-down branch;
-/// the daemon-up path requires a live daemon and is exercised manually.
+/// [`ProjectCtlState::on_project_selection_changed`]). Finally refreshes
+/// [`ProjectCtlState::activity`] for whichever session is selected AFTER the
+/// project/session refresh above (see [`refresh_activity`]).
+/// Test: `poll_marks_unreachable_clears_state` drives the full-poll
+/// daemon-down branch; `poll_never_touches_pending_confirm` (in
+/// `super::tests`) covers the confirm-gate invariant; the daemon-up path
+/// requires a live daemon and is exercised manually.
 pub(crate) async fn project_ctl_poll_daemon(
     state: &mut ProjectCtlState,
     client: &mut DaemonClient,
@@ -62,6 +85,46 @@ pub(crate) async fn project_ctl_poll_daemon(
     }
     state.projects_nav.sync_len(state.projects.len());
     state.sessions_nav.sync_len(state.current_sessions().len());
+    refresh_activity(state, client).await;
+}
+
+/// Refresh [`ProjectCtlState::activity`] for the currently selected session
+/// (DOC-35 §5.4, #2119).
+///
+/// Why: split out of [`project_ctl_poll_daemon`] so the "no session selected"
+/// / "daemon down, keep last known" / "fetch failed, keep last known" /
+/// "fetch succeeded" branches are each one arm instead of nested inside the
+/// larger poll function. Runs AFTER the project/session refresh above so
+/// `state.selected_session()` reflects the just-synced navigation, not a
+/// pre-refresh selection that may have shrunk out of range.
+/// What: no selection → clears `state.activity`. A selection with the daemon
+/// unreachable, or whose fetch errors, → if `state.activity` already targets
+/// this session id it is marked `stale` (kept, not discarded, per the
+/// graceful-daemon-down requirement); otherwise cleared (nothing recent
+/// enough to show as stale). A successful fetch replaces `state.activity`
+/// outright with a fresh, non-stale [`ActivityInfo`].
+/// Test: `refresh_activity_marks_existing_activity_stale_on_fetch_failure`,
+/// `refresh_activity_clears_when_no_session_is_selected`.
+async fn refresh_activity(state: &mut ProjectCtlState, client: &DaemonClient) {
+    let Some(session_id) = state.selected_session().map(|s| s.id.clone()) else {
+        state.activity = None;
+        return;
+    };
+
+    if state.daemon_reachable {
+        match client.managed_session_activity(&session_id).await {
+            Ok(resp) => {
+                state.activity = Some(activity_from_response(session_id, resp));
+                return;
+            }
+            Err(_) => { /* fall through to the stale-or-clear handling below */ }
+        }
+    }
+
+    match &mut state.activity {
+        Some(existing) if existing.session_id == session_id => existing.stale = true,
+        _ => state.activity = None,
+    }
 }
 
 /// Re-resolve the daemon URL from the lock file when the daemon is unreachable.
@@ -153,10 +216,11 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
 
 /// Project one fleet [`ManagedSessionSummary`] into a [`SessionRow`].
 ///
-/// Why: the Sessions pane needs a numbered, compact row per session, plus the
-/// static `pending_decision`/`proposed_default` fields the Activity pane
-/// skeleton renders (#2118 does NOT call the live `/activity` endpoint — that
-/// is #2119).
+/// Why: the Sessions pane needs a numbered, compact row per session; the
+/// fleet poll is one call for every session regardless of count, so this
+/// projection stays over the STATIC record fields even after #2119 — only the
+/// one selected session's activity gets the extra live `/activity` fetch (see
+/// [`refresh_activity`]), never the whole list.
 /// What: derives the 8-hex short id via [`session_short_id`] and copies the
 /// rest through unchanged.
 /// Test: `session_to_row_derives_short_id_and_copies_fields`.
@@ -172,6 +236,51 @@ pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
         pending_decision: s.pending_decision,
         proposed_default: s.proposed_default,
     }
+}
+
+/// Project a [`ManagedActivityResponse`] into an [`ActivityInfo`] for `session_id`.
+///
+/// Why: the Activity pane needs a lean, render-ready shape (DOC-35 §5.4) with
+/// a bounded pane-tail preview rather than the full wire response.
+/// What: copies `state`/`summary`/`pending_decision`/`proposed_default`
+/// through unchanged, tags the snapshot with `session_id`, sets `stale` to
+/// `false` (a just-succeeded fetch is by definition fresh), and derives
+/// `raw_pane_tail` as the last [`RAW_PANE_TAIL_LINES`] non-empty lines of
+/// `raw_pane` via [`tail_lines`].
+/// Test: `activity_from_response_derives_fields_and_tail`,
+/// `activity_from_response_handles_short_pane`.
+pub(crate) fn activity_from_response(
+    session_id: String,
+    resp: ManagedActivityResponse,
+) -> ActivityInfo {
+    ActivityInfo {
+        session_id,
+        state: resp.state,
+        summary: resp.summary,
+        pending_decision: resp.pending_decision,
+        proposed_default: resp.proposed_default,
+        raw_pane_tail: tail_lines(&resp.raw_pane, RAW_PANE_TAIL_LINES),
+        stale: false,
+    }
+}
+
+/// The last `n` non-empty, trimmed lines of `text`, in original order.
+///
+/// Why: a raw tmux pane capture is typically newline-padded and much longer
+/// than the Activity pane's fixed 4-row height can show; a small pure helper
+/// keeps the "which lines" rule unit-testable independent of rendering.
+/// What: splits on `\n`, trims each line, drops empty ones, then keeps the
+/// last `n` (or fewer, if `text` has fewer than `n` non-empty lines).
+/// Test: `tail_lines_keeps_last_n_non_empty_lines`,
+/// `tail_lines_handles_fewer_lines_than_requested`.
+fn tail_lines(text: &str, n: usize) -> Vec<String> {
+    let non_empty: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let start = non_empty.len().saturating_sub(n);
+    non_empty[start..].iter().map(|l| l.to_string()).collect()
 }
 
 #[cfg(test)]
@@ -247,5 +356,174 @@ mod tests {
         assert_eq!(row.state, "active");
         assert_eq!(row.branch.as_deref(), Some("main"));
         assert_eq!(row.task.as_deref(), Some("do the thing"));
+    }
+
+    fn activity_response(raw_pane: &str) -> ManagedActivityResponse {
+        ManagedActivityResponse {
+            raw_pane: raw_pane.to_string(),
+            runtime_active: true,
+            pane_stale: false,
+            state: "working".to_string(),
+            summary: "running tests".to_string(),
+            confidence: 0.9,
+            cache_hit: false,
+            input_tokens: 0,
+            output_tokens: 0,
+            latency_ms: 12,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            classification: None,
+            pending_decision: Some("write to ci.yml?".to_string()),
+            proposed_default: Some("yes".to_string()),
+        }
+    }
+
+    #[test]
+    fn activity_from_response_derives_fields_and_tail() {
+        let resp = activity_response("line1\nline2\nline3\nline4\n");
+        let info = activity_from_response("sess-1".to_string(), resp);
+        assert_eq!(info.session_id, "sess-1");
+        assert_eq!(info.state, "working");
+        assert_eq!(info.summary, "running tests");
+        assert_eq!(info.pending_decision.as_deref(), Some("write to ci.yml?"));
+        assert_eq!(info.proposed_default.as_deref(), Some("yes"));
+        assert_eq!(info.raw_pane_tail, vec!["line2", "line3", "line4"]);
+        assert!(!info.stale);
+    }
+
+    #[test]
+    fn activity_from_response_handles_short_pane() {
+        let resp = activity_response("only one line");
+        let info = activity_from_response("sess-1".to_string(), resp);
+        assert_eq!(info.raw_pane_tail, vec!["only one line"]);
+    }
+
+    #[test]
+    fn tail_lines_keeps_last_n_non_empty_lines() {
+        let text = "a\nb\n\nc\nd\n";
+        assert_eq!(tail_lines(text, 2), vec!["c", "d"]);
+    }
+
+    #[test]
+    fn tail_lines_handles_fewer_lines_than_requested() {
+        assert_eq!(tail_lines("only", 3), vec!["only"]);
+        assert_eq!(tail_lines("", 3), Vec::<String>::new());
+    }
+
+    // ---- daemon-down branches (guaranteed-dead client, no live daemon needed) ---
+
+    /// A `127.0.0.1` URL bound to an ephemeral port, then immediately dropped
+    /// so a later connect is refused — mirrors
+    /// `tui::coordinator::tests::dead_loopback_url`.
+    fn dead_loopback_url() -> String {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
+        let port = listener.local_addr().expect("read bound local addr").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn poll_marks_unreachable_clears_state() {
+        let discovered = crate::core::resolve_daemon_url(None);
+        let probe = DaemonClient::new(discovered.clone());
+        if probe.is_healthy().await {
+            eprintln!("skipping: a reachable daemon was discovered at {discovered}");
+            return;
+        }
+
+        let mut state = ProjectCtlState {
+            projects: vec![ProjectRow {
+                name: "widget".to_string(),
+                repo_url: "https://github.com/acme/widget".to_string(),
+                live_count: 1,
+                total_count: 1,
+            }],
+            daemon_reachable: true, // pretend a prior poll had succeeded
+            ..Default::default()
+        };
+        state
+            .sessions_by_project
+            .insert("widget".to_string(), vec![]);
+        let mut client = DaemonClient::new(dead_loopback_url());
+
+        project_ctl_poll_daemon(&mut state, &mut client).await;
+
+        assert!(!state.daemon_reachable);
+        assert!(state.projects.is_empty());
+        assert!(state.sessions_by_project.is_empty());
+    }
+
+    fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
+        let mut state = ProjectCtlState {
+            projects: vec![ProjectRow {
+                name: "widget".to_string(),
+                repo_url: "https://github.com/acme/widget".to_string(),
+                live_count: 1,
+                total_count: 1,
+            }],
+            daemon_reachable: true,
+            ..Default::default()
+        };
+        state.sessions_by_project.insert(
+            "widget".to_string(),
+            vec![session_to_row(summary(session_id, "active"))],
+        );
+        state.projects_nav.sync_len(state.projects.len());
+        state.sessions_nav.sync_len(state.current_sessions().len());
+        state
+    }
+
+    /// `refresh_activity` is called directly (bypassing `project_ctl_poll_daemon`'s
+    /// own health probe) so this test stays deterministic regardless of whether
+    /// a real daemon happens to be discoverable on this machine — it only needs
+    /// the `/activity` HTTP call itself to fail, which a dead loopback port
+    /// guarantees.
+    #[tokio::test]
+    async fn refresh_activity_marks_existing_activity_stale_on_fetch_failure() {
+        let mut state = seeded_activity_state("s1");
+        state.activity = Some(ActivityInfo {
+            session_id: "s1".to_string(),
+            state: "working".to_string(),
+            summary: "last known summary".to_string(),
+            pending_decision: None,
+            proposed_default: None,
+            raw_pane_tail: vec!["$ cargo test".to_string()],
+            stale: false,
+        });
+        let client = DaemonClient::new(dead_loopback_url());
+
+        refresh_activity(&mut state, &client).await;
+
+        let activity = state
+            .activity
+            .expect("last-known activity must be kept, not discarded");
+        assert!(activity.stale, "a failed fetch must mark it stale");
+        assert_eq!(
+            activity.summary, "last known summary",
+            "the last-known data must be kept, not cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_activity_clears_when_no_session_is_selected() {
+        let mut state = ProjectCtlState {
+            daemon_reachable: true,
+            activity: Some(ActivityInfo {
+                session_id: "orphaned".to_string(),
+                state: "working".to_string(),
+                summary: "stale from a since-deselected session".to_string(),
+                pending_decision: None,
+                proposed_default: None,
+                raw_pane_tail: vec![],
+                stale: false,
+            }),
+            ..Default::default()
+        };
+        let client = DaemonClient::new(dead_loopback_url());
+
+        refresh_activity(&mut state, &client).await;
+
+        assert!(state.activity.is_none());
     }
 }
