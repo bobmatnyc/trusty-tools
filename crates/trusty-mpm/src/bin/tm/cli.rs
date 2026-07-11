@@ -101,16 +101,37 @@ pub(crate) enum Command {
     ///   Managed fleet sessions (provisioned in isolated worktrees):
     ///     new, ls, activity, send, answer, decommission, prune-idle, …
     ///
-    /// Why (#1916): the invoked name is the singular `session` — renamed from the
-    /// plural `sessions` (#1394/#1841) now that `tm` has no external users to keep
-    /// a compatibility alias for. `tm session start`/`tm session new` reads more
-    /// naturally as a singular verb group. The Rust variant stays `Session`
-    /// (matching the clap-derived kebab-case default, so no rename of the
-    /// `SessionAction` group or its ~80 internal references was needed).
-    /// What: the `tm session <action>` command group (`tui`, `ls`, `new`, …).
-    /// Test: `cli_parses_session_singular` / `cli_sessions_plural_no_longer_parses`
-    /// in `tests.rs`.
-    #[command(name = "session")]
+    /// Why (#2116, DOC-35 §2.2/§3.2): session lifecycle verbs are promoted to a
+    /// sibling top-level plural noun — `tm sessions` — matching `tm projects`
+    /// (epic #2108) rather than folding under either. This reverses the earlier
+    /// #1916 rename to the singular `session`: that rename assumed `tm` had no
+    /// external users to keep a compatibility alias for, but the owner has since
+    /// resolved that the plural is the durable spelling and the singular
+    /// (`Command::Session` below) is kept as a hidden deprecated alias instead of
+    /// being retired outright, so scripts/skills/muscle memory keep working.
+    /// What: the `tm sessions <action>` command group (`tui`, `ls`, `new`, …).
+    /// Test: `cli_parses_sessions_*` in `tests.rs` cover the canonical plural;
+    /// `cli_parses_session_*` continue to cover the deprecated singular alias.
+    Sessions {
+        /// Session action to perform.
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+    /// [DEPRECATED] Alias of `sessions` (#2116) — use `tm sessions <verb>`.
+    ///
+    /// Why: `tm session` was the canonical spelling from #1916 until #2116
+    /// promoted `sessions` to a sibling top-level plural alongside `tm projects`.
+    /// This singular form is kept as a hidden alias (mirroring the
+    /// `ManagedStop`/`RuntimeStop`/`ManagedResume` verb-level precedent) so
+    /// existing scripts, skills (`tm-session-management`, `tm-session-pause`,
+    /// `tm-session-resume`), and muscle memory keep working unchanged.
+    /// What: identical dispatch to `Sessions`; `main.rs` prints a one-line
+    /// deprecation notice to stderr exactly once per invocation before routing
+    /// to the same handler — no functional difference in behavior.
+    /// Test: every existing `cli_parses_session_*` test in `tests.rs`;
+    /// `tm_session_singular_prints_deprecation_notice_once` (integration test)
+    /// asserts the notice fires exactly once.
+    #[command(name = "session", hide = true)]
     Session {
         /// Session action to perform.
         #[command(subcommand)]
@@ -554,14 +575,14 @@ pub(crate) enum Command {
     /// current context. On a real terminal it opens the interactive session picker
     /// (the same numbered menu as bare `tm`, but scoped to the managed fleet), so
     /// resuming a session is one keystroke away. Piped, scripted, or `--json`
-    /// invocations degrade to the same static, pipeable list as `tm session ls`,
+    /// invocations degrade to the same static, pipeable list as `tm sessions ls`,
     /// never blocking on stdin. The former top-level `tm ls` (the DOC-24 alias /
     /// project-registry list) now lives behind `--projects`/`-p`.
     /// What: with `--projects`/`-p`, prints the local-project + managed-fleet alias
     /// registry (`--json` = combined JSON, `--root` overrides the managed root).
     /// Without `--projects`, it is the session connector: a TTY with ≥1 session
     /// opens the picker; `--json`, `--all`, a non-TTY, or 0 sessions print the
-    /// static table. `--source-id`/`--current`/`--all` mirror `tm session ls`.
+    /// static table. `--source-id`/`--current`/`--all` mirror `tm sessions ls`.
     /// Test: `cli_parses_ls_connector_bare`, `cli_parses_ls_projects`,
     /// `cli_parses_ls_projects_short`, `cli_parses_ls_json`, `cli_parses_ls_current`,
     /// `cli_ls_source_id_and_current_conflict`.
@@ -583,7 +604,7 @@ pub(crate) enum Command {
         json: bool,
         /// Filter sessions to this `owner/repo` slug (session mode only).
         ///
-        /// Passed to the daemon as `?source_id=`; mirrors `tm session ls`.
+        /// Passed to the daemon as `?source_id=`; mirrors `tm sessions ls`.
         #[arg(long)]
         source_id: Option<String>,
         /// Derive `source_id` from the cwd's git remote (session mode only).
@@ -987,7 +1008,7 @@ pub(crate) enum SessctlAction {
     },
     /// Stop a session (graceful by default, --force for immediate).
     ///
-    /// Why: mirrors `tm session stop` for the SESSCTL surface.
+    /// Why: mirrors `tm sessions stop` for the SESSCTL surface.
     /// What: POSTs to `POST /api/v1/control/sessions/{id}/stop?force=<bool>`.
     /// Test: `cli_parses_sessctl_stop`.
     Stop {
@@ -1307,7 +1328,7 @@ pub(crate) enum CatalogAction {
 pub(crate) enum RepairAction {
     /// Repair the agent/skill deploy state in `~/.claude/`.
     ///
-    /// Why: a crash during `tm install` or `tm session start` may leave stale
+    /// Why: a crash during `tm install` or `tm sessions start` may leave stale
     /// `.tmp` staging files in `~/.claude/agents/` or `~/.claude/skills/`, or
     /// leave either manifest corrupt. This command removes the orphans and
     /// validates both manifests.
@@ -1464,7 +1485,8 @@ pub(crate) enum ProjectAction {
     },
 }
 
-/// Actions for the `session` subcommand.
+/// Actions for the `sessions` subcommand (canonical since #2116; also
+/// reachable via the deprecated hidden `session` alias, see `Command::Session`).
 ///
 /// Two families coexist here (see `sessions --help` for the full description):
 ///   - Local project sessions: start, stop, list, run, output, pause, resume, …
@@ -1507,7 +1529,7 @@ pub(crate) enum SessionAction {
     /// session list (controller bullet + one row per managed session, the active
     /// row in two columns `[id] │ [summary]`). This is a NEW screen, distinct
     /// from the existing `tm tui` dashboard. It lives under the `session` group
-    /// as `tm session tui` (#1392): it operates on the same managed-session list
+    /// as `tm sessions tui` (#1392): it operates on the same managed-session list
     /// the other `session` verbs do, so grouping it there keeps the surface
     /// discoverable without colliding with the `coordinator` SM chat command.
     /// What: polls the daemon's coordinator-context endpoint live on the
@@ -1591,7 +1613,7 @@ pub(crate) enum SessionAction {
     /// Spawn a new managed session from a repo + ref (session-manager MVP).
     ///
     /// Why: the session-manager MVP provisions an isolated workspace from a git
-    /// repo and starts a harness in it; `tm session new` is the operator-facing
+    /// repo and starts a harness in it; `tm sessions new` is the operator-facing
     /// entry point that posts to `POST /api/v1/sessions/managed`.
     /// What: posts repo, ref, task, and an optional name hint to the daemon.
     /// Test: `cli_parses_session_new`.
@@ -1621,7 +1643,7 @@ pub(crate) enum SessionAction {
         /// By default the task is turnkey: once the session's runtime is ready
         /// it is typed into the pane so the session starts working immediately.
         /// Pass `--no-inject` for the legacy metadata-only behavior, where the
-        /// task is stored but you deliver it yourself with `tm session send`.
+        /// task is stored but you deliver it yourself with `tm sessions send`.
         #[arg(long)]
         no_inject: bool,
     },

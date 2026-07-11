@@ -3,15 +3,17 @@
 //! Why: session lifecycle operations (start, stop, list, clean, info, events,
 //! breakers, pause, resume, catchup, run, output, instructions) form a cohesive
 //! group that benefits from a dedicated file.
-//! What: the `session` dispatcher function and its private helpers
-//! `emit_managed_alias_notice`, `compose_session_instructions`. `start` is
-//! handled by the [`start`] submodule (protected-path routing, #1916). The
-//! managed verbs (`new`/`ls`/`send`/`answer`/`attach`/`stop`/`resume`/
-//! `decommission`) route through the shared chat-core layer
+//! What: the `session` dispatcher function (shared by the canonical `tm
+//! sessions` command and its deprecated hidden `tm session` alias, #2116) and
+//! its private helpers `emit_managed_alias_notice`, `compose_session_instructions`,
+//! plus the crate-visible [`emit_top_level_alias_notice`] the alias's `main.rs`
+//! match arm calls. `start` is handled by the [`start`] submodule (protected-path
+//! routing, #1916). The managed verbs (`new`/`ls`/`send`/`answer`/`attach`/
+//! `stop`/`resume`/`decommission`) route through the shared chat-core layer
 //! (`commands::managed_route`); the id-or-name resolution for both managed and
 //! project sessions goes through the one canonical `client::resolve_target`.
 //! `catchup` is handled by the DOC-28 cutover bridge in the `catchup` submodule.
-//! Test: `cli_parses_session_*`, `cli_parses_session_catchup`,
+//! Test: `cli_parses_session_*` / `cli_parses_sessions_*`, `cli_parses_session_catchup`,
 //! `compose_session_instructions_*` in `tests.rs`.
 
 // CUTOVER BRIDGE submodule — remove post-migration (#1762)
@@ -427,6 +429,26 @@ fn emit_managed_alias_notice(action: &SessionAction) {
     if let Some((old, new)) = pair {
         crate::commands::managed::deprecation_notice(old, new);
     }
+}
+
+/// Emit the deprecation notice for the top-level `session` (singular) alias (#2116).
+///
+/// Why: `tm session <verb>` is now a hidden deprecated alias of the canonical
+/// `tm sessions <verb>` (DOC-35 §2.2/§3.2). Unlike [`emit_managed_alias_notice`],
+/// this is a rename of the top-level NOUN, not a specific verb, so it must fire
+/// exactly once per invocation regardless of which verb was invoked. `main.rs`
+/// calls this from the single `Command::Session` match arm — one call site,
+/// executed at most once per process — before dispatching to [`session`], the
+/// same handler the canonical `Command::Sessions` arm calls. No functional
+/// difference in behavior between the two arms beyond this notice.
+/// What: writes `warning: 'session' is deprecated; use 'sessions'` to stderr.
+/// Test: `tm_session_singular_prints_deprecation_notice_once` /
+/// `tm_sessions_plural_prints_no_deprecation_notice` (integration tests,
+/// `tests/tm_sessions_alias_notice.rs`) drive the real binary and assert the
+/// notice appears exactly once for the singular form and not at all for the
+/// plural; `top_level_alias_notice_message` in `tests.rs` asserts the exact text.
+pub(crate) fn emit_top_level_alias_notice() {
+    crate::commands::managed::deprecation_notice("session", "sessions");
 }
 
 /// Derive the `owner/repo` source_id from a git directory for `--current`.

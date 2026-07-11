@@ -797,10 +797,11 @@ fn cli_parses_session_tui_with_flags() {
 
 #[test]
 fn cli_parses_session_singular() {
-    // #1916: the command group was renamed from the plural `sessions` (#1394)
-    // to the singular `session` — `tm` has no external users, so the rename is
-    // clean (no compatibility alias). Assert a representative subcommand
-    // parses under the canonical singular name.
+    // #1916 made `session` (singular) canonical with no plural alias. #2116
+    // (DOC-35 §2.2/§3.2) reverses that: `sessions` (plural) is now canonical,
+    // sibling to `tm projects`, and `session` is kept as a hidden deprecated
+    // alias rather than retired — so this exact invocation must keep parsing
+    // identically to before, into the same `Command::Session` variant.
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "list"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
@@ -810,14 +811,11 @@ fn cli_parses_session_singular() {
     }
 }
 
-#[test]
-fn cli_sessions_plural_no_longer_parses() {
-    // #1916: the old plural spelling `sessions` was retired (not aliased) as
-    // part of the clean rename to `session`. Parsing it must now fail with an
-    // unrecognized-subcommand error, mirroring `cli_rejects_removed_coordinator_tui`.
-    let err = Cli::try_parse_from(["trusty-mpm", "sessions", "list"]).unwrap_err();
-    assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-}
+// #2116 note: the mirror-plural parse test, the full-verb-surface parity
+// sweep, and the alias-notice message-text assertion moved to
+// `tests_behavior_e_tests.rs` to keep this file under the 1500-SLOC test cap
+// (`cli_parses_sessions_plural_canonical`, `cli_session_and_sessions_agree_for_every_verb`,
+// `top_level_alias_notice_message`).
 
 #[test]
 fn cli_rejects_removed_coordinator_tui() {

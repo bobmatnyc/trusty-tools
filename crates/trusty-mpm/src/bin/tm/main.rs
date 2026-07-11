@@ -49,6 +49,10 @@ mod tests_behavior_c;
 #[path = "tests_behavior_d_tests.rs"]
 mod tests_behavior_d;
 
+#[cfg(test)]
+#[path = "tests_behavior_e_tests.rs"]
+mod tests_behavior_e;
+
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
 /// Why: the YAML help bundle is checked in as a string literal; loading it
@@ -243,7 +247,15 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Stop) => stop_daemon().await,
         Some(Command::Restart) => restart(&client, &url).await,
         Some(Command::Project { action }) => project(&client, &url, action).await,
-        Some(Command::Session { action }) => session(&client, &url, action).await,
+        // #2116: `sessions` (plural) is the canonical top-level command.
+        Some(Command::Sessions { action }) => session(&client, &url, action).await,
+        // #2116: `session` (singular) is a hidden deprecated alias of `sessions`.
+        // The notice fires here — exactly once per invocation, regardless of
+        // which verb was invoked — before dispatching to the identical handler.
+        Some(Command::Session { action }) => {
+            commands::session::emit_top_level_alias_notice();
+            session(&client, &url, action).await
+        }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
