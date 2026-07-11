@@ -20,16 +20,46 @@ pub struct QualityReport {
     pub chunk_count: usize,
 }
 
-/// Sort `chunks` by descending cyclomatic complexity and return the top N.
-/// Chunks without a `complexity` field are scored on demand from `content`.
-pub fn complexity_hotspots(chunks: &[CodeChunk], top_n: usize) -> Vec<CodeChunk> {
-    let mut scored: Vec<(u32, CodeChunk)> = chunks
+/// A ranked complexity hotspot: the chunk plus the complexity numbers that
+/// earned it its rank.
+///
+/// Why: `/complexity_hotspots` historically ranked chunks by cyclomatic
+/// complexity but discarded the score before serialization (#2446), so HTTP
+/// clients (trusty-review) either re-derived it or silently read zeros. This
+/// wrapper carries the score through to the response so client-side complexity
+/// bucketing works without a second pass.
+/// What: flattens `CodeChunk` so the JSON stays backward-compatible — every
+/// prior field remains at the top level — and adds two sibling fields,
+/// `cyclomatic` and `cognitive`. `CodeChunk` itself is left untouched.
+/// Test: `hotspots_carry_complexity_numbers` asserts the messy chunk ranks
+/// first and its carried `cyclomatic` is non-zero.
+#[derive(Debug, Clone, Serialize)]
+pub struct HotspotItem {
+    #[serde(flatten)]
+    pub chunk: CodeChunk,
+    pub cyclomatic: u32,
+    pub cognitive: u32,
+}
+
+/// Sort `chunks` by descending cyclomatic complexity and return the top N,
+/// each carrying the cyclomatic + cognitive numbers it was ranked on.
+/// Chunks without a pre-computed `complexity` field are scored on demand from
+/// `content`.
+pub fn complexity_hotspots(chunks: &[CodeChunk], top_n: usize) -> Vec<HotspotItem> {
+    let mut scored: Vec<HotspotItem> = chunks
         .iter()
-        .map(|c| (cyclomatic_of(c), c.clone()))
+        .map(|c| {
+            let metrics = compute_complexity(&c.content);
+            HotspotItem {
+                chunk: c.clone(),
+                cyclomatic: metrics.cyclomatic,
+                cognitive: metrics.cognitive,
+            }
+        })
         .collect();
-    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
+    scored.sort_by_key(|h| std::cmp::Reverse(h.cyclomatic));
     scored.truncate(top_n);
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored
 }
 
 /// Return chunks that have at least one detected smell. Re-runs `detect_smells`
@@ -112,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn hotspots_sort_by_cyclomatic_descending() {
+    fn hotspots_carry_complexity_numbers() {
         // build content with varying decision-point counts.
         let simple = chunk("s", "/// doc\nfn s() {}\n");
         let mut messy_src = String::from("/// doc\nfn m(a: u32) {\n");
@@ -123,7 +153,24 @@ mod tests {
         let messy = chunk("m", &messy_src);
         let hot = complexity_hotspots(&[simple.clone(), messy.clone()], 2);
         assert_eq!(hot.len(), 2);
-        assert_eq!(hot[0].id, "m"); // messy first
+        assert_eq!(hot[0].chunk.id, "m", "messy chunk ranks first");
+        // The carried score is the number it was ranked on — non-zero here.
+        assert!(
+            hot[0].cyclomatic > 1,
+            "messy chunk cyclomatic should exceed 1"
+        );
+        assert!(hot[0].cyclomatic >= hot[1].cyclomatic);
+    }
+
+    #[test]
+    fn hotspot_item_flattens_chunk_and_adds_numbers() {
+        // The JSON must keep every CodeChunk field at the top level and add
+        // cyclomatic + cognitive siblings (backward-compatible, additive).
+        let items = complexity_hotspots(&[chunk("f:1:5", "fn f() {}")], 1);
+        let v = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(v["id"], "f:1:5"); // flattened chunk field at top level
+        assert!(v.get("cyclomatic").is_some());
+        assert!(v.get("cognitive").is_some());
     }
 
     #[test]

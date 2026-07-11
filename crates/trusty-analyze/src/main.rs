@@ -437,13 +437,12 @@ async fn main() -> Result<()> {
 
             let hotspots = trusty_analyze::core::quality::complexity_hotspots(&chunks, top_k);
             println!("\nTop {top_k} complexity hotspots:");
-            for (i, c) in hotspots.iter().enumerate() {
-                let cyclo =
-                    trusty_analyze::core::complexity::compute_complexity(&c.content).cyclomatic;
+            for (i, h) in hotspots.iter().enumerate() {
+                let c = &h.chunk;
                 println!(
                     "  {:>3}. cyclo={:>3} {}:{}-{} ({})",
                     i + 1,
-                    cyclo,
+                    h.cyclomatic,
                     c.file,
                     c.start_line,
                     c.end_line,
