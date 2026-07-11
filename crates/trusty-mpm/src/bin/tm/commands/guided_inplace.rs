@@ -56,6 +56,34 @@
 //! [`parse_show_environment_value`], is pure and exhaustively unit-tested. Every
 //! rejected gate now also emits a `tracing::debug!` so a stuck-in-the-picker
 //! report is diagnosable from `RUST_LOG=debug` output without code archaeology.
+//!
+//! #2453: [`run_inplace_relaunch`] and [`InPlaceOutcome`] are `pub(crate)` so
+//! `super::guided::run_guided_default`'s nested-session guard can drive this
+//! SAME primitive for a second, distinct entry point, independent of
+//! [`try_inplace_relaunch`]'s env-var + Stopped-state gate. This closes the
+//! bare-`tm` self-switch (no-op) bug: previously that call site trusted a
+//! possibly-stale `record.state == "active"` and unconditionally attached/
+//! switch-cliented, which is a guaranteed no-op when the operator is already
+//! sitting in that exact pane. See `run_inplace_relaunch`'s doc for the safety
+//! argument (the daemon's reactivate round-trip remains the sole authority).
+//! CORRECTION (#2456 review finding 1, ROUND 2): the nested-session guard's
+//! OWN match is by tmux SESSION name alone — every window/pane in a tmux
+//! session shares the same session name, so that match is NOT pane-level
+//! identity. A first attempt at closing this gap re-derived the process-scoped
+//! `TM_MANAGED_SESSION_ID` env var this module's own primary gate
+//! ([`read_env_managed_session_id`]) uses — that was EMPIRICALLY DISPROVEN:
+//! the healing step in `SessionManager::mark_runtime_exited_stopped` calls
+//! `tmux set-environment -t <session>` (SESSION-scoped), and tmux applies a
+//! session's stored environment to the process env of every NEW pane/window
+//! created in that session AFTERWARD — a genuinely different sibling window
+//! inherits the SAME env value, defeating an env-var-only gate. `guided.rs`
+//! now compares tmux's own stable `pane_id` (`super::tmux_attach::
+//! current_tmux_pane_id`) against the matched record's `pane_id`
+//! (`SessionRecord::pane_id`, captured at spawn/reconcile time) — a signal
+//! that is NEVER inherited across panes — before calling
+//! [`run_inplace_relaunch`] at all. A session-name-only match, a missing
+//! `pane_id` (legacy record), or a pane_id mismatch all fall back to the
+//! pre-existing refuse+switch-client behavior instead.
 
 use anyhow::Context as _;
 
@@ -340,8 +368,10 @@ fn exec_claude_in_place(mut cmd: std::process::Command) -> anyhow::Result<()> {
 /// which is exactly the same outcome as [`plan_inplace`] returning `None`.
 /// Separating the two outcomes lets [`try_inplace_relaunch`] route a
 /// reactivate failure back into the `None`/fall-through path instead of
-/// wrapping it in `Some(Err(..))`.
-enum InPlaceOutcome {
+/// wrapping it in `Some(Err(..))`. `pub(crate)` (#2453): `super::guided::
+/// run_guided_default`'s nested-session-guard branch also drives this enum
+/// directly — see [`run_inplace_relaunch`]'s doc for why.
+pub(crate) enum InPlaceOutcome {
     /// The exec attempt concluded (never returns on success; carries the
     /// error when `exec` itself failed, or when command resolution failed
     /// before any daemon mutation occurred).
@@ -351,11 +381,39 @@ enum InPlaceOutcome {
     FallThrough,
 }
 
-/// Drive the full in-place relaunch once [`plan_inplace`] selected it.
+/// Drive the full in-place relaunch once [`plan_inplace`] selected it — OR
+/// once `guided::run_guided_default`'s nested-session guard confirms the
+/// current tmux pane belongs to a managed record (#2453).
 ///
 /// Why: separated from [`try_inplace_relaunch`] so the "should we take this
 /// path at all" decision and the "how do we execute it" mechanics are
-/// distinct, readable steps.
+/// distinct, readable steps. `pub(crate)` (#2453): the nested-session guard in
+/// `guided.rs` matches a record by tmux SESSION name, then — ONLY when it can
+/// additionally confirm pane-level identity via tmux's own stable `pane_id`
+/// (`super::tmux_attach::current_tmux_pane_id` vs. the record's
+/// `SessionRecord::pane_id`; see the `#2456 review finding 1, ROUND 2`
+/// correction in this module's top doc comment for why the process-env
+/// signal this paragraph used to describe was proven insufficient) — drives
+/// this function; a session-name-only match never reaches here) BEFORE the
+/// record's `state` is known to be `Stopped` —
+/// its `record.state` field can lag reality by up to 60s (the same staleness
+/// race #2148 hardens [`fetch_managed_session_until_stopped`] against).
+/// Rather than duplicate the Stopped-only gate [`plan_inplace`] enforces for
+/// the env-var entry point, that call site drives this function directly
+/// with whatever record it matched (any state) and trusts the SAME safety
+/// boundary every caller of this function already relies on:
+/// [`reactivate_managed_session`]'s daemon round-trip (backed, as of #2453,
+/// by the daemon's own independent pane-idle reconciliation — see
+/// `daemon::managed_routes::reactivate::reconcile_stale_active_then_reactivate`)
+/// is the single source of truth, and a refused/failed reactivate here folds
+/// into [`InPlaceOutcome::FallThrough`] exactly as it does for the env-var
+/// path — never an unconditional exec. Note (#2456 review finding 2): unlike
+/// [`try_inplace_relaunch`]'s own contract (a command-build failure there is
+/// a deliberate hard error), the nested-guard caller treats EVERY
+/// `InPlaceOutcome::Result(Err(_))` from THIS call site — pre-mutation
+/// (cwd/binary resolution) or post-reactivate (`exec` itself failing) alike
+/// — as a fall-back-to-reconnect condition, matching that call site's
+/// pre-#2453 behavior of never hard-failing.
 /// What, IN ORDER (#2027 exec-ordering fix): (1) prints a one-line notice;
 /// (2) resolves the workdir and builds the resume argv via
 /// [`trusty_mpm::runtime::build_inplace_resume_command`] (the SAME
@@ -368,7 +426,7 @@ enum InPlaceOutcome {
 /// refused/failed reactivate this returns [`InPlaceOutcome::FallThrough`]
 /// rather than proceeding; (4) execs `claude` in place.
 /// Test: I/O path; not unit-tested (requires a live daemon + real `claude`).
-async fn run_inplace_relaunch(
+pub(crate) async fn run_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
     id: &str,
@@ -469,6 +527,32 @@ pub(crate) async fn try_inplace_relaunch(
     match plan_inplace(Some(&env_id), record_state) {
         Some(ResumeAction::InPlace) => {
             let record = record.expect("plan_inplace only selects InPlace when record is Some");
+            // #2453 review finding 1 (round 2), extended to this PRE-EXISTING
+            // env-var entry point: `env_id` alone only proves SOME shell in
+            // this tmux session/process tree carries `TM_MANAGED_SESSION_ID`
+            // — including a sibling pane that merely INHERITED it via tmux's
+            // session-scoped healing `set-environment` (see `guided::
+            // pane_identity_confirmed`'s doc for the full empirical proof).
+            // That is not proof THIS pane is the one bound to `record`.
+            // Require the SAME pane_id confirmation the nested-session guard
+            // uses before driving the destructive exec. In the common case
+            // (bare `tm` typed in the exact pane whose runtime just exited)
+            // `record.pane_id` was just refreshed by the SessionEnd-hook-
+            // triggered `mark_runtime_exited_stopped` moments before this
+            // fetch resolved "stopped", so this adds no friction there.
+            let current_pane_id = super::tmux_attach::current_tmux_pane_id();
+            if !super::guided::pane_identity_confirmed(
+                current_pane_id.as_deref(),
+                record.pane_id.as_deref(),
+            ) {
+                tracing::debug!(
+                    id = %env_id,
+                    "tm: in-place relaunch gate: pane_id could not be confirmed for \
+                     this pane (env var may be inherited from a healed sibling \
+                     session/window) — falling through to guided default"
+                );
+                return None;
+            }
             match run_inplace_relaunch(client, url, &env_id, record).await {
                 InPlaceOutcome::Result(r) => Some(r),
                 InPlaceOutcome::FallThrough => {
@@ -824,6 +908,7 @@ mod tests {
             task: None,
             cwd: None,
             claude_session_id: None,
+            pane_id: None,
         };
         let client = reqwest::Client::new();
 

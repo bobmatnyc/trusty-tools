@@ -82,6 +82,7 @@ async fn reconcile_backfills_source_id_from_workspace_git_remote() {
         scrollback_path: None,
         last_cwd: None,
         deliverable_id: None,
+        pane_id: None,
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
@@ -168,6 +169,7 @@ async fn reconcile_backfills_source_id_for_stopped_record() {
         scrollback_path: None,
         last_cwd: None,
         deliverable_id: None,
+        pane_id: None,
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 

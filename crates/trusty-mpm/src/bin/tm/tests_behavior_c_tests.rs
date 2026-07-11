@@ -27,7 +27,8 @@ use crate::commands::first_run::needs_first_run_clone;
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     derive_project, fallback_protected, github_host, is_github_remote, nested_managed_match,
-    non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
+    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
+    tty_gate,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -488,6 +489,7 @@ fn make_session(
         task: None,
         cwd: None,
         claude_session_id: None,
+        pane_id: None,
     }
 }
 
@@ -1364,4 +1366,70 @@ fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
         matched.is_some(),
         "must match by session name regardless of source_id"
     );
+}
+
+// ── pane_identity_confirmed (#2456 review finding 1, ROUND 2) ────────────────
+// The cross-pane-hijack guard: `nested_managed_match` alone only proves the
+// tmux SESSION matches (every window/pane in that session shares the same
+// session name) — it is NOT proof the CURRENT pane is the one bound to the
+// matched record. A ROUND-1 fix compared the process-level
+// `TM_MANAGED_SESSION_ID` env var; that was EMPIRICALLY DISPROVEN (live tmux
+// 3.6b) — tmux's session-scoped `set-environment` (used by the runtime-exit
+// healing step) is inherited into the process env of every NEW pane/window
+// created in that session AFTERWARD, so an env-var comparison can be
+// satisfied by a genuinely different, unrelated pane. `pane_identity_confirmed`
+// now compares tmux's own stable `pane_id` (never inherited across panes)
+// instead.
+
+#[test]
+fn pane_identity_confirmed_true_when_pane_id_matches_record() {
+    // THIS pane's own tmux pane_id equals the SAME record's captured
+    // pane_id — genuinely the pane bound to that record; safe to relaunch.
+    assert!(pane_identity_confirmed(Some("%5"), Some("%5")));
+}
+
+#[test]
+fn pane_identity_confirmed_false_when_current_pane_id_absent() {
+    // The CURRENT pane's tmux query failed (or we are not inside tmux at
+    // all) — cannot confirm identity; must refuse to drive the in-place
+    // relaunch here, even if the record DOES have a pane_id.
+    assert!(!pane_identity_confirmed(None, Some("%5")));
+}
+
+#[test]
+fn pane_identity_confirmed_false_when_record_pane_id_absent() {
+    // A legacy record (created before #2453) never had a pane_id captured —
+    // `None` must be treated as "identity unconfirmed", never an implicit
+    // match, regardless of what the current pane's own id is.
+    assert!(!pane_identity_confirmed(Some("%5"), None));
+}
+
+#[test]
+fn pane_identity_confirmed_false_when_pane_ids_differ() {
+    // Both resolved, but for genuinely DIFFERENT panes — must still refuse.
+    assert!(!pane_identity_confirmed(Some("%7"), Some("%5")));
+}
+
+#[test]
+fn pane_identity_confirmed_false_when_inherited_env_but_different_pane_id() {
+    // #2456 review finding 1's ROUND-2 exact hijack scenario, reproduced at
+    // the pane_id layer: a session whose runtime-exit healing has fired once
+    // (so `TM_MANAGED_SESSION_ID` is now poisoned into the tmux SESSION
+    // environment) gets a second window opened afterward. That new window's
+    // process env INHERITS the healed session's id — an env-var-only gate
+    // would wrongly treat this as belonging to the healed session's record.
+    // Modeled here directly at the pane_id layer (env inheritance is a tmux
+    // process-env mechanism, not observable from pure Rust — the point this
+    // test proves is that pane_id comparison does NOT share that weakness):
+    // the healed record's `pane_id` is `"%5"` (the ORIGINAL pane), but the
+    // NEW sibling window bare `tm` is actually invoked from resolves to a
+    // DIFFERENT pane_id, `"%9"` — even though (in the real system) both
+    // panes' process env would read the SAME inherited
+    // `TM_MANAGED_SESSION_ID`. The gate must reject this pane_id mismatch.
+    let healed_record_pane_id = Some("%5");
+    let sibling_window_current_pane_id = Some("%9");
+    assert!(!pane_identity_confirmed(
+        sibling_window_current_pane_id,
+        healed_record_pane_id
+    ));
 }

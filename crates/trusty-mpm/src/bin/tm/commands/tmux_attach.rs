@@ -83,6 +83,41 @@ pub(crate) fn current_tmux_session_name() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Resolve the tmux `pane_id` (e.g. `"%5"`) of the CURRENT client's pane
+/// (#2453 review finding 1, round 2).
+///
+/// Why: [`current_tmux_session_name`] only proves the tmux SESSION matches —
+/// every window/pane in that session shares the same name — which is not
+/// proof the CURRENT pane is the one bound to a specific managed record. A
+/// process-env-var comparison was tried and PROVEN insufficient: tmux's
+/// session-scoped `set-environment` (used to heal `TM_MANAGED_SESSION_ID`
+/// into a pane that never got the durable publish, #2157 item 3) is
+/// inherited into the process env of every NEW pane/window created in that
+/// session AFTERWARD — verified empirically against a live tmux 3.6b. tmux's
+/// own `pane_id` is never inherited across panes, making it the only
+/// reliable "is this literally the same pane" signal available to the CLI.
+/// What: returns `None` immediately when [`inside_tmux`] is `false`.
+/// Otherwise runs `tmux display-message -p '#{pane_id}'` and returns the
+/// trimmed, non-empty stdout, or `None` on any I/O failure, non-zero exit,
+/// or empty output — mirrors [`current_tmux_session_name`]'s exact shape.
+/// Test: I/O path, not unit-tested (requires a live tmux server); the pure
+/// decision that CONSUMES this value
+/// (`guided::pane_identity_confirmed`) is unit-tested separately.
+pub(crate) fn current_tmux_pane_id() -> Option<String> {
+    if !inside_tmux() {
+        return None;
+    }
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{pane_id}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
 /// Attach (or switch) the current terminal into the tmux session `name`.
 ///
 /// Why: single choke point for the nested-tmux-safe attach behavior so

@@ -470,15 +470,84 @@ impl SessionManager {
     /// Test: `stop_runtime_exited_transitions_active_to_stopped` (in
     /// `daemon::runtime_reap`) asserts the record becomes `Stopped`;
     /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
-    /// `kill_session` is never invoked on the fake driver.
+    /// `kill_session` is never invoked on the fake driver;
+    /// `mark_runtime_exited_stopped_rejects_concurrently_decommissioned`
+    /// (this module's tests) asserts the CAS guard below.
+    ///
+    /// CAS guard (#2453 review finding 3): the pre-fix implementation read
+    /// the record via [`Self::get`] (which acquires and releases the store's
+    /// write lock internally), then — AFTER that lock was released — did a
+    /// SECOND, separate `self.store.write().await` to upsert. A concurrent
+    /// `decommission`/`stop` landing in the gap between those two lock
+    /// acquisitions would be silently clobbered: this function would blindly
+    /// write back a `Stopped` record built from the stale pre-decommission
+    /// read, resurrecting a session that had just been torn down. This
+    /// implementation now holds ONE write-lock guard across the entire
+    /// read-check-write sequence and re-validates the record is STILL
+    /// `Active` immediately before mutating it — a state change that landed
+    /// while we were not holding the lock (there is no other window) is
+    /// therefore impossible to observe as anything but the CURRENT state,
+    /// and a record that is no longer `Active` (already reconciled,
+    /// decommissioned, or errored by a concurrent caller) is rejected
+    /// with [`ManagedError::InvalidState`] rather than overwritten. The
+    /// periodic `runtime_reap` tick and the `#2453` reconcile-then-reactivate
+    /// path both call this SAME function, so the guard protects both.
     pub async fn mark_runtime_exited_stopped(
         &self,
         id: &ManagedSessionId,
     ) -> Result<SessionRecord, ManagedError> {
-        let mut record = self.get(id).await?;
+        let mut guard = self.store.write().await;
+        if let Err(e) = guard.reload_if_changed().await {
+            // Reload failed (transient I/O): do NOT surface as "not found" —
+            // fall through to the last-known in-memory record, mirroring
+            // `Self::get`'s own tolerance for a transient reload error.
+            warn!(id = %id, "mark_runtime_exited_stopped: reload failed: {e}; using last-known record");
+        }
+        let mut record = guard.cached_get(id).map_err(|e| match e {
+            StoreError::NotFound(k) => ManagedError::SessionNotFound(k),
+            other => ManagedError::Store(other),
+        })?;
+        if record.state != ManagedSessionState::Active {
+            return Err(ManagedError::InvalidState(
+                id.to_string(),
+                format!(
+                    "cannot mark runtime-exited-stopped: session is '{}', not 'active' — \
+                     a concurrent operation already changed its state",
+                    record.state
+                ),
+            ));
+        }
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        // #2453 review finding 1 (round 3 — round 2's re-derive-on-every-call
+        // approach was proven UNSOUND): `get_pane_id` shells out to `tmux
+        // display-message -t <SESSION_NAME> -p '#{pane_id}'`, which is
+        // SESSION-scoped — tmux resolves it to the session's CURRENTLY
+        // ACTIVE window's pane, not necessarily the pane this reconcile is
+        // about. Verified against a live tmux 3.6b: `display-message -t
+        // testsess` reads `%0` with one window, then reads `%1` after `tmux
+        // new-window -t testsess` (which auto-activates the new window) —
+        // the SAME session-scoped query now resolves to a DIFFERENT pane.
+        // Since this function runs on every runtime-exit reconcile (the
+        // periodic reaper, the #2455 SessionEnd hook, and the #2453
+        // reconcile-then-reactivate route), a sibling window merely being
+        // tmux-active at reconcile time would silently OVERWRITE a
+        // known-good `pane_id` with the active sibling's — reopening the
+        // cross-pane hijack via a new vector AND breaking the legitimate
+        // relaunch for the pane that actually exited. Backfill-only-when-
+        // `None` (chosen over re-verifying the stored pane_id via a
+        // pane-scoped `display-message -t <pane_id>` query, #2456 review's
+        // alternative option) is simpler and sufficient: it still heals a
+        // legacy record that never had a `pane_id` captured (created before
+        // this field existed, where session-scoped ambiguity does not yet
+        // matter — no earlier capture exists to protect), but a
+        // known-good id, once captured at spawn/adopt time, is NEVER
+        // re-derived here again.
+        if record.pane_id.is_none() {
+            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+        }
         record.state = ManagedSessionState::Stopped;
-        self.store.write().await.upsert(record.clone()).await?;
+        guard.upsert(record.clone()).await?;
+        drop(guard);
         info!(
             id = %id,
             name = %record.tmux_name,
@@ -590,6 +659,14 @@ impl SessionManager {
                 &record.tmux_name,
                 &workdir,
             )?;
+            // #2453 review finding 1 (round 2): the recreated pane is a BRAND
+            // NEW tmux pane — the record's previously-captured `pane_id` now
+            // refers to the DESTROYED pane and must be refreshed, or the
+            // bare-`tm` in-pane relaunch's pane-identity gate would never
+            // match this session again until the next runtime-exit reconcile
+            // heals it. Best-effort — `None` on failure, consistent with
+            // every other `get_pane_id` call site.
+            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
             info!(
                 id = %id,
                 name = %record.tmux_name,

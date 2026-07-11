@@ -93,6 +93,27 @@ pub trait ManagedTmuxDriver: Send + Sync {
         None
     }
 
+    /// Return the session's pane's stable tmux `pane_id` (e.g. `"%5"`),
+    /// captured at spawn/reconcile time for pane-identity confirmation
+    /// (#2453 review finding 1, round 2).
+    ///
+    /// Why: a session-name or process-env-var match is not proof the
+    /// operator's CURRENT pane is the one bound to a record — see
+    /// [`super::record::SessionRecord::pane_id`]'s doc for the full
+    /// rationale (session-scoped `tmux set-environment` is inherited by
+    /// sibling panes created afterward, which defeats an env-var-only gate).
+    /// `pane_id` is tmux's own identifier and is never inherited across
+    /// panes.
+    /// What: returns the `pane_id` tmux format string value, or `None` if
+    /// the driver does not support it or the call fails — the safe default,
+    /// mirroring [`Self::get_pane_cwd`]. Callers MUST treat `None` as
+    /// "identity unconfirmed," never as an implicit match.
+    /// Test: `RealTmuxDriver` runs `tmux display-message`; fake drivers
+    /// return `None` unless a test explicitly seeds one.
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
 

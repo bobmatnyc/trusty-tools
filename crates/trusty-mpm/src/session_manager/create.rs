@@ -175,6 +175,15 @@ impl SessionManager {
             .create_session(&tmux_name, &workdir)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
 
+        // Capture the freshly-created pane's stable tmux `pane_id` (#2453
+        // review finding 1, round 2) — best-effort; `None` when the driver
+        // does not support it (fake drivers in tests) or the call fails.
+        // This is the ONLY signal the bare-`tm` in-pane relaunch's
+        // nested-session guard can trust to confirm pane-level identity; a
+        // session-scoped env var is inherited by sibling panes/windows and
+        // therefore insufficient (see `SessionRecord::pane_id`'s doc).
+        let pane_id = self.tmux.get_pane_id(&tmux_name);
+
         // OWN the freshly-created tmux session immediately (#1453). From here
         // until the record is durably persisted, this guard is the session's
         // sole owner: any early return (e.g. a failing `store.upsert`) drops the
@@ -224,6 +233,7 @@ impl SessionManager {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

@@ -160,6 +160,11 @@ impl SessionManager {
         if !self.tmux_driver().session_exists(tmux_name) {
             return Err(ManagedError::TmuxSessionMissing(tmux_name.to_string()));
         }
+        // Capture the pre-existing pane's stable tmux `pane_id` (#2453 review
+        // finding 1, round 2) — best-effort, `None` if the driver cannot
+        // resolve one. Adoption connects to an ALREADY-LIVE pane, so this is
+        // available immediately, unlike a fresh spawn.
+        let pane_id = self.tmux_driver().get_pane_id(tmux_name);
 
         let record = SessionRecord {
             id: ManagedSessionId::new(),
@@ -186,6 +191,7 @@ impl SessionManager {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────
@@ -242,6 +248,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         }
     }
 
@@ -268,6 +275,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         }
     }
 

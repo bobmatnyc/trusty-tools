@@ -51,6 +51,21 @@ async fn manager_resume_reuses_live_pane_without_recreate() {
         .await
         .expect("create");
 
+    // `create` leaves the record `Provisioning`; the real spawn path flips it
+    // to `Active` once the runtime starts. `mark_runtime_exited_stopped`'s
+    // CAS guard (#2453 review finding 3) now requires the record be observed
+    // `Active` at write time — mirroring every real production caller
+    // (`runtime_reap::find_runtime_exited` only ever selects `Active`
+    // records) — so activate it first rather than relying on the pre-guard
+    // behavior of transitioning from ANY prior state.
+    mgr.set_workspace(
+        &record.id,
+        workspace_path.clone(),
+        ManagedSessionState::Active,
+    )
+    .await
+    .expect("set Active");
+
     // Runtime-exit reaper path (#2023 A): marks Stopped WITHOUT killing the pane.
     mgr.mark_runtime_exited_stopped(&record.id)
         .await
