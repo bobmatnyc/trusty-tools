@@ -239,6 +239,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         }
     }
 

@@ -423,6 +423,19 @@ pub struct ManagedSessionSummary {
     /// sessions with no captured conversation id or predating this field.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// The tmux `pane_id` of this session's original pane, if captured
+    /// (additive; #2453 review finding 1, round 2).
+    ///
+    /// Why: the bare-`tm` in-pane relaunch's nested-session guard
+    /// (`bin/tm/commands/guided.rs`) compares THIS against the CURRENT
+    /// pane's own `tmux display-message -p '#{pane_id}'` to confirm pane-level
+    /// identity before driving a destructive `exec` — a session-name or
+    /// process-env-var match alone was proven insufficient (tmux's
+    /// session-scoped `set-environment` is inherited by sibling panes
+    /// created afterward). `None` for legacy records or when the driver
+    /// could not resolve one; the gate treats `None` as "unconfirmed."
+    #[serde(default)]
+    pub pane_id: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

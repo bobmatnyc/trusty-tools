@@ -37,6 +37,7 @@ fn make_record(source_id: Option<&str>) -> SessionRecord {
         scrollback_path: None,
         last_cwd: None,
         deliverable_id: None,
+        pane_id: None,
     }
 }
 
@@ -166,6 +167,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         cwd: None,
         claude_session_id: None,
         deliverable_id: None,
+        pane_id: None,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -197,6 +199,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         cwd: None,
         claude_session_id: None,
         deliverable_id: None,
+        pane_id: None,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

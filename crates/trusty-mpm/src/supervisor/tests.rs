@@ -179,6 +179,7 @@ async fn seed_sessions(
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -311,6 +312,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         scrollback_path: None,
         last_cwd: None,
         deliverable_id: None,
+        pane_id: None,
     }
 }
 

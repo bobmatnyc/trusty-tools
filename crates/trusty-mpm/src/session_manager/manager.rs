@@ -518,6 +518,16 @@ impl SessionManager {
             ));
         }
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        // #2453 review finding 1 (round 2): refresh `pane_id` — the pane
+        // survives this transition (never killed/recreated), so its id is not
+        // expected to change, but re-resolving it here heals legacy records
+        // that never had one captured at spawn time (created before this
+        // field existed). Only overwrite on a successful resolve — a
+        // transient tmux hiccup must not regress a previously-known-good id
+        // back to `None`.
+        if let Some(pane_id) = self.tmux.get_pane_id(&record.tmux_name) {
+            record.pane_id = Some(pane_id);
+        }
         record.state = ManagedSessionState::Stopped;
         guard.upsert(record.clone()).await?;
         drop(guard);
@@ -632,6 +642,14 @@ impl SessionManager {
                 &record.tmux_name,
                 &workdir,
             )?;
+            // #2453 review finding 1 (round 2): the recreated pane is a BRAND
+            // NEW tmux pane — the record's previously-captured `pane_id` now
+            // refers to the DESTROYED pane and must be refreshed, or the
+            // bare-`tm` in-pane relaunch's pane-identity gate would never
+            // match this session again until the next runtime-exit reconcile
+            // heals it. Best-effort — `None` on failure, consistent with
+            // every other `get_pane_id` call site.
+            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
             info!(
                 id = %id,
                 name = %record.tmux_name,

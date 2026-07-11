@@ -100,6 +100,13 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_current_path(name)
     }
 
+    /// Overrides the trait's `None` default so the production path actually
+    /// calls `tmux display-message -p '#{pane_id}'` (#2453 review finding 1,
+    /// round 2).
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        self.driver.pane_id(name)
+    }
+
     /// Report the runtime ready when the `claude` child PID has appeared under
     /// the pane shell (overrides the trait's weaker `session_exists` default;
     /// issue #1903 / #1299).

@@ -73,32 +73,31 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
         // no-op: the operator was already inside the very session being
         // "reconnected" to.
         //
-        // #2456 review finding 1 (CRITICAL): `nested_session_guard` matches
-        // on EITHER the tmux SESSION name (shared by every window/pane in
-        // that session) OR the process-level `TM_MANAGED_SESSION_ID` env var
-        // (pane/process-scoped — only ever set in the exact shell that ran
-        // the spawn/resume export prefix, see `runtime::claude_code::
-        // session_id_export_prefix`). A session-name-only match is NOT proof
-        // this is the pane bound to `record` — a genuinely different, idle
-        // window in the SAME tmux session (e.g. window 1, while window 0
-        // holds the just-exited `claude` pane) matches on session name
-        // alone. Driving the destructive `run_inplace_relaunch` (which
-        // `exec`s `claude` into WHATEVER pane this process is literally
-        // running in, chdir'd to `record`'s workspace) off that weaker
-        // signal would silently discard the invoking pane's shell and drop
-        // the operator into a DIFFERENT pane's conversation. Re-derive the
-        // SAME process-env signal `nested_session_guard` / `try_inplace_
-        // relaunch`'s primary gate already uses (never the looser,
-        // session-wide `tmux show-environment` fallback, which cannot
-        // discriminate between panes either) and require it to name THIS
-        // exact record before attempting the in-place path; a
-        // session-name-only match falls back to the pre-existing, harmless
-        // refuse+switch-client behavior.
-        let env_session_id = std::env::var("TM_MANAGED_SESSION_ID")
-            .ok()
-            .filter(|v| !v.trim().is_empty());
+        // #2456 review finding 1 (CRITICAL, ROUND 2): `nested_session_guard`
+        // matches on the tmux SESSION name (shared by every window/pane in
+        // that session) — NOT proof this is the pane bound to `record`. A
+        // ROUND-1 fix compared the process-level `TM_MANAGED_SESSION_ID` env
+        // var, reasoning it was pane/process-scoped; that premise was
+        // EMPIRICALLY DISPROVEN (live tmux 3.6b): the healing step in
+        // `SessionManager::mark_runtime_exited_stopped` calls `tmux
+        // set-environment -t <session>` — SESSION-scoped — and tmux applies
+        // a session's stored environment to the process env of every NEW
+        // pane/window created in that session AFTERWARD. Any session that
+        // has exited-and-relaunched once therefore has a "poisoned" session
+        // env that a genuinely different sibling window inherits into its
+        // OWN process env — the env-based gate would have passed that
+        // sibling. The authoritative signal is tmux's own stable `pane_id`
+        // (never inherited across panes, unlike an env var or `pane_pid`,
+        // which the OS can reuse across a pane's lifetime) — see
+        // `pane_identity_confirmed`'s doc for the full rationale. A record
+        // with no captured `pane_id` (legacy, pre-#2453) or a tmux query
+        // failure both fail CLOSED — never trust a weaker signal to justify
+        // the destructive `run_inplace_relaunch` `exec`, which lands in
+        // WHATEVER pane this process is literally running in, chdir'd to
+        // `record`'s workspace.
+        let current_pane_id = super::tmux_attach::current_tmux_pane_id();
 
-        if pane_identity_confirmed(env_session_id.as_deref(), &record.id) {
+        if pane_identity_confirmed(current_pane_id.as_deref(), record.pane_id.as_deref()) {
             // Safe to attempt: its daemon reactivate call independently
             // reconciles a stale-`Active` record whose pane is confirmed
             // idle (#2453 daemon-side fix, `daemon::managed_routes::
@@ -352,35 +351,50 @@ pub(crate) fn nested_managed_match<'a>(
     })
 }
 
-/// Pure predicate (#2456 review finding 1): does the CURRENT pane's own
-/// process-level `TM_MANAGED_SESSION_ID` env var confirm THIS pane is the
-/// one bound to `record_id` — as opposed to [`nested_managed_match`] having
-/// matched purely on tmux SESSION name (a signal every window/pane in that
-/// session shares)?
+/// Pure predicate (#2456 review finding 1, ROUND 2 — the round-1 env-var
+/// gate was empirically disproven): does the CURRENT pane's own stable tmux
+/// `pane_id` confirm THIS pane is the one bound to `record_pane_id` — as
+/// opposed to [`nested_managed_match`] having matched purely on tmux SESSION
+/// name (a signal every window/pane in that session shares)?
 ///
-/// Why: [`nested_managed_match`] deliberately matches on session name alone
-/// as a fallback (a pane that never got the durable env-var publish, #2157
-/// item 2) — correct for the ORIGINAL harmless refuse+switch-client
-/// behavior, but NOT sufficient to justify driving [`super::guided_inplace::
-/// run_inplace_relaunch`]'s destructive `exec`, which lands in WHATEVER pane
-/// this process is literally running in. Isolating the confirmation check
-/// from the `std::env::var` read makes the exact cross-pane hijack scenario
-/// (two idle panes in the same tmux session, `tm` invoked from the one that
-/// is NOT bound to the matched record) unit-testable without mutating
-/// process env or spawning tmux.
-/// What: `true` only when `env_session_id` is `Some` and equals `record_id`
-/// exactly — this is the SAME process-scoped signal
-/// `guided_inplace::read_env_managed_session_id` uses as its primary gate,
-/// never the looser, session-wide `tmux show-environment` fallback (which
-/// cannot discriminate between panes either). `false` for a missing env var
-/// OR one that names a DIFFERENT session — including the two-idle-panes
-/// case — meaning the caller must fall back to refuse+switch-client rather
-/// than attempt the in-place relaunch.
-/// Test: `pane_identity_confirmed_true_when_env_matches_record`,
-/// `pane_identity_confirmed_false_when_env_absent`,
-/// `pane_identity_confirmed_false_when_env_names_different_session`.
-pub(crate) fn pane_identity_confirmed(env_session_id: Option<&str>, record_id: &str) -> bool {
-    env_session_id.is_some_and(|id| id == record_id)
+/// Why: the round-1 fix compared `TM_MANAGED_SESSION_ID` process env values,
+/// reasoning that env var was pane/process-scoped. That premise was proven
+/// FALSE against a live tmux 3.6b: `mark_runtime_exited_stopped`'s healing
+/// step calls `tmux set-environment -t <session>` — SESSION-scoped — and
+/// tmux applies a session's stored environment to the process env of every
+/// NEW pane/window created in that session AFTERWARD. Concretely: `tmux
+/// set-environment -t sess ID abc; tmux new-window -t sess` then reading
+/// `$ID` inside that BRAND NEW window returns `abc` — inherited, not
+/// exported by THIS pane's own spawn command. Since the healing step runs on
+/// every runtime-exit reconcile (the periodic reap tick, #2453's own
+/// reconcile-then-reactivate route, and #2455's hook), any session that has
+/// exited-and-relaunched once has this poisoned session env, and every
+/// window opened afterward inherits the id into ITS OWN process env — the
+/// exact env-based gate this predicate replaces would have passed a
+/// genuinely different, unrelated sibling pane. tmux's own `pane_id` (e.g.
+/// `"%5"`, distinct from `pane_pid`, which the OS can reuse across a pane's
+/// lifetime) is NEVER inherited across panes — see
+/// [`SessionRecord::pane_id`](trusty_mpm::session_manager::SessionRecord::pane_id)'s
+/// doc for the full rationale and [`super::tmux_attach::current_tmux_pane_id`]
+/// for how the CURRENT pane's id is resolved.
+/// What: `true` only when BOTH `current_pane_id` and `record_pane_id` are
+/// `Some` and equal. `false` when either is `None` (a legacy record that
+/// never had a `pane_id` captured, or a tmux query failure) OR they differ —
+/// fails CLOSED in every ambiguous case, meaning the caller must fall back
+/// to refuse+switch-client rather than attempt the in-place relaunch.
+/// Test: `pane_identity_confirmed_true_when_pane_id_matches_record`,
+/// `pane_identity_confirmed_false_when_current_pane_id_absent`,
+/// `pane_identity_confirmed_false_when_record_pane_id_absent`,
+/// `pane_identity_confirmed_false_when_inherited_env_but_different_pane_id`
+/// (the exact two-idle-panes/inherited-session-env hijack scenario).
+pub(crate) fn pane_identity_confirmed(
+    current_pane_id: Option<&str>,
+    record_pane_id: Option<&str>,
+) -> bool {
+    match (current_pane_id, record_pane_id) {
+        (Some(cur), Some(rec)) => cur == rec,
+        _ => false,
+    }
 }
 
 /// Fetch EVERY managed session, unfiltered — `GET /api/v1/sessions/managed`

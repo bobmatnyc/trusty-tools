@@ -67,6 +67,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         scrollback_path: None,
         last_cwd: None,
         deliverable_id: None,
+        pane_id: None,
     }
 }
 
@@ -93,6 +94,7 @@ fn session_no_repo() -> SessionRecord {
         scrollback_path: None,
         last_cwd: None,
         deliverable_id: None,
+        pane_id: None,
     }
 }
 

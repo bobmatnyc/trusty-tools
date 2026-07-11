@@ -150,6 +150,10 @@ impl SessionManager {
                     last_cwd: None,
                     // External sessions have no known Deliverable linkage.
                     deliverable_id: None,
+                    // Best-effort capture (#2453 review finding 1, round 2) —
+                    // the adopted pane already exists, so this is available
+                    // immediately, mirroring `adopt.rs`'s explicit adoption path.
+                    pane_id: self.tmux.get_pane_id(name),
                 };
                 if let Some(path) = resolved_cwd {
                     newly_resolved.push((id, path));

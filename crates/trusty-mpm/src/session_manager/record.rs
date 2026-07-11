@@ -282,6 +282,38 @@ pub struct SessionRecord {
     /// this field existed was ever bound to a Deliverable.
     #[serde(default)]
     pub deliverable_id: Option<crate::deliverable::DeliverableId>,
+
+    /// The tmux `pane_id` (e.g. `"%5"`) of this session's ORIGINAL pane,
+    /// captured at spawn time and refreshed whenever the runtime-exit
+    /// reconcile confirms the pane is still alive (#2453 review finding 1,
+    /// round 2).
+    ///
+    /// Why: the bare-`tm` in-pane relaunch (`guided::run_guided_default`'s
+    /// nested-session guard, #2453) must confirm the OPERATOR'S CURRENT pane
+    /// is genuinely the one bound to this record before driving a destructive
+    /// `exec` into it — a session-name-only match (every window/pane in a
+    /// tmux session shares the session name) is not enough, and a
+    /// process-env-var comparison was PROVEN insufficient too: tmux's
+    /// session-scoped `set-environment` (used to heal `TM_MANAGED_SESSION_ID`
+    /// into a pane that never got the durable publish, #2157 item 3) is
+    /// inherited into the process env of every NEW pane/window created in
+    /// that tmux session AFTER the healing call — verified empirically
+    /// against a live tmux 3.6b. `pane_id` is tmux's own stable per-pane
+    /// identifier (distinct from `pane_pid`, which the OS can reuse across a
+    /// pane's lifetime); it is NEVER inherited across panes, making it the
+    /// only reliable "is this literally the same pane" signal available.
+    /// What: `None` for every record created before this field existed, or
+    /// whenever the driver could not resolve a pane_id (fails CLOSED — the
+    /// nested-session guard treats an absent/mismatched `pane_id` as
+    /// "identity unconfirmed" and refuses the in-place relaunch rather than
+    /// trusting a weaker signal).
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps every pre-#2453 record
+    /// deserializable — they load with `pane_id = None`, which is correct:
+    /// no session before this field existed had one captured. Mirrors the
+    /// `deliverable_id` rollback-safety pattern immediately above.
+    #[serde(default)]
+    pub pane_id: Option<String>,
 }
 
 /// Error types for session record operations.
@@ -349,6 +381,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -383,6 +416,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -415,6 +449,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -472,6 +507,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -533,6 +569,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -624,6 +661,7 @@ mod tests {
             scrollback_path: Some(PathBuf::from("/managed/ws/.trusty-mpm/scrollback.txt")),
             last_cwd: Some(PathBuf::from("/managed/ws/src")),
             deliverable_id: None,
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -660,6 +698,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -724,6 +763,7 @@ mod tests {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: Some(did),
+            pane_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

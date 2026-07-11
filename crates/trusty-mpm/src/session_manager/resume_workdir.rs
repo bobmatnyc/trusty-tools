@@ -178,6 +178,7 @@ mod tests {
             scrollback_path: None,
             last_cwd,
             deliverable_id: None,
+            pane_id: None,
         }
     }
 

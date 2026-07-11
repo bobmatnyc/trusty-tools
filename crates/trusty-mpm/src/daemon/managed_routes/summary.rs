@@ -47,6 +47,7 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "proposed_default": r.proposed_default,
         "source_id": r.source_id,
         "deliverable_id": r.deliverable_id.map(|id| id.to_string()),
+        "pane_id": r.pane_id,
     })
 }
 
@@ -76,6 +77,7 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         cwd: Some(r.cwd.to_string_lossy().to_string()),
         claude_session_id: r.claude_session_id.clone(),
         deliverable_id: r.deliverable_id.map(|id| id.to_string()),
+        pane_id: r.pane_id.clone(),
     }
 }
 

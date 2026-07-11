@@ -587,6 +587,41 @@ impl TmuxDriver {
         }
     }
 
+    /// Return the pane's stable tmux `pane_id` (e.g. `"%5"`) via `display-message`.
+    ///
+    /// Why: `#2453` review finding 1 (round 2) — pane-identity confirmation for
+    /// the bare-`tm` in-pane relaunch's nested-session guard needs a signal
+    /// that is NEVER inherited across panes, unlike a tmux session-scoped env
+    /// var (`set-environment` is applied to every new pane/window created in
+    /// that session afterward, defeating an env-var-only gate — see
+    /// [`crate::session_manager::record::SessionRecord::pane_id`]'s doc for
+    /// the full empirical proof). tmux's own `pane_id` (distinct from
+    /// `pane_pid`, which the OS can reuse across a pane's lifetime) is that
+    /// signal.
+    /// What: runs `tmux display-message -t <name> -p '#{pane_id}'`, trims the
+    /// output, and returns `Some(id)` on success or `None` if the session does
+    /// not exist, tmux is unavailable, or the id is empty. Mirrors
+    /// [`Self::pane_current_path`]'s exact shape.
+    /// Test: exercised indirectly via `SessionManager::create`/
+    /// `mark_runtime_exited_stopped` with a live tmux;
+    /// `RealTmuxDriver::get_pane_id` wraps this method.
+    pub fn pane_id(&self, session_name: &str) -> Option<String> {
+        let output = Command::new(&self.tmux_path)
+            .args(["display-message", "-t", session_name, "-p", "#{pane_id}"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
     /// Register an external session for oversight without modifying it.
     ///
     /// Why: before trusty-mpm watches an externally-created session it records

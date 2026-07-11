@@ -284,6 +284,17 @@ pub struct SessionSummary {
     /// #2379; additive — absent for legacy records and sessions with no link).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable_id: Option<String>,
+    /// The tmux `pane_id` of this session's original pane, if captured
+    /// (additive; #2453 review finding 1, round 2 — absent for legacy
+    /// records, or when the driver could not resolve one).
+    ///
+    /// Why: the bare-`tm` in-pane relaunch's nested-session guard needs this
+    /// to confirm the operator's CURRENT pane is genuinely the one bound to
+    /// this record before driving a destructive `exec` — see
+    /// `SessionRecord::pane_id`'s doc for the full rationale (a session-name
+    /// or process-env-var match alone is provably insufficient).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.
