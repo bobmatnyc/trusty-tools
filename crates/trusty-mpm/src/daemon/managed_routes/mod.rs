@@ -120,8 +120,12 @@ pub struct SpawnRequest {
     /// pre-flight so an explicit "launch new session" surface (the `tm` picker's
     /// "launch new session" choice, `tm session new`) always spawns a FRESH
     /// session + worktree instead of adopting an existing live one for the same
-    /// project. Absent/null/`false` → the reconnect default (#1707), so
-    /// programmatic/idempotent callers are unaffected.
+    /// project. Absent or `false` → the reconnect default (#1707), so
+    /// programmatic/idempotent callers are unaffected. Unlike `inject_task`
+    /// above, this is a plain `bool` (not `Option<bool>`): `#[serde(default)]`
+    /// on a bool only supplies the default when the KEY IS ABSENT — an
+    /// explicit `"force_new": null` in the request body is a type mismatch and
+    /// fails the whole request with a 400, it is not tolerated as `false`.
     #[serde(default)]
     pub force_new: bool,
 }
