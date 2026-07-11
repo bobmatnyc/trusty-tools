@@ -28,6 +28,19 @@ name = "tickets-mcp"
 path = "src/bin/tickets_mcp.rs"
 required-features = ["tickets"]
 
+# Task-drawer + dream-cycle integration test (spec-001 Phase 4, issue #1722).
+# Pre-existing gap fixed incidentally by #2401: this target references
+# `trusty_common::memory_core` and the `embedder-test-support`-gated
+# `seed_shared_embedder_with_mock` unconditionally, so `cargo test
+# -p trusty-common` with default (empty) features failed to compile it.
+# `required-features` tells cargo to skip building this test binary unless
+# both are enabled, matching the pattern already used for the
+# `candle_metal_bench` / `tickets-mcp` binaries above.
+[[test]]
+name = "memory_palace"
+path = "tests/memory_palace.rs"
+required-features = ["memory-core", "embedder-test-support"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -118,8 +131,16 @@ postcard = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature (absorbed from `trusty-tickets`).
 # base64 is used by the JIRA backend for Basic-auth encoding.
 base64 = { workspace = true, optional = true }
-# Optional: enabled by the `tickets` feature for config-file parsing.
+# Optional: enabled by the `tickets` feature for config-file parsing. Also
+# reused by the `credentials` feature's `FileKeyStore` backend (issue #2401).
 toml = { version = "0.8", optional = true }
+
+# Optional: enabled by the `credentials` feature (issue #2401). Shared
+# `.env.local` loader for the `inference::credentials` resolver's env tier.
+dotenvy = { workspace = true, optional = true }
+# Optional: enabled by the `keyring-store` feature (issue #2401). OS-keychain
+# backend for `inference::credentials::KeyringStore`.
+keyring = { workspace = true, optional = true }
 
 # Optional: enabled by the `cli-help` feature. Declarative help-config parsing
 # (YAML → `HelpConfig`) plus the "did you mean?" suggester for unknown
@@ -316,6 +337,12 @@ symgraph-server = ["symgraph-parser", "axum-server"]
 # feature — all stores migrated to redb (#44, #45, #46, #56, #57). The
 # migration-era `usearch-migrate` and `sqlite-kg` features have been removed
 # (issue #989) — all production palaces are confirmed migrated to redb.
+#
+# Issue #2401: implies `credentials` so `memory_core::filter::redact_token`
+# can delegate to the single canonical `inference::credentials::redact_secret`
+# implementation without every `memory-core` consumer needing to opt in to
+# `credentials` separately — the two extra deps it pulls (`toml`, `dotenvy`)
+# are negligible next to memory-core's existing footprint.
 memory-core = [
     "dep:hnsw_rs",
     "dep:git2",
@@ -333,6 +360,7 @@ memory-core = [
     "dep:hex",
     "embedder",
     "embedder-bundled-ort",
+    "credentials",
 ]
 # Optional kuzu graph DB read-only integration on top of the memory-core
 # feature. Pulls in the `kuzu` crate. Off by default because kuzu adds a
@@ -429,3 +457,19 @@ stdio-mcp-client = []
 # to decode. Implies `stdio-mcp-client` so the console can poll via the shared
 # client without a separate feature declaration.
 console-metrics = ["stdio-mcp-client"]
+
+# Enables the `inference::credentials` module (issue #2401, epic #2400 Wave
+# 1): the `KeyStore` trait, `MemoryKeyStore`, the `0600`-permission
+# `FileKeyStore` (`~/.trusty-tools/credentials.toml`), the `resolve_key`
+# 3-tier precedence resolver (process env > `.env.local` > secure store),
+# and the shared `redact_secret` helper. Pulls in `thiserror` (error type),
+# `toml` (`FileKeyStore`'s on-disk format), and `dotenvy` (the `.env.local`
+# loader) — all already optional workspace deps. Does NOT pull in the OS
+# keychain backend; see `keyring-store` for that.
+credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
+# Enables `inference::credentials::KeyringStore`, the OS-keychain backend
+# (macOS Keychain / Windows Credential Manager / Secret Service on Linux)
+# selected by `inference::credentials::default_store` when available, with
+# `FileKeyStore` as the runtime-probed fallback (issue #2401). Pulls in the
+# `keyring` crate in addition to everything `credentials` already requires.
+keyring-store = ["credentials", "dep:keyring"]

@@ -348,6 +348,21 @@ pub mod error_capture;
 #[cfg(feature = "crate-config")]
 pub mod crate_config;
 
+/// Unified inference provider adapter layer (epic #2400).
+///
+/// Why: six trusty-* crates each hand-rolled their own LLM client, key
+/// lookup, and `.env.local` loading. Epic #2400 centralises the adapter,
+/// credential resolution, and capability registry here so every consumer
+/// shares one implementation.
+/// What: Gated behind the `credentials` feature. Wave 1 ticket #2401 ships
+/// the [`inference::credentials`] submodule (`KeyStore` trait + 3 backends +
+/// `resolve_key` precedence + `redact_secret`); later Wave 1/2 tickets add
+/// sibling modules (adapter trait, capability registry, provider clients).
+/// Test: `cargo test -p trusty-common --features credentials -- inference::`
+/// and `cargo test -p trusty-common --features keyring-store -- inference::`.
+#[cfg(feature = "credentials")]
+pub mod inference;
+
 // ─── Focused submodules (split from lib.rs in issue #1108) ────────────────
 
 /// TCP port auto-walking helper.
