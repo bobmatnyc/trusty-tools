@@ -1197,6 +1197,101 @@ fn reporter_tags_top_risks_as_inferred() {
     assert!(md.matches(inferred).count() >= 3);
 }
 
+/// Why: #2373 — the Top Risks table hard-capped at 3 fixed placeholder rows, so
+/// synthesized rows 4-5 were silently dropped even though the JSON twin carried
+/// them and the synthesis schema caps `top_risks` at 5. The repeatable
+/// `top_risk_row` block must render EVERY synthesized row, in order, with
+/// sequential 1..N ranks and the `⁽ⁱ⁾` provenance tag intact on the prose cells.
+/// What: attaches a `Synthesis` carrying the full 5 top-risk rows and asserts all
+/// five descriptions render (rows 4 and 5 explicitly), the ranks number 1..5, and
+/// the inferred marker survives on the synthesized prose.
+/// Test: this test itself.
+#[test]
+fn reporter_renders_all_top_risk_rows() {
+    use crate::report::synthesize::{RiskRow, Synthesis, SynthesisStatus};
+
+    let risk = |n: usize| RiskRow {
+        description: format!("Risk number {n} description"),
+        severity: "RED".to_string(),
+        cost: format!("cost-{n}"),
+        apps: format!("App {n}"),
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: Some("Summary.".to_string()),
+        top_risks: (1..=5).map(risk).collect(),
+        findings: vec![],
+        notes: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // All five rows render — rows 4 and 5 were the ones previously dropped.
+    for n in 1..=5 {
+        assert!(
+            md.contains(&format!("Risk number {n} description")),
+            "row {n} missing from rendered markdown"
+        );
+    }
+    // Ranks number sequentially 1..5 within the Top Risks table rows.
+    for n in 1..=5 {
+        assert!(
+            md.contains(&format!("| {n} | Risk number {n} description")),
+            "row {n} not ranked sequentially"
+        );
+    }
+    // The ⁽ⁱ⁾ provenance tag survives on the synthesized prose cells.
+    let inferred = crate::report::provenance::INFERRED_TAG.trim();
+    assert!(md.contains(inferred));
+    // description + cost per row (5 rows) plus the exec summary → >= 11 markers.
+    assert!(
+        md.matches(inferred).count() >= 11,
+        "expected >=11 inferred tags across 5 risk rows, got {}",
+        md.matches(inferred).count()
+    );
+}
+
+/// Why: #2373 omit-empty — with zero synthesized top risks (deterministic-only
+/// run, or synthesis absent), no `top_risk_row` block is pushed, so the table
+/// must collapse per the existing rules rather than leaving an empty header +
+/// separator skeleton behind.
+/// What: renders a model whose synthesis carries no top risks and asserts the
+/// Top Risks table header row is absent from the polished markdown (the section
+/// collapsed) while no raw placeholder leaks through.
+/// Test: this test itself.
+#[test]
+fn reporter_collapses_empty_top_risks() {
+    use crate::report::synthesize::{Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: Some("Summary.".to_string()),
+        top_risks: vec![],
+        findings: vec![],
+        notes: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // No empty table skeleton: the Top Risks header row is collapsed away.
+    assert!(
+        !md.contains("| # | Risk | Severity | Est. cost/effort |"),
+        "empty Top Risks table skeleton should have collapsed"
+    );
+    // The unfilled per-row placeholders never leak as literal text.
+    assert!(!md.contains("{{risk_description}}"));
+    assert!(!md.contains("{{risk_rank}}"));
+}
+
 /// Why: live-QA wave-2 defect #5 — the per-language LoC breakdown was computed
 /// (both by the scanner and from an external metrics file) but only language
 /// NAMES reached the rendered Profile table; the actual split (the useful

@@ -309,12 +309,18 @@ fn build_scope(model: &ReportModel) -> Scope {
 /// `inferred` (live-QA wave-2 defect #1 — the marker was defined but never
 /// wired to any synthesized content).
 /// What: sets the executive-summary scalar (tagged once, section granularity)
-/// and the `risk_N_description` / `risk_N_cost` scalars (tagged per field) from
-/// the synthesis's verified top-risk rows.  `risk_N_severity` / `risk_N_apps`
-/// are left untagged — they restate categorical/identifier data (the RED/AMBER
-/// band, the affected application names) rather than narrative prose.
+/// and pushes one `top_risk_row` block per verified top-risk row — the
+/// `risk_description` / `risk_cost` prose fields are tagged per field, while
+/// `risk_severity` / `risk_apps` are left untagged (they restate
+/// categorical/identifier data — the RED/AMBER band, the affected application
+/// names — rather than narrative prose).  `risk_rank` numbers the rows
+/// sequentially (1..N).  Because the template row is a repeatable block, ALL
+/// synthesized rows render (previously the template hard-capped at 3/5 fixed
+/// placeholder rows, silently dropping any beyond the cap — #2373); with zero
+/// top risks no block is pushed and the section collapses via omit-empty.
 /// Test: `reporter_tests.rs::{reporter_injects_synthesis_prose,
-/// reporter_tags_top_risks_as_inferred}`.
+/// reporter_tags_top_risks_as_inferred, reporter_renders_all_top_risk_rows,
+/// reporter_collapses_empty_top_risks}`.
 fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis) {
     if let Some(exec) = &syn.executive_summary {
         root.set(
@@ -324,17 +330,16 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
     }
 
     for (i, risk) in syn.top_risks.iter().enumerate() {
-        let n = i + 1;
-        root.set(
-            format!("risk_{n}_description"),
+        let mut row = Scope::new();
+        row.set("risk_rank", (i + 1).to_string());
+        row.set(
+            "risk_description",
             tag(risk.description.clone(), Provenance::Inferred),
         );
-        root.set(format!("risk_{n}_severity"), risk.severity.clone());
-        root.set(
-            format!("risk_{n}_cost"),
-            tag(risk.cost.clone(), Provenance::Inferred),
-        );
-        root.set(format!("risk_{n}_apps"), risk.apps.clone());
+        row.set("risk_severity", risk.severity.clone());
+        row.set("risk_cost", tag(risk.cost.clone(), Provenance::Inferred));
+        row.set("risk_apps", risk.apps.clone());
+        root.push_block("top_risk_row", row);
     }
 }
 
