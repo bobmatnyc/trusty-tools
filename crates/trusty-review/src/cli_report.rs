@@ -103,6 +103,18 @@ pub struct ReportArgs {
     /// manifest key.
     #[arg(long)]
     pub no_mermaid: bool,
+
+    /// Populate the complexity-distribution chart and RED/AMBER finding bands
+    /// deterministically from the trusty-analyze daemon (epic #2445).  OFF by
+    /// default: a bare run stays scan-only.  Fills metrics ONLY for local-path
+    /// repositories that declare no `metrics` file (declared metrics always win),
+    /// and only when the repo is already indexed in trusty-search/trusty-analyze.
+    /// Fully fail-open — an unindexed repo or an unreachable daemon logs a
+    /// warning and falls through to the built-in scan; it never aborts the report.
+    /// Daemon URL precedence: manifest `[report].analyze_url` > env
+    /// `PR_INTELLIGENCE_ANALYZER_URL` > default `http://127.0.0.1:7879`.
+    #[arg(long)]
+    pub analyze: bool,
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
@@ -173,6 +185,31 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+
+    // Epic #2445: opt-in deterministic analyze fetch.  Runs AFTER the model is
+    // built (so declared metrics files already loaded and win) and BEFORE
+    // synthesis/benchmark/mermaid (so the complexity chart + finding bands see
+    // the live metrics).  Fully fail-open — populates only local-path repos that
+    // declared no metrics, and only when their index is served.
+    if args.analyze {
+        let analyze_url = manifest
+            .report
+            .analyze_url
+            .clone()
+            .unwrap_or_else(|| config.analyzer_url.clone());
+        eprintln!("[trusty-review report] --analyze: fetching from {analyze_url}");
+        match trusty_review::report::HttpAnalyzeMetricsSource::new(analyze_url) {
+            Ok(source) => {
+                trusty_review::report::enrich_with_analyze(&mut model, &source).await;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[trusty-review report] --analyze: could not build HTTP client ({e}); \
+                     falling back to scan"
+                );
+            }
+        }
     }
 
     // M2 + wave-3: opt-in LLM synthesis plus the repo-evidence investigation.
@@ -429,6 +466,18 @@ mod tests {
         assert!(!args.benchmark);
         assert!(!args.corpus_add);
         assert!(args.corpus.is_none());
+        // Epic #2445: --analyze defaults off.
+        assert!(!args.analyze);
+    }
+
+    /// Why: the epic #2445 `--analyze` flag must parse.
+    /// What: parses `--analyze` and asserts the boolean is set.
+    /// Test: this test itself.
+    #[test]
+    fn report_args_parse_analyze() {
+        let args = ReportArgs::try_parse_from(["report", "--manifest", "m.toml", "--analyze"])
+            .expect("parse");
+        assert!(args.analyze);
     }
 
     /// Why: the M3 corpus/benchmark flags must parse and resolve a corpus dir.

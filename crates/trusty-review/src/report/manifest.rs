@@ -90,6 +90,16 @@ pub struct ReportSection {
     /// report is byte-identical to the pre-wave-4 output.
     #[serde(default)]
     pub mermaid: Option<bool>,
+    /// Optional base URL of the trusty-analyze daemon for the `--analyze` live
+    /// deterministic-metrics fetch (epic #2445).
+    ///
+    /// Why: `--analyze` populates the complexity chart + finding bands from the
+    /// analyze daemon; the URL is deployment-specific.  Precedence: this manifest
+    /// key wins when set; otherwise `ReviewConfig.analyzer_url` (env
+    /// `PR_INTELLIGENCE_ANALYZER_URL`, itself defaulting to the loopback daemon
+    /// `http://localhost:7879` ≡ `http://127.0.0.1:7879`) applies.
+    #[serde(default)]
+    pub analyze_url: Option<String>,
 }
 
 /// One validated repository entry mapping to a single per-application block.

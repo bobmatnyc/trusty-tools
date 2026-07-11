@@ -809,7 +809,7 @@ Per-dataset status:
 |---|---|---|
 | `loc_by_technology` | `RepositoryReport::scan.by_language` (measured), or `metrics.loc.by_language` (declared) when an external metrics JSON is supplied — declared wins, same precedence as the Profile "Technology stack" line (`fill_profile`) | **Populates** — one row per (application, language), `tech_pct` computed against the breakdown's own total; a real `stacked-bar` chart renders |
 | `tqi_benchmark_position` | `ReportModel::benchmark` (only set under `--benchmark`) | Empty — correctly gated on `--benchmark`, not a bare-scan input |
-| `complexity_distribution` | `metrics.complexity.buckets` — **metrics-only**; `RepoScan` has no complexity analysis, so the bare scan can never supply this | Empty (omit-empty) — **requires an external trusty-analyze metrics JSON**; never fabricated |
+| `complexity_distribution` | `metrics.complexity.buckets` — supplied either by a declared external metrics JSON OR, under `--analyze` (epic #2445), fetched live from the trusty-analyze daemon and bucketed client-side; `RepoScan` has no complexity analysis, so a bare scan alone cannot supply this | **Populates under `--analyze`** (or with a declared metrics JSON) — one row per bucket + a `bar` chart; empty (omit-empty) on a bare scan-only run without either. Never fabricated. |
 | `health_factors_by_app`, `violations_by_iso_domain` / `violations_by_domain`, `cve_by_component_severity`, `license_risk_tiers`, `cloud_maturity_by_tech`, `violations_by_horizon`, `remediation_cost_by_tier`, `green_deficiencies_top10` | Deal-specific DD findings (violations, CVEs, license tiers, remediation economics) that no deterministic scan or metrics schema currently captures | Empty (omit-empty) by design — populating these requires a future structured-findings source (see the Alternative/future source note above); NOT wired by #2366, and must not be force-populated from unrelated data |
 
 The same precedence rule applies throughout: an external metrics JSON is
@@ -818,6 +818,78 @@ figure, metrics (declared) wins; where only the scan has it, the measured figure
 still renders (and still charts). A dataset with genuinely no available
 deterministic source stays empty and chartless — that is the honest outcome, not
 a bug.
+
+### `--analyze`: deterministic live fetch from trusty-analyze (epic #2445)
+
+The `--analyze` flag populates the `complexity_distribution` chart and the
+RED/AMBER finding bands deterministically (NO LLM) by fetching from the
+trusty-analyze daemon at report time, so a bare run yields real complexity +
+findings without a hand-authored metrics JSON and without `--synthesize`. The
+mapping lives in `report/analyze_adapter.rs` (`AnalyzeMetricsSource` /
+`HttpAnalyzeMetricsSource`).
+
+**Architecture.** An HTTP client to the analyze daemon, NOT a library
+dependency — a lib dep is blocked by a cargo cycle (trusty-analyze already
+optionally depends on trusty-review via its `review` feature). The adapter
+fetches `GET /indexes` (readiness), `/complexity_hotspots?top_n=1000`,
+`/diagnostics`, and `/refactor-suggestions`, then maps the wire JSON onto the v0
+`AnalyzeMetrics`. `loc`/`counts` are left EMPTY — the built-in scanner owns those
+measured numbers. `/quality` is intentionally NOT called: it has no v0 mapping
+target and is O(corpus) (never a readiness probe, per REV-441).
+
+**Daemon URL.** Precedence: manifest `[report].analyze_url` (when set) > env
+`PR_INTELLIGENCE_ANALYZER_URL` (via `ReviewConfig.analyzer_url`) > default
+`http://127.0.0.1:7879` (the loopback `localhost:7879` the config defaults to).
+
+**Metrics-resolution precedence (fail-open).** Declared metrics file (manifest
+`metrics` key) > `--analyze` live fetch > `None` (bare scan). `--analyze` fills a
+repository ONLY when it declared no metrics file AND is a local-path source
+(remote repos are never indexed locally); a declared metrics JSON always wins.
+
+**Indexing prerequisite.** trusty-analyze serves an *index*, which requires the
+repo to already be indexed in trusty-search. The adapter derives the index id
+from the local checkout's directory basename (the same id `trusty-search index .`
+and the git hooks register) and confirms it via `GET /indexes`. If the index is
+not served — or the daemon is unreachable, or any fetch/parse fails — the adapter
+logs a clear stderr warning (`--analyze: '<id>' not indexed in
+trusty-analyze/trusty-search; falling back to scan`) and continues WITHOUT
+analyze metrics. It never aborts the report; fail-open is absolute.
+
+**Complexity-bucket threshold table** (mirrors trusty-analyze's
+`ComplexityGrade`, computed client-side from each hotspot's cyclomatic count):
+
+| Bucket label | Cyclomatic range | Grade band |
+|---|---|---|
+| `A: simple (0-5)` | 0–5 | A |
+| `B: moderate (6-10)` | 6–10 | B |
+| `C: elevated (11-15)` | 11–15 | C |
+| `D: high (16-20)` | 16–20 | D |
+| `F: very high (>20)` | 21+ | F |
+
+Empty buckets are omitted. The distribution is computed over the top-N most
+complex functions (`top_n=1000`), a documented sampling limit — the endpoint
+exposes no full-corpus histogram.
+
+**Severity-mapping convention (BINDING).** Both analyze severity vocabularies map
+onto the report's three bands with one balanced rule:
+
+| trusty-analyze severity | Report band |
+|---|---|
+| diagnostic `error`, refactor `critical` | RED |
+| diagnostic `warning`, refactor `high` | AMBER |
+| diagnostic `info`/`hint`, refactor `medium`/`low`, unknown | GREEN |
+
+GREEN-mapped findings are omitted from `findings[]` (they never render under the
+RED/AMBER bands and the report's no-green rule keeps them off the risk register).
+Findings are **prose-free** (title / severity / category / component only): a
+diagnostic's title is its rule code (else `"<tool> diagnostic"`), category is the
+producing tool, component is the file; a refactor's title is the humanised
+refactor type plus the function name, category is `maintainability`. The human
+message / rationale prose is dropped (prose is M2 synthesis's job).
+
+**Scope.** `--analyze` populates `complexity_distribution` + findings only. The
+CVE / license / cloud-maturity datasets stay empty — trusty-analyze has no source
+for them; they remain future structured-findings work.
 
 ### Column resolution & numeric parsing
 
