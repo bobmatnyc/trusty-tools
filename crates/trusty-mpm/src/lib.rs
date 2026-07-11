@@ -129,6 +129,17 @@ pub mod supervisor;
 /// Test: each submodule carries inline unit tests run by `cargo test -p trusty-mpm`.
 pub mod project;
 
+/// Deliverable/Milestone data model, central stores, and status state machine
+/// (DOC-35 §10, epic #2108; #2378 CRUD API + #2380 transition enforcement).
+///
+/// Why: the L3 substrate needs a deterministic ledger of what work exists, its
+/// tier, and its lifecycle state — bookkeeping `tm manager` (#2109) reasons over
+/// but must not own. Central sibling stores to `projects.json` (§10.7, §13 Q5).
+/// What: re-exports `Deliverable`/`Milestone` records, the `DeliverableStatus`
+/// state machine (§10.3), the on-disk `store`, and the `DeliverableManager`.
+/// Test: each submodule carries inline unit tests run by `cargo test -p trusty-mpm`.
+pub mod deliverable;
+
 /// SESSCTL alpha-1 session control plane (epic #1590, WI-1).
 ///
 /// Why: the daemon's two parallel session paths (project sessions + managed

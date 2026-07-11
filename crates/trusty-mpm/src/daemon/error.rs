@@ -65,6 +65,49 @@ pub enum DaemonError {
         id: String,
     },
 
+    /// No Deliverable matched the supplied id (within the named project).
+    ///
+    /// Why: the Deliverable CRUD routes (#2378) need a 404 distinct from the
+    /// session/checkpoint not-founds so the error message names the right
+    /// resource.
+    /// What: carries the id (or malformed id string); maps to HTTP 404.
+    /// Test: `error_status_codes_map`, and the deliverable route tests.
+    #[error("deliverable not found: {id}")]
+    DeliverableNotFound {
+        /// The Deliverable id that failed to resolve.
+        id: String,
+    },
+
+    /// No Milestone matched the supplied id (within the named project).
+    #[error("milestone not found: {id}")]
+    MilestoneNotFound {
+        /// The Milestone id that failed to resolve.
+        id: String,
+    },
+
+    /// A requested Deliverable status change is not a legal transition (#2380).
+    ///
+    /// Why: the §10.3 state machine rejects illegal `set-status` requests (e.g.
+    /// `proposed → complete`). A dedicated variant lets the error body name the
+    /// legal next states so the caller can self-correct, and maps to 409 Conflict
+    /// (the requested change conflicts with the record's current state) — the same
+    /// class as [`SessionNotActive`](Self::SessionNotActive).
+    /// What: carries the `from`/`to` labels and the legal `allowed` next states;
+    /// [`into_response`](Self::into_response) surfaces `allowed` as a JSON array.
+    /// Test: `error_status_codes_map`, `invalid_transition_body_lists_allowed`.
+    #[error(
+        "invalid status transition {from} \u{2192} {to}; legal next states from {from}: [{}]",
+        allowed.join(", ")
+    )]
+    InvalidTransition {
+        /// The Deliverable's current status.
+        from: String,
+        /// The requested (rejected) target status.
+        to: String,
+        /// The states that would have been legal transitions from `from`.
+        allowed: Vec<String>,
+    },
+
     /// A bot pairing code was wrong or had expired.
     #[error("pair code invalid or expired")]
     InvalidPairCode,
@@ -111,8 +154,11 @@ impl DaemonError {
     /// Test: `error_status_codes_map`.
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::SessionNotFound { .. } | Self::CheckpointNotFound { .. } => StatusCode::NOT_FOUND,
-            Self::SessionNotActive { .. } => StatusCode::CONFLICT,
+            Self::SessionNotFound { .. }
+            | Self::CheckpointNotFound { .. }
+            | Self::DeliverableNotFound { .. }
+            | Self::MilestoneNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::SessionNotActive { .. } | Self::InvalidTransition { .. } => StatusCode::CONFLICT,
             Self::OverseerBlocked { .. } | Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) | Self::InvalidPairCode => StatusCode::BAD_REQUEST,
             Self::TmuxUnavailable(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -132,7 +178,18 @@ impl DaemonError {
 impl IntoResponse for DaemonError {
     fn into_response(self) -> Response {
         let status = self.status();
-        let body = Json(serde_json::json!({ "error": self.to_string() }));
+        // #2380: an invalid transition surfaces the legal next states as a
+        // structured `allowed_next` array so the caller can self-correct without
+        // parsing the message string.
+        let body = match &self {
+            Self::InvalidTransition { from, to, allowed } => Json(serde_json::json!({
+                "error": self.to_string(),
+                "from": from,
+                "to": to,
+                "allowed_next": allowed,
+            })),
+            _ => Json(serde_json::json!({ "error": self.to_string() })),
+        };
         (status, body).into_response()
     }
 }
@@ -198,6 +255,38 @@ mod tests {
             DaemonError::Unprocessable("x".into()).status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
+        assert_eq!(
+            DaemonError::DeliverableNotFound { id: "x".into() }.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            DaemonError::MilestoneNotFound { id: "x".into() }.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            DaemonError::InvalidTransition {
+                from: "proposed".into(),
+                to: "complete".into(),
+                allowed: vec!["in-progress".into()],
+            }
+            .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn invalid_transition_message_lists_allowed() {
+        // The Display must name the from-state, to-state, and legal next states
+        // so an operator reading the plain error string can self-correct.
+        let e = DaemonError::InvalidTransition {
+            from: "proposed".into(),
+            to: "complete".into(),
+            allowed: vec!["in-progress".into()],
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("proposed"), "{msg}");
+        assert!(msg.contains("complete"), "{msg}");
+        assert!(msg.contains("in-progress"), "{msg}");
     }
 
     #[test]
