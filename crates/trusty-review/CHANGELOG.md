@@ -5,6 +5,16 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.8.1] — 2026-07-11
+
+### Fixed
+
+- Top Risks table in both bundled templates (`report-technical-dd.md`, `report-technical-dd-cast.md`) hardcapped a fixed number of risk rows (3 generic / 5 CAST), silently dropping synthesized rows 4-5 despite them being present in the JSON twin and within the schema's 5-row max (closes #2373). Converted to a repeatable `BEGIN`/`END` block (same pattern as findings/benchmark rows), rendering one row per synthesized risk with sequential numbering and provenance tags; empty case collapses via omit-empty. ([#2430](https://github.com/bobmatnyc/trusty-tools/pull/2430)) ([`7d844b7`](https://github.com/bobmatnyc/trusty-tools/commit/7d844b7af4a52ed244d5c61c4ed30424c1b2c5f4))
+
+### Changed
+
+- Root workspace `[workspace.dependencies]` pin for `trusty-review` bumped 0.8.0 → 0.8.1 (consumed by `trusty-analyze`'s optional `review` feature).
+
 ## [0.8.0] — 2026-07-10
 
 ### Added
