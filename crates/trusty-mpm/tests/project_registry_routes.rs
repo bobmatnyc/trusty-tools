@@ -25,18 +25,28 @@ use trusty_mpm::client::http_client::deliverables::{
     CreateDeliverableArgs, CreateMilestoneArgs, SetStatusError,
 };
 use trusty_mpm::client::http_client::projects::RegisterProjectArgs;
+use trusty_mpm::core::trusty_tools_config::GithubConfig;
 use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::deliverable::{DeliverableKind, DeliverableStatus, EstimationTier};
+use trusty_mpm::project::Project;
 
-/// Bind the real router on an ephemeral loopback port; return a client for it.
-async fn serve() -> DaemonClient {
+/// Bind the real router on an ephemeral loopback port; return a client plus the
+/// backing [`DaemonState`] (some tests need to seed the store directly, bypassing
+/// HTTP, to set up state the HTTP request body cannot express — e.g. the
+/// per-project `github`/commit identity binding, #2184).
+async fn serve_with_state() -> (DaemonClient, Arc<DaemonState>) {
     let root = tempfile::tempdir().unwrap().keep();
     let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
     let router = api::router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, router).into_future());
-    DaemonClient::new(format!("http://{addr}"))
+    (DaemonClient::new(format!("http://{addr}")), state)
+}
+
+/// Bind the real router on an ephemeral loopback port; return a client for it.
+async fn serve() -> DaemonClient {
+    serve_with_state().await.0
 }
 
 /// register → get → list → status round-trips over real HTTP.
@@ -112,6 +122,92 @@ async fn register_is_idempotent_upsert() {
     let out = client.registry_register_project(&updated).await.unwrap();
     assert_eq!(out.default_branch, "release");
     assert_eq!(client.registry_list_projects(None).await.unwrap().len(), 1);
+}
+
+/// The highest-risk clobber path: a project already carries a per-project
+/// `github`/commit identity binding (#2184, set out-of-band — e.g. via
+/// `seed_from_config` or a direct `registry.register` call, since the HTTP
+/// register body has no fields for them). Re-registering that SAME project
+/// through `POST /api/v1/projects` — whose body cannot express `github`/
+/// `commit_name`/`commit_email` — must NOT wipe the binding; the route
+/// preserves it by reading the existing record before building the replacement
+/// (see `register_project_registry_route`'s `existing.as_ref().and_then(...)`
+/// carry-forward).
+#[tokio::test]
+async fn register_preserves_identity_binding_not_expressible_in_body() {
+    let (client, state) = serve_with_state().await;
+
+    // Seed directly on the store (bypassing HTTP) with a full identity binding —
+    // this is state the register HTTP body has no way to set.
+    state
+        .project_registry()
+        .await
+        .register(Project {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            github: Some(GithubConfig {
+                config_dir: Some("/home/bob/.config/gh-work".into()),
+                token_env: None,
+                account: None,
+                host: None,
+            }),
+            commit_name: Some("Bob".into()),
+            commit_email: Some("bob@example.com".into()),
+        })
+        .await
+        .expect("seed project with identity binding");
+
+    // Re-register the SAME project over HTTP, changing only the branch — the
+    // body cannot carry `github`/`commit_name`/`commit_email` at all.
+    let updated = client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: Some("develop".into()),
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        updated.default_branch, "develop",
+        "the field the request DID carry must still apply"
+    );
+    assert_eq!(
+        updated.commit_name.as_deref(),
+        Some("Bob"),
+        "commit_name must survive a re-register the body cannot express it in"
+    );
+    assert_eq!(
+        updated.commit_email.as_deref(),
+        Some("bob@example.com"),
+        "commit_email must survive a re-register the body cannot express it in"
+    );
+    let github = updated
+        .github
+        .as_ref()
+        .expect("github binding must survive the re-register");
+    assert_eq!(
+        github.config_dir.as_deref(),
+        Some(std::path::Path::new("/home/bob/.config/gh-work")),
+        "github.config_dir must survive unchanged"
+    );
+
+    // The persisted record (read back independently of the register response)
+    // must show the same preserved binding — proving it is durable, not just an
+    // artifact of the immediate response body.
+    let refetched = client.registry_get_project("widget").await.unwrap();
+    assert_eq!(refetched.commit_name.as_deref(), Some("Bob"));
+    assert_eq!(refetched.commit_email.as_deref(), Some("bob@example.com"));
+    assert!(refetched.github.is_some());
 }
 
 /// Fetching an unregistered project surfaces an error (the daemon 404s).

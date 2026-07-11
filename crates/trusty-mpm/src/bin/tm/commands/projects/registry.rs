@@ -99,15 +99,19 @@ pub(crate) async fn show(
 
     // Read-only nested sessions via the fleet endpoint (§3.1). A fleet read
     // failure must not sink the whole `show` — the config is the primary payload
-    // — so degrade to an empty session list on error.
-    let sessions = daemon
-        .fleet_managed_sessions()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .find(|g| g.project_name == project.name)
-        .map(|g| g.sessions)
-        .unwrap_or_default();
+    // — so degrade to an empty session list on error, but warn so the operator
+    // knows the session list may be incomplete rather than genuinely empty.
+    let sessions = match daemon.fleet_managed_sessions().await {
+        Ok(groups) => groups
+            .into_iter()
+            .find(|g| g.project_name == project.name)
+            .map(|g| g.sessions)
+            .unwrap_or_default(),
+        Err(e) => {
+            eprintln!("warning: could not read sessions: {e}");
+            Vec::new()
+        }
+    };
 
     if json {
         let out = serde_json::json!({

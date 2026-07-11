@@ -71,7 +71,7 @@ pub struct RegisterProjectBody {
 /// Why: mirrors the `project_list` MCP tool's `{ projects, count }` shape so a
 /// consumer can read the inventory and its size in one call.
 /// What: the registered projects plus their count.
-/// Test: `tests/project_registry_routes.rs::list_returns_registered_projects`.
+/// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`.
 #[derive(Debug, Serialize)]
 pub struct ProjectsListResponse {
     /// Every registered project.
@@ -87,7 +87,7 @@ pub struct ProjectsListResponse {
 /// What: returns `{ projects, count }`; a store read failure degrades to 500 with
 /// a logged warning rather than a panic (the library never `unwrap`s a store
 /// result).
-/// Test: `tests/project_registry_routes.rs::list_returns_registered_projects`.
+/// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`.
 pub async fn list_projects_registry_route(
     State(state): State<Arc<DaemonState>>,
 ) -> impl IntoResponse {
@@ -117,8 +117,8 @@ pub async fn list_projects_registry_route(
 /// (defaulting `default_branch` to `"main"`), preserves the existing binding,
 /// persists via [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
 /// and returns 201 with the stored record.
-/// Test: `tests/project_registry_routes.rs::register_then_get_round_trips`,
-/// `register_preserves_existing_identity_binding`.
+/// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`,
+/// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`.
 pub async fn register_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProjectBody>,
@@ -164,8 +164,8 @@ pub async fn register_project_registry_route(
 /// project view (the nested sessions half comes from the fleet endpoint, §3.1).
 /// What: returns the project (200) or a 404 when unregistered; any other store
 /// error degrades to 500 with a logged warning.
-/// Test: `tests/project_registry_routes.rs::register_then_get_round_trips`,
-/// `get_unknown_project_is_404`.
+/// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`,
+/// `get_unknown_project_errors`.
 pub async fn get_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(name): AxumPath<String>,
