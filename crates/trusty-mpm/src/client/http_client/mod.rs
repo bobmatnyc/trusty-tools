@@ -12,7 +12,9 @@
 //! deserialization; live HTTP is exercised by the executor tests against an
 //! in-process test daemon and by the daemon's own API tests.
 
+pub mod deliverables;
 mod managed;
+pub mod projects;
 mod session_connect;
 #[cfg(test)]
 mod tests;

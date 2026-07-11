@@ -22,6 +22,7 @@ use commands::{
     launch::{connect, launch},
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
+    projects::projects,
     repair::repair_deploy,
     services::services,
     session::session,
@@ -52,6 +53,10 @@ mod tests_behavior_d;
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
 mod tests_behavior_e;
+
+#[cfg(test)]
+#[path = "tests_projects.rs"]
+mod tests_projects;
 
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
@@ -249,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Project { action }) => project(&client, &url, action).await,
         // #2116: `sessions` (plural) is the canonical top-level command.
         Some(Command::Sessions { action }) => session(&client, &url, action).await,
+        Some(Command::Projects { action }) => projects(&client, &url, action).await,
         // #2116: `session` (singular) is a hidden deprecated alias of `sessions`.
         // The notice fires here — exactly once per invocation, regardless of
         // which verb was invoked — before dispatching to the identical handler.

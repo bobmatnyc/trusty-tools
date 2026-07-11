@@ -137,6 +137,24 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+    /// Manage the project registry (registry B) and its Deliverable/Milestone
+    /// ledger.
+    ///
+    /// Why (#2115/#2381, DOC-35 §3.1/§10.8): `tm projects` is the deterministic
+    /// CLI half of the project control plane — a sibling top-level plural noun
+    /// alongside `tm sessions` (#2116). Its verbs are thin HTTP clients over the
+    /// daemon's registry-B surface (§1.3): `list`/`register`/`show`/`status` cover
+    /// the project registry itself, and the `deliverables`/`milestones` subtrees
+    /// cover the L3-substrate work-tracking ledger (§10). Mutating session verbs
+    /// deliberately live at `tm sessions`; `tm projects show` surfaces sessions
+    /// read-only per the naming split.
+    /// What: the `tm projects <action>` command group.
+    /// Test: `cli_parses_projects_*` in `tests_projects.rs`.
+    Projects {
+        /// Project action to perform.
+        #[command(subcommand)]
+        action: ProjectsAction,
+    },
     /// Show the recent hook-event feed.
     Events,
     /// Run a full system diagnostic of the trusty-mpm stack.
@@ -1483,6 +1501,229 @@ pub(crate) enum ProjectAction {
         #[arg(long)]
         dir: Option<String>,
     },
+}
+
+/// Actions for the `tm projects` subcommand (DOC-35 §3.1/§10.8, #2115/#2381).
+///
+/// Why: the registry-B project surface plus the Deliverable/Milestone ledger,
+/// exposed as a deterministic verb tree of thin HTTP clients.
+/// What: the four registry verbs (`list`/`register`/`show`/`status`) and the two
+/// nested subtrees (`deliverables`/`milestones`).
+/// Test: `cli_parses_projects_*` in `tests_projects.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProjectsAction {
+    /// List registered projects (optionally filtered by tag).
+    List {
+        /// Emit the raw project JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Only show projects carrying this tag.
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Register (idempotent upsert) a project in registry B.
+    Register {
+        /// Registry key / short project name.
+        name: String,
+        /// Full repository URL.
+        #[arg(long)]
+        repo_url: String,
+        /// Default branch (daemon defaults to `main` when omitted).
+        #[arg(long)]
+        default_branch: Option<String>,
+        /// Free-form description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Comma-separated classification tags.
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Technology-stack hint (e.g. `rust`).
+        #[arg(long)]
+        stack_hint: Option<String>,
+        /// Preferred `gh` login for this project (#2081).
+        #[arg(long)]
+        gh_user: Option<String>,
+    },
+    /// Show a project's config PLUS a read-only nested sessions listing.
+    Show {
+        /// Project name.
+        name: String,
+        /// Emit raw JSON (config + sessions) instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a project's deterministic status rollup (session histogram + flags).
+    Status {
+        /// Project name.
+        name: String,
+        /// Emit the raw status JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage a project's Deliverables (§10.8).
+    Deliverables {
+        /// Deliverable action to perform.
+        #[command(subcommand)]
+        action: DeliverablesAction,
+    },
+    /// Manage a project's Milestones (§10.8).
+    Milestones {
+        /// Milestone action to perform.
+        #[command(subcommand)]
+        action: MilestonesAction,
+    },
+}
+
+/// Actions for `tm projects deliverables` (DOC-35 §10.8, #2381).
+#[derive(Debug, Subcommand)]
+pub(crate) enum DeliverablesAction {
+    /// List a project's Deliverables (optionally filtered by status).
+    List {
+        /// Project name.
+        project: String,
+        /// Emit raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Only show Deliverables in this status.
+        #[arg(long)]
+        status: Option<DeliverableStatusArg>,
+    },
+    /// Create a Deliverable (starts in `proposed`).
+    #[command(alias = "create")]
+    Add {
+        /// Project name.
+        project: String,
+        /// Human-readable name.
+        #[arg(long)]
+        name: String,
+        /// Category of work.
+        #[arg(long)]
+        kind: DeliverableKindArg,
+        /// Coarse effort tier (S/M/L/XL).
+        #[arg(long)]
+        estimate: EstimationTierArg,
+        /// Free-form description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Repo-relative spec path (plain string, §10.4).
+        #[arg(long)]
+        spec_ref: Option<String>,
+        /// Opaque gh-first ticket reference (plain string, §13 Q6).
+        #[arg(long)]
+        ticket_ref: Option<String>,
+    },
+    /// Show one Deliverable by id.
+    Show {
+        /// Project name.
+        project: String,
+        /// Deliverable id (UUID).
+        id: String,
+        /// Emit raw JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Transition a Deliverable's status (enforces the §10.3 state machine).
+    SetStatus {
+        /// Project name.
+        project: String,
+        /// Deliverable id (UUID).
+        id: String,
+        /// Target status.
+        status: DeliverableStatusArg,
+    },
+}
+
+/// Actions for `tm projects milestones` (DOC-35 §10.8, #2381).
+#[derive(Debug, Subcommand)]
+pub(crate) enum MilestonesAction {
+    /// List a project's Milestones.
+    List {
+        /// Project name.
+        project: String,
+        /// Emit raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a Milestone.
+    #[command(alias = "create")]
+    Add {
+        /// Project name.
+        project: String,
+        /// Human-readable name.
+        #[arg(long)]
+        name: String,
+        /// Target date (RFC 3339, e.g. `2026-09-01T00:00:00Z`).
+        #[arg(long)]
+        target_date: String,
+        /// Free-form description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Show one Milestone by id.
+    Show {
+        /// Project name.
+        project: String,
+        /// Milestone id (UUID).
+        id: String,
+        /// Emit raw JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// CLI value for a Deliverable kind (§10.2); maps 1:1 to
+/// `trusty_mpm::deliverable::DeliverableKind`. Kept local so `cli.rs` carries no
+/// domain dependency; the projects command module does the mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum DeliverableKindArg {
+    /// A new capability.
+    Feature,
+    /// A defect repair.
+    Bugfix,
+    /// A behavior-preserving restructuring.
+    Refactor,
+    /// Maintenance / housekeeping.
+    Chore,
+    /// Test-only work.
+    Test,
+    /// Documentation-only work.
+    Docs,
+}
+
+/// CLI value for an estimation tier (§10.2); the value names are the exact
+/// uppercase `S`/`M`/`L`/`XL` letters the spec uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum EstimationTierArg {
+    /// Small.
+    #[value(name = "S")]
+    S,
+    /// Medium.
+    #[value(name = "M")]
+    M,
+    /// Large.
+    #[value(name = "L")]
+    L,
+    /// Extra-large.
+    #[value(name = "XL")]
+    Xl,
+}
+
+/// CLI value for a Deliverable status (§10.3); default kebab-case value names
+/// match the wire encoding (`in-progress`, `proposed`, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum DeliverableStatusArg {
+    /// Planned but not started.
+    Proposed,
+    /// Actively worked.
+    InProgress,
+    /// Paused on an external blocker.
+    Blocked,
+    /// Objective gate passed or user-confirmed.
+    Complete,
+    /// Terminal: delivered.
+    Delivered,
+    /// Terminal: shipped.
+    Shipped,
 }
 
 /// Actions for the `sessions` subcommand (canonical since #2116; also
