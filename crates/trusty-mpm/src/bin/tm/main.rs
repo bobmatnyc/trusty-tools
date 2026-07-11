@@ -86,13 +86,18 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 /// early — rather than by relaxing `ProjectsAction` to `Option` and branching
 /// inside the dispatcher — specifically so `tm projects <verb>` and a
 /// non-interactive bare `tm projects` both flow through the completely
-/// unmodified clap definition: the latter must keep failing with clap's own
-/// "requires a subcommand" usage error (exit code 2), byte-for-byte identical
-/// to the pre-#2118 behavior. "Interactive" requires BOTH stdin and stdout to
-/// be real terminals (`commands::projects::should_launch_bare_tui`) — stdout
-/// alone is not enough: a supervisor/wrapper that redirects stdin from
-/// `/dev/null` while leaving stdout attached to a pty would otherwise launch a
-/// raw-mode TUI with no keyboard path able to exit it. See
+/// unmodified clap definition: the latter must keep failing with a clap usage
+/// error (exit code 2), unchanged from the pre-#2118 behavior. (The EXACT
+/// clap `ErrorKind` — and therefore the exact rendered wording — for that
+/// bare-invocation usage error is not itself a stable cross-environment
+/// property of this unmodified definition; see `tests_projects::
+/// cli_rejects_bare_projects_with_a_usage_error`'s doc for the evidence. The
+/// invariant this interception actually depends on, and the one that IS
+/// stable, is the non-zero exit code.) "Interactive" requires BOTH stdin and
+/// stdout to be real terminals (`commands::projects::should_launch_bare_tui`)
+/// — stdout alone is not enough: a supervisor/wrapper that redirects stdin
+/// from `/dev/null` while leaving stdout attached to a pty would otherwise
+/// launch a raw-mode TUI with no keyboard path able to exit it. See
 /// `commands::projects::should_launch_bare_tui` and
 /// `commands::projects::launch_bare_tui`.
 /// Test: integration tests in `tests.rs` exercise every dispatch branch; the
