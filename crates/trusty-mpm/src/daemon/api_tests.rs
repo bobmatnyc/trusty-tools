@@ -1662,17 +1662,33 @@ async fn session_end_hook_does_not_kill_pane() {
     use std::sync::{Arc as SArc, Mutex};
 
     // Spy driver: records every `kill_session` call, mirroring
-    // `runtime_reap::tests::KillSpyTmuxDriver` (#2023 A).
+    // `runtime_reap::tests::KillSpyTmuxDriver` (#2023 A). Unlike that sibling
+    // (which never needs `session_exists` to be truthful because the reaper
+    // path it drives doesn't gate on it), THIS spy must track live session
+    // names in `sessions` and return them from `list_sessions` — the default
+    // `ManagedTmuxDriver::session_exists` derives from `list_sessions`, and
+    // `graceful_terminate_runtime` (invoked by the destructive `stop()` this
+    // test must distinguish from) fast-path RETURNS before ever calling
+    // `kill_session` when `session_exists` is false. An always-empty
+    // `list_sessions` (as a prior revision of this spy had) made
+    // `kill_calls` empty NO MATTER which method — `stop` or
+    // `mark_runtime_exited_stopped` — `handle_session_end` called, so the
+    // assertion below proved nothing. Mutation-tested: reverting the api.rs
+    // call site back to `mgr.stop(&id)` now makes this test FAIL (see PR
+    // #2455 review discussion, finding 1).
     #[derive(Default)]
     struct KillSpyTmuxDriver {
+        sessions: Mutex<Vec<String>>,
         kill_calls: Mutex<Vec<String>>,
     }
     impl crate::session_manager::ManagedTmuxDriver for KillSpyTmuxDriver {
-        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            self.sessions.lock().unwrap().push(name.to_owned());
             Ok(())
         }
         fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
             self.kill_calls.lock().unwrap().push(name.to_owned());
+            self.sessions.lock().unwrap().retain(|n| n != name);
             Ok(())
         }
         fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
@@ -1682,7 +1698,7 @@ async fn session_end_hook_does_not_kill_pane() {
             Ok(String::new())
         }
         fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(Vec::new())
+            Ok(self.sessions.lock().unwrap().clone())
         }
     }
 
@@ -1742,5 +1758,55 @@ async fn session_end_hook_does_not_kill_pane() {
     assert!(
         driver.kill_calls.lock().unwrap().is_empty(),
         "SessionEnd correlation must NEVER kill the tmux pane (#2454, mirrors #2023 A)"
+    );
+}
+
+// ─── #2454 finding-2: session_end_pane_still_live liveness gate ───────────
+
+fn pane_for_gate_test(name: &str, cmd: &str) -> crate::daemon::orphan_gc::PaneInfo {
+    crate::daemon::orphan_gc::PaneInfo {
+        session_name: name.to_string(),
+        pane_current_command: cmd.to_string(),
+        pane_pid: Some(4242),
+    }
+}
+
+#[test]
+fn session_end_pane_still_live_true_for_running_agent() {
+    // Why (#2454): a pane whose matching record still shows the runtime
+    // running (`claude`) must be classified as "still live" so the caller
+    // defers the Stopped transition to the next reaper tick.
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    let panes = vec![pane_for_gate_test("tmpm-live", "claude")];
+    assert!(
+        session_end_pane_still_live("tmpm-live", &panes, &AlwaysIdleProbe),
+        "a pane still running the agent must be classified as still-live"
+    );
+}
+
+#[test]
+fn session_end_pane_still_live_false_for_idle_shell() {
+    // Why (#2454): a pane that has already fallen back to a bare idle shell
+    // (matching the reaper's own `pane_runtime_exited` classification) must
+    // NOT be deferred — the transition should proceed immediately.
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    let panes = vec![pane_for_gate_test("tmpm-idle", "zsh")];
+    assert!(
+        !session_end_pane_still_live("tmpm-idle", &panes, &AlwaysIdleProbe),
+        "an idle-shell pane with no live child must NOT be classified as still-live"
+    );
+}
+
+#[test]
+fn session_end_pane_still_live_false_when_pane_missing() {
+    // Why (#2454): when no pane matches (already gone, or tmux/pane
+    // enumeration was unavailable and `panes` is empty) there is nothing to
+    // protect — the transition must proceed (fail open), matching this
+    // gate's documented default.
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    let panes: Vec<crate::daemon::orphan_gc::PaneInfo> = Vec::new();
+    assert!(
+        !session_end_pane_still_live("tmpm-gone", &panes, &AlwaysIdleProbe),
+        "a missing pane must fail open (not classified as still-live)"
     );
 }
