@@ -52,8 +52,8 @@ pub use project_registry_routes::{
     list_projects_registry_route, register_project_registry_route,
 };
 pub use project_status::{
-    ProjectConfigFlags, ProjectStatusResponse, SessionStateCounts, aggregate_project_status,
-    project_status_route,
+    DeliverableStatusCounts, MilestoneStatusCounts, ProjectConfigFlags, ProjectStatusResponse,
+    SessionStateCounts, aggregate_project_status, project_status_route,
 };
 pub use proxy::{
     DirectManagedBackend, ProxyFocusRequest, ProxyFocusResponse, ProxyMessageRequest,
