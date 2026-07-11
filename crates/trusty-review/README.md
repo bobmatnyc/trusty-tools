@@ -380,6 +380,58 @@ placement tables. A corpus with fewer than 5 peers is never ranked — the
 report discloses `benchmark: corpus too small (n=<peers>)` instead of a
 fabricated placement (the small-n honesty gate).
 
+### `--instructions <md>` (analyst brief)
+
+`--instructions <file>` (precedence over manifest `[report].instructions`)
+hands the generator a free-form markdown brief — focus areas, deal concerns,
+questions. It is always recorded verbatim as an `## Analyst Instructions`
+section; under `--synthesize` it is additionally injected as focus
+directives that steer emphasis in the executive summary and RED/AMBER prose.
+Instructions steer emphasis only — they never authorize invention and never
+relax the numeric guardrail or the no-green rule. A missing file is a hard
+error; an empty file warns and proceeds as absent.
+
+### Inference-first output: repo scanning, provenance, section instructions
+
+Without `--synthesize`, and even without an external trusty-analyze metrics
+file, a local-path repository still gets a substantive report: `src/report/scan.rs`
+computes a **measured** baseline directly from the checkout — tracked file
+list (`git ls-files`, or a filtered walk for non-git paths), total LoC + a
+per-language breakdown, file counts, and top declared dependencies from
+`package.json`/`Cargo.toml`/`pyproject.toml`/`go.mod`. An external metrics
+JSON is treated as enrichment layered on top of the scan — where both provide
+a figure, the declared metrics win; where only the scan has it, the measured
+figure fills the field.
+
+Every substantive value in the rendered report carries a trailing **provenance
+marker** — `⁽ᵐ⁾` measured (from the repo), `⁽ᵈ⁾` declared (manifest/analyst/metrics
+input), or `⁽ⁱ⁾` inferred (LLM judgement grounded in repo evidence); a
+genuinely-unknowable field is dropped rather than shown with a marker. A
+one-line legend renders once near the top of the report.
+
+Templates may override the instruction given to each of the three
+LLM-synthesized sections (`executive_summary`, `top_risks`,
+`finding_elaboration`) with a `<!-- instruct:<section_id> ... -->` comment
+anywhere in the template file; the override replaces the built-in generic
+instruction for that section only and never reaches rendered output (it is
+stripped like any other non-`dataset:` comment). The analyst `--instructions`
+brief still layers on top as an additive emphasis overlay.
+
+Full detail on the scan heuristics, provenance model, and instruction
+layering: [docs/trusty-review/spec/report-generation.md](../../docs/trusty-review/spec/report-generation.md).
+
+### Mermaid charts (`--no-mermaid`)
+
+Every populated Graph-Ready Data Appendix table (tagged with a
+`<!-- dataset: <slug> | chart: <type> | x: … | y: … -->` marker) gets a
+Mermaid chart rendered directly beneath it — `bar`/`stacked-bar` as
+`xychart-beta`, `radar` as `radar-beta` (Mermaid ≥ 11.6), `heatmap` has no
+Mermaid equivalent and falls back to a note. This is on by default, purely
+deterministic (no LLM, no network) — a rendering pass over already-filled
+table rows. Disable it with `--no-mermaid` or the manifest `[report] mermaid
+= false` key (the flag always wins); with it disabled the report is
+byte-identical to the pre-Mermaid output.
+
 ### Templates
 
 Two vendor-neutral, placeholder-only templates ship in
