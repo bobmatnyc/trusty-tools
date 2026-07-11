@@ -1647,3 +1647,100 @@ async fn session_end_hook_marks_managed_stopped() {
         "SessionEnd hook must immediately mark the managed session Stopped (#1744)"
     );
 }
+
+#[tokio::test]
+async fn session_end_hook_does_not_kill_pane() {
+    // Why (#2454): `handle_session_end` previously routed through
+    // `SessionManager::stop`, which kills the tmux pane via
+    // `graceful_terminate_runtime` — destroying a pane the operator might
+    // still be attached to. Per #2023 A this correlation is a self-healing
+    // reconcile, not an explicit human/client stop request, so it must use
+    // the non-destructive `mark_runtime_exited_stopped` path instead (same as
+    // the 60-second runtime-exit reaper in `daemon::runtime_reap`). This test
+    // proves the SessionEnd hook never calls `kill_session`.
+    use crate::session_manager::{ManagedError, ManagedSessionState, SessionManager};
+    use std::sync::{Arc as SArc, Mutex};
+
+    // Spy driver: records every `kill_session` call, mirroring
+    // `runtime_reap::tests::KillSpyTmuxDriver` (#2023 A).
+    #[derive(Default)]
+    struct KillSpyTmuxDriver {
+        kill_calls: Mutex<Vec<String>>,
+    }
+    impl crate::session_manager::ManagedTmuxDriver for KillSpyTmuxDriver {
+        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+            self.kill_calls.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(Vec::new())
+        }
+    }
+
+    let ws = std::path::PathBuf::from("/tmp/test-ws-session-end-no-kill");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let driver = SArc::new(KillSpyTmuxDriver::default());
+    let mgr = SessionManager::new(tmp.path(), driver.clone() as SArc<_>)
+        .await
+        .unwrap();
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("create managed session");
+    let managed_id = record.id;
+    mgr.set_workspace(&managed_id, ws, ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+
+    let claude_id = "550e8400-e29b-41d4-a716-446655440003";
+    mgr.set_claude_session_id(&managed_id, claude_id)
+        .await
+        .expect("set claude_session_id for no-kill test");
+
+    let mgr_arc = SArc::new(mgr);
+    let state = Arc::new(DaemonState::with_session_manager(mgr_arc));
+    std::mem::forget(tmp);
+
+    let post = HookPost {
+        session_id: claude_id.to_string(),
+        event: HookEvent::SessionEnd,
+        payload: serde_json::json!({}),
+    };
+    let result = ingest_hook(State(Arc::clone(&state)), Json(post)).await;
+    assert!(
+        result.is_ok(),
+        "ingest_hook(SessionEnd) must succeed: {result:?}"
+    );
+
+    let mgr = state.session_manager().await;
+    let after = mgr
+        .get(&managed_id)
+        .await
+        .expect("get managed session after SessionEnd");
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Stopped,
+        "SessionEnd hook must still mark the managed session Stopped (#1744)"
+    );
+
+    assert!(
+        driver.kill_calls.lock().unwrap().is_empty(),
+        "SessionEnd correlation must NEVER kill the tmux pane (#2454, mirrors #2023 A)"
+    );
+}

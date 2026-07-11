@@ -1373,18 +1373,33 @@ async fn correlate_session_start(
     }
 }
 
-/// Immediately mark a managed session Stopped on `SessionEnd`.
+/// Immediately mark a managed session Stopped on `SessionEnd`, WITHOUT killing
+/// its tmux pane (#2454).
 ///
-/// Why (#1744): without this, a managed session that exits ungracefully (tmux
-/// pane killed, terminal closed) stays `Active` in the store until the 60-second
-/// reap loop fires. On `SessionEnd`, Claude Code's internal session has already
-/// ended; marking the managed session `Stopped` immediately keeps the daemon's
-/// view consistent and lets the operator see the correct state right away.
+/// Why (#1744, revised #2454): without this, a managed session that exits
+/// ungracefully (tmux pane killed, terminal closed) stays `Active` in the store
+/// until the 60-second reap loop fires. On `SessionEnd`, Claude Code's internal
+/// session has already ended; marking the managed session `Stopped` immediately
+/// keeps the daemon's view consistent and lets the operator see the correct
+/// state right away. This originally called [`SessionManager::stop`], which is
+/// the EXPLICIT-stop contract (`tm session stop`) and therefore also
+/// `graceful_terminate_runtime`s / `kill_session`s the tmux pane — but a
+/// `SessionEnd` correlation is a self-healing state reconcile, not a
+/// human/client teardown request, exactly like the 60-second runtime-exit
+/// reaper (see [`crate::daemon::runtime_reap`] #2023 A). Routing it through
+/// `stop` could destroy a pane the operator was still attached to, purely
+/// because the daemon correlated the exit a few hundred milliseconds before
+/// they noticed. This now mirrors the reaper and calls
+/// [`SessionManager::mark_runtime_exited_stopped`] instead, leaving the pane
+/// alive.
 /// What: searches Active managed sessions for one whose `claude_session_id`
-/// matches the hook's `session_id`; calls `SessionManager::stop` which kills the
-/// tmux session (best-effort, already gone) and marks the record `Stopped`.
-/// Best-effort — failures are logged and swallowed so the hook response is unaffected.
-/// Test: `session_end_hook_marks_managed_stopped` in `api_tests.rs`.
+/// matches the hook's `session_id`; calls
+/// `SessionManager::mark_runtime_exited_stopped`, which marks the record
+/// `Stopped` and persists WITHOUT calling `graceful_terminate_runtime` /
+/// `kill_session`. Best-effort — failures are logged and swallowed so the hook
+/// response is unaffected.
+/// Test: `session_end_hook_marks_managed_stopped` and
+/// `session_end_hook_does_not_kill_pane` in `api_tests.rs`.
 async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
@@ -1394,11 +1409,11 @@ async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
     });
     if let Some(r) = matched {
         let id = r.id;
-        match mgr.stop(&id).await {
+        match mgr.mark_runtime_exited_stopped(&id).await {
             Ok(_) => tracing::info!(
                 managed_id = %id,
                 claude_session_id = %claude_session_id,
-                "SessionEnd: marked managed session Stopped immediately (#1744)"
+                "SessionEnd: marked managed session Stopped immediately (#1744, pane left alive #2454)"
             ),
             Err(e) => tracing::warn!(
                 managed_id = %id,
