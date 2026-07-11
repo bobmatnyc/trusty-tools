@@ -420,6 +420,15 @@ brief still layers on top as an additive emphasis overlay.
 Full detail on the scan heuristics, provenance model, and instruction
 layering: [docs/trusty-review/spec/report-generation.md](../../docs/trusty-review/spec/report-generation.md).
 
+### `--analyze` (deterministic trusty-analyze integration)
+
+`--analyze` populates the metrics-driven sections (the complexity-distribution
+chart + RED/AMBER findings) from a live trusty-analyze daemon (`:7879`)
+without an LLM or a hand-authored metrics JSON. It is fully deterministic and
+fail-open: any probe, fetch, or parse failure degrades to the built-in scan
+rather than erroring — a missing analyze index is never fatal. Full detail:
+[docs/trusty-review/spec/report-generation.md](../../docs/trusty-review/spec/report-generation.md).
+
 ### Mermaid charts (`--no-mermaid`)
 
 Every populated Graph-Ready Data Appendix table (tagged with a

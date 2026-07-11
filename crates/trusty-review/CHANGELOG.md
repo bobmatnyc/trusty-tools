@@ -5,6 +5,16 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.9.0] — 2026-07-11
+
+### Added
+
+- `report --analyze` — deterministic `complexity_distribution` + RED/AMBER findings from the trusty-analyze daemon, fail-open to scan; balanced severity map ([#2452](https://github.com/bobmatnyc/trusty-tools/pull/2452), epic [#2445](https://github.com/bobmatnyc/trusty-tools/issues/2445)) ([`569a88a`](https://github.com/bobmatnyc/trusty-tools/commit/569a88ab2be33551ed46f6a938160523e8d0c7a7))
+
+### Changed
+
+- Root workspace `[workspace.dependencies]` pin for `trusty-review` bumped 0.8.1 → 0.9.0 (consumed by `trusty-analyze`'s optional `review` feature).
+
 ## [0.8.1] — 2026-07-11
 
 ### Fixed
