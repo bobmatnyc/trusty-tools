@@ -1,0 +1,309 @@
+//! Registry-B project methods for [`DaemonClient`] (DOC-35 §3.1/§4, #2115).
+//!
+//! Why: the `tm projects list/register/show/status` CLI verbs are thin HTTP
+//! clients (DOC-35 §1.3). Wiring each endpoint once here — as typed
+//! [`DaemonClient`] methods — keeps every consumer (the CLI today, the TUI next)
+//! off hand-rolled `reqwest` calls, exactly as the managed-session methods in the
+//! sibling `managed.rs` do. This file lives beside `mod.rs` (not in it) so the
+//! near-cap client `mod.rs` stays under the 500-SLOC bar; it reaches the
+//! `base`/`http` fields because they are `pub(in crate::client::http_client)`.
+//! What: the registry-B response DTOs the client owns ([`ProjectStatusWire`] and
+//! its parts, plus [`RegisterProjectArgs`] for the POST body) and four methods:
+//! [`DaemonClient::registry_list_projects`], [`DaemonClient::registry_register_project`],
+//! [`DaemonClient::registry_get_project`], and [`DaemonClient::project_status`].
+//! The status DTO deliberately does NOT `deny_unknown_fields` so the additive
+//! Deliverable/Milestone histogram fields #2382 adds to the endpoint deserialize
+//! cleanly against an older client (wire-compat, forward-tolerant).
+//! Test: `project_status_wire_tolerates_additive_fields`,
+//! `register_args_serializes_to_wire_shape`, `projects_list_deserializes` in the
+//! `tests` submodule; live HTTP via the daemon's own route tests.
+
+use anyhow::Context;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::DaemonClient;
+use crate::project::Project;
+
+/// Serializable body for `POST /api/v1/projects` (registry-B register).
+///
+/// Why: `tm projects register` builds this from its flags; a typed struct keeps
+/// the wire body checkable in a unit test rather than a hand-built `json!`.
+/// What: mirrors the daemon's `RegisterProjectBody` — `name`/`repo_url` required,
+/// the rest optional and omitted from the JSON when `None`.
+/// Test: `register_args_serializes_to_wire_shape`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegisterProjectArgs {
+    /// Registry key.
+    pub name: String,
+    /// Full repository URL.
+    pub repo_url: String,
+    /// Default branch; the daemon defaults to `"main"` when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    /// Free-form description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Classification tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Technology-stack hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_hint: Option<String>,
+    /// Preferred `gh` login (#2081).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gh_user: Option<String>,
+}
+
+/// Per-state session histogram (client mirror of the daemon `SessionStateCounts`).
+///
+/// Why: the `tm projects status` rollup needs the per-state counts; every field
+/// is `#[serde(default)]` so a daemon that renames or drops a state (unlikely,
+/// but forward-safe) still deserializes.
+/// What: one count per lifecycle state plus the total.
+/// Test: `project_status_wire_tolerates_additive_fields`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SessionStateCountsWire {
+    /// Sessions in `Provisioning`.
+    #[serde(default)]
+    pub provisioning: usize,
+    /// Sessions in `Active`.
+    #[serde(default)]
+    pub active: usize,
+    /// Sessions in `Stopped`.
+    #[serde(default)]
+    pub stopped: usize,
+    /// Sessions in `Errored`.
+    #[serde(default)]
+    pub errored: usize,
+    /// Sessions in `Decommissioned` (tombstones).
+    #[serde(default)]
+    pub decommissioned: usize,
+    /// Total bound session records.
+    #[serde(default)]
+    pub total: usize,
+}
+
+/// Config-completeness flags (client mirror of the daemon `ProjectConfigFlags`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProjectConfigFlagsWire {
+    /// Whether `gh_user` is set.
+    #[serde(default)]
+    pub gh_user_set: bool,
+    /// Whether the per-project `gh` identity binding is set.
+    #[serde(default)]
+    pub github_binding_set: bool,
+}
+
+/// Deserialized `GET /api/v1/projects/{name}/status` rollup.
+///
+/// Why: the daemon's `ProjectStatusResponse` is `Serialize`-only and lives in the
+/// daemon module; the client needs its own `Deserialize` mirror. It is
+/// intentionally forward-tolerant — no `deny_unknown_fields` — so the additive
+/// `deliverables`/`milestones` histogram fields #2382 adds land in an older client
+/// without error (the client simply ignores fields it does not model).
+/// What: the project identity, the session histogram, the newest activity
+/// timestamp, and the config flags.
+/// Test: `project_status_wire_tolerates_additive_fields`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectStatusWire {
+    /// Registered project name.
+    #[serde(default)]
+    pub project_name: String,
+    /// Repository URL.
+    #[serde(default)]
+    pub repo_url: String,
+    /// Per-state session histogram.
+    #[serde(default)]
+    pub sessions: SessionStateCountsWire,
+    /// Most recent activity across the project's sessions, if any.
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    /// Config-completeness flags.
+    #[serde(default)]
+    pub config: ProjectConfigFlagsWire,
+}
+
+/// Wire wrapper for `GET /api/v1/projects` (`{ projects, count }`).
+#[derive(Debug, Deserialize)]
+struct ProjectsListWire {
+    #[serde(default)]
+    projects: Vec<Project>,
+}
+
+impl DaemonClient {
+    /// List registry-B projects via `GET /api/v1/projects`, optional tag filter.
+    ///
+    /// Why: backs `tm projects list [--tag <t>]` (#2115). Tag filtering is applied
+    /// client-side (a pure `retain`) so the endpoint stays a plain list and the
+    /// filter rule lives in one place.
+    /// What: GETs the collection, returns the `projects` array; when `tag` is
+    /// `Some`, keeps only projects whose `tags` contain it.
+    /// Test: `projects_list_deserializes`; live HTTP via the daemon route tests.
+    pub async fn registry_list_projects(&self, tag: Option<&str>) -> anyhow::Result<Vec<Project>> {
+        let url = format!("{}/api/v1/projects", self.base);
+        let body: ProjectsListWire = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("deserialize project list")?;
+        let mut projects = body.projects;
+        if let Some(tag) = tag {
+            projects.retain(|p| p.tags.iter().any(|t| t == tag));
+        }
+        Ok(projects)
+    }
+
+    /// Register (idempotent upsert) a project via `POST /api/v1/projects`.
+    ///
+    /// Why: backs `tm projects register` (#2115). The daemon upserts on `name` and
+    /// preserves any existing `gh`/commit identity binding.
+    /// What: POSTs `args`, returns the stored [`Project`].
+    /// Test: `register_args_serializes_to_wire_shape`; live HTTP via the daemon
+    /// route tests.
+    pub async fn registry_register_project(
+        &self,
+        args: &RegisterProjectArgs,
+    ) -> anyhow::Result<Project> {
+        let url = format!("{}/api/v1/projects", self.base);
+        let project: Project = self
+            .http
+            .post(&url)
+            .json(args)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("deserialize registered project")?;
+        Ok(project)
+    }
+
+    /// Fetch one project via `GET /api/v1/projects/{name}`.
+    ///
+    /// Why: backs the config half of `tm projects show` (#2115).
+    /// What: GETs the point-lookup, returns the [`Project`]; a 404 surfaces as an
+    /// error via `error_for_status`.
+    /// Test: live HTTP via the daemon route tests.
+    pub async fn registry_get_project(&self, name: &str) -> anyhow::Result<Project> {
+        let url = format!("{}/api/v1/projects/{name}", self.base);
+        let project: Project = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("deserialize project")?;
+        Ok(project)
+    }
+
+    /// Fetch the deterministic status rollup via `GET .../{name}/status`.
+    ///
+    /// Why: backs `tm projects status` (#2115). The [`ProjectStatusWire`] target is
+    /// forward-tolerant of #2382's additive histogram fields.
+    /// What: GETs the rollup, returns the parsed [`ProjectStatusWire`].
+    /// Test: `project_status_wire_tolerates_additive_fields`; live HTTP via the
+    /// daemon route tests.
+    pub async fn project_status(&self, name: &str) -> anyhow::Result<ProjectStatusWire> {
+        let url = format!("{}/api/v1/projects/{name}/status", self.base);
+        let status: ProjectStatusWire = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("deserialize project status")?;
+        Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The status DTO ignores unknown fields, so #2382's additive
+    /// `deliverables`/`milestones` histograms deserialize against this client.
+    #[test]
+    fn project_status_wire_tolerates_additive_fields() {
+        let json = serde_json::json!({
+            "project_name": "widget",
+            "repo_url": "https://github.com/acme/widget",
+            "sessions": { "provisioning": 1, "active": 2, "stopped": 0,
+                          "errored": 0, "decommissioned": 1, "total": 4 },
+            "last_activity_at": "2026-07-10T12:00:00Z",
+            "config": { "gh_user_set": true, "github_binding_set": false },
+            // Fields #2382 (Wave 2) adds — an older client must ignore them.
+            "deliverables": { "proposed": 3, "complete": 1 },
+            "milestones": { "in-progress": 1 }
+        });
+        let status: ProjectStatusWire = serde_json::from_value(json).unwrap();
+        assert_eq!(status.project_name, "widget");
+        assert_eq!(status.sessions.active, 2);
+        assert_eq!(status.sessions.total, 4);
+        assert!(status.config.gh_user_set);
+        assert!(status.last_activity_at.is_some());
+    }
+
+    /// A status body missing the newer `config`/`last_activity_at` still parses
+    /// (backward tolerance): every field defaults.
+    #[test]
+    fn project_status_wire_tolerates_missing_fields() {
+        let json = serde_json::json!({
+            "project_name": "widget",
+            "repo_url": "https://github.com/acme/widget",
+            "sessions": { "total": 0 }
+        });
+        let status: ProjectStatusWire = serde_json::from_value(json).unwrap();
+        assert_eq!(status.sessions.total, 0);
+        assert!(status.last_activity_at.is_none());
+        assert!(!status.config.gh_user_set);
+    }
+
+    /// The register body omits absent optionals and keeps the required pair.
+    #[test]
+    fn register_args_serializes_to_wire_shape() {
+        let args = RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: Some("develop".into()),
+            description: None,
+            tags: Some(vec!["backend".into()]),
+            stack_hint: None,
+            gh_user: None,
+        };
+        let v = serde_json::to_value(&args).unwrap();
+        assert_eq!(v["name"], "widget");
+        assert_eq!(v["repo_url"], "https://github.com/acme/widget");
+        assert_eq!(v["default_branch"], "develop");
+        assert_eq!(v["tags"][0], "backend");
+        // Absent optionals must not appear in the body.
+        assert!(v.get("description").is_none());
+        assert!(v.get("stack_hint").is_none());
+        assert!(v.get("gh_user").is_none());
+    }
+
+    /// The list wrapper deserializes the `{ projects, count }` shape and drops the
+    /// extra `count` field the client does not model.
+    #[test]
+    fn projects_list_deserializes() {
+        let json = serde_json::json!({
+            "projects": [{
+                "name": "widget",
+                "repo_url": "https://github.com/acme/widget",
+                "default_branch": "main"
+            }],
+            "count": 1
+        });
+        let body: ProjectsListWire = serde_json::from_value(json).unwrap();
+        assert_eq!(body.projects.len(), 1);
+        assert_eq!(body.projects[0].name, "widget");
+    }
+}

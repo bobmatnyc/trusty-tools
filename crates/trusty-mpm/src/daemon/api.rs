@@ -135,10 +135,11 @@ pub use deliverable_routes::{
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
-    get_managed_session, get_session_activity, list_managed_sessions, project_status_route,
-    proxy_focus, proxy_get_focus, proxy_message, proxy_summary, proxy_unfocus, prune_managed_route,
-    prune_worktrees_route, reactivate_managed_session, resume_managed_session, send_to_session,
-    spawn_session, stop_managed_session, stop_managed_session_runtime,
+    get_managed_session, get_project_registry_route, get_session_activity, list_managed_sessions,
+    list_projects_registry_route, project_status_route, proxy_focus, proxy_get_focus,
+    proxy_message, proxy_summary, proxy_unfocus, prune_managed_route, prune_worktrees_route,
+    reactivate_managed_session, register_project_registry_route, resume_managed_session,
+    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -174,6 +175,17 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/projects", get(list_projects).post(register_project))
         .route("/projects/current", get(current_project))
         .route("/projects/discover", get(discover_projects))
+        // #2114 (DOC-35 §4): registry-B project HTTP surface — the plain-HTTP
+        // list/register/get the deterministic `tm projects` CLI (#2115) calls,
+        // mirroring the `project_list`/`project_register`/`project_get` MCP tools.
+        // The bare `/api/v1/projects` collection route is registered here; the
+        // `{name}` point-lookup sits below the more specific `/status` and
+        // `/deliverables` param routes (matchit disambiguates by segment count).
+        .route(
+            "/api/v1/projects",
+            get(list_projects_registry_route).post(register_project_registry_route),
+        )
+        .route("/api/v1/projects/{name}", get(get_project_registry_route))
         // #2117 (DOC-35 §4.1): deterministic project status-aggregation rollup —
         // session-state histogram + most-recent activity + config-completeness
         // flags for ONE named project. Pure composition over ProjectRegistry::get
