@@ -119,10 +119,10 @@ pub use rpc::rpc_handler;
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
-    get_managed_session, get_session_activity, list_managed_sessions, proxy_focus, proxy_get_focus,
-    proxy_message, proxy_summary, proxy_unfocus, prune_managed_route, prune_worktrees_route,
-    reactivate_managed_session, resume_managed_session, send_to_session, spawn_session,
-    stop_managed_session, stop_managed_session_runtime,
+    get_managed_session, get_session_activity, list_managed_sessions, project_status_route,
+    proxy_focus, proxy_get_focus, proxy_message, proxy_summary, proxy_unfocus, prune_managed_route,
+    prune_worktrees_route, reactivate_managed_session, resume_managed_session, send_to_session,
+    spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -158,6 +158,11 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/projects", get(list_projects).post(register_project))
         .route("/projects/current", get(current_project))
         .route("/projects/discover", get(discover_projects))
+        // #2117 (DOC-35 §4.1): deterministic project status-aggregation rollup —
+        // session-state histogram + most-recent activity + config-completeness
+        // flags for ONE named project. Pure composition over ProjectRegistry::get
+        // + SessionManager::list; no LLM, no cross-project reasoning (§11).
+        .route("/api/v1/projects/{name}/status", get(project_status_route))
         .route("/events", get(stream_events))
         .route("/events/poll", get(recent_events))
         .route("/hooks", post(ingest_hook))
