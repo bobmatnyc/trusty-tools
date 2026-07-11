@@ -1239,6 +1239,255 @@ fn reporter_renders_language_breakdown_with_counts() {
     )));
 }
 
+/// A minimal template carrying one POPULATED dataset table (literal values, so
+/// it survives fill + omit-empty) to exercise the wave-4 mermaid injection.
+const MERMAID_TEMPLATE: &str = "# Report\n\n\
+    ## 7. Graph-Ready Data Appendix\n\n\
+    <!-- dataset: loc_by_tech | chart: bar | x: tech | y: loc -->\n\
+    | Tech | LoC |\n|---|---|\n| Rust | 8200 |\n| Python | 3100 |\n";
+
+/// Why: when mermaid is enabled (the default) the reporter must emit a ```mermaid
+/// block directly under a populated §7 dataset table (#2366).
+/// What: renders a template with one literal-value dataset table and asserts the
+/// `xychart-beta` block appears AFTER the table.
+/// Test: this test itself.
+#[test]
+fn render_injects_mermaid_under_populated_dataset() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let md = Reporter::new(tmp.path()).render(&model, MERMAID_TEMPLATE);
+    assert!(md.contains("```mermaid"), "block emitted:\n{md}");
+    assert!(md.contains("xychart-beta"));
+    assert!(md.contains("x-axis [\"Rust\", \"Python\"]"), "{md}");
+    assert!(md.contains("bar [8200, 3100]"), "{md}");
+    let table_pos = md.find("| Python |").unwrap();
+    let block_pos = md.find("```mermaid").unwrap();
+    assert!(table_pos < block_pos, "chart follows table");
+}
+
+/// Why: `--no-mermaid` / `[report] mermaid = false` must disable charts entirely,
+/// leaving output byte-identical to the pre-wave-4 report (#2366).
+/// What: renders the same model+template with `with_mermaid(false)`; asserts no
+/// mermaid artifacts appear and the pipe table is untouched.
+/// Test: this test itself.
+#[test]
+fn no_mermaid_byte_identical() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let off = Reporter::new(tmp.path())
+        .with_mermaid(false)
+        .render(&model, MERMAID_TEMPLATE);
+    let on = Reporter::new(tmp.path()).render(&model, MERMAID_TEMPLATE);
+    assert!(
+        !off.contains("```mermaid"),
+        "no chart when disabled:\n{off}"
+    );
+    assert!(!off.contains("xychart-beta"));
+    assert!(on.contains("```mermaid"), "chart when enabled");
+    // Disabling is purely additive-off: the `on` output is the `off` output with
+    // the chart block inserted, so removing every mermaid fence region recovers it.
+    assert!(on.len() > off.len());
+    assert!(off.contains("| Rust | 8200 |"), "table itself untouched");
+}
+
+// ─── §7 graph-appendix repo-derivable dataset fill (#2366 follow-up) ───────
+
+/// Initialise a tiny git repo at `dir` with Rust + TypeScript sources so
+/// `scan_repo` computes a real, non-empty per-language LoC breakdown (mirrors
+/// `scan_tests.rs::git_init_add`).
+fn git_repo_with_languages(dir: &Path) {
+    std::fs::write(
+        dir.join("main.rs"),
+        "fn main() {\n    work();\n    work();\n}\n",
+    )
+    .expect("write rs");
+    std::fs::write(
+        dir.join("app.ts"),
+        "const x = 1;\nexport {};\nconst y = 2;\n",
+    )
+    .expect("write ts");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("init")
+        .output();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["add", "-A"])
+        .output();
+}
+
+/// Why: live-QA on a real bare run (no `--synthesize`, no external metrics JSON)
+/// found the §7 `loc_by_technology` dataset table NEVER populated — it had no
+/// fill path, so it collapsed under omit-empty and the Mermaid injector had
+/// nothing to chart. This dataset's data (per-language LoC) is exactly what the
+/// built-in scan already computes.
+/// What: builds a model from a manifest pointing at a REAL scanned checkout (no
+/// `metrics` key) using the bundled `report-technical-dd` template, and asserts
+/// the dataset table renders with the scanned languages under `measured`
+/// provenance, and a real `xychart-beta` chart follows it.
+/// Test: this test itself.
+#[test]
+fn bare_scan_populates_loc_by_technology() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).expect("mkdir");
+    git_repo_with_languages(&repo_dir);
+
+    let manifest_toml = format!(
+        "[report]\ntitle = \"Bare Scan DD\"\n\n[[repositories]]\nname = \"Acme\"\npath = \"{}\"\n",
+        repo_dir.display()
+    );
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(&manifest_toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+    // Sanity: the scan actually ran and found languages (else this test proves nothing).
+    let scan = model.repositories[0].scan.as_ref().expect("scan present");
+    assert!(!scan.by_language.is_empty(), "scan found languages");
+
+    let template = TemplateLoader::new()
+        .load("report-technical-dd")
+        .expect("template loads");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("Rust"), "loc_by_technology row for Rust:\n{md}");
+    assert!(
+        md.contains("TypeScript"),
+        "loc_by_technology row for TS:\n{md}"
+    );
+    // Measured provenance: no metrics JSON was supplied, only the scan.
+    assert!(
+        md.contains('⁽'),
+        "measured/declared provenance tag present:\n{md}"
+    );
+    // A real mermaid chart renders under the now-populated dataset.
+    assert!(
+        md.contains("```mermaid"),
+        "chart emitted for scan-only run:\n{md}"
+    );
+    assert!(md.contains("xychart-beta"));
+}
+
+/// Why: an external trusty-analyze metrics JSON is ENRICHMENT that must win over
+/// the measured scan (mirrors `fill_profile`'s existing precedence) — a stale or
+/// differing scan number must never leak into the dataset table when a more
+/// authoritative declared figure exists.
+/// What: a repo with BOTH a real scanned checkout AND a metrics JSON declaring a
+/// different LoC for the same language; asserts the DECLARED number renders
+/// (under its provenance tag), not the scanned one.
+/// Test: this test itself.
+#[test]
+fn declared_metrics_win_for_loc_by_technology() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).expect("mkdir");
+    git_repo_with_languages(&repo_dir); // scan would find a handful of Rust lines
+
+    std::fs::write(
+        tmp.path().join("acme.json"),
+        r#"{ "loc": { "total": 9000, "by_language": [
+          { "language": "Rust", "loc": 9000 }
+        ]}}"#,
+    )
+    .expect("write metrics");
+
+    let manifest_toml = format!(
+        "[report]\ntitle = \"Declared Wins\"\n\n[[repositories]]\nname = \"Acme\"\npath = \"{}\"\nmetrics = \"acme.json\"\n",
+        repo_dir.display()
+    );
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(&manifest_toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+
+    let template = TemplateLoader::new()
+        .load("report-technical-dd")
+        .expect("template loads");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("9,000"), "declared LoC wins over scan:\n{md}");
+    assert!(
+        md.contains(&format!("9,000{}", crate::report::provenance::DECLARED_TAG)),
+        "declared provenance tag on the declared value:\n{md}"
+    );
+}
+
+/// Why: cyclomatic-complexity buckets are NOT computable by the built-in scan
+/// (`RepoScan` has no complexity analysis) — they exist only in an externally
+/// supplied trusty-analyze metrics JSON. When that data IS present, wiring must
+/// fill the dataset from it (never fabricate).
+/// What: a repo whose metrics declare two complexity buckets; asserts both
+/// bucket labels/percentages render and a `xychart-beta` bar chart follows.
+/// Test: this test itself.
+#[test]
+fn complexity_distribution_fills_from_metrics() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("acme.json"),
+        r#"{ "complexity": { "buckets": [
+          { "label": "low (1-5)", "count": 80 },
+          { "label": "high (>20)", "count": 20 }
+        ]}}"#,
+    )
+    .expect("write metrics");
+    let manifest_toml = "[report]\ntitle = \"Complexity\"\n\n[[repositories]]\nname = \"Acme\"\npath = \"/nonexistent/acme\"\nmetrics = \"acme.json\"\n";
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(manifest_toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+    let template = TemplateLoader::new()
+        .load("report-technical-dd")
+        .expect("template loads");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("low (1-5)"), "{md}");
+    assert!(md.contains("high (>20)"), "{md}");
+    assert!(md.contains("80%"), "80/100 buckets:\n{md}");
+    assert!(md.contains("20%"), "20/100 buckets:\n{md}");
+    assert!(
+        md.contains("```mermaid"),
+        "chart emitted for complexity dataset:\n{md}"
+    );
+}
+
+/// Why: a bare scan-only run has NO complexity data — the dataset must stay
+/// empty (omit-empty) rather than fabricating buckets from nothing, and no
+/// chart should render for it, even while a SIBLING repo-derivable dataset
+/// (`loc_by_technology`) in the same §7 section DOES populate and chart.
+/// What: a repo with a real scanned checkout but no `metrics` key; asserts no
+/// complexity bucket data leaks in and exactly one `xychart-beta` chart renders
+/// (the loc_by_technology one) — proving complexity contributed no chart.
+/// Test: this test itself.
+#[test]
+fn complexity_distribution_empty_without_metrics() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).expect("mkdir");
+    git_repo_with_languages(&repo_dir);
+
+    let manifest_toml = format!(
+        "[report]\ntitle = \"No Complexity\"\n\n[[repositories]]\nname = \"Acme\"\npath = \"{}\"\n",
+        repo_dir.display()
+    );
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(&manifest_toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+    let template = TemplateLoader::new()
+        .load("report-technical-dd")
+        .expect("template loads");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(!md.contains("low ("), "no fabricated bucket label:\n{md}");
+    assert_eq!(
+        md.matches("xychart-beta").count(),
+        1,
+        "only the sibling loc_by_technology chart renders:\n{md}"
+    );
+}
+
 /// Why: output filenames must be date-prefixed and slug-stable.
 /// What: asserts the stem is `{date}-{title-slug}`.
 /// Test: this test itself.

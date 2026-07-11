@@ -299,13 +299,13 @@ Summary: {{total_components}} components detected; {{critical_cve_components}} w
 
 <!-- dataset: loc_by_technology | chart: stacked-bar | x: application | y: loc, group: technology -->
 | Application | Technology | LoC | % of total |
-|---|---|---|---|
-| {{app_name}} | {{tech_name}} | {{tech_loc}} | {{tech_pct}} |
+|---|---|---|---|<!-- BEGIN loc_by_tech_row -->
+| {{app_name}} | {{tech_name}} | {{tech_loc}} | {{tech_pct}} |<!-- END loc_by_tech_row -->
 
 <!-- dataset: complexity_distribution | chart: bar | x: complexity_bucket | y: count, group: application -->
 | Application | Complexity bucket | Count | % of total complexity |
-|---|---|---|---|
-| {{app_name}} | {{complexity_bucket}} | {{complexity_count}} | {{complexity_pct}} |
+|---|---|---|---|<!-- BEGIN complexity_bucket_row -->
+| {{app_name}} | {{complexity_bucket}} | {{complexity_count}} | {{complexity_pct}} |<!-- END complexity_bucket_row -->
 
 <!-- dataset: green_deficiencies_top10 | chart: bar | x: deficiency | y: occurrences, group: application -->
 | Application | Deficiency | Technology | Occurrences | Effort (days) |

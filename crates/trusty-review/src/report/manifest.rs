@@ -83,6 +83,13 @@ pub struct ReportSection {
     /// precedence; when neither is set the built-in default applies.
     #[serde(default)]
     pub investigate_max_bytes: Option<usize>,
+    /// Optional toggle for Mermaid chart rendering under dataset tables (#2366).
+    ///
+    /// Why: charts are on by default; a manifest may opt out with `mermaid =
+    /// false` (the `--no-mermaid` CLI flag also forces off).  When disabled the
+    /// report is byte-identical to the pre-wave-4 output.
+    #[serde(default)]
+    pub mermaid: Option<bool>,
 }
 
 /// One validated repository entry mapping to a single per-application block.

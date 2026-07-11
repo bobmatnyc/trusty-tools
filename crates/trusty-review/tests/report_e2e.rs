@@ -217,3 +217,145 @@ fn end_to_end_corpus_benchmark() {
         "ranked"
     );
 }
+
+/// Initialise a tiny git repo at `dir` with a real, deterministic per-language
+/// LoC split — 3 non-blank Rust lines, 2 non-blank TypeScript lines — so
+/// `scan_repo` (and, downstream, the §7 `loc_by_technology` dataset fill) has
+/// real `measured` data to work with, with no external metrics JSON at all.
+fn git_repo_with_known_loc(dir: &std::path::Path) {
+    std::fs::write(dir.join("main.rs"), "fn main() {\n\n    work();\n}\n").expect("write rs");
+    std::fs::write(dir.join("app.ts"), "const x = 1;\nexport {};\n").expect("write ts");
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("init")
+        .output();
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["add", "-A"])
+        .output();
+}
+
+/// Why: live-QA on a real bare `report` run (no `--synthesize`, no external
+/// trusty-analyze metrics JSON) found the §7 Graph-Ready Data Appendix entirely
+/// empty — every dataset table collapsed under omit-empty and the wave-4
+/// Mermaid renderer had nothing to chart. The root cause: `loc_by_technology`
+/// had no fill path at all, even though its data (per-language LoC) is exactly
+/// what the built-in scan already computes. This test proves the fix
+/// end-to-end: a bare scan-only run now emits a REAL populated dataset table
+/// AND a real `xychart-beta` Mermaid block whose numbers match the scan.
+/// What: builds a two-language fixture repo (no metrics), renders the bundled
+/// `report-technical-dd` template, and asserts (a) the dataset table carries
+/// the scanned LoC figures, (b) a mermaid chart follows it with matching
+/// numbers, (c) a dataset with genuinely no available data (complexity
+/// buckets, which only ever come from an external metrics JSON) stays empty
+/// and chartless, and (d) `--no-mermaid` (`with_mermaid(false)`) suppresses
+/// only the chart, leaving the populated table intact.
+/// Test: this test itself.
+#[test]
+fn end_to_end_bare_scan_emits_mermaid_chart() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    let repo_dir = dir.join("repo");
+    std::fs::create_dir_all(&repo_dir).expect("mkdir repo");
+    git_repo_with_known_loc(&repo_dir);
+
+    let manifest_toml = format!(
+        "[report]\ntitle = \"Bare Scan Report\"\n\n[[repositories]]\nname = \"Acme\"\npath = \"{}\"\n",
+        repo_dir.display()
+    );
+    let manifest_path = dir.join("manifest.toml");
+    std::fs::write(&manifest_path, &manifest_toml).expect("write manifest");
+
+    let manifest = load_manifest(&manifest_path).expect("manifest loads");
+    let template = TemplateLoader::new()
+        .load("report-technical-dd")
+        .expect("template loads");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds — no --synthesize, no metrics, scan-only");
+
+    // Sanity: prove the scan itself found the expected LoC split before
+    // asserting on the rendered report (isolates a scanner regression from a
+    // fill-wiring regression).
+    let scan = model.repositories[0].scan.as_ref().expect("scan present");
+    let rust_loc = scan
+        .by_language
+        .iter()
+        .find(|l| l.language == "Rust")
+        .map(|l| l.loc)
+        .expect("rust language present");
+    let ts_loc = scan
+        .by_language
+        .iter()
+        .find(|l| l.language == "TypeScript")
+        .map(|l| l.loc)
+        .expect("typescript language present");
+    assert_eq!(rust_loc, 3, "3 non-blank Rust lines");
+    assert_eq!(ts_loc, 2, "2 non-blank TypeScript lines");
+
+    // (a) + (b): mermaid ON (default) — populated table + matching chart.
+    let on = Reporter::new(dir.join("reports")).render(&model, &template);
+    assert!(on.contains("Rust"), "loc_by_technology row for Rust:\n{on}");
+    assert!(
+        on.contains("TypeScript"),
+        "loc_by_technology row for TypeScript:\n{on}"
+    );
+    assert!(on.contains("```mermaid"), "chart emitted:\n{on}");
+    assert!(on.contains("xychart-beta"));
+    // `loc_by_technology` is `stacked-bar` with `x: application, group:
+    // technology` — the fixture repo has only ONE application ("Acme"), so the
+    // x-axis has a single category and the two languages become two layered
+    // bar series (Rust=3, TypeScript=2), each the raw scanned LoC value.
+    assert!(
+        on.contains("x-axis [\"Acme\"]"),
+        "x-axis is the single application:\n{on}"
+    );
+    assert!(on.contains("bar [3]"), "Rust series = scanned LoC 3:\n{on}");
+    assert!(
+        on.contains("bar [2]"),
+        "TypeScript series = scanned LoC 2:\n{on}"
+    );
+    let table_pos = on
+        .find("| Acme | TypeScript |")
+        .unwrap_or_else(|| panic!("expected a filled loc_by_technology row in:\n{on}"));
+    let chart_pos = on.find("```mermaid").expect("chart present");
+    assert!(table_pos < chart_pos, "chart follows the table");
+
+    // (c) complexity_distribution has no data source on a bare scan (no
+    // metrics JSON, and the scan itself never computes complexity buckets) —
+    // it must stay empty and contribute no chart, while the sibling
+    // loc_by_technology chart above still renders. Its header row (distinct
+    // from the always-present `<!-- dataset: complexity_distribution -->`
+    // marker text, which legitimately contains the substring
+    // "complexity_bucket") must be gone; exactly one `xychart-beta` block
+    // exists (proves complexity added no chart of its own).
+    assert!(
+        !on.contains("Complexity bucket |"),
+        "no fabricated complexity table header — genuinely no data:\n{on}"
+    );
+    assert_eq!(
+        on.matches("xychart-beta").count(),
+        1,
+        "only loc_by_technology charts on a bare scan-only run:\n{on}"
+    );
+
+    // (d) --no-mermaid suppresses only the chart; the table itself must be
+    // byte-for-byte present in both renders (mermaid is purely additive).
+    let off = Reporter::new(dir.join("reports"))
+        .with_mermaid(false)
+        .render(&model, &template);
+    assert!(
+        !off.contains("```mermaid"),
+        "no chart when disabled:\n{off}"
+    );
+    assert!(!off.contains("xychart-beta"));
+    assert!(
+        off.contains("Rust"),
+        "table survives with mermaid off:\n{off}"
+    );
+    assert!(
+        off.contains("TypeScript"),
+        "table survives with mermaid off:\n{off}"
+    );
+}

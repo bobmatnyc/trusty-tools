@@ -95,6 +95,14 @@ pub struct ReportArgs {
     /// corpus with fewer than five peers is disclosed, never silently ranked.
     #[arg(long)]
     pub benchmark: bool,
+
+    /// Disable Mermaid chart rendering under the Graph-Ready Data Appendix tables
+    /// (#2366).  Charts are ON by default; this flag OR the manifest key
+    /// `[report] mermaid = false` disables them, yielding byte-identical
+    /// pre-wave-4 output.  Precedence: this flag forces off regardless of the
+    /// manifest key.
+    #[arg(long)]
+    pub no_mermaid: bool,
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
@@ -219,7 +227,10 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         model.benchmark = Some(report);
     }
 
-    let reporter = Reporter::new(&args.out);
+    // #2366: Mermaid charts on by default; disabled by --no-mermaid OR the
+    // manifest `[report] mermaid = false`.  The flag forces off unconditionally.
+    let mermaid = manifest.report.mermaid.unwrap_or(true) && !args.no_mermaid;
+    let reporter = Reporter::new(&args.out).with_mermaid(mermaid);
     let written = reporter
         .write(&model, &template)
         .context("failed to write report output")?;

@@ -23,6 +23,9 @@ use super::model::{ReportModel, RepositoryReport};
 use super::polish::polish;
 use super::provenance::{self, Provenance, tag};
 use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_scoring_model};
+use super::reporter_graph_datasets::{
+    inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
+};
 
 /// Renders a [`ReportModel`] to markdown + JSON and writes them atomically.
 ///
@@ -32,10 +35,16 @@ use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_
 /// Test: `reporter_tests.rs::{render_contains_expected, write_emits_both}`.
 pub struct Reporter {
     output_dir: PathBuf,
+    /// Whether to render Mermaid charts under populated dataset tables (#2366).
+    ///
+    /// Why: charts are on by default but disabled via `--no-mermaid` / manifest
+    /// `[report] mermaid = false`; when off the output is byte-identical to the
+    /// pre-wave-4 report (the injection pass is simply skipped).
+    mermaid: bool,
 }
 
 impl Reporter {
-    /// Create a reporter writing to `output_dir`.
+    /// Create a reporter writing to `output_dir` (Mermaid charts on by default).
     ///
     /// Why: callers choose the output directory (`--out`, default `./reports`).
     /// What: stores the directory; it is created on `write` if absent.
@@ -43,7 +52,20 @@ impl Reporter {
     pub fn new(output_dir: impl Into<PathBuf>) -> Self {
         Self {
             output_dir: output_dir.into(),
+            mermaid: true,
         }
+    }
+
+    /// Set whether Mermaid charts are rendered (#2366).
+    ///
+    /// Why: the CLI resolves the on/off decision (flag OR manifest key) and threads
+    /// it in without changing `render`'s signature.
+    /// What: consumes and returns `self` with the flag set; `false` disables the
+    /// post-polish injection pass, keeping output byte-identical to pre-wave-4.
+    /// Test: `reporter_tests.rs::no_mermaid_byte_identical`.
+    pub fn with_mermaid(mut self, mermaid: bool) -> Self {
+        self.mermaid = mermaid;
+        self
     }
 
     /// Render the model into markdown using the supplied template source.
@@ -67,6 +89,13 @@ impl Reporter {
         // never mistaken for real placeholders by the fill engine.
         let filled = render(strip_leading_comment(template), &scope);
         let mut out = polish(&filled);
+        // #2366 wave-4: render a ```mermaid chart under every populated dataset
+        // table.  Runs AFTER polish (so it sees the omit-empty'd tables and never
+        // charts a dropped/empty dataset) and BEFORE the appended status notes.
+        // When disabled the pass is skipped entirely — output stays byte-identical.
+        if self.mermaid {
+            out = super::mermaid::inject(&out);
+        }
         // Status notes are appended AFTER polish so their bullets are not subject
         // to omit-empty (they are always meaningful provenance, never markers).
         append_synthesis_note(&mut out, model);
@@ -214,6 +243,12 @@ fn build_scope(model: &ReportModel) -> Scope {
     if let Some(bench) = &model.benchmark {
         inject_benchmark_dataset(&mut root, model, bench);
     }
+
+    // #2366 follow-up (live-QA): the §7 graph appendix must produce REAL charts
+    // on a bare run, not empty scaffolding — these two datasets are wired to data
+    // the model already computes (scan/metrics), never fabricated.
+    inject_loc_by_technology_dataset(&mut root, model);
+    inject_complexity_distribution_dataset(&mut root, model);
 
     // Live-QA defect #2314: RED/AMBER finding blocks are deterministic, not
     // synthesis-gated — title/category/component come verbatim from

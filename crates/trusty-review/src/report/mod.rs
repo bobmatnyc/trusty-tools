@@ -20,12 +20,14 @@ pub mod git_info;
 pub mod instructions;
 pub mod investigate;
 pub mod manifest;
+pub mod mermaid;
 pub mod metrics;
 pub mod model;
 pub mod polish;
 pub mod provenance;
 pub mod reporter;
 pub mod reporter_fill;
+pub mod reporter_graph_datasets;
 pub mod scan;
 pub mod section_instructions;
 pub mod synthesize;
@@ -51,6 +53,7 @@ pub use manifest::{
     Manifest, ReportSection, RepositoryEntry, RepositorySource, load_manifest, parse_manifest,
     slugify,
 };
+pub use mermaid::inject as inject_mermaid;
 pub use metrics::{AnalyzeMetrics, MetricFinding, Severity, load_metrics};
 pub use model::{ReportModel, RepositoryReport};
 pub use polish::{polish, strip_template_comments};
