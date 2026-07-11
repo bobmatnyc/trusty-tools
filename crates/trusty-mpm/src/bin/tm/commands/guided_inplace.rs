@@ -56,6 +56,17 @@
 //! [`parse_show_environment_value`], is pure and exhaustively unit-tested. Every
 //! rejected gate now also emits a `tracing::debug!` so a stuck-in-the-picker
 //! report is diagnosable from `RUST_LOG=debug` output without code archaeology.
+//!
+//! #2453: [`run_inplace_relaunch`] and [`InPlaceOutcome`] are `pub(crate)` so
+//! `super::guided::run_guided_default`'s nested-session guard can drive this
+//! SAME primitive for a second, distinct entry point — the operator's own
+//! current pane matched by tmux session/pane identity, independent of
+//! [`try_inplace_relaunch`]'s env-var + Stopped-state gate. This closes the
+//! bare-`tm` self-switch (no-op) bug: previously that call site trusted a
+//! possibly-stale `record.state == "active"` and unconditionally attached/
+//! switch-cliented, which is a guaranteed no-op when the operator is already
+//! sitting in that exact pane. See `run_inplace_relaunch`'s doc for the safety
+//! argument (the daemon's reactivate round-trip remains the sole authority).
 
 use anyhow::Context as _;
 
@@ -340,8 +351,10 @@ fn exec_claude_in_place(mut cmd: std::process::Command) -> anyhow::Result<()> {
 /// which is exactly the same outcome as [`plan_inplace`] returning `None`.
 /// Separating the two outcomes lets [`try_inplace_relaunch`] route a
 /// reactivate failure back into the `None`/fall-through path instead of
-/// wrapping it in `Some(Err(..))`.
-enum InPlaceOutcome {
+/// wrapping it in `Some(Err(..))`. `pub(crate)` (#2453): `super::guided::
+/// run_guided_default`'s nested-session-guard branch also drives this enum
+/// directly — see [`run_inplace_relaunch`]'s doc for why.
+pub(crate) enum InPlaceOutcome {
     /// The exec attempt concluded (never returns on success; carries the
     /// error when `exec` itself failed, or when command resolution failed
     /// before any daemon mutation occurred).
@@ -351,11 +364,26 @@ enum InPlaceOutcome {
     FallThrough,
 }
 
-/// Drive the full in-place relaunch once [`plan_inplace`] selected it.
+/// Drive the full in-place relaunch once [`plan_inplace`] selected it — OR
+/// once `guided::run_guided_default`'s nested-session guard confirms the
+/// current tmux pane belongs to a managed record (#2453).
 ///
 /// Why: separated from [`try_inplace_relaunch`] so the "should we take this
 /// path at all" decision and the "how do we execute it" mechanics are
-/// distinct, readable steps.
+/// distinct, readable steps. `pub(crate)` (#2453): the nested-session guard in
+/// `guided.rs` matches a record by tmux session/pane identity BEFORE the
+/// record's `state` is known to be `Stopped` — its `record.state` field can
+/// lag reality by up to 60s (the same staleness race #2148 hardens
+/// [`fetch_managed_session_until_stopped`] against). Rather than duplicate the
+/// Stopped-only gate [`plan_inplace`] enforces for the env-var entry point,
+/// that call site drives this function directly with whatever record it
+/// matched (any state) and trusts the SAME safety boundary every caller of
+/// this function already relies on: [`reactivate_managed_session`]'s daemon
+/// round-trip (backed, as of #2453, by the daemon's own independent pane-idle
+/// reconciliation — see `daemon::managed_routes::reactivate::
+/// reconcile_stale_active_then_reactivate`) is the single source of truth,
+/// and a refused/failed reactivate here folds into [`InPlaceOutcome::FallThrough`]
+/// exactly as it does for the env-var path — never an unconditional exec.
 /// What, IN ORDER (#2027 exec-ordering fix): (1) prints a one-line notice;
 /// (2) resolves the workdir and builds the resume argv via
 /// [`trusty_mpm::runtime::build_inplace_resume_command`] (the SAME
@@ -368,7 +396,7 @@ enum InPlaceOutcome {
 /// refused/failed reactivate this returns [`InPlaceOutcome::FallThrough`]
 /// rather than proceeding; (4) execs `claude` in place.
 /// Test: I/O path; not unit-tested (requires a live daemon + real `claude`).
-async fn run_inplace_relaunch(
+pub(crate) async fn run_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
     id: &str,

@@ -64,11 +64,36 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     // would nest one tmux client's session inside another (the root cause of
     // #2157). Check BEFORE any project detection or picker logic runs.
     if let Some(record) = nested_session_guard(client, url).await {
-        eprintln!(
-            "tm: this tmux session ('{}') is already a managed session (state={}) — \
-             refusing to launch a nested session here.",
-            record.name, record.state
-        );
+        // #2453: `record.state` can lag reality by up to 60s after the
+        // pane's `claude` process exits (the periodic reap tick / a racing
+        // `SessionEnd` hook has not caught up yet). Previously this branch
+        // trusted that stale state unconditionally and fell straight to
+        // `resume_guided_session`, which — because the tmux SESSION is
+        // (correctly) still alive — always resolved to a `switch-client`
+        // no-op: the operator was already inside the very session being
+        // "reconnected" to. Try the SAME in-place-relaunch primitive #2023
+        // component C uses instead: its daemon reactivate call independently
+        // reconciles a stale-`Active` record whose pane is confirmed idle
+        // (#2453 daemon-side fix, `daemon::managed_routes::reactivate::
+        // reconcile_stale_active_then_reactivate`) and refuses — falling
+        // through to the notice + reconnect below — when the runtime, or a
+        // genuinely different sibling pane in the same tmux session (#2157),
+        // is still live. Safe to attempt unconditionally: a hard failure
+        // (e.g. no `claude` binary) still surfaces as `Err` below rather than
+        // silently falling through.
+        match super::guided_inplace::run_inplace_relaunch(client, url, &record.id, record.clone())
+            .await
+        {
+            super::guided_inplace::InPlaceOutcome::Result(r) => return r,
+            super::guided_inplace::InPlaceOutcome::FallThrough => {
+                eprintln!(
+                    "tm: in-place relaunch unavailable for '{}' (state={}) — \
+                     this tmux session is already a managed session; \
+                     refusing to launch a nested session here.",
+                    record.name, record.state
+                );
+            }
+        }
         eprintln!("tm: reconnecting to '{}' instead…", record.name);
         return super::guided_resume::resume_guided_session(client, url, &record).await;
     }
