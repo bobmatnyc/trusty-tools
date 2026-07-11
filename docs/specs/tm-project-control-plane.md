@@ -720,7 +720,7 @@ pattern (`store.rs`'s existing `save()` implementation, reused verbatim — no n
 primitive). `SessionRecord.deliverable_id` (§10.6) is a field addition to the existing
 `sessions.json` schema, not a new store.
 
-### 10.8 CLI/API surface sketch (proposed — not yet filed, see §12)
+### 10.8 CLI/API surface sketch (filed as #2378–#2383, see §12)
 
 Mirrors §3's plural-noun, `--json`-everywhere, deterministic-forms conventions:
 
@@ -784,12 +784,11 @@ to an explicit stored flag, it is `tm manager`.
 
 ---
 
-## 12. Proposed work items — Deliverable/Milestone layer (NOT YET FILED)
+## 12. Work items — Deliverable/Milestone layer (FILED 2026-07-10 as #2378–#2383)
 
-Unlike §8 (filed as #2114–#2124), the following are **proposed only** — pending owner review of
-this revision before filing, consistent with this repo's convention of filing child issues only
-after the owner resolves the relevant design questions (§8's own issues were filed the same day
-their §9 decisions were resolved). §13 lists the open questions that should be resolved first.
+The following work items complement §8's filed child issues (#2114–#2124). They were filed under
+epic #2108 on 2026-07-10 once §13's owner decisions were resolved (following the same convention
+as §8: file after resolving design questions).
 
 | # | Slice | Depends on | Notes |
 |---|---|---|---|
@@ -873,9 +872,9 @@ their §9 decisions were resolved). §13 lists the open questions that should be
   (deterministic configurator, CLI+TUI), #2121 (`gh_user` fail-loud validation), #2122
   (`jira_config` opaque placeholder), #2123 (deprecate registry A), #2124 (bare-`tm` entry-point
   transition, gated Phase 2).
-- **Proposed work items (2026-07-10, NOT YET FILED — §12):** WI-12 (Deliverable/Milestone CRUD
-  API), WI-13 (`SessionRecord.deliverable_id`), WI-14 (state-machine enforcement), WI-15
-  (`tm projects deliverables`/`milestones` CLI), WI-16 (`/status` histogram extension), WI-17
+- **Child issues (filed 2026-07-10, §12):** #2378 (Deliverable/Milestone CRUD API), #2379
+  (`SessionRecord.deliverable_id`), #2380 (state-machine enforcement), #2381
+  (`tm projects deliverables`/`milestones` CLI), #2382 (`/status` histogram extension), #2383
   (TUI Deliverable/Milestone view).
 - **DOC-22** — Multi-Repo Session Routing: `docs/specs/multi-repo-session-routing.md` (registry
   B's origin, `Project`/`ProjectRegistry`/resolver/`fleet_by_project`).
