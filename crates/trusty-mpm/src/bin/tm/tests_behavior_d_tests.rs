@@ -45,6 +45,7 @@ fn cli_parses_session_new() {
                     name_hint,
                     runtime,
                     no_inject,
+                    deliverable,
                 },
         } => {
             assert_eq!(repo, "https://github.com/owner/repo");
@@ -55,6 +56,35 @@ fn cli_parses_session_new() {
             assert_eq!(runtime, trusty_mpm::runtime::RuntimeKind::ClaudeCode);
             // No --no-inject → turnkey injection is the default (#1903/#1299).
             assert!(!no_inject);
+            // No --deliverable → no link (#2379).
+            assert_eq!(deliverable, None);
+        }
+        other => panic!("expected session new, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_new_with_deliverable() {
+    // Why: #2379 — `--deliverable <id>` binds the new session to a Deliverable.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "new",
+        "https://github.com/owner/repo",
+        "--task",
+        "do the thing",
+        "--deliverable",
+        "11111111-1111-1111-1111-111111111111",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::New { deliverable, .. },
+        } => {
+            assert_eq!(
+                deliverable.as_deref(),
+                Some("11111111-1111-1111-1111-111111111111")
+            );
         }
         other => panic!("expected session new, got {other:?}"),
     }

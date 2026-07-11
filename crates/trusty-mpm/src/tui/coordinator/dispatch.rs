@@ -217,6 +217,9 @@ fn route_new(args: &str) -> Dispatch {
         name_hint: None,
         runtime: None,
         inject_task: None,
+        // The TUI `/new` chat command has no `--deliverable` surface (#2379;
+        // TUI Deliverable affordances are #2383's scope).
+        deliverable_id: None,
     })
 }
 

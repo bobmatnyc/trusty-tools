@@ -73,6 +73,8 @@ pub(crate) async fn start_session(
             // Empty task → injection is a no-op regardless; keep the turnkey
             // default so `session start` mirrors `session new` semantics (#1903).
             no_inject: false,
+            // `session start` has no `--deliverable` surface of its own (#2379).
+            deliverable: None,
         };
         crate::commands::managed_route::run(client, url, &new_action).await?;
         return Ok(());

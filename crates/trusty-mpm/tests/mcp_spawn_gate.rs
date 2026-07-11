@@ -76,6 +76,7 @@ fn base_params(repo_url: &str, mcp_initiated: bool) -> SpawnParams {
         ephemeral: Some(true),
         mcp_initiated,
         inject_task: None,
+        deliverable_id: None,
     }
 }
 

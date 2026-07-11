@@ -45,6 +45,7 @@ impl CommandExecutor {
     }
 
     /// `managed-new` — spawn a managed session from a repo + ref + task.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn managed_new(
         &self,
         repo_url: String,
@@ -53,6 +54,7 @@ impl CommandExecutor {
         name_hint: Option<String>,
         runtime: Option<String>,
         inject_task: Option<bool>,
+        deliverable_id: Option<String>,
     ) -> CommandResult {
         let req = ManagedSpawnRequest {
             repo_url,
@@ -61,6 +63,7 @@ impl CommandExecutor {
             name_hint,
             runtime,
             inject_task,
+            deliverable_id,
         };
         match self.client().spawn_managed_session(&req).await {
             Ok(resp) => CommandResult::ManagedSpawned {

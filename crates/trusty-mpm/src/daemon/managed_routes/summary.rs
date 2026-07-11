@@ -46,6 +46,7 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "pending_decision": r.pending_decision,
         "proposed_default": r.proposed_default,
         "source_id": r.source_id,
+        "deliverable_id": r.deliverable_id.map(|id| id.to_string()),
     })
 }
 
@@ -74,6 +75,7 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         task: Some(r.task.clone()),
         cwd: Some(r.cwd.to_string_lossy().to_string()),
         claude_session_id: r.claude_session_id.clone(),
+        deliverable_id: r.deliverable_id.map(|id| id.to_string()),
     }
 }
 

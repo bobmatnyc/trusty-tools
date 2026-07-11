@@ -265,6 +265,23 @@ pub struct SessionRecord {
     /// they resume from `workspace_path` / `cwd` as before.
     #[serde(default)]
     pub last_cwd: Option<PathBuf>,
+
+    /// Which Deliverable this session is working on (DOC-35 §10.6, #2379).
+    ///
+    /// Why: 1 Deliverable ↔ many Sessions (DOC-30 Decision #7, carried forward
+    /// unchanged) — a session works on at most ONE Deliverable at a time;
+    /// `None` is the common case for ad-hoc sessions not tracked against a
+    /// Deliverable. This is a PURE POINTER: linking a session to a Deliverable
+    /// never auto-transitions the Deliverable's status (§11 forbids
+    /// auto-transitions — only an explicit `set-status` call, #2380, mutates
+    /// it) and decommissioning the session never auto-unlinks the pointer —
+    /// a tombstoned session still records which Deliverable it worked on.
+    ///
+    /// `#[serde(default)]` keeps every pre-#2379 record deserializable — they
+    /// load with `deliverable_id = None`, which is correct: no session before
+    /// this field existed was ever bound to a Deliverable.
+    #[serde(default)]
+    pub deliverable_id: Option<crate::deliverable::DeliverableId>,
 }
 
 /// Error types for session record operations.
@@ -331,6 +348,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -364,6 +382,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -395,6 +414,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -451,6 +471,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -511,6 +532,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -601,6 +623,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: Some(PathBuf::from("/managed/ws/.trusty-mpm/scrollback.txt")),
             last_cwd: Some(PathBuf::from("/managed/ws/src")),
+            deliverable_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -636,9 +659,74 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
         assert!(back.workspace_owned, "workspace_owned=true must round-trip");
+    }
+
+    #[test]
+    fn record_without_deliverable_id_field_defaults_to_none() {
+        // Why (#2379): every record persisted before this field existed has no
+        // `deliverable_id` key; it MUST deserialize as `None` (unbound) — no
+        // session created before the Deliverable layer existed was ever bound
+        // to one. This pins the `#[serde(default)]` back-compat contract that
+        // lets an old store load cleanly under the new binary, and (by the
+        // same additive-field contract) lets an OLD binary reading a NEWER
+        // store simply ignore the extra key it does not know about.
+        let legacy_json = serde_json::json!({
+            "id": ManagedSessionId::new(),
+            "tmux_name": "tmpm-legacy",
+            "cwd": "/tmp",
+            "task": "legacy task",
+            "state": "active",
+            "created_at": Utc::now().to_rfc3339(),
+            "last_activity_at": null,
+            "workspace_path": null,
+            "repo_url": null,
+            "branch": null,
+            "pending_decision": null,
+            "proposed_default": null
+        })
+        .to_string();
+        let back: SessionRecord = serde_json::from_str(&legacy_json).expect("deserialize legacy");
+        assert!(
+            back.deliverable_id.is_none(),
+            "a record with no `deliverable_id` key must default to None (unbound)"
+        );
+    }
+
+    #[test]
+    fn record_round_trips_deliverable_id() {
+        // Why (#2379): a session bound via `tm sessions new --deliverable <id>`
+        // must persist the link so `resume`/`ls`/`status` all see it.
+        let did = crate::deliverable::DeliverableId::new();
+        let record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-bound".into(),
+            cwd: PathBuf::from("/tmp"),
+            task: "implement WI-13".into(),
+            state: ManagedSessionState::Active,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: Some(did),
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.deliverable_id, Some(did));
     }
 }

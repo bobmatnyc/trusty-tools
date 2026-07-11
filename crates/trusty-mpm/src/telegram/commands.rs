@@ -174,6 +174,8 @@ impl From<TelegramCommand> for TrustyCommand {
                     name_hint: None,
                     runtime: None,
                     inject_task: None,
+                    // Telegram `/launch` has no `--deliverable` surface (#2379).
+                    deliverable_id: None,
                 }
             }
             TelegramCommand::Fleet => TrustyCommand::ManagedFleet,
@@ -426,6 +428,7 @@ mod tests {
                 name_hint: None,
                 runtime: None,
                 inject_task: None,
+                deliverable_id: None,
             }
         );
     }

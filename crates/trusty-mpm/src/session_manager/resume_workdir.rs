@@ -177,6 +177,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd,
+            deliverable_id: None,
         }
     }
 

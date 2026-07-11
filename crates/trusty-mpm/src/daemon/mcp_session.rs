@@ -80,6 +80,9 @@ pub async fn session_new(
         mcp_initiated: true,
         // Turnkey by default (#1903/#1299): an MCP `session_new` spawns to work.
         inject_task: None,
+        // The MCP `session_new` tool does not expose Deliverable linkage
+        // (#2379's CLI surface is `tm sessions new --deliverable`, HTTP-only).
+        deliverable_id: None,
     };
     let record = spawn_managed(state, params).await?;
     Ok(record_to_json(&record))
