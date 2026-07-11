@@ -14,7 +14,9 @@
 //! trusty-memory's `memory_recall` via the `tools/call` MCP envelope
 //! (spike-verified on issue #2348: the daemon wraps the tool result as a
 //! STRINGIFIED JSON blob inside `result.content[0].text`, not a raw JSON
-//! value — [`parse_recall_envelope`] handles that unwrap), over-fetching
+//! value — `crate::memory_envelope::parse_tools_call_envelope`, the shared
+//! unwrap this module originally owned and #2424 promoted so the turn
+//! recorder writes through the same shape, handles that), over-fetching
 //! `top_k * `[`OVER_FETCH_FACTOR`] results because the daemon cannot
 //! tag-filter server-side (filtering happens client-side, AFTER the
 //! daemon's own truncation — see the spike comment on #2348). Results are
@@ -36,6 +38,7 @@ use tracing::warn;
 use trusty_common::mcp::memory_rpc::call_memory_tool_at;
 
 use crate::agent_loop::estimate_tokens;
+use crate::memory_envelope::{parse_tools_call_envelope, tools_call_params};
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// The tool's registered/advertised name.
@@ -104,27 +107,6 @@ impl RecallSessionTool {
     fn session_tag(&self) -> String {
         format!("session:{}", self.session_id)
     }
-}
-
-/// Extract and parse the inner recall JSON from a `tools/call` envelope.
-///
-/// Why: isolates the spike-verified unwrap (`result.content[0].text` is a
-/// STRINGIFIED JSON blob, not a nested `Value`) as its own testable step,
-/// distinct from the tag-filter/budget logic below it.
-/// What: `envelope` is the raw `result` field of the JSON-RPC response
-/// (i.e. `call_memory_tool_at`'s `Ok` payload for a `tools/call` request).
-/// Returns `Some(parsed_body)` on a well-formed envelope, `None` otherwise
-/// (never panics on an unexpected shape).
-/// Test: `tests::parse_recall_envelope_unwraps_stringified_content`,
-/// `tests::parse_recall_envelope_none_on_missing_content`,
-/// `tests::parse_recall_envelope_none_on_malformed_inner_json`.
-fn parse_recall_envelope(envelope: &Value) -> Option<Value> {
-    let text = envelope
-        .get("content")
-        .and_then(|c| c.get(0))
-        .and_then(|c0| c0.get("text"))
-        .and_then(|t| t.as_str())?;
-    serde_json::from_str(text).ok()
 }
 
 /// Whether a single `memory_recall` result entry carries `tag`.
@@ -245,14 +227,14 @@ impl ToolExecutor for RecallSessionTool {
         let top_k = parsed.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K);
         let fetch_k = top_k * OVER_FETCH_FACTOR;
 
-        let rpc_params = json!({
-            "name": "memory_recall",
-            "arguments": {
+        let rpc_params = tools_call_params(
+            "memory_recall",
+            json!({
                 "palace": self.palace,
                 "query": parsed.query,
                 "top_k": fetch_k,
-            }
-        });
+            }),
+        );
 
         let envelope = match call_memory_tool_at(&self.base_url, "tools/call", rpc_params).await {
             Ok(v) => v,
@@ -268,7 +250,7 @@ impl ToolExecutor for RecallSessionTool {
             }
         };
 
-        let Some(body) = parse_recall_envelope(&envelope) else {
+        let Some(body) = parse_tools_call_envelope(&envelope) else {
             warn!(
                 session_id = %self.session_id,
                 "recall_session: unexpected memory_recall response shape (fail-open)"
@@ -330,30 +312,9 @@ mod tests {
         json!({"content": [{"type": "text", "text": inner}]})
     }
 
-    // ── `parse_recall_envelope` ──────────────────────────────────────────
-
-    #[test]
-    fn parse_recall_envelope_unwraps_stringified_content() {
-        let envelope = tools_call_envelope(
-            "p",
-            "q",
-            vec![result_entry("hello", 0.9, &["session:s1", "turn"])],
-        );
-        let body = parse_recall_envelope(&envelope).expect("should parse");
-        assert_eq!(body["palace"], "p");
-        assert_eq!(body["results"][0]["content"], "hello");
-    }
-
-    #[test]
-    fn parse_recall_envelope_none_on_missing_content() {
-        assert!(parse_recall_envelope(&json!({"not_content": []})).is_none());
-    }
-
-    #[test]
-    fn parse_recall_envelope_none_on_malformed_inner_json() {
-        let envelope = json!({"content": [{"type": "text", "text": "not valid json"}]});
-        assert!(parse_recall_envelope(&envelope).is_none());
-    }
+    // NOTE (#2424): the envelope-unwrap unit tests moved with the helper to
+    // `crate::memory_envelope::tests` when `parse_recall_envelope` was
+    // promoted to the shared `parse_tools_call_envelope`.
 
     // ── `filter_and_cap` ─────────────────────────────────────────────────
 
