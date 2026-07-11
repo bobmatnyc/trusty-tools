@@ -1,5 +1,15 @@
 # Common Pitfalls Reference
 
+🔴 **Duplicating a shared capability instead of extending the common entry point** —
+every cross-crate capability (external tool spawning, HTTP clients, config/secret
+loading, daemon discovery) has exactly one canonical implementation. A second
+implementation is a defect: fixes land N times, security patches miss copies, and
+silent behavioral drift emerges. Before writing `Command::new(...)`, `reqwest::Client`,
+`std::env::var()` for a concern used in multiple crates, search for an existing
+entry point (`git grep`, then trusty-common source tree) and extend it. See the
+common-entry-point principle and domain consolidation audit in
+[.trusty-mpm/INSTRUCTIONS.md](../../.trusty-mpm/INSTRUCTIONS.md).
+
 🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
 it violates the project's hard rule. Use `?` with `thiserror` error types in
 libraries. `expect()` is allowed only for invariants that genuinely cannot

@@ -32,6 +32,7 @@ pub mod inproject;
 pub mod inproject_hygiene;
 mod lifecycle;
 mod mcp_spawn_gate;
+mod project_registry_routes;
 mod project_status;
 pub mod proxy;
 pub mod prune;
@@ -45,6 +46,10 @@ pub use front_gate::{
 pub use lifecycle::{
     ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
     spawn_runtime_for, write_task_md,
+};
+pub use project_registry_routes::{
+    ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
+    list_projects_registry_route, register_project_registry_route,
 };
 pub use project_status::{
     DeliverableStatusCounts, MilestoneStatusCounts, ProjectConfigFlags, ProjectStatusResponse,

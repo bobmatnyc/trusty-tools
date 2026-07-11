@@ -36,6 +36,7 @@ pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod project;
+pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod repair;
 pub(crate) mod serve_stdio;

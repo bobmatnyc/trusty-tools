@@ -104,7 +104,15 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<()> {
     } else {
         eprintln!("tm: attaching to session '{name}'");
     }
-    let status = std::process::Command::new("tmux")
+    // #2398: resolves the binary through the crate's shared resolver rather
+    // than a bare "tmux" lookup — this is the "attach path" migration (the
+    // interactive attach-session/switch-client spawn itself inherits this
+    // process's stdio via `.status()`, which does not fit
+    // `core::tmux::run_tmux`'s output-capturing `.output()` shape, so only
+    // binary resolution is unified here; see `core::tmux`'s module doc for
+    // the full scope note).
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let status = std::process::Command::new(&tmux_bin)
         .args(&argv)
         .status()
         .context("failed to invoke tmux")?;

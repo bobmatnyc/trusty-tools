@@ -69,9 +69,12 @@ impl Drop for LaunchSessionGuard {
         if !self.armed {
             return;
         }
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &self.name])
-            .output();
+        // #2398 architecture consolidation: route through the crate's single
+        // tmux entry point instead of shelling out independently.
+        let _ =
+            trusty_mpm::core::tmux::run_tmux(&trusty_mpm::core::tmux::TmuxCommand::KillSession {
+                name: self.name.clone(),
+            });
     }
 }
 
@@ -326,16 +329,14 @@ pub(crate) async fn launch(
     let _ = instructions_path;
 
     // 12. Create a detached tmux session rooted at the MANAGED clone directory.
-    let new_session = std::process::Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &tmux_name,
-            "-c",
-            &managed_workdir,
-        ])
-        .status();
+    //     #2398: routes through `core::tmux::create_managed_session`, the
+    //     crate's single session-creation choke point — this is what applies
+    //     the configured scrollback/mouse ergonomics BEFORE the pane exists
+    //     (a bare `tmux new-session` here would silently bypass them, the
+    //     exact QA-caught regression this consolidation closes).
+    let new_session =
+        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&managed_workdir))
+            .map(|output| output.status);
     if !matches!(new_session, Ok(s) if s.success()) {
         anyhow::bail!("failed to create tmux session {tmux_name} in {managed_workdir}");
     }
@@ -346,9 +347,12 @@ pub(crate) async fn launch(
     let mut session_guard = LaunchSessionGuard::new(&tmux_name);
 
     // 13. Start `claude` inside the tmux session.
-    let send = std::process::Command::new("tmux")
-        .args(["send-keys", "-t", &tmux_name, &claude_cmd, "Enter"])
-        .status();
+    let send = trusty_mpm::core::tmux::send_line(
+        None,
+        &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),
+        &claude_cmd,
+    )
+    .map(|output| output.status);
     if !matches!(send, Ok(s) if s.success()) {
         anyhow::bail!("tmux session {tmux_name} created but failed to start claude");
     }
@@ -515,11 +519,14 @@ pub(crate) async fn connect(
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
     //    `has-session` probe tells us which happened so `claude` is started
-    //    only for a freshly-created session.
+    //    only for a freshly-created session. #2398: routes through
+    //    `core::tmux::create_managed_session`, the crate's single session-
+    //    creation choke point, so the configured scrollback/mouse ergonomics
+    //    are applied before the pane exists.
     let already_running = tmux_has_session(&tmux_name);
-    let new_session = std::process::Command::new("tmux")
-        .args(["new-session", "-A", "-d", "-s", &tmux_name, "-c", &workdir])
-        .status();
+    let new_session =
+        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&workdir))
+            .map(|output| output.status);
     if !matches!(new_session, Ok(s) if s.success()) {
         anyhow::bail!("failed to create tmux session {tmux_name} in {workdir}");
     }
@@ -535,9 +542,12 @@ pub(crate) async fn connect(
     //    system-prompt injection plus the shared isolation flags (#2230).
     if !already_running {
         let claude_cmd = connect_claude_cmd(prompt_path.as_deref());
-        let send = std::process::Command::new("tmux")
-            .args(["send-keys", "-t", &tmux_name, &claude_cmd, "Enter"])
-            .status();
+        let send = trusty_mpm::core::tmux::send_line(
+            None,
+            &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),
+            &claude_cmd,
+        )
+        .map(|output| output.status);
         if !matches!(send, Ok(s) if s.success()) {
             anyhow::bail!("tmux session {tmux_name} created but failed to start claude");
         }
