@@ -85,6 +85,24 @@ pub enum DaemonError {
         id: String,
     },
 
+    /// No registered project matches the given `repo_url`, so a Deliverable
+    /// id cannot be scoped against it (#2379 review MEDIUM).
+    ///
+    /// Why: distinct from [`DeliverableNotFound`](Self::DeliverableNotFound) —
+    /// the Deliverable itself may well exist; what's missing is the PROJECT
+    /// identity to scope it against. Returning `DeliverableNotFound` here
+    /// would misleadingly imply the id itself was bad, when the actual gap is
+    /// "no project is registered for this repo at all".
+    /// What: carries the `repo_url` that failed to resolve; maps to HTTP 404
+    /// (there is genuinely no project resource for this identity).
+    /// Test: `error_status_codes_map`, and
+    /// `validate_deliverable_scope_unknown_project_is_404`.
+    #[error("no registered project matches repo_url {repo_url:?}; cannot scope deliverable")]
+    ProjectNotFoundForRepoUrl {
+        /// The `repo_url` that did not resolve to any registered project.
+        repo_url: String,
+    },
+
     /// A requested Deliverable status change is not a legal transition (#2380).
     ///
     /// Why: the §10.3 state machine rejects illegal `set-status` requests (e.g.
@@ -157,7 +175,8 @@ impl DaemonError {
             Self::SessionNotFound { .. }
             | Self::CheckpointNotFound { .. }
             | Self::DeliverableNotFound { .. }
-            | Self::MilestoneNotFound { .. } => StatusCode::NOT_FOUND,
+            | Self::MilestoneNotFound { .. }
+            | Self::ProjectNotFoundForRepoUrl { .. } => StatusCode::NOT_FOUND,
             Self::SessionNotActive { .. } | Self::InvalidTransition { .. } => StatusCode::CONFLICT,
             Self::OverseerBlocked { .. } | Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) | Self::InvalidPairCode => StatusCode::BAD_REQUEST,
@@ -264,6 +283,13 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
+            DaemonError::ProjectNotFoundForRepoUrl {
+                repo_url: "x".into()
+            }
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
             DaemonError::InvalidTransition {
                 from: "proposed".into(),
                 to: "complete".into(),
@@ -304,5 +330,21 @@ mod tests {
         };
         assert!(e.to_string().contains("abc"));
         assert!(e.to_string().contains("stopped"));
+    }
+
+    #[test]
+    fn project_not_found_message_names_repo_url_not_deliverable() {
+        // #2379 review MEDIUM: the message must talk about the missing
+        // PROJECT, never imply the deliverable id itself was bad.
+        let e = DaemonError::ProjectNotFoundForRepoUrl {
+            repo_url: "/local/path/checkout".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("/local/path/checkout"), "{msg}");
+        assert!(msg.contains("project"), "{msg}");
+        assert!(
+            !msg.contains("deliverable not found"),
+            "must not read as a deliverable-not-found error: {msg}"
+        );
     }
 }

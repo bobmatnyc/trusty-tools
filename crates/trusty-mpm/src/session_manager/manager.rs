@@ -866,7 +866,7 @@ impl SessionManager {
     /// not a session made invisible to a whole filtered listing, so the
     /// simpler shape matches `set_workspace`/`set_pending_decision`.
     /// Test: `set_deliverable_id_persists`,
-    /// `set_deliverable_id_missing_session_errors` in `tests.rs`.
+    /// `set_deliverable_id_missing_session_errors` in `set_deliverable_id_tests.rs`.
     pub async fn set_deliverable_id(
         &self,
         id: &ManagedSessionId,
