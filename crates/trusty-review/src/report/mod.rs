@@ -13,6 +13,7 @@
 //! Test: each submodule carries its own unit-test section; an end-to-end render
 //! lives in `crates/trusty-review/tests/report_e2e.rs`.
 
+pub mod analyze_adapter;
 pub mod benchmark;
 pub mod error;
 pub mod fill;
@@ -38,6 +39,10 @@ pub mod template;
 
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
+pub use analyze_adapter::{
+    AnalyzeAdapterError, AnalyzeMetricsSource, HttpAnalyzeMetricsSource, derive_index_id,
+    enrich_with_analyze,
+};
 pub use benchmark::{
     BenchmarkReport, BenchmarkStatus, CorpusSnapshot, LoadedCorpus, MetricPlacement,
     RepositoryBenchmark, build_benchmark_report, corpus_dir, load_corpus, write_snapshot,
