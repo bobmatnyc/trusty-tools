@@ -71,6 +71,22 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// Overrides the trait default so a resume/restart respawn actually lands
+    /// in the recorded pane instead of tmux's session-scoped "active pane"
+    /// resolution (sibling-window hijack, follow-up to #2456).
+    fn send_line_to_pane(&self, name: &str, pane_id: &str, text: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_line(&TmuxTarget::pane(name, pane_id), text)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Overrides the trait's optimistic `true` default so the production path
+    /// actually calls `tmux list-panes` and confirms the recorded pane is
+    /// still among them (sibling-window hijack, follow-up to #2456).
+    fn pane_exists(&self, name: &str, pane_id: &str) -> bool {
+        self.driver.pane_exists(name, pane_id)
+    }
+
     /// Send Ctrl-C to the session (overrides the no-op trait default; #1461).
     fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
         self.driver

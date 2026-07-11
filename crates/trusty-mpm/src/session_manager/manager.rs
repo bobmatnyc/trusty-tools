@@ -118,6 +118,28 @@ pub enum ManagedError {
         "workspace directory {1} no longer exists; cannot resume session {0} — the worktree may have been removed"
     )]
     WorkspaceMissing(String, String),
+
+    /// The session's recorded `pane_id` no longer exists, though its tmux
+    /// SESSION is still alive (sibling-window hijack, follow-up to #2456).
+    ///
+    /// Why: `resume`'s reuse branch previously trusted `session_exists` alone
+    /// to mean "the recorded pane survived" — but a tmux session stays alive
+    /// as long as ANY pane/window in it is open, including a sibling that has
+    /// nothing to do with this record. Recreating in that situation via the
+    /// existing `kill_session` + `create_and_verify_pane` path would destroy
+    /// the sibling too; silently respawning via a session-scoped target would
+    /// land the runtime in the sibling instead of failing. Neither is safe,
+    /// so this variant surfaces the ambiguity to the operator explicitly
+    /// rather than guessing.
+    /// What: `(session_id, pane_id)` — the missing pane's id, surfaced in the
+    /// error message so the operator knows exactly what vanished.
+    #[error(
+        "recorded pane {1} for session {0} no longer exists, but its tmux session is still \
+         alive (likely a sibling window) — refusing to respawn into an unrelated active pane; \
+         close the sibling window and delete/recreate this session, or manually verify pane \
+         state with `tmux list-panes`"
+    )]
+    PaneGone(String, String),
 }
 
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the
@@ -591,18 +613,30 @@ impl SessionManager {
     /// existence-checks `last_cwd` → `workspace_path` → `cwd` in order,
     /// erroring with [`ManagedError::WorkspaceMissing`] rather than handing a
     /// stale/removed path to tmux when none remain), then branches on
-    /// [`ManagedTmuxDriver::session_exists`]: if the tmux pane is STILL alive, it
-    /// is reused as-is — no `kill_session`, no `create_session` — because the
-    /// caller (e.g. `resume_managed`) re-spawns the runtime via
-    /// `RuntimeAdapter::spawn_resume`, which types the resume command straight
-    /// into that same pane (already rooted at the right cwd from its original
-    /// creation). If the pane is gone: a best-effort `kill_session` guard
-    /// followed by [`resume_workdir::create_and_verify_pane`], which creates the
-    /// fresh session AND verifies (#2250) the pane actually landed at the
-    /// resolved workdir — tmux `-c <dir>` can exit 0 while silently falling back
-    /// to `$HOME`, which this catches and fails loudly on rather than typing the
-    /// resume command into a mis-rooted pane. Either way the record is marked
-    /// `Active` and persisted.
+    /// [`ManagedTmuxDriver::session_exists`]: if the tmux SESSION is STILL
+    /// alive, it is (usually) reused as-is — no `kill_session`, no
+    /// `create_session` — because the caller (e.g. `resume_managed`)
+    /// re-spawns the runtime via `RuntimeAdapter::spawn_resume`, which now
+    /// types the resume command straight into the record's OWN recorded
+    /// `pane_id` (sibling-window hijack fix, follow-up to #2456) rather than a
+    /// session-scoped target that tmux could resolve to any other pane. Before
+    /// trusting that reuse, when `record.pane_id` is known this branch
+    /// additionally confirms via [`ManagedTmuxDriver::pane_exists`] that the
+    /// SPECIFIC recorded pane — not just some pane in the session — is still
+    /// there: `session_exists` alone cannot tell "the recorded pane survived"
+    /// apart from "a sibling window opened after it was closed is keeping the
+    /// session alive". A confirmed-gone recorded pane fails loudly with
+    /// [`ManagedError::PaneGone`] rather than either (a) silently respawning
+    /// into the unrelated active sibling, or (b) killing the whole session
+    /// (which would destroy the sibling too) to recreate it. If the whole
+    /// session is gone: a best-effort `kill_session` guard followed by
+    /// [`resume_workdir::create_and_verify_pane`], which creates the fresh
+    /// session AND verifies (#2250) the pane actually landed at the resolved
+    /// workdir — tmux `-c <dir>` can exit 0 while silently falling back to
+    /// `$HOME`, which this catches and fails loudly on rather than typing the
+    /// resume command into a mis-rooted pane; the freshly created pane's id is
+    /// then captured to refresh the stale `pane_id`. Either way (reuse or
+    /// recreate) the record is marked `Active` and persisted.
     /// Test: `manager_resume_respawns_in_existing_workspace` (`tests.rs`) —
     /// asserts a new `create_session` call is issued when no pane survives (the
     /// `stop()` path, which kills the pane); `resume_reattach_tests.rs`'s
@@ -610,7 +644,11 @@ impl SessionManager {
     /// `kill_session` NOR `create_session` fires when the pane survives (the
     /// `mark_runtime_exited_stopped` path, #2148); `resume_reattach_tests.rs`'s
     /// `manager_resume_errors_when_recreated_pane_cwd_mismatches` — asserts a
-    /// pane-cwd mismatch on the recreate path fails loudly (#2250).
+    /// pane-cwd mismatch on the recreate path fails loudly (#2250);
+    /// `resume_reattach_tests.rs`'s
+    /// `resume_refuses_when_stored_pane_gone_but_session_alive` — asserts a
+    /// confirmed-gone recorded pane refuses with `PaneGone` and never falls
+    /// through to a session-scoped reuse or a session-wide kill/recreate.
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         match record.state {
@@ -638,6 +676,25 @@ impl SessionManager {
         // `mark_runtime_exited_stopped`, #2023 A) must be REUSED, not destroyed.
         // Only recreate the tmux session when no live pane remains.
         if self.tmux.session_exists(&record.tmux_name) {
+            // Sibling-window hijack fix (follow-up to #2456): `session_exists`
+            // only proves SOME pane in this tmux session is alive — it says
+            // nothing about whether it is the SPECIFIC pane this record is
+            // bound to. When a `pane_id` was captured, confirm that exact
+            // pane is still there before trusting the reuse; a legacy record
+            // with no captured `pane_id` (pre-#2453) has no stronger signal
+            // available and keeps the prior session-scoped behavior.
+            if let Some(pane_id) = record.pane_id.as_deref()
+                && !self.tmux.pane_exists(&record.tmux_name, pane_id)
+            {
+                warn!(
+                    id = %id,
+                    name = %record.tmux_name,
+                    pane_id = %pane_id,
+                    "resume: recorded pane is gone but the tmux session is still alive \
+                     (sibling window) — refusing to respawn into an unrelated active pane"
+                );
+                return Err(ManagedError::PaneGone(id.to_string(), pane_id.to_string()));
+            }
             info!(
                 id = %id,
                 name = %record.tmux_name,

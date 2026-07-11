@@ -1414,8 +1414,14 @@ pub async fn resume_managed(
     // SessionStart; fall back to --continue (most-recent conversation in the
     // workspace) when the id is absent. ClaudeCodeAdapter overrides spawn_resume
     // to implement this; TcodeAdapter's default delegates to plain spawn.
+    // Sibling-window hijack fix (follow-up to #2456): pass the record's OWN
+    // `record.pane_id` through so the adapter targets that SPECIFIC pane
+    // (`SessionManager::resume`, just above, already confirmed it — or a
+    // freshly recreated one — still exists) instead of a session-scoped
+    // target that tmux could resolve to an unrelated active sibling pane.
     if let Err(e) = adapter.spawn_resume(
         &record.tmux_name,
+        record.pane_id.as_deref(),
         &workspace,
         &record.task,
         record.claude_session_id.as_deref(),

@@ -131,21 +131,21 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
                 }
                 super::guided_inplace::InPlaceOutcome::FallThrough => {
                     eprintln!(
-                        "tm: in-place relaunch unavailable for '{}' (state={}) — \
-                         this tmux session is already a managed session; \
-                         refusing to launch a nested session here.",
-                        record.name, record.state
+                        "tm: in-place relaunch unavailable for '{}' (state={}) — {}",
+                        record.name,
+                        record.state,
+                        nested_guard_notice(&record.name)
                     );
                 }
             }
         } else {
             eprintln!(
-                "tm: this tmux session ('{}') is already a managed session (state={}) — \
-                 refusing to launch a nested session here.",
-                record.name, record.state
+                "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
+                record.name,
+                record.state,
+                nested_guard_notice(&record.name)
             );
         }
-        eprintln!("tm: reconnecting to '{}' instead…", record.name);
         return super::guided_resume::resume_guided_session(client, url, &record).await;
     }
 
@@ -395,6 +395,29 @@ pub(crate) fn pane_identity_confirmed(
         (Some(cur), Some(rec)) => cur == rec,
         _ => false,
     }
+}
+
+/// Build the operator-facing notice for the nested-session guard's fallback
+/// path — reused by both call sites that print it before falling through to
+/// [`super::guided_resume::resume_guided_session`].
+///
+/// Why: the two call sites previously printed "…refusing to launch a nested
+/// session here." as a standalone line, immediately followed by a SEPARATE
+/// "reconnecting to '{name}' instead…" line. When the subsequent reconcile
+/// (or plain restart) succeeds, that reads as a contradiction: the operator
+/// sees "refusing" — which sounds like a hard failure — immediately followed
+/// by a session that comes up fine anyway. Nothing was actually refused: `tm`
+/// deliberately chose the reconnect path over nesting a new session, and that
+/// choice went on to work. Folding both lines into one, reworded message
+/// removes the false "this failed" signal without hiding WHY a fresh session
+/// was not launched here.
+/// What: returns the single-sentence notice — "not nesting a new session
+/// here; reconnecting to '{name}' instead…" — that replaces both the old
+/// "refusing…" line and the old separate "reconnecting…" line.
+/// Test: `nested_guard_notice_never_says_refusing`,
+/// `nested_guard_notice_mentions_reconnect_target`.
+pub(crate) fn nested_guard_notice(name: &str) -> String {
+    format!("not nesting a new session here; reconnecting to '{name}' instead…")
 }
 
 /// Fetch EVERY managed session, unfiltered — `GET /api/v1/sessions/managed`

@@ -51,6 +51,60 @@ pub trait ManagedTmuxDriver: Send + Sync {
         ))
     }
 
+    /// Send literal text followed by Enter to a SPECIFIC pane within `name`'s
+    /// tmux session, rather than whichever pane happens to be active.
+    ///
+    /// Why (sibling-window hijack, follow-up to #2456): `send_line` addresses
+    /// the tmux SESSION only. tmux resolves a session-scoped target to
+    /// whichever pane/window is currently ACTIVE — not necessarily the pane
+    /// this call is actually about. `SessionManager::resume`'s reuse branch
+    /// discovered this the hard way: a sibling window opened after the
+    /// original pane, left active, silently received the respawned `claude`
+    /// process while the original pane sat at a bare shell. This method is
+    /// the pane-scoped alternative: it must land in the exact pane addressed
+    /// by `pane_id`, regardless of tmux's notion of "active".
+    /// What: sends `text` + Enter to the pane addressed by `name:pane_id`
+    /// (tmux's `-t <session>:<pane_id>` form). The default falls back to
+    /// [`Self::send_line`] (session-scoped) — correct for any driver that
+    /// predates pane-level addressing or has no pane to target yet (e.g. a
+    /// freshly created session, where the session-scoped target IS the only
+    /// pane). [`super::real_tmux::RealTmuxDriver`] overrides this to build an
+    /// actual pane-scoped `TmuxTarget`.
+    /// Test: `RealTmuxDriver`'s override is exercised by `core::tmux`'s
+    /// pane-target argv coverage (`TmuxTarget::pane`); call-site assertions
+    /// live in `runtime::test_helpers::FakeTmux` (`pane_sends`) and
+    /// `claude_code`'s `spawn_resume_targets_stored_pane_id_when_known` test.
+    fn send_line_to_pane(&self, name: &str, pane_id: &str, text: &str) -> Result<(), ManagedError> {
+        let _ = pane_id;
+        self.send_line(name, text)
+    }
+
+    /// Report whether `pane_id` still exists as a live pane within `name`'s
+    /// tmux session.
+    ///
+    /// Why (sibling-window hijack, follow-up to #2456): `resume`'s reuse
+    /// branch must distinguish "the recorded pane is still there" from "the
+    /// tmux SESSION merely has some OTHER pane alive" (e.g. a sibling window
+    /// opened after the original pane was closed) — `session_exists` alone
+    /// conflates the two, which is exactly how the hijack happens: the
+    /// session look-alive check passes, so the code reuses it, then respawns
+    /// via a session-scoped target that resolves to the sibling.
+    /// What: returns `true` when the pane is confirmed present, `false` when
+    /// confirmed absent. The default is `true` — "cannot verify" is treated
+    /// as "assume present," so a driver that does not implement pane-level
+    /// listing keeps today's session-scoped reuse behavior; this is a
+    /// STRICTER check layered on top for drivers that opt in, not a new
+    /// failure mode for ones that do not.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to actually query
+    /// `tmux list-panes`.
+    /// Test: `RealTmuxDriver`'s override is covered by `core::tmux`'s
+    /// `list_panes_argv`; the manager-level refusal path is covered by
+    /// `resume_refuses_when_stored_pane_gone_but_session_alive` in
+    /// `resume_reattach_tests.rs`.
+    fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+        true
+    }
+
     /// Send an interrupt (Ctrl-C) to the session named `name` (#1461).
     ///
     /// Why: the [`Submit::Interrupt`](crate::core::sm::control::Submit::Interrupt)

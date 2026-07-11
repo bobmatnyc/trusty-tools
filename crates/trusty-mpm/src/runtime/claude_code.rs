@@ -876,14 +876,23 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// resolves an optional `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (#2246 — same carrier
     /// `spawn` uses), then sends the appropriate [`resume_command`] to the
-    /// tmux pane.
+    /// tmux pane — targeting the SPECIFIC `pane_id` (via
+    /// [`ManagedTmuxDriver::send_line_to_pane`]) when the caller supplies one,
+    /// rather than the session-scoped [`ManagedTmuxDriver::send_line`], which
+    /// tmux resolves to whichever pane/window is currently active (sibling-
+    /// window hijack fix, follow-up to #2456). `pane_id: None` (a legacy
+    /// record that predates pane-id capture) falls back to the session-scoped
+    /// send, preserving prior behavior for that case.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
     /// `spawn_resume_without_id_no_prior_conv_sends_plain_spawn`,
     /// `spawn_resume_sends_prompt_file_when_binary_available`,
-    /// `spawn_resume_sends_oauth_token_when_available`.
+    /// `spawn_resume_sends_oauth_token_when_available`,
+    /// `spawn_resume_targets_stored_pane_id_when_known`,
+    /// `spawn_resume_falls_back_to_session_target_when_pane_id_unknown`.
     fn spawn_resume(
         &self,
         tmux_name: &str,
+        pane_id: Option<&str>,
         cwd: &Path,
         task: &str,
         claude_session_id: Option<&str>,
@@ -942,6 +951,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let prior = effective_id.is_some() || file_history;
         debug!(
             session = %tmux_name,
+            pane_id = pane_id.unwrap_or("<none>"),
             cwd = %cwd.display(),
             task = %task,
             claude = %claude_bin,
@@ -949,21 +959,28 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             has_prior_conv = file_history, // reflects actual .jsonl file check, not the combined value
             "resuming claude-code in tmux pane"
         );
-        self.tmux
-            .send_line(
-                tmux_name,
-                &resume_command(
-                    cwd,
-                    &claude_bin,
-                    config_dir.as_deref(),
-                    effective_id,
-                    prior,
-                    session_id,
-                    prompt_file.as_deref(),
-                    oauth_token.as_deref(),
-                ),
-            )
-            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
+        let cmd = resume_command(
+            cwd,
+            &claude_bin,
+            config_dir.as_deref(),
+            effective_id,
+            prior,
+            session_id,
+            prompt_file.as_deref(),
+            oauth_token.as_deref(),
+        );
+        // Sibling-window hijack fix (follow-up to #2456): when the caller
+        // supplies the record's own `pane_id`, target it directly — tmux's
+        // session-scoped `send_line` resolves to whichever pane/window is
+        // currently ACTIVE, which is not necessarily (and after this bug,
+        // often was not) the pane this resume is actually about. `None`
+        // (a legacy record predating pane-id capture) preserves the prior
+        // session-scoped behavior — there is no stronger signal available.
+        let send_result = match pane_id {
+            Some(pane_id) => self.tmux.send_line_to_pane(tmux_name, pane_id, &cmd),
+            None => self.tmux.send_line(tmux_name, &cmd),
+        };
+        send_result.map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
         // #2157 item 1: durable publish for the RESUME path too — a fresh tmux
         // session is created on resume, so it needs the same belt-and-suspenders
         // set-environment call as spawn().
@@ -1847,6 +1864,7 @@ mod tests {
         adapter
             .spawn_resume(
                 "tmpm-test",
+                None,
                 cwd,
                 "task",
                 Some("my-session-id"),
@@ -1890,6 +1908,7 @@ mod tests {
         adapter
             .spawn_resume(
                 "tmpm-test",
+                None,
                 Path::new("/tmp/does-not-exist-2230"),
                 "task",
                 None,
@@ -1928,6 +1947,7 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new(fake.clone());
         let result = adapter.spawn_resume(
             "tmpm-test",
+            None,
             Path::new("/tmp/does-not-exist-2246"),
             "task",
             None,
@@ -1964,6 +1984,7 @@ mod tests {
         adapter
             .spawn_resume(
                 "tmpm-test",
+                None,
                 Path::new("/tmp/does-not-exist-2013"),
                 "task",
                 Some("stale-session-id"),
@@ -1987,6 +2008,96 @@ mod tests {
             sends[0].1.contains("env -u ANTHROPIC_API_KEY"),
             "fallback command must still scrub the API key: {}",
             sends[0].1
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn spawn_resume_targets_stored_pane_id_when_known() {
+        // Sibling-window hijack fix, follow-up to #2456: when the caller
+        // supplies `record.pane_id`, spawn_resume MUST target that SPECIFIC
+        // pane (via `send_line_to_pane`), never the bare session name (via
+        // `send_line`, which tmux resolves to whichever pane/window happens
+        // to be active — e.g. a sibling window opened after the original
+        // pane). This is the exact regression that let a resume/restart
+        // respawn `claude` into an unrelated active pane while the original
+        // pane sat at a bare shell.
+        let _home = HomeGuard::set();
+        if ClaudeCodeAdapter::resolve_claude().is_none() {
+            return;
+        };
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter
+            .spawn_resume(
+                "tmpm-test",
+                Some("%6015"),
+                Path::new("/tmp/does-not-exist-pane-target"),
+                "task",
+                None,
+                TEST_SESSION_ID,
+            )
+            .expect("spawn_resume with known pane_id");
+
+        let pane_sends = fake.pane_sends.lock().unwrap();
+        assert_eq!(
+            pane_sends.len(),
+            1,
+            "spawn_resume with a known pane_id must call send_line_to_pane exactly once: \
+             {pane_sends:?}"
+        );
+        assert_eq!(
+            pane_sends[0].0, "tmpm-test",
+            "pane-scoped send must target the record's tmux session name"
+        );
+        assert_eq!(
+            pane_sends[0].1, "%6015",
+            "pane-scoped send must target the record's STORED pane_id, not whatever pane \
+             tmux considers active"
+        );
+
+        let sends = fake.sends.lock().unwrap();
+        assert!(
+            sends.is_empty(),
+            "spawn_resume with a known pane_id must NEVER fall back to the session-scoped \
+             send_line (which tmux resolves to the active pane): {sends:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn spawn_resume_falls_back_to_session_target_when_pane_id_unknown() {
+        // The inverse of the above: a legacy record that predates pane-id
+        // capture (`pane_id: None`) has no stronger signal to target than the
+        // session name — spawn_resume must fall back to the pre-existing
+        // session-scoped `send_line`, not silently drop the command.
+        let _home = HomeGuard::set();
+        if ClaudeCodeAdapter::resolve_claude().is_none() {
+            return;
+        };
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter
+            .spawn_resume(
+                "tmpm-test",
+                None,
+                Path::new("/tmp/does-not-exist-no-pane"),
+                "task",
+                None,
+                TEST_SESSION_ID,
+            )
+            .expect("spawn_resume with no pane_id");
+
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(
+            sends.len(),
+            1,
+            "spawn_resume with no pane_id must fall back to session-scoped send_line: {sends:?}"
+        );
+        let pane_sends = fake.pane_sends.lock().unwrap();
+        assert!(
+            pane_sends.is_empty(),
+            "spawn_resume with no pane_id must never call send_line_to_pane: {pane_sends:?}"
         );
     }
 
@@ -2139,6 +2250,7 @@ mod tests {
         adapter
             .spawn_resume(
                 "test-tmux-session",
+                None,
                 tmp.path(),
                 "task",
                 None,

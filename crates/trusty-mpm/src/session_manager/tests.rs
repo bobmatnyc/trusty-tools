@@ -57,6 +57,23 @@ pub struct FakeTmuxDriver {
     /// simulate a real driver reporting the pane's actual cwd, including a
     /// deliberate mismatch against the requested workdir.
     pub pane_cwd_override: Mutex<Option<PathBuf>>,
+    /// Controllable `get_pane_id` response (sibling-window hijack fix,
+    /// follow-up to #2456) — `None` by default, matching the trait's "cannot
+    /// verify" default (this fake never captures a real pane_id at
+    /// `create_session` time); set to `Some(id)` to simulate a real driver
+    /// having captured one, so tests can exercise the pane-scoped resume
+    /// respawn / pane-gone-refusal paths.
+    pub pane_id_override: Mutex<Option<String>>,
+    /// Controllable `pane_exists` response (sibling-window hijack fix,
+    /// follow-up to #2456) — `None` by default, which falls through to the
+    /// trait's optimistic `true` default (matches every existing test's
+    /// assumption that a reused pane is still there); set to `Some(false)`
+    /// to simulate the recorded pane having been closed while a sibling
+    /// window keeps the tmux session alive.
+    pub pane_exists_override: Mutex<Option<bool>>,
+    /// Records every `send_line_to_pane` call as `(session_name, pane_id,
+    /// text)` (sibling-window hijack fix, follow-up to #2456).
+    pub pane_send_calls: Mutex<Vec<(String, String, String)>>,
 }
 
 impl FakeTmuxDriver {
@@ -71,6 +88,9 @@ impl FakeTmuxDriver {
             graceful_stop_calls: Mutex::new(Vec::new()),
             interrupt_calls: Mutex::new(Vec::new()),
             pane_cwd_override: Mutex::new(None),
+            pane_id_override: Mutex::new(None),
+            pane_exists_override: Mutex::new(None),
+            pane_send_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -152,6 +172,35 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     /// confirming (or disagreeing with) the pane's actual cwd.
     fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
         self.pane_cwd_override.lock().unwrap().clone()
+    }
+
+    /// Report the controllable `pane_id_override` (sibling-window hijack fix,
+    /// follow-up to #2456) instead of the trait's silent `None` default, so
+    /// tests can simulate a real driver having captured a `pane_id` at
+    /// `create_session` time.
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        self.pane_id_override.lock().unwrap().clone()
+    }
+
+    /// Report the controllable `pane_exists_override` (sibling-window hijack
+    /// fix, follow-up to #2456) when set; otherwise fall through to the
+    /// trait's optimistic `true` default — matches every existing test's
+    /// implicit assumption that a reused pane is still there.
+    fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+        self.pane_exists_override.lock().unwrap().unwrap_or(true)
+    }
+
+    /// Records `(name, pane_id, text)` instead of delegating to `send_line`
+    /// (the trait default) — a test asserting `pane_send_calls` got the call
+    /// and `send_calls` stayed empty is exactly what proves the manager chose
+    /// the pane-scoped path over the session-scoped one.
+    fn send_line_to_pane(&self, name: &str, pane_id: &str, text: &str) -> Result<(), ManagedError> {
+        self.pane_send_calls.lock().unwrap().push((
+            name.to_owned(),
+            pane_id.to_owned(),
+            text.to_owned(),
+        ));
+        Ok(())
     }
 }
 
