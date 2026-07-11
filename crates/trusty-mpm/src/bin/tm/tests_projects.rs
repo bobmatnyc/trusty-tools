@@ -25,6 +25,48 @@ fn projects_action(argv: &[&str]) -> ProjectsAction {
     }
 }
 
+/// #2118: `ProjectsAction` stays a MANDATORY clap subcommand — a bare
+/// `tm projects` (no verb) must still fail to parse with a clap usage error,
+/// unchanged from before #2118. The interactive-TTY TUI launch is intercepted
+/// in `main.rs` BEFORE `Cli::try_parse()` even runs (see
+/// `commands::projects::is_bare_projects_argv`), so it never reaches this
+/// parse path at all.
+///
+/// Why this asserts `exit_code()` rather than a specific `ErrorKind`: clap's
+/// internal validator (`clap_builder`'s `parser::validator::Validator::validate`)
+/// checks `is_arg_required_else_help_set()` BEFORE `is_subcommand_required_set()`
+/// — whichever is true first decides between
+/// `ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand` and
+/// `ErrorKind::MissingSubcommand`. That internal, non-`Option`-derived
+/// resolution was observed to differ between this project's local dev
+/// environment (always `MissingSubcommand`, confirmed via
+/// `cargo test --workspace` too, not just `-p trusty-mpm`) and CI's Linux
+/// runner (`DisplayHelpOnMissingArgumentOrSubcommand`) despite an identical
+/// locked `clap_builder` version (4.6.0, verified via `Cargo.lock`) — i.e. it
+/// is not this project's dependency resolution that differs. Both kinds are
+/// `Stream::Stderr` in `clap_builder`'s `error::Error::stream()` (only
+/// `DisplayHelp`/`DisplayVersion` map to `Stream::Stdout`), so both share
+/// `exit_code() == 2` regardless of which one fires — that shared, portable
+/// contract (a non-zero exit, not clap's internal error-kind taxonomy) is
+/// what `main.rs`'s bare-invocation interception actually depends on, so it
+/// is what this test pins.
+/// Test: this test.
+#[test]
+fn cli_rejects_bare_projects_with_a_usage_error() {
+    let err =
+        Cli::try_parse_from(["tm", "projects"]).expect_err("bare `projects` must fail to parse");
+    assert_eq!(err.exit_code(), 2);
+    assert!(
+        matches!(
+            err.kind(),
+            clap::error::ErrorKind::MissingSubcommand
+                | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        ),
+        "expected a 'needs a subcommand' usage error, got {:?}",
+        err.kind()
+    );
+}
+
 // ───────────────────────── registry verbs (#2115) ─────────────────────────
 
 #[test]
