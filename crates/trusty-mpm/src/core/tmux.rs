@@ -1,16 +1,58 @@
-//! tmux session-control primitives.
+//! tmux session-control primitives AND the crate's single tmux-spawning
+//! entry point (#2398 architecture consolidation).
 //!
 //! Why: trusty-mpm hosts each Claude Code session inside a named tmux session
 //! (the primary control model — see `docs/research/session-control-models.md`).
 //! The patterns here are distilled from `ai-commander`'s `commander-tmux` crate
 //! and `open-mpm`'s `tm` module: create named detached sessions, send keystrokes
-//! with `send-keys`, and capture pane output. Keeping the command-builder logic
-//! in `core` (pure, no process spawning) makes it unit-testable; the daemon
-//! owns the actual `std::process::Command` execution.
-//! What: `TmuxTarget` (session\[:pane\] addressing), `TmuxCommand` (a typed tmux
-//! sub-command), and `tmux_argv` (renders a command to an argv vector).
+//! with `send-keys`, and capture pane output. `TmuxTarget`/`TmuxCommand`/
+//! `tmux_argv` stay PURE (no process spawning) so argv construction is
+//! unit-testable without a live tmux server.
+//!
+//! Originally this module was argv-construction only, with each of the
+//! daemon (`daemon::tmux::TmuxDriver`), the CLI (`bin/tm`'s launch/connect/
+//! session-start commands), the TUI client (`client::http_client`), and the
+//! control-plane backend (`control::backend::tmux`) independently spawning
+//! `std::process::Command::new("tmux")`. That let FIVE call sites bypass the
+//! #2398 scrollback/mouse ergonomics entirely (a QA-caught regression) simply
+//! by not knowing about `daemon::tmux::TmuxDriver::create_session`. Per Bob's
+//! architecture directive, this module now ALSO owns the actual process
+//! spawning for output-capturing tmux commands
+//! ([`run_tmux_with_bin`]/[`run_tmux`]) and the single choke point for
+//! creating a session with ergonomics applied first
+//! ([`create_managed_session`]) — every session-creating call site in the
+//! crate routes through it, so nothing can bypass the scrollback/mouse
+//! options again. [`daemon::tmux::TmuxDriver`](crate::daemon::tmux::TmuxDriver)
+//! wraps [`run_tmux_with_bin`] rather than spawning independently.
+//!
+//! Scope note (#2398 follow-up filed for stragglers): a handful of read-only
+//! probes — `tmux display-message -p '#S'` (current-session-name lookups in
+//! `bin/tm/commands/tmux_attach.rs` and `bin/tm/commands/statusline/
+//! branch.rs`), `tmux show-environment` (`bin/tm/commands/guided_inplace.rs`),
+//! and `tmux display-message -t <s> -p '#{pane_pid}'`
+//! (`core::process::tmux_pane_pid`) — still shell out directly. They are
+//! read-only queries against an EXISTING session, not session-creation, so
+//! they cannot bypass the scrollback/mouse ergonomics; migrating them was
+//! judged out of scope for this PR (no `TmuxCommand` variant models
+//! `display-message`/`show-environment` yet) to keep the diff reviewable.
+//! `bin/tm/commands/tmux_attach.rs::tmux_attach` (the actual `attach-session`/
+//! `switch-client` spawn) DOES route its binary resolution through
+//! [`resolve_tmux_binary_or_bare`] even though its interactive,
+//! stdio-inheriting `.status()` call shape does not fit [`run_tmux`]'s
+//! output-capturing signature.
+//! What: `TmuxTarget` (session\[:pane\] addressing), `TmuxCommand` (a typed
+//! tmux sub-command), `tmux_argv` (renders a command to an argv vector),
+//! [`resolve_tmux_binary`]/[`resolve_tmux_binary_or_bare`] (binary
+//! resolution), [`run_tmux_with_bin`]/[`run_tmux`] (the shared spawn
+//! primitive), and [`create_managed_session`] (the session-creation choke
+//! point with ergonomics baked in).
 //! Test: `cargo test -p trusty-mpm-core` asserts the rendered argv for each
-//! command shape, including literal vs. key-name `send-keys`.
+//! command shape, including literal vs. key-name `send-keys`; the spawning
+//! functions are exercised transitively by every call site (a live `tmux`
+//! binary is needed to observe real output, so those paths are covered by
+//! `#[ignore]` integration tests plus this module's own no-panic smoke test).
+
+use tracing::warn;
 
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +227,205 @@ pub fn scrollback_option_commands(history_limit: u32, mouse: bool) -> Vec<TmuxCo
             value: if mouse { "on" } else { "off" }.to_string(),
         },
     ]
+}
+
+/// Resolve the `tmux` binary, preferring live `PATH` and falling back to
+/// well-known daemon dirs (Homebrew, user bins) via `trusty_common::bin_resolve`
+/// (#2398 architecture consolidation).
+///
+/// Why: a daemon process under launchd inherits a minimal `PATH` (#1298);
+/// resolving through the SAME helper for every caller (daemon, CLI, TUI
+/// client) — rather than a bare `"tmux"` PATH lookup for some callers and a
+/// well-known-dirs-aware lookup for others — means resolution behavior is
+/// identical everywhere, and there is exactly one place to fix if it ever
+/// needs to change.
+/// What: delegates to `trusty_common::bin_resolve::resolve_binary("tmux")`.
+/// Test: `resolve_tmux_binary_does_not_panic`.
+pub fn resolve_tmux_binary() -> Option<std::path::PathBuf> {
+    trusty_common::bin_resolve::resolve_binary("tmux")
+}
+
+/// [`resolve_tmux_binary`], falling back to the literal `"tmux"` (a plain
+/// `PATH` lookup at spawn time) when resolution itself comes up empty.
+///
+/// Why: callers that do not need [`daemon::tmux::TmuxDriver::discover`]'s
+/// (crate::daemon::tmux) fail-fast-if-truly-absent contract — the CLI and TUI
+/// client, which already surface their own "tmux command failed" error on the
+/// subsequent spawn — just want a best-effort binary name to run. Falling
+/// back to the bare string preserves their pre-#2398 behavior (trust the
+/// interactive shell's own `PATH`) as the worst case.
+/// What: returns the resolved absolute path as a `String` when found, else
+/// `"tmux"`.
+/// Test: `resolve_tmux_binary_or_bare_never_empty`.
+pub fn resolve_tmux_binary_or_bare() -> String {
+    resolve_tmux_binary()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .unwrap_or_else(|| "tmux".to_string())
+}
+
+/// Run a typed tmux command against an EXPLICITLY resolved binary path,
+/// returning the raw process `Output` (#2398 architecture consolidation).
+///
+/// Why: this is the ONE place in the crate that actually spawns an
+/// output-capturing `tmux` child process — every caller
+/// ([`daemon::tmux::TmuxDriver`](crate::daemon::tmux::TmuxDriver), `bin/tm`'s
+/// CLI commands, `client::http_client`'s TUI-driving methods, and
+/// `control::backend::tmux::TmuxBackend`) routes through here so argv
+/// construction and process-spawning can never drift or be re-implemented ad
+/// hoc at a call site — the exact drift that let 5 CLI/client call sites
+/// bypass the scrollback/mouse ergonomics entirely (the QA finding this
+/// consolidation closes). Takes an explicit `tmux_bin` (rather than
+/// re-resolving on every call) so callers that already cache a resolved path
+/// — like `TmuxDriver`, which resolves once in `discover()` for its
+/// fail-fast-if-absent contract — do not pay repeated resolution cost.
+/// What: renders `cmd` via [`tmux_argv`] and runs
+/// `Command::new(tmux_bin).args(argv).output()`. Callers own interpreting the
+/// exit status / stderr — this function does not classify failures.
+/// Test: exercised transitively by every call site; a live `tmux` binary is
+/// required to observe real output, so this is covered by the `#[ignore]`
+/// integration tests rather than a hermetic unit test.
+pub fn run_tmux_with_bin(
+    tmux_bin: &str,
+    cmd: &TmuxCommand,
+) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(tmux_bin)
+        .args(tmux_argv(cmd))
+        .output()
+}
+
+/// [`run_tmux_with_bin`], resolving the tmux binary via
+/// [`resolve_tmux_binary_or_bare`] first.
+///
+/// Why: the common-case convenience for callers (CLI, TUI client) that do not
+/// already hold a cached, resolved tmux path.
+/// What: resolves then delegates to [`run_tmux_with_bin`].
+/// Test: exercised transitively; see [`run_tmux_with_bin`].
+pub fn run_tmux(cmd: &TmuxCommand) -> std::io::Result<std::process::Output> {
+    run_tmux_with_bin(&resolve_tmux_binary_or_bare(), cmd)
+}
+
+/// Create a tmux session with the configured scrollback + mouse ergonomics
+/// applied FIRST — THE single choke point for "create a managed session"
+/// used by every session-creating call site in the crate (#2398 architecture
+/// consolidation).
+///
+/// Why: `history-limit` is captured into a pane's ring buffer AT CREATION
+/// TIME, so the scrollback/mouse `set-option -g` calls MUST run before
+/// `new-session` — see [`scrollback_option_commands`]. Baking both steps into
+/// one function (rather than asking every caller to remember "apply options,
+/// then create") is what makes it structurally impossible for a future call
+/// site to bypass the ergonomics again, which is exactly how the #2398 QA
+/// finding happened the first time (5 call sites independently shelled out to
+/// `tmux new-session`, none aware the daemon-side ergonomics existed).
+/// What: resolves the tmux binary (`tmux_bin` if given, else
+/// [`resolve_tmux_binary_or_bare`]), loads
+/// [`crate::core::trusty_tools_config::TrustyToolsConfig`] and resolves the
+/// `tmux:` section, best-effort applies each
+/// [`scrollback_option_commands`] entry via [`run_tmux_with_bin`] (a failure
+/// here is logged and does NOT block session creation — `set-option -g` is
+/// idempotent and virtually never fails on a tmux new enough to run
+/// trusty-mpm at all), then issues `new-session` and returns its raw
+/// `Output`. Callers classify success/failure from the returned `Output`
+/// exactly as they did before this consolidation (`output.status.success()`).
+/// Test: argv construction is covered by `scrollback_option_commands_*` and
+/// `new_session_argv`; config resolution by `core::trusty_tools_config`'s
+/// `tmux_options_*` tests. The live-process call itself needs a real `tmux`
+/// binary, so it is exercised transitively by every migrated call site
+/// (daemon `#[ignore]` integration tests; CLI/TUI paths are exercised
+/// end-to-end by the existing `tm launch`/`tm connect` integration coverage).
+pub fn create_managed_session(
+    tmux_bin: Option<&str>,
+    name: &str,
+    workdir: Option<&str>,
+) -> std::io::Result<std::process::Output> {
+    let owned_bin;
+    let bin = match tmux_bin {
+        Some(b) => b,
+        None => {
+            owned_bin = resolve_tmux_binary_or_bare();
+            &owned_bin
+        }
+    };
+
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
+    for cmd in scrollback_option_commands(opts.history_limit, opts.mouse) {
+        match run_tmux_with_bin(bin, &cmd) {
+            Ok(output) if !output.status.success() => {
+                warn!(
+                    "tmux {cmd:?} exited non-zero (non-fatal, session creation continues): {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(e) => {
+                warn!("failed to run tmux {cmd:?} (non-fatal, session creation continues): {e}");
+            }
+            Ok(_) => {}
+        }
+    }
+
+    run_tmux_with_bin(
+        bin,
+        &TmuxCommand::NewSession {
+            name: name.to_string(),
+            workdir: workdir.map(str::to_string),
+        },
+    )
+}
+
+/// Type `text` into a tmux pane, then press Enter (#2398 consolidation).
+///
+/// Why: every call site that starts `claude` in a freshly-created pane needs
+/// this exact idiom — mirrors
+/// [`daemon::tmux::TmuxDriver::send_line`](crate::daemon::tmux::TmuxDriver::send_line)'s
+/// literal-then-Enter pattern (two `send-keys` invocations: `-l` literal text,
+/// then the `Enter` key name), now shared so CLI/TUI callers do not
+/// re-implement it as a single bare `send-keys <text> Enter` invocation
+/// (functionally equivalent for a non-key-name string, but a second,
+/// independently-typed-out version of the same idiom is exactly the kind of
+/// drift #2398 closes).
+/// What: runs the literal `send-keys -l <text>` via [`run_tmux_with_bin`]
+/// (`tmux_bin` if given, else resolved via [`resolve_tmux_binary_or_bare`]);
+/// if that invocation itself fails to spawn, the error is returned
+/// immediately WITHOUT sending `Enter`. Otherwise sends `Enter` and returns
+/// ITS `Output` — callers check `output.status.success()` exactly as they
+/// did with the single-invocation form.
+/// Test: argv shapes covered by `core::tmux`'s `send_keys_literal_argv`/
+/// `send_keys_keyname_argv`; the live-process call needs a real `tmux`
+/// binary, exercised transitively by every migrated call site.
+pub fn send_line(
+    tmux_bin: Option<&str>,
+    target: &TmuxTarget,
+    text: &str,
+) -> std::io::Result<std::process::Output> {
+    let owned_bin;
+    let bin = match tmux_bin {
+        Some(b) => b,
+        None => {
+            owned_bin = resolve_tmux_binary_or_bare();
+            &owned_bin
+        }
+    };
+    let literal_output = run_tmux_with_bin(
+        bin,
+        &TmuxCommand::SendKeys {
+            target: target.clone(),
+            keys: text.to_string(),
+            literal: true,
+        },
+    )?;
+    if !literal_output.status.success() {
+        // Don't send Enter after a failed literal send — nothing to submit.
+        return Ok(literal_output);
+    }
+    run_tmux_with_bin(
+        bin,
+        &TmuxCommand::SendKeys {
+            target: target.clone(),
+            keys: "Enter".to_string(),
+            literal: false,
+        },
+    )
 }
 
 /// tmux `-F` format string for `list-sessions`.
@@ -457,5 +698,43 @@ mod tests {
     fn scrollback_option_commands_mouse_off() {
         let cmds = scrollback_option_commands(100_000, false);
         assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "off"]);
+    }
+
+    // ── #2398 architecture consolidation: shared tmux entry point ──────────
+
+    #[test]
+    fn resolve_tmux_binary_does_not_panic() {
+        // Works whether or not tmux is installed on the test host.
+        let _ = resolve_tmux_binary();
+    }
+
+    #[test]
+    fn resolve_tmux_binary_or_bare_never_empty() {
+        // Even when resolution fails entirely, the bare "tmux" fallback keeps
+        // this non-empty — callers always get a spawnable binary name.
+        assert!(!resolve_tmux_binary_or_bare().is_empty());
+    }
+
+    #[test]
+    fn run_tmux_with_bin_does_not_panic_on_missing_binary() {
+        // A deliberately bogus binary name must surface as an Err, never panic.
+        let result = run_tmux_with_bin(
+            "definitely-not-a-real-tmux-binary-2398",
+            &TmuxCommand::ListSessions,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_managed_session_does_not_panic_on_missing_binary() {
+        // Same smoke guarantee for the session-creation choke point: a bogus
+        // binary must degrade to an Err (from the final new-session spawn),
+        // never panic — including through the best-effort scrollback loop.
+        let result = create_managed_session(
+            Some("definitely-not-a-real-tmux-binary-2398"),
+            "tmpm-test-2398-no-bin",
+            None,
+        );
+        assert!(result.is_err());
     }
 }

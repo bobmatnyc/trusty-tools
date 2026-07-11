@@ -212,6 +212,23 @@ pub const DEFAULT_TMUX_HISTORY_LIMIT: u32 = 100_000;
 /// Test: `tmux_options_default_when_no_config`.
 pub const DEFAULT_TMUX_MOUSE: bool = true;
 
+/// Minimum tmux `history-limit` accepted from config (#2398 QA finding).
+///
+/// Why: `history-limit 0` does NOT mean "unlimited" in tmux — it means "keep
+/// no scrollback beyond the visible screen", the exact opposite of what an
+/// operator setting `tmux.history_limit: 0` almost certainly intended (this
+/// is a common mental-model mismatch with tools where `0` conventionally
+/// means unbounded). Rather than silently honouring a self-defeating value
+/// that reintroduces the unscrollable-session problem #2398 exists to fix, a
+/// configured value below this floor is clamped UP to it.
+/// What: `1_000`. Deliberately below [`DEFAULT_TMUX_HISTORY_LIMIT`] so an
+/// operator who intentionally wants a SMALL (but still usable) scrollback
+/// can still dial it down — only the pathological `0` (or another
+/// near-zero value) is corrected.
+/// Test: `tmux_options_clamps_zero_history_limit`,
+/// `tmux_options_clamps_below_minimum`.
+pub const MIN_TMUX_HISTORY_LIMIT: u32 = 1_000;
+
 /// The `tmux:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#2398).
 ///
 /// Why: managed sessions inherited tmux's tiny default `history-limit`
@@ -220,17 +237,20 @@ pub const DEFAULT_TMUX_MOUSE: bool = true;
 /// built-in defaults — no regression for existing configs.
 /// What: `history_limit` (scrollback lines retained per pane) and `mouse`
 /// (server-wide wheel-scroll/copy-mode toggle). Resolution precedence
-/// (config > built-in default) lives in [`resolve_tmux_options`], not here —
-/// this is purely the on-disk shape.
+/// (config > built-in default, clamped to [`MIN_TMUX_HISTORY_LIMIT`]) lives
+/// in [`resolve_tmux_options`], not here — this is purely the on-disk shape.
 /// Test: `tmux_config_yaml_round_trip`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxConfig {
     /// Scrollback lines retained per pane (tmux `history-limit`).
     ///
-    /// `None` → [`DEFAULT_TMUX_HISTORY_LIMIT`]. Only affects panes created
-    /// AFTER this is applied — tmux captures `history-limit` into a pane's
-    /// ring buffer at creation time, so an already-running pane's scrollback
-    /// is never retroactively grown (a tmux limitation, not a trusty-mpm one).
+    /// `None` → [`DEFAULT_TMUX_HISTORY_LIMIT`]. A configured value below
+    /// [`MIN_TMUX_HISTORY_LIMIT`] (including `0`, which tmux treats as "no
+    /// scrollback", not "unlimited") is clamped up to it — see
+    /// [`resolve_tmux_options`]. Only affects panes created AFTER this is
+    /// applied — tmux captures `history-limit` into a pane's ring buffer at
+    /// creation time, so an already-running pane's scrollback is never
+    /// retroactively grown (a tmux limitation, not a trusty-mpm one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_limit: Option<u32>,
 
@@ -261,18 +281,25 @@ pub struct ResolvedTmuxOptions {
 /// sessions (#2398).
 ///
 /// Why: gives every tmux-session-creating call site (normal spawn, resume/
-/// restart, GUI spawn-mode, config-restart) a single answer, so a future
-/// config change cannot land in one call site and be forgotten in another.
+/// restart, GUI spawn-mode, config-restart, and the CLI/TUI paths that create
+/// sessions directly) a single answer, so a future config change cannot land
+/// in one call site and be forgotten in another.
 /// What: applies precedence **config `tmux.history_limit`/`tmux.mouse`
 /// override > built-in default** ([`DEFAULT_TMUX_HISTORY_LIMIT`] /
-/// [`DEFAULT_TMUX_MOUSE`]) for each field independently.
-/// Test: `tmux_options_default_when_no_config`, `tmux_options_config_override`.
+/// [`DEFAULT_TMUX_MOUSE`]) for each field independently, then clamps
+/// `history_limit` up to [`MIN_TMUX_HISTORY_LIMIT`] — a configured `0` (or
+/// any other near-zero value) does NOT mean "unlimited" in tmux, so it is
+/// corrected rather than honoured verbatim (#2398 QA finding).
+/// Test: `tmux_options_default_when_no_config`, `tmux_options_config_override`,
+/// `tmux_options_clamps_zero_history_limit`, `tmux_options_clamps_below_minimum`.
 pub fn resolve_tmux_options(config: &TrustyToolsConfig) -> ResolvedTmuxOptions {
     let section = config.tmux.as_ref();
+    let history_limit = section
+        .and_then(|t| t.history_limit)
+        .unwrap_or(DEFAULT_TMUX_HISTORY_LIMIT)
+        .max(MIN_TMUX_HISTORY_LIMIT);
     ResolvedTmuxOptions {
-        history_limit: section
-            .and_then(|t| t.history_limit)
-            .unwrap_or(DEFAULT_TMUX_HISTORY_LIMIT),
+        history_limit,
         mouse: section.and_then(|t| t.mouse).unwrap_or(DEFAULT_TMUX_MOUSE),
     }
 }
@@ -946,6 +973,54 @@ mod tests {
         let opts = resolve_tmux_options(&partial);
         assert_eq!(opts.history_limit, 10_000);
         assert_eq!(opts.mouse, DEFAULT_TMUX_MOUSE);
+    }
+
+    /// Why (#2398 QA finding): `history-limit 0` means "no scrollback" in
+    /// tmux, not "unlimited" — a configured `0` must be clamped up to
+    /// [`MIN_TMUX_HISTORY_LIMIT`] rather than honoured verbatim, which would
+    /// silently reintroduce the unscrollable-session problem this feature
+    /// exists to fix.
+    /// Test: itself.
+    #[test]
+    fn tmux_options_clamps_zero_history_limit() {
+        let cfg = TrustyToolsConfig {
+            tmux: Some(TmuxConfig {
+                history_limit: Some(0),
+                mouse: None,
+            }),
+            ..Default::default()
+        };
+        let opts = resolve_tmux_options(&cfg);
+        assert_eq!(opts.history_limit, MIN_TMUX_HISTORY_LIMIT);
+    }
+
+    /// Why: any near-zero configured value below the floor is clamped, not
+    /// just the literal `0` case.
+    /// Test: itself.
+    #[test]
+    fn tmux_options_clamps_below_minimum() {
+        let cfg = TrustyToolsConfig {
+            tmux: Some(TmuxConfig {
+                history_limit: Some(42),
+                mouse: None,
+            }),
+            ..Default::default()
+        };
+        let opts = resolve_tmux_options(&cfg);
+        assert_eq!(opts.history_limit, MIN_TMUX_HISTORY_LIMIT);
+
+        // A value AT the floor is left untouched (not bumped further).
+        let at_floor = TrustyToolsConfig {
+            tmux: Some(TmuxConfig {
+                history_limit: Some(MIN_TMUX_HISTORY_LIMIT),
+                mouse: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_tmux_options(&at_floor).history_limit,
+            MIN_TMUX_HISTORY_LIMIT
+        );
     }
 
     /// Why: the project subpath must nest `<owner>/<repo>` under the root in that

@@ -441,10 +441,12 @@ pub(crate) fn normalize_workdir(workdir: &str) -> String {
 /// What: runs `tmux has-session -t <name>` and returns true on exit code 0.
 /// Test: covered indirectly by the launch reconnect integration path.
 pub(crate) fn tmux_has_session(name: &str) -> bool {
+    // #2398 architecture consolidation: routes through the crate's single
+    // tmux entry point instead of shelling out independently.
     matches!(
-        std::process::Command::new("tmux")
-            .args(["has-session", "-t", name])
-            .status(),
-        Ok(status) if status.success()
+        trusty_mpm::core::tmux::run_tmux(&trusty_mpm::core::tmux::TmuxCommand::HasSession {
+            name: name.to_string(),
+        }),
+        Ok(output) if output.status.success()
     )
 }

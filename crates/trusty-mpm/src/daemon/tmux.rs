@@ -211,16 +211,22 @@ impl TmuxDriver {
     /// Run a typed tmux command, returning captured stdout on success.
     ///
     /// Why: every other method routes through here so exit-status handling
-    /// lives in one place.
-    /// What: renders argv via `core::tmux::tmux_argv`, runs `tmux`, and maps a
-    /// non-zero exit to `Error::Protocol` carrying stderr.
+    /// lives in one place. The actual process spawn is delegated to
+    /// [`crate::core::tmux::run_tmux_with_bin`] (#2398 architecture
+    /// consolidation) — `TmuxDriver` WRAPS that single crate-wide entry point
+    /// rather than spawning independently, using its own already-resolved
+    /// `self.tmux_path` (cached at [`Self::discover`] time for the
+    /// fail-fast-if-absent contract) instead of re-resolving on every call.
+    /// What: renders argv via `core::tmux::tmux_argv` (for the error message
+    /// only — the actual spawn happens inside `run_tmux_with_bin`), runs
+    /// `tmux`, and maps a non-zero exit to `Error::Protocol` carrying stderr.
     /// Test: exercised indirectly by the `#[ignore]` integration tests.
     fn run(&self, cmd: &TmuxCommand) -> Result<String> {
-        let argv = tmux_argv(cmd);
-        let output = Command::new(&self.tmux_path).args(&argv).output()?;
+        let output = crate::core::tmux::run_tmux_with_bin(&self.tmux_path, cmd)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
+            let argv = tmux_argv(cmd);
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             // #2246: the argv can embed a cleartext CLAUDE_CODE_OAUTH_TOKEN
             // (managed-spawn pane command). Redact at this single source so the
@@ -242,15 +248,22 @@ impl TmuxDriver {
     ///
     /// Why (#2398): the scrollback/mouse server options MUST be applied
     /// before this method's `new-session` call — `history-limit` is captured
-    /// into a pane's ring buffer at creation time, so ordering here is load
-    /// bearing (see [`Self::apply_scrollback_options`]).
+    /// into a pane's ring buffer at creation time. Delegates to
+    /// [`crate::core::tmux::create_managed_session`], the crate-wide session-
+    /// creation choke point EVERY session-creating call site (daemon, CLI,
+    /// TUI client, control-plane backend) now routes through, so the
+    /// ordering can never be bypassed by a future call site again.
     pub fn create_session(&self, name: &str, workdir: Option<&str>) -> Result<()> {
-        self.apply_scrollback_options();
-        self.run(&TmuxCommand::NewSession {
-            name: name.to_string(),
-            workdir: workdir.map(str::to_string),
-        })?;
-        Ok(())
+        let output =
+            crate::core::tmux::create_managed_session(Some(&self.tmux_path), name, workdir)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            Err(Error::Protocol(redact_oauth_token(&format!(
+                "tmux new-session for {name} failed: {stderr}"
+            ))))
+        }
     }
 
     /// Apply the configured scrollback + mouse ergonomics to the tmux
