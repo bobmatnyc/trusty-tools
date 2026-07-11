@@ -185,6 +185,7 @@ impl SessionManager {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────
@@ -240,6 +241,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         }
     }
 
@@ -265,6 +267,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         }
     }
 

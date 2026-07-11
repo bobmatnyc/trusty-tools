@@ -36,6 +36,7 @@ fn make_record(source_id: Option<&str>) -> SessionRecord {
         claude_session_id: None,
         scrollback_path: None,
         last_cwd: None,
+        deliverable_id: None,
     }
 }
 
@@ -87,6 +88,49 @@ fn serializers_include_source_id() {
     );
 }
 
+/// Why: `record_to_json` (MCP path) and `record_to_summary` (HTTP path) must
+/// both surface `deliverable_id` (DOC-35 §10.6, #2379) so `tm sessions ls`/
+/// `status` and the MCP tools can show which Deliverable a session is bound
+/// to, exactly as they already do for `source_id`.
+/// What: asserts a bound session serializes the stringified id on both paths,
+/// and an unbound session serializes JSON `null` / `None` respectively.
+/// Test: this test.
+#[test]
+fn serializers_include_deliverable_id() {
+    use crate::deliverable::DeliverableId;
+
+    // ── Case 1: deliverable_id is set ─────────────────────────────────────
+    let mut r = make_record(None);
+    let did = DeliverableId::new();
+    r.deliverable_id = Some(did);
+
+    let json = record_to_json(&r);
+    assert_eq!(
+        json["deliverable_id"].as_str(),
+        Some(did.to_string().as_str()),
+        "record_to_json must serialize deliverable_id when present"
+    );
+    let summary = record_to_summary(&r);
+    assert_eq!(
+        summary.deliverable_id.as_deref(),
+        Some(did.to_string().as_str()),
+        "record_to_summary must include deliverable_id when present"
+    );
+
+    // ── Case 2: deliverable_id is None (the common, unbound case) ─────────
+    let r_none = make_record(None);
+    let json_none = record_to_json(&r_none);
+    assert!(
+        json_none["deliverable_id"].is_null(),
+        "record_to_json must serialize deliverable_id as null when absent"
+    );
+    let summary_none = record_to_summary(&r_none);
+    assert_eq!(
+        summary_none.deliverable_id, None,
+        "record_to_summary must carry None deliverable_id when absent"
+    );
+}
+
 /// Verify that `DecommissionResponse.workspace_removed` correctly reflects
 /// workspace ownership rather than being inferred from the post-call filesystem.
 ///
@@ -121,6 +165,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         task: None,
         cwd: None,
         claude_session_id: None,
+        deliverable_id: None,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -151,6 +196,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         task: None,
         cwd: None,
         claude_session_id: None,
+        deliverable_id: None,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

@@ -172,6 +172,9 @@ pub enum TrustyCommand {
         /// (`--no-inject`); `None`/`Some(true)` → the daemon auto-injects the
         /// task once the runtime is ready (the turnkey default).
         inject_task: Option<bool>,
+        /// Optional Deliverable id to bind this session to (`--deliverable`,
+        /// DOC-35 §10.6, #2379). `None` → no link, the common case.
+        deliverable_id: Option<String>,
     },
     /// List every managed session (`sessions.list`).
     ManagedList,
@@ -308,6 +311,7 @@ mod tests {
             name_hint: Some("api".into()),
             runtime: Some("tcode".into()),
             inject_task: None,
+            deliverable_id: None,
         };
         assert_eq!(spawn.clone(), spawn);
         let answer = TrustyCommand::ManagedAnswer {

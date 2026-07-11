@@ -1313,6 +1313,7 @@ fn route_new_builds_managed_new() {
             name_hint: None,
             runtime: None,
             inject_task: None,
+            deliverable_id: None,
         })
     );
 }

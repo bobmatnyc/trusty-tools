@@ -78,6 +78,21 @@ pub struct SpawnParams {
     /// additionally gated by [`crate::session_manager::should_inject_task`]
     /// (non-empty task, Claude Code runtime, session reached `Active`).
     pub inject_task: Option<bool>,
+    /// Optional Deliverable id to bind this session to (DOC-35 §10.6, #2379).
+    ///
+    /// Why: `tm sessions new --deliverable <id>` links a session to a
+    /// Deliverable so its status/ls output can surface which unit of work the
+    /// session is advancing (§10.6: 1 Deliverable ↔ many Sessions). Carried as
+    /// the raw stringified id here — the HTTP route (`spawn_session`) is
+    /// responsible for validating the Deliverable exists AND belongs to the
+    /// spawning project BEFORE any provisioning side effect (a 404-style
+    /// [`crate::daemon::error::DaemonError::DeliverableNotFound`] otherwise);
+    /// [`spawn_managed`] trusts that pre-validation and just persists the
+    /// pointer post-creation via
+    /// [`crate::session_manager::SessionManager::set_deliverable_id`]. A
+    /// malformed or absent id is silently a no-op link (`None`) — never a
+    /// reason to fail an otherwise-successful spawn.
+    pub deliverable_id: Option<String>,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -143,15 +158,45 @@ pub async fn spawn_managed(
         params.repo_url.clone(),
         state.event_tx.clone(),
     );
-    // Capture the injection opt-out before `params` is moved into the routed
-    // dispatch. `None`/`Some(true)` → turnkey (inject); `Some(false)` →
+    // Capture the injection opt-out and the (already HTTP-layer-validated)
+    // Deliverable link before `params` is moved into the routed dispatch.
+    // inject_task: `None`/`Some(true)` → turnkey (inject); `Some(false)` →
     // metadata-only (`--no-inject`).
     let inject_flag = params.inject_task != Some(false);
-    let record = crate::core::provisioning_stage::scoped(
+    let deliverable_id = params.deliverable_id.clone();
+    let mut record = crate::core::provisioning_stage::scoped(
         emitter,
         spawn_managed_routed(state, session_id, params, runtime, config),
     )
     .await?;
+
+    // Deliverable linkage (DOC-35 §10.6, #2379): the HTTP route already
+    // validated `deliverable_id` exists and belongs to this project BEFORE
+    // provisioning started, so this is a trusting, non-fatal persist of a
+    // PURE POINTER — never a reason to fail an otherwise-successful spawn,
+    // and never a mutation of the Deliverable itself (§11 forbids
+    // auto-transitions). The local `record` is updated too so the immediate
+    // spawn response already reflects the link, not just later `GET`s.
+    if let Some(raw_id) = deliverable_id {
+        match raw_id.parse::<crate::deliverable::DeliverableId>() {
+            Ok(did) => match state
+                .session_manager()
+                .await
+                .set_deliverable_id(&record.id, did)
+                .await
+            {
+                Ok(()) => record.deliverable_id = Some(did),
+                Err(e) => warn!(
+                    id = %record.id,
+                    "spawn_managed: set_deliverable_id failed: {e}; deliverable link not recorded"
+                ),
+            },
+            Err(e) => warn!(
+                id = %record.id,
+                "spawn_managed: deliverable_id {raw_id:?} failed to re-parse (already validated by the HTTP layer): {e}"
+            ),
+        }
+    }
 
     // Turnkey task injection (#1903 / #1299): once the pane is up and the
     // runtime is ready, deliver the task through the same seam `tm session send`
@@ -1571,6 +1616,7 @@ mod tests {
             claude_session_id: None,
             scrollback_path: None,
             last_cwd: None,
+            deliverable_id: None,
         }
     }
 
@@ -1827,6 +1873,7 @@ mod tests {
             ephemeral: Some(true),
             mcp_initiated: false,
             inject_task: None,
+            deliverable_id: None,
         };
 
         let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();

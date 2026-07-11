@@ -465,6 +465,12 @@ pub struct ManagedSpawnRequest {
     /// task once the runtime is ready). Absent → the daemon default (inject).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject_task: Option<bool>,
+    /// Optional Deliverable id to bind this session to (DOC-35 §10.6, #2379).
+    /// Absent → no link, the common case; the CLI omits the field entirely
+    /// when `--deliverable` was not passed (same additive wire pattern
+    /// `inject_task` established in #2361).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deliverable_id: Option<String>,
 }
 
 /// Response body for `POST /api/v1/sessions/managed` (spawn).

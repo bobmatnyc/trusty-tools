@@ -211,6 +211,8 @@ impl From<SlackCommand> for TrustyCommand {
                     name_hint: None,
                     runtime: None,
                     inject_task: None,
+                    // Slack `/launch` has no `--deliverable` surface (#2379).
+                    deliverable_id: None,
                 }
             }
             SlackCommand::Fleet => TrustyCommand::ManagedList,
@@ -383,6 +385,7 @@ mod tests {
                 name_hint: None,
                 runtime: None,
                 inject_task: None,
+                deliverable_id: None,
             }
         );
     }

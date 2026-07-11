@@ -26,6 +26,7 @@ use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 
 pub mod activity;
+mod deliverable_link;
 mod fleet;
 pub mod front_gate;
 pub mod inproject;
@@ -106,6 +107,15 @@ pub struct SpawnRequest {
     /// (the caller delivers the task via `POST .../{id}/send`).
     #[serde(default)]
     pub inject_task: Option<bool>,
+    /// Optional Deliverable id to bind this session to (DOC-35 §10.6, #2379).
+    ///
+    /// Why: `tm sessions new --deliverable <id>` links a fresh session to an
+    /// existing Deliverable so its ledger accumulates the sessions that
+    /// worked on it. Validated at spawn time (must exist AND belong to this
+    /// project) BEFORE any provisioning side effect; an invalid id is a 404,
+    /// never a silently-dropped link. Absent/null → no link (the common case).
+    #[serde(default)]
+    pub deliverable_id: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -134,6 +144,10 @@ pub struct SpawnResponse {
     pub attach_cmd: String,
     /// Runtime backend that hosts the session (`"claude-code"` | `"tcode"`).
     pub runtime: String,
+    /// The Deliverable this session is bound to, if `--deliverable` was passed
+    /// (DOC-35 §10.6, #2379). `None` for the common ad-hoc-session case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable_id: Option<String>,
 }
 
 /// Request body for POST /api/v1/sessions/managed/adopt (#1433).
@@ -254,6 +268,10 @@ pub struct SessionSummary {
     /// landed yet, or for legacy records predating the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_session_id: Option<String>,
+    /// The Deliverable this session is working on, if bound (DOC-35 §10.6,
+    /// #2379; additive — absent for legacy records and sessions with no link).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable_id: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.
@@ -418,6 +436,18 @@ pub async fn spawn_session(
         return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
 
+    // Deliverable linkage (DOC-35 §10.6, #2379): validate BEFORE any
+    // provisioning side effect, mirroring the runtime-selector pre-check
+    // above — an invalid `--deliverable` must never mint infrastructure for a
+    // link that was never going to be recorded.
+    if let Some(deliverable_id) = req.deliverable_id.as_deref()
+        && let Err(resp) =
+            deliverable_link::validate_deliverable_scope(&state, &req.repo_url, deliverable_id)
+                .await
+    {
+        return resp;
+    }
+
     let params = SpawnParams {
         repo_url: req.repo_url,
         git_ref: req.git_ref,
@@ -431,6 +461,7 @@ pub async fn spawn_session(
         // Turnkey by default (#1903/#1299); a client sets `inject_task: false`
         // to opt into the legacy metadata-only behavior (`--no-inject`).
         inject_task: req.inject_task,
+        deliverable_id: req.deliverable_id,
     };
 
     match spawn_managed(&state, params).await {
@@ -448,6 +479,7 @@ pub async fn spawn_session(
                 created_at: final_record.created_at.to_rfc3339(),
                 attach_cmd: attach_cmd_for(&final_record.tmux_name),
                 runtime: final_record.runtime.as_str().to_owned(),
+                deliverable_id: final_record.deliverable_id.map(|id| id.to_string()),
             };
             (StatusCode::CREATED, Json(resp)).into_response()
         }

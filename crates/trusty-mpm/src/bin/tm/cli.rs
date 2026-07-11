@@ -1887,6 +1887,13 @@ pub(crate) enum SessionAction {
         /// task is stored but you deliver it yourself with `tm sessions send`.
         #[arg(long)]
         no_inject: bool,
+        /// Bind this session to an existing Deliverable (DOC-35 §10.6, #2379).
+        ///
+        /// The daemon validates the id exists AND belongs to this session's
+        /// project BEFORE spawning anything (a 404 otherwise); this is a
+        /// pointer-only link — it never changes the Deliverable's own status.
+        #[arg(long)]
+        deliverable: Option<String>,
     },
     /// List managed sessions (session-manager MVP).
     ///

@@ -314,10 +314,15 @@ pub async fn list_deliverables(
 ///
 /// Why: a Deliverable id is global, but the route nests it under a project; a
 /// mismatched project must 404 rather than leak another project's record.
+/// `pub(crate)` (not private) so the pre-spawn `--deliverable` validation gate
+/// (`daemon::managed_routes::deliverable_link`, #2379) reuses this EXACT
+/// existence+scope check rather than re-implementing it — the Deliverable
+/// CRUD routes and the session-spawn validation must never be able to drift
+/// on what "belongs to this project" means.
 /// What: looks up by id, maps `NotFound` to a typed 404, then enforces the
 /// project scope.
 /// Test: `get_wrong_project_is_404`.
-async fn fetch_scoped(
+pub(crate) async fn fetch_scoped(
     state: &Arc<DaemonState>,
     project: &str,
     id: &str,

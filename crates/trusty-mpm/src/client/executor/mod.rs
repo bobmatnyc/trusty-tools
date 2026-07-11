@@ -134,9 +134,18 @@ impl CommandExecutor {
                 name_hint,
                 runtime,
                 inject_task,
+                deliverable_id,
             } => {
-                self.managed_new(repo_url, git_ref, task, name_hint, runtime, inject_task)
-                    .await
+                self.managed_new(
+                    repo_url,
+                    git_ref,
+                    task,
+                    name_hint,
+                    runtime,
+                    inject_task,
+                    deliverable_id,
+                )
+                .await
             }
             TrustyCommand::ManagedList => self.managed_list().await,
             TrustyCommand::ManagedFleet => self.managed_fleet().await,
