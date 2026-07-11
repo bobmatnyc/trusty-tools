@@ -80,19 +80,23 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 /// What: tries to parse via `clap::Parser::try_parse`, prints a "did you
 /// mean?" hint on an unknown-subcommand error, then dispatches.
 ///
-/// #2118: a bare `tm projects` (no verb) on an interactive TTY is intercepted
-/// HERE, before `Cli::try_parse()` even runs, and launches the 4-pane
-/// project-control-plane TUI skeleton. The interception happens this early —
-/// rather than by relaxing `ProjectsAction` to `Option` and branching inside
-/// the dispatcher — specifically so `tm projects <verb>` and a
+/// #2118: a bare `tm projects` (no verb) on an interactive terminal is
+/// intercepted HERE, before `Cli::try_parse()` even runs, and launches the
+/// 4-pane project-control-plane TUI skeleton. The interception happens this
+/// early — rather than by relaxing `ProjectsAction` to `Option` and branching
+/// inside the dispatcher — specifically so `tm projects <verb>` and a
 /// non-interactive bare `tm projects` both flow through the completely
 /// unmodified clap definition: the latter must keep failing with clap's own
 /// "requires a subcommand" usage error (exit code 2), byte-for-byte identical
-/// to the pre-#2118 behavior. See `commands::projects::is_bare_projects_argv`
-/// and `commands::projects::launch_bare_tui`.
+/// to the pre-#2118 behavior. "Interactive" requires BOTH stdin and stdout to
+/// be real terminals (`commands::projects::should_launch_bare_tui`) — stdout
+/// alone is not enough: a supervisor/wrapper that redirects stdin from
+/// `/dev/null` while leaving stdout attached to a pty would otherwise launch a
+/// raw-mode TUI with no keyboard path able to exit it. See
+/// `commands::projects::should_launch_bare_tui` and
+/// `commands::projects::launch_bare_tui`.
 /// Test: integration tests in `tests.rs` exercise every dispatch branch; the
-/// argv-shape half of the #2118 interception is unit tested in
-/// `commands::projects::tests`.
+/// #2118 interception gate is unit tested in `commands::projects::tests`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Why: parse via `try_parse` so we can attach the workspace-shared
@@ -100,7 +104,13 @@ async fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
 
     // #2118: see this function's module doc for why this runs before parsing.
-    if commands::projects::is_bare_projects_argv(&argv) && std::io::stdout().is_terminal() {
+    // Requires BOTH stdin and stdout to be real terminals — stdout alone is
+    // not a safe interactivity signal (see the module doc).
+    if commands::projects::should_launch_bare_tui(
+        &argv,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
         return commands::projects::launch_bare_tui().await;
     }
 
