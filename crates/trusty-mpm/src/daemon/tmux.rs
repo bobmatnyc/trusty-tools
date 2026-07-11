@@ -660,10 +660,17 @@ impl TmuxDriver {
             .collect())
     }
 
-    /// List the pane `id:active` rows for a session.
+    /// List the pane `id:active` rows for a session, across ALL of its
+    /// windows.
     ///
-    /// Why: snapshot and adoption both need a session's pane list.
-    /// What: runs `list-panes -F` and returns each row verbatim.
+    /// Why: snapshot and adoption both need a session's FULL pane list, not
+    /// just the currently active window's — a plain `list-panes -t <session>`
+    /// (no `-s`) resolves the session target down to its active window only,
+    /// which silently drops any pane living in a non-active window (exactly
+    /// the sibling-window-hijack shape this feature guards against). This bug
+    /// was caught by the live-tmux test written for the #2467 follow-up, not
+    /// by the mock-only unit tests.
+    /// What: runs `list-panes -s -t <name> -F` and returns each row verbatim.
     /// Test: argv shape covered by `core::tmux::list_panes_argv`.
     fn list_panes(&self, name: &str) -> Result<Vec<String>> {
         let raw = self.run(&TmuxCommand::ListPanes {
@@ -674,6 +681,38 @@ impl TmuxDriver {
             .filter(|l| !l.is_empty())
             .map(String::from)
             .collect())
+    }
+
+    /// Return whether `pane_id` still exists as a live pane within
+    /// `session_name`'s tmux session (sibling-window hijack, follow-up to
+    /// #2456).
+    ///
+    /// Why: `session_exists` alone cannot distinguish "the recorded pane
+    /// survived" from "the tmux SESSION merely has some OTHER pane alive"
+    /// (e.g. a sibling window opened after the recorded pane was closed) —
+    /// `SessionManager::resume`'s reuse branch needs the stronger,
+    /// pane-specific answer before it trusts a session-scoped respawn target.
+    /// What: runs `list-panes -t <session_name> -F` (via [`Self::list_panes`],
+    /// format `#{pane_id}:#{pane_active}`) and checks whether `pane_id`
+    /// matches the id portion of any row. Returns `false` on any query
+    /// failure (session gone, tmux unavailable) — the safe direction for a
+    /// presence check feeding a refusal path is to treat "cannot confirm" as
+    /// "not present" (fail toward refusing the unsafe respawn, never toward
+    /// silently trusting a pane that might not be there).
+    /// Test: argv shape covered by `core::tmux::list_panes_argv`; behavior
+    /// (true for a real pane, false for a fabricated pane id in a live,
+    /// still-alive session) is exercised by the `#[ignore]` live integration
+    /// test `live_pane_scoped_send_targets_original_pane_not_sibling` in
+    /// `tests/session_manager_mvp.rs` — that test also covers
+    /// `RealTmuxDriver::pane_exists`'s call-through and
+    /// `send_line`/`send_line_to_pane`'s pane-scoped `-t` targeting.
+    pub fn pane_exists(&self, session_name: &str, pane_id: &str) -> bool {
+        match self.list_panes(session_name) {
+            Ok(rows) => rows
+                .iter()
+                .any(|row| row.split(':').next() == Some(pane_id)),
+            Err(_) => false,
+        }
     }
 }
 

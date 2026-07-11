@@ -94,21 +94,28 @@ pub trait RuntimeAdapter: Send + Sync {
     /// which is correct for the `tcode` adapter and any other runtime that does
     /// not support conversation continuity.
     /// What: same contract as `spawn` but with an optional `claude_session_id` for
-    /// the `--resume` flag, plus the same `session_id` (managed session UUID,
-    /// #2023 component B) forwarded to [`Self::spawn`] for the
-    /// `TM_MANAGED_SESSION_ID` pane-shell export. Called by `resume_managed`
-    /// instead of `spawn`.
+    /// the `--resume` flag, an optional `pane_id` (the record's stored
+    /// tmux pane identity, sibling-window hijack fix, follow-up to #2456) so
+    /// the resume command lands in the SPECIFIC pane the session is bound to
+    /// rather than whichever pane tmux considers active, plus the same
+    /// `session_id` (managed session UUID, #2023 component B) forwarded to
+    /// [`Self::spawn`] for the `TM_MANAGED_SESSION_ID` pane-shell export.
+    /// Called by `resume_managed` instead of `spawn`.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
-    /// `spawn_resume_without_id_uses_continue_flag` in `claude_code` tests.
+    /// `spawn_resume_without_id_uses_continue_flag`,
+    /// `spawn_resume_targets_stored_pane_id_when_known`,
+    /// `spawn_resume_falls_back_to_session_target_when_pane_id_unknown` in
+    /// `claude_code` tests.
     fn spawn_resume(
         &self,
         tmux_name: &str,
+        pane_id: Option<&str>,
         cwd: &Path,
         task: &str,
         claude_session_id: Option<&str>,
         session_id: &str,
     ) -> Result<(), RuntimeError> {
-        let _ = claude_session_id;
+        let _ = (pane_id, claude_session_id);
         self.spawn(tmux_name, cwd, task, session_id)
     }
 

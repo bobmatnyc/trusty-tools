@@ -2,8 +2,8 @@
 //!
 //! Why: the session-manager MVP spans several units (provisioner, catalog sync,
 //! session manager, daemon routes). These tests verify the units that can be
-//! exercised without a live tmux/git/LLM, plus a single `#[ignore]` live test
-//! that drives the real tmux + git path on a developer machine.
+//! exercised without a live tmux/git/LLM, plus `#[ignore]` live tests that
+//! drive the real tmux + git path on a developer machine.
 //! What: provisioner isolation, catalog sync TTL behavior, the session
 //! manager's create/answer flow with in-memory fakes, handler-level
 //! anti-stub tests proving provision+spawn are wired, and an activity
@@ -2037,4 +2037,148 @@ async fn isolated_managed_state_guard_panics_on_production_root() {
     let prod_root = home.join(".trusty-mpm");
     // This MUST panic with the production-root guard message.
     let _ = DaemonState::with_root_isolated_managed(prod_root).await;
+}
+
+// ── Live pane-target coverage (CRITICAL fix, follow-up to #2467) ────────────
+//
+// PR #2467 fixed `resume`/`restart` to target `record.pane_id` instead of
+// tmux's session-scoped active pane. The FIRST cut of `TmuxTarget::as_target`
+// rendered pane targets as `"<session>:<pane_id>"`, which tmux parses as a
+// WINDOW spec, not a pane spec — every resume with a known `pane_id` (i.e.
+// every post-#2456 session) hard-failed with "can't find window: %NNNN".
+// This test is the missing live-tmux coverage: mock-only tests could not
+// catch an invalid `-t` string because the mocks never parse it.
+
+use trusty_mpm::core::tmux::TmuxTarget;
+use trusty_mpm::daemon::tmux::TmuxDriver;
+
+/// Kills a throwaway tmux session on drop, including on test-assertion panic.
+///
+/// Why: a live-tmux test that panics partway through must not leak the tmux
+/// session it created — a bare `driver.kill_session(...)` call at the end of
+/// the test function would never run if an earlier `assert_eq!` panicked.
+/// What: wraps a `TmuxDriver` reference and a session name; `Drop::drop` best-
+/// effort kills the session (`kill_session`'s error is intentionally
+/// swallowed — cleanup must never itself panic during unwind).
+/// Test: exercised by every test below that constructs one.
+struct KillSessionGuard<'a> {
+    driver: &'a TmuxDriver,
+    name: String,
+}
+
+impl Drop for KillSessionGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.driver.kill_session(&self.name);
+    }
+}
+
+/// Live proof that a pane-scoped send lands in the ORIGINAL pane, never a
+/// sibling window that happens to be tmux's "active" pane.
+///
+/// Why: this is the exact sibling-window-hijack scenario #2467 set out to
+/// fix, driven against a REAL `tmux` binary rather than the `FakeTmuxDriver`
+/// mocks used elsewhere in this crate — the invalid `"session:%pane"` target
+/// string bug shipped past review specifically because coverage was
+/// mock-only (mocks never invoke real tmux argv parsing). It is `#[ignore]`
+/// (needs a live tmux); run locally with
+/// `cargo test -p trusty-mpm -- --include-ignored`.
+/// What: creates a throwaway session (original pane = the session's sole
+/// pane), opens a sibling window via `tmux new-window` (which tmux makes the
+/// new ACTIVE pane), then sends a marker line via `TmuxDriver::send_line`
+/// with a pane-scoped `TmuxTarget` addressing the ORIGINAL (now inactive)
+/// pane. Asserts the marker landed in the original pane's `capture-pane`
+/// output and did NOT land in the sibling's. Also exercises
+/// `TmuxDriver::pane_exists`: `true` for the real original pane, `false` for
+/// a fabricated pane id within the same (still-alive) session — the exact
+/// signal `SessionManager::resume` relies on to distinguish "pane gone" from
+/// "session gone". Cleans up via [`KillSessionGuard`] even on assertion
+/// failure.
+/// Test: this function IS the coverage `TmuxDriver::pane_exists`'s `Test:`
+/// doc pointer now names (previously falsely claimed by a comment that
+/// pointed at coverage which did not exist).
+#[test]
+#[ignore = "requires a live tmux binary; run with --include-ignored"]
+fn live_pane_scoped_send_targets_original_pane_not_sibling() {
+    let driver = TmuxDriver::discover().expect("tmux must be installed for this live test");
+    let session_name = format!("trusty-mpm-test-pane-{}", std::process::id());
+
+    // Clean slate: a leftover session from a prior crashed run must not
+    // confuse this test.
+    let _ = driver.kill_session(&session_name);
+    driver
+        .create_session(&session_name, None)
+        .expect("create throwaway session");
+    let _guard = KillSessionGuard {
+        driver: &driver,
+        name: session_name.clone(),
+    };
+
+    // Immediately after creation the session has exactly one pane, which is
+    // also the active one — `pane_id` (session-scoped `display-message`)
+    // resolves to it.
+    let original_pane = driver
+        .pane_id(&session_name)
+        .expect("original pane id must resolve");
+
+    // Open a sibling window. tmux makes the new window (and its pane) the
+    // active one — this is precisely the state that caused the hijack: any
+    // SESSION-scoped send would now land here instead of the original pane.
+    let status = std::process::Command::new("tmux")
+        .args(["new-window", "-t", &session_name])
+        .status()
+        .expect("spawn tmux new-window");
+    assert!(status.success(), "tmux new-window must succeed");
+
+    let sibling_pane = driver
+        .pane_id(&session_name)
+        .expect("sibling pane id must resolve once it is active");
+    assert_ne!(
+        original_pane, sibling_pane,
+        "sibling window must be a distinct pane from the original"
+    );
+
+    // Pane-scoped send: must land in the ORIGINAL pane, not the (now active)
+    // sibling — this is the exact call shape `spawn_resume` uses via
+    // `send_line_to_pane` -> `RealTmuxDriver::send_line_to_pane` ->
+    // `TmuxDriver::send_line(&TmuxTarget::pane(...), ...)`.
+    let marker = "trusty_mpm_pane_target_marker_2467";
+    driver
+        .send_line(&TmuxTarget::pane(&session_name, &original_pane), marker)
+        .expect("pane-scoped send_line must succeed against the ORIGINAL pane");
+
+    // Give tmux a moment to render the sent keys into the pane buffer before
+    // capturing (send-keys itself is synchronous, but the shell's own echo
+    // of the typed line can lag by a beat under load).
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let original_capture = driver
+        .capture(&TmuxTarget::pane(&session_name, &original_pane), None)
+        .expect("capture original pane");
+    assert!(
+        original_capture.contains(marker),
+        "marker must land in the ORIGINAL pane; captured: {original_capture:?}"
+    );
+
+    let sibling_capture = driver
+        .capture(&TmuxTarget::pane(&session_name, &sibling_pane), None)
+        .expect("capture sibling pane");
+    assert!(
+        !sibling_capture.contains(marker),
+        "marker must NOT land in the sibling pane (that is the hijack this test \
+         guards against); captured: {sibling_capture:?}"
+    );
+
+    // `pane_exists` must confirm the real pane and refuse a fabricated one
+    // within the same (still-alive) session — the signal `resume` relies on
+    // to distinguish "pane gone" (refuse) from "session gone" (different
+    // path entirely).
+    assert!(
+        driver.pane_exists(&session_name, &original_pane),
+        "pane_exists must report true for the real original pane"
+    );
+    assert!(
+        !driver.pane_exists(&session_name, "%999999999"),
+        "pane_exists must report false for a pane id that was never created \
+         in this session"
+    );
 }

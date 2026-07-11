@@ -59,9 +59,9 @@ use serde::{Deserialize, Serialize};
 /// Addresses a tmux session, optionally a specific pane within it.
 ///
 /// Why: every tmux I/O command needs a `-t` target; modelling it once avoids
-/// re-deriving the `session:pane` string at each call site.
+/// re-deriving the target string at each call site.
 /// What: a session name plus an optional pane id (`%0`, `%1`, ...).
-/// Test: `target_renders_session_and_pane`.
+/// Test: `target_renders_session_and_bare_pane`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxTarget {
     /// tmux session name (the daemon names these `trusty-mpm-<session-id>`).
@@ -88,10 +88,25 @@ impl TmuxTarget {
         }
     }
 
-    /// Render the tmux `-t` target string (`session` or `session:pane`).
+    /// Render the tmux `-t` target string.
+    ///
+    /// Why (CRITICAL fix, follow-up to #2467): tmux pane ids (`%NNNN`) are
+    /// GLOBALLY unique across the whole server, not scoped to a session — but
+    /// `-t "<session>:<pane_id>"` still parses everything after the `:` as a
+    /// WINDOW spec, not a pane spec. Live tmux 3.6b proof: `send-keys -t
+    /// "sess:%6028" ...` fails with `can't find window: %6028`, while `-t
+    /// "%6028"` (bare) works. Every resume/restart with a stored `pane_id`
+    /// hit this — `spawn_resume` returned `Err` and the record flipped to
+    /// `Errored`. The session-qualified form was never valid tmux syntax for
+    /// a pane target.
+    /// What: a pane target renders as the BARE pane id (`%NNNN`) with no
+    /// session qualifier; a session-only target still renders the session
+    /// name.
+    /// Test: `target_renders_session_and_bare_pane`;
+    /// `send_keys_pane_target_is_bare_id`.
     pub fn as_target(&self) -> String {
         match &self.pane {
-            Some(p) => format!("{}:{}", self.session, p),
+            Some(p) => p.clone(),
             None => self.session.clone(),
         }
     }
@@ -133,7 +148,18 @@ pub enum TmuxCommand {
         /// Session whose windows to list.
         name: String,
     },
-    /// `list-panes -t <name> -F <fmt>` — enumerate a session's panes.
+    /// `list-panes -s -t <name> -F <fmt>` — enumerate ALL of a session's
+    /// panes, across every window (`-s`).
+    ///
+    /// Why (CRITICAL follow-up, discovered by the live-tmux test written for
+    /// #2467's fix): without `-s`, tmux resolves a session-name target to
+    /// only the session's currently ACTIVE window and lists that window's
+    /// panes — exactly the sibling-window-hijack scenario this feature
+    /// exists to guard against. A pane in a non-active window (e.g. the
+    /// original pane, once a sibling window steals focus) would silently
+    /// vanish from this list even though it is still alive, making
+    /// `pane_exists` wrongly report `false` and `resume` wrongly refuse with
+    /// `PaneGone`.
     ListPanes {
         /// Session whose panes to list.
         name: String,
@@ -492,6 +518,9 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
         TmuxCommand::ListPanes { name } => {
             vec![
                 "list-panes".into(),
+                // `-s`: list every pane in the SESSION (all windows), not just
+                // the currently active window's panes. See the variant doc.
+                "-s".into(),
                 "-t".into(),
                 name.clone(),
                 "-F".into(),
@@ -556,9 +585,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_renders_session_and_pane() {
+    fn target_renders_session_and_bare_pane() {
+        // Session-only targets still render the session name.
         assert_eq!(TmuxTarget::session("s").as_target(), "s");
-        assert_eq!(TmuxTarget::pane("s", "%2").as_target(), "s:%2");
+        // Pane targets render the BARE pane id — no `session:` prefix.
+        // tmux pane ids are globally unique; `-t "session:%2"` parses `%2` as
+        // a WINDOW spec and fails with "can't find window: %2" (live tmux
+        // 3.6b), while `-t "%2"` correctly resolves the pane regardless of
+        // which window/session currently owns the terminal focus.
+        assert_eq!(TmuxTarget::pane("s", "%2").as_target(), "%2");
     }
 
     #[test]
@@ -609,7 +644,27 @@ mod tests {
             keys: "Enter".into(),
             literal: false,
         });
-        assert_eq!(argv, ["send-keys", "-t", "s:%1", "Enter"]);
+        assert_eq!(argv, ["send-keys", "-t", "%1", "Enter"]);
+    }
+
+    /// CRITICAL regression guard (follow-up to #2467): asserts the literal
+    /// `-t` string built for a pane target is the bare `%NNNN` form with no
+    /// `session:` prefix, so a regression back to the session-qualified form
+    /// (which tmux parses as an invalid WINDOW spec, not a pane spec) fails
+    /// fast in CI without needing a live tmux binary.
+    #[test]
+    fn send_keys_pane_target_is_bare_id() {
+        let argv = tmux_argv(&TmuxCommand::SendKeys {
+            target: TmuxTarget::pane("trusty-mpm-xyz", "%6015"),
+            keys: "claude --resume".into(),
+            literal: true,
+        });
+        let target_arg = &argv[argv.iter().position(|a| a == "-t").unwrap() + 1];
+        assert_eq!(target_arg, "%6015", "pane target must be the bare pane id");
+        assert!(
+            !target_arg.contains(':'),
+            "pane target must not be session-qualified: {target_arg}"
+        );
     }
 
     #[test]
@@ -646,10 +701,17 @@ mod tests {
 
     #[test]
     fn list_panes_argv() {
+        // `-s` is required so the listing spans every window in the session,
+        // not just the currently active one — without it, a pane in a
+        // non-active window (e.g. the original pane once a sibling window
+        // steals focus) silently drops out of the list.
         let argv = tmux_argv(&TmuxCommand::ListPanes {
             name: "work".into(),
         });
-        assert_eq!(argv, ["list-panes", "-t", "work", "-F", PANE_LIST_FORMAT]);
+        assert_eq!(
+            argv,
+            ["list-panes", "-s", "-t", "work", "-F", PANE_LIST_FORMAT]
+        );
     }
 
     #[test]

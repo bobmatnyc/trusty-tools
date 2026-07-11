@@ -26,9 +26,9 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    derive_project, fallback_protected, github_host, is_github_remote, nested_managed_match,
-    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
-    tty_gate,
+    derive_project, fallback_protected, github_host, is_github_remote, nested_guard_notice,
+    nested_managed_match, non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint,
+    print_project_context, tty_gate,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -1432,4 +1432,36 @@ fn pane_identity_confirmed_false_when_inherited_env_but_different_pane_id() {
         sibling_window_current_pane_id,
         healed_record_pane_id
     ));
+}
+
+// ── nested_guard_notice (sibling-window hijack fix, follow-up to #2456) ─────
+
+#[test]
+fn nested_guard_notice_never_says_refusing() {
+    // Regression guard: the old wording ("…refusing to launch a nested
+    // session here.") read as a hard failure even when the immediately
+    // following reconcile-relaunch succeeded. The reworded notice must never
+    // contain that alarming phrasing.
+    let msg = nested_guard_notice("my-session");
+    assert!(
+        !msg.to_lowercase().contains("refus"),
+        "nested_guard_notice must not read as a refusal: {msg:?}"
+    );
+}
+
+#[test]
+fn nested_guard_notice_mentions_reconnect_target() {
+    // The notice replaces two previously-separate lines (the refusal line and
+    // a standalone "reconnecting to '{name}' instead…" line) with one — the
+    // session name must still be present so the operator knows where they are
+    // being reconnected.
+    let msg = nested_guard_notice("my-session");
+    assert!(
+        msg.contains("my-session"),
+        "nested_guard_notice must name the session being reconnected to: {msg:?}"
+    );
+    assert!(
+        msg.contains("reconnecting"),
+        "nested_guard_notice must still communicate the reconnect action: {msg:?}"
+    );
 }
