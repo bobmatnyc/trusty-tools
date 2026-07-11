@@ -17,13 +17,12 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use std::process::Command;
 use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use crate::control::event::SessionEvent;
 use crate::control::id::ControlSessionId;
-use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
+use crate::core::tmux::TmuxTarget;
 use crate::daemon::tmux::TmuxDriver;
 
 use super::{SessionBackend, SessionInput};
@@ -135,28 +134,6 @@ impl TmuxBackend {
             last_pane_content: String::new(),
         })
     }
-
-    /// Run a raw tmux command and return its stdout as a `String`.
-    ///
-    /// Why: the `TmuxDriver` wraps synchronous `std::process::Command` calls;
-    /// calling them from async context is acceptable here because they are
-    /// short-lived (< 1s) shell invocations. For Phase 1 this avoids
-    /// introducing `tokio::task::spawn_blocking` complexity.
-    /// What: invokes `tmux <argv>` via `std::process::Command::output()`,
-    /// returns stdout or an error.
-    /// Test: covered transitively by `recv()` unit tests.
-    fn run_tmux_cmd(&self, cmd: &TmuxCommand) -> Result<String> {
-        let argv = tmux_argv(cmd);
-        let out = Command::new("tmux")
-            .args(&argv)
-            .output()
-            .with_context(|| format!("failed to run tmux {}", argv.first().map_or("", |s| s)))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("tmux command failed: {stderr}");
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    }
 }
 
 #[async_trait]
@@ -181,19 +158,25 @@ impl SessionBackend for TmuxBackend {
     /// Why: the actor polls `recv()` to pick up new pane output and broadcast
     /// it to observers. Without a park point the actor's `select!` loop would
     /// call `capture-pane` in a tight spin at ~100% CPU when the pane is idle.
-    /// What: runs `capture-pane -p -S -<lines>`. If the pane is empty OR its
-    /// content is unchanged since the last call, parks for `TMUX_POLL_INTERVAL_MS`
+    /// What: runs `capture-pane -p -S -<lines>` via `TmuxDriver::capture`
+    /// (#2398 architecture consolidation — this used to shell out to a bare
+    /// `tmux` independently via a private `run_tmux_cmd` helper; reusing
+    /// `TmuxDriver`'s own public `capture` method, which already routes
+    /// through the crate's shared tmux entry point, removed that duplicate
+    /// implementation entirely). If the pane is empty OR its content is
+    /// unchanged since the last call, parks for `TMUX_POLL_INTERVAL_MS`
     /// before returning an empty batch — giving the executor a chance to service
     /// other tasks. Only emits an `Output` event when the pane content has
     /// actually changed (diff vs `last_pane_content`). Returns `None` when the
     /// tmux session no longer exists (treating it as a clean exit).
     /// Test: `tmux_recv_parks_when_idle`.
     async fn recv(&mut self) -> Option<Result<Vec<SessionEvent>>> {
-        let cmd = TmuxCommand::CapturePane {
-            target: TmuxTarget::session(&self.tmux_name),
-            lines: Some(self.capture_lines),
-        };
-        match self.run_tmux_cmd(&cmd) {
+        let target = TmuxTarget::session(&self.tmux_name);
+        match self
+            .driver
+            .capture(&target, Some(self.capture_lines))
+            .with_context(|| format!("capture-pane for tmux session {} failed", self.tmux_name))
+        {
             Ok(output) => {
                 let is_empty = output.trim().is_empty();
                 let is_unchanged = !is_empty && output == self.last_pane_content;

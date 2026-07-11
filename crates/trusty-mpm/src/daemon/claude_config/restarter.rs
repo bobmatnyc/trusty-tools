@@ -48,14 +48,25 @@ impl ClaudeCodeRestarter {
     /// Restart Claude Code inside a named tmux session.
     ///
     /// Why: a Claude Code session hosted in tmux is restarted in place — send
-    /// an interrupt to stop the current process, then relaunch `claude`.
-    /// What: discovers tmux, sends `C-c` to the session's pane, waits briefly
-    /// for the process to exit, then types `claude` + Enter. tmux being absent
-    /// surfaces as an `Err`.
+    /// an interrupt to stop the current process, then relaunch `claude`. The
+    /// scrollback/mouse server options (#2398) are re-applied defensively
+    /// before the relaunch: this is the "restarter/relaunch-on-exit" path, so
+    /// re-applying here guards the edge case where the tmux server was
+    /// started or restarted independently of trusty-mpm (e.g. `tmux
+    /// kill-server` followed by an operator's own `tmux new-session`) since
+    /// this session's pane was created. `set-option -g` is idempotent and
+    /// best-effort (never fails the restart) — see
+    /// [`crate::daemon::tmux::TmuxDriver::apply_scrollback_options`]. It does
+    /// NOT retroactively grow THIS session's already-created pane; only
+    /// panes created after the option lands benefit.
+    /// What: discovers tmux, re-applies the scrollback/mouse options, sends
+    /// `C-c` to the session's pane, waits briefly for the process to exit,
+    /// then types `claude` + Enter. tmux being absent surfaces as an `Err`.
     /// Test: `restart_in_session_errors_without_tmux` (skipped when tmux is
     /// installed).
     pub fn restart_in_session(tmux_session: &str) -> Result<()> {
         let driver = crate::daemon::tmux::TmuxDriver::discover()?;
+        driver.apply_scrollback_options();
         let target = TmuxTarget::session(tmux_session);
         // Interrupt the running Claude Code process.
         driver.send_interrupt(&target)?;

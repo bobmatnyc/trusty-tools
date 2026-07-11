@@ -94,14 +94,22 @@ impl DaemonClient {
             }
         };
 
-        let new_session = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &body.name, "-c", workdir])
-            .status();
+        // #2398: routes through `core::tmux::create_managed_session`, the
+        // crate's single session-creation choke point, so the configured
+        // scrollback/mouse ergonomics are applied before the pane exists (a
+        // bare `tmux new-session` here would silently bypass them — the
+        // exact QA-caught regression this consolidation closes).
+        let new_session =
+            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir))
+                .map(|output| output.status);
         match new_session {
             Ok(status) if status.success() => {
-                let send = std::process::Command::new("tmux")
-                    .args(["send-keys", "-t", &body.name, &claude_cmd, "Enter"])
-                    .status();
+                let send = crate::core::tmux::send_line(
+                    None,
+                    &crate::core::tmux::TmuxTarget::session(&body.name),
+                    &claude_cmd,
+                )
+                .map(|output| output.status);
                 if !matches!(send, Ok(s) if s.success()) {
                     return Err(anyhow::anyhow!(
                         "tmux session {} created but failed to start claude",
@@ -184,21 +192,29 @@ impl DaemonClient {
         // it already exists and creates it (detached, `-d`) otherwise. The
         // `has-session` probe distinguishes the two so `claude` is started only
         // for a freshly-created session — an already-running one is left alone.
-        let already_running = std::process::Command::new("tmux")
-            .args(["has-session", "-t", &body.name])
-            .status()
-            .map(|s| s.success())
+        // #2398: routes through the crate's single tmux entry point.
+        let already_running =
+            crate::core::tmux::run_tmux(&crate::core::tmux::TmuxCommand::HasSession {
+                name: body.name.clone(),
+            })
+            .map(|output| output.status.success())
             .unwrap_or(false);
 
-        let new_session = std::process::Command::new("tmux")
-            .args(["new-session", "-A", "-d", "-s", &body.name, "-c", workdir])
-            .status();
+        // #2398: routes through `core::tmux::create_managed_session`, the
+        // crate's single session-creation choke point, so the configured
+        // scrollback/mouse ergonomics are applied before the pane exists.
+        let new_session =
+            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir))
+                .map(|output| output.status);
         match new_session {
             Ok(status) if status.success() => {
                 if !already_running {
-                    let send = std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &body.name, &claude_cmd, "Enter"])
-                        .status();
+                    let send = crate::core::tmux::send_line(
+                        None,
+                        &crate::core::tmux::TmuxTarget::session(&body.name),
+                        &claude_cmd,
+                    )
+                    .map(|output| output.status);
                     if !matches!(send, Ok(s) if s.success()) {
                         return Err(anyhow::anyhow!(
                             "tmux session {} created but failed to start claude",
