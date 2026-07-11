@@ -1373,18 +1373,87 @@ async fn correlate_session_start(
     }
 }
 
-/// Immediately mark a managed session Stopped on `SessionEnd`.
+/// Pure decision: should `handle_session_end` DEFER its `Stopped` transition
+/// because the record's own tmux pane still shows a live runtime? (#2454)
 ///
-/// Why (#1744): without this, a managed session that exits ungracefully (tmux
-/// pane killed, terminal closed) stays `Active` in the store until the 60-second
-/// reap loop fires. On `SessionEnd`, Claude Code's internal session has already
-/// ended; marking the managed session `Stopped` immediately keeps the daemon's
-/// view consistent and lets the operator see the correct state right away.
+/// Why: `SessionEnd` firing is Claude Code self-reporting that its session is
+/// "ending / being torn down" ([`crate::core::hook::HookEvent::SessionEnd`])
+/// — NOT proof the OS process (and therefore the tmux pane) has already fully
+/// exited; the hook POST can race the pane's actual fall-back to a bare idle
+/// shell. `SessionManager::resume` decides pane reuse purely on
+/// `tmux.session_exists()`, so flipping the record to `Stopped` while the
+/// pane is still occupied could let a `resume` (manual or the auto-resume
+/// supervisor) type into a pane the outgoing runtime hasn't relinquished yet.
+/// This reuses the EXACT SAME classification the 60-second runtime-exit
+/// reaper already trusts for this question —
+/// [`crate::daemon::runtime_reap::pane_runtime_exited`] (idle-shell allowlist
+/// combined with the [`ChildLivenessProbe`] fail-closed gate) — instead of
+/// inventing a second one, so the two call sites can never disagree about
+/// what "exited" means.
+/// What: finds the pane whose `session_name` matches `tmux_name` in `panes`
+/// and returns `true` (defer) only when a match exists AND
+/// [`pane_runtime_exited`](crate::daemon::runtime_reap::pane_runtime_exited)
+/// reports it as NOT yet exited. When no matching pane is found (already
+/// gone, or tmux/pane enumeration was unavailable and `panes` is empty) this
+/// returns `false` (proceed) — there is nothing to protect from a destructive
+/// teardown here, since `mark_runtime_exited_stopped` never touches the pane
+/// either way; a genuinely vanished session is left to the #1744 reaper as
+/// before. Pure — no I/O — so it is unit-testable without a live tmux.
+/// Test: `session_end_pane_still_live_true_for_running_agent`,
+/// `session_end_pane_still_live_false_for_idle_shell`,
+/// `session_end_pane_still_live_false_when_pane_missing` in `api_tests.rs`.
+fn session_end_pane_still_live(
+    tmux_name: &str,
+    panes: &[crate::daemon::orphan_gc::PaneInfo],
+    probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
+) -> bool {
+    panes
+        .iter()
+        .find(|p| p.session_name == tmux_name)
+        .map(|p| !crate::daemon::runtime_reap::pane_runtime_exited(p, probe))
+        .unwrap_or(false)
+}
+
+/// Immediately mark a managed session Stopped on `SessionEnd`, WITHOUT killing
+/// its tmux pane (#2454).
+///
+/// Why (#1744, revised #2454): without this, a managed session that exits
+/// ungracefully (tmux pane killed, terminal closed) stays `Active` in the store
+/// until the 60-second reap loop fires. On `SessionEnd`, Claude Code's internal
+/// session has already ended; marking the managed session `Stopped` immediately
+/// keeps the daemon's view consistent and lets the operator see the correct
+/// state right away. This originally called [`SessionManager::stop`], which is
+/// the EXPLICIT-stop contract (`tm session stop`) and therefore also
+/// `graceful_terminate_runtime`s / `kill_session`s the tmux pane — but a
+/// `SessionEnd` correlation is a self-healing state reconcile, not a
+/// human/client teardown request, exactly like the 60-second runtime-exit
+/// reaper (see [`crate::daemon::runtime_reap`] #2023 A). Routing it through
+/// `stop` could destroy a pane the operator was still attached to, purely
+/// because the daemon correlated the exit a few hundred milliseconds before
+/// they noticed. This now mirrors the reaper and calls
+/// [`SessionManager::mark_runtime_exited_stopped`] instead, leaving the pane
+/// alive. It also gates that transition behind
+/// [`session_end_pane_still_live`] (#2454 follow-up): the hook can race the
+/// pane's actual teardown, so if the pane is found and still shows a live
+/// runtime the transition is DEFERRED for this hook receipt — the 60-second
+/// reaper will pick the session up once its pane is genuinely idle. This gate
+/// is best-effort: it needs a real `tmux` binary to enumerate panes, so on a
+/// host with no `tmux` (or a `list_managed_panes` failure) it fails OPEN and
+/// proceeds with the transition unchecked, same as pre-gate behavior.
 /// What: searches Active managed sessions for one whose `claude_session_id`
-/// matches the hook's `session_id`; calls `SessionManager::stop` which kills the
-/// tmux session (best-effort, already gone) and marks the record `Stopped`.
-/// Best-effort — failures are logged and swallowed so the hook response is unaffected.
-/// Test: `session_end_hook_marks_managed_stopped` in `api_tests.rs`.
+/// matches the hook's `session_id`. If found, best-effort discovers the live
+/// tmux panes ([`crate::daemon::tmux::TmuxDriver::discover`] +
+/// `list_managed_panes`) and calls [`session_end_pane_still_live`]; when that
+/// reports the pane is still live, logs and returns WITHOUT transitioning.
+/// Otherwise calls `SessionManager::mark_runtime_exited_stopped`, which marks
+/// the record `Stopped` and persists WITHOUT calling
+/// `graceful_terminate_runtime` / `kill_session`. Best-effort — failures are
+/// logged and swallowed so the hook response is unaffected.
+/// Test: `session_end_hook_marks_managed_stopped` and
+/// `session_end_hook_does_not_kill_pane` in `api_tests.rs` cover the
+/// transition itself (tmux is unavailable/pane-not-found in that harness, so
+/// the gate fails open); the gate's own decision logic is covered by the
+/// `session_end_pane_still_live_*` unit tests above.
 async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
@@ -1394,11 +1463,34 @@ async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
     });
     if let Some(r) = matched {
         let id = r.id;
-        match mgr.stop(&id).await {
+        let tmux_name = r.tmux_name.clone();
+
+        // #2454: best-effort gate — defer if the pane still shows a live
+        // runtime. Fails open (proceeds) when tmux is unavailable or pane
+        // enumeration fails, matching the transition's own non-destructive
+        // nature (nothing here ever touches the pane regardless).
+        if let Ok(driver) = crate::daemon::tmux::TmuxDriver::discover()
+            && let Ok(panes) = driver.list_managed_panes()
+            && session_end_pane_still_live(
+                &tmux_name,
+                &panes,
+                &crate::daemon::orphan_gc::ProcessTreeProbe,
+            )
+        {
+            tracing::info!(
+                managed_id = %id,
+                claude_session_id = %claude_session_id,
+                name = %tmux_name,
+                "SessionEnd: deferring Stopped transition — pane still shows a live runtime (#2454); the 60s reaper will retry once idle"
+            );
+            return;
+        }
+
+        match mgr.mark_runtime_exited_stopped(&id).await {
             Ok(_) => tracing::info!(
                 managed_id = %id,
                 claude_session_id = %claude_session_id,
-                "SessionEnd: marked managed session Stopped immediately (#1744)"
+                "SessionEnd: marked managed session Stopped immediately (#1744, pane left alive #2454)"
             ),
             Err(e) => tracing::warn!(
                 managed_id = %id,
