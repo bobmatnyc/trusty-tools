@@ -82,11 +82,8 @@
 ### Top Risks
 
 | # | Risk | Severity | Est. cost/effort | Affected application(s) |
-|---|---|---|---|---|
-| 1 | {{risk_1_description}} | {{risk_1_severity}} | {{risk_1_cost}} | {{risk_1_apps}} |
-| 2 | {{risk_2_description}} | {{risk_2_severity}} | {{risk_2_cost}} | {{risk_2_apps}} |
-| 3 | {{risk_3_description}} | {{risk_3_severity}} | {{risk_3_cost}} | {{risk_3_apps}} |
-<!-- extend to 4-5 rows if the source supports it; do not pad with filler -->
+|---|---|---|---|---|<!-- BEGIN top_risk_row -->
+| {{risk_rank}} | {{risk_description}} | {{risk_severity}} | {{risk_cost}} | {{risk_apps}} |<!-- END top_risk_row -->
 
 ## 3. Scoring Model Normalization
 

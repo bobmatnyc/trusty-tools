@@ -19,6 +19,8 @@
 
 use std::process::Command;
 
+use tracing::warn;
+
 use crate::core::external_session::ExternalSession;
 use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
@@ -209,16 +211,22 @@ impl TmuxDriver {
     /// Run a typed tmux command, returning captured stdout on success.
     ///
     /// Why: every other method routes through here so exit-status handling
-    /// lives in one place.
-    /// What: renders argv via `core::tmux::tmux_argv`, runs `tmux`, and maps a
-    /// non-zero exit to `Error::Protocol` carrying stderr.
+    /// lives in one place. The actual process spawn is delegated to
+    /// [`crate::core::tmux::run_tmux_with_bin`] (#2398 architecture
+    /// consolidation) — `TmuxDriver` WRAPS that single crate-wide entry point
+    /// rather than spawning independently, using its own already-resolved
+    /// `self.tmux_path` (cached at [`Self::discover`] time for the
+    /// fail-fast-if-absent contract) instead of re-resolving on every call.
+    /// What: renders argv via `core::tmux::tmux_argv` (for the error message
+    /// only — the actual spawn happens inside `run_tmux_with_bin`), runs
+    /// `tmux`, and maps a non-zero exit to `Error::Protocol` carrying stderr.
     /// Test: exercised indirectly by the `#[ignore]` integration tests.
     fn run(&self, cmd: &TmuxCommand) -> Result<String> {
-        let argv = tmux_argv(cmd);
-        let output = Command::new(&self.tmux_path).args(&argv).output()?;
+        let output = crate::core::tmux::run_tmux_with_bin(&self.tmux_path, cmd)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
+            let argv = tmux_argv(cmd);
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             // #2246: the argv can embed a cleartext CLAUDE_CODE_OAUTH_TOKEN
             // (managed-spawn pane command). Redact at this single source so the
@@ -237,12 +245,66 @@ impl TmuxDriver {
     /// Idempotent: if a session with the same name already exists, the
     /// underlying `tmux new-session -A` attaches to it instead of failing
     /// with a "duplicate session" error.
+    ///
+    /// Why (#2398): the scrollback/mouse server options MUST be applied
+    /// before this method's `new-session` call — `history-limit` is captured
+    /// into a pane's ring buffer at creation time. Delegates to
+    /// [`crate::core::tmux::create_managed_session`], the crate-wide session-
+    /// creation choke point EVERY session-creating call site (daemon, CLI,
+    /// TUI client, control-plane backend) now routes through, so the
+    /// ordering can never be bypassed by a future call site again.
     pub fn create_session(&self, name: &str, workdir: Option<&str>) -> Result<()> {
-        self.run(&TmuxCommand::NewSession {
-            name: name.to_string(),
-            workdir: workdir.map(str::to_string),
-        })?;
-        Ok(())
+        let output =
+            crate::core::tmux::create_managed_session(Some(&self.tmux_path), name, workdir)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            Err(Error::Protocol(redact_oauth_token(&format!(
+                "tmux new-session for {name} failed: {stderr}"
+            ))))
+        }
+    }
+
+    /// Apply the configured scrollback + mouse ergonomics to the tmux
+    /// SERVER, before any pane is created (#2398).
+    ///
+    /// Why: tmux's own default `history-limit` is 2000 lines — a long-running
+    /// PM session scrolls off the top almost immediately. `history-limit` is
+    /// captured into a pane's ring buffer AT CREATION TIME; a per-session
+    /// `set-option` issued after a pane already exists does not retroactively
+    /// grow it (a tmux limitation — existing panes are unaffected by this
+    /// call; only NEW panes/sessions created after it benefit). Because
+    /// trusty-mpm runs every managed session on the ONE default tmux server
+    /// (no dedicated `-S` socket — confirmed: no call site in this crate
+    /// passes `-S`/`-L`), setting these as GLOBAL (`-g`) options once, right
+    /// before [`Self::create_session`]'s `new-session`, benefits every
+    /// session subsequently created without per-session bookkeeping. `mouse
+    /// on` additionally maps the wheel to pane-scroll/copy-mode entry, the
+    /// actual "scroll" gesture operators expect.
+    /// What: loads [`crate::core::trusty_tools_config::TrustyToolsConfig`],
+    /// resolves the `tmux:` section via
+    /// [`crate::core::trusty_tools_config::resolve_tmux_options`] (defaults:
+    /// 100,000-line history-limit, mouse on), and runs each
+    /// [`crate::core::tmux::scrollback_option_commands`] entry via
+    /// [`Self::run`]. Best-effort: `set-option -g` is idempotent (safe to
+    /// call before every session creation) and virtually never fails on a
+    /// tmux new enough to run trusty-mpm at all, but a failure here must
+    /// never block session creation/restart — each failure is logged and the
+    /// next option (or the caller's subsequent tmux call) still runs.
+    /// Test: argv construction is covered by `core::tmux`'s
+    /// `scrollback_option_commands_*` tests and config resolution by
+    /// `core::trusty_tools_config`'s `tmux_options_*` tests; this method's
+    /// live-server call site is exercised transitively by every
+    /// `create_session` caller with a real `tmux` binary (`#[ignore]` tests).
+    pub fn apply_scrollback_options(&self) {
+        let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+        let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
+        for cmd in crate::core::tmux::scrollback_option_commands(opts.history_limit, opts.mouse) {
+            if let Err(e) = self.run(&cmd) {
+                warn!("tmux scrollback/mouse option {cmd:?} failed (non-fatal): {e}");
+            }
+        }
     }
 
     /// Kill the tmux session named `name`.
