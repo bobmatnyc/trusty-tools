@@ -134,41 +134,53 @@ async fn resolve_cadence_config_env_wins_over_settings_json() {
 /// fired at all — proving the settings.json override is what changed the
 /// observed behaviour, not some incidental default.
 /// Test: this test.
-#[test]
-fn settings_json_cadence_turns_override_changes_fire_schedule_end_to_end() {
+///
+/// Hermeticity: `resolve_cadence_config` reads the process-global
+/// `TCODE_CADENCE_TURNS` / `TCODE_CADENCE_MAX_OVERHEAD_FRACTION_PCT` env vars,
+/// which the sibling `resolve_cadence_config_env_wins_over_settings_json` test
+/// sets to `"5"`/`"50"` while it runs. This test therefore resolves under
+/// `with_cadence_env(None, None, …)` — holding `CADENCE_ENV_LOCK` and forcing
+/// the env vars unset — so a concurrent env-setting test cannot bleed its
+/// `TCODE_CADENCE_TURNS=5` into this resolver and make the `== 3` assertion
+/// observe `5` (the pre-existing flake this guards against).
+#[tokio::test]
+async fn settings_json_cadence_turns_override_changes_fire_schedule_end_to_end() {
     let project = project_with_settings(Some(r#"{"code_harness": {"cadence_turns": 3}}"#));
-    let overridden_cfg = resolve_cadence_config(project.path());
-    assert_eq!(overridden_cfg.cadence_turns, 3);
+    with_cadence_env(None, None, || {
+        let overridden_cfg = resolve_cadence_config(project.path());
+        assert_eq!(overridden_cfg.cadence_turns, 3);
 
-    let context_window = 1_000_000;
-    let mut overridden_transcript = Transcript::seed("s", "task");
-    for turn in 1..=4 {
-        push_sized_turn(&mut overridden_transcript, turn, 10);
-        maybe_cadence_compress(
-            &mut overridden_transcript,
-            &overridden_cfg,
+        let context_window = 1_000_000;
+        let mut overridden_transcript = Transcript::seed("s", "task");
+        for turn in 1..=4 {
+            push_sized_turn(&mut overridden_transcript, turn, 10);
+            maybe_cadence_compress(
+                &mut overridden_transcript,
+                &overridden_cfg,
+                1,
+                context_window,
+            );
+        }
+        assert_eq!(
+            overridden_transcript.cadence_fire_count(),
             1,
-            context_window,
+            "cadence_turns=3 from settings.json must have fired once by turn 4"
         );
-    }
-    assert_eq!(
-        overridden_transcript.cadence_fire_count(),
-        1,
-        "cadence_turns=3 from settings.json must have fired once by turn 4"
-    );
 
-    let default_cfg = CadenceConfig::default();
-    let mut default_transcript = Transcript::seed("s", "task");
-    for turn in 1..=4 {
-        push_sized_turn(&mut default_transcript, turn, 10);
-        maybe_cadence_compress(&mut default_transcript, &default_cfg, 1, context_window);
-    }
-    assert_eq!(
-        default_transcript.cadence_fire_count(),
-        0,
-        "the built-in default (cadence_turns=8) must NOT have fired by turn 4 — \
-         proving the settings.json override, not the default, drove the difference"
-    );
+        let default_cfg = CadenceConfig::default();
+        let mut default_transcript = Transcript::seed("s", "task");
+        for turn in 1..=4 {
+            push_sized_turn(&mut default_transcript, turn, 10);
+            maybe_cadence_compress(&mut default_transcript, &default_cfg, 1, context_window);
+        }
+        assert_eq!(
+            default_transcript.cadence_fire_count(),
+            0,
+            "the built-in default (cadence_turns=8) must NOT have fired by turn 4 — \
+             proving the settings.json override, not the default, drove the difference"
+        );
+    })
+    .await;
 }
 
 /// Cadence fires exactly every N turns (N=3 override) — not on any other
