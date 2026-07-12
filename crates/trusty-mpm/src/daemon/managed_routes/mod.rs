@@ -49,8 +49,8 @@ pub use lifecycle::{
     spawn_runtime_for, write_task_md,
 };
 pub use project_registry_routes::{
-    ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
-    list_projects_registry_route, register_project_registry_route,
+    PatchProjectBody, ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
+    list_projects_registry_route, patch_project_registry_route, register_project_registry_route,
 };
 pub use project_status::{
     DeliverableStatusCounts, MilestoneStatusCounts, ProjectConfigFlags, ProjectStatusResponse,

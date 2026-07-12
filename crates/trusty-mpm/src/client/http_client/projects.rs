@@ -1,22 +1,24 @@
-//! Registry-B project methods for [`DaemonClient`] (DOC-35 §3.1/§4, #2115).
+//! Registry-B project methods for [`DaemonClient`] (DOC-35 §3.1/§4/§6, #2115/#2114).
 //!
-//! Why: the `tm projects list/register/show/status` CLI verbs are thin HTTP
-//! clients (DOC-35 §1.3). Wiring each endpoint once here — as typed
+//! Why: the `tm projects list/register/show/status/config` CLI verbs are thin
+//! HTTP clients (DOC-35 §1.3). Wiring each endpoint once here — as typed
 //! [`DaemonClient`] methods — keeps every consumer (the CLI today, the TUI next)
 //! off hand-rolled `reqwest` calls, exactly as the managed-session methods in the
 //! sibling `managed.rs` do. This file lives beside `mod.rs` (not in it) so the
 //! near-cap client `mod.rs` stays under the 500-SLOC bar; it reaches the
 //! `base`/`http` fields because they are `pub(in crate::client::http_client)`.
 //! What: the registry-B response DTOs the client owns ([`ProjectStatusWire`] and
-//! its parts, plus [`RegisterProjectArgs`] for the POST body) and four methods:
-//! [`DaemonClient::registry_list_projects`], [`DaemonClient::registry_register_project`],
-//! [`DaemonClient::registry_get_project`], and [`DaemonClient::project_status`].
+//! its parts, plus [`RegisterProjectArgs`]/[`PatchProjectArgs`] for the
+//! POST/PATCH bodies) and five methods: [`DaemonClient::registry_list_projects`],
+//! [`DaemonClient::registry_register_project`], [`DaemonClient::registry_get_project`],
+//! [`DaemonClient::registry_patch_project`], and [`DaemonClient::project_status`].
 //! The status DTO deliberately does NOT `deny_unknown_fields` so the additive
 //! Deliverable/Milestone histogram fields #2382 adds to the endpoint deserialize
 //! cleanly against an older client (wire-compat, forward-tolerant).
 //! Test: `project_status_wire_tolerates_additive_fields`,
-//! `register_args_serializes_to_wire_shape`, `projects_list_deserializes` in the
-//! `tests` submodule; live HTTP via the daemon's own route tests.
+//! `register_args_serializes_to_wire_shape`,
+//! `patch_args_serializes_double_option_semantics`, `projects_list_deserializes`
+//! in the `tests` submodule; live HTTP via the daemon's own route tests.
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -53,6 +55,54 @@ pub struct RegisterProjectArgs {
     /// Preferred `gh` login (#2081).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<String>,
+}
+
+/// Serializable body for `PATCH /api/v1/projects/{name}` (registry-B partial
+/// update, #2114, DOC-35 §6).
+///
+/// Why: `tm projects config <name> set/unset` and the TUI config form (#2120)
+/// build this from their flags; mirrors the daemon's `PatchProjectBody` wire
+/// shape exactly, including the double-`Option` unset story for
+/// `description`/`stack_hint`/`gh_user` and the `tags_add`/`tags_remove`
+/// add/remove pair (§6: "no free-text replace-whole-list footgun" — there is
+/// deliberately no plain `tags` replacement field).
+/// What: every field optional and omitted from the JSON when the OUTER
+/// `Option` is `None` (`skip_serializing_if`); for the three double-`Option`
+/// fields, `Some(None)` serializes as JSON `null` (serde's stock `Option<T>`
+/// `Serialize` impl already does this — no custom serializer is needed on the
+/// SEND side, only on the daemon's receive side), clearing the field, while
+/// `Some(Some(v))` serializes as the value. `name` is intentionally NOT a
+/// field here: the identity key is always the `{name}` path segment
+/// [`DaemonClient::registry_patch_project`] takes separately, so this DTO's
+/// shape cannot even express the (always-rejected) name-change attempt.
+/// Test: `patch_args_serializes_double_option_semantics`,
+/// `patch_args_omits_absent_fields`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PatchProjectArgs {
+    /// New repository URL, if changing (rejected by the daemon when blank).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_url: Option<String>,
+    /// New default branch, if changing (rejected by the daemon when blank).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    /// `None` = unchanged; `Some(None)` = clear; `Some(Some(v))` = set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+    /// Same three-state semantics as `description`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_hint: Option<Option<String>>,
+    /// Same three-state semantics as `description` (#2081; `gh auth status`
+    /// validation is deferred to #2121).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gh_user: Option<Option<String>>,
+    /// Tags to add, deduplicated server-side against the current set. A
+    /// blank/whitespace-only entry rejects the whole PATCH with 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags_add: Option<Vec<String>>,
+    /// Tags to remove; applied AFTER `tags_add` server-side. Same
+    /// blank-rejection rule as `tags_add`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags_remove: Option<Vec<String>>,
 }
 
 /// Per-state session histogram (client mirror of the daemon `SessionStateCounts`).
@@ -203,6 +253,37 @@ impl DaemonClient {
         Ok(project)
     }
 
+    /// Partially update a project via `PATCH /api/v1/projects/{name}`.
+    ///
+    /// Why: backs `tm projects config <name> set/unset` and the TUI config form
+    /// (#2120) — both are thin clients over the daemon's single PATCH
+    /// implementation (§6). See [`PatchProjectArgs`] for the field-by-field
+    /// unset/tags contract.
+    /// What: PATCHes `args` to the named project, returns the updated
+    /// [`Project`]; a 404 (unknown project) or 400 (blank required field, or a
+    /// body that tried to change `name`) surfaces as an error via
+    /// `error_for_status`.
+    /// Test: live HTTP via the daemon route tests
+    /// (`tests/project_registry_routes.rs`).
+    pub async fn registry_patch_project(
+        &self,
+        name: &str,
+        args: &PatchProjectArgs,
+    ) -> anyhow::Result<Project> {
+        let url = format!("{}/api/v1/projects/{name}", self.base);
+        let project: Project = self
+            .http
+            .patch(&url)
+            .json(args)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("deserialize patched project")?;
+        Ok(project)
+    }
+
     /// Fetch the deterministic status rollup via `GET .../{name}/status`.
     ///
     /// Why: backs `tm projects status` (#2115). The [`ProjectStatusWire`] target is
@@ -305,5 +386,47 @@ mod tests {
         let body: ProjectsListWire = serde_json::from_value(json).unwrap();
         assert_eq!(body.projects.len(), 1);
         assert_eq!(body.projects[0].name, "widget");
+    }
+
+    /// `Some(None)` (clear) serializes as JSON `null`; `Some(Some(v))` (set)
+    /// serializes as the value — the double-`Option` unset story the daemon's
+    /// `deserialize_double_option` expects on the receiving end.
+    #[test]
+    fn patch_args_serializes_double_option_semantics() {
+        let args = PatchProjectArgs {
+            description: Some(None),
+            stack_hint: Some(Some("rust".into())),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&args).unwrap();
+        assert!(v["description"].is_null(), "{v}");
+        assert_eq!(v["stack_hint"], "rust");
+    }
+
+    /// Every field defaults to `None` (outer), so a default `PatchProjectArgs`
+    /// serializes to an empty object — a true "change nothing" PATCH body.
+    #[test]
+    fn patch_args_omits_absent_fields() {
+        let args = PatchProjectArgs::default();
+        let v = serde_json::to_value(&args).unwrap();
+        assert_eq!(v, serde_json::json!({}));
+    }
+
+    /// `tags_add`/`tags_remove` and the two required-string fields serialize
+    /// plainly when present.
+    #[test]
+    fn patch_args_serializes_tags_and_required_fields() {
+        let args = PatchProjectArgs {
+            repo_url: Some("https://github.com/acme/widget2".into()),
+            default_branch: Some("release".into()),
+            tags_add: Some(vec!["ml".into()]),
+            tags_remove: Some(vec!["oss".into()]),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&args).unwrap();
+        assert_eq!(v["repo_url"], "https://github.com/acme/widget2");
+        assert_eq!(v["default_branch"], "release");
+        assert_eq!(v["tags_add"][0], "ml");
+        assert_eq!(v["tags_remove"][0], "oss");
     }
 }

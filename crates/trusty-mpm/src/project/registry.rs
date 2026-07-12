@@ -7,10 +7,21 @@
 //! What: [`ProjectRegistry`] wraps a [`ProjectStore`] in an async `RwLock`,
 //! exposes `register` (idempotent upsert), `get`, and `list`; `seed_from_config`
 //! upserts statically-declared entries; `auto_register_from_sessions` derives
-//! implicit entries from existing session records.
+//! implicit entries from existing session records. [`update_with`](ProjectRegistry::update_with)
+//! is the atomic read-mutate-persist seam a PATCH handler MUST use (#2481 review
+//! HIGH): it holds ONE write-lock guard across the whole fetch→mutate→persist
+//! sequence, mirroring [`crate::deliverable::manager::DeliverableManager::update_deliverable_with`]
+//! (#2395) — `get` followed later by a separate `register` call (two distinct
+//! lock acquisitions) leaves a window where a concurrent caller's own
+//! get-then-register can land in between, and whichever `register` runs last
+//! silently discards the other's update because each call persists a FULL
+//! record built from its own (by-then-stale) snapshot.
 //! Test: `registry_register_idempotent`, `registry_list`, `registry_get`,
 //! `registry_seed_from_config`, `registry_auto_register_from_sessions`,
-//! `registry_derive_name_skips_missing_url`.
+//! `registry_derive_name_skips_missing_url`,
+//! `get_then_register_pattern_reproduces_lost_update_pre_fix`,
+//! `update_with_serializes_concurrent_field_edits`,
+//! `update_with_unknown_project_errors`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -84,6 +95,43 @@ impl ProjectRegistry {
     pub async fn list(&self) -> Result<Vec<Project>, ProjectStoreError> {
         let mut guard = self.store.write().await;
         guard.all().await
+    }
+
+    /// Atomically read-mutate-persist a project under ONE lock.
+    ///
+    /// Why (fixes the #2481 review HIGH): `PATCH /api/v1/projects/{name}`
+    /// originally called [`get`](Self::get) (one write-lock acquisition),
+    /// released the lock, mutated a CLONE in the caller, then separately
+    /// called [`register`](Self::register) (a SECOND, later acquisition) to
+    /// persist the FULL replacement record. Two concurrent PATCHes to the
+    /// SAME project — even ones editing completely DIFFERENT fields — can
+    /// both fetch the same stale snapshot in the gap between those two calls;
+    /// each then persists a full record built from that stale snapshot, so
+    /// whichever `register` lands last silently overwrites the other's
+    /// already-"successful" field edit with no error ever surfacing to that
+    /// caller. This is the exact lost-update hazard #2395 already fixed for
+    /// `DeliverableManager::update_deliverable_with`.
+    /// What: acquires `self.store.write().await` ONCE and holds the guard for
+    /// the ENTIRE fetch→mutate→persist sequence. Fetches the CURRENT on-disk
+    /// record via the store's own reload-on-read `get` (`NotFound` propagates
+    /// unchanged), calls `f` with that freshly-reloaded record, persists `f`'s
+    /// (infallible — Project PATCH has no state-machine rejection path, unlike
+    /// Deliverable's §10.3 transitions) result, and returns it — all before
+    /// releasing the lock, so no other task can observe or clobber the
+    /// intermediate state.
+    /// Test: `update_with_serializes_concurrent_field_edits` (the concurrency
+    /// regression test — proves two concurrent edits to DIFFERENT fields are
+    /// both present in the final persisted record, never one lost), and
+    /// `update_with_unknown_project_errors`.
+    pub async fn update_with<F>(&self, name: &str, f: F) -> Result<Project, ProjectStoreError>
+    where
+        F: FnOnce(Project) -> Project,
+    {
+        let mut guard = self.store.write().await;
+        let current = guard.get(name).await?;
+        let updated = f(current);
+        guard.upsert(updated.clone()).await?;
+        Ok(updated)
     }
 
     /// Seed the registry from statically-declared `projects:` config entries.
@@ -302,6 +350,150 @@ mod tests {
 
         let err = registry.get("nonexistent").await;
         assert!(matches!(err, Err(ProjectStoreError::NotFound(_))));
+    }
+
+    fn make_project(name: &str) -> Project {
+        Project {
+            name: name.into(),
+            repo_url: format!("https://github.com/o/{name}"),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+        }
+    }
+
+    /// `update_with` propagates `NotFound` for an unregistered project and
+    /// never calls the mutation closure (there is nothing to mutate).
+    #[tokio::test]
+    async fn update_with_unknown_project_errors() {
+        let dir = TempDir::new().expect("tempdir");
+        let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+        let err = registry
+            .update_with("nope", |p| p)
+            .await
+            .expect_err("unknown project must error");
+        assert!(matches!(err, ProjectStoreError::NotFound(_)));
+    }
+
+    /// Reproduces, using the still-available low-level primitives (`get` +
+    /// `register`), the EXACT pre-fix PATCH hazard the #2481 review flagged as
+    /// a HIGH: a `get` under one lock followed LATER by a separate `register`
+    /// under a second lock leaves a window in which another task's own
+    /// get-then-register sequence can run to completion entirely — both tasks
+    /// build their full replacement record from the SAME stale snapshot, so
+    /// whichever `register` lands last silently discards the other's
+    /// already-"successful" field edit. This is the exact two-call shape the
+    /// OLD `patch_project_registry_route` used (fetch under one lock, mutate a
+    /// clone, then persist under a later, separate lock) — the shape
+    /// `update_with` replaces. A `tokio::sync::Notify` gate forces the
+    /// deterministic interleave (B's whole get-mutate-register sequence
+    /// completes while A is parked between its OWN get and its OWN register),
+    /// so the outcome never depends on scheduler luck.
+    /// Test: this IS the test (the #2481 HIGH regression guard, negative case).
+    #[tokio::test]
+    async fn get_then_register_pattern_reproduces_lost_update_pre_fix() {
+        let dir = TempDir::new().expect("tempdir");
+        let registry = Arc::new(ProjectRegistry::load(dir.path()).await.expect("load"));
+        registry
+            .register(make_project("widget"))
+            .await
+            .expect("seed");
+
+        // Gate: task A fetches, then PARKS here — simulating the exact window
+        // the two-lock pattern leaves open between its `get` and its
+        // `register` — until B has fetched, mutated, AND registered its own
+        // (different field) edit.
+        let gate = Arc::new(tokio::sync::Notify::new());
+
+        let reg_a = Arc::clone(&registry);
+        let gate_a = Arc::clone(&gate);
+        let a = tokio::spawn(async move {
+            // Lock #1 (fetch), released as soon as `get` returns — exactly the
+            // OLD handler's read.
+            let mut current = reg_a.get("widget").await.unwrap();
+            // Park until B's own get-mutate-register has fully landed.
+            gate_a.notified().await;
+            current.description = Some("set by A".into());
+            // Lock #2 (register) — a SEPARATE, later acquisition than lock #1.
+            reg_a.register(current).await.unwrap();
+        });
+
+        let reg_b = Arc::clone(&registry);
+        let gate_b = Arc::clone(&gate);
+        let b = tokio::spawn(async move {
+            let mut current = reg_b.get("widget").await.unwrap();
+            current.stack_hint = Some("rust".into());
+            reg_b.register(current).await.unwrap();
+            // B's committed write has landed — release A to clobber it.
+            gate_b.notify_one();
+        });
+
+        b.await.unwrap();
+        a.await.unwrap();
+
+        // The bug: B's committed `stack_hint` edit is silently discarded — A's
+        // later `register` persists a full record built from a snapshot taken
+        // BEFORE B's write, so A's own field lands but B's is gone, with no
+        // error ever surfaced to B's caller (B's own call returned Ok).
+        let final_state = registry.get("widget").await.unwrap();
+        assert_eq!(final_state.description.as_deref(), Some("set by A"));
+        assert_eq!(
+            final_state.stack_hint, None,
+            "demonstrates the pre-fix hazard: B's committed stack_hint edit is \
+             lost — silently clobbered by A's later register() against a \
+             stale snapshot, even though B's own call reported success"
+        );
+    }
+
+    /// Proves the fix: racing two `update_with` calls that edit DIFFERENT
+    /// fields of the SAME project can never lose either edit — both are
+    /// present in the final persisted record, regardless of which task's
+    /// write lands first. Pre-fix (the two-lock pattern exercised by
+    /// `get_then_register_pattern_reproduces_lost_update_pre_fix` above), this
+    /// same race would silently drop whichever edit lost the race.
+    /// Test: this IS the test (the #2481 HIGH regression guard, positive case).
+    #[tokio::test]
+    async fn update_with_serializes_concurrent_field_edits() {
+        let dir = TempDir::new().expect("tempdir");
+        let registry = Arc::new(ProjectRegistry::load(dir.path()).await.expect("load"));
+        registry
+            .register(make_project("widget"))
+            .await
+            .expect("seed");
+
+        let reg_a = Arc::clone(&registry);
+        let a = tokio::spawn(async move {
+            reg_a
+                .update_with("widget", |mut p| {
+                    p.description = Some("set by A".into());
+                    p
+                })
+                .await
+        });
+
+        let reg_b = Arc::clone(&registry);
+        let b = tokio::spawn(async move {
+            reg_b
+                .update_with("widget", |mut p| {
+                    p.stack_hint = Some("rust".into());
+                    p
+                })
+                .await
+        });
+
+        a.await.unwrap().expect("A's update must succeed");
+        b.await.unwrap().expect("B's update must succeed");
+
+        // Both concurrent field edits must be present — neither was lost,
+        // regardless of which task's write landed first.
+        let final_state = registry.get("widget").await.unwrap();
+        assert_eq!(final_state.description.as_deref(), Some("set by A"));
+        assert_eq!(final_state.stack_hint.as_deref(), Some("rust"));
     }
 
     #[tokio::test]
