@@ -42,6 +42,10 @@ mod sink;
 mod transcript;
 
 #[cfg(test)]
+mod cadence_env_helper;
+#[cfg(test)]
+pub(crate) use cadence_env_helper::with_cadence_env;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;

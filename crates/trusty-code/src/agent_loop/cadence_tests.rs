@@ -5,32 +5,8 @@
 
 use super::super::CompactionConfig;
 use super::*;
+use crate::agent_loop::with_cadence_env;
 use crate::llm::{ChatMessage, FunctionCall, ToolCall};
-
-/// Serializes tests that mutate the process-wide cadence env vars, mirroring
-/// `crate::mode::MODE_ENV_LOCK`'s identical rationale.
-static CADENCE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn with_cadence_env<T>(turns: Option<&str>, pct: Option<&str>, f: impl FnOnce() -> T) -> T {
-    let _guard = CADENCE_ENV_LOCK.lock().await;
-    // SAFETY: test-only env mutation, serialized by `CADENCE_ENV_LOCK`.
-    unsafe {
-        match turns {
-            Some(v) => std::env::set_var(CADENCE_TURNS_ENV_VAR, v),
-            None => std::env::remove_var(CADENCE_TURNS_ENV_VAR),
-        }
-        match pct {
-            Some(v) => std::env::set_var(CADENCE_OVERHEAD_FRACTION_ENV_VAR, v),
-            None => std::env::remove_var(CADENCE_OVERHEAD_FRACTION_ENV_VAR),
-        }
-    }
-    let result = f();
-    unsafe {
-        std::env::remove_var(CADENCE_TURNS_ENV_VAR);
-        std::env::remove_var(CADENCE_OVERHEAD_FRACTION_ENV_VAR);
-    }
-    result
-}
 
 fn project_with_settings(json: Option<&str>) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
