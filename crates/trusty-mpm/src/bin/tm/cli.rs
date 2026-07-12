@@ -1569,6 +1569,21 @@ pub(crate) enum ProjectsAction {
         #[arg(long)]
         json: bool,
     },
+    /// View or edit a project's deterministic config (§3.1/§6, #2120).
+    ///
+    /// Bare (no `set`/`unset`/`tags` subcommand) is a read-only view (GET);
+    /// each subcommand is a single deterministic PATCH — never free text.
+    Config {
+        /// Project name.
+        name: String,
+        /// Emit raw JSON instead of the human view (bare view form only).
+        #[arg(long)]
+        json: bool,
+        /// `set <field> <value>` / `unset <field>` / `tags --add/--remove`;
+        /// omitted = view.
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// Manage a project's Deliverables (§10.8).
     Deliverables {
         /// Deliverable action to perform.
@@ -1581,6 +1596,85 @@ pub(crate) enum ProjectsAction {
         #[command(subcommand)]
         action: MilestonesAction,
     },
+}
+
+/// Actions for `tm projects config <name>` (DOC-35 §3.1/§6, #2120).
+///
+/// Why: the deterministic sub-verbs of the configurator — `set`/`unset` mirror
+/// the field-level PATCH exactly (never free text); `tags` is a DEDICATED verb
+/// rather than folded into `set`/`unset` — disclosed deviation from a literal
+/// reading of the spec's CLI sketch (which groups tags under the same
+/// set/unset comment line): `set <field> <value>` structurally cannot express
+/// two independent lists (add AND remove) in one positional value, and §6's
+/// own field table sanctions "`--add`/`--remove`" as the mechanism; the issue
+/// text explicitly allows either "set/unset or dedicated --add/--remove
+/// flags" and this is the dedicated-verb form.
+/// What: three subcommands routed by `commands::projects::registry::config`.
+/// Test: `cli_parses_projects_config_*` in `tests_projects.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum ConfigAction {
+    /// Set a field to a new value.
+    Set {
+        /// Which field to set.
+        #[arg(value_enum)]
+        field: SettableConfigField,
+        /// The new value.
+        value: String,
+    },
+    /// Clear (unset) a field back to absent.
+    ///
+    /// `default_branch` is deliberately NOT a valid target here — see
+    /// [`ClearableConfigField`]'s doc for why.
+    Unset {
+        /// Which field to clear.
+        #[arg(value_enum)]
+        field: ClearableConfigField,
+    },
+    /// Add and/or remove tags in one call (§6: "no free-text
+    /// replace-whole-list footgun" — there is no plain tags-replace form).
+    Tags {
+        /// Comma-separated tags to add.
+        #[arg(long, value_delimiter = ',')]
+        add: Vec<String>,
+        /// Comma-separated tags to remove (applied after `--add`, server-side).
+        #[arg(long, value_delimiter = ',')]
+        remove: Vec<String>,
+    },
+}
+
+/// CLI value for a settable config field (§6); maps 1:1 to
+/// `trusty_mpm::project_config::ConfigField` via `convert.rs`. Kept local so
+/// `cli.rs` carries no domain dependency. Default kebab-case value names
+/// (`default-branch`, `stack-hint`, …) match this codebase's other
+/// `ValueEnum`s (e.g. `DeliverableStatusArg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum SettableConfigField {
+    /// `default_branch` — required, non-empty.
+    DefaultBranch,
+    /// `description` — free-form, clearable.
+    Description,
+    /// `stack_hint` — advisory, clearable.
+    StackHint,
+    /// `gh_user` — preferred `gh` login (#2081), clearable.
+    GhUser,
+}
+
+/// CLI value for a clearable config field (§6) — DELIBERATELY NARROWER than
+/// [`SettableConfigField`]: `default_branch` is excluded because it has no
+/// wire representation for "clear" at all (`PatchProjectBody::default_branch`
+/// is a plain `Option<String>` — absent=unchanged, present+blank=400,
+/// present+non-blank=set; there is no double-Option `null`=clear story like
+/// `description`/`stack_hint`/`gh_user` have). Rejecting `unset
+/// default-branch` at clap parse time (an "invalid value" error) is strictly
+/// better than proxying a request the server cannot honor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ClearableConfigField {
+    /// `description`.
+    Description,
+    /// `stack_hint`.
+    StackHint,
+    /// `gh_user`.
+    GhUser,
 }
 
 /// Actions for `tm projects deliverables` (DOC-35 §10.8, #2381).

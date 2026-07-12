@@ -17,7 +17,11 @@ use crate::cli::{
 };
 
 /// Assert `argv` parses to a `Command::Projects` and hand its action to `check`.
-fn projects_action(argv: &[&str]) -> ProjectsAction {
+///
+/// `pub(crate)`: reused by the sibling `tests_projects_config_tests.rs`
+/// (#2120's config-subtree tests, split out to stay under this file's
+/// 500-SLOC cap — see the comment above the `config` subtree marker below).
+pub(crate) fn projects_action(argv: &[&str]) -> ProjectsAction {
     let cli = Cli::try_parse_from(argv).expect("parse");
     match cli.command.expect("subcommand") {
         Command::Projects { action } => action,
@@ -187,6 +191,11 @@ fn cli_parses_projects_status() {
         other => panic!("expected status, got {other:?}"),
     }
 }
+
+// `config` subtree (§3.1/§6, #2120) parse + shared-suite tests live in the
+// sibling `tests_projects_config_tests.rs` (split out to stay under this
+// file's 500-SLOC production cap — that file's `_tests.rs` suffix gives it
+// the 1500-SLOC test-file cap instead; see its module doc).
 
 // ─────────────────────── deliverables subtree (#2381) ──────────────────────
 

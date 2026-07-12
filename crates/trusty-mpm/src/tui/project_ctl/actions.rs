@@ -10,10 +10,11 @@
 //! spawning a managed session requires a `task` description and a `git_ref`
 //! (see [`crate::client::ManagedSpawnRequest`]) that a 4-pane skeleton has no
 //! text-entry surface to collect — building that form is explicitly out of
-//! scope here (mirrors why `c`/config is also a stub; a real launch form is a
-//! natural follow-up alongside #2120's config form). Rather than silently
-//! doing nothing, `l` shows a notice pointing at the existing
-//! `tm sessions new` CLI verb, which already does the real work.
+//! scope here. Rather than silently doing nothing, `l` shows a notice
+//! pointing at the existing `tm sessions new` CLI verb, which already does
+//! the real work. Config (`c`) is NO LONGER a stub — #2120 replaced it with a
+//! real fixed-field form; see [`PendingAction::SubmitConfig`]'s handling
+//! below.
 //!
 //! **Decommission has no confirmation step**, matching the issue's keybinding
 //! table verbatim (`d` → decommission, no modal). This is a permanent,
@@ -38,12 +39,18 @@ use super::state::ProjectCtlState;
 ///
 /// Why: the single async seam the run loop calls after `handle_key` returns
 /// `Some(action)`.
-/// What: `Launch`/`Config` are stubs — see the module doc — that set an
-/// explanatory notice with no daemon call. `Kill`/`Resume`/`Decommission`
-/// call the matching mutating endpoint and, on success, request an immediate
-/// re-poll ([`ProjectCtlState::request_repoll`]) so the fleet reflects the
-/// change now. `Attach` fetches and displays the tmux attach command
-/// (read-only — no repoll).
+/// What: `Launch` is a stub — see the module doc — that sets an explanatory
+/// notice with no daemon call. `Kill`/`Resume`/`Decommission` call the
+/// matching mutating endpoint and, on success, request an immediate re-poll
+/// ([`ProjectCtlState::request_repoll`]) so the fleet reflects the change
+/// now. `Attach` fetches and displays the tmux attach command (read-only —
+/// no repoll). `SubmitConfig` (DOC-35 §6, #2120) PATCHes the config form's
+/// built args: on success, CLOSES the form (`close_config_form`), sets a
+/// success notice, and requests a repoll (matching the other mutating
+/// verbs); on failure, the form STAYS OPEN and the error renders INLINE in
+/// it (`set_config_form_error`) rather than as a transient notice — the
+/// explicit #2120 requirement that a rejected submit never discards the
+/// operator's other unsaved edits.
 pub(crate) async fn dispatch(
     state: &mut ProjectCtlState,
     client: &DaemonClient,
@@ -71,10 +78,15 @@ pub(crate) async fn dispatch(
             Ok(resp) => state.set_notice(format!("attach: {}", resp.attach_cmd)),
             Err(e) => state.set_notice(format!("attach failed: {e}")),
         },
-        PendingAction::Config(project) => {
-            state.set_notice(format!(
-                "config for '{project}' is not available yet (#2120)"
-            ));
+        PendingAction::SubmitConfig(name, args) => {
+            match client.registry_patch_project(&name, &args).await {
+                Ok(project) => {
+                    state.close_config_form();
+                    state.set_notice(format!("updated config for '{}'", project.name));
+                    state.request_repoll();
+                }
+                Err(e) => state.set_config_form_error(format!("{e}")),
+            }
         }
     }
 }

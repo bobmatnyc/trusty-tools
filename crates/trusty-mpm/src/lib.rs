@@ -129,6 +129,20 @@ pub mod supervisor;
 /// Test: each submodule carries inline unit tests run by `cargo test -p trusty-mpm`.
 pub mod project;
 
+/// Shared deterministic project-config edit model (DOC-35 §6, #2120).
+///
+/// Why: `tm projects config <name> set/unset/tags` (CLI) and the TUI config
+/// form (`tui::project_ctl`) are both thin clients over `PATCH
+/// /api/v1/projects/{name}`; this module is the ONE place that turns a
+/// deterministic field edit into the wire-shape `PatchProjectArgs`, so the two
+/// front ends cannot drift on what a given edit means on the wire.
+/// What: re-exports `ConfigField`, `ClearableField`, `ConfigEdit`,
+/// `build_patch_args`, `merge_patch_args`, and the shared
+/// `config_edit_cases`/`assert_matches_case` test-case table.
+/// Test: inline unit tests plus the CLI (`bin/tm/tests_projects.rs`) and TUI
+/// (`tui::project_ctl::state::modals::tests`) consumers — see the module doc.
+pub mod project_config;
+
 /// Deliverable/Milestone data model, central stores, and status state machine
 /// (DOC-35 §10, epic #2108; #2378 CRUD API + #2380 transition enforcement).
 ///

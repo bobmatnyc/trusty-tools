@@ -59,7 +59,13 @@ const RAW_PANE_TAIL_LINES: usize = 3;
 /// project/session refresh above (see [`refresh_activity`]).
 /// Test: `poll_marks_unreachable_clears_state` drives the full-poll
 /// daemon-down branch; `poll_never_touches_pending_confirm` (in
-/// `super::tests`) covers the confirm-gate invariant; the daemon-up path
+/// `super::tests`) covers the confirm-gate invariant, `poll_never_closes_an_open_deliverable_view`
+/// covers the Deliverable-view invariant, and `poll_doesnt_touch_open_config_form`
+/// covers the SAME invariant for the #2120 config form (never reassigned,
+/// closed, or have its in-progress unsaved field edits clobbered by a
+/// racing poll — the config form has no live daemon-fed content to refresh
+/// mid-edit, unlike the Deliverable view, so a poll's only correct action
+/// toward an open form is to leave it alone entirely); the daemon-up path
 /// requires a live daemon and is exercised manually.
 pub(crate) async fn project_ctl_poll_daemon(
     state: &mut ProjectCtlState,
@@ -71,19 +77,22 @@ pub(crate) async fn project_ctl_poll_daemon(
     }
     if state.daemon_reachable {
         match fetch_projects_and_sessions(client).await {
-            Ok((projects, sessions_by_project)) => {
+            Ok((projects, sessions_by_project, projects_full)) => {
                 state.projects = projects;
                 state.sessions_by_project = sessions_by_project;
+                state.projects_full = projects_full;
             }
             Err(_) => {
                 state.daemon_reachable = false;
                 state.projects.clear();
                 state.sessions_by_project.clear();
+                state.projects_full.clear();
             }
         }
     } else {
         state.projects.clear();
         state.sessions_by_project.clear();
+        state.projects_full.clear();
     }
     state.projects_nav.sync_len(state.projects.len());
     state.sessions_nav.sync_len(state.current_sessions().len());
@@ -245,14 +254,20 @@ fn rediscover(client: &mut DaemonClient, reachable: bool) -> bool {
 /// stays a thin health/rediscover wrapper.
 /// What: GETs `registry_list_projects` and `fleet_managed_sessions`, then
 /// builds the `Vec<ProjectRow>` (registry order, counts from the matching
-/// fleet group) and the `sessions_by_project` map (every fleet group, even a
+/// fleet group), the `sessions_by_project` map (every fleet group, even a
 /// project the registry list omitted — defensive against a transient
-/// registry/fleet mismatch).
+/// registry/fleet mismatch), and a `name -> Project` map of the FULL records
+/// `registry_list_projects` already returned (DOC-35 §6, #2120) — the config
+/// form needs the full record to seed its baseline values; retaining it here
+/// (rather than re-fetching per-project when the form opens) costs nothing,
+/// since `projects` was already in hand before being projected down to
+/// `ProjectRow`.
 async fn fetch_projects_and_sessions(
     client: &DaemonClient,
 ) -> anyhow::Result<(
     Vec<ProjectRow>,
     std::collections::BTreeMap<String, Vec<SessionRow>>,
+    std::collections::BTreeMap<String, Project>,
 )> {
     let projects = client.registry_list_projects(None).await?;
     let groups = client.fleet_managed_sessions().await?;
@@ -271,7 +286,9 @@ async fn fetch_projects_and_sessions(
         })
         .collect();
 
-    Ok((rows, sessions_by_project))
+    let projects_full = projects.into_iter().map(|p| (p.name.clone(), p)).collect();
+
+    Ok((rows, sessions_by_project, projects_full))
 }
 
 /// Project one registry [`Project`] (plus its matching fleet group, if any)

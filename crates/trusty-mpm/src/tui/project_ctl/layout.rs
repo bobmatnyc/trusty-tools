@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
 };
 
-use super::panes::{actions_bar, activity, deliverables_view, projects, sessions};
+use super::panes::{actions_bar, activity, config_form, deliverables_view, projects, sessions};
 use super::state::ProjectCtlState;
 
 /// Minimum height (rows, including the two border rows) of the main
@@ -41,10 +41,13 @@ const ACTIVITY_ROWS: u16 = 4;
 /// at [`MIN_MAIN_ROWS`]), the Activity strip ([`ACTIVITY_ROWS`]), and the
 /// 1-row action bar; splits the main row horizontally 25/75 for
 /// Projects/Sessions per DOC-35 §5. When
-/// [`ProjectCtlState::deliverable_view`] is `Some` (DOC-35 §10.8, #2383), a
-/// centred overlay floats on top of the whole frame afterward — a strict
-/// addition, never replacing a pane, mirroring the dashboard help-overlay's
-/// "draw base frame, then float overlay" sequencing.
+/// [`ProjectCtlState::deliverable_view`] is `Some` (DOC-35 §10.8, #2383) or
+/// [`ProjectCtlState::config_form`] is `Some` (DOC-35 §6, #2120), a centred
+/// overlay floats on top of the whole frame afterward — a strict addition,
+/// never replacing a pane, mirroring the dashboard help-overlay's "draw base
+/// frame, then float overlay" sequencing. The two are mutually exclusive by
+/// construction (see `events`'s module doc), so at most one overlay ever
+/// renders in a given frame.
 pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -67,5 +70,8 @@ pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
 
     if let Some(view) = &state.deliverable_view {
         deliverables_view::render(frame, view);
+    }
+    if let Some(view) = &state.config_form {
+        config_form::render(frame, view);
     }
 }

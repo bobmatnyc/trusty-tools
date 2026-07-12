@@ -1,8 +1,8 @@
-//! `tm projects` command group (DOC-35 §3.1/§10.8, #2115/#2381).
+//! `tm projects` command group (DOC-35 §3.1/§6/§10.8, #2115/#2120/#2381).
 //!
 //! Why: the deterministic CLI half of the project control plane. The verb tree is
-//! large (four registry verbs + two nested CRUD subtrees), so it is split per
-//! subtree — `registry` (list/register/show/status), `deliverables`, and
+//! large (five registry verbs + two nested CRUD subtrees), so it is split per
+//! subtree — `registry` (list/register/show/status/config), `deliverables`, and
 //! `milestones` — each a sibling file well under the 500-SLOC cap, with this
 //! `mod.rs` a thin dispatcher plus the shared clap-arg → domain-type conversions.
 //! What: [`projects`] routes a [`ProjectsAction`] to the right subtree handler
@@ -134,6 +134,9 @@ pub(crate) async fn projects(
         }
         ProjectsAction::Show { name, json } => registry::show(client, url, &name, json).await,
         ProjectsAction::Status { name, json } => registry::status(client, url, &name, json).await,
+        ProjectsAction::Config { name, json, action } => {
+            registry::config(client, url, &name, json, action).await
+        }
         ProjectsAction::Deliverables { action } => {
             deliverables::dispatch(client, url, action).await
         }

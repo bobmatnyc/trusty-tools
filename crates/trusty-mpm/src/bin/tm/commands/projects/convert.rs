@@ -1,17 +1,23 @@
 //! Clap-arg → domain-type conversions for the `tm projects` command group.
 //!
 //! Why: the CLI value enums (`DeliverableKindArg`, `EstimationTierArg`,
-//! `DeliverableStatusArg`) live in `cli.rs` so that file carries no dependency on
-//! the `trusty_mpm::deliverable` domain types. The mapping to those domain types
+//! `DeliverableStatusArg`, `SettableConfigField`, `ClearableConfigField`) live in
+//! `cli.rs` so that file carries no dependency on the `trusty_mpm::deliverable` /
+//! `trusty_mpm::project_config` domain types. The mapping to those domain types
 //! has to live somewhere the command handlers can call; centralizing it here
-//! keeps the three subtree files free of repeated `match` arms and gives the
+//! keeps the subtree files free of repeated `match` arms and gives the
 //! mapping a single tested home.
 //! What: `From` impls converting each CLI value enum to its domain counterpart.
-//! Test: `kind_maps`, `tier_maps`, `status_maps` in the `tests` submodule assert
-//! every variant round-trips to the right domain value.
+//! Test: `kind_maps`, `tier_maps`, `status_maps`, `settable_config_field_maps`,
+//! `clearable_config_field_maps` in the `tests` submodule assert every variant
+//! round-trips to the right domain value.
 
-use crate::cli::{DeliverableKindArg, DeliverableStatusArg, EstimationTierArg};
+use crate::cli::{
+    ClearableConfigField, DeliverableKindArg, DeliverableStatusArg, EstimationTierArg,
+    SettableConfigField,
+};
 use trusty_mpm::deliverable::{DeliverableKind, DeliverableStatus, EstimationTier};
+use trusty_mpm::project_config::{ClearableField, ConfigField};
 
 impl From<DeliverableKindArg> for DeliverableKind {
     fn from(arg: DeliverableKindArg) -> Self {
@@ -46,6 +52,27 @@ impl From<DeliverableStatusArg> for DeliverableStatus {
             DeliverableStatusArg::Complete => DeliverableStatus::Complete,
             DeliverableStatusArg::Delivered => DeliverableStatus::Delivered,
             DeliverableStatusArg::Shipped => DeliverableStatus::Shipped,
+        }
+    }
+}
+
+impl From<SettableConfigField> for ConfigField {
+    fn from(arg: SettableConfigField) -> Self {
+        match arg {
+            SettableConfigField::DefaultBranch => ConfigField::DefaultBranch,
+            SettableConfigField::Description => ConfigField::Description,
+            SettableConfigField::StackHint => ConfigField::StackHint,
+            SettableConfigField::GhUser => ConfigField::GhUser,
+        }
+    }
+}
+
+impl From<ClearableConfigField> for ClearableField {
+    fn from(arg: ClearableConfigField) -> Self {
+        match arg {
+            ClearableConfigField::Description => ClearableField::Description,
+            ClearableConfigField::StackHint => ClearableField::StackHint,
+            ClearableConfigField::GhUser => ClearableField::GhUser,
         }
     }
 }
@@ -87,6 +114,30 @@ mod tests {
         assert_eq!(
             DeliverableStatus::from(DeliverableStatusArg::Shipped),
             DeliverableStatus::Shipped
+        );
+    }
+
+    #[test]
+    fn settable_config_field_maps() {
+        assert_eq!(
+            ConfigField::from(SettableConfigField::DefaultBranch),
+            ConfigField::DefaultBranch
+        );
+        assert_eq!(
+            ConfigField::from(SettableConfigField::GhUser),
+            ConfigField::GhUser
+        );
+    }
+
+    #[test]
+    fn clearable_config_field_maps() {
+        assert_eq!(
+            ClearableField::from(ClearableConfigField::Description),
+            ClearableField::Description
+        );
+        assert_eq!(
+            ClearableField::from(ClearableConfigField::GhUser),
+            ClearableField::GhUser
         );
     }
 }

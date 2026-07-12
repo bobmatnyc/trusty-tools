@@ -16,11 +16,24 @@
 //! execute.
 //! Test: `super::tests` covers focus cycling, selection clamp/reset, the
 //! notice/repoll flags, and the confirm-gate request/clear/override rules.
+//!
+//! **Split (#2120, pre-emptive 500-SLOC cap avoidance)**: the two modal view
+//! types ([`DeliverableView`] and the config form) plus their
+//! `ProjectCtlState` mutator methods live in the sibling [`modals`] submodule,
+//! re-exported here (`pub use modals::*`) so every existing
+//! `super::state::DeliverableView`-style reference elsewhere in this crate
+//! keeps working unchanged.
 
 use std::collections::BTreeMap;
 
-use crate::deliverable::{Deliverable, Milestone};
+use crate::deliverable::Deliverable;
+use crate::project::Project;
 use crate::tui::coordinator::nav::ListNav;
+
+mod modals;
+pub use modals::{
+    ConfigFormField, ConfigFormFocus, ConfigFormTags, ConfigFormView, DeliverableView,
+};
 
 /// Which of the three navigable panes currently has keyboard focus.
 ///
@@ -233,36 +246,6 @@ pub enum DeliverableLinkState {
     Dangling,
 }
 
-/// The read-only Deliverable/Milestone view for one project (DOC-35 §10.8
-/// `show`, #2383), reachable from the Projects pane.
-///
-/// Why: the view is opened for exactly the project selected when the
-/// operator requested it, and — like [`PendingConfirm`] — must pin that
-/// target rather than silently following a later Projects-pane selection
-/// change (which cannot happen anyway while the view is open, since it
-/// captures all input, but pinning by value keeps the render layer from
-/// re-deriving "which project" from a selection that a same-tick poll could
-/// otherwise race). `deliverables` is populated from the same per-tick fetch
-/// [`ProjectCtlState::deliverables`] uses for the Sessions-pane glyph (no
-/// duplicate call — see `poll.rs`); `milestones` is fetched only while this
-/// view is open, the one extra per-tick call this feature adds (disclosed in
-/// the PR body).
-/// What: the target project's name, its Deliverables and Milestones as of
-/// the last successful fetch, and a line-based `scroll` offset for a list
-/// too tall for the overlay.
-/// Test: `super::panes::deliverables_view::tests`, `super::tests`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliverableView {
-    /// The project this view is scoped to.
-    pub project_name: String,
-    /// The project's Deliverables, as of the last successful fetch.
-    pub deliverables: Vec<Deliverable>,
-    /// The project's Milestones, as of the last successful fetch.
-    pub milestones: Vec<Milestone>,
-    /// How many lines the body is scrolled down from the top.
-    pub scroll: u16,
-}
-
 /// Everything the `tm projects` TUI renders and mutates this frame.
 ///
 /// Why: a single owned struct (mirroring `CoordinatorState`) keeps the
@@ -335,6 +318,30 @@ pub struct ProjectCtlState {
     ///
     /// [`handle_key`]: super::events::handle_key
     pub deliverable_view: Option<DeliverableView>,
+    /// The full registry-B [`Project`] record for every currently known
+    /// project, keyed by name (DOC-35 §6, #2120) — refreshed on the same poll
+    /// cadence as `projects`/`sessions_by_project`, from the SAME
+    /// `registry_list_projects` response `poll.rs` already fetches to build
+    /// [`ProjectRow`]s (no extra HTTP call). [`ProjectRow`] only carries the
+    /// aggregate-glyph fields the Projects pane renders; the config form
+    /// needs the full record (`default_branch`/`description`/`tags`/
+    /// `stack_hint`/`gh_user`) to seed its baseline values, so it is kept
+    /// here rather than widening `ProjectRow` (which many call sites and
+    /// tests construct with only its four existing fields).
+    pub projects_full: BTreeMap<String, Project>,
+    /// A deterministic config-edit form awaiting operator input (DOC-35 §6,
+    /// #2120), opened by `c` in the Projects pane. While `Some`,
+    /// [`handle_key`] in `events.rs` routes EVERY key through the form's own
+    /// focus-cycle/edit/submit/close handling instead of normal dispatch —
+    /// the identical "modal captures all input, `Esc` closes" discipline
+    /// [`PendingConfirm`]/[`DeliverableView`] already establish. Mutually
+    /// exclusive with both in practice: `c` is only ever evaluated by
+    /// `handle_key` when neither `pending_confirm` nor `deliverable_view` is
+    /// `Some` (both take priority and return early), so this form can never
+    /// open while either other modal is already showing.
+    ///
+    /// [`handle_key`]: super::events::handle_key
+    pub config_form: Option<ConfigFormView>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///
@@ -509,44 +516,6 @@ impl ProjectCtlState {
                     DeliverableLinkState::Dangling
                 }
             }
-        }
-    }
-
-    /// Open the Deliverable/Milestone view for the given project (`v` in the
-    /// Projects pane, DOC-35 §10.8 `show`, #2383).
-    ///
-    /// Why: the single seam [`super::events`]'s `v` handler calls; seeds the
-    /// view with whatever `deliverables` the last poll already fetched (no
-    /// duplicate call — see [`Self::deliverables`]'s doc) and an empty
-    /// `milestones` list that [`super::poll::project_ctl_poll_daemon`] fills
-    /// in on the next tick now that the view is open. When `deliverables` is
-    /// still `None` (unknown — nothing successfully fetched yet), the view
-    /// opens with an empty Deliverables section that the same next-tick fetch
-    /// backfills; it is not treated as "confirmed zero".
-    /// What: sets [`Self::deliverable_view`], overriding any prior one.
-    /// Test: `super::events::tests`.
-    pub fn open_deliverable_view(&mut self, project_name: impl Into<String>) {
-        self.deliverable_view = Some(DeliverableView {
-            project_name: project_name.into(),
-            deliverables: self.deliverables.clone().unwrap_or_default(),
-            milestones: Vec::new(),
-            scroll: 0,
-        });
-    }
-
-    /// Close the Deliverable/Milestone view (`Esc`/`v` while it is open).
-    pub fn close_deliverable_view(&mut self) {
-        self.deliverable_view = None;
-    }
-
-    /// Scroll the open Deliverable/Milestone view by `delta` lines, floored
-    /// at zero (no known-max clamp — the render layer clamps visually; an
-    /// operator scrolling past the end just sees the last page, matching
-    /// `ListNav`'s existing "clamp at render, not at input" pattern used
-    /// elsewhere in this screen).
-    pub fn scroll_deliverable_view(&mut self, delta: i16) {
-        if let Some(view) = &mut self.deliverable_view {
-            view.scroll = view.scroll.saturating_add_signed(delta);
         }
     }
 
