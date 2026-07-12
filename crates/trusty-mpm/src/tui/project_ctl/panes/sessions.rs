@@ -49,7 +49,13 @@ pub const DECOMMISSIONED_GLYPH: char = '⊘';
 /// `stopped`/`errored`/`decommissioned`, see `session_manager::record`) is
 /// the only state this issue's skeleton has available — the live
 /// "awaiting approval" / "idle Nm" detail the mockup shows comes from the
-/// `/activity` endpoint, deferred to #2119.
+/// `/activity` endpoint, deferred to #2119. The `"decommissioned"` arm is
+/// kept for completeness and stays directly unit tested, but is DEAD in the
+/// live poll path as of #2476:
+/// [`super::super::poll::live_session_rows`] drops every decommissioned
+/// session before a [`SessionRow`] is ever built, so this function never
+/// actually receives that word from [`render`] — a decommissioned session's
+/// row simply stops existing rather than rendering tombstoned.
 /// What: maps each of the five known state words to its glyph; any other
 /// (forward-compat) value falls back to [`STOPPED_GLYPH`].
 /// Test: `state_glyph_maps_every_known_state`, `state_glyph_unknown_falls_back`.

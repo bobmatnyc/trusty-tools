@@ -83,7 +83,7 @@ impl Pane {
 /// What: the registry name/repo URL plus `live_count` (sessions currently
 /// `active` or `provisioning`) and `total_count` (every session bound to the
 /// project, any state).
-/// Test: `poll::tests::project_to_row_*`.
+/// Test: `poll::rows::tests::project_to_row_*`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectRow {
     /// Registry key / short project name.
@@ -108,7 +108,9 @@ pub struct ProjectRow {
 /// that live wiring is deferred to #2119.
 /// What: id/short-id/name/branch/task plus the lifecycle `state` word and the
 /// two static activity fields.
-/// Test: `poll::tests::session_to_row_*`.
+/// Test: `poll::rows::tests::session_to_row_*`,
+/// `poll::rows::tests::live_session_rows_*` (#2476 — decommissioned rows are
+/// filtered before this type is ever constructed for a tombstoned session).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionRow {
     /// Full session id (UUID string).
@@ -156,7 +158,7 @@ pub struct SessionRow {
 /// What: the four DOC-35 §5.4 fields (`state`, `summary`, `pending_decision`,
 /// `proposed_default`) plus a short `raw_pane_tail` (the mockup's "last 3
 /// lines of raw_pane") and the `stale` flag.
-/// Test: `poll::tests::activity_from_response_*`,
+/// Test: `poll::rows::tests::activity_from_response_*`,
 /// `panes::activity::tests::activity_lines_*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivityInfo {
