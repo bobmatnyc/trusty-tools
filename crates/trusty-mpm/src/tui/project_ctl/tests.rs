@@ -71,6 +71,12 @@ fn seeded_state() -> ProjectCtlState {
             project_to_row(&trusty_tools, Some(&group)),
             project_to_row(&genealogy, None),
         ],
+        projects_full: [
+            ("trusty-tools".to_string(), trusty_tools.clone()),
+            ("genealogy".to_string(), genealogy.clone()),
+        ]
+        .into_iter()
+        .collect(),
         ..Default::default()
     };
     state.sessions_by_project.insert(
@@ -217,5 +223,34 @@ async fn poll_never_closes_an_open_deliverable_view() {
             .map(|v| v.project_name.as_str()),
         Some("trusty-tools"),
         "a poll must never close an open Deliverable/Milestone view"
+    );
+}
+
+/// A daemon poll racing with an open config form must never touch it (DOC-35
+/// §6, #2120) — the THIRD modal this invariant now covers, mirroring
+/// `poll_never_touches_pending_confirm` (which pins by `session_id`) and
+/// `poll_never_closes_an_open_deliverable_view` (which pins by
+/// `project_name`). Pinned here by `project_name`, same as the Deliverable
+/// view. Unlike the Deliverable view, the config form has no live daemon-fed
+/// content to refresh mid-edit (`poll.rs` never touches `state.config_form`
+/// at all, by construction — see `project_ctl_poll_daemon`'s doc), so this
+/// test ALSO asserts the stronger claim the task calls for: an in-progress,
+/// UNSAVED field edit survives a poll byte-for-byte, not just "the form
+/// stays open."
+#[tokio::test]
+async fn poll_doesnt_touch_open_config_form() {
+    let mut state = seeded_state();
+    state.open_config_form("trusty-tools");
+    state.config_form.as_mut().unwrap().description.value = "unsaved edit in progress".to_string();
+    let before = state.config_form.clone().expect("form requested");
+
+    let mut client = DaemonClient::new(dead_loopback_url());
+    project_ctl_poll_daemon(&mut state, &mut client).await;
+
+    assert_eq!(
+        state.config_form,
+        Some(before),
+        "a poll must never mutate an open config form — not even its \
+         unsaved, not-yet-submitted field edits"
     );
 }

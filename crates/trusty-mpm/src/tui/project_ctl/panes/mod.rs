@@ -6,16 +6,18 @@
 //! `Rect`s and calls into each of these.
 //! What: [`projects`] (left, 25%), [`sessions`] (right, 75%),
 //! [`activity`] (bottom strip, live `/activity`-endpoint wiring per #2119),
-//! [`actions_bar`] (the 1-row key-hint / notice line), and
-//! [`deliverables_view`] (a centred overlay, the read-only Deliverable/
-//! Milestone view reachable from the Projects pane, DOC-35 §10.8 `show`,
-//! #2383).
+//! [`actions_bar`] (the 1-row key-hint / notice line), [`deliverables_view`]
+//! (a centred overlay, the read-only Deliverable/Milestone view reachable
+//! from the Projects pane, DOC-35 §10.8 `show`, #2383), and [`config_form`]
+//! (a centred overlay, the editable deterministic config form reachable from
+//! the Projects pane, DOC-35 §6, #2120).
 //! Test: each submodule's pure builders are unit-tested in its own `tests`
 //! block; the `render` functions are terminal glue exercised by launching the
 //! TUI.
 
 pub mod actions_bar;
 pub mod activity;
+pub mod config_form;
 pub mod deliverables_view;
 pub mod projects;
 pub mod sessions;

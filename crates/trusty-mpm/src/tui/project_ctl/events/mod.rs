@@ -36,37 +36,66 @@
 //! Sessions, `c` in Projects) or reserved by the confirm gate (`y`/`n`) —
 //! `v` ("view") is free in every context and mnemonic for §10.8's read-only
 //! `show`. While [`ProjectCtlState::deliverable_view`] is `Some`, EVERY key
-//! routes through [`handle_deliverable_view_key`] instead — the identical
-//! "modal captures all input, `q`/`Ctrl-C` swallowed, `Esc` closes" discipline
-//! [`handle_confirm_key`] already establishes, plus `↑`/`↓` to scroll and `v`
-//! itself as a second way to close (matching the dashboard help overlay's
-//! "same key opens and closes" convention).
+//! routes through [`modal::handle_deliverable_view_key`] instead — the
+//! identical "modal captures all input, `q`/`Ctrl-C` swallowed, `Esc` closes"
+//! discipline [`modal::handle_confirm_key`] already establishes, plus `↑`/`↓`
+//! to scroll and `v` itself as a second way to close (matching the dashboard
+//! help overlay's "same key opens and closes" convention).
+//!
+//! **Config form (DOC-35 §6, #2120)**: `c` in the Projects pane opens a
+//! fixed-field, tab-navigable config-edit form for the selected project (see
+//! `state::ConfigFormView`, `panes::config_form`) — a THIRD modal, joining
+//! the confirm gate and the Deliverable view. Opening is a pure state
+//! mutation ([`ProjectCtlState::open_config_form`]), not a [`PendingAction`]
+//! — unlike every other lettered verb, there is no async call to make just
+//! to OPEN the form (the daemon round trip only happens on submit, see
+//! [`PendingAction::SubmitConfig`]). While [`ProjectCtlState::config_form`]
+//! is `Some`, EVERY key routes through [`modal::handle_config_form_key`]
+//! instead, checked THIRD — after `pending_confirm` and `deliverable_view` —
+//! in [`handle_key`]'s precedence chain. **Mutual exclusion, by
+//! construction, not by an extra guard**: `c`'s match arm below is only ever
+//! reached once both earlier `if state.X.is_some() { return ... }` checks
+//! have fallen through, so the config form can never open while either
+//! other modal is already showing; conversely, once it IS open, this
+//! function returns before evaluating any other branch, so `v`/`k`/`d` etc.
+//! can never open a second modal on top of it either.
 //! What: [`PendingAction`] (the async actions a key can request — the actual
 //! HTTP dispatch lives in [`super::actions`]), [`is_quit`], and [`handle_key`]
 //! which routes a [`KeyEvent`] into [`ProjectCtlState`] mutations (focus
-//! cycling, selection, drill-in, notice-clear, the confirm gate, the
-//! deliverable view) and returns `Some(action)` for the lettered verbs (once
-//! confirmed, for `k`-on-Active and `d`).
+//! cycling, selection, drill-in, notice-clear, and the three modals) and
+//! returns `Some(action)` for the lettered verbs (once confirmed, for
+//! `k`-on-Active and `d`; immediately for the config form's submit key). The
+//! three modals' own key handling lives in the sibling [`modal`] submodule
+//! (pre-emptive 500-SLOC-cap split, #2120 — see that module's doc).
 //! Test: `super::tests` covers focus cycling, selection movement, the
 //! project-switch reset, every lettered action's valid/invalid-context
 //! branches, the confirm-gate's request/confirm/cancel/ignore branches, and
 //! the deliverable view's open/scroll/close branches, via synthetic
-//! [`KeyEvent`]s.
+//! [`KeyEvent`]s; `tests::config_form_*` covers the third modal's
+//! open/edit/submit/error/close branches.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::state::{ConfirmKind, Pane, PendingConfirm, ProjectCtlState, SessionRow};
+use crate::client::http_client::projects::PatchProjectArgs;
+
+use super::state::{ConfirmKind, Pane, ProjectCtlState, SessionRow};
+
+mod modal;
+use modal::{handle_config_form_key, handle_confirm_key, handle_deliverable_view_key};
 
 /// An action a key press requested that needs an async daemon round trip.
 ///
 /// Why: [`handle_key`] must stay a pure, terminal-free, IO-free function to
 /// remain unit-testable; the actual HTTP calls live in [`super::actions::dispatch`],
 /// which the run loop awaits after `handle_key` returns.
-/// What: one variant per lettered verb (DOC-35 §5 keybinding table); `Launch`
-/// and `Config` carry the target project name, the rest carry the target
-/// session id.
+/// What: one variant per lettered verb (DOC-35 §5 keybinding table) plus
+/// [`PendingAction::SubmitConfig`] for the #2120 config form's submit
+/// (opening the form is a pure state mutation — see the module doc — so
+/// there is no `Config` variant here anymore). `Launch` and `SubmitConfig`
+/// carry the target project name (`SubmitConfig` also carries the built
+/// [`PatchProjectArgs`]); the rest carry the target session id.
 /// Test: `handle_key_*` in `super::tests`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum PendingAction {
     /// `l` in the Sessions pane — launch a new session for the given project.
     Launch(String),
@@ -78,8 +107,34 @@ pub enum PendingAction {
     Decommission(String),
     /// `a` in the Sessions pane — fetch and display the attach command.
     Attach(String),
-    /// `c` in the Projects pane — config stub (no-op notice; real form is #2120).
-    Config(String),
+    /// The config form's submit key (DOC-35 §6, #2120) — PATCHes the built
+    /// args for the named project; see [`super::actions::dispatch`] for the
+    /// success/error handling (close-on-success, inline-error-on-failure).
+    SubmitConfig(String, PatchProjectArgs),
+}
+
+/// Manual `PartialEq` (not derived): [`PatchProjectArgs`] — a contract type
+/// owned by `client/http_client/projects.rs` (#2114/#2115, not modified by
+/// #2120) — derives `Serialize` only, no `PartialEq`. Comparing
+/// [`PendingAction::SubmitConfig`]'s two payloads via their serialized JSON
+/// `Value` is a pragmatic structural-equality substitute that needs no
+/// upstream change to the contract type; every other variant compares its
+/// plain `String` payload directly.
+impl PartialEq for PendingAction {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Launch(a), Self::Launch(b)) => a == b,
+            (Self::Kill(a), Self::Kill(b)) => a == b,
+            (Self::Resume(a), Self::Resume(b)) => a == b,
+            (Self::Decommission(a), Self::Decommission(b)) => a == b,
+            (Self::Attach(a), Self::Attach(b)) => a == b,
+            (Self::SubmitConfig(name_a, args_a), Self::SubmitConfig(name_b, args_b)) => {
+                name_a == name_b
+                    && serde_json::to_value(args_a).ok() == serde_json::to_value(args_b).ok()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// True when this key event means "quit" (`q` or Ctrl-C).
@@ -102,18 +157,25 @@ pub fn is_quit(key: &KeyEvent) -> bool {
 /// testable with synthetic [`KeyEvent`]s.
 /// What: when [`ProjectCtlState::pending_confirm`] is `Some`, EVERY key
 /// routes through [`handle_confirm_key`] instead (DOC-35 §5.2 — see the
-/// module doc). Otherwise: Ctrl-C / `q` set `should_exit`. Tab/Shift+Tab
+/// module doc); else when [`ProjectCtlState::deliverable_view`] is `Some`,
+/// through [`handle_deliverable_view_key`]; else when
+/// [`ProjectCtlState::config_form`] is `Some`, through
+/// [`handle_config_form_key`] (#2120 — checked THIRD, see the module doc for
+/// why this ordering makes the three modals mutually exclusive by
+/// construction). Otherwise: Ctrl-C / `q` set `should_exit`. Tab/Shift+Tab
 /// cycle pane focus. ↑/↓ move the selection in the focused pane
 /// (Projects-pane movement also resets the Sessions-pane selection via
 /// [`ProjectCtlState::on_project_selection_changed`]); the Activity pane has
 /// no navigable rows, so movement there is a no-op. Enter on the Projects
-/// pane drills into Sessions. `l`/`r`/`a` in the Sessions pane and `c` in the
-/// Projects pane return the matching [`PendingAction`] immediately when a
-/// target is selected, else set an explanatory notice and return `None`.
-/// `k`/`d` (see [`request_kill`] / [`request_decommission`]) open the confirm
-/// gate instead of returning an action directly, except a `k` on a
-/// non-Active session, which is not destructive-pending and fires
-/// immediately. Esc clears any shown notice.
+/// pane drills into Sessions. `l`/`r`/`a` in the Sessions pane return the
+/// matching [`PendingAction`] immediately when a target is selected, else set
+/// an explanatory notice and return `None`. `c` in the Projects pane calls
+/// [`ProjectCtlState::open_config_form`] directly (a pure state mutation, NOT
+/// a [`PendingAction`] — see the module doc) when a project is selected, else
+/// sets the same explanatory notice. `k`/`d` (see [`request_kill`] /
+/// [`request_decommission`]) open the confirm gate instead of returning an
+/// action directly, except a `k` on a non-Active session, which is not
+/// destructive-pending and fires immediately. Esc clears any shown notice.
 /// Test: `super::tests`.
 pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
     if state.pending_confirm.is_some() {
@@ -122,6 +184,10 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
 
     if state.deliverable_view.is_some() {
         return handle_deliverable_view_key(state, key);
+    }
+
+    if state.config_form.is_some() {
+        return handle_config_form_key(state, key);
     }
 
     if is_quit(&key) {
@@ -173,12 +239,13 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         }
         KeyCode::Char('c') if state.focus == Pane::Projects => {
             match state.selected_project_name() {
-                Some(name) => Some(PendingAction::Config(name.to_string())),
-                None => {
-                    state.set_notice("no project selected");
-                    None
+                Some(name) => {
+                    let name = name.to_string();
+                    state.open_config_form(name);
                 }
+                None => state.set_notice("no project selected"),
             }
+            None
         }
         KeyCode::Char('v') if state.focus == Pane::Projects => {
             match state.selected_project_name() {
@@ -191,70 +258,6 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
             None
         }
         _ => None,
-    }
-}
-
-/// Route one key event while the Deliverable/Milestone view is open (DOC-35
-/// §10.8, #2383).
-///
-/// Why: split out of [`handle_key`] for the same reason
-/// [`handle_confirm_key`] is — the "this modal captures ALL input" contract
-/// lives in one place. Unlike the confirm gate (which resolves to an action
-/// on `y`/`n`), this view is read-only, so every branch returns `None` — it
-/// never produces a [`PendingAction`].
-/// What: `↑`/`↓` scroll the body by one line; `Esc` or `v` closes the view;
-/// every other key (including `q`/`Ctrl-C`) is swallowed, matching the
-/// confirm gate's "not in a modal" quit rule.
-/// Test: `super::tests::deliverable_view_*`.
-fn handle_deliverable_view_key(
-    state: &mut ProjectCtlState,
-    key: KeyEvent,
-) -> Option<PendingAction> {
-    match key.code {
-        KeyCode::Up => state.scroll_deliverable_view(-1),
-        KeyCode::Down => state.scroll_deliverable_view(1),
-        KeyCode::Esc | KeyCode::Char('v') => state.close_deliverable_view(),
-        _ => {}
-    }
-    None
-}
-
-/// Resolve the currently open confirmation gate against one key event.
-///
-/// Why: split out of [`handle_key`] so the "confirm gate captures ALL input"
-/// contract (DOC-35 §5.2, plus the spec's "`q`/`Ctrl-C` not in a modal" /
-/// "`Esc` any modal/form" rules) lives in one place, independent of whatever
-/// pane happened to have focus when the gate opened.
-/// What: `y`/`Y`/Enter → clears the gate and returns the confirmed
-/// [`PendingAction`] (`Kill` or `Decommission`, per [`ConfirmKind`]);
-/// `n`/`N`/Esc → clears the gate, sets a "cancelled" notice, returns `None`;
-/// any other key (including `q`/Ctrl-C) → the gate stays open, returns
-/// `None` — a destructive action can only ever be resolved by an explicit
-/// yes/no, never dismissed as a side effect of an unrelated keypress.
-fn handle_confirm_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingAction> {
-    let confirm = state
-        .pending_confirm
-        .clone()
-        .expect("caller checked pending_confirm.is_some()");
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            state.clear_confirm();
-            Some(resolve_confirm(confirm))
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            state.clear_confirm();
-            state.set_notice("cancelled");
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Map a resolved [`PendingConfirm`] to its confirmed [`PendingAction`].
-fn resolve_confirm(confirm: PendingConfirm) -> PendingAction {
-    match confirm.kind {
-        ConfirmKind::Kill => PendingAction::Kill(confirm.session_id),
-        ConfirmKind::Decommission => PendingAction::Decommission(confirm.session_id),
     }
 }
 
@@ -362,358 +365,9 @@ fn selected_session_action(
     }
 }
 
+// Split into `events/tests.rs` (basename EXACTLY `tests.rs`, giving it the
+// 1500-SLOC test-file cap rather than counting against this file's
+// 500-SLOC production cap — pre-emptive split, #2120, mirroring this file's
+// own `modal.rs` split).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tui::project_ctl::state::ProjectRow;
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn ctrl_c() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
-    }
-
-    fn seeded_state() -> ProjectCtlState {
-        let mut state = ProjectCtlState {
-            projects: vec![
-                ProjectRow {
-                    name: "alpha".to_string(),
-                    repo_url: "https://github.com/acme/alpha".to_string(),
-                    live_count: 1,
-                    total_count: 1,
-                },
-                ProjectRow {
-                    name: "beta".to_string(),
-                    repo_url: "https://github.com/acme/beta".to_string(),
-                    live_count: 0,
-                    total_count: 0,
-                },
-            ],
-            ..Default::default()
-        };
-        state.sessions_by_project.insert(
-            "alpha".to_string(),
-            vec![SessionRow {
-                id: "sess-1".to_string(),
-                short_id: "sess-1".chars().take(8).collect(),
-                name: "alpha-session".to_string(),
-                branch: Some("main".to_string()),
-                task: Some("ship it".to_string()),
-                state: "active".to_string(),
-                pending_decision: None,
-                proposed_default: None,
-                deliverable_id: None,
-            }],
-        );
-        state.projects_nav.sync_len(state.projects.len());
-        state.sessions_nav.sync_len(state.current_sessions().len());
-        state
-    }
-
-    #[test]
-    fn quit_on_bare_q_and_ctrl_c() {
-        let mut state = seeded_state();
-        assert!(handle_key(&mut state, key(KeyCode::Char('q'))).is_none());
-        assert!(state.should_exit);
-
-        let mut state = seeded_state();
-        assert!(handle_key(&mut state, ctrl_c()).is_none());
-        assert!(state.should_exit);
-    }
-
-    #[test]
-    fn tab_cycles_focus_forward_and_back() {
-        let mut state = seeded_state();
-        assert_eq!(state.focus, Pane::Projects);
-        handle_key(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, Pane::Sessions);
-        handle_key(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, Pane::Activity);
-        handle_key(&mut state, key(KeyCode::BackTab));
-        assert_eq!(state.focus, Pane::Sessions);
-    }
-
-    #[test]
-    fn arrow_keys_move_projects_selection_and_reset_sessions() {
-        let mut state = seeded_state();
-        state.sessions_nav.down(); // no-op (only one session), but exercises the path
-        handle_key(&mut state, key(KeyCode::Down));
-        assert_eq!(state.selected_project().unwrap().name, "beta");
-        assert_eq!(state.sessions_nav.selected(), 0);
-    }
-
-    #[test]
-    fn enter_on_projects_pane_drills_into_sessions() {
-        let mut state = seeded_state();
-        handle_key(&mut state, key(KeyCode::Enter));
-        assert_eq!(state.focus, Pane::Sessions);
-    }
-
-    #[test]
-    fn enter_on_sessions_pane_is_a_noop() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        assert!(handle_key(&mut state, key(KeyCode::Enter)).is_none());
-        assert_eq!(state.focus, Pane::Sessions);
-    }
-
-    #[test]
-    fn launch_requires_sessions_focus_and_a_selected_project() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        let action = handle_key(&mut state, key(KeyCode::Char('l')));
-        assert_eq!(action, Some(PendingAction::Launch("alpha".to_string())));
-    }
-
-    #[test]
-    fn kill_without_selection_sets_notice_and_returns_none() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        state.projects_nav.down(); // select "beta", which has no sessions
-        let action = handle_key(&mut state, key(KeyCode::Char('k')));
-        assert!(action.is_none());
-        assert_eq!(state.notice.as_deref(), Some("select a session first"));
-        assert!(state.pending_confirm.is_none());
-    }
-
-    #[test]
-    fn resume_and_attach_target_selected_session_immediately() {
-        // Neither verb is destructive, so DOC-35 §5.2's confirm gate does not
-        // apply — both fire on the first keypress.
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        assert_eq!(
-            handle_key(&mut state, key(KeyCode::Char('r'))),
-            Some(PendingAction::Resume("sess-1".to_string()))
-        );
-        assert!(state.pending_confirm.is_none());
-        assert_eq!(
-            handle_key(&mut state, key(KeyCode::Char('a'))),
-            Some(PendingAction::Attach("sess-1".to_string()))
-        );
-        assert!(state.pending_confirm.is_none());
-    }
-
-    #[test]
-    fn config_requires_projects_focus_and_a_selected_project() {
-        let mut state = seeded_state();
-        let action = handle_key(&mut state, key(KeyCode::Char('c')));
-        assert_eq!(action, Some(PendingAction::Config("alpha".to_string())));
-    }
-
-    #[test]
-    fn lettered_actions_are_ignored_outside_their_pane() {
-        let mut state = seeded_state();
-        // Projects pane focused: Sessions-only verbs are ignored (no notice).
-        assert!(handle_key(&mut state, key(KeyCode::Char('l'))).is_none());
-        assert!(state.notice.is_none());
-    }
-
-    #[test]
-    fn esc_clears_notice() {
-        let mut state = seeded_state();
-        state.set_notice("hi");
-        handle_key(&mut state, key(KeyCode::Esc));
-        assert!(state.notice.is_none());
-    }
-
-    // ---- DOC-35 §5.2 confirmation gate ----------------------------------
-
-    #[test]
-    fn kill_on_active_session_opens_confirm_gate_instead_of_firing() {
-        // seeded_state's lone session is "active".
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        let action = handle_key(&mut state, key(KeyCode::Char('k')));
-        assert!(action.is_none(), "must not fire on the first keypress");
-        let confirm = state.pending_confirm.expect("confirm gate should be open");
-        assert_eq!(confirm.kind, ConfirmKind::Kill);
-        assert_eq!(confirm.session_id, "sess-1");
-    }
-
-    #[test]
-    fn kill_on_non_active_session_fires_immediately() {
-        let mut state = seeded_state();
-        state.sessions_by_project.get_mut("alpha").unwrap()[0].state = "stopped".to_string();
-        state.focus = Pane::Sessions;
-        let action = handle_key(&mut state, key(KeyCode::Char('k')));
-        assert_eq!(action, Some(PendingAction::Kill("sess-1".to_string())));
-        assert!(state.pending_confirm.is_none());
-    }
-
-    #[test]
-    fn decommission_always_opens_confirm_gate_regardless_of_state() {
-        for state_word in ["active", "stopped", "provisioning", "errored"] {
-            let mut state = seeded_state();
-            state.sessions_by_project.get_mut("alpha").unwrap()[0].state = state_word.to_string();
-            state.focus = Pane::Sessions;
-            let action = handle_key(&mut state, key(KeyCode::Char('d')));
-            assert!(action.is_none(), "must not fire for state {state_word}");
-            let confirm = state
-                .pending_confirm
-                .expect("confirm gate should be open for state {state_word}");
-            assert_eq!(confirm.kind, ConfirmKind::Decommission);
-            assert_eq!(confirm.session_id, "sess-1");
-        }
-    }
-
-    #[test]
-    fn confirm_gate_y_resolves_to_the_real_action_and_clears() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        handle_key(&mut state, key(KeyCode::Char('d'))); // open the gate
-        assert!(state.pending_confirm.is_some());
-
-        let action = handle_key(&mut state, key(KeyCode::Char('y')));
-        assert_eq!(
-            action,
-            Some(PendingAction::Decommission("sess-1".to_string()))
-        );
-        assert!(state.pending_confirm.is_none());
-    }
-
-    #[test]
-    fn confirm_gate_uppercase_y_and_enter_also_confirm() {
-        for confirm_key in [key(KeyCode::Char('Y')), key(KeyCode::Enter)] {
-            let mut state = seeded_state();
-            state.focus = Pane::Sessions;
-            handle_key(&mut state, key(KeyCode::Char('d')));
-            let action = handle_key(&mut state, confirm_key);
-            assert_eq!(
-                action,
-                Some(PendingAction::Decommission("sess-1".to_string()))
-            );
-        }
-    }
-
-    #[test]
-    fn confirm_gate_n_or_esc_cancels_and_sets_notice() {
-        for cancel_key in [
-            key(KeyCode::Char('n')),
-            key(KeyCode::Char('N')),
-            key(KeyCode::Esc),
-        ] {
-            let mut state = seeded_state();
-            state.focus = Pane::Sessions;
-            handle_key(&mut state, key(KeyCode::Char('d')));
-            let action = handle_key(&mut state, cancel_key);
-            assert!(action.is_none());
-            assert!(state.pending_confirm.is_none());
-            assert_eq!(state.notice.as_deref(), Some("cancelled"));
-        }
-    }
-
-    #[test]
-    fn confirm_gate_swallows_unrelated_keys_and_stays_open() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        handle_key(&mut state, key(KeyCode::Char('d')));
-        assert!(state.pending_confirm.is_some());
-
-        // An unrelated key must not resolve or dismiss the gate.
-        let action = handle_key(&mut state, key(KeyCode::Char('x')));
-        assert!(action.is_none());
-        assert!(
-            state.pending_confirm.is_some(),
-            "gate must stay open for an unrecognised key"
-        );
-    }
-
-    #[test]
-    fn confirm_gate_blocks_quit_keys_matching_the_spec_not_in_a_modal_rule() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        handle_key(&mut state, key(KeyCode::Char('d')));
-
-        handle_key(&mut state, key(KeyCode::Char('q')));
-        assert!(!state.should_exit, "q must not quit while a modal is open");
-        assert!(state.pending_confirm.is_some());
-
-        handle_key(&mut state, ctrl_c());
-        assert!(
-            !state.should_exit,
-            "Ctrl-C must not quit while a modal is open"
-        );
-        assert!(state.pending_confirm.is_some());
-    }
-
-    #[test]
-    fn quit_still_works_once_the_gate_is_resolved() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        handle_key(&mut state, key(KeyCode::Char('d')));
-        handle_key(&mut state, key(KeyCode::Esc)); // cancel — gate closes
-        assert!(state.pending_confirm.is_none());
-
-        handle_key(&mut state, key(KeyCode::Char('q')));
-        assert!(state.should_exit);
-    }
-
-    // ---- DOC-35 §10.8 Deliverable/Milestone view (#2383) -----------------
-
-    #[test]
-    fn v_opens_the_deliverable_view_for_the_selected_project() {
-        let mut state = seeded_state();
-        assert!(handle_key(&mut state, key(KeyCode::Char('v'))).is_none());
-        let view = state.deliverable_view.expect("view should be open");
-        assert_eq!(view.project_name, "alpha");
-    }
-
-    #[test]
-    fn v_without_a_selected_project_sets_notice_and_opens_nothing() {
-        let mut state = ProjectCtlState::default();
-        handle_key(&mut state, key(KeyCode::Char('v')));
-        assert!(state.deliverable_view.is_none());
-        assert_eq!(state.notice.as_deref(), Some("no project selected"));
-    }
-
-    #[test]
-    fn v_is_ignored_outside_the_projects_pane() {
-        let mut state = seeded_state();
-        state.focus = Pane::Sessions;
-        assert!(handle_key(&mut state, key(KeyCode::Char('v'))).is_none());
-        assert!(state.deliverable_view.is_none());
-    }
-
-    #[test]
-    fn deliverable_view_scrolls_and_closes_on_esc_or_v() {
-        let mut state = seeded_state();
-        handle_key(&mut state, key(KeyCode::Char('v')));
-        handle_key(&mut state, key(KeyCode::Down));
-        assert_eq!(state.deliverable_view.as_ref().unwrap().scroll, 1);
-        handle_key(&mut state, key(KeyCode::Up));
-        assert_eq!(state.deliverable_view.as_ref().unwrap().scroll, 0);
-
-        handle_key(&mut state, key(KeyCode::Esc));
-        assert!(state.deliverable_view.is_none());
-
-        handle_key(&mut state, key(KeyCode::Char('v')));
-        handle_key(&mut state, key(KeyCode::Char('v')));
-        assert!(
-            state.deliverable_view.is_none(),
-            "v must close the view the same way it opened it"
-        );
-    }
-
-    #[test]
-    fn deliverable_view_swallows_quit_and_unrelated_keys() {
-        let mut state = seeded_state();
-        handle_key(&mut state, key(KeyCode::Char('v')));
-
-        handle_key(&mut state, key(KeyCode::Char('q')));
-        assert!(!state.should_exit, "q must not quit while the view is open");
-        assert!(state.deliverable_view.is_some());
-
-        handle_key(&mut state, ctrl_c());
-        assert!(!state.should_exit);
-        assert!(state.deliverable_view.is_some());
-
-        handle_key(&mut state, key(KeyCode::Char('x')));
-        assert!(
-            state.deliverable_view.is_some(),
-            "an unrecognised key must not close the view"
-        );
-    }
-}
+mod tests;
