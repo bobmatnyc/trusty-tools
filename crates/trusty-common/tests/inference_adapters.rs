@@ -16,7 +16,7 @@
 use serde_json::{Value, json};
 use serial_test::serial;
 use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
-use trusty_common::inference::providers::{fireworks, openai, openrouter};
+use trusty_common::inference::providers::{fireworks, openai, openrouter, together};
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{
     CacheControl, ChatMessage, ChatRequest, Configurator, FunctionDefinition, InferenceError,
@@ -31,6 +31,7 @@ fn clear_provider_env() {
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "FIREWORKS_API_KEY",
+        "TOGETHER_API_KEY",
     ] {
         // SAFETY: every caller is `#[serial(dotenv_credential_env)]`, matching
         // the lock the credential resolver's own env-mutating tests use.
@@ -273,6 +274,88 @@ async fn openai_direct_sends_bare_body() {
     );
 }
 
+// ── Together.ai: bare OpenAI body + tool-call round-trip via the shared core ─────
+
+/// Why: driving Together through the `Configurator` must (a) send a bare
+/// OpenAI-shaped body (bearer auth, no attribution headers, NO detailed-usage
+/// directive), (b) carry tools + the OpenAI-dialect `tool_choice`, and (c) parse
+/// a tool-call response — the full resolve→build→chat→usage cycle against a real
+/// socket, exactly like the Fireworks e2e.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn together_tool_call_round_trip_no_usage_directive() {
+    clear_provider_env();
+    let body = json!({
+        "id": "gen-together",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"loc\":\"SEA\"}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 8}
+    });
+    let server = MockInferenceServer::spawn(200, body).await.expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    // Together key present AND explicit together/ prefix → resolves to Together.
+    store.set("together", "tgp_v1_fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Together,
+        Box::new(move |r: &ResolvedProvider| together::build(r, &base)),
+    );
+
+    let adapter = cfg
+        .build("together/meta-llama/Llama-3.3-70B-Instruct-Turbo", &store)
+        .expect("build");
+    assert_eq!(adapter.name(), "together");
+    assert_eq!(adapter.capabilities().id, ProviderId::Together);
+
+    let mut req = ChatRequest::new(
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        vec![ChatMessage::user("weather in SEA?")],
+    );
+    req.tools = Some(vec![ToolDefinition::function(FunctionDefinition {
+        name: "get_weather".into(),
+        description: Some("look up weather".into()),
+        parameters: Some(json!({"type": "object"})),
+        cache_control: None,
+    })]);
+    req.tool_choice = Some(adapter.map_tool_choice(ToolChoice::Auto));
+
+    let resp = adapter.chat(&req).await.expect("chat ok");
+
+    // Tool-call response parsing.
+    let calls = resp.first_tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(resp.usage().total_tokens(), 28);
+
+    // Request translation: bearer auth, no attribution, tools + tool_choice,
+    // and NO detailed-usage directive.
+    let sent = server.last_request().expect("captured");
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.path, "/chat/completions");
+    assert_eq!(sent.header("authorization"), Some("Bearer tgp_v1_fake")); // pragma: allowlist secret
+    assert!(sent.header("http-referer").is_none());
+    let body = sent.body.expect("json");
+    assert_eq!(body["model"], "meta-llama/Llama-3.3-70B-Instruct-Turbo");
+    assert_eq!(body["tools"][0]["function"]["name"], "get_weather");
+    assert_eq!(body["tool_choice"], "auto");
+    assert!(
+        body.get("usage").is_none() || body["usage"].is_null(),
+        "Together must not send the detailed-usage directive: {body}"
+    );
+}
+
 // ── Error classification through a real socket ───────────────────────────────────
 
 /// Why: a non-2xx provider status must surface as a classified `InferenceError`
@@ -306,15 +389,18 @@ async fn http_429_maps_to_retryable_api_error() {
 
 // ── Default factory registration ─────────────────────────────────────────────────
 
-/// Why: `register_default_factories` must wire the three OpenAI-dialect providers
-/// so a bare/OpenRouter slug builds a real adapter through the public entry point
-/// (Bedrock stays unregistered — a later wave).
+/// Why: `register_default_factories` must wire the OpenAI-dialect providers
+/// (OpenRouter, Fireworks, OpenAI, Together) so a bare/OpenRouter slug builds a
+/// real adapter through the public entry point, and an explicit `together/` slug
+/// (with a resolvable key) builds a real Together adapter (Bedrock stays
+/// unregistered — a later wave).
 #[test]
 #[serial(dotenv_credential_env)]
-fn default_factories_register_three() {
+fn default_factories_register_openai_dialect() {
     clear_provider_env();
     let store = MemoryKeyStore::new();
     store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    store.set("together", "tgp_v1_fake").unwrap(); // pragma: allowlist secret
 
     let mut cfg = Configurator::new();
     register_default_factories(&mut cfg);
@@ -322,6 +408,12 @@ fn default_factories_register_three() {
     // OpenRouter default path builds a real adapter.
     let adapter = cfg.build("some/model", &store).expect("build openrouter");
     assert_eq!(adapter.name(), "openrouter");
+
+    // Together (#2488) is registered by the default set.
+    let together = cfg
+        .build("together/meta-llama/Llama-3.3-70B-Instruct-Turbo", &store)
+        .expect("build together");
+    assert_eq!(together.name(), "together");
 
     // Bedrock is intentionally not registered by the default set.
     let Err(err) = cfg.build("bedrock/us.anthropic.claude-sonnet-4-5", &store) else {
