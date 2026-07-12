@@ -107,6 +107,10 @@ fn build_bridge_config() -> DaemonBridgeConfig {
         // Issue #1152: NEVER spawn an unmanaged daemon from the stdio bridge.
         // If the launchd daemon at :7070 is not reachable, fail loudly.
         no_spawn: true,
+        // trusty-memory's real operator guidance matches the shared helper's
+        // generic `{service} setup` / `io.trusty.{service}.plist` wording, so
+        // no override is needed here (issue #2491).
+        no_spawn_hint: None,
     }
 }
 

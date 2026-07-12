@@ -397,17 +397,30 @@ plist's `EnvironmentVariables` (`TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`) and
 runs with `cwd=$HOME`, so features like the Telegram poller silently never
 start. As of the #2486 fix the bridge refuses to auto-spawn while a trusty-mpm
 launchd unit is registered, and `GET /health` reports a `supervised` flag — but
-always verify the restart with ONE of:
+always verify the restart with ONE of the two robust checks below:
 
 ```bash
-# (a) does launchd itself think it owns the process?
+# (a) does launchd itself think it owns the process? (most direct)
 launchctl print gui/$(id -u)/com.trusty.mpm.supervisor   # or com.trusty.mpm
 
-# (b) is launchd (PID 1) the parent of the running daemon?
-ps -o ppid= -p "$(pgrep -fx 'tm daemon' | head -1)"       # must print "1"
-
-# (c) does /health say so directly?
+# (b) does /health say so directly?
 curl -s http://127.0.0.1:<port>/health | jq '.supervised' # must print true
+```
+
+A third, weaker variant — is launchd (PID 1) the parent of the running daemon
+process — is sometimes useful but has two sharp edges: the daemon binary on
+disk is named `trusty-mpm`, not `tm` (both binary names exist, but launchd's
+plist invokes `trusty-mpm daemon`), and `pgrep -fx` requires an exact full
+cmdline match, which never matches launchd's absolute-path invocation
+(`/Users/…/.cargo/bin/trusty-mpm daemon`). Use an anchored, non-exact match
+against BOTH binary names instead:
+
+```bash
+# (c) is launchd (PID 1) the parent of the running daemon? (weaker — PID 1 is
+# also where macOS reparents ANY orphaned process, so this alone does not
+# distinguish "launchd-supervised service" from "orphan that got reparented
+# to init"; prefer (a) or (b) above and use this only as a quick sanity check)
+ps -o ppid= -p "$(pgrep -f 'trusty-mpm daemon|tm daemon' | head -1)"  # must print "1"
 ```
 
 Prefer restarting between Claude Code sessions. See the cargo-publish skill

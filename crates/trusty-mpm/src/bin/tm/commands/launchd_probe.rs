@@ -67,7 +67,8 @@ pub(crate) fn mpm_launchd_plist_exists() -> bool {
 /// Test: `compute_supervised_true_when_no_plist`,
 /// `compute_supervised_true_when_plist_and_launchd`,
 /// `compute_supervised_false_when_plist_without_launchd`,
-/// `compute_supervised_true_when_no_plist_and_not_launchd`.
+/// `compute_supervised_true_when_launchd_and_no_plist` (all four quadrants of
+/// the (`is_launchd_supervised`, `plist_exists`) truth table are covered).
 pub(crate) fn compute_supervised(is_launchd_supervised: bool, plist_exists: bool) -> bool {
     !plist_exists || is_launchd_supervised
 }
@@ -97,9 +98,11 @@ mod tests {
     }
 
     #[test]
-    fn compute_supervised_true_when_no_plist_and_not_launchd() {
-        // No plist at all — even an unsupervised process is fine (dev machine).
-        assert!(compute_supervised(false, false));
+    fn compute_supervised_true_when_launchd_and_no_plist() {
+        // Launchd-supervised with no plist registered (e.g. probed before the
+        // plist path convention existed, or a unit under a third path) — still
+        // safe: `is_launchd_supervised` alone is sufficient.
+        assert!(compute_supervised(true, false));
     }
 
     #[test]
