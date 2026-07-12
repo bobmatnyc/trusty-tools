@@ -49,6 +49,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         task: Some("ship it".to_string()),
         cwd: None,
         claude_session_id: None,
+        deliverable_id: None,
         pane_id: None,
     }
 }
@@ -99,7 +100,7 @@ fn seeded_state_renders_live_project_and_its_session() {
         "expected a live glyph+count: {text}"
     );
 
-    let session_line = sessions::session_line(1, &state.current_sessions()[0]);
+    let session_line = sessions::session_line(1, &state.current_sessions()[0], false);
     let text: String = session_line
         .spans
         .iter()
@@ -187,5 +188,30 @@ async fn poll_never_touches_pending_confirm() {
         state.pending_confirm,
         Some(before),
         "a poll must never mutate an open confirmation gate's pinned target"
+    );
+}
+
+/// A daemon poll racing with an open Deliverable/Milestone view must never
+/// close it (DOC-35 §10.8, #2383) — mirrors `poll_never_touches_pending_confirm`
+/// for the second modal this screen now has. A daemon-down poll MAY leave the
+/// view's cached `deliverables`/`milestones` stale (there is no live
+/// connection to refresh them from), but must not clear `deliverable_view`
+/// itself out from under the operator.
+#[tokio::test]
+async fn poll_never_closes_an_open_deliverable_view() {
+    let mut state = seeded_state();
+    state.open_deliverable_view("trusty-tools");
+    assert!(state.deliverable_view.is_some());
+
+    let mut client = DaemonClient::new(dead_loopback_url());
+    project_ctl_poll_daemon(&mut state, &mut client).await;
+
+    assert_eq!(
+        state
+            .deliverable_view
+            .as_ref()
+            .map(|v| v.project_name.as_str()),
+        Some("trusty-tools"),
+        "a poll must never close an open Deliverable/Milestone view"
     );
 }

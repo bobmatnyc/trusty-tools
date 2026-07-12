@@ -25,7 +25,7 @@ use crate::tui::project_ctl::state::{Pane, PendingConfirm, ProjectCtlState};
 
 /// Key-hint text shown while the Projects pane has focus.
 pub const PROJECTS_HINT: &str =
-    "[Enter] drill in  [c] config  [Tab] switch pane  [↑↓] select  [q] quit";
+    "[Enter] drill in  [c] config  [v] deliverables  [Tab] switch pane  [↑↓] select  [q] quit";
 /// Key-hint text shown while the Sessions pane has focus.
 pub const SESSIONS_HINT: &str = "[l] launch  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [Tab] switch pane  [↑↓] select  [q] quit";
 /// Key-hint text shown while the Activity pane has focus (no verbs bound

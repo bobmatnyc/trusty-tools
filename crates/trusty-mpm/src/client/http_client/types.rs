@@ -423,6 +423,20 @@ pub struct ManagedSessionSummary {
     /// sessions with no captured conversation id or predating this field.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// The Deliverable this session is working on, if bound (DOC-35 §10.6,
+    /// #2379; additive — absent for legacy records and sessions with no
+    /// link). Mirrors `daemon::managed_routes::SessionSummary::deliverable_id`
+    /// field-for-field; a bare UUID string, not the typed `DeliverableId` (the
+    /// client keeps wire DTOs string-typed, matching every other id field on
+    /// this struct).
+    ///
+    /// Why: the `tm projects` TUI's Sessions pane (#2383) renders a glyph on
+    /// any row whose `deliverable_id` is `Some`, distinguishing a resolved
+    /// link (matches a Deliverable the pane also fetched) from a dangling one
+    /// (the id no longer resolves — e.g. the Deliverable was deleted out from
+    /// under the session).
+    #[serde(default)]
+    pub deliverable_id: Option<String>,
     /// The tmux `pane_id` of this session's original pane, if captured
     /// (additive; #2453 review finding 1, round 2).
     ///

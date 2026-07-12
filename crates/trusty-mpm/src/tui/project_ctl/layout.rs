@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
 };
 
-use super::panes::{actions_bar, activity, projects, sessions};
+use super::panes::{actions_bar, activity, deliverables_view, projects, sessions};
 use super::state::ProjectCtlState;
 
 /// Minimum height (rows, including the two border rows) of the main
@@ -40,7 +40,11 @@ const ACTIVITY_ROWS: u16 = 4;
 /// What: splits `frame.area()` vertically into the main row (flexing, floored
 /// at [`MIN_MAIN_ROWS`]), the Activity strip ([`ACTIVITY_ROWS`]), and the
 /// 1-row action bar; splits the main row horizontally 25/75 for
-/// Projects/Sessions per DOC-35 §5.
+/// Projects/Sessions per DOC-35 §5. When
+/// [`ProjectCtlState::deliverable_view`] is `Some` (DOC-35 §10.8, #2383), a
+/// centred overlay floats on top of the whole frame afterward — a strict
+/// addition, never replacing a pane, mirroring the dashboard help-overlay's
+/// "draw base frame, then float overlay" sequencing.
 pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -60,4 +64,8 @@ pub fn render(frame: &mut Frame, state: &mut ProjectCtlState) {
     sessions::render(frame, main_row[1], state);
     activity::render(frame, outer[1], state);
     actions_bar::render(frame, outer[2], state);
+
+    if let Some(view) = &state.deliverable_view {
+        deliverables_view::render(frame, view);
+    }
 }

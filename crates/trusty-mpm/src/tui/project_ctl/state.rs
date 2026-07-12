@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::deliverable::{Deliverable, Milestone};
 use crate::tui::coordinator::nav::ListNav;
 
 /// Which of the three navigable panes currently has keyboard focus.
@@ -114,6 +115,14 @@ pub struct SessionRow {
     pub pending_decision: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
+    /// The Deliverable this session is bound to, if any (DOC-35 §10.6,
+    /// #2379). `Some` drives the Sessions-pane deliverable glyph (#2383);
+    /// whether the id resolves against [`ProjectCtlState::deliverables`] (a
+    /// live link) or not (a dangling ref — the Deliverable was deleted or
+    /// belongs to a project mismatch) is resolved at render time, not stored
+    /// here, so a poll-driven change in the deliverable set is picked up on
+    /// the very next frame without re-deriving this row.
+    pub deliverable_id: Option<String>,
 }
 
 /// Live per-session activity fetched from `GET .../{id}/activity` (DOC-35
@@ -195,6 +204,36 @@ pub struct PendingConfirm {
     pub session_label: String,
 }
 
+/// The read-only Deliverable/Milestone view for one project (DOC-35 §10.8
+/// `show`, #2383), reachable from the Projects pane.
+///
+/// Why: the view is opened for exactly the project selected when the
+/// operator requested it, and — like [`PendingConfirm`] — must pin that
+/// target rather than silently following a later Projects-pane selection
+/// change (which cannot happen anyway while the view is open, since it
+/// captures all input, but pinning by value keeps the render layer from
+/// re-deriving "which project" from a selection that a same-tick poll could
+/// otherwise race). `deliverables` is populated from the same per-tick fetch
+/// [`ProjectCtlState::deliverables`] uses for the Sessions-pane glyph (no
+/// duplicate call — see `poll.rs`); `milestones` is fetched only while this
+/// view is open, the one extra per-tick call this feature adds (disclosed in
+/// the PR body).
+/// What: the target project's name, its Deliverables and Milestones as of
+/// the last successful fetch, and a line-based `scroll` offset for a list
+/// too tall for the overlay.
+/// Test: `super::panes::deliverables_view::tests`, `super::tests`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliverableView {
+    /// The project this view is scoped to.
+    pub project_name: String,
+    /// The project's Deliverables, as of the last successful fetch.
+    pub deliverables: Vec<Deliverable>,
+    /// The project's Milestones, as of the last successful fetch.
+    pub milestones: Vec<Milestone>,
+    /// How many lines the body is scrolled down from the top.
+    pub scroll: u16,
+}
+
 /// Everything the `tm projects` TUI renders and mutates this frame.
 ///
 /// Why: a single owned struct (mirroring `CoordinatorState`) keeps the
@@ -240,6 +279,23 @@ pub struct ProjectCtlState {
     /// mismatched (stale-selection) snapshot is never rendered under the
     /// wrong session's header.
     pub activity: Option<ActivityInfo>,
+    /// The currently selected project's Deliverables, refreshed on the same
+    /// poll cadence as `projects`/`sessions_by_project` (DOC-35 §10.6,
+    /// #2383). Empty when no project is selected, the project has none, or
+    /// the fetch failed. This is the ONE additional per-tick call the
+    /// Sessions-pane deliverable glyph adds to the poll loop — see
+    /// `poll::project_ctl_poll_daemon`'s doc for the exact budget accounting.
+    /// Also backs [`DeliverableView::deliverables`] when the view is open for
+    /// this same project, so opening it never triggers a second fetch.
+    pub deliverables: Vec<Deliverable>,
+    /// A read-only Deliverable/Milestone view awaiting display (DOC-35 §10.8
+    /// `show`, #2383). While `Some`, [`handle_key`] in `events.rs` routes
+    /// EVERY key through the view's own scroll/close handling instead of
+    /// normal dispatch — the identical "modal captures all input, `Esc`
+    /// closes" discipline [`PendingConfirm`] already establishes.
+    ///
+    /// [`handle_key`]: super::events::handle_key
+    pub deliverable_view: Option<DeliverableView>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///
@@ -381,6 +437,58 @@ impl ProjectCtlState {
         self.pending_confirm = None;
     }
 
+    /// Look up a Deliverable by id against the currently fetched
+    /// [`Self::deliverables`] (DOC-35 §10.6, #2383).
+    ///
+    /// Why: the Sessions-pane glyph (`panes::sessions`) needs an O(1)-ish
+    /// membership check per row to decide "resolved link" vs. "dangling
+    /// ref"; a linear scan over the (small, single-project-scoped) list is
+    /// simpler than maintaining a parallel `HashSet` and is only ever run
+    /// once per render, not per poll.
+    /// What: returns the matching [`Deliverable`] when `id` equals one
+    /// entry's `id.to_string()`, else `None` — covers both "never bound"
+    /// (caller already filtered on `Some`) and "bound but no longer resolves"
+    /// (a genuinely dangling ref).
+    /// Test: `deliverable_for_resolves_known_id_and_flags_dangling`.
+    pub fn deliverable_for(&self, id: &str) -> Option<&Deliverable> {
+        self.deliverables.iter().find(|d| d.id.to_string() == id)
+    }
+
+    /// Open the Deliverable/Milestone view for the given project (`v` in the
+    /// Projects pane, DOC-35 §10.8 `show`, #2383).
+    ///
+    /// Why: the single seam [`super::events`]'s `v` handler calls; seeds the
+    /// view with whatever `deliverables` the last poll already fetched (no
+    /// duplicate call — see [`Self::deliverables`]'s doc) and an empty
+    /// `milestones` list that [`super::poll::project_ctl_poll_daemon`] fills
+    /// in on the next tick now that the view is open.
+    /// What: sets [`Self::deliverable_view`], overriding any prior one.
+    /// Test: `super::events::tests`.
+    pub fn open_deliverable_view(&mut self, project_name: impl Into<String>) {
+        self.deliverable_view = Some(DeliverableView {
+            project_name: project_name.into(),
+            deliverables: self.deliverables.clone(),
+            milestones: Vec::new(),
+            scroll: 0,
+        });
+    }
+
+    /// Close the Deliverable/Milestone view (`Esc`/`v` while it is open).
+    pub fn close_deliverable_view(&mut self) {
+        self.deliverable_view = None;
+    }
+
+    /// Scroll the open Deliverable/Milestone view by `delta` lines, floored
+    /// at zero (no known-max clamp — the render layer clamps visually; an
+    /// operator scrolling past the end just sees the last page, matching
+    /// `ListNav`'s existing "clamp at render, not at input" pattern used
+    /// elsewhere in this screen).
+    pub fn scroll_deliverable_view(&mut self, delta: i16) {
+        if let Some(view) = &mut self.deliverable_view {
+            view.scroll = view.scroll.saturating_add_signed(delta);
+        }
+    }
+
     /// Request an immediate daemon re-poll on the next run-loop tick.
     ///
     /// Why: after a mutating action (kill/resume/decommission) the operator
@@ -419,6 +527,7 @@ mod tests {
             state: "active".to_string(),
             pending_decision: None,
             proposed_default: None,
+            deliverable_id: None,
         }
     }
 

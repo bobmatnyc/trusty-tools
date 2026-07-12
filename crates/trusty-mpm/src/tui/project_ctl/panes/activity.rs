@@ -164,6 +164,7 @@ mod tests {
             state: "active".to_string(),
             pending_decision: None,
             proposed_default: None,
+            deliverable_id: None,
         }
     }
 

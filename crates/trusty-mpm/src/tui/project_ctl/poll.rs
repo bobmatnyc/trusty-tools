@@ -11,13 +11,15 @@
 //! refresh to two HTTP calls regardless of project count; the activity fetch
 //! is a third call, made only when a session is selected (DOC-35 §5.4).
 //! What: [`project_ctl_poll_daemon`] (health → rediscover-on-fail → registry
-//! list + fleet → map → selected-session activity via [`refresh_activity`];
-//! on daemon-down clears the project/session state — which in turn clears
-//! `activity` too, since a daemon-down poll has no session left selected to
-//! attribute it to; see [`refresh_activity`]'s own doc for the narrower
-//! "fetch failed but the daemon is otherwise up" case that DOES keep the
-//! last-known activity, marked stale) plus the pure projections
-//! [`project_to_row`], [`session_to_row`], and [`activity_from_response`].
+//! list + fleet → map → selected-session activity via [`refresh_activity`] →
+//! selected-project Deliverables (+ Milestones when the view is open) via
+//! [`refresh_deliverables`], DOC-35 §10.6/§10.8, #2383; on daemon-down clears
+//! the project/session state — which in turn clears `activity` too, since a
+//! daemon-down poll has no session left selected to attribute it to; see
+//! [`refresh_activity`]'s own doc for the narrower "fetch failed but the
+//! daemon is otherwise up" case that DOES keep the last-known activity,
+//! marked stale) plus the pure projections [`project_to_row`],
+//! [`session_to_row`], and [`activity_from_response`].
 //! Test: `tests` covers the pure projections and the daemon-down branches
 //! against a guaranteed-dead client (mirroring
 //! `tui::coordinator::poll::tests::poll_marks_unreachable_clears_sessions`);
@@ -86,6 +88,79 @@ pub(crate) async fn project_ctl_poll_daemon(
     state.projects_nav.sync_len(state.projects.len());
     state.sessions_nav.sync_len(state.current_sessions().len());
     refresh_activity(state, client).await;
+    refresh_deliverables(state, client).await;
+}
+
+/// Refresh [`ProjectCtlState::deliverables`] for the currently selected
+/// project, and — while [`ProjectCtlState::deliverable_view`] is open —
+/// [`super::state::DeliverableView::milestones`] too (DOC-35 §10.6/§10.8,
+/// #2383).
+///
+/// Why: split out of [`project_ctl_poll_daemon`] for the same reason
+/// [`refresh_activity`] is — one focused function per "what does this fetch,
+/// under what conditions" concern. This is the poll loop's ONE additional
+/// steady-state call (Deliverables for the selected project, mirroring how
+/// `refresh_activity` scopes its own fetch to the selected session) plus a
+/// SECOND call that only fires while the view is open (Milestones) — bounded
+/// by "is a modal open", never by session/project count, so it never becomes
+/// an O(n) per-session loop. Runs AFTER the project/session refresh so
+/// `state.selected_project_name()` reflects the just-synced navigation.
+/// What: no project selected, or the daemon unreachable → clears
+/// `state.deliverables` (matching `state.projects`/`sessions_by_project`'s
+/// own daemon-down handling in this function, NOT `refresh_activity`'s
+/// narrower stale-keep treatment — there is no "last known glyph" concept
+/// worth preserving through a daemon outage). A selected project with the
+/// daemon reachable → fetches `list_deliverables`, replacing
+/// `state.deliverables` on success or clearing it on a transport error. When
+/// [`ProjectCtlState::deliverable_view`] is `Some` for the SAME project, also
+/// fetches `list_milestones` and updates its `milestones` field in place
+/// (leaving `deliverables` alone — [`ProjectCtlState::open_deliverable_view`]
+/// seeded it, and this function's own `state.deliverables` update above keeps
+/// it current on every subsequent tick via [`sync_open_view_deliverables`]).
+/// Test: `refresh_deliverables_clears_when_no_project_selected`,
+/// `refresh_deliverables_clears_on_daemon_down`.
+async fn refresh_deliverables(state: &mut ProjectCtlState, client: &DaemonClient) {
+    let Some(project_name) = state.selected_project_name().map(str::to_string) else {
+        state.deliverables.clear();
+        return;
+    };
+
+    if !state.daemon_reachable {
+        state.deliverables.clear();
+        return;
+    }
+
+    match client.list_deliverables(&project_name, None).await {
+        Ok(deliverables) => state.deliverables = deliverables,
+        Err(_) => state.deliverables.clear(),
+    }
+    sync_open_view_deliverables(state, &project_name);
+
+    if let Some(view) = &state.deliverable_view
+        && view.project_name == project_name
+        && let Ok(milestones) = client.list_milestones(&project_name).await
+        && let Some(view) = &mut state.deliverable_view
+    {
+        view.milestones = milestones;
+    }
+}
+
+/// Keep an open [`super::state::DeliverableView`]'s `deliverables` in sync
+/// with [`ProjectCtlState::deliverables`] on every tick, when the view is
+/// still scoped to `project_name`.
+///
+/// Why: [`ProjectCtlState::open_deliverable_view`] seeds the view from
+/// whatever `state.deliverables` held at the moment it opened; without this,
+/// a status change (e.g. an operator running `tm projects deliverables
+/// set-status` in another terminal) would never appear in an already-open
+/// view until it was closed and reopened.
+fn sync_open_view_deliverables(state: &mut ProjectCtlState, project_name: &str) {
+    let deliverables = state.deliverables.clone();
+    if let Some(view) = &mut state.deliverable_view
+        && view.project_name == project_name
+    {
+        view.deliverables = deliverables;
+    }
 }
 
 /// Refresh [`ProjectCtlState::activity`] for the currently selected session
@@ -222,8 +297,10 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
 /// one selected session's activity gets the extra live `/activity` fetch (see
 /// [`refresh_activity`]), never the whole list.
 /// What: derives the 8-hex short id via [`session_short_id`] and copies the
-/// rest through unchanged.
-/// Test: `session_to_row_derives_short_id_and_copies_fields`.
+/// rest through unchanged, including `deliverable_id` (DOC-35 §10.6, #2383 —
+/// drives the Sessions-pane deliverable glyph).
+/// Test: `session_to_row_derives_short_id_and_copies_fields`,
+/// `session_to_row_carries_deliverable_id`.
 pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
     let short_id = session_short_id(&s.id);
     SessionRow {
@@ -235,6 +312,7 @@ pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
         state: s.state,
         pending_decision: s.pending_decision,
         proposed_default: s.proposed_default,
+        deliverable_id: s.deliverable_id,
     }
 }
 
@@ -318,6 +396,7 @@ mod tests {
             task: Some("do the thing".to_string()),
             cwd: None,
             claude_session_id: None,
+            deliverable_id: None,
             pane_id: None,
         }
     }
@@ -356,6 +435,20 @@ mod tests {
         assert_eq!(row.state, "active");
         assert_eq!(row.branch.as_deref(), Some("main"));
         assert_eq!(row.task.as_deref(), Some("do the thing"));
+    }
+
+    #[test]
+    fn session_to_row_carries_deliverable_id() {
+        let mut s = summary("4f9ca1b2ffff", "active");
+        s.deliverable_id = Some("11111111-1111-1111-1111-111111111111".to_string());
+        let row = session_to_row(s);
+        assert_eq!(
+            row.deliverable_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+
+        let none_row = session_to_row(summary("aaaaaaaabbbb", "active"));
+        assert!(none_row.deliverable_id.is_none());
     }
 
     fn activity_response(raw_pane: &str) -> ManagedActivityResponse {
@@ -525,5 +618,34 @@ mod tests {
         refresh_activity(&mut state, &client).await;
 
         assert!(state.activity.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_deliverables_clears_when_no_project_selected() {
+        let mut state = ProjectCtlState {
+            daemon_reachable: true,
+            deliverables: vec![],
+            ..Default::default()
+        };
+        let client = DaemonClient::new(dead_loopback_url());
+
+        refresh_deliverables(&mut state, &client).await;
+
+        assert!(state.deliverables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_deliverables_clears_on_daemon_down() {
+        let mut state = seeded_activity_state("s1");
+        state.daemon_reachable = false;
+        let client = DaemonClient::new(dead_loopback_url());
+
+        refresh_deliverables(&mut state, &client).await;
+
+        assert!(
+            state.deliverables.is_empty(),
+            "a project IS selected here, but daemon_reachable=false must still clear, \
+             matching state.projects/sessions_by_project's own daemon-down handling"
+        );
     }
 }
