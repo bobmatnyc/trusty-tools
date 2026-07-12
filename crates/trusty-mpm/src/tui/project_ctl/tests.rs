@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::events::{PendingAction, handle_key};
 use super::panes::{actions_bar, projects, sessions};
 use super::poll::{project_ctl_poll_daemon, project_to_row, session_to_row};
-use super::state::{ConfirmKind, Pane, ProjectCtlState};
+use super::state::{ConfirmKind, DeliverableLinkState, Pane, ProjectCtlState};
 use crate::client::{DaemonClient, FleetProjectGroupWire, ManagedSessionSummary};
 use crate::project::Project;
 
@@ -100,7 +100,11 @@ fn seeded_state_renders_live_project_and_its_session() {
         "expected a live glyph+count: {text}"
     );
 
-    let session_line = sessions::session_line(1, &state.current_sessions()[0], false);
+    let session_line = sessions::session_line(
+        1,
+        &state.current_sessions()[0],
+        DeliverableLinkState::Unknown,
+    );
     let text: String = session_line
         .spans
         .iter()

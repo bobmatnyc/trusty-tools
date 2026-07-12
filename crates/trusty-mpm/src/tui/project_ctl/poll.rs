@@ -105,34 +105,44 @@ pub(crate) async fn project_ctl_poll_daemon(
 /// by "is a modal open", never by session/project count, so it never becomes
 /// an O(n) per-session loop. Runs AFTER the project/session refresh so
 /// `state.selected_project_name()` reflects the just-synced navigation.
-/// What: no project selected, or the daemon unreachable → clears
-/// `state.deliverables` (matching `state.projects`/`sessions_by_project`'s
-/// own daemon-down handling in this function, NOT `refresh_activity`'s
-/// narrower stale-keep treatment — there is no "last known glyph" concept
-/// worth preserving through a daemon outage). A selected project with the
-/// daemon reachable → fetches `list_deliverables`, replacing
-/// `state.deliverables` on success or clearing it on a transport error. When
-/// [`ProjectCtlState::deliverable_view`] is `Some` for the SAME project, also
-/// fetches `list_milestones` and updates its `milestones` field in place
-/// (leaving `deliverables` alone — [`ProjectCtlState::open_deliverable_view`]
-/// seeded it, and this function's own `state.deliverables` update above keeps
-/// it current on every subsequent tick via [`sync_open_view_deliverables`]).
+/// What: no project selected, or the daemon unreachable → resets
+/// `state.deliverables` to `None` (Unknown; matching `state.projects`/
+/// `sessions_by_project`'s own daemon-down handling in this function — every
+/// session row also vanishes from the Sessions pane in that case, so the
+/// glyph question is moot). A selected project with the daemon reachable →
+/// fetches `list_deliverables`; on success replaces `state.deliverables`
+/// with `Some(list)`. **On a transient fetch error, `state.deliverables` is
+/// left UNCHANGED** (neither cleared nor reset to `None`) — mirrors
+/// [`refresh_activity`]'s stale-keep pattern: a `None` (still-unknown) stays
+/// `None`, and a `Some(last-known-good-list)` stays exactly that, so
+/// [`ProjectCtlState::deliverable_link_state`] keeps resolving previously-
+/// resolved sessions correctly instead of flipping them to a false
+/// "dangling" reading on one bad poll (review finding on #2383's initial
+/// PR). When [`ProjectCtlState::deliverable_view`] is `Some` for the SAME
+/// project, also fetches `list_milestones` and updates its `milestones`
+/// field in place (leaving `deliverables` alone —
+/// [`ProjectCtlState::open_deliverable_view`] seeded it, and this function's
+/// own `state.deliverables` update above keeps it current on every
+/// subsequent tick via [`sync_open_view_deliverables`]).
 /// Test: `refresh_deliverables_clears_when_no_project_selected`,
-/// `refresh_deliverables_clears_on_daemon_down`.
+/// `refresh_deliverables_clears_on_daemon_down`,
+/// `refresh_deliverables_keeps_stale_list_on_transient_fetch_failure`.
 async fn refresh_deliverables(state: &mut ProjectCtlState, client: &DaemonClient) {
     let Some(project_name) = state.selected_project_name().map(str::to_string) else {
-        state.deliverables.clear();
+        state.deliverables = None;
         return;
     };
 
     if !state.daemon_reachable {
-        state.deliverables.clear();
+        state.deliverables = None;
         return;
     }
 
-    match client.list_deliverables(&project_name, None).await {
-        Ok(deliverables) => state.deliverables = deliverables,
-        Err(_) => state.deliverables.clear(),
+    // A transient `Err` deliberately falls through WITHOUT touching
+    // `state.deliverables` — see the doc above for why (stale-keep, not
+    // clear, to avoid a false "dangling" glyph on one bad poll).
+    if let Ok(deliverables) = client.list_deliverables(&project_name, None).await {
+        state.deliverables = Some(deliverables);
     }
     sync_open_view_deliverables(state, &project_name);
 
@@ -153,9 +163,14 @@ async fn refresh_deliverables(state: &mut ProjectCtlState, client: &DaemonClient
 /// whatever `state.deliverables` held at the moment it opened; without this,
 /// a status change (e.g. an operator running `tm projects deliverables
 /// set-status` in another terminal) would never appear in an already-open
-/// view until it was closed and reopened.
+/// view until it was closed and reopened. Only syncs on `Some` — a `None`
+/// (Unknown, e.g. this tick's fetch failed) leaves the view's last-known
+/// list on screen rather than blanking it, the same stale-keep principle
+/// [`refresh_deliverables`] applies to `state.deliverables` itself.
 fn sync_open_view_deliverables(state: &mut ProjectCtlState, project_name: &str) {
-    let deliverables = state.deliverables.clone();
+    let Some(deliverables) = state.deliverables.clone() else {
+        return;
+    };
     if let Some(view) = &mut state.deliverable_view
         && view.project_name == project_name
     {
@@ -624,14 +639,14 @@ mod tests {
     async fn refresh_deliverables_clears_when_no_project_selected() {
         let mut state = ProjectCtlState {
             daemon_reachable: true,
-            deliverables: vec![],
+            deliverables: Some(vec![]),
             ..Default::default()
         };
         let client = DaemonClient::new(dead_loopback_url());
 
         refresh_deliverables(&mut state, &client).await;
 
-        assert!(state.deliverables.is_empty());
+        assert!(state.deliverables.is_none());
     }
 
     #[tokio::test]
@@ -643,9 +658,57 @@ mod tests {
         refresh_deliverables(&mut state, &client).await;
 
         assert!(
-            state.deliverables.is_empty(),
-            "a project IS selected here, but daemon_reachable=false must still clear, \
-             matching state.projects/sessions_by_project's own daemon-down handling"
+            state.deliverables.is_none(),
+            "a project IS selected here, but daemon_reachable=false must still reset to \
+             Unknown, matching state.projects/sessions_by_project's own daemon-down handling"
+        );
+    }
+
+    /// THE review-required regression test: `daemon_reachable == true` (the
+    /// daemon is otherwise healthy — the earlier health probe succeeded) but
+    /// `list_deliverables` itself fails on this one tick. Previously this
+    /// cleared `state.deliverables` outright, which made
+    /// `deliverable_link_state` report every previously-resolved session as
+    /// `Dangling` — a false "the Deliverable was deleted" signal for what was
+    /// really just one dropped HTTP call. The fix: keep the last-known-good
+    /// `Some(list)` untouched, mirroring `refresh_activity`'s stale-keep
+    /// pattern for `ActivityInfo`.
+    #[tokio::test]
+    async fn refresh_deliverables_keeps_stale_list_on_transient_fetch_failure() {
+        let mut state = seeded_activity_state("s1");
+        let known_id = crate::deliverable::DeliverableId::new();
+        state.deliverables = Some(vec![crate::deliverable::Deliverable {
+            id: known_id,
+            project_name: "widget".to_string(),
+            name: "OAuth2 flow".to_string(),
+            description: String::new(),
+            kind: crate::deliverable::DeliverableKind::Feature,
+            ticket_ref: None,
+            spec_ref: None,
+            status: crate::deliverable::DeliverableStatus::InProgress,
+            estimated_effort: crate::deliverable::EstimationTier::M,
+            created_at: chrono::Utc::now(),
+            target_date: None,
+        }]);
+        // `seeded_activity_state` leaves `daemon_reachable = true` — the
+        // failure here is scoped to `list_deliverables` alone, via a dead
+        // loopback client, exactly the "endpoint fails, daemon otherwise up"
+        // case the review flagged.
+        let client = DaemonClient::new(dead_loopback_url());
+
+        refresh_deliverables(&mut state, &client).await;
+
+        let kept = state
+            .deliverables
+            .as_ref()
+            .expect("a transient fetch failure must KEEP the last-known-good list, not clear it");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, known_id);
+        assert_eq!(
+            state.deliverable_link_state(&known_id.to_string()),
+            crate::tui::project_ctl::state::DeliverableLinkState::Resolved,
+            "a previously-resolved link must stay Resolved through one bad poll, \
+             never flip to Dangling"
         );
     }
 }

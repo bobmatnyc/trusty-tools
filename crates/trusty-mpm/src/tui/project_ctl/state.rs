@@ -204,6 +204,35 @@ pub struct PendingConfirm {
     pub session_label: String,
 }
 
+/// The resolution of a session's `deliverable_id` against the currently
+/// known Deliverable set (DOC-35 §10.6, #2383).
+///
+/// Why: a two-state (resolved/dangling) model conflates "confirmed the
+/// Deliverable no longer exists" with "we simply don't know yet" — e.g. the
+/// very first poll after launch, or a transient `list_deliverables` failure
+/// on an otherwise-healthy daemon. Rendering the latter as a red "dangling"
+/// glyph is a false signal (adversarial review finding on #2383's initial
+/// PR): an operator seeing it would reasonably conclude the Deliverable was
+/// deleted, when in fact the daemon just missed one HTTP round trip. A third,
+/// explicit `Unknown` state lets the render layer show NO glyph (rather than
+/// guess) until a fetch actually succeeds or actually confirms absence.
+/// What: `Unknown` when [`ProjectCtlState::deliverables`] is `None` (nothing
+/// fetched yet, or the poll deliberately kept stale-but-unclassified data —
+/// see that field's own doc). `Resolved`/`Dangling` when `Some(list)` either
+/// does or does not contain a matching id.
+/// Test: `super::tests::deliverable_link_state_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverableLinkState {
+    /// No successfully fetched Deliverable set exists yet for the current
+    /// project — render no glyph, never a dangling one.
+    Unknown,
+    /// The id resolves against the last successfully fetched set.
+    Resolved,
+    /// The id does NOT resolve against the last successfully fetched set —
+    /// a confirmed dangling reference.
+    Dangling,
+}
+
 /// The read-only Deliverable/Milestone view for one project (DOC-35 §10.8
 /// `show`, #2383), reachable from the Projects pane.
 ///
@@ -281,13 +310,23 @@ pub struct ProjectCtlState {
     pub activity: Option<ActivityInfo>,
     /// The currently selected project's Deliverables, refreshed on the same
     /// poll cadence as `projects`/`sessions_by_project` (DOC-35 §10.6,
-    /// #2383). Empty when no project is selected, the project has none, or
-    /// the fetch failed. This is the ONE additional per-tick call the
-    /// Sessions-pane deliverable glyph adds to the poll loop — see
+    /// #2383). `None` means UNKNOWN — no project selected, the selection just
+    /// changed (not yet fetched for the new project), or every fetch so far
+    /// has failed; it does NOT mean "confirmed no Deliverables." `Some(list)`
+    /// — even a `Some(vec![])` — means a fetch for the current project has
+    /// succeeded at least once; a transient fetch failure after that point
+    /// leaves the last-known-good `Some(list)` in place rather than
+    /// overwriting it (mirrors [`ActivityInfo`]'s stale-keep pattern via
+    /// [`refresh_activity`]: `poll::refresh_activity`). This distinction
+    /// matters because [`Self::deliverable_link_state`] must never render a
+    /// bound session's link as "confirmed dangling" just because ONE poll's
+    /// `list_deliverables` call happened to time out — see the review finding
+    /// this fixed. This is the ONE additional per-tick call the Sessions-pane
+    /// deliverable glyph adds to the poll loop — see
     /// `poll::project_ctl_poll_daemon`'s doc for the exact budget accounting.
     /// Also backs [`DeliverableView::deliverables`] when the view is open for
     /// this same project, so opening it never triggers a second fetch.
-    pub deliverables: Vec<Deliverable>,
+    pub deliverables: Option<Vec<Deliverable>>,
     /// A read-only Deliverable/Milestone view awaiting display (DOC-35 §10.8
     /// `show`, #2383). While `Some`, [`handle_key`] in `events.rs` routes
     /// EVERY key through the view's own scroll/close handling instead of
@@ -376,12 +415,19 @@ impl ProjectCtlState {
     /// top on an explicit project switch (but NOT on every poll — see
     /// [`super::poll::project_ctl_poll_daemon`], which preserves the Sessions
     /// selection across a refresh) matches the operator's expectation.
+    /// [`Self::deliverables`] is ALSO reset to `Unknown` (`None`) here — it
+    /// belonged to the PREVIOUS project, and carrying it over would let a new
+    /// project's session rows resolve against a stranger project's Deliverable
+    /// set (harmless by UUID uniqueness, but semantically wrong and worth
+    /// avoiding outright rather than relying on that coincidence).
     /// What: replaces `sessions_nav` with a fresh default, then syncs its
-    /// length to `current_sessions().len()`.
-    /// Test: `project_switch_resets_session_selection`.
+    /// length to `current_sessions().len()`; clears `deliverables` to `None`.
+    /// Test: `project_switch_resets_session_selection`,
+    /// `project_switch_resets_deliverables_to_unknown`.
     pub fn on_project_selection_changed(&mut self) {
         self.sessions_nav = ListNav::default();
         self.sessions_nav.sync_len(self.current_sessions().len());
+        self.deliverables = None;
     }
 
     /// Cycle focus forward (Projects → Sessions → Activity → …).
@@ -437,21 +483,33 @@ impl ProjectCtlState {
         self.pending_confirm = None;
     }
 
-    /// Look up a Deliverable by id against the currently fetched
-    /// [`Self::deliverables`] (DOC-35 §10.6, #2383).
+    /// Resolve one session's `deliverable_id` against the currently fetched
+    /// [`Self::deliverables`] (DOC-35 §10.6, #2383) — a THREE-state result,
+    /// not a boolean, so a transient fetch failure is never rendered as a
+    /// confirmed-dangling reference (see [`DeliverableLinkState`]'s own doc
+    /// for why this distinction exists).
     ///
-    /// Why: the Sessions-pane glyph (`panes::sessions`) needs an O(1)-ish
-    /// membership check per row to decide "resolved link" vs. "dangling
-    /// ref"; a linear scan over the (small, single-project-scoped) list is
-    /// simpler than maintaining a parallel `HashSet` and is only ever run
-    /// once per render, not per poll.
-    /// What: returns the matching [`Deliverable`] when `id` equals one
-    /// entry's `id.to_string()`, else `None` — covers both "never bound"
-    /// (caller already filtered on `Some`) and "bound but no longer resolves"
-    /// (a genuinely dangling ref).
-    /// Test: `deliverable_for_resolves_known_id_and_flags_dangling`.
-    pub fn deliverable_for(&self, id: &str) -> Option<&Deliverable> {
-        self.deliverables.iter().find(|d| d.id.to_string() == id)
+    /// Why: the Sessions-pane glyph (`panes::sessions`) needs this per row; a
+    /// linear scan over the (small, single-project-scoped) list is simpler
+    /// than maintaining a parallel `HashSet` and is only ever run once per
+    /// render, not per poll.
+    /// What: [`Self::deliverables`] is `None` → [`DeliverableLinkState::Unknown`].
+    /// `Some(list)` and `id` matches an entry's `id.to_string()` →
+    /// [`DeliverableLinkState::Resolved`]. `Some(list)` and no entry matches →
+    /// [`DeliverableLinkState::Dangling`].
+    /// Test: `deliverable_link_state_unknown_when_not_yet_fetched`,
+    /// `deliverable_link_state_resolved_and_dangling`.
+    pub fn deliverable_link_state(&self, id: &str) -> DeliverableLinkState {
+        match &self.deliverables {
+            None => DeliverableLinkState::Unknown,
+            Some(list) => {
+                if list.iter().any(|d| d.id.to_string() == id) {
+                    DeliverableLinkState::Resolved
+                } else {
+                    DeliverableLinkState::Dangling
+                }
+            }
+        }
     }
 
     /// Open the Deliverable/Milestone view for the given project (`v` in the
@@ -461,13 +519,16 @@ impl ProjectCtlState {
     /// view with whatever `deliverables` the last poll already fetched (no
     /// duplicate call — see [`Self::deliverables`]'s doc) and an empty
     /// `milestones` list that [`super::poll::project_ctl_poll_daemon`] fills
-    /// in on the next tick now that the view is open.
+    /// in on the next tick now that the view is open. When `deliverables` is
+    /// still `None` (unknown — nothing successfully fetched yet), the view
+    /// opens with an empty Deliverables section that the same next-tick fetch
+    /// backfills; it is not treated as "confirmed zero".
     /// What: sets [`Self::deliverable_view`], overriding any prior one.
     /// Test: `super::events::tests`.
     pub fn open_deliverable_view(&mut self, project_name: impl Into<String>) {
         self.deliverable_view = Some(DeliverableView {
             project_name: project_name.into(),
-            deliverables: self.deliverables.clone(),
+            deliverables: self.deliverables.clone().unwrap_or_default(),
             milestones: Vec::new(),
             scroll: 0,
         });
@@ -588,6 +649,21 @@ mod tests {
     }
 
     #[test]
+    fn project_switch_resets_deliverables_to_unknown() {
+        let mut state = ProjectCtlState {
+            deliverables: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(state.deliverables.is_some());
+        state.on_project_selection_changed();
+        assert!(
+            state.deliverables.is_none(),
+            "switching projects must reset deliverables to Unknown, not carry over the \
+             previous project's (possibly stale) list"
+        );
+    }
+
+    #[test]
     fn notice_set_and_clear() {
         let mut state = ProjectCtlState::default();
         assert!(state.notice.is_none());
@@ -683,5 +759,53 @@ mod tests {
         let confirm = state.pending_confirm.expect("confirm requested");
         assert_eq!(confirm.kind, ConfirmKind::Decommission);
         assert_eq!(confirm.session_id, "sess-2");
+    }
+
+    // ---- DOC-35 §10.6 DeliverableLinkState (#2383 review fix) -------------
+
+    fn sample_deliverable(id: crate::deliverable::DeliverableId) -> Deliverable {
+        Deliverable {
+            id,
+            project_name: "widget".to_string(),
+            name: "OAuth2 flow".to_string(),
+            description: String::new(),
+            kind: crate::deliverable::DeliverableKind::Feature,
+            ticket_ref: None,
+            spec_ref: None,
+            status: crate::deliverable::DeliverableStatus::InProgress,
+            estimated_effort: crate::deliverable::EstimationTier::M,
+            created_at: chrono::Utc::now(),
+            target_date: None,
+        }
+    }
+
+    #[test]
+    fn deliverable_link_state_unknown_when_not_yet_fetched() {
+        let state = ProjectCtlState::default();
+        assert!(state.deliverables.is_none());
+        assert_eq!(
+            state.deliverable_link_state("any-id"),
+            DeliverableLinkState::Unknown,
+            "before any successful fetch (or after one keeps failing), the link state \
+             must be Unknown, never Dangling"
+        );
+    }
+
+    #[test]
+    fn deliverable_link_state_resolved_and_dangling() {
+        let id = crate::deliverable::DeliverableId::new();
+        let state = ProjectCtlState {
+            deliverables: Some(vec![sample_deliverable(id)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            state.deliverable_link_state(&id.to_string()),
+            DeliverableLinkState::Resolved
+        );
+        assert_eq!(
+            state.deliverable_link_state("00000000-0000-0000-0000-000000000000"),
+            DeliverableLinkState::Dangling,
+            "a Some(list) that does not contain the id is a CONFIRMED dangling ref"
+        );
     }
 }
