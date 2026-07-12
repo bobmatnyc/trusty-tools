@@ -133,17 +133,22 @@ pub mod rbac;
 
 // ── Phase 3 agents + LLM layer (per #642) ──
 
-/// Native OpenRouter LLM client.
+/// LLM transports for trusty-code.
 ///
-/// Why: trusty-code agents need to invoke LLMs via the OpenRouter API without
-/// depending on third-party Rust SDK crates that pin us to specific provider
-/// contracts. A thin native client gives full control over the wire format,
-/// headers, and error handling.
-/// What: Exports `LlmClient`, `LlmClientConfig`, all request/response types
-/// (`ChatRequest`, `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), and
-/// `LlmError`. The API key is injected at construction time.
+/// Why: trusty-code agents invoke LLMs via OpenAI-compatible endpoints
+/// (OpenRouter / Fireworks) and AWS Bedrock. Since #2406 (epic #2400) the
+/// OpenAI-compatible HTTP mechanics live in the shared `trusty_common::inference`
+/// adapter layer rather than a bespoke tcode client, so credential resolution,
+/// error classification, and the wire schema are shared across the ecosystem.
+/// What: Exports `OpenAiCompatClient` (shared OpenRouter/Fireworks transport),
+/// `DispatchingLlmClient` (slug-routed transport), `BedrockChatClient`, all
+/// request/response types (`ChatRequest`, `ChatResponse`, `ChatMessage`,
+/// `ToolDefinition`, …), and `LlmError`. Credentials resolve via the shared
+/// 3-tier chain (env > `.env.local` > secure store) at first use.
 /// Test: `cargo test -p trusty-code` covers serialisation, deserialisation,
-/// and error-mapping unit tests. `--include-ignored` adds the live HTTP test.
+/// type-conversion, and error-mapping unit tests plus the offline black-box
+/// e2e (`tests/inference_shared_adapter_e2e.rs`). `--include-ignored` adds the
+/// live provider tests.
 pub mod llm;
 
 /// Agent configuration loading.

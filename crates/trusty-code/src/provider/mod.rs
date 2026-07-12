@@ -5,8 +5,9 @@
 //! not branch on the backend; it depends on the [`Provider`] trait and asks a
 //! factory for the right implementation given a model slug. This module is that
 //! seam (#1021) and the precedence resolver for which slug to use.
-//! What: Re-exports the [`Provider`] trait and [`ToolChoice`] enum, the two
-//! concrete providers ([`OpenRouterProvider`], [`BedrockProvider`]), the
+//! What: Re-exports the [`Provider`] trait and [`ToolChoice`] enum, the three
+//! concrete providers ([`OpenRouterProvider`], [`BedrockProvider`],
+//! [`FireworksProvider`]), the
 //! [`provider_for`] factory, the [`resolve_model`] precedence function plus
 //! its [`DEFAULT_MODEL`] constant, the [`resolve_max_tokens`] precedence
 //! function plus its [`DEFAULT_MAX_TOKENS`] constant, and (#2207) the
@@ -19,12 +20,14 @@
 
 mod adapter;
 mod bedrock;
+mod fireworks;
 mod openrouter;
 mod routing;
 mod traits;
 
 pub use adapter::provider_for;
 pub use bedrock::BedrockProvider;
+pub use fireworks::FireworksProvider;
 pub use openrouter::OpenRouterProvider;
 pub use routing::{
     DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_RUN_DEADLINE_SECS,

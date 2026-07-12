@@ -1,16 +1,18 @@
-//! Object-safe trait abstraction over the concrete `LlmClient`.
+//! Object-safe trait abstraction over the concrete inference transports.
 //!
 //! Why: The multi-turn agent loop must be unit-testable without issuing real
-//! HTTP requests. The concrete `LlmClient` performs network I/O in its inherent
-//! `chat` method, so the loop depends on this trait instead — production wires in
-//! the real `LlmClient`, tests wire in a scripted mock. Defining the seam here
-//! keeps `LlmClient` itself free of test-only machinery.
-//! What: Declares `LlmClientTrait` with a single `chat` method mirroring
-//! `LlmClient::chat`, and provides the blanket-free impl for `LlmClient` that
-//! delegates to the existing inherent method.
-//! Test: `client_trait::tests::llm_client_implements_trait` proves `LlmClient`
-//! satisfies the trait via a `dyn` coercion; the loop's mock (in
-//! `agent_loop::tests`) exercises the trait independently of the network.
+//! HTTP requests. The production transports (`OpenAiCompatClient`,
+//! `DispatchingLlmClient`, `BedrockChatClient`) perform network I/O in their
+//! inherent `chat` methods, so the loop depends on this trait instead —
+//! production wires in a real transport, tests wire in a scripted mock. Defining
+//! the seam here keeps the transports free of test-only machinery.
+//! What: Declares `LlmClientTrait` with a single `chat` method mirroring the
+//! transports' `chat`. Each concrete transport implements it in its own module
+//! (`client`, `dispatch`, `bedrock`).
+//! Test: `client_trait::tests::transport_implements_trait` proves
+//! `OpenAiCompatClient` satisfies the trait via a `dyn` coercion; the loop's
+//! mock (in `agent_loop::tests`) exercises the trait independently of the
+//! network.
 
 use async_trait::async_trait;
 
@@ -37,19 +39,6 @@ pub trait LlmClientTrait: Send + Sync {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError>;
 }
 
-#[async_trait]
-impl LlmClientTrait for super::LlmClient {
-    /// Delegate to the inherent `LlmClient::chat`.
-    ///
-    /// Why: Keeps a single implementation of the HTTP mechanics; the trait is a
-    /// thin dispatch seam only.
-    /// What: Forwards `req` to the inherent method.
-    /// Test: `llm_client_implements_trait`.
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        super::LlmClient::chat(self, req).await
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -57,19 +46,19 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::llm::{LlmClient, LlmClientConfig};
+    use crate::llm::OpenAiCompatClient;
 
-    /// `LlmClient` can be coerced to `Arc<dyn LlmClientTrait>`.
+    /// The production `OpenAiCompatClient` can be coerced to
+    /// `Arc<dyn LlmClientTrait>`.
     ///
     /// Why: The agent loop stores its client as `Arc<dyn LlmClientTrait>`; this
-    /// guards that the production client actually satisfies the trait (object
-    /// safety + impl presence) without making a network call.
-    /// What: Build a client with a fake key and coerce it to the trait object.
+    /// guards that the production transport actually satisfies the trait (object
+    /// safety + impl presence) without making a network call. Construction is
+    /// credential-free (#2245), so this needs no key.
+    /// What: Build a client and coerce it to the trait object.
     /// Test: this test.
     #[test]
-    fn llm_client_implements_trait() {
-        let cfg = LlmClientConfig::new("sk-or-test").expect("config");
-        let client = LlmClient::from_config(cfg).expect("client");
-        let _erased: Arc<dyn LlmClientTrait> = Arc::new(client);
+    fn transport_implements_trait() {
+        let _erased: Arc<dyn LlmClientTrait> = Arc::new(OpenAiCompatClient::new());
     }
 }

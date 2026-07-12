@@ -1,33 +1,38 @@
-//! Native LLM clients for trusty-code: OpenRouter (HTTP) and AWS Bedrock
-//! (Converse API).
+//! LLM transports for trusty-code: the shared OpenAI-compatible adapter
+//! (OpenRouter / Fireworks) and AWS Bedrock (Converse API).
 //!
-//! Why: trusty-code agents need to invoke LLMs via OpenRouter's chat-
-//! completions endpoint OR, for organisations running on AWS (#1021), via
-//! Bedrock's Converse API — without pulling in a third-party SDK
-//! (`async-openai`, etc.) that pins us to one provider's contract. Both
-//! transports speak the same provider-neutral `ChatRequest`/`ChatResponse`
-//! shape so `AgentLoop` and every other caller never branches on the
-//! backend.
-//! What: This module exports `LlmClient` (OpenRouter HTTP), `BedrockChatClient`
-//! (Bedrock Converse), `DispatchingLlmClient` (routes each request to the
-//! right transport by model slug via `crate::provider::provider_for`),
-//! `LlmClientConfig`, all request/response types (`ChatRequest`,
-//! `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), `LlmError`, and
-//! (#2264) the opt-in `debug_capture` module — `DebugCaptureSink` +
-//! `wrap_with_debug_capture` — that dumps the FULL wire-level request/
-//! response of every round-trip to JSONL when `TCODE_DEBUG_TRANSCRIPT` is
-//! set. The OpenRouter API key is injected at construction time via
-//! `LlmClientConfig::new`/`from_env`; Bedrock uses the standard AWS
-//! credential chain (no key). Library helpers never read `std::env` directly
-//! except at these documented construction seams.
+//! Why: trusty-code agents need to invoke LLMs via OpenAI-compatible endpoints
+//! (OpenRouter, and — since #2406 — Fireworks) OR, for organisations running on
+//! AWS (#1021), via Bedrock's Converse API. Both transports speak the same
+//! provider-neutral `ChatRequest`/`ChatResponse` shape so `AgentLoop` and every
+//! other caller never branches on the backend. The OpenAI-compatible HTTP
+//! mechanics now live in the shared `trusty_common::inference` adapter layer
+//! (epic #2400) rather than a bespoke tcode client — `OpenAiCompatClient`
+//! (`client`) is the thin consumer of that core, bridged to tcode's wire types
+//! by `convert`.
+//! What: This module exports `OpenAiCompatClient` (shared OpenRouter/Fireworks
+//! transport), `BedrockChatClient` (Bedrock Converse), `DispatchingLlmClient`
+//! (routes each request to the right transport by model slug via
+//! `crate::provider::provider_for`), all request/response types (`ChatRequest`,
+//! `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), `LlmError`, and (#2264)
+//! the opt-in `debug_capture` module — `DebugCaptureSink` +
+//! `wrap_with_debug_capture` — that dumps the FULL wire-level request/response
+//! of every round-trip to JSONL when `TCODE_DEBUG_TRANSCRIPT` is set.
+//! OpenRouter/Fireworks credentials are resolved via the shared 3-tier chain
+//! (process env > `.env.local` > secure store); Bedrock uses the standard AWS
+//! credential chain (no key). Library helpers never read `std::env` for secrets
+//! directly — resolution is centralised in the shared resolver.
 //! Test: `cargo test -p trusty-code` covers all unit tests (serialisation,
-//! deserialisation, error mapping, Bedrock message/tool-choice/response
-//! conversion, debug-capture). `cargo test -p trusty-code -- --include-ignored`
-//! additionally runs the live `live_openrouter_call`/`live_bedrock_call` tests.
+//! deserialisation, type conversion + error mapping, Bedrock message/tool-choice/
+//! response conversion, debug-capture) plus the offline black-box HTTP round-trip
+//! in `tests/inference_shared_adapter_e2e.rs`. `cargo test -p trusty-code --
+//! --include-ignored` additionally runs the live
+//! `live_openrouter_call`/`live_fireworks_call`/`live_bedrock_call` tests.
 
 mod bedrock;
 mod client;
 mod client_trait;
+mod convert;
 mod debug_capture;
 mod dispatch;
 mod error;
@@ -40,7 +45,7 @@ mod usage;
 // ── Public API re-exports ─────────────────────────────────────────────────────
 
 pub use bedrock::BedrockChatClient;
-pub use client::{LlmClient, LlmClientConfig};
+pub use client::OpenAiCompatClient;
 pub use client_trait::LlmClientTrait;
 pub use debug_capture::{DebugCaptureSink, wrap_with_debug_capture};
 pub use dispatch::DispatchingLlmClient;

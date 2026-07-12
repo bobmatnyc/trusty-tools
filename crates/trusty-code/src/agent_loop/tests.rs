@@ -1591,14 +1591,14 @@ async fn finish_gate_inert_without_named_test_command() {
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final
 /// answer. Gated on `OPENROUTER_API_KEY` so CI stays offline-green.
-/// What: Build a real `LlmClient`, register the echo tool, and ask the model to
-/// reply with a short word; assert a non-empty final answer and that usage
-/// accrued.
+/// What: Build a real `OpenAiCompatClient` (shared-adapter transport, #2406),
+/// register the echo tool, and ask the model to reply with a short word; assert
+/// a non-empty final answer and that usage accrued.
 /// Test: `cargo test -p trusty-code -- --include-ignored agent_loop_live`.
 #[tokio::test]
 #[ignore = "requires OPENROUTER_API_KEY; skipped in CI"]
 async fn agent_loop_live() {
-    use crate::llm::{LlmClient, LlmClientConfig};
+    use crate::llm::OpenAiCompatClient;
 
     let Ok(key) = std::env::var("OPENROUTER_API_KEY") else {
         eprintln!("OPENROUTER_API_KEY not set — skipping live agent-loop test");
@@ -1609,12 +1609,9 @@ async fn agent_loop_live() {
         return;
     }
 
-    let client = LlmClient::from_config(
-        LlmClientConfig::new(key)
-            .expect("config")
-            .with_title("trusty-code-agent-loop-test"),
-    )
-    .expect("client");
+    // Construction is credential-free; the shared resolver reads
+    // `OPENROUTER_API_KEY` (confirmed present above) at first use.
+    let client = OpenAiCompatClient::new();
 
     let registry = registry_with_echo(false);
     let agent = AgentLoop::new(
