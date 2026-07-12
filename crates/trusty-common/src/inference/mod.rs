@@ -31,6 +31,8 @@ pub mod configurator;
 #[cfg(feature = "inference-client")]
 pub mod error;
 #[cfg(feature = "inference-client")]
+pub mod providers;
+#[cfg(feature = "inference-client")]
 pub mod registry;
 #[cfg(feature = "inference-client")]
 pub mod test_support;
@@ -46,6 +48,8 @@ pub use adapter::InferenceAdapter;
 pub use configurator::{AdapterFactory, Configurator, ResolvedProvider, provider_for};
 #[cfg(feature = "inference-client")]
 pub use error::InferenceError;
+#[cfg(feature = "inference-client")]
+pub use providers::{OpenAiCompatAdapter, OpenAiCompatConfig, register_default_factories};
 #[cfg(feature = "inference-client")]
 pub use registry::{
     Pricing, ProviderCapabilities, ProviderId, ToolDialect, capabilities, capabilities_for,

@@ -50,6 +50,15 @@ name = "inference_foundation"
 path = "tests/inference_foundation.rs"
 required-features = ["inference-client"]
 
+# Concrete inference-adapter integration suite (issue #2403). Drives the
+# OpenRouter/Fireworks/OpenAI adapters through the `Configurator` against the
+# axum `MockInferenceServer`, so it needs BOTH `inference-client` (the adapters)
+# and `axum-server` (the HTTP mock); `required-features` skips it otherwise.
+[[test]]
+name = "inference_adapters"
+path = "tests/inference_adapters.rs"
+required-features = ["inference-client", "axum-server"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
