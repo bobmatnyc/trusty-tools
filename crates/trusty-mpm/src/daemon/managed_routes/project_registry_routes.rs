@@ -269,11 +269,14 @@ pub struct PatchProjectBody {
     /// #2121 — this endpoint accepts and stores the string as-is.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub gh_user: Option<Option<String>>,
-    /// Tags to add, deduplicated against the current set.
+    /// Tags to add, deduplicated against the current set. Each entry is
+    /// trimmed; a blank/whitespace-only entry rejects the WHOLE request with
+    /// 400 (see [`trim_and_reject_blank_tags`]).
     #[serde(default)]
     pub tags_add: Option<Vec<String>>,
     /// Tags to remove. Applied AFTER `tags_add`, so a tag present in both
-    /// lists in the same request ends up removed.
+    /// lists in the same request ends up removed. Same trim/blank-rejection
+    /// rule as `tags_add`.
     #[serde(default)]
     pub tags_remove: Option<Vec<String>>,
 }
@@ -286,20 +289,28 @@ pub struct PatchProjectBody {
 /// validation and persistence never drift between the two front ends. See
 /// [`PatchProjectBody`] for the full field-by-field unset/tags contract.
 /// What: validates the body BEFORE touching the store (name-change rejection,
-/// then blank-value rejection on the two required string fields — matching
+/// blank-value rejection on the two required string fields, and blank/
+/// whitespace-only-tag rejection on `tags_add`/`tags_remove` — matching
 /// [`register_project_registry_route`]'s "validate then touch the store"
-/// order), 404s an unknown project (same shape as
-/// [`get_project_registry_route`]), applies only the fields present in the
-/// body to a clone of the existing record, persists via
-/// [`ProjectRegistry::register`](crate::project::ProjectRegistry::register)
-/// (the same idempotent upsert `POST` uses), and returns 200 with the updated
-/// record. Re-issuing an identical PATCH is idempotent: the second call
+/// order), then applies the merge under
+/// [`ProjectRegistry::update_with`](crate::project::ProjectRegistry::update_with) — ONE
+/// write-lock guard held across the whole fetch→mutate→persist sequence
+/// (#2481 review HIGH fix: a `get` followed by a LATER, separate `register`
+/// call left a window where a concurrent PATCH to a different field could be
+/// silently discarded — see `update_with`'s doc comment for the full
+/// mechanism). 404s an unknown project (same shape as
+/// [`get_project_registry_route`]) and returns 200 with the updated record on
+/// success. Re-issuing an identical PATCH is idempotent: the second call
 /// applies the same (already-applied) values and tag adds/removes are
 /// membership-checked, so it is a true no-op.
 /// Test: `patch_body_distinguishes_absent_null_and_value` (in-module), and in
 /// `tests/project_registry_routes.rs`: `patch_round_trip_updates_fields`,
 /// `patch_absent_fields_untouched`, `patch_unknown_project_is_404`,
-/// `patch_rejects_name_change`, `patch_is_idempotent`.
+/// `patch_rejects_name_change`, `patch_is_idempotent`,
+/// `patch_rejects_blank_tags_add`, `patch_rejects_blank_tags_remove`; and in
+/// `crate::project::registry::tests`:
+/// `update_with_serializes_concurrent_field_edits`,
+/// `get_then_register_pattern_reproduces_lost_update_pre_fix`.
 pub async fn patch_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(name): AxumPath<String>,
@@ -325,57 +336,103 @@ pub async fn patch_project_registry_route(
         return (StatusCode::BAD_REQUEST, "default_branch must not be empty").into_response();
     }
 
+    let tags_add = match body
+        .tags_add
+        .map(|tags| trim_and_reject_blank_tags(tags, "tags_add"))
+    {
+        Some(Ok(tags)) => Some(tags),
+        Some(Err(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        None => None,
+    };
+    let tags_remove = match body
+        .tags_remove
+        .map(|tags| trim_and_reject_blank_tags(tags, "tags_remove"))
+    {
+        Some(Ok(tags)) => Some(tags),
+        Some(Err(msg)) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        None => None,
+    };
+    let repo_url = body.repo_url;
+    let default_branch = body.default_branch;
+    let description = body.description;
+    let stack_hint = body.stack_hint;
+    let gh_user = body.gh_user;
+
     let registry = state.project_registry().await;
-    let mut project = match registry.get(&name).await {
-        Ok(project) => project,
+    let result = registry
+        .update_with(&name, move |mut project| {
+            if let Some(repo_url) = repo_url {
+                project.repo_url = repo_url;
+            }
+            if let Some(default_branch) = default_branch {
+                project.default_branch = default_branch;
+            }
+            if let Some(description) = description {
+                project.description = description;
+            }
+            if let Some(stack_hint) = stack_hint {
+                project.stack_hint = stack_hint;
+            }
+            if let Some(gh_user) = gh_user {
+                project.gh_user = gh_user;
+            }
+            if let Some(add) = tags_add {
+                for tag in add {
+                    if !project.tags.contains(&tag) {
+                        project.tags.push(tag);
+                    }
+                }
+            }
+            if let Some(remove) = tags_remove {
+                project.tags.retain(|t| !remove.contains(t));
+            }
+            project
+        })
+        .await;
+
+    match result {
+        Ok(project) => Json(project).into_response(),
         Err(ProjectStoreError::NotFound(_)) => {
-            return (StatusCode::NOT_FOUND, format!("project {name} not found")).into_response();
+            (StatusCode::NOT_FOUND, format!("project {name} not found")).into_response()
         }
         Err(e) => {
-            warn!(error = %e, project = %name, "patch_project_registry_route: registry read failed");
-            return (
+            warn!(error = %e, project = %name, "patch_project_registry_route: registry write failed");
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "project registry read failed".to_string(),
+                "project registry write failed".to_string(),
             )
-                .into_response();
-        }
-    };
-
-    if let Some(repo_url) = body.repo_url {
-        project.repo_url = repo_url;
-    }
-    if let Some(default_branch) = body.default_branch {
-        project.default_branch = default_branch;
-    }
-    if let Some(description) = body.description {
-        project.description = description;
-    }
-    if let Some(stack_hint) = body.stack_hint {
-        project.stack_hint = stack_hint;
-    }
-    if let Some(gh_user) = body.gh_user {
-        project.gh_user = gh_user;
-    }
-    if let Some(add) = body.tags_add {
-        for tag in add {
-            if !project.tags.contains(&tag) {
-                project.tags.push(tag);
-            }
+                .into_response()
         }
     }
-    if let Some(remove) = body.tags_remove {
-        project.tags.retain(|t| !remove.contains(t));
-    }
+}
 
-    if let Err(e) = registry.register(project.clone()).await {
-        warn!(error = %e, project = %project.name, "patch_project_registry_route: registry write failed");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "project registry write failed".to_string(),
-        )
-            .into_response();
+/// Trim every tag in a `tags_add`/`tags_remove` list and reject the whole
+/// request (400) if any entry is blank/whitespace-only after trimming.
+///
+/// Why (#2481 review MEDIUM): `repo_url`/`default_branch` already reject a
+/// blank value; `tags_add` previously pushed entries as-is with no trim/blank
+/// check, so a blank tag would persist silently with a 200. Since this
+/// endpoint is THE server-side validation surface #2120's CLI/TUI depend on,
+/// silently accepting a blank tag would let a client-side typo (e.g. a
+/// trailing comma in `--add a,b,`) persist unnoticed. Rejecting — rather than
+/// silently dropping the blank entry — surfaces the mistake to the caller
+/// immediately, matching the `repo_url`/`default_branch` precedent.
+/// What: returns the trimmed tags on success, or an `Err(message)` naming
+/// which field (`tags_add`/`tags_remove`) failed, suitable for a 400 body.
+/// Test: `patch_rejects_blank_tags_add`, `patch_rejects_blank_tags_remove`
+/// (`tests/project_registry_routes.rs`).
+fn trim_and_reject_blank_tags(tags: Vec<String>, field: &str) -> Result<Vec<String>, String> {
+    let mut trimmed = Vec::with_capacity(tags.len());
+    for tag in tags {
+        let tag = tag.trim().to_string();
+        if tag.is_empty() {
+            return Err(format!(
+                "{field} must not contain blank/whitespace-only tags"
+            ));
+        }
+        trimmed.push(tag);
     }
-    Json(project).into_response()
+    Ok(trimmed)
 }
 
 #[cfg(test)]

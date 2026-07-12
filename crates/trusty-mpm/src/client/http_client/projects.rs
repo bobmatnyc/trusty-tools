@@ -95,10 +95,12 @@ pub struct PatchProjectArgs {
     /// validation is deferred to #2121).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<Option<String>>,
-    /// Tags to add, deduplicated server-side against the current set.
+    /// Tags to add, deduplicated server-side against the current set. A
+    /// blank/whitespace-only entry rejects the whole PATCH with 400.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags_add: Option<Vec<String>>,
-    /// Tags to remove; applied AFTER `tags_add` server-side.
+    /// Tags to remove; applied AFTER `tags_add` server-side. Same
+    /// blank-rejection rule as `tags_add`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags_remove: Option<Vec<String>>,
 }

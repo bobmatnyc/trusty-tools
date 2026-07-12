@@ -424,6 +424,100 @@ async fn patch_is_idempotent() {
     );
 }
 
+/// A blank/whitespace-only entry in `tags_add` is rejected with 400 rather
+/// than silently persisted — this endpoint is the server-side validation
+/// surface #2120's CLI/TUI depend on, so a client-side mistake (e.g. a
+/// trailing comma in `--add a,b,`) must surface immediately.
+#[tokio::test]
+async fn patch_rejects_blank_tags_add() {
+    let (client, base) = serve_with_base().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    let resp = reqwest::Client::new()
+        .patch(format!("{base}/api/v1/projects/widget"))
+        .json(&serde_json::json!({ "tags_add": ["backend", "   "] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Rejected request must not have partially applied "backend".
+    let unchanged = client.registry_get_project("widget").await.unwrap();
+    assert!(unchanged.tags.is_empty(), "{:?}", unchanged.tags);
+}
+
+/// Same rejection rule applies to `tags_remove`.
+#[tokio::test]
+async fn patch_rejects_blank_tags_remove() {
+    let (client, base) = serve_with_base().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: Some(vec!["backend".into()]),
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    let resp = reqwest::Client::new()
+        .patch(format!("{base}/api/v1/projects/widget"))
+        .json(&serde_json::json!({ "tags_remove": [""] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Rejected request must not have removed "backend".
+    let unchanged = client.registry_get_project("widget").await.unwrap();
+    assert_eq!(unchanged.tags, vec!["backend".to_string()]);
+}
+
+/// A tag with leading/trailing whitespace is trimmed before being persisted
+/// (not rejected — only fully-blank entries are rejected).
+#[tokio::test]
+async fn patch_trims_tags_add_whitespace() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    let patched = client
+        .registry_patch_project(
+            "widget",
+            &PatchProjectArgs {
+                tags_add: Some(vec!["  rust  ".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(patched.tags, vec!["rust".to_string()]);
+}
+
 /// Deliverable create → list → set-status legal → illegal-409 round-trips, and
 /// the illegal transition surfaces as `SetStatusError::Rejected` with the legal
 /// next states (#2380).
