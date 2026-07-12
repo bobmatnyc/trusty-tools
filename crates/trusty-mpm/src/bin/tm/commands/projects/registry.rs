@@ -14,6 +14,9 @@
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::client::http_client::projects::{ProjectStatusWire, RegisterProjectArgs};
 use trusty_mpm::project::Project;
+use trusty_mpm::project_config::{self, ConfigEdit};
+
+use crate::cli::ConfigAction;
 
 /// Owned inputs for [`register`], mirroring the `Register` clap variant.
 ///
@@ -188,6 +191,117 @@ pub(crate) async fn status(
     Ok(())
 }
 
+/// `tm projects config <name> [set|unset|tags]` — view or edit config fields
+/// (DOC-35 §3.1/§6, #2120).
+///
+/// Why: the deterministic CLI half of the configurator — a thin client over
+/// `PATCH /api/v1/projects/{name}` via the shared
+/// [`trusty_mpm::project_config`] edit model, so this front end and the TUI
+/// form can never drift on what a given edit means on the wire (§6 RESOLVED).
+/// What: `action = None` is a read-only view (GET, human or `--json`); each
+/// `Some(ConfigAction)` variant maps to exactly one [`ConfigEdit`] and PATCHes
+/// it. `Tags` with both `--add`/`--remove` empty is rejected client-side
+/// (disclosed judgment call — a friendlier `bail!` here rather than sending a
+/// genuine no-op PATCH the server would just idempotently accept).
+/// Test: `cli_parses_projects_config_*` (parse) in `tests_projects.rs`;
+/// `projects_config_shared_cases_match_cli_arg_building` exercises this
+/// module's own edit-to-`ConfigEdit` mapping against the shared case table;
+/// live HTTP via the daemon route tests.
+pub(crate) async fn config(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+    json: bool,
+    action: Option<ConfigAction>,
+) -> anyhow::Result<()> {
+    match action {
+        None => config_view(client, url, name, json).await,
+        Some(ConfigAction::Set { field, value }) => {
+            config_apply(client, url, name, ConfigEdit::Set(field.into(), value)).await
+        }
+        Some(ConfigAction::Unset { field }) => {
+            config_apply(client, url, name, ConfigEdit::Unset(field.into())).await
+        }
+        Some(ConfigAction::Tags { add, remove }) => {
+            if add.is_empty() && remove.is_empty() {
+                anyhow::bail!("tags: provide --add and/or --remove");
+            }
+            config_apply(client, url, name, ConfigEdit::Tags { add, remove }).await
+        }
+    }
+}
+
+/// `tm projects config <name>` (no subcommand) — read-only config view.
+async fn config_view(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let project = daemon(client, url).registry_get_project(name).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&project)?);
+        return Ok(());
+    }
+    println!("{}", render_config_view(&project));
+    Ok(())
+}
+
+/// Apply one [`ConfigEdit`] via `PATCH /api/v1/projects/{name}` and print the
+/// updated config.
+///
+/// Why: the single call site every `ConfigAction` variant in [`config`]
+/// routes through — one PATCH, one render, matching [`register`]'s
+/// print-after-write convention.
+/// What: builds the wire args via [`project_config::build_patch_args`] (the
+/// SAME builder the TUI form's submit uses), PATCHes, and renders the
+/// server's returned (authoritative, post-write) record. A 400/404 surfaces
+/// as an `anyhow::Error` via `DaemonClient::registry_patch_project`'s
+/// `error_for_status` — propagated unchanged, printed by `main`'s default
+/// error handler.
+async fn config_apply(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+    edit: ConfigEdit,
+) -> anyhow::Result<()> {
+    let args = project_config::build_patch_args(&edit);
+    let project = daemon(client, url)
+        .registry_patch_project(name, &args)
+        .await?;
+    println!("updated project '{}'", project.name);
+    println!("{}", render_config_view(&project));
+    Ok(())
+}
+
+/// Render a project's configurator-scoped fields (DOC-35 §6's field table):
+/// `default_branch`, `description`, `tags`, `stack_hint`, `gh_user` — no
+/// nested sessions (that is `show`'s job, not `config`'s).
+fn render_config_view(p: &Project) -> String {
+    let lines = [
+        format!("{} ({})", p.name, p.repo_url),
+        format!("  default_branch: {}", p.default_branch),
+        format!(
+            "  description: {}",
+            p.description.as_deref().unwrap_or("(unset)")
+        ),
+        format!(
+            "  tags: {}",
+            if p.tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                p.tags.join(", ")
+            }
+        ),
+        format!(
+            "  stack_hint: {}",
+            p.stack_hint.as_deref().unwrap_or("(unset)")
+        ),
+        format!("  gh_user: {}", p.gh_user.as_deref().unwrap_or("(unset)")),
+    ];
+    lines.join("\n")
+}
+
 /// Render one project as a compact `name  repo_url  (branch)` line.
 ///
 /// Why: shared between `list` and `show`; a pure helper keeps it testable.
@@ -288,6 +402,30 @@ mod tests {
         assert!(lines[1].contains("2 active"));
         assert!(lines[2].contains("2026-07-10"));
         assert!(lines[3].contains("gh_user set"));
+    }
+
+    #[test]
+    fn render_config_view_shows_every_field() {
+        let mut p = project();
+        p.description = Some("the widget".to_string());
+        p.tags = vec!["backend".to_string()];
+        p.stack_hint = Some("rust".to_string());
+        p.gh_user = Some("acme-bot".to_string());
+        let rendered = render_config_view(&p);
+        assert!(rendered.contains("default_branch: main"));
+        assert!(rendered.contains("description: the widget"));
+        assert!(rendered.contains("tags: backend"));
+        assert!(rendered.contains("stack_hint: rust"));
+        assert!(rendered.contains("gh_user: acme-bot"));
+    }
+
+    #[test]
+    fn render_config_view_shows_unset_placeholders() {
+        let rendered = render_config_view(&project());
+        assert!(rendered.contains("description: (unset)"));
+        assert!(rendered.contains("tags: (none)"));
+        assert!(rendered.contains("stack_hint: (unset)"));
+        assert!(rendered.contains("gh_user: (unset)"));
     }
 
     #[test]

@@ -60,6 +60,10 @@ mod tests_behavior_e;
 #[path = "tests_projects.rs"]
 mod tests_projects;
 
+#[cfg(test)]
+#[path = "tests_projects_config_tests.rs"]
+mod tests_projects_config_tests;
+
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
 /// Why: the YAML help bundle is checked in as a string literal; loading it
