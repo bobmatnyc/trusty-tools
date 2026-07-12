@@ -72,6 +72,25 @@ async fn health_reports_catalog_unknown_without_catalog() {
 }
 
 #[tokio::test]
+async fn health_response_serializes_supervised_field() {
+    // #2486: `supervised` must be a real field on the `/health` wire shape,
+    // defaulted `true` (safe) until `daemon_run` computes and sets it.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert!(
+        body.supervised,
+        "supervised defaults true before daemon_run sets it"
+    );
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("supervised"),
+        Some(&serde_json::Value::Bool(true)),
+        "wire shape must carry `supervised`: {value}"
+    );
+}
+
+#[tokio::test]
 async fn current_project_found_and_missing() {
     // `GET /projects/current` returns the project for a registered path
     // and `404` for an unregistered one.

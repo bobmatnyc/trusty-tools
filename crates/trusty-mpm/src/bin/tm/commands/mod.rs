@@ -25,6 +25,7 @@ pub(crate) mod hook_rewrite;
 pub(crate) mod install;
 pub(crate) mod issue;
 pub(crate) mod launch;
+pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 pub(crate) mod managed_root;
 pub(crate) mod managed_route;

@@ -273,6 +273,23 @@ pub struct DaemonState {
     /// Test: `daemon::managed_routes::proxy::tests`, `tests/proxy_routes.rs`.
     pub(super) proxy_focus:
         Arc<std::sync::Mutex<HashMap<String, crate::client::proxy::FocusTarget>>>,
+    /// Launchd-supervision signal for `GET /health` (issue #2486).
+    ///
+    /// Why: a green `/health` alone does not prove launchd owns this process —
+    /// see [`crate::daemon::api::types::HealthResponse::supervised`] for the
+    /// full restart-race rationale. This field is the mutable half of that
+    /// signal: it defaults to the safe value (`true`) at construction because
+    /// the real probe (`commands::launchd_probe::compute_supervised`) needs
+    /// process startup context (env vars, PPID) that only `daemon_run` — the
+    /// actual `tm daemon` entry point — has readily at hand; test-only
+    /// constructors never override it.
+    /// What: an `AtomicBool` so `daemon_run` can set it once, post-construction,
+    /// without requiring `&mut DaemonState` through the shared `Arc`. Read via
+    /// [`Self::supervised`], written via [`Self::set_supervised`].
+    /// Test: `health_response_serializes_supervised_field` asserts the default;
+    /// `commands::launchd_probe::tests` cover the pure decision logic that
+    /// `daemon_run` uses to compute the value passed to `set_supervised`.
+    pub(super) supervised: std::sync::atomic::AtomicBool,
 }
 
 impl Default for DaemonState {
@@ -359,6 +376,7 @@ impl DaemonState {
             deliverable_manager: tokio::sync::OnceCell::new(),
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            supervised: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -418,6 +436,7 @@ impl DaemonState {
             deliverable_manager: tokio::sync::OnceCell::new(),
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            supervised: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -433,6 +452,26 @@ impl DaemonState {
     /// `with_root` a tempdir and asserts the handler reads it.
     pub fn framework_root(&self) -> &std::path::Path {
         &self.framework_root
+    }
+
+    /// Whether this daemon process is currently considered safely supervised
+    /// (issue #2486). See [`Self::supervised`] field doc for the full rationale.
+    /// What: relaxed-ordering read — this is a startup-once flag, not a
+    /// synchronization primitive; any ordering suffices.
+    /// Test: `health_response_serializes_supervised_field`.
+    pub fn supervised(&self) -> bool {
+        self.supervised.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set the launchd-supervision signal (issue #2486). Called exactly once
+    /// by `daemon_run::run_daemon` right after startup, using the value
+    /// computed by `commands::launchd_probe::compute_supervised`.
+    /// What: relaxed-ordering store — see [`Self::supervised`].
+    /// Test: `health_response_serializes_supervised_field` exercises the
+    /// default; the daemon e2e suite exercises the post-`run_daemon` value.
+    pub fn set_supervised(&self, value: bool) {
+        self.supervised
+            .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The shared focus-state store for the local session-manager PROXY routes.

@@ -41,6 +41,13 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
     }
 
     let state = trusty_mpm::daemon::DaemonState::shared();
+
+    // #2486: compute the launchd-supervision signal once, up front, so both
+    // the MCP-mode early return and the HTTP-serving path below carry it on
+    // `GET /health`. See `crate::commands::launchd_probe` for the full
+    // restart-race rationale and the pure decision table.
+    apply_supervision_signal(&state);
+
     if mcp {
         return trusty_mpm::daemon::run_mcp(state).await;
     }
@@ -184,6 +191,38 @@ async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Compute and store the launchd-supervision signal on `state` (issue #2486).
+///
+/// Why: a green `/health` alone does not prove launchd owns this process —
+/// during a `bootout → cargo install → bootstrap` restart, a racing MCP stdio
+/// bridge can auto-spawn an orphan daemon that answers `/health` 200 but is
+/// missing the plist's `EnvironmentVariables` and runs with `cwd=$HOME`.
+/// `crate::commands::launchd_probe::compute_supervised` combines "is THIS
+/// process launchd-supervised" with "does a trusty-mpm launchd unit exist at
+/// all" into the single safe/hazardous signal `GET /health` exposes.
+/// What: probes for a trusty-mpm launchd plist, combines it with
+/// `trusty_common::update::is_launchd_supervised()`, stores the result on
+/// `state` via [`trusty_mpm::daemon::DaemonState::set_supervised`], and logs a
+/// `tracing::warn!` exactly once at startup when the result is hazardous.
+/// Test: the pure decision table is covered by
+/// `crate::commands::launchd_probe::tests`; this wrapper is side-effect-only
+/// (env/filesystem probes + a state mutation) and is exercised via the daemon
+/// e2e suite's boot path.
+fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) {
+    let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
+    let is_launchd = trusty_common::update::is_launchd_supervised();
+    let supervised = crate::commands::launchd_probe::compute_supervised(is_launchd, plist_exists);
+    state.set_supervised(supervised);
+    if !supervised {
+        tracing::warn!(
+            "unsupervised trusty-mpm daemon running alongside a launchd unit — \
+             likely spawned by a client during a restart race; kill it and use \
+             `launchctl kickstart -k gui/$(id -u)/com.trusty.mpm.supervisor` \
+             (or `com.trusty.mpm`) to let launchd own the daemon."
+        );
     }
 }
 

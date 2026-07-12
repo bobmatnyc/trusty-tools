@@ -203,6 +203,18 @@ After the first signed install, grant Full Disk Access once:
 After this one-time grant, future `scripts/install-trusty-search-signed.sh`
 reinstalls keep the FDA grant — no re-granting needed.
 
+🔴 **A 200 `GET /health` right after `bootstrap` is NOT sufficient evidence the
+restart succeeded** (issue #2486) — a client racing the restart window (e.g. an
+MCP stdio bridge's auto-reconnect) can spawn an orphan daemon that answers
+`/health` 200 while missing the plist's `EnvironmentVariables` and running with
+the wrong `cwd`. Verify launchd actually owns the new process with one of:
+
+```bash
+launchctl print gui/$(id -u)/<label>                       # launchd's own view
+ps -o ppid= -p "$(pgrep -fx '<daemon process>' | head -1)"  # must print "1"
+curl -s http://127.0.0.1:<port>/health | jq '.supervised'   # trusty-mpm only; must print true
+```
+
 ### Notarization Appendix (Optional — for distributing to OTHER machines)
 
 Notarization is **not required** for local FDA persistence. It is only needed

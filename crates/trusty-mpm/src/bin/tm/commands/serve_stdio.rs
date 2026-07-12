@@ -55,15 +55,36 @@ fn build_rpc_client() -> Result<reqwest::Client> {
 /// Why: the daemon discovers its own (possibly ephemeral) port and records it in
 /// `~/.trusty-mpm/daemon.lock`. `resolve_daemon_url(None)` re-reads that lock on
 /// every call, so passing it as `base_url_fn` lets `ensure_daemon_up` track a
-/// dynamic port as soon as the daemon writes the lock. Unlike trusty-memory
-/// (which sets `no_spawn` to avoid squatting a redb write lock), the trusty-mpm
-/// daemon is HTTP-only and singleton-guarded, so auto-spawn is safe and matches
-/// the existing `tm start` behaviour.
-/// What: returns a config that probes `/health`, auto-spawns `tm daemon` when
-/// absent, and resolves the base URL from the lock file each poll.
-/// Test: covered indirectly; `ensure_daemon_up` itself is unit-tested in
-/// `trusty_common::mcp::daemon_bridge`.
+/// dynamic port as soon as the daemon writes the lock.
+///
+/// `no_spawn` is now launchd-aware (issue #2486, precedent: trusty-memory's
+/// #1152 fix). The doc comment this replaced claimed singleton-guarding made
+/// unconditional auto-spawn "safe" — #2486 disproved that: during the
+/// documented `launchctl bootout → cargo install → launchctl bootstrap`
+/// restart, this bridge's auto-reconnect can race the restart and spawn an
+/// ORPHAN daemon (PPID pointing at the client chain, not launchd) *before*
+/// launchd relaunches the real one. The orphan answers `/health` 200 — so the
+/// old "singleton-guarded" reasoning silently masked the bug — but it lacks
+/// the plist's `EnvironmentVariables` (`TELEGRAM_BOT_TOKEN`,
+/// `OPENROUTER_API_KEY`) and runs with `cwd=$HOME`, so features like the
+/// Telegram poller never start. When a trusty-mpm launchd unit IS registered,
+/// `launchctl bootstrap`/`kickstart` is the correct way to bring the daemon
+/// back, so this bridge must refuse to auto-spawn and instead surface a clear
+/// error (`ensure_daemon_up`'s `no_spawn` path) — the console's existing
+/// backoff/retry recovers once launchd finishes the restart. On a dev machine
+/// with no registered launchd unit, auto-spawn remains the convenient default,
+/// unchanged from `tm start`'s existing behaviour.
+/// What: returns a config that probes `/health`, resolves the base URL from
+/// the lock file each poll, and sets `no_spawn` to
+/// [`crate::commands::launchd_probe::compute_no_spawn`] applied to
+/// [`crate::commands::launchd_probe::mpm_launchd_plist_exists`].
+/// Test: `build_bridge_config_no_spawn_matches_plist_probe` below;
+/// `ensure_daemon_up`'s no-spawn error path is unit-tested in
+/// `trusty_common::mcp::daemon_bridge` (`no_spawn_returns_err_without_spawning`).
 fn build_bridge_config() -> DaemonBridgeConfig {
+    let no_spawn = crate::commands::launchd_probe::compute_no_spawn(
+        crate::commands::launchd_probe::mpm_launchd_plist_exists(),
+    );
     DaemonBridgeConfig {
         service_name: "trusty-mpm".to_string(),
         // The daemon picks its own port and records it in the lock file; no addr
@@ -80,7 +101,7 @@ fn build_bridge_config() -> DaemonBridgeConfig {
         base_url_fn: Box::new(|| trusty_mpm::core::resolve_daemon_url(None)),
         startup_timeout: None, // shared 30s default
         poll_interval: None,   // shared 500ms default
-        no_spawn: false,
+        no_spawn,
     }
 }
 
@@ -231,6 +252,22 @@ mod tests {
     #[test]
     fn build_rpc_client_succeeds() {
         assert!(build_rpc_client().is_ok());
+    }
+
+    /// Why (#2486): `build_bridge_config`'s `no_spawn` must be wired straight
+    /// through `compute_no_spawn(mpm_launchd_plist_exists())` — this test
+    /// pins the wiring without faking the filesystem (the pure decision table
+    /// itself is covered by `commands::launchd_probe::tests`).
+    #[test]
+    fn build_bridge_config_no_spawn_matches_plist_probe() {
+        let expected = crate::commands::launchd_probe::compute_no_spawn(
+            crate::commands::launchd_probe::mpm_launchd_plist_exists(),
+        );
+        let cfg = build_bridge_config();
+        assert_eq!(
+            cfg.no_spawn, expected,
+            "no_spawn must track the live plist probe"
+        );
     }
 
     #[test]

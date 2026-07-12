@@ -393,12 +393,16 @@ pub fn router(state: Arc<DaemonState>) -> Router {
 /// from the synced catalog so the TUI can show an indicator and the operator can
 /// rebuild. The check is a cheap, offline SHA compare (no network pull on the
 /// hot path), and an unreachable/never-synced catalog degrades to `unknown`
-/// (never `stale`, never an error) per the spec's "never block" rule.
-/// What: returns `status: "ok"` with `catalog_stale`/`catalog_unknown` flags and
-/// a small `catalog_changes` summary, computed via
+/// (never `stale`, never an error) per the spec's "never block" rule. Also
+/// surfaces the #2486 `supervised` restart-race signal — a 200 response here
+/// does NOT by itself prove launchd owns this process; check `supervised` too.
+/// What: returns `status: "ok"` with `catalog_stale`/`catalog_unknown` flags, a
+/// small `catalog_changes` summary computed via
 /// [`crate::core::update_check::detect_for_framework`] anchored at the daemon's
-/// framework root.
-/// Test: `health_reports_ok_status`, `health_reports_catalog_unknown_without_catalog`.
+/// framework root, and `supervised` read from `state` (set once at daemon
+/// startup by `daemon_run::run_daemon`).
+/// Test: `health_reports_ok_status`, `health_reports_catalog_unknown_without_catalog`,
+/// `health_response_serializes_supervised_field`.
 #[utoipa::path(
     get,
     path = "/health",
@@ -415,6 +419,7 @@ pub async fn health(State(state): State<Arc<DaemonState>>) -> Json<HealthRespons
         catalog_stale: report.stale,
         catalog_unknown: report.unknown,
         catalog_changes: report.summary_lines(),
+        supervised: state.supervised(),
     })
 }
 
