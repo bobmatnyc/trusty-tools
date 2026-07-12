@@ -38,16 +38,17 @@ fn clear_provider_env() {
 
 // ── Capability registry ────────────────────────────────────────────────────────
 
-/// Why: each of the five seeded providers must be queryable by id and by name
-/// and expose a coherent capability descriptor.
+/// Why: each seeded provider must be queryable by id and by name and expose a
+/// coherent capability descriptor.
 #[test]
-fn registry_seeds_all_five_providers() {
+fn registry_seeds_all_providers() {
     let expected = [
         (ProviderId::OpenRouter, "openrouter", true),
         (ProviderId::Fireworks, "fireworks", true),
         (ProviderId::Bedrock, "bedrock", false), // no API-key env (AWS chain)
         (ProviderId::Anthropic, "anthropic", true),
         (ProviderId::OpenAI, "openai", true),
+        (ProviderId::Together, "together", true),
     ];
     for (id, name, has_key_env) in expected {
         let by_id = capabilities(id);

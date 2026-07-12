@@ -22,12 +22,13 @@ pub use pricing::{Pricing, pricing};
 
 use std::fmt;
 
-/// One of the five inference providers epic #2400 targets.
+/// One of the inference providers epic #2400 targets (the original five plus the
+/// extension providers added in later waves — Together via #2488).
 ///
 /// Why: a closed enum (rather than a bare string) lets the configurator and the
 /// registry share one exhaustively-matched identity, so adding a provider is a
 /// compile error until every match arm is handled.
-/// What: the five target providers. `Bedrock` authenticates via the AWS
+/// What: the target providers. `Bedrock` authenticates via the AWS
 /// credential chain (no API key), which is why [`Self::credential_name`] returns
 /// `None` for it.
 /// Test: `provider_id_round_trips`, `from_slug_prefix_matches`.
@@ -43,6 +44,8 @@ pub enum ProviderId {
     Anthropic,
     /// OpenAI first-party API.
     OpenAI,
+    /// Together.ai (OpenAI-compatible inference; extension provider, #2488).
+    Together,
 }
 
 impl ProviderId {
@@ -51,7 +54,8 @@ impl ProviderId {
     ///
     /// Why: one canonical spelling per provider that never changes across
     /// releases.
-    /// What: `"openrouter"`, `"fireworks"`, `"bedrock"`, `"anthropic"`, `"openai"`.
+    /// What: `"openrouter"`, `"fireworks"`, `"bedrock"`, `"anthropic"`,
+    /// `"openai"`, `"together"`.
     /// Test: `provider_id_round_trips`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -60,6 +64,7 @@ impl ProviderId {
             Self::Bedrock => "bedrock",
             Self::Anthropic => "anthropic",
             Self::OpenAI => "openai",
+            Self::Together => "together",
         }
     }
 
@@ -82,8 +87,8 @@ impl ProviderId {
     /// Resolve a provider from an explicit `<prefix>/…` model slug.
     ///
     /// Why: stage 1 of the configurator's two-stage resolver keys off the slug
-    /// prefix (`bedrock/`, `fireworks/`, `anthropic/`, `openai/`, `openrouter/`);
-    /// this is the single mapping it uses.
+    /// prefix (`bedrock/`, `fireworks/`, `anthropic/`, `openai/`, `together/`,
+    /// `openrouter/`); this is the single mapping it uses.
     /// What: matches the segment before the first `/` case-insensitively;
     /// returns `None` for a bare slug or an unrecognised prefix (the caller then
     /// falls back to the OpenRouter default).
@@ -96,6 +101,7 @@ impl ProviderId {
             "bedrock" => Some(Self::Bedrock),
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::OpenAI),
+            "together" => Some(Self::Together),
             _ => None,
         }
     }
@@ -173,7 +179,7 @@ pub struct ProviderCapabilities {
     pub credential_env: Option<&'static str>,
 }
 
-/// Seed capability table for the five target providers.
+/// Seed capability table for the target providers.
 ///
 /// Why: a single static source of truth. Values are a documented BEST-EFFORT
 /// seed sufficient for the foundation; the concrete adapters in #2403 refine
@@ -181,8 +187,8 @@ pub struct ProviderCapabilities {
 /// `provider::openrouter`/`bedrock` (native-tool + caching posture) and
 /// trusty-review's model notes (structured output).
 /// What: one entry per [`ProviderId`], indexed by [`capabilities`].
-/// Test: `all_five_providers_seeded`.
-const SEED: [ProviderCapabilities; 5] = [
+/// Test: `all_providers_seeded`.
+const SEED: [ProviderCapabilities; 6] = [
     ProviderCapabilities {
         id: ProviderId::OpenRouter,
         native_tool_calling: true,
@@ -248,6 +254,28 @@ const SEED: [ProviderCapabilities; 5] = [
         default_model: "gpt-4o-mini",
         credential_env: Some("OPENAI_API_KEY"),
     },
+    // Together.ai (#2488) — OpenAI-compatible `/chat/completions`, Bearer auth,
+    // native OpenAI-style tool calling. Caching is AUTOMATIC/implicit on
+    // Together's side (no explicit `cache_control` breakpoint markers), so this
+    // is modeled exactly like OpenAI-direct: `prompt_caching = true` (caching
+    // happens, the caller simply cannot place breakpoints) and
+    // `detailed_usage_accounting = false` (the OpenRouter usage directive is
+    // OpenRouter-specific). #2483 is tightening what `prompt_caching` means; when
+    // it lands, revisit this flag alongside OpenAI-direct's. Default model is a
+    // current, tool-calling, 128K-context Llama slug from Together's catalog.
+    ProviderCapabilities {
+        id: ProviderId::Together,
+        native_tool_calling: true,
+        tool_dialect: ToolDialect::OpenAiFunctions,
+        streaming: true,
+        prompt_caching: true,
+        structured_output: true,
+        vision: false,
+        detailed_usage_accounting: false,
+        max_context_window: 128_000,
+        default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        credential_env: Some("TOGETHER_API_KEY"),
+    },
 ];
 
 /// Look up the capability descriptor for a provider.
@@ -302,6 +330,7 @@ mod tests {
             ProviderId::Bedrock,
             ProviderId::Anthropic,
             ProviderId::OpenAI,
+            ProviderId::Together,
         ] {
             assert_eq!(id.to_string(), id.as_str());
             assert_eq!(ProviderId::from_slug_prefix(&format!("{id}/x")), Some(id));
@@ -343,19 +372,42 @@ mod tests {
     /// Why: every provider must be seeded and queryable by id and by name.
     /// Test: itself.
     #[test]
-    fn all_five_providers_seeded() {
-        assert_eq!(all().len(), 5);
+    fn all_providers_seeded() {
+        assert_eq!(all().len(), 6);
         for id in [
             ProviderId::OpenRouter,
             ProviderId::Fireworks,
             ProviderId::Bedrock,
             ProviderId::Anthropic,
             ProviderId::OpenAI,
+            ProviderId::Together,
         ] {
             let caps = capabilities(id);
             assert_eq!(caps.id, id);
             assert!(caps.max_context_window >= 128_000);
         }
+    }
+
+    /// Why: Together (#2488) must resolve by id, by name, and by slug prefix, and
+    /// carry its OpenAI-compat capability posture (native tools, OpenAI dialect,
+    /// `TOGETHER_API_KEY` credential env).
+    /// Test: itself.
+    #[test]
+    fn together_seeded_with_openai_compat_posture() {
+        assert_eq!(
+            ProviderId::from_slug_prefix("together/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+            Some(ProviderId::Together)
+        );
+        let caps = capabilities(ProviderId::Together);
+        assert_eq!(caps.id, ProviderId::Together);
+        assert!(caps.native_tool_calling);
+        assert_eq!(caps.tool_dialect, ToolDialect::OpenAiFunctions);
+        assert_eq!(caps.credential_env, Some("TOGETHER_API_KEY"));
+        assert_eq!(
+            capabilities_for("Together").map(|c| c.id),
+            Some(ProviderId::Together)
+        );
+        assert_eq!(ProviderId::Together.credential_name(), Some("together"));
     }
 
     /// Why: the by-name query must be case-insensitive and total for knowns.
