@@ -256,9 +256,9 @@ async fn config_view(
 /// What: builds the wire args via [`project_config::build_patch_args`] (the
 /// SAME builder the TUI form's submit uses), PATCHes, and renders the
 /// server's returned (authoritative, post-write) record. A 400/404 surfaces
-/// as an `anyhow::Error` via `DaemonClient::registry_patch_project`'s
-/// `error_for_status` — propagated unchanged, printed by `main`'s default
-/// error handler.
+/// as an `anyhow::Error` via `DaemonClient::registry_patch_project`, whose
+/// message now carries the daemon's actual rejection reason (#2485) —
+/// propagated unchanged, printed by `main`'s default error handler.
 async fn config_apply(
     client: &reqwest::Client,
     url: &str,

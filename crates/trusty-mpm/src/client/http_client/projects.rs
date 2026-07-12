@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::DaemonClient;
+use super::error::response_or_body_error;
 use crate::project::Project;
 
 /// Serializable body for `POST /api/v1/projects` (registry-B register).
@@ -192,12 +193,9 @@ impl DaemonClient {
     /// Test: `projects_list_deserializes`; live HTTP via the daemon route tests.
     pub async fn registry_list_projects(&self, tag: Option<&str>) -> anyhow::Result<Vec<Project>> {
         let url = format!("{}/api/v1/projects", self.base);
-        let body: ProjectsListWire = self
-            .http
-            .get(&url)
-            .send()
+        let resp = self.http.get(&url).send().await?;
+        let body: ProjectsListWire = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize project list")?;
@@ -220,13 +218,9 @@ impl DaemonClient {
         args: &RegisterProjectArgs,
     ) -> anyhow::Result<Project> {
         let url = format!("{}/api/v1/projects", self.base);
-        let project: Project = self
-            .http
-            .post(&url)
-            .json(args)
-            .send()
+        let resp = self.http.post(&url).json(args).send().await?;
+        let project: Project = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize registered project")?;
@@ -237,16 +231,13 @@ impl DaemonClient {
     ///
     /// Why: backs the config half of `tm projects show` (#2115).
     /// What: GETs the point-lookup, returns the [`Project`]; a 404 surfaces as an
-    /// error via `error_for_status`.
+    /// error via [`response_or_body_error`], carrying the daemon's body text.
     /// Test: live HTTP via the daemon route tests.
     pub async fn registry_get_project(&self, name: &str) -> anyhow::Result<Project> {
         let url = format!("{}/api/v1/projects/{name}", self.base);
-        let project: Project = self
-            .http
-            .get(&url)
-            .send()
+        let resp = self.http.get(&url).send().await?;
+        let project: Project = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize project")?;
@@ -261,23 +252,22 @@ impl DaemonClient {
     /// unset/tags contract.
     /// What: PATCHes `args` to the named project, returns the updated
     /// [`Project`]; a 404 (unknown project) or 400 (blank required field, or a
-    /// body that tried to change `name`) surfaces as an error via
-    /// `error_for_status`.
-    /// Test: live HTTP via the daemon route tests
-    /// (`tests/project_registry_routes.rs`).
+    /// body that tried to change `name`) surfaces as an [`anyhow::Error`] via
+    /// [`response_or_body_error`] carrying the daemon's actual rejection
+    /// message (#2485) — e.g. `"400 Bad Request: repo_url must not be
+    /// empty"` — rather than a bare status line.
+    /// Test: `patch_rejects_blank_repo_url_surfaces_server_message` in
+    /// `tests/project_registry_routes.rs`; live HTTP via the other daemon
+    /// route tests there.
     pub async fn registry_patch_project(
         &self,
         name: &str,
         args: &PatchProjectArgs,
     ) -> anyhow::Result<Project> {
         let url = format!("{}/api/v1/projects/{name}", self.base);
-        let project: Project = self
-            .http
-            .patch(&url)
-            .json(args)
-            .send()
+        let resp = self.http.patch(&url).json(args).send().await?;
+        let project: Project = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize patched project")?;
@@ -293,12 +283,9 @@ impl DaemonClient {
     /// daemon route tests.
     pub async fn project_status(&self, name: &str) -> anyhow::Result<ProjectStatusWire> {
         let url = format!("{}/api/v1/projects/{name}/status", self.base);
-        let status: ProjectStatusWire = self
-            .http
-            .get(&url)
-            .send()
+        let resp = self.http.get(&url).send().await?;
+        let status: ProjectStatusWire = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize project status")?;

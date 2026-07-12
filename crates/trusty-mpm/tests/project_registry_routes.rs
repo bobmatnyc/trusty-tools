@@ -345,7 +345,45 @@ async fn patch_unknown_project_is_404() {
         )
         .await
         .expect_err("unknown project must error via the typed client too");
-    drop(err);
+    // #2485: the typed client's error must carry the daemon's actual body
+    // text, not just a bare status line.
+    let msg = err.to_string();
+    assert!(msg.contains("project nope not found"), "{msg}");
+}
+
+/// #2485: a PATCH rejected for a validation reason (blank `repo_url`) must
+/// surface the daemon's actual rejection message through the typed client,
+/// not a bare "400 Bad Request" — this is the exact regression the fast-follow
+/// from PR #2484's review fixes for `tm projects config` / the TUI form.
+#[tokio::test]
+async fn patch_rejects_blank_repo_url_surfaces_server_message() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    let err = client
+        .registry_patch_project(
+            "widget",
+            &PatchProjectArgs {
+                repo_url: Some("   ".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("blank repo_url must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("repo_url must not be empty"), "{msg}");
+    assert!(msg.contains("400"), "{msg}");
 }
 
 /// A body carrying a `name` different from the `{name}` path segment is

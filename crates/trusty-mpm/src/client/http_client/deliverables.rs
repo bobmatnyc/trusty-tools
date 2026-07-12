@@ -25,6 +25,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::DaemonClient;
+use super::error::response_or_body_error;
 use crate::deliverable::{
     Deliverable, DeliverableKind, DeliverableStatus, EstimationTier, Milestone,
 };
@@ -174,10 +175,9 @@ impl DaemonClient {
         if let Some(status) = status {
             req = req.query(&[("status", status.as_str())]);
         }
-        let body: DeliverablesListWire = req
-            .send()
+        let resp = req.send().await?;
+        let body: DeliverablesListWire = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize deliverable list")?;
@@ -195,13 +195,9 @@ impl DaemonClient {
         args: &CreateDeliverableArgs,
     ) -> anyhow::Result<Deliverable> {
         let url = format!("{}/api/v1/projects/{project}/deliverables", self.base);
-        let created: Deliverable = self
-            .http
-            .post(&url)
-            .json(args)
-            .send()
+        let resp = self.http.post(&url).json(args).send().await?;
+        let created: Deliverable = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize created deliverable")?;
@@ -215,12 +211,9 @@ impl DaemonClient {
     /// Test: live HTTP via `deliverable_routes`.
     pub async fn get_deliverable(&self, project: &str, id: &str) -> anyhow::Result<Deliverable> {
         let url = format!("{}/api/v1/projects/{project}/deliverables/{id}", self.base);
-        let d: Deliverable = self
-            .http
-            .get(&url)
-            .send()
+        let resp = self.http.get(&url).send().await?;
+        let d: Deliverable = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize deliverable")?;
@@ -264,9 +257,9 @@ impl DaemonClient {
             });
         }
 
-        let resp = resp
-            .error_for_status()
-            .map_err(|e| SetStatusError::Other(e.into()))?;
+        let resp = response_or_body_error(resp)
+            .await
+            .map_err(SetStatusError::Other)?;
         resp.json()
             .await
             .context("deserialize updated deliverable")
@@ -280,12 +273,9 @@ impl DaemonClient {
     /// Test: `milestones_list_deserializes`; live HTTP via `deliverable_routes`.
     pub async fn list_milestones(&self, project: &str) -> anyhow::Result<Vec<Milestone>> {
         let url = format!("{}/api/v1/projects/{project}/milestones", self.base);
-        let body: MilestonesListWire = self
-            .http
-            .get(&url)
-            .send()
+        let resp = self.http.get(&url).send().await?;
+        let body: MilestonesListWire = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize milestone list")?;
@@ -303,13 +293,9 @@ impl DaemonClient {
         args: &CreateMilestoneArgs,
     ) -> anyhow::Result<Milestone> {
         let url = format!("{}/api/v1/projects/{project}/milestones", self.base);
-        let created: Milestone = self
-            .http
-            .post(&url)
-            .json(args)
-            .send()
+        let resp = self.http.post(&url).json(args).send().await?;
+        let created: Milestone = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize created milestone")?;
@@ -323,12 +309,9 @@ impl DaemonClient {
     /// Test: live HTTP via `deliverable_routes`.
     pub async fn get_milestone(&self, project: &str, id: &str) -> anyhow::Result<Milestone> {
         let url = format!("{}/api/v1/projects/{project}/milestones/{id}", self.base);
-        let m: Milestone = self
-            .http
-            .get(&url)
-            .send()
+        let resp = self.http.get(&url).send().await?;
+        let m: Milestone = response_or_body_error(resp)
             .await?
-            .error_for_status()?
             .json()
             .await
             .context("deserialize milestone")?;
