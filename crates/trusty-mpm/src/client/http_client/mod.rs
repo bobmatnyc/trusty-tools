@@ -13,6 +13,7 @@
 //! in-process test daemon and by the daemon's own API tests.
 
 pub mod deliverables;
+mod error;
 mod managed;
 pub mod projects;
 mod session_connect;
