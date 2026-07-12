@@ -69,7 +69,13 @@ regex = { workspace = true }
 # `axum-server` enables `trusty_common::server::with_standard_middleware`
 # (CORS/trace/gzip) so `tcode serve --http` matches the trusty-memory/
 # trusty-search middleware stack exactly.
-trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server"] }
+# `inference-client` (#2406, epic #2400) provides the shared inference adapter
+# layer (`trusty_common::inference`) tcode's OpenRouter/Fireworks transport is
+# built on: the OpenAI-compatible HTTP core, the two-stage credential resolver
+# (env > .env.local > secure store), and the capability registry. It composes
+# with `axum-server` to expose `inference::test_support::MockInferenceServer`
+# for the offline black-box e2e in `tests/inference_shared_adapter_e2e.rs`.
+trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server", "inference-client"] }
 
 # `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
 # CLAUDE.md, axum stays feature-gated in *library* crates

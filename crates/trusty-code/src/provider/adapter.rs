@@ -11,23 +11,30 @@
 use std::sync::Arc;
 
 use super::bedrock::BedrockProvider;
+use super::fireworks::FireworksProvider;
 use super::openrouter::OpenRouterProvider;
 use super::traits::Provider;
 
 /// Slug prefix that routes to the Bedrock backend.
 const BEDROCK_PREFIX: &str = "bedrock/";
 
+/// Slug prefix that routes to the Fireworks backend (#2406).
+const FIREWORKS_PREFIX: &str = "fireworks/";
+
 /// Select the provider implementation for a model slug.
 ///
 /// Why: The loop must stay backend-agnostic; this factory is the only place that
 /// knows how to map a slug to a backend, so adding a backend touches one site.
-/// What: Returns [`BedrockProvider`] for slugs beginning with `bedrock/`, and
-/// the default [`OpenRouterProvider`] (carrying the slug for its
+/// What: Returns [`BedrockProvider`] for slugs beginning with `bedrock/`,
+/// [`FireworksProvider`] for slugs beginning with `fireworks/` (#2406), and the
+/// default [`OpenRouterProvider`] (carrying the slug for its
 /// `supports_native_tools` decision) for everything else.
 /// Test: `adapter::tests::provider_for_routes_*`.
 pub fn provider_for(slug: &str) -> Arc<dyn Provider> {
     if slug.starts_with(BEDROCK_PREFIX) {
         Arc::new(BedrockProvider::new())
+    } else if slug.starts_with(FIREWORKS_PREFIX) {
+        Arc::new(FireworksProvider::new())
     } else {
         Arc::new(OpenRouterProvider::new(slug))
     }
@@ -51,7 +58,19 @@ mod tests {
         assert_eq!(p.name(), "bedrock");
     }
 
-    /// Non-Bedrock slugs route to OpenRouter (the default).
+    /// `fireworks/*` slugs route to the Fireworks provider (#2406).
+    ///
+    /// Why: per-agent routing must direct Fireworks-hosted models to the
+    /// Fireworks normalisation profile, not the OpenRouter default.
+    /// What: Resolve a `fireworks/...` slug, assert `name() == "fireworks"`.
+    /// Test: this test.
+    #[test]
+    fn provider_for_routes_fireworks() {
+        let p = provider_for("fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct");
+        assert_eq!(p.name(), "fireworks");
+    }
+
+    /// Non-Bedrock, non-Fireworks slugs route to OpenRouter (the default).
     ///
     /// Why: Qwen/DeepSeek/Gemma/OpenAI/Anthropic-via-OR all go through
     /// OpenRouter; verify the default branch for several families.

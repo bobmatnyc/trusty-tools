@@ -24,9 +24,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::jsonrpc::RpcError;
-use crate::llm::{
-    ChatRequest, ChatResponse, DispatchingLlmClient, LlmClientConfig, LlmClientTrait, LlmError,
-};
+use crate::llm::{ChatRequest, ChatResponse, DispatchingLlmClient, LlmClientTrait, LlmError};
 
 /// Environment variable selecting the mock LLM. Set to [`MOCK_LLM_ECHO`] to
 /// enable [`EchoLlmClient`] instead of a real OpenRouter client.
@@ -42,24 +40,21 @@ pub const MOCK_LLM_ECHO: &str = "echo";
 /// once and is easy to find.
 /// What: if [`MOCK_LLM_ENV`] is set to [`MOCK_LLM_ECHO`], returns an
 /// [`EchoLlmClient`]. Otherwise builds a real `DispatchingLlmClient` — routing
-/// `bedrock/*` model slugs to AWS Bedrock and everything else to OpenRouter
-/// via `OPENROUTER_API_KEY` (#1021 phase 1). `OPENROUTER_API_KEY` is read
-/// best-effort (via `LlmClientConfig::from_env().ok()`): a pure-Bedrock
-/// `task.run` must not be blocked by a key it will never use (#2245) — a
-/// missing key only surfaces as `RpcError::internal` if a non-bedrock model
-/// actually needs OpenRouter and it turns out to be unconfigured, at which
-/// point `DispatchingLlmClient::chat` returns that error and the caller
-/// still gets an actionable message naming both escape hatches.
+/// `bedrock/*` slugs to AWS Bedrock, `fireworks/*` to Fireworks, and everything
+/// else to OpenRouter (#1021 phase 1; #2406). Construction touches no
+/// credentials: the OpenAI-dialect providers resolve their key lazily via the
+/// shared env > `.env.local` > store chain at first use, and Bedrock uses the
+/// AWS credential chain — so a pure-Bedrock `task.run` is never blocked by a key
+/// it will never use (#2245). A missing key only surfaces (via
+/// `DispatchingLlmClient::chat` → an actionable error) when a model that needs
+/// it is actually dispatched.
 /// Test: `task::mock_llm::tests::mock_env_selects_echo_client`,
 /// `task::mock_llm::tests::real_client_builds_without_openrouter_key`.
 pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
     if std::env::var(MOCK_LLM_ENV).ok().as_deref() == Some(MOCK_LLM_ECHO) {
         return Ok(Arc::new(EchoLlmClient::new()));
     }
-    let openrouter_config = LlmClientConfig::from_env().ok();
-    let client = DispatchingLlmClient::new(openrouter_config)
-        .map_err(|e| RpcError::internal(format!("build LLM client: {e}")))?;
-    Ok(Arc::new(client))
+    Ok(Arc::new(DispatchingLlmClient::new()))
 }
 
 /// A deterministic, scripted `LlmClientTrait` for offline task-execution

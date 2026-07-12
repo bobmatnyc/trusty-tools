@@ -69,6 +69,21 @@ pub enum LlmError {
     /// error message honest.
     #[error("Bedrock error: {0}")]
     Bedrock(String),
+
+    /// A failure originating in the shared `trusty_common::inference` adapter
+    /// layer that does not map cleanly onto a status-carrying variant (#2406):
+    /// a transport error (the adapter stringifies `reqwest::Error` before it
+    /// reaches tcode, so it cannot be a [`Self::Transport`]), a response the
+    /// shared parser rejected, or a missing/unregistered-provider alarm. The
+    /// two shared errors that DO map cleanly — a non-2xx API status and a
+    /// missing credential — are translated to [`Self::ApiError`] and
+    /// [`Self::MissingConfig`] respectively (see `llm::convert::map_error`) so
+    /// their status code / operator guidance is preserved.
+    ///
+    /// Why: keeps the shared error's own `Display` text verbatim rather than
+    /// forcing a lossy re-shape into a status-carrying variant it does not fit.
+    #[error("inference error: {0}")]
+    Inference(String),
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

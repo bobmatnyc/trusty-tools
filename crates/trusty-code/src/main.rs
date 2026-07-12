@@ -30,7 +30,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use trusty_code::llm::{DispatchingLlmClient, LlmClientConfig, LlmClientTrait};
+use trusty_code::llm::{DispatchingLlmClient, LlmClientTrait};
 use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
 
 mod cli;
@@ -560,37 +560,27 @@ async fn run_task(
 }
 
 /// Build the real LLM client, dispatching `bedrock/*` model slugs to AWS
-/// Bedrock and everything else to OpenRouter via `OPENROUTER_API_KEY` (#1021
-/// phase 1).
+/// Bedrock, `fireworks/*` to Fireworks, and everything else to OpenRouter —
+/// all via the shared `trusty_common::inference` adapter for the OpenAI-dialect
+/// providers (#1021 phase 1; #2406 migration).
 ///
-/// Why: The binary is the only place that reads the API key from the environment
-/// (library code never touches `std::env` for secrets). Attribution headers help
-/// OpenRouter dashboards label tcode traffic. `DispatchingLlmClient` (rather than
-/// a bare `LlmClient`) is what lets `--engineer-model bedrock/us.anthropic.*` (or
-/// `TCODE_ENGINEER_MODEL`) actually reach AWS Bedrock instead of OpenRouter's
-/// HTTP endpoint; the Bedrock transport is only constructed lazily on first use
+/// Why: `DispatchingLlmClient` is what lets `--engineer-model bedrock/us.anthropic.*`
+/// (or `TCODE_ENGINEER_MODEL`) reach AWS Bedrock, `fireworks/*` reach Fireworks,
+/// and every other slug reach OpenRouter — the caller keeps depending only on
+/// `LlmClientTrait`. The Bedrock transport is constructed lazily on first use
 /// (standard AWS credential chain, e.g. `AWS_PROFILE=cto`), so a pure-OpenRouter
-/// run never needs AWS credentials. Symmetrically (#2245), a MISSING
-/// `OPENROUTER_API_KEY` is no longer a hard construction-time error here: a
-/// pure-Bedrock run (`TCODE_ENGINEER_MODEL=bedrock/...`) must not be blocked
-/// by a key it will never use. `OPENROUTER_API_KEY` still surfaces as a clear
-/// error the moment a non-bedrock model actually needs it (from
-/// `DispatchingLlmClient::chat`), just no longer at startup.
-/// What: Attempts `LlmClientConfig::from_env`, attaching referer/title on
-/// success; on failure (key unset) passes `None` through instead of
-/// propagating the error. Always constructs a `DispatchingLlmClient` — it
-/// can only fail here if a PRESENT key somehow fails to build the underlying
-/// HTTP client (see `LlmClient::from_config`'s docs: "extremely rare").
+/// run never needs AWS credentials. Credentials for the OpenAI-dialect providers
+/// are resolved by the shared 3-tier chain (process env > `.env.local` > secure
+/// store) at first use, not read here — so construction touches no secrets and
+/// cannot fail on a missing key (#2245); a missing key surfaces as a clear error
+/// the moment a model that needs it is actually dispatched
+/// (`DispatchingLlmClient::chat`), never at startup.
+/// What: constructs a `DispatchingLlmClient` (infallible — no credential access
+/// at construction) and boxes it as the shared `Arc<dyn LlmClientTrait>`.
 /// Test: `tests::build_llm_client_succeeds_without_openrouter_key`; a live
-/// run against either backend is exercised manually.
+/// run against each backend is exercised manually.
 fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
-    let openrouter_config = LlmClientConfig::from_env().ok().map(|cfg| {
-        cfg.with_referer("https://github.com/bobmatnyc/trusty-tools")
-            .with_title("trusty-code run-task")
-    });
-    let client = DispatchingLlmClient::new(openrouter_config)
-        .map_err(|e| anyhow::anyhow!("failed to build LLM client: {e}"))?;
-    Ok(Arc::new(client))
+    Ok(Arc::new(DispatchingLlmClient::new()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
