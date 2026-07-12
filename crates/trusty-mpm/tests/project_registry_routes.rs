@@ -24,7 +24,7 @@ use trusty_mpm::client::DaemonClient;
 use trusty_mpm::client::http_client::deliverables::{
     CreateDeliverableArgs, CreateMilestoneArgs, SetStatusError,
 };
-use trusty_mpm::client::http_client::projects::RegisterProjectArgs;
+use trusty_mpm::client::http_client::projects::{PatchProjectArgs, RegisterProjectArgs};
 use trusty_mpm::core::trusty_tools_config::GithubConfig;
 use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::deliverable::{DeliverableKind, DeliverableStatus, EstimationTier};
@@ -47,6 +47,21 @@ async fn serve_with_state() -> (DaemonClient, Arc<DaemonState>) {
 /// Bind the real router on an ephemeral loopback port; return a client for it.
 async fn serve() -> DaemonClient {
     serve_with_state().await.0
+}
+
+/// Bind the real router on an ephemeral loopback port; return a client for it
+/// plus the plain `http://host:port` base URL (needed by the one test that
+/// must send a raw wire body the typed [`DaemonClient`] methods cannot
+/// express — `DaemonClient`'s `base` field is crate-private).
+async fn serve_with_base() -> (DaemonClient, String) {
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let router = api::router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    let base = format!("http://{addr}");
+    (DaemonClient::new(base.clone()), base)
 }
 
 /// register → get → list → status round-trips over real HTTP.
@@ -215,6 +230,198 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
 async fn get_unknown_project_errors() {
     let client = serve().await;
     assert!(client.registry_get_project("nope").await.is_err());
+}
+
+// ───────────────────────── PATCH /api/v1/projects/{name} (#2114) ──────────
+
+/// register → patch → get round-trips: every mutable field type (required
+/// string, clearable optional, tag add/remove) is reflected by a follow-up
+/// `GET`, not just the PATCH response.
+#[tokio::test]
+async fn patch_round_trip_updates_fields() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: Some("main".into()),
+            description: Some("original".into()),
+            tags: Some(vec!["backend".into(), "keep-me".into()]),
+            stack_hint: Some("rust".into()),
+            gh_user: Some("acme-bot".into()),
+        })
+        .await
+        .unwrap();
+
+    let patched = client
+        .registry_patch_project(
+            "widget",
+            &PatchProjectArgs {
+                default_branch: Some("develop".into()),
+                description: Some(Some("updated".into())),
+                stack_hint: Some(None), // clear
+                tags_add: Some(vec!["ml".into()]),
+                tags_remove: Some(vec!["backend".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(patched.default_branch, "develop");
+    assert_eq!(patched.description.as_deref(), Some("updated"));
+    assert_eq!(patched.stack_hint, None, "explicit null must clear");
+    assert!(patched.tags.contains(&"ml".to_string()));
+    assert!(patched.tags.contains(&"keep-me".to_string()));
+    assert!(!patched.tags.contains(&"backend".to_string()));
+    // gh_user was not touched by this PATCH — must survive unchanged.
+    assert_eq!(patched.gh_user.as_deref(), Some("acme-bot"));
+
+    // A follow-up GET, independent of the PATCH response, shows the same state.
+    let refetched = client.registry_get_project("widget").await.unwrap();
+    assert_eq!(refetched, patched);
+}
+
+/// Fields absent from the PATCH body are left completely untouched, including
+/// fields that could look ambiguous (an empty `tags_add`/`tags_remove` array
+/// vs. the key being absent entirely).
+#[tokio::test]
+async fn patch_absent_fields_untouched() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: Some("main".into()),
+            description: Some("keep this".into()),
+            tags: Some(vec!["backend".into()]),
+            stack_hint: Some("rust".into()),
+            gh_user: Some("acme-bot".into()),
+        })
+        .await
+        .unwrap();
+
+    // A PATCH that only touches repo_url must leave every other field alone.
+    let patched = client
+        .registry_patch_project(
+            "widget",
+            &PatchProjectArgs {
+                repo_url: Some("https://github.com/acme/widget2".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(patched.repo_url, "https://github.com/acme/widget2");
+    assert_eq!(patched.default_branch, "main");
+    assert_eq!(patched.description.as_deref(), Some("keep this"));
+    assert_eq!(patched.stack_hint.as_deref(), Some("rust"));
+    assert_eq!(patched.gh_user.as_deref(), Some("acme-bot"));
+    assert_eq!(patched.tags, vec!["backend".to_string()]);
+}
+
+/// PATCHing an unregistered project 404s (same shape as `GET .../{name}`).
+#[tokio::test]
+async fn patch_unknown_project_is_404() {
+    let (client, base) = serve_with_base().await;
+    // The typed client only surfaces "is this an error", so assert the exact
+    // status via a raw request to confirm it is a 404, not some other 4xx/5xx.
+    let resp = reqwest::Client::new()
+        .patch(format!("{base}/api/v1/projects/nope"))
+        .json(&serde_json::json!({ "description": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let err = client
+        .registry_patch_project(
+            "nope",
+            &PatchProjectArgs {
+                description: Some(Some("x".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unknown project must error via the typed client too");
+    drop(err);
+}
+
+/// A body carrying a `name` different from the `{name}` path segment is
+/// rejected — `name` is the identity key and PATCH cannot change it.
+#[tokio::test]
+async fn patch_rejects_name_change() {
+    let (client, base) = serve_with_base().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    // The typed client DTO cannot express a `name` field at all (by design —
+    // see `PatchProjectArgs`'s doc comment); drive the raw wire body directly
+    // to prove the daemon itself rejects the attempt.
+    let url = format!("{base}/api/v1/projects/widget");
+    let resp = reqwest::Client::new()
+        .patch(&url)
+        .json(&serde_json::json!({ "name": "renamed" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // The record must be unchanged after the rejected attempt.
+    let unchanged = client.registry_get_project("widget").await.unwrap();
+    assert_eq!(unchanged.name, "widget");
+}
+
+/// Re-issuing an identical PATCH is idempotent: the second call produces the
+/// same resulting record as the first (no duplicate tag entries, no drift).
+#[tokio::test]
+async fn patch_is_idempotent() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: Some(vec!["backend".into()]),
+            stack_hint: None,
+            gh_user: None,
+        })
+        .await
+        .unwrap();
+
+    let args = PatchProjectArgs {
+        description: Some(Some("stable".into())),
+        tags_add: Some(vec!["ml".into()]),
+        ..Default::default()
+    };
+    let first = client
+        .registry_patch_project("widget", &args)
+        .await
+        .unwrap();
+    let second = client
+        .registry_patch_project("widget", &args)
+        .await
+        .unwrap();
+
+    assert_eq!(first.description, second.description);
+    assert_eq!(first.tags, second.tags);
+    assert_eq!(
+        second.tags.iter().filter(|t| *t == "ml").count(),
+        1,
+        "re-applying tags_add must not duplicate the tag"
+    );
 }
 
 /// Deliverable create → list → set-status legal → illegal-409 round-trips, and
