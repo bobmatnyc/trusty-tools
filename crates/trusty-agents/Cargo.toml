@@ -60,7 +60,7 @@ thiserror = "1"
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dotenvy = "0.15"
+dotenvy = { workspace = true }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
