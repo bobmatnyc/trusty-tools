@@ -5,8 +5,8 @@
 //! touching `render` calls). [`super::layout::render`] composes the frame's
 //! `Rect`s and calls into each of these.
 //! What: [`projects`] (left, 25%), [`sessions`] (right, 75%),
-//! [`activity`] (bottom strip, static-fields skeleton), and [`actions_bar`]
-//! (the 1-row key-hint / notice line).
+//! [`activity`] (bottom strip, live `/activity`-endpoint wiring per #2119),
+//! and [`actions_bar`] (the 1-row key-hint / notice line).
 //! Test: each submodule's pure builders are unit-tested in its own `tests`
 //! block; the `render` functions are terminal glue exercised by launching the
 //! TUI.

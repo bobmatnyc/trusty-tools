@@ -116,6 +116,46 @@ pub struct SessionRow {
     pub proposed_default: Option<String>,
 }
 
+/// Live per-session activity fetched from `GET .../{id}/activity` (DOC-35
+/// §5.4, #2119).
+///
+/// Why: the Activity pane skeleton (#2118) rendered only the already-polled
+/// STATIC [`SessionRow`] fields; this issue wires the pane to the live
+/// `/activity` endpoint instead. `session_id` is carried alongside the fetched
+/// fields (rather than trusting the caller to only ever read this when it is
+/// current) so [`ProjectCtlState::activity_for_selected`] can detect a fetch
+/// that has not yet caught up with a just-changed selection and fall back
+/// rather than showing one session's live data under another's header.
+/// `stale` marks a fetch that failed while the daemon was unreachable — the
+/// last-known data is KEPT rather than discarded (the issue's "graceful
+/// daemon-down behavior: stale-data indicator... recover when the daemon
+/// returns" requirement), and clears automatically the next time a fetch for
+/// the same session succeeds.
+/// What: the four DOC-35 §5.4 fields (`state`, `summary`, `pending_decision`,
+/// `proposed_default`) plus a short `raw_pane_tail` (the mockup's "last 3
+/// lines of raw_pane") and the `stale` flag.
+/// Test: `poll::tests::activity_from_response_*`,
+/// `panes::activity::tests::activity_lines_*`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityInfo {
+    /// The session this activity snapshot belongs to.
+    pub session_id: String,
+    /// Activity state word (`working`/`idle`/`blocked_on_permission`/
+    /// `errored`/`done`/`unknown`).
+    pub state: String,
+    /// Human-readable summary of what the session is doing.
+    pub summary: String,
+    /// A pending decision question, if surfaced.
+    pub pending_decision: Option<String>,
+    /// Proposed default answer to the pending decision.
+    pub proposed_default: Option<String>,
+    /// The last few lines of the session's raw tmux pane, oldest first.
+    pub raw_pane_tail: Vec<String>,
+    /// True when this snapshot is carried over from a prior successful fetch
+    /// because the daemon was unreachable on the most recent poll.
+    pub stale: bool,
+}
+
 /// Which destructive verb a [`PendingConfirm`] is gating.
 ///
 /// Why: DOC-35 §5.2 requires a confirmation gate before `k` (kill) executes
@@ -192,6 +232,14 @@ pub struct ProjectCtlState {
     ///
     /// [`handle_key`]: super::events::handle_key
     pub pending_confirm: Option<PendingConfirm>,
+    /// Live activity for the currently selected session (DOC-35 §5.4, #2119),
+    /// refreshed on the same poll cadence as `projects`/`sessions_by_project`.
+    /// `None` before the first successful fetch, when no session is selected,
+    /// or once the selection moves off the session this snapshot belongs to.
+    /// Read it through [`Self::activity_for_selected`], not directly, so a
+    /// mismatched (stale-selection) snapshot is never rendered under the
+    /// wrong session's header.
+    pub activity: Option<ActivityInfo>,
     /// Set when a mutating action just succeeded and the operator should see
     /// the fleet refreshed without waiting for the next timer tick.
     ///
@@ -240,6 +288,28 @@ impl ProjectCtlState {
     /// The currently selected session row, if any.
     pub fn selected_session(&self) -> Option<&SessionRow> {
         self.current_sessions().get(self.sessions_nav.selected())
+    }
+
+    /// The live [`ActivityInfo`] for the currently selected session, only
+    /// when it matches that session's id.
+    ///
+    /// Why: [`Self::activity`] is refreshed once per poll for whichever
+    /// session was selected AT THE TIME of that poll; if the operator moves
+    /// the Sessions-pane selection between polls, a stale fetch for the
+    /// PREVIOUS session must never render under the new session's header.
+    /// Comparing ids on every read (rather than clearing `activity` eagerly
+    /// on every selection change, which would need re-plumbing into every
+    /// selection-mutating call site) keeps the id-freshness rule in exactly
+    /// one place.
+    /// What: `None` when no session is selected, no fetch has landed yet, or
+    /// the last fetch's `session_id` no longer matches the current selection;
+    /// otherwise `Some(&ActivityInfo)`.
+    /// Test: `panes::activity::tests::activity_lines_falls_back_while_activity_is_stale_selection`.
+    pub fn activity_for_selected(&self) -> Option<&ActivityInfo> {
+        let selected_id = &self.selected_session()?.id;
+        self.activity
+            .as_ref()
+            .filter(|a| &a.session_id == selected_id)
     }
 
     /// Re-sync the Sessions-pane navigation to a freshly selected project.
@@ -438,6 +508,62 @@ mod tests {
         assert_eq!(confirm.session_label, "my-session");
         state.clear_confirm();
         assert!(state.pending_confirm.is_none());
+    }
+
+    fn activity(session_id: &str) -> ActivityInfo {
+        ActivityInfo {
+            session_id: session_id.to_string(),
+            state: "working".to_string(),
+            summary: "running tests".to_string(),
+            pending_decision: None,
+            proposed_default: None,
+            raw_pane_tail: vec!["$ cargo test".to_string()],
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn activity_for_selected_matches_by_session_id() {
+        let mut state = ProjectCtlState {
+            projects: vec![row("a")],
+            ..Default::default()
+        };
+        state
+            .sessions_by_project
+            .insert("a".to_string(), vec![session("sess-1")]);
+        state.projects_nav.sync_len(state.projects.len());
+        state.sessions_nav.sync_len(state.current_sessions().len());
+        state.activity = Some(activity("sess-1"));
+        assert_eq!(
+            state.activity_for_selected().unwrap().summary,
+            "running tests"
+        );
+    }
+
+    #[test]
+    fn activity_for_selected_is_none_when_it_targets_a_different_session() {
+        let mut state = ProjectCtlState {
+            projects: vec![row("a")],
+            ..Default::default()
+        };
+        state
+            .sessions_by_project
+            .insert("a".to_string(), vec![session("sess-1")]);
+        state.projects_nav.sync_len(state.projects.len());
+        state.sessions_nav.sync_len(state.current_sessions().len());
+        // Simulates a fetch that landed for a session the selection has since
+        // moved off of.
+        state.activity = Some(activity("some-other-session"));
+        assert!(state.activity_for_selected().is_none());
+    }
+
+    #[test]
+    fn activity_for_selected_is_none_with_no_selection() {
+        let state = ProjectCtlState {
+            activity: Some(activity("sess-1")),
+            ..Default::default()
+        };
+        assert!(state.activity_for_selected().is_none());
     }
 
     #[test]
