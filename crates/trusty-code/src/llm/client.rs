@@ -6,27 +6,30 @@
 //! detailed-usage directive, HTTP→error classification, response parsing) in
 //! ONE shared core so every consumer shares it instead of six near-identical
 //! copies. This module is tcode's thin consumer of that core: it selects the
-//! provider (OpenRouter or Fireworks) by model slug, resolves the credential via
-//! the shared 3-tier resolver (process env > `.env.local` > secure store),
-//! builds the matching `trusty_common::inference` adapter once (caching it so
-//! the underlying `reqwest` connection pool is reused across a run's many
-//! turns — a bake-off latency concern), and bridges tcode's request/response
-//! types across the seam (`super::convert`). Bedrock stays on its own Converse
-//! transport (`super::bedrock`, routed by `super::dispatch`) — its migration
-//! into commons is #2407.
+//! provider (OpenRouter, Fireworks, or Together) by model slug, resolves the
+//! credential via the shared 3-tier resolver (process env > `.env.local` >
+//! secure store), builds the matching `trusty_common::inference` adapter once
+//! (caching it so the underlying `reqwest` connection pool is reused across a
+//! run's many turns — a bake-off latency concern), and bridges tcode's
+//! request/response types across the seam (`super::convert`). Bedrock stays on
+//! its own Converse transport (`super::bedrock`, routed by `super::dispatch`) —
+//! its migration into commons is #2407.
 //! What: [`OpenAiCompatClient`] implements [`LlmClientTrait`]. `fireworks/*`
 //! slugs route to the Fireworks adapter (stripping the `fireworks/` routing
 //! prefix to the provider-native model id and requiring `FIREWORKS_API_KEY`);
-//! everything else routes to OpenRouter, sending the slug unchanged (identical
-//! to the pre-#2406 behaviour). A missing credential surfaces at `chat()` time
-//! (not construction), preserving the #2245 deferred-failure contract. The base
-//! URLs are overridable (`TCODE_OPENROUTER_BASE_URL` / `TCODE_FIREWORKS_BASE_URL`
-//! or [`OpenAiCompatClient::with_config`]) so an offline mock server can be
-//! targeted end-to-end.
+//! `together/*` slugs route to the Together adapter (#2494 — stripping the
+//! `together/` routing prefix and requiring `TOGETHER_API_KEY`); everything else
+//! routes to OpenRouter, sending the slug unchanged (identical to the pre-#2406
+//! behaviour). A missing credential surfaces at `chat()` time (not
+//! construction), preserving the #2245 deferred-failure contract. The base URLs
+//! are overridable (`TCODE_OPENROUTER_BASE_URL` / `TCODE_FIREWORKS_BASE_URL` /
+//! `TCODE_TOGETHER_BASE_URL` or [`OpenAiCompatClient::with_config`]) so an
+//! offline mock server can be targeted end-to-end.
 //! Test: `client::tests::*` (provider selection, prefix stripping, hermetic
 //! missing-credential path against an injected empty store) and the black-box
 //! HTTP round-trip in `tests/inference_shared_adapter_e2e.rs`; the `#[ignore]`
-//! `live_openrouter_call` / `live_fireworks_call` smokes hit the real APIs.
+//! `live_openrouter_call` / `live_fireworks_call` / `live_together_call` smokes
+//! hit the real APIs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,7 +40,7 @@ use trusty_common::inference::{
     InferenceAdapter,
     credentials::{KeyStore, default_store, resolve_key_with},
     provider_for,
-    providers::{fireworks, openrouter},
+    providers::{fireworks, openrouter, together},
     registry::ProviderId,
 };
 
@@ -55,10 +58,19 @@ const OPENROUTER_BASE_URL_ENV: &str = "TCODE_OPENROUTER_BASE_URL";
 /// [`fireworks::FIREWORKS_BASE_URL`].
 const FIREWORKS_BASE_URL_ENV: &str = "TCODE_FIREWORKS_BASE_URL";
 
+/// Env var overriding the Together API base URL. Defaults to
+/// [`together::TOGETHER_BASE_URL`].
+const TOGETHER_BASE_URL_ENV: &str = "TCODE_TOGETHER_BASE_URL";
+
 /// The provider name `crate::provider::provider_for` reports for `fireworks/*`
 /// slugs — the single routing condition this client checks (mirroring how
 /// `super::dispatch` keys Bedrock routing off the same factory).
 const FIREWORKS_PROVIDER_NAME: &str = "fireworks";
+
+/// The provider name `crate::provider::provider_for` reports for `together/*`
+/// slugs — the second OpenAI-dialect routing condition this client checks
+/// (#2494), keyed off the same factory as Fireworks.
+const TOGETHER_PROVIDER_NAME: &str = "together";
 
 /// OpenAI-compatible transport over the shared inference adapter, routing
 /// OpenRouter and Fireworks by model slug.
@@ -74,6 +86,7 @@ pub struct OpenAiCompatClient {
     store: Box<dyn KeyStore>,
     openrouter_base: String,
     fireworks_base: String,
+    together_base: String,
     adapters: Mutex<HashMap<ProviderId, Arc<dyn InferenceAdapter>>>,
 }
 
@@ -111,25 +124,29 @@ impl OpenAiCompatClient {
             .unwrap_or_else(|_| openrouter::OPENROUTER_BASE_URL.to_string());
         let fireworks_base = std::env::var(FIREWORKS_BASE_URL_ENV)
             .unwrap_or_else(|_| fireworks::FIREWORKS_BASE_URL.to_string());
-        Self::with_config(store, openrouter_base, fireworks_base)
+        let together_base = std::env::var(TOGETHER_BASE_URL_ENV)
+            .unwrap_or_else(|_| together::TOGETHER_BASE_URL.to_string());
+        Self::with_config(store, openrouter_base, fireworks_base, together_base)
     }
 
-    /// Construct with an explicit store AND explicit base URLs.
+    /// Construct with an explicit store AND explicit per-provider base URLs.
     ///
-    /// Why: the offline black-box e2e points both providers at a
+    /// Why: the offline black-box e2e points each provider at a
     /// [`trusty_common::inference::test_support::MockInferenceServer`] without
     /// mutating process env (so the test stays parallel-safe).
-    /// What: stores all three inputs and an empty adapter cache.
+    /// What: stores all four inputs and an empty adapter cache.
     /// Test: `tests/inference_shared_adapter_e2e.rs`.
     pub fn with_config(
         store: Box<dyn KeyStore>,
         openrouter_base: String,
         fireworks_base: String,
+        together_base: String,
     ) -> Self {
         Self {
             store,
             openrouter_base,
             fireworks_base,
+            together_base,
             adapters: Mutex::new(HashMap::new()),
         }
     }
@@ -141,32 +158,38 @@ impl OpenAiCompatClient {
     /// `AgentLoop::build_request` consults for usage/caching decisions, so
     /// routing can never disagree with normalisation.
     /// What: [`ProviderId::Fireworks`] iff that factory reports `"fireworks"`,
-    /// else [`ProviderId::OpenRouter`] (the default for every other slug).
+    /// [`ProviderId::Together`] iff it reports `"together"` (#2494), else
+    /// [`ProviderId::OpenRouter`] (the default for every other slug).
     /// Test: `client::tests::selects_fireworks_for_prefixed_slug`,
+    /// `client::tests::selects_together_for_prefixed_slug`,
     /// `client::tests::selects_openrouter_for_plain_slug`.
     fn provider_for_slug(model: &str) -> ProviderId {
-        if crate::provider::provider_for(model).name() == FIREWORKS_PROVIDER_NAME {
-            ProviderId::Fireworks
-        } else {
-            ProviderId::OpenRouter
+        match crate::provider::provider_for(model).name() {
+            FIREWORKS_PROVIDER_NAME => ProviderId::Fireworks,
+            TOGETHER_PROVIDER_NAME => ProviderId::Together,
+            _ => ProviderId::OpenRouter,
         }
     }
 
     /// The provider-native wire model id for a routing slug.
     ///
-    /// Why: Fireworks serves bare `accounts/fireworks/models/*` ids, but tcode
-    /// routes on a `fireworks/`-prefixed slug; the prefix is a routing artefact
-    /// that must be stripped before the id is sent. OpenRouter takes the slug
-    /// verbatim (identical to pre-#2406).
-    /// What: strips a leading `fireworks/` for [`ProviderId::Fireworks`]; returns
-    /// the slug unchanged otherwise.
-    /// Test: `client::tests::fireworks_wire_model_strips_prefix`.
+    /// Why: Fireworks serves bare `accounts/fireworks/models/*` ids and Together
+    /// serves bare `meta-llama/*` (etc.) ids, but tcode routes on a
+    /// `fireworks/`- or `together/`-prefixed slug; the prefix is a routing
+    /// artefact that must be stripped before the id is sent. OpenRouter takes the
+    /// slug verbatim (identical to pre-#2406).
+    /// What: strips a leading `fireworks/` for [`ProviderId::Fireworks`] and a
+    /// leading `together/` for [`ProviderId::Together`] (#2494); returns the slug
+    /// unchanged otherwise.
+    /// Test: `client::tests::fireworks_wire_model_strips_prefix`,
+    /// `client::tests::together_wire_model_strips_prefix`.
     fn wire_model(provider: ProviderId, model: &str) -> String {
         match provider {
             ProviderId::Fireworks => model
                 .strip_prefix("fireworks/")
                 .unwrap_or(model)
                 .to_string(),
+            ProviderId::Together => model.strip_prefix("together/").unwrap_or(model).to_string(),
             _ => model.to_string(),
         }
     }
@@ -210,13 +233,15 @@ impl OpenAiCompatClient {
     /// fall-back to OpenRouter (which would be a wrong-provider misroute), and
     /// never an OpenRouter-flavoured error when both keys happen to be absent;
     /// only once the key is confirmed does it resolve + build the Fireworks
-    /// adapter. For OpenRouter, resolves on an `openrouter/` routing slug (a
-    /// missing key surfaces as the resolver's own `MissingCredential`, mapped to
-    /// `MissingConfig`). The resolved model slug is irrelevant to the built
-    /// adapter (it sends the per-request wire model), so a fixed routing slug is
-    /// used.
+    /// adapter. Together (#2494) follows the identical contract against
+    /// `TOGETHER_API_KEY`. For OpenRouter, resolves on an `openrouter/` routing
+    /// slug (a missing key surfaces as the resolver's own `MissingCredential`,
+    /// mapped to `MissingConfig`). The resolved model slug is irrelevant to the
+    /// built adapter (it sends the per-request wire model), so a fixed routing
+    /// slug is used.
     /// Test: `client::tests::missing_openrouter_key_errors_at_chat_time`,
-    /// `client::tests::missing_fireworks_key_errors_not_falls_back`.
+    /// `client::tests::missing_fireworks_key_errors_not_falls_back`,
+    /// `client::tests::missing_together_key_errors_not_falls_back`.
     fn build_adapter(&self, provider: ProviderId) -> Result<Box<dyn InferenceAdapter>, LlmError> {
         match provider {
             ProviderId::Fireworks => {
@@ -232,6 +257,20 @@ impl OpenAiCompatClient {
                 let resolved = provider_for("fireworks/route", self.store.as_ref())
                     .map_err(convert::map_error)?;
                 fireworks::build(&resolved, &self.fireworks_base).map_err(convert::map_error)
+            }
+            ProviderId::Together => {
+                if resolve_key_with("together", self.store.as_ref()).is_none() {
+                    return Err(LlmError::MissingConfig(
+                        "TOGETHER_API_KEY is required to reach a together/* model. Export it \
+                         (e.g. `export TOGETHER_API_KEY=tgp_...`), add it to .env.local, or set \
+                         it via `tcode config keys set together`."
+                            .to_string(),
+                    ));
+                }
+                // The key is present, so stage-1 of the resolver returns Together.
+                let resolved = provider_for("together/route", self.store.as_ref())
+                    .map_err(convert::map_error)?;
+                together::build(&resolved, &self.together_base).map_err(convert::map_error)
             }
             _ => {
                 let resolved = provider_for("openrouter/route", self.store.as_ref())
@@ -320,6 +359,21 @@ mod tests {
         );
     }
 
+    /// A `together/*` slug selects Together.
+    ///
+    /// Why: this is the routing decision that makes Together reachable (#2494).
+    /// What: assert the provider selection for a together slug.
+    /// Test: this test.
+    #[test]
+    fn selects_together_for_prefixed_slug() {
+        assert_eq!(
+            OpenAiCompatClient::provider_for_slug(
+                "together/meta-llama/Llama-3.3-70B-Instruct-Turbo"
+            ),
+            ProviderId::Together
+        );
+    }
+
     /// The Fireworks wire model strips the `fireworks/` routing prefix; the
     /// OpenRouter wire model is the slug verbatim.
     ///
@@ -338,6 +392,24 @@ mod tests {
         assert_eq!(
             OpenAiCompatClient::wire_model(ProviderId::OpenRouter, "openai/gpt-4o-mini"),
             "openai/gpt-4o-mini"
+        );
+    }
+
+    /// The Together wire model strips the `together/` routing prefix down to the
+    /// bare Together catalog slug.
+    ///
+    /// Why: Together 404s on the prefixed id; the prefix is a tcode routing
+    /// artefact only (#2494).
+    /// What: assert the stripped slug.
+    /// Test: this test.
+    #[test]
+    fn together_wire_model_strips_prefix() {
+        assert_eq!(
+            OpenAiCompatClient::wire_model(
+                ProviderId::Together,
+                "together/meta-llama/Llama-3.3-70B-Instruct-Turbo"
+            ),
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo"
         );
     }
 
@@ -413,6 +485,44 @@ mod tests {
                 )
             }
             other => panic!("expected MissingConfig naming FIREWORKS_API_KEY, got: {other:?}"),
+        }
+    }
+
+    /// A `together/*` request with no `TOGETHER_API_KEY` fails with an explicit
+    /// `MissingConfig` — it must NOT silently fall back to OpenRouter (#2494).
+    ///
+    /// Why: the shared resolver's stage-1 falls through to OpenRouter when a
+    /// family key is absent; for an explicit tcode together route that would be a
+    /// wrong-provider misroute, so `build_adapter` turns it into a clear error —
+    /// the same contract as Fireworks.
+    /// What: with an empty store (and, when present locally, a real
+    /// `TOGETHER_API_KEY` shadowing it, in which case skip), assert
+    /// `MissingConfig` naming `TOGETHER_API_KEY`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn missing_together_key_errors_not_falls_back() {
+        if std::env::var("TOGETHER_API_KEY").is_ok_and(|v| !v.is_empty()) {
+            return; // real key present locally — the fall-back guard isn't exercised
+        }
+        let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
+        let req = ChatRequest {
+            model: "together/meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: None,
+        };
+        let err = client
+            .chat(&req)
+            .await
+            .expect_err("must fail without a key");
+        match err {
+            LlmError::MissingConfig(msg) => {
+                assert!(msg.contains("TOGETHER_API_KEY"), "unhelpful message: {msg}")
+            }
+            other => panic!("expected MissingConfig naming TOGETHER_API_KEY, got: {other:?}"),
         }
     }
 
@@ -496,5 +606,46 @@ mod tests {
             "prompt_tokens should be > 0"
         );
         eprintln!("live fireworks ok — text: {text:?}");
+    }
+
+    /// Live integration: a real Together round-trip via the shared adapter
+    /// (the concrete payoff of #2494).
+    ///
+    /// Why: proves `together/*` routing + prefix stripping + `TOGETHER_API_KEY`
+    /// resolution work against the real API.
+    /// What: reads `TOGETHER_API_KEY`; SKIPS when absent.
+    /// Test: `cargo test -p trusty-code -- --include-ignored live_together`.
+    #[tokio::test]
+    #[ignore = "requires TOGETHER_API_KEY; skipped in CI"]
+    async fn live_together_call() {
+        let Ok(key) = std::env::var("TOGETHER_API_KEY") else {
+            eprintln!("TOGETHER_API_KEY not set — skipping live test");
+            return;
+        };
+        if key.trim().is_empty() {
+            eprintln!("TOGETHER_API_KEY is empty — skipping live test");
+            return;
+        }
+        let client = OpenAiCompatClient::new();
+        let req = ChatRequest {
+            model: "together/meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
+            messages: vec![
+                super::super::ChatMessage::system("You are a concise assistant."),
+                super::super::ChatMessage::user("Reply with exactly the word: pong"),
+            ],
+            temperature: Some(0.0),
+            max_tokens: Some(16),
+            tools: None,
+            tool_choice: None,
+            usage: None,
+        };
+        let resp = client.chat(&req).await.expect("chat call succeeded");
+        let text = resp.first_text().expect("assistant produced text");
+        assert!(!text.is_empty(), "assistant text was empty");
+        assert!(
+            resp.token_usage().prompt_tokens > 0,
+            "prompt_tokens should be > 0"
+        );
+        eprintln!("live together ok — text: {text:?}");
     }
 }
