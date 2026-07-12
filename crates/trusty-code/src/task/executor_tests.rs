@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::*;
+use crate::agent_loop::with_cadence_env;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::session::{SessionRegistry, SessionStatus};
 use crate::task::mock_llm::EchoLlmClient;
@@ -159,24 +160,36 @@ fn daily_driver_skills_catalog_none_when_no_skills_dir() {
 /// `cadence_turns` to `3`; assert `crate::agent_loop::resolve_cadence_config`
 /// against `p.project` returns `3`, not the built-in default of `8`.
 /// Test: this test.
-#[test]
-fn settings_json_cadence_turns_override_reaches_resolver() {
-    let agents = agents_dir();
-    let project = tempfile::tempdir().expect("project tempdir");
-    std::fs::create_dir_all(project.path().join(".claude")).expect("mkdir .claude");
-    std::fs::write(
-        project.path().join(".claude").join("settings.json"),
-        r#"{"code_harness": {"cadence_turns": 3}}"#,
-    )
-    .expect("write settings.json");
+///
+/// Hermeticity: `resolve_cadence_config` reads the process-global
+/// `TCODE_CADENCE_TURNS` env var, which the sibling
+/// `crate::agent_loop::cadence::tests::resolve_cadence_config_env_wins_over_settings_json`
+/// test sets to `"5"` while it runs. This test therefore resolves under
+/// `with_cadence_env(None, None, …)` — holding `CADENCE_ENV_LOCK` and forcing
+/// the env var unset — so a concurrent env-setting test cannot bleed its
+/// `TCODE_CADENCE_TURNS=5` into this resolver and make the `== 3` assertion
+/// observe `5` (fixing the pre-existing flake this test guards against).
+#[tokio::test]
+async fn settings_json_cadence_turns_override_reaches_resolver() {
+    with_cadence_env(None, None, || {
+        let agents = agents_dir();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::create_dir_all(project.path().join(".claude")).expect("mkdir .claude");
+        std::fs::write(
+            project.path().join(".claude").join("settings.json"),
+            r#"{"code_harness": {"cadence_turns": 3}}"#,
+        )
+        .expect("write settings.json");
 
-    let p = params(&agents, &project, "s");
-    let cfg = crate::agent_loop::resolve_cadence_config(&p.project);
-    assert_eq!(cfg.cadence_turns, 3);
-    assert_ne!(
-        cfg.cadence_turns,
-        crate::agent_loop::CadenceConfig::default().cadence_turns
-    );
+        let p = params(&agents, &project, "s");
+        let cfg = crate::agent_loop::resolve_cadence_config(&p.project);
+        assert_eq!(cfg.cadence_turns, 3);
+        assert_ne!(
+            cfg.cadence_turns,
+            crate::agent_loop::CadenceConfig::default().cadence_turns
+        );
+    })
+    .await;
 }
 
 /// `daily_driver_skills_catalog` returns the rendered catalog + a working
