@@ -41,6 +41,15 @@ name = "memory_palace"
 path = "tests/memory_palace.rs"
 required-features = ["memory-core", "embedder-test-support"]
 
+# Inference-foundation integration suite (issue #2402). References
+# `trusty_common::inference::{InferenceAdapter, Configurator, …}`, which only
+# exist behind the `inference-client` feature, so — like `memory_palace` above —
+# `required-features` tells cargo to skip building it unless that feature is on.
+[[test]]
+name = "inference_foundation"
+path = "tests/inference_foundation.rs"
+required-features = ["inference-client"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -473,3 +482,15 @@ credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
 # `FileKeyStore` as the runtime-probed fallback (issue #2401). Pulls in the
 # `keyring` crate in addition to everything `credentials` already requires.
 keyring-store = ["credentials", "dep:keyring"]
+# Enables the `inference` adapter foundation (issue #2402, epic #2400 Wave 1):
+# the `types` request/response model, `InferenceError`, the `InferenceAdapter`
+# trait, the capability `registry` (context windows incl. the #2330 haiku fix,
+# pricing, caching, tool dialects), the two-stage `configurator` (`provider_for`
+# + `Configurator`), and the `test_support::ScriptedAdapter` double. Composes
+# with `credentials` for the resolver's env > `.env.local` > store precedence.
+# Adds NO new dependencies — `async-trait`, `serde`, `serde_json`, and (via
+# `credentials`) `thiserror` are already required. The axum HTTP mock
+# (`test_support::MockInferenceServer`) additionally requires `axum-server`; it
+# is not pulled in by this feature, keeping the base surface HTTP-server-free.
+# Concrete provider adapters (OpenRouter/Fireworks/Bedrock) land in #2403/#2407.
+inference-client = ["credentials"]
