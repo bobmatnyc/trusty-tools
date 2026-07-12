@@ -1,0 +1,336 @@
+//! Offline e2e for the concrete inference adapters (issue #2403, epic #2400).
+//!
+//! Why: the acceptance criteria demand each adapter be driven through the full
+//! `Configurator` resolve→build→`chat`→`usage` cycle against a REAL socket
+//! ([`MockInferenceServer`]) — asserting BOTH the outbound request translation
+//! (the mock captures the body + headers the adapter sent) AND the response /
+//! usage parsing, without a live provider or network. This is the cycle #2402's
+//! `inference_foundation.rs` left as a placeholder ("where #2403's live-provider
+//! e2e attaches"); this file realises it for OpenRouter, Fireworks, and OpenAI.
+//! What: black-box tests against `trusty_common::inference::*`, pointing each
+//! provider's adapter core at the mock's URL through a `Configurator` factory.
+//! Requires `inference-client` (adapters) + `axum-server` (the mock).
+//! Test: this file — run with
+//! `cargo test -p trusty-common --features inference-client,axum-server`.
+
+use serde_json::{Value, json};
+use serial_test::serial;
+use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
+use trusty_common::inference::providers::{fireworks, openai, openrouter};
+use trusty_common::inference::test_support::MockInferenceServer;
+use trusty_common::inference::{
+    CacheControl, ChatMessage, ChatRequest, Configurator, FunctionDefinition, InferenceError,
+    ProviderId, ResolvedProvider, ToolChoice, ToolDefinition, register_default_factories,
+};
+
+/// Clear every provider env var so the injected `MemoryKeyStore` is the only
+/// credential source (a stray `OPENROUTER_API_KEY` would otherwise shadow it).
+fn clear_provider_env() {
+    for var in [
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "FIREWORKS_API_KEY",
+    ] {
+        // SAFETY: every caller is `#[serial(dotenv_credential_env)]`, matching
+        // the lock the credential resolver's own env-mutating tests use.
+        unsafe { std::env::remove_var(var) };
+    }
+}
+
+/// A minimal successful chat/completions response body (text turn).
+fn text_response_body() -> Value {
+    json!({
+        "id": "gen-mock",
+        "model": "served/model",
+        "choices": [{
+            "message": {"role": "assistant", "content": "pong"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8}
+    })
+}
+
+// ── OpenRouter: request translation + detailed-usage directive ───────────────────
+
+/// Why: driving OpenRouter through the `Configurator` must (a) send an
+/// OpenAI-shaped body with the model + messages, (b) inject `usage:{include:true}`
+/// (OpenRouter's detailed-usage flag), (c) attach the `Authorization` bearer and
+/// attribution headers, and (d) parse the response text back.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openrouter_translates_request_and_parses_response() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn mock");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+
+    let adapter = cfg.build("openai/gpt-4o-mini", &store).expect("build");
+    assert_eq!(adapter.name(), "openrouter");
+
+    let req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("ping")]);
+    let resp = adapter.chat(&req).await.expect("chat ok");
+
+    // Response parsing.
+    assert_eq!(resp.first_text().as_deref(), Some("pong"));
+    assert_eq!(resp.usage().total_tokens(), 8);
+
+    // Request translation captured by the mock.
+    let sent = server.last_request().expect("captured request");
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.path, "/chat/completions");
+    assert_eq!(sent.header("authorization"), Some("Bearer sk-or-fake")); // pragma: allowlist secret
+    assert_eq!(
+        sent.header("http-referer"),
+        Some("https://github.com/bobmatnyc/trusty-tools")
+    );
+    assert_eq!(sent.header("x-title"), Some("trusty-tools"));
+    let body = sent.body.expect("json body");
+    assert_eq!(body["model"], "openai/gpt-4o-mini");
+    assert_eq!(body["messages"][0]["content"], "ping");
+    // OpenRouter detailed-usage directive injected by the core.
+    assert_eq!(body["usage"], json!({"include": true}));
+}
+
+/// Why: the cache-token accounting path must parse OpenRouter's nested
+/// `prompt_tokens_details` into the normalized `Usage` cache buckets, and a
+/// caller-set `cache_control` breakpoint must pass through onto the wire.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openrouter_cache_accounting_and_passthrough() {
+    clear_provider_env();
+    let body = json!({
+        "id": "gen-cache",
+        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 1200,
+            "completion_tokens": 40,
+            "cost": 0.0021,
+            "prompt_tokens_details": {"cached_tokens": 900, "cache_write_tokens": 300}
+        }
+    });
+    let server = MockInferenceServer::spawn(200, body).await.expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+    let adapter = cfg
+        .build("anthropic/claude-sonnet-4-5", &store)
+        .expect("build");
+
+    // Caller marks the system prefix as a cache breakpoint.
+    let mut sys = ChatMessage::system("cache me");
+    sys.cache_control = Some(CacheControl::ephemeral());
+    let req = ChatRequest::new(
+        "anthropic/claude-sonnet-4-5",
+        vec![sys, ChatMessage::user("go")],
+    );
+    let resp = adapter.chat(&req).await.expect("chat ok");
+
+    // Nested cache counters flowed into normalized Usage.
+    let usage = resp.usage();
+    assert_eq!(usage.cache_read_tokens, 900);
+    assert_eq!(usage.cache_creation_tokens, 300);
+    assert_eq!(usage.cost_usd, Some(0.0021));
+
+    // cache_control passthrough: system content serialised as the block array.
+    let sent = server.last_request().expect("captured");
+    let body = sent.body.expect("json");
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([{
+            "type": "text",
+            "text": "cache me",
+            "cache_control": {"type": "ephemeral"}
+        }])
+    );
+}
+
+// ── Fireworks: no detailed-usage directive + tool-call round-trip ────────────────
+
+/// Why: Fireworks must NOT inject the detailed-usage directive, must send tools +
+/// the OpenAI-dialect `tool_choice`, and must parse a tool-call response
+/// (round-trip through the full configurator cycle).
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn fireworks_tool_call_round_trip_no_usage_directive() {
+    clear_provider_env();
+    let body = json!({
+        "id": "gen-fw",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"loc\":\"SEA\"}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 8}
+    });
+    let server = MockInferenceServer::spawn(200, body).await.expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    // Fireworks key present AND explicit fireworks/ prefix → resolves to Fireworks.
+    store.set("fireworks", "fw-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Fireworks,
+        Box::new(move |r: &ResolvedProvider| fireworks::build(r, &base)),
+    );
+
+    let adapter = cfg
+        .build("fireworks/llama-v3p1-8b-instruct", &store)
+        .expect("build");
+    assert_eq!(adapter.name(), "fireworks");
+
+    let mut req = ChatRequest::new(
+        "accounts/fireworks/models/llama-v3p1-8b-instruct",
+        vec![ChatMessage::user("weather in SEA?")],
+    );
+    req.tools = Some(vec![ToolDefinition::function(FunctionDefinition {
+        name: "get_weather".into(),
+        description: Some("look up weather".into()),
+        parameters: Some(json!({"type": "object"})),
+        cache_control: None,
+    })]);
+    req.tool_choice = Some(adapter.map_tool_choice(ToolChoice::Auto));
+
+    let resp = adapter.chat(&req).await.expect("chat ok");
+
+    // Tool-call response parsing.
+    let calls = resp.first_tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].function.name, "get_weather");
+
+    // Request translation: tools + tool_choice present, NO usage directive.
+    let sent = server.last_request().expect("captured");
+    assert_eq!(sent.header("authorization"), Some("Bearer fw-fake")); // pragma: allowlist secret
+    let body = sent.body.expect("json");
+    assert_eq!(body["tools"][0]["function"]["name"], "get_weather");
+    assert_eq!(body["tool_choice"], "auto");
+    assert!(
+        body.get("usage").is_none() || body["usage"].is_null(),
+        "Fireworks must not send the detailed-usage directive: {body}"
+    );
+}
+
+// ── OpenAI-direct: bare OpenAI body via the shared core ──────────────────────────
+
+/// Why: the OpenAI-direct adapter must send a bare OpenAI-compatible body (bearer
+/// auth, no attribution headers, no usage directive) and parse the response.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openai_direct_sends_bare_body() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("openai", "sk-openai-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenAI,
+        Box::new(move |r: &ResolvedProvider| openai::build(r, &base)),
+    );
+
+    // Explicit openai/ prefix + resolvable OPENAI key → OpenAI-direct.
+    let adapter = cfg.build("openai/gpt-4o-mini", &store).expect("build");
+    assert_eq!(adapter.name(), "openai");
+
+    let req = ChatRequest::new("gpt-4o-mini", vec![ChatMessage::user("ping")]);
+    let resp = adapter.chat(&req).await.expect("chat ok");
+    assert_eq!(resp.first_text().as_deref(), Some("pong"));
+
+    let sent = server.last_request().expect("captured");
+    assert_eq!(sent.header("authorization"), Some("Bearer sk-openai-fake")); // pragma: allowlist secret
+    assert!(sent.header("http-referer").is_none());
+    let body = sent.body.expect("json");
+    assert!(
+        body.get("usage").is_none() || body["usage"].is_null(),
+        "OpenAI-direct must not send the detailed-usage directive"
+    );
+}
+
+// ── Error classification through a real socket ───────────────────────────────────
+
+/// Why: a non-2xx provider status must surface as a classified `InferenceError`
+/// — a 429 is retryable (not an alarm), driven end-to-end through the adapter.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn http_429_maps_to_retryable_api_error() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(429, json!({"error": "rate limited"}))
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+    let adapter = cfg.build("x/y", &store).expect("build");
+
+    let req = ChatRequest::new("x/y", vec![ChatMessage::user("hi")]);
+    let Err(err) = adapter.chat(&req).await else {
+        panic!("expected an API error");
+    };
+    assert!(matches!(err, InferenceError::Api { status: 429, .. }));
+    assert!(err.is_retryable());
+    assert!(!err.is_alarm());
+}
+
+// ── Default factory registration ─────────────────────────────────────────────────
+
+/// Why: `register_default_factories` must wire the three OpenAI-dialect providers
+/// so a bare/OpenRouter slug builds a real adapter through the public entry point
+/// (Bedrock stays unregistered — a later wave).
+#[test]
+#[serial(dotenv_credential_env)]
+fn default_factories_register_three() {
+    clear_provider_env();
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+
+    let mut cfg = Configurator::new();
+    register_default_factories(&mut cfg);
+
+    // OpenRouter default path builds a real adapter.
+    let adapter = cfg.build("some/model", &store).expect("build openrouter");
+    assert_eq!(adapter.name(), "openrouter");
+
+    // Bedrock is intentionally not registered by the default set.
+    let Err(err) = cfg.build("bedrock/us.anthropic.claude-sonnet-4-5", &store) else {
+        panic!("expected NoAdapterRegistered for Bedrock");
+    };
+    assert!(matches!(
+        err,
+        InferenceError::NoAdapterRegistered {
+            provider: ProviderId::Bedrock
+        }
+    ));
+}
