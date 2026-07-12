@@ -369,12 +369,13 @@ the daemon logs an error with the actionable FDA re-grant hint.
 
 ### Connection-safe daemon restart convention (issue #534)
 
-As of trusty-common 0.10.0, all three HTTP daemons (trusty-memory, trusty-search,
-trusty-analyze) implement graceful shutdown: they drain in-flight requests before
-exiting when they receive SIGTERM. The `serve --stdio` proxy reconnects automatically
-with exponential backoff when the daemon restarts (the `trusty-memory-mcp-bridge`
-binary is a deprecated shim that forwards to `serve --stdio`; update your
-`.mcp.json` to `"command": "trusty-memory", "args": ["serve", "--stdio"]`).
+As of trusty-common 0.10.0, all four HTTP daemons (trusty-memory, trusty-search,
+trusty-analyze, trusty-mpm) implement graceful shutdown: they drain in-flight
+requests before exiting when they receive SIGTERM. The `serve --stdio` proxy
+reconnects automatically with exponential backoff when the daemon restarts (the
+`trusty-memory-mcp-bridge` binary is a deprecated shim that forwards to
+`serve --stdio`; update your `.mcp.json` to `"command": "trusty-memory", "args":
+["serve", "--stdio"]`).
 
 **Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
 
@@ -384,6 +385,42 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 cargo install --path crates/<dir> --locked
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 # NOTE: re-grant Full Disk Access only for trusty-search (and external-volume daemons), not for trusty-mpm (see FDA section above)
+```
+
+🔴 **A 200 `GET /health` is NOT sufficient evidence the restart succeeded**
+(issue #2486). During this exact `bootout → cargo install → bootstrap` window,
+trusty-mpm's `tm serve --stdio` MCP bridge (e.g. trusty-console's auto-reconnect)
+can race the restart: it spawns before launchd relaunches the daemon and, on an
+older binary, would auto-spawn an ORPHAN `tm daemon` — PPID pointing at the
+client chain, not launchd. That orphan answers `/health` 200 but is missing the
+plist's `EnvironmentVariables` (`TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`) and
+runs with `cwd=$HOME`, so features like the Telegram poller silently never
+start. As of the #2486 fix the bridge refuses to auto-spawn while a trusty-mpm
+launchd unit is registered, and `GET /health` reports a `supervised` flag — but
+always verify the restart with ONE of the two robust checks below:
+
+```bash
+# (a) does launchd itself think it owns the process? (most direct)
+launchctl print gui/$(id -u)/com.trusty.mpm.supervisor   # or com.trusty.mpm
+
+# (b) does /health say so directly?
+curl -s http://127.0.0.1:<port>/health | jq '.supervised' # must print true
+```
+
+A third, weaker variant — is launchd (PID 1) the parent of the running daemon
+process — is sometimes useful but has two sharp edges: the daemon binary on
+disk is named `trusty-mpm`, not `tm` (both binary names exist, but launchd's
+plist invokes `trusty-mpm daemon`), and `pgrep -fx` requires an exact full
+cmdline match, which never matches launchd's absolute-path invocation
+(`/Users/…/.cargo/bin/trusty-mpm daemon`). Use an anchored, non-exact match
+against BOTH binary names instead:
+
+```bash
+# (c) is launchd (PID 1) the parent of the running daemon? (weaker — PID 1 is
+# also where macOS reparents ANY orphaned process, so this alone does not
+# distinguish "launchd-supervised service" from "orphan that got reparented
+# to init"; prefer (a) or (b) above and use this only as a quick sanity check)
+ps -o ppid= -p "$(pgrep -f 'trusty-mpm daemon|tm daemon' | head -1)"  # must print "1"
 ```
 
 Prefer restarting between Claude Code sessions. See the cargo-publish skill

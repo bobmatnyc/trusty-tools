@@ -141,7 +141,8 @@ pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> 
         ),
         startup_timeout: None,
         poll_interval: None,
-        no_spawn: false, // trusty-analyze bridge may auto-start its sidecar
+        no_spawn: false,     // trusty-analyze bridge may auto-start its sidecar
+        no_spawn_hint: None, // unused: no_spawn is false
     };
     trusty_common::mcp::ensure_daemon_up(&config).await
 }

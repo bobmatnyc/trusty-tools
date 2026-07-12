@@ -33,9 +33,10 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot};
 /// What: `status` is the liveness word; `catalog_stale` is true when deployed
 /// content drifts from the synced catalog; `catalog_unknown` is true when the
 /// catalog has never been synced (distinct from "fresh"); `catalog_changes` is a
-/// small human summary of WHAT changed (empty unless stale).
+/// small human summary of WHAT changed (empty unless stale); `supervised`
+/// carries the #2486 restart-race signal (see the field's own doc comment).
 /// Test: `health_reports_catalog_unknown_without_catalog`,
-/// `health_reports_ok_status`.
+/// `health_reports_ok_status`, `health_response_serializes_supervised_field`.
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HealthResponse {
     /// Liveness word — `"ok"` while the daemon is up.
@@ -46,6 +47,32 @@ pub struct HealthResponse {
     pub catalog_unknown: bool,
     /// Short human summary of changed artifacts (empty unless `catalog_stale`).
     pub catalog_changes: Vec<String>,
+    /// Whether this daemon process is safely supervised (issue #2486).
+    ///
+    /// Why: a green `/health` alone is NOT sufficient evidence that launchd
+    /// won a `bootout → cargo install → bootstrap` restart — a stdio bridge
+    /// racing the restart can auto-spawn an ORPHAN daemon (PPID pointing at
+    /// the client chain, not launchd) that answers `/health` 200 but lacks the
+    /// plist's `EnvironmentVariables` (`TELEGRAM_BOT_TOKEN`,
+    /// `OPENROUTER_API_KEY`) and runs with `cwd=$HOME`. Operators and tooling
+    /// verifying a restart must check this flag, not just the HTTP status.
+    /// What: `true` when either (a) this process is itself launchd-supervised,
+    /// or (b) no trusty-mpm launchd unit is registered on this host at all (a
+    /// bare dev-run daemon with no plist is not hazardous). `false` only in
+    /// the hazardous state: a launchd unit IS registered but this process was
+    /// NOT launched by launchd — the #2486 orphan-daemon signature. Computed
+    /// once at daemon startup by `commands::launchd_probe::compute_supervised`.
+    /// Test: `health_response_serializes_supervised_field`;
+    /// `compute_supervised_*` in `commands::launchd_probe::tests`.
+    #[serde(default = "default_supervised")]
+    pub supervised: bool,
+}
+
+/// Default for [`HealthResponse::supervised`] on deserialize — matches the
+/// "safe" default so an older daemon response missing the field never reads
+/// as hazardous.
+fn default_supervised() -> bool {
+    true
 }
 
 /// Response of `GET /sessions`.

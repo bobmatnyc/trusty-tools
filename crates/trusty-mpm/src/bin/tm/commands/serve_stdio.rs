@@ -55,15 +55,43 @@ fn build_rpc_client() -> Result<reqwest::Client> {
 /// Why: the daemon discovers its own (possibly ephemeral) port and records it in
 /// `~/.trusty-mpm/daemon.lock`. `resolve_daemon_url(None)` re-reads that lock on
 /// every call, so passing it as `base_url_fn` lets `ensure_daemon_up` track a
-/// dynamic port as soon as the daemon writes the lock. Unlike trusty-memory
-/// (which sets `no_spawn` to avoid squatting a redb write lock), the trusty-mpm
-/// daemon is HTTP-only and singleton-guarded, so auto-spawn is safe and matches
-/// the existing `tm start` behaviour.
-/// What: returns a config that probes `/health`, auto-spawns `tm daemon` when
-/// absent, and resolves the base URL from the lock file each poll.
-/// Test: covered indirectly; `ensure_daemon_up` itself is unit-tested in
-/// `trusty_common::mcp::daemon_bridge`.
+/// dynamic port as soon as the daemon writes the lock.
+///
+/// `no_spawn` is now launchd-aware (issue #2486, precedent: trusty-memory's
+/// #1152 fix). The doc comment this replaced claimed singleton-guarding made
+/// unconditional auto-spawn "safe" — #2486 disproved that: during the
+/// documented `launchctl bootout → cargo install → launchctl bootstrap`
+/// restart, this bridge's auto-reconnect can race the restart and spawn an
+/// ORPHAN daemon (PPID pointing at the client chain, not launchd) *before*
+/// launchd relaunches the real one. The orphan answers `/health` 200 — so the
+/// old "singleton-guarded" reasoning silently masked the bug — but it lacks
+/// the plist's `EnvironmentVariables` (`TELEGRAM_BOT_TOKEN`,
+/// `OPENROUTER_API_KEY`) and runs with `cwd=$HOME`, so features like the
+/// Telegram poller never start. When a trusty-mpm launchd unit IS registered,
+/// `launchctl bootstrap`/`kickstart` is the correct way to bring the daemon
+/// back, so this bridge must refuse to auto-spawn and instead surface a clear
+/// error (`ensure_daemon_up`'s `no_spawn` path) — the console's existing
+/// backoff/retry recovers once launchd finishes the restart. On a dev machine
+/// with no registered launchd unit, auto-spawn remains the convenient default,
+/// unchanged from `tm start`'s existing behaviour.
+/// What: returns a config that probes `/health`, resolves the base URL from
+/// the lock file each poll, sets `no_spawn` to
+/// [`crate::commands::launchd_probe::compute_no_spawn`] applied to
+/// [`crate::commands::launchd_probe::mpm_launchd_plist_exists`], and sets a
+/// trusty-mpm-specific `no_spawn_hint` (issue #2491) — the shared helper's
+/// generic hint names a `{service} setup` subcommand and an
+/// `io.trusty.{service}.plist` path that do not exist for trusty-mpm (there is
+/// no `trusty-mpm setup` subcommand; the real plists are `com.trusty.mpm.plist`
+/// / `com.trusty.mpm.supervisor.plist`).
+/// Test: `build_bridge_config_no_spawn_matches_plist_probe` and
+/// `build_bridge_config_no_spawn_hint_names_real_plists` below;
+/// `ensure_daemon_up`'s no-spawn error path is unit-tested in
+/// `trusty_common::mcp::daemon_bridge` (`no_spawn_returns_err_without_spawning`,
+/// `no_spawn_error_uses_hint_when_set`).
 fn build_bridge_config() -> DaemonBridgeConfig {
+    let no_spawn = crate::commands::launchd_probe::compute_no_spawn(
+        crate::commands::launchd_probe::mpm_launchd_plist_exists(),
+    );
     DaemonBridgeConfig {
         service_name: "trusty-mpm".to_string(),
         // The daemon picks its own port and records it in the lock file; no addr
@@ -80,8 +108,29 @@ fn build_bridge_config() -> DaemonBridgeConfig {
         base_url_fn: Box::new(|| trusty_mpm::core::resolve_daemon_url(None)),
         startup_timeout: None, // shared 30s default
         poll_interval: None,   // shared 500ms default
-        no_spawn: false,
+        no_spawn,
+        no_spawn_hint: Some(mpm_no_spawn_hint()),
     }
+}
+
+/// Build trusty-mpm's operator guidance for the `no_spawn` error (issue #2491).
+///
+/// Why: the shared `DaemonBridgeConfig`'s generic `no_spawn` hint templates
+/// `{service_name} setup` and `~/Library/LaunchAgents/io.trusty.{service_name}.plist`
+/// — for trusty-mpm that yields a nonexistent `trusty-mpm setup` subcommand and
+/// a wrong plist path. This function returns the correct, trusty-mpm-specific
+/// text instead: the real plist names and the `launchctl bootstrap`/`kickstart`
+/// commands that actually restart it, plus a pointer back to the #2486 restart
+/// race this `no_spawn` guard exists to avoid.
+/// What: a fixed, service-specific string passed as
+/// `DaemonBridgeConfig::no_spawn_hint`.
+/// Test: `build_bridge_config_no_spawn_hint_names_real_plists`.
+fn mpm_no_spawn_hint() -> String {
+    "trusty-mpm daemon is launchd-managed on this machine — start it with \
+     `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.trusty.mpm.plist` \
+     (or kickstart: `launchctl kickstart -k gui/$UID/com.trusty.mpm`); this \
+     bridge will not auto-spawn to avoid the #2486 restart race."
+        .to_string()
 }
 
 /// Returns true if the request is a JSON-RPC notification.
@@ -231,6 +280,54 @@ mod tests {
     #[test]
     fn build_rpc_client_succeeds() {
         assert!(build_rpc_client().is_ok());
+    }
+
+    /// Why (#2486): `build_bridge_config`'s `no_spawn` must track whether a
+    /// trusty-mpm launchd unit is registered on this host — this test compares
+    /// against `mpm_launchd_plist_exists()` directly (not via
+    /// `compute_no_spawn`, since `compute_no_spawn` is currently the identity
+    /// function over that boolean) so the assertion pins the actual invariant
+    /// rather than restating `build_bridge_config`'s own call chain. The pure
+    /// decision table itself is covered by `commands::launchd_probe::tests`.
+    #[test]
+    fn build_bridge_config_no_spawn_matches_plist_probe() {
+        let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
+        let cfg = build_bridge_config();
+        assert_eq!(
+            cfg.no_spawn, plist_exists,
+            "no_spawn must track the live plist probe"
+        );
+    }
+
+    /// Why (#2491 review): the shared helper's generic `no_spawn` hint names a
+    /// `{service} setup` subcommand and an `io.trusty.{service}.plist` path
+    /// that do not exist for trusty-mpm. `build_bridge_config` must override
+    /// that with the real plist names and a working `launchctl` recipe.
+    /// What: asserts the built config's `no_spawn_hint` contains both real
+    /// plist basenames and does NOT contain the wrong generic wording.
+    /// Test: this test.
+    #[test]
+    fn build_bridge_config_no_spawn_hint_names_real_plists() {
+        let cfg = build_bridge_config();
+        let hint = cfg
+            .no_spawn_hint
+            .expect("trusty-mpm must set a no_spawn_hint");
+        assert!(
+            hint.contains("com.trusty.mpm.plist"),
+            "hint must name the real plist; got: {hint}"
+        );
+        assert!(
+            hint.contains("launchctl bootstrap") || hint.contains("launchctl kickstart"),
+            "hint must give a working launchctl recipe; got: {hint}"
+        );
+        assert!(
+            !hint.contains("trusty-mpm setup"),
+            "hint must NOT reference the nonexistent `trusty-mpm setup` subcommand; got: {hint}"
+        );
+        assert!(
+            !hint.contains("io.trusty."),
+            "hint must NOT reference the wrong io.trusty.* plist path; got: {hint}"
+        );
     }
 
     #[test]

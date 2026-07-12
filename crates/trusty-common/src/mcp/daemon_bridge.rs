@@ -51,9 +51,14 @@ pub const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// What: holds the service name (for diagnostics), the arguments appended to
 /// `current_exe()` when spawning the daemon, the path for health probing (e.g.
 /// `/health` or `/api/v1/health`), a URL-resolver closure, optional timeout
-/// overrides, and the `no_spawn` flag (issue #1152).
+/// overrides, the `no_spawn` flag (issue #1152), and an optional
+/// `no_spawn_hint` override for the `no_spawn` error's operator guidance
+/// (issue #2491).
 /// Test: `daemon_bridge_config_health_url` unit test;
-/// `no_spawn_returns_err_without_spawning` covers the new field.
+/// `no_spawn_returns_err_without_spawning` covers the `no_spawn` field;
+/// `no_spawn_error_uses_hint_when_set` /
+/// `no_spawn_error_falls_back_to_generic_when_hint_unset` cover
+/// `no_spawn_hint`.
 pub struct DaemonBridgeConfig {
     /// Human-readable service name, used in diagnostic messages.
     pub service_name: String,
@@ -90,6 +95,26 @@ pub struct DaemonBridgeConfig {
     /// spawning `current_exe() + spawn_args`.
     /// Test: `no_spawn_returns_err_without_spawning`.
     pub no_spawn: bool,
+    /// Optional per-service override for the `no_spawn` error's operator
+    /// guidance text.
+    ///
+    /// Why (#2491 review): the generic `no_spawn` error assumed every caller
+    /// has a `{service_name} setup` subcommand and a
+    /// `~/Library/LaunchAgents/io.trusty.{service_name}.plist` unit. Neither is
+    /// true for trusty-mpm — there is no `trusty-mpm setup` subcommand, and the
+    /// real plists are `com.trusty.mpm.plist` /
+    /// `com.trusty.mpm.supervisor.plist` — so the generic hint told the
+    /// operator to run a nonexistent command against a nonexistent path. When
+    /// `Some`, this text REPLACES the generic setup/plist advice in the error
+    /// message; when `None`, the original generic wording is used unchanged so
+    /// existing callers (trusty-memory, trusty-search, trusty-analyze) are
+    /// unaffected.
+    /// What: appended verbatim after the "daemon is not reachable at {addr}"
+    /// preamble instead of the generic `` `{name} start`/`{name} setup` ``
+    /// text.
+    /// Test: `no_spawn_error_uses_hint_when_set`,
+    /// `no_spawn_error_falls_back_to_generic_when_hint_unset`.
+    pub no_spawn_hint: Option<String>,
 }
 
 impl DaemonBridgeConfig {
@@ -161,17 +186,20 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
     // knows exactly what to do.
     if config.no_spawn {
         let addr = (config.base_url_fn)();
+        let hint = match &config.no_spawn_hint {
+            Some(hint) => hint.clone(),
+            None => format!(
+                "start it with `{} start` (launchd-managed) before using the MCP bridge. \
+                 If already installed via `{} setup`, run `launchctl bootstrap gui/$(id -u) \
+                 ~/Library/LaunchAgents/io.trusty.{}.plist` or `{} start`.",
+                config.service_name, config.service_name, config.service_name, config.service_name,
+            ),
+        };
         return Err(anyhow!(
-            "{} daemon is not reachable at {} — \
-             start it with `{} start` (launchd-managed) before using the MCP bridge. \
-             If already installed via `{} setup`, run `launchctl bootstrap gui/$(id -u) \
-             ~/Library/LaunchAgents/io.trusty.{}.plist` or `{} start`.",
+            "{} daemon is not reachable at {} — {}",
             config.service_name,
             addr,
-            config.service_name,
-            config.service_name,
-            config.service_name,
-            config.service_name,
+            hint,
         ));
     }
 
@@ -238,6 +266,7 @@ mod tests {
             startup_timeout: Some(Duration::from_millis(100)), // very short for tests
             poll_interval: Some(Duration::from_millis(20)),
             no_spawn: false,
+            no_spawn_hint: None,
         }
     }
 
@@ -301,6 +330,7 @@ mod tests {
             startup_timeout: Some(Duration::from_secs(5)),
             poll_interval: Some(Duration::from_millis(50)),
             no_spawn: false,
+            no_spawn_hint: None,
         };
         let result = ensure_daemon_up(&cfg).await;
         assert!(
@@ -343,6 +373,7 @@ mod tests {
             startup_timeout: Some(Duration::from_millis(100)),
             poll_interval: Some(Duration::from_millis(20)),
             no_spawn: true,
+            no_spawn_hint: None,
         };
         let result = ensure_daemon_up(&cfg).await;
         assert!(result.is_err(), "no_spawn must return Err when probe fails");
@@ -354,6 +385,80 @@ mod tests {
         assert!(
             msg.contains("start"),
             "error must mention how to start the daemon; got: {msg}"
+        );
+    }
+
+    /// Why (#2491 review): a service with a `no_spawn_hint` set (e.g.
+    /// trusty-mpm, whose real operator guidance differs from the generic
+    /// `{name} setup` / `io.trusty.{name}.plist` text) must see ITS hint in the
+    /// error, not the generic wording that names a nonexistent subcommand and
+    /// plist path.
+    /// What: builds a config with `no_spawn: true` and a distinctive
+    /// `no_spawn_hint`, asserts the hint text appears verbatim and the generic
+    /// `setup`/`io.trusty.` wording does not.
+    /// Test: this test.
+    #[tokio::test]
+    async fn no_spawn_error_uses_hint_when_set() {
+        let cfg = DaemonBridgeConfig {
+            service_name: "trusty-mpm".to_string(),
+            spawn_args: vec![],
+            health_path: "/health".to_string(),
+            base_url_fn: Box::new(|| "http://127.0.0.1:65534".to_string()),
+            startup_timeout: Some(Duration::from_millis(100)),
+            poll_interval: Some(Duration::from_millis(20)),
+            no_spawn: true,
+            no_spawn_hint: Some(
+                "trusty-mpm daemon is launchd-managed on this machine — start it with \
+                 `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.trusty.mpm.plist`."
+                    .to_string(),
+            ),
+        };
+        let result = ensure_daemon_up(&cfg).await;
+        assert!(result.is_err(), "no_spawn must return Err when probe fails");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("com.trusty.mpm.plist"),
+            "error must contain the service-specific hint; got: {msg}"
+        );
+        assert!(
+            !msg.contains("trusty-mpm setup"),
+            "error must NOT contain the generic (wrong-for-trusty-mpm) setup advice; got: {msg}"
+        );
+        assert!(
+            !msg.contains("io.trusty."),
+            "error must NOT contain the generic io.trusty.* plist path; got: {msg}"
+        );
+    }
+
+    /// Why (#2491 review): when `no_spawn_hint` is left `None` (every caller
+    /// except trusty-mpm), the original generic setup/plist wording must still
+    /// appear — the new field must not change existing behaviour for
+    /// trusty-memory, trusty-search, or trusty-analyze.
+    /// What: reuses `no_spawn_returns_err_without_spawning`'s config shape with
+    /// `no_spawn_hint: None` and asserts the generic wording is present.
+    /// Test: this test.
+    #[tokio::test]
+    async fn no_spawn_error_falls_back_to_generic_when_hint_unset() {
+        let cfg = DaemonBridgeConfig {
+            service_name: "trusty-memory".to_string(),
+            spawn_args: vec![],
+            health_path: "/health".to_string(),
+            base_url_fn: Box::new(|| "http://127.0.0.1:65534".to_string()),
+            startup_timeout: Some(Duration::from_millis(100)),
+            poll_interval: Some(Duration::from_millis(20)),
+            no_spawn: true,
+            no_spawn_hint: None,
+        };
+        let result = ensure_daemon_up(&cfg).await;
+        assert!(result.is_err(), "no_spawn must return Err when probe fails");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("trusty-memory setup"),
+            "generic hint must still mention `{{service}} setup`; got: {msg}"
+        );
+        assert!(
+            msg.contains("io.trusty.trusty-memory.plist"),
+            "generic hint must still mention the io.trusty.* plist path; got: {msg}"
         );
     }
 }

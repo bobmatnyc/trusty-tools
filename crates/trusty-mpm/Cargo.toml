@@ -152,6 +152,10 @@ trusty-common = { workspace = true, features = [
     # SPEC-ONESM-01 / DOC-33: canonical tmux-session naming was hoisted into
     # trusty-common so trusty-agents can reuse it. `core::names` re-exports it.
     "session-naming",
+    # #2486: reuses `trusty_common::update::is_launchd_supervised` for the
+    # daemon-restart-race supervision signal (see daemon_run.rs / api/types.rs).
+    # Zero extra transitive deps — see the feature's Cargo.toml comment.
+    "update-check",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
