@@ -28,16 +28,30 @@
 //! contract). Per the same table, `q`/`Ctrl-C` quits only when NOT in a
 //! modal — while `pending_confirm` is `Some`, quit keys are swallowed by the
 //! modal like every other key.
+//!
+//! **Deliverable/Milestone view (DOC-35 §10.8 `show`, #2383)**: `v` in the
+//! Projects pane opens a read-only overlay for the selected project (see
+//! `panes::deliverables_view`). Chosen because every other unshifted letter
+//! is already bound in one pane or the other (`l`/`k`/`r`/`d`/`a` in
+//! Sessions, `c` in Projects) or reserved by the confirm gate (`y`/`n`) —
+//! `v` ("view") is free in every context and mnemonic for §10.8's read-only
+//! `show`. While [`ProjectCtlState::deliverable_view`] is `Some`, EVERY key
+//! routes through [`handle_deliverable_view_key`] instead — the identical
+//! "modal captures all input, `q`/`Ctrl-C` swallowed, `Esc` closes" discipline
+//! [`handle_confirm_key`] already establishes, plus `↑`/`↓` to scroll and `v`
+//! itself as a second way to close (matching the dashboard help overlay's
+//! "same key opens and closes" convention).
 //! What: [`PendingAction`] (the async actions a key can request — the actual
 //! HTTP dispatch lives in [`super::actions`]), [`is_quit`], and [`handle_key`]
 //! which routes a [`KeyEvent`] into [`ProjectCtlState`] mutations (focus
-//! cycling, selection, drill-in, notice-clear, the confirm gate) and returns
-//! `Some(action)` for the lettered verbs (once confirmed, for `k`-on-Active
-//! and `d`).
+//! cycling, selection, drill-in, notice-clear, the confirm gate, the
+//! deliverable view) and returns `Some(action)` for the lettered verbs (once
+//! confirmed, for `k`-on-Active and `d`).
 //! Test: `super::tests` covers focus cycling, selection movement, the
 //! project-switch reset, every lettered action's valid/invalid-context
-//! branches, and the confirm-gate's request/confirm/cancel/ignore branches,
-//! via synthetic [`KeyEvent`]s.
+//! branches, the confirm-gate's request/confirm/cancel/ignore branches, and
+//! the deliverable view's open/scroll/close branches, via synthetic
+//! [`KeyEvent`]s.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -106,6 +120,10 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
         return handle_confirm_key(state, key);
     }
 
+    if state.deliverable_view.is_some() {
+        return handle_deliverable_view_key(state, key);
+    }
+
     if is_quit(&key) {
         state.should_exit = true;
         return None;
@@ -162,8 +180,43 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
                 }
             }
         }
+        KeyCode::Char('v') if state.focus == Pane::Projects => {
+            match state.selected_project_name() {
+                Some(name) => {
+                    let name = name.to_string();
+                    state.open_deliverable_view(name);
+                }
+                None => state.set_notice("no project selected"),
+            }
+            None
+        }
         _ => None,
     }
+}
+
+/// Route one key event while the Deliverable/Milestone view is open (DOC-35
+/// §10.8, #2383).
+///
+/// Why: split out of [`handle_key`] for the same reason
+/// [`handle_confirm_key`] is — the "this modal captures ALL input" contract
+/// lives in one place. Unlike the confirm gate (which resolves to an action
+/// on `y`/`n`), this view is read-only, so every branch returns `None` — it
+/// never produces a [`PendingAction`].
+/// What: `↑`/`↓` scroll the body by one line; `Esc` or `v` closes the view;
+/// every other key (including `q`/`Ctrl-C`) is swallowed, matching the
+/// confirm gate's "not in a modal" quit rule.
+/// Test: `super::tests::deliverable_view_*`.
+fn handle_deliverable_view_key(
+    state: &mut ProjectCtlState,
+    key: KeyEvent,
+) -> Option<PendingAction> {
+    match key.code {
+        KeyCode::Up => state.scroll_deliverable_view(-1),
+        KeyCode::Down => state.scroll_deliverable_view(1),
+        KeyCode::Esc | KeyCode::Char('v') => state.close_deliverable_view(),
+        _ => {}
+    }
+    None
 }
 
 /// Resolve the currently open confirmation gate against one key event.
@@ -351,6 +404,7 @@ mod tests {
                 state: "active".to_string(),
                 pending_decision: None,
                 proposed_default: None,
+                deliverable_id: None,
             }],
         );
         state.projects_nav.sync_len(state.projects.len());
@@ -595,5 +649,71 @@ mod tests {
 
         handle_key(&mut state, key(KeyCode::Char('q')));
         assert!(state.should_exit);
+    }
+
+    // ---- DOC-35 §10.8 Deliverable/Milestone view (#2383) -----------------
+
+    #[test]
+    fn v_opens_the_deliverable_view_for_the_selected_project() {
+        let mut state = seeded_state();
+        assert!(handle_key(&mut state, key(KeyCode::Char('v'))).is_none());
+        let view = state.deliverable_view.expect("view should be open");
+        assert_eq!(view.project_name, "alpha");
+    }
+
+    #[test]
+    fn v_without_a_selected_project_sets_notice_and_opens_nothing() {
+        let mut state = ProjectCtlState::default();
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        assert!(state.deliverable_view.is_none());
+        assert_eq!(state.notice.as_deref(), Some("no project selected"));
+    }
+
+    #[test]
+    fn v_is_ignored_outside_the_projects_pane() {
+        let mut state = seeded_state();
+        state.focus = Pane::Sessions;
+        assert!(handle_key(&mut state, key(KeyCode::Char('v'))).is_none());
+        assert!(state.deliverable_view.is_none());
+    }
+
+    #[test]
+    fn deliverable_view_scrolls_and_closes_on_esc_or_v() {
+        let mut state = seeded_state();
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        handle_key(&mut state, key(KeyCode::Down));
+        assert_eq!(state.deliverable_view.as_ref().unwrap().scroll, 1);
+        handle_key(&mut state, key(KeyCode::Up));
+        assert_eq!(state.deliverable_view.as_ref().unwrap().scroll, 0);
+
+        handle_key(&mut state, key(KeyCode::Esc));
+        assert!(state.deliverable_view.is_none());
+
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        assert!(
+            state.deliverable_view.is_none(),
+            "v must close the view the same way it opened it"
+        );
+    }
+
+    #[test]
+    fn deliverable_view_swallows_quit_and_unrelated_keys() {
+        let mut state = seeded_state();
+        handle_key(&mut state, key(KeyCode::Char('v')));
+
+        handle_key(&mut state, key(KeyCode::Char('q')));
+        assert!(!state.should_exit, "q must not quit while the view is open");
+        assert!(state.deliverable_view.is_some());
+
+        handle_key(&mut state, ctrl_c());
+        assert!(!state.should_exit);
+        assert!(state.deliverable_view.is_some());
+
+        handle_key(&mut state, key(KeyCode::Char('x')));
+        assert!(
+            state.deliverable_view.is_some(),
+            "an unrecognised key must not close the view"
+        );
     }
 }

@@ -908,6 +908,7 @@ mod tests {
             task: None,
             cwd: None,
             claude_session_id: None,
+            deliverable_id: None,
             pane_id: None,
         };
         let client = reqwest::Client::new();

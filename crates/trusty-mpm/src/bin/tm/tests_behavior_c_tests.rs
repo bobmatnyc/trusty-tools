@@ -489,6 +489,7 @@ fn make_session(
         task: None,
         cwd: None,
         claude_session_id: None,
+        deliverable_id: None,
         pane_id: None,
     }
 }
