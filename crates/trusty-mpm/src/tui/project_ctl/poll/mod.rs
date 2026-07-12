@@ -18,24 +18,34 @@
 //! daemon-down poll has no session left selected to attribute it to; see
 //! [`refresh_activity`]'s own doc for the narrower "fetch failed but the
 //! daemon is otherwise up" case that DOES keep the last-known activity,
-//! marked stale) plus the pure projections [`project_to_row`],
-//! [`session_to_row`], and [`activity_from_response`].
-//! Test: `tests` covers the pure projections and the daemon-down branches
-//! against a guaranteed-dead client (mirroring
+//! marked stale). The pure DTO → row projections ([`rows::project_to_row`],
+//! [`rows::live_session_rows`], [`rows::session_to_row`],
+//! [`rows::activity_from_response`]) live in the [`rows`] submodule (split
+//! out by #2476 to keep this file under the 500-SLOC production cap) and are
+//! re-exported here so existing callers keep using `poll::project_to_row`
+//! etc.
+//! Test: `tests` covers the daemon-down / stale-keep branches against a
+//! guaranteed-dead client (mirroring
 //! `tui::coordinator::poll::tests::poll_marks_unreachable_clears_sessions`);
-//! the daemon-UP path is exercised manually / by launching the TUI.
+//! [`rows`]'s own `tests` covers the pure projections; the daemon-UP path is
+//! exercised manually / by launching the TUI.
 
-use crate::client::{
-    DaemonClient, FleetProjectGroupWire, ManagedActivityResponse, ManagedSessionSummary,
-};
+mod rows;
+
+pub(crate) use rows::{activity_from_response, live_session_rows, project_to_row};
+// Only reachable from `super::tests` (this module's daemon-down test
+// fixtures) and `super::super::tests` (the project_ctl-level integration
+// tests) — both `#[cfg(test)]`-gated, so a plain `cargo build` never sees a
+// caller and would otherwise warn on the re-export.
+#[cfg(test)]
+pub(crate) use rows::session_to_row;
+
+use crate::client::DaemonClient;
 use crate::project::Project;
-use crate::tui::coordinator::rows::session_short_id;
 
-use super::state::{ActivityInfo, ProjectCtlState, ProjectRow, SessionRow};
-
-/// How many trailing lines of a session's raw tmux pane the Activity pane
-/// previews (DOC-35 §5.1 mockup: "last 3 lines of raw_pane").
-const RAW_PANE_TAIL_LINES: usize = 3;
+#[cfg(test)]
+use super::state::ActivityInfo;
+use super::state::{ProjectCtlState, ProjectRow, SessionRow};
 
 /// Refresh [`ProjectCtlState`] from one daemon poll.
 ///
@@ -256,12 +266,13 @@ fn rediscover(client: &mut DaemonClient, reachable: bool) -> bool {
 /// builds the `Vec<ProjectRow>` (registry order, counts from the matching
 /// fleet group), the `sessions_by_project` map (every fleet group, even a
 /// project the registry list omitted — defensive against a transient
-/// registry/fleet mismatch), and a `name -> Project` map of the FULL records
-/// `registry_list_projects` already returned (DOC-35 §6, #2120) — the config
-/// form needs the full record to seed its baseline values; retaining it here
-/// (rather than re-fetching per-project when the form opens) costs nothing,
-/// since `projects` was already in hand before being projected down to
-/// `ProjectRow`.
+/// registry/fleet mismatch) via [`live_session_rows`] (which drops
+/// decommissioned sessions, #2476), and a `name -> Project` map of the FULL
+/// records `registry_list_projects` already returned (DOC-35 §6, #2120) —
+/// the config form needs the full record to seed its baseline values;
+/// retaining it here (rather than re-fetching per-project when the form
+/// opens) costs nothing, since `projects` was already in hand before being
+/// projected down to `ProjectRow`.
 async fn fetch_projects_and_sessions(
     client: &DaemonClient,
 ) -> anyhow::Result<(
@@ -274,7 +285,7 @@ async fn fetch_projects_and_sessions(
 
     let mut sessions_by_project = std::collections::BTreeMap::new();
     for group in &groups {
-        let rows = group.sessions.iter().cloned().map(session_to_row).collect();
+        let rows = live_session_rows(group.sessions.clone());
         sessions_by_project.insert(group.project_name.clone(), rows);
     }
 
@@ -291,126 +302,10 @@ async fn fetch_projects_and_sessions(
     Ok((rows, sessions_by_project, projects_full))
 }
 
-/// Project one registry [`Project`] (plus its matching fleet group, if any)
-/// into a [`ProjectRow`].
-///
-/// Why: the Projects pane needs the aggregate-state glyph + live session
-/// count (DOC-35 §5), not the raw registry/fleet DTOs.
-/// What: `live_count` is the number of sessions in `group` whose `state` is
-/// `"active"` or `"provisioning"`; `total_count` is `group.sessions.len()`.
-/// A project with no matching fleet group (never spawned a session) gets
-/// `0`/`0`.
-/// Test: `project_to_row_counts_live_and_total`,
-/// `project_to_row_missing_group_is_zeroed`.
-pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>) -> ProjectRow {
-    let (live_count, total_count) = match group {
-        Some(g) => (
-            g.sessions
-                .iter()
-                .filter(|s| matches!(s.state.as_str(), "active" | "provisioning"))
-                .count(),
-            g.sessions.len(),
-        ),
-        None => (0, 0),
-    };
-    ProjectRow {
-        name: p.name.clone(),
-        repo_url: p.repo_url.clone(),
-        live_count,
-        total_count,
-    }
-}
-
-/// Project one fleet [`ManagedSessionSummary`] into a [`SessionRow`].
-///
-/// Why: the Sessions pane needs a numbered, compact row per session; the
-/// fleet poll is one call for every session regardless of count, so this
-/// projection stays over the STATIC record fields even after #2119 — only the
-/// one selected session's activity gets the extra live `/activity` fetch (see
-/// [`refresh_activity`]), never the whole list.
-/// What: derives the 8-hex short id via [`session_short_id`] and copies the
-/// rest through unchanged, including `deliverable_id` (DOC-35 §10.6, #2383 —
-/// drives the Sessions-pane deliverable glyph).
-/// Test: `session_to_row_derives_short_id_and_copies_fields`,
-/// `session_to_row_carries_deliverable_id`.
-pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
-    let short_id = session_short_id(&s.id);
-    SessionRow {
-        id: s.id,
-        short_id,
-        name: s.name,
-        branch: s.branch,
-        task: s.task,
-        state: s.state,
-        pending_decision: s.pending_decision,
-        proposed_default: s.proposed_default,
-        deliverable_id: s.deliverable_id,
-    }
-}
-
-/// Project a [`ManagedActivityResponse`] into an [`ActivityInfo`] for `session_id`.
-///
-/// Why: the Activity pane needs a lean, render-ready shape (DOC-35 §5.4) with
-/// a bounded pane-tail preview rather than the full wire response.
-/// What: copies `state`/`summary`/`pending_decision`/`proposed_default`
-/// through unchanged, tags the snapshot with `session_id`, sets `stale` to
-/// `false` (a just-succeeded fetch is by definition fresh), and derives
-/// `raw_pane_tail` as the last [`RAW_PANE_TAIL_LINES`] non-empty lines of
-/// `raw_pane` via [`tail_lines`].
-/// Test: `activity_from_response_derives_fields_and_tail`,
-/// `activity_from_response_handles_short_pane`.
-pub(crate) fn activity_from_response(
-    session_id: String,
-    resp: ManagedActivityResponse,
-) -> ActivityInfo {
-    ActivityInfo {
-        session_id,
-        state: resp.state,
-        summary: resp.summary,
-        pending_decision: resp.pending_decision,
-        proposed_default: resp.proposed_default,
-        raw_pane_tail: tail_lines(&resp.raw_pane, RAW_PANE_TAIL_LINES),
-        stale: false,
-    }
-}
-
-/// The last `n` non-empty, trimmed lines of `text`, in original order.
-///
-/// Why: a raw tmux pane capture is typically newline-padded and much longer
-/// than the Activity pane's fixed 4-row height can show; a small pure helper
-/// keeps the "which lines" rule unit-testable independent of rendering.
-/// What: splits on `\n`, trims each line, drops empty ones, then keeps the
-/// last `n` (or fewer, if `text` has fewer than `n` non-empty lines).
-/// Test: `tail_lines_keeps_last_n_non_empty_lines`,
-/// `tail_lines_handles_fewer_lines_than_requested`.
-fn tail_lines(text: &str, n: usize) -> Vec<String> {
-    let non_empty: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let start = non_empty.len().saturating_sub(n);
-    non_empty[start..].iter().map(|l| l.to_string()).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn project(name: &str) -> Project {
-        Project {
-            name: name.to_string(),
-            repo_url: format!("https://github.com/acme/{name}"),
-            default_branch: "main".to_string(),
-            stack_hint: None,
-            tags: vec![],
-            description: None,
-            gh_user: None,
-            github: None,
-            commit_name: None,
-            commit_email: None,
-        }
-    }
+    use crate::client::ManagedSessionSummary;
 
     fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         ManagedSessionSummary {
@@ -431,108 +326,6 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
         }
-    }
-
-    #[test]
-    fn project_to_row_counts_live_and_total() {
-        let p = project("widget");
-        let group = FleetProjectGroupWire {
-            project_name: "widget".to_string(),
-            repo_url: p.repo_url.clone(),
-            sessions: vec![
-                summary("a1111111", "active"),
-                summary("b2222222", "provisioning"),
-                summary("c3333333", "stopped"),
-            ],
-        };
-        let row = project_to_row(&p, Some(&group));
-        assert_eq!(row.live_count, 2);
-        assert_eq!(row.total_count, 3);
-        assert_eq!(row.name, "widget");
-    }
-
-    #[test]
-    fn project_to_row_missing_group_is_zeroed() {
-        let p = project("widget");
-        let row = project_to_row(&p, None);
-        assert_eq!(row.live_count, 0);
-        assert_eq!(row.total_count, 0);
-    }
-
-    #[test]
-    fn session_to_row_derives_short_id_and_copies_fields() {
-        let row = session_to_row(summary("4f9ca1b2ffff", "active"));
-        assert_eq!(row.short_id, "4f9ca1b2");
-        assert_eq!(row.id, "4f9ca1b2ffff");
-        assert_eq!(row.state, "active");
-        assert_eq!(row.branch.as_deref(), Some("main"));
-        assert_eq!(row.task.as_deref(), Some("do the thing"));
-    }
-
-    #[test]
-    fn session_to_row_carries_deliverable_id() {
-        let mut s = summary("4f9ca1b2ffff", "active");
-        s.deliverable_id = Some("11111111-1111-1111-1111-111111111111".to_string());
-        let row = session_to_row(s);
-        assert_eq!(
-            row.deliverable_id.as_deref(),
-            Some("11111111-1111-1111-1111-111111111111")
-        );
-
-        let none_row = session_to_row(summary("aaaaaaaabbbb", "active"));
-        assert!(none_row.deliverable_id.is_none());
-    }
-
-    fn activity_response(raw_pane: &str) -> ManagedActivityResponse {
-        ManagedActivityResponse {
-            raw_pane: raw_pane.to_string(),
-            runtime_active: true,
-            pane_stale: false,
-            state: "working".to_string(),
-            summary: "running tests".to_string(),
-            confidence: 0.9,
-            cache_hit: false,
-            input_tokens: 0,
-            output_tokens: 0,
-            latency_ms: 12,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            classification: None,
-            pending_decision: Some("write to ci.yml?".to_string()),
-            proposed_default: Some("yes".to_string()),
-        }
-    }
-
-    #[test]
-    fn activity_from_response_derives_fields_and_tail() {
-        let resp = activity_response("line1\nline2\nline3\nline4\n");
-        let info = activity_from_response("sess-1".to_string(), resp);
-        assert_eq!(info.session_id, "sess-1");
-        assert_eq!(info.state, "working");
-        assert_eq!(info.summary, "running tests");
-        assert_eq!(info.pending_decision.as_deref(), Some("write to ci.yml?"));
-        assert_eq!(info.proposed_default.as_deref(), Some("yes"));
-        assert_eq!(info.raw_pane_tail, vec!["line2", "line3", "line4"]);
-        assert!(!info.stale);
-    }
-
-    #[test]
-    fn activity_from_response_handles_short_pane() {
-        let resp = activity_response("only one line");
-        let info = activity_from_response("sess-1".to_string(), resp);
-        assert_eq!(info.raw_pane_tail, vec!["only one line"]);
-    }
-
-    #[test]
-    fn tail_lines_keeps_last_n_non_empty_lines() {
-        let text = "a\nb\n\nc\nd\n";
-        assert_eq!(tail_lines(text, 2), vec!["c", "d"]);
-    }
-
-    #[test]
-    fn tail_lines_handles_fewer_lines_than_requested() {
-        assert_eq!(tail_lines("only", 3), vec!["only"]);
-        assert_eq!(tail_lines("", 3), Vec::<String>::new());
     }
 
     // ---- daemon-down branches (guaranteed-dead client, no live daemon needed) ---

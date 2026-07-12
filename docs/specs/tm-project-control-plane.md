@@ -420,7 +420,14 @@ already used in `tui/coordinator/layout.rs` and `tui/health/render.rs`):
    project (registry B), a glyph for aggregate state, and a live session count. `▸` marks focus.
 2. **Sessions pane** (right column, `Constraint::Percentage(75)`) — the selected project's
    sessions, numbered (DOC-16 §3.2 convention), sourced from `GET
-   .../fleet?project=<name>` (§4).
+   .../fleet?project=<name>` (§4). **RESOLVED (#2476):** decommissioned (tombstoned) sessions
+   are filtered OUT of this pane and its `(N)` header count on every poll tick — decommissioning
+   flips a session record's `state` to `"decommissioned"` in the daemon's store but does not
+   delete it, so an unfiltered projection would let a dead row (and an inflated count) persist
+   forever. The pane counts *live* sessions; a session later replaced by a new one reusing its
+   `name` never ghosts or duplicates, since every tick rebuilds the row list wholesale from the
+   daemon's current fleet snapshot rather than diffing against the previous tick's rows. See
+   `tui/project_ctl/poll/rows.rs::live_session_rows`.
 3. **Activity pane** (bottom, `Constraint::Length(4)`) — the focused session's status line,
    sourced from `GET .../{id}/activity` (§4) — the same fields DOC-16 §6.2 already specifies
    (`state`, `summary`/`last_summary` equivalent, `pending_decision`, `proposed_default`).
@@ -917,6 +924,11 @@ as §8: file after resolving design questions).
 
 ## 15. Change log
 
+- **2026-07-12 (v3.1, #2476)** — RESOLVED bug: decommissioned sessions were persisting in the
+  Sessions pane (§5.1 item 2) instead of dropping on the next refresh tick, with the `(N)` header
+  count never decrementing. Decided and implemented: filter tombstoned/decommissioned sessions OUT
+  of the Sessions pane rather than keep them visible with a live-only count. §5.1 item 2 updated
+  to document the resolved behavior.
 - **2026-07-10 (v3)** — Owner articulated the three-layer communication model and retired DOC-30
   (issue #1878), directing its salvage into this spec. Added §1.1 (three-layer model, the new
   organizing frame for the whole document, mapping every existing/planned surface to L1/L2/L3);
