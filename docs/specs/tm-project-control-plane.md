@@ -384,14 +384,13 @@ depends on.
 
 ## 5. Multipane TUI
 
-**RESOLVED (owner, 2026-07-06): full 4-pane layout ships as v1 — there is no 2-pane MVP cut.**
-Projects, Sessions, Activity, and Actions all land together in the first TUI release; §8's
-child-issue breakdown reflects this as a single TUI slice (still split into a skeleton PR and a
-live-refresh/activity-wiring PR for reviewability, §8, but both are required for v1, not
-sequenced as MVP-then-follow-up). Invocation: `tm projects` with no further arguments launches
-this TUI when a TTY is attached (mirroring `tm session tui`'s existing invocation pattern,
-`cli.rs:1248` `SessionAction::Tui`); `tm projects list --json` remains the scriptable, non-TUI
-path.
+**RESOLVED (owner, 2026-07-06): full 3-pane + actions bar layout ships as v1 — there is no 2-pane MVP cut.**
+Projects, Sessions, and Activity panes, plus a contextual actions bar (a 1-row hint line, not a boxed pane),
+all land together in the first TUI release; §8's child-issue breakdown reflects this as a single TUI slice
+(still split into a skeleton PR and a live-refresh/activity-wiring PR for reviewability, §8, but both are
+required for v1, not sequenced as MVP-then-follow-up). Invocation: `tm projects` with no further arguments
+launches this TUI when a TTY is attached (mirroring `tm session tui`'s existing invocation pattern,
+`cli.rs:1248` `SessionAction::Tui`); `tm projects list --json` remains the scriptable, non-TUI path.
 
 ### 5.1 Pane layout (ASCII mockup)
 
@@ -516,7 +515,7 @@ box):**
    `"guided"` (no behavior change). Operators who want the new dashboard opt in explicitly via
    `tm projects` or the config flag.
 2. **Phase 2 (default flip) — BLOCKED until ALL THREE gates hold:**
-   - **Gate (a) — shipped and stable.** The 4-pane TUI (§5) and the full `tm projects`/`tm
+   - **Gate (a) — shipped and stable.** The 3-pane + actions-bar TUI (§5) and the full `tm projects`/`tm
      sessions` CLI (§3) are shipped, and have not required a stabilization/bugfix pass in the
      immediately preceding release.
    - **Gate (b) — guided/first-run flow preserved, not regressed.** The existing
@@ -531,7 +530,7 @@ box):**
      issues surfaced and fixed, before it becomes the unconditional default.
    Only once (a), (b), and (c) all hold does bare `tm` flip its default: bare `tm` with **zero
    registered projects** still routes to `commands::first_run` (onboarding, unchanged); bare `tm`
-   with **≥1 registered project** lands on the `tm projects` multipane dashboard (§5) instead of
+   with **≥1 registered project** lands on the `tm projects` 3-pane + actions-bar dashboard (§5) instead of
    the guided cwd-scoped flow. The guided flow remains reachable explicitly (e.g. `tm guided` or
    `tm sessions start`) for the cwd-scoped launch/reconnect use case it already serves well — it
    is not deleted, only demoted from "default when no args" to "explicit verb."
@@ -554,7 +553,7 @@ actual issue numbers (filed 2026-07-06).
 | 2 | **`tm projects` CLI: list/register/show/status** — §3.1's verbs wired to slice 1 and slice 4. Gate: `cli_parses_projects_*` tests + integration test against a live daemon. | #2115 |
 | 3 | **`tm sessions` CLI: promote to sibling top-level plural** — rename `tm session` → `tm sessions` (list/launch/kill/resume/decommission/attach/activity, `--project <name>` scoping, §3.2), with `tm session` retained as a hidden deprecated alias (mirroring the `ManagedStop`/`RuntimeStop` precedent, `cli.rs:1433-1459`). Gate: existing `cli_parses_session_*` tests continue to pass unchanged (alias), new `cli_parses_sessions_*` tests cover the canonical plural form, and a deprecation-notice-printed assertion. | #2116 |
 | 4 | **`GET /api/v1/projects/{name}/status` aggregation endpoint** — session-count rollup + config-completeness flags (§4). Gate: unit test with a fixture registry + session set. | #2117 |
-| 5 | **Multipane TUI skeleton — full 4-pane v1 (RESOLVED, no MVP cut)** — Projects/Sessions/Activity/Actions panes (§5.1), keyboard nav (§5.2), built as a new module under `crates/trusty-mpm/src/tui/` (e.g. `tui/project_ctl/`, split per the 500-SLOC convention: `layout`, `state`, `poll`, `panes/*`). Gate: manual + the existing TUI test patterns (`tui/coordinator/tests.rs`, `tui/health/tests.rs`) as a template. | #2118 |
+| 5 | **Multipane TUI skeleton — 3 panes + actions bar v1 (RESOLVED, no MVP cut)** — Projects/Sessions/Activity panes plus contextual actions bar (§5.1), keyboard nav (§5.2), built as a new module under `crates/trusty-mpm/src/tui/` (e.g. `tui/project_ctl/`, split per the 500-SLOC convention: `layout`, `state`, `poll`, `panes/*`). Gate: manual + the existing TUI test patterns (`tui/coordinator/tests.rs`, `tui/health/tests.rs`) as a template. | #2118 |
 | 6 | **TUI live-refresh + activity-pane wiring** — poll cadence, re-poll-after-mutation, activity-pane consumption of `GET .../{id}/activity` (§5.3, §5.4). Gate: TUI state-machine unit tests for refresh timing (mirroring DOC-16 STUI-8's pattern). | #2119 |
 | 7 | **Deterministic project configurator — CLI + TUI, RESOLVED same-epic scope** — `tm projects config <name> set/unset` (§3.1) AND the TUI config form (§5.2 `c` key, §6), both thin clients over the same `PATCH /api/v1/projects/{name}`. Gate: one shared validation/persistence test suite exercised from both a CLI integration test and a TUI form unit test. | #2120 |
 | 8 | **`gh_user` validation wiring in `PATCH /api/v1/projects/{name}`** — enforce the #2081 fail-loud contract (`gh auth status` check) at config-write time, not just at `gh`-call time. Gate: unit test with a mocked `gh auth status` fixture. | #2121 |
@@ -579,13 +578,13 @@ actual issue numbers (filed 2026-07-06).
 2. **Registry A fold-in mechanics (§2.2, §8 slice 10) — RESOLVED.** DEPRECATE, do not merge, do
    not hard-cut: `tm project init/list/info` keeps working, prints a deprecation notice pointing
    at `tm projects register/list/show`, and is removed in a later release. Filed as #2123.
-3. **TUI scope/MVP cut (§5) — RESOLVED.** Full 4-pane v1 (Projects/Sessions/Activity/Actions).
+3. **TUI scope/MVP cut (§5) — RESOLVED.** Full 3 panes + actions bar v1 (Projects/Sessions/Activity plus contextual actions bar).
    No 2-pane MVP cut. Filed as #2118 (skeleton) and #2119 (live-refresh + activity wiring).
 4. **Deterministic-config UX (§6) — RESOLVED.** BOTH the CLI (`tm projects config set/unset`)
    AND a TUI config form ship in v1, same epic — not CLI-first-TUI-later. Filed as #2120.
 5. **Bare-`tm` entry-point timing (§7, §8 slice 11) — RESOLVED.** Not a calendar trigger — gated
    on three explicit conditions, ALL of which must hold before the Phase-2 default flip: (a) the
-   4-pane TUI + full CLI are shipped and stable, (b) the guided/first-run flow is preserved
+   3-pane + actions-bar TUI + full CLI are shipped and stable, (b) the guided/first-run flow is preserved
    reachable from inside `tm projects` so new users do not regress, (c) a dogfood period (with
    the opt-in Phase-1 flag) has occurred. Filed as #2124 (Phase 1 actionable now; Phase 2 an
    explicit checklist, not started until the owner confirms all three gates).
@@ -804,7 +803,7 @@ as §8: file after resolving design questions).
 | #2380 | Status state-machine enforcement — reject invalid `set-status` transitions per §10.3 | #2378 | Unit tests: one per illegal transition (e.g. `proposed→complete`). |
 | #2381 | `tm projects deliverables`/`tm projects milestones` CLI subtree (§10.8) | #2378 | Thin HTTP client, mirrors §3.1's pattern exactly. |
 | #2382 | Extend `GET /api/v1/projects/{name}/status` (#2117) with `DeliverableStatus`/`MilestoneStatus` histograms (§4.1 extension) | #2378, #2117 | Additive response fields; existing consumers unaffected. |
-| #2383 | TUI: Deliverable glyph in Sessions pane, Deliverable/Milestone view reachable from Projects pane (§10.8's `show`, read-only) | #2378, #2118, #2119 | Extends, does not replace, the existing 4-pane layout (§5.1). |
+| #2383 | TUI: Deliverable glyph in Sessions pane, Deliverable/Milestone view reachable from Projects pane (§10.8's `show`, read-only) | #2378, #2118, #2119 | Extends, does not replace, the existing 3-pane + actions-bar layout (§5.1). |
 
 ---
 
@@ -875,7 +874,7 @@ as §8: file after resolving design questions).
   forward.
 - **Child issues (filed 2026-07-06):** #2114 (registry-B HTTP surface), #2115 (`tm projects`
   CLI), #2116 (`tm sessions` rename/alias), #2117 (`/status` aggregation endpoint), #2118
-  (multipane TUI skeleton, 4-pane), #2119 (TUI live-refresh + activity wiring), #2120
+  (multipane TUI skeleton, 3 panes + actions bar), #2119 (TUI live-refresh + activity wiring), #2120
   (deterministic configurator, CLI+TUI), #2121 (`gh_user` fail-loud validation), #2122
   (`jira_config` opaque placeholder), #2123 (deprecate registry A), #2124 (bare-`tm` entry-point
   transition, gated Phase 2).
@@ -924,6 +923,12 @@ as §8: file after resolving design questions).
 
 ## 15. Change log
 
+- **2026-07-12 (v3.2, #2477)** — CLARIFIED pane wording for precision. The spec previously referred
+  to a "4-pane" TUI layout, but the shipped implementation (#2118) is a 3-pane + actions-bar design:
+  three boxed panes (Projects, Sessions, Activity) plus a 1-row contextual actions hint line. Updated
+  §5, §7, §8 (slice 5), §9 (decision 3), §10.8, §12 (item #2383), §14 (references), and the 2026-07-06
+  v2 changelog entry to consistently refer to "3 panes + actions bar" or "3 panes + contextual actions bar"
+  to match the shipped behavior and avoid verification confusion.
 - **2026-07-12 (v3.1, #2476)** — RESOLVED bug: decommissioned sessions were persisting in the
   Sessions pane (§5.1 item 2) instead of dropping on the next refresh tick, with the `(N)` header
   count never decrementing. Decided and implemented: filter tombstoned/decommissioned sessions OUT
@@ -943,7 +948,7 @@ as §8: file after resolving design questions).
 - **2026-07-06 (v2)** — Owner resolved all six §9 open decisions from v1. Naming: sessions
   promoted to sibling top-level plural `tm sessions` (not nested under `tm projects`), `tm
   session` singular aliased+deprecated; registry A (`tm project init/list/info`) deprecated
-  (not merged, not hard-cut); TUI ships full 4-pane v1 (no MVP cut); config UX ships as CLI+TUI
+  (not merged, not hard-cut); TUI ships 3 panes + actions bar v1 (no MVP cut); config UX ships as CLI+TUI
   in the same epic; bare-`tm` default flip gated on three explicit conditions (shipped+stable,
   guided/first-run preserved, dogfood period); `jira_boards` replaced with an opaque
   `jira_config` placeholder, concrete schema deferred to #2082. §2, §3, §5, §6, §7, §8, §9
