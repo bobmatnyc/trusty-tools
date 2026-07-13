@@ -130,7 +130,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         "tools": [
             {
                 "name": "memory_remember",
-                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass filtering, or use memory_note for short curated facts.",
+                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass ALL content-quality gates, or use memory_note for short curated facts.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -138,7 +138,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "text":    {"type": "string", "description": "Memory content"},
                         "room":    {"type": "string", "description": "Room type (optional)"},
                         "tags":    {"type": "array", "items": {"type": "string"}},
-                        "force":   {"type": "boolean", "description": "Bypass the signal/noise filter. Use sparingly — intended for explicit operator overrides.", "default": false},
+                        "force":   {"type": "boolean", "description": "Explicit operator override: bypasses EVERY content-quality gate for this write — the blocklist (auto-capture noise patterns), the short-content check, the dedup window, and the noise/secret-token filter. Use sparingly; intended for app-managed writers (e.g. session/turn recorders) that need deterministic storage regardless of heuristic false positives.", "default": false},
                         "context": {"type": "string", "description": "Optional surrounding context. When supplied alongside very short content (< 4 words), the context is prepended (separated by `---`) so the stored memory has standalone meaning; without it, short content is dropped (issue #215)."}
                     },
                     "required": memory_remember_required,

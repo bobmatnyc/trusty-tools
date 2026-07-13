@@ -701,6 +701,135 @@ fn gate_accepts_key_equals_slashpath() {
     }
 }
 
+// ---- Issue #2442: blocklist prefix-anchoring + secret-heuristic FP fixes ----
+
+/// Why (issue #2442): `blocklist_match` replaces the old substring-anywhere
+/// `str::contains` check with a `starts_with` anchor. Known auto-capture
+/// prefixes must still be caught at the start of (whitespace-trimmed)
+/// content.
+/// What: asserts the exact write-path prefixes are matched.
+/// Test: itself.
+#[test]
+fn blocklist_match_blocks_known_prefixes() {
+    assert_eq!(blocklist_match("Tool use: Bash"), Some("Tool use: "));
+    assert_eq!(
+        blocklist_match("   Tool use: Read"),
+        Some("Tool use: "),
+        "leading whitespace must not let it through"
+    );
+    assert_eq!(
+        blocklist_match("Claude Code session ended: abc"),
+        Some("Claude Code session")
+    );
+}
+
+/// Why (issue #2442): the "sharper problem" from the issue report — a coding
+/// agent's turn text routinely QUOTES phrases like `"Tool use: "` mid-prose
+/// when recapping tool output. The old `contains`-based match silently
+/// dropped these legitimate memories. Anchoring to the start of the content
+/// must let them through.
+/// What: asserts content that merely mentions the pattern (not framed by it)
+/// is NOT matched.
+/// Test: itself.
+#[test]
+fn blocklist_match_ignores_quoted_mid_text() {
+    assert_eq!(blocklist_match("I used Tool use: Bash here"), None);
+    assert_eq!(
+        blocklist_match("The transcript shows Claude Code session lifecycle events firing twice"),
+        None
+    );
+    assert_eq!(blocklist_match("an ordinary engineering note"), None);
+}
+
+/// Why (issue #2442, live false positive #1): a Rust source-location
+/// reference of the shape `crate/module/file.rs::function_name` was rejected
+/// by `looks_like_secret` because the `::` inside the final slash-segment
+/// broke `is_word_segment`, so the token fell through to the entropy
+/// heuristics — `/` tripped `has_b64_sym` and the token was flagged.
+/// What: asserts the exact real-world rejected token (and the full gate,
+/// end-to-end) now passes.
+/// Test: itself.
+#[test]
+fn path_like_token_with_rust_module_separator_not_flagged() {
+    let tok = "client/http_client/error.rs::response_or_body_error";
+    assert!(
+        !looks_like_secret(tok),
+        "Rust path::fn reference must NOT be flagged as secret: {tok}"
+    );
+    let cfg = FilterConfig::default();
+    let content = format!(
+        "Milestone: fixed the retry loop in {tok} so transient 5xxs no longer abort the batch"
+    );
+    assert!(
+        cfg.apply(&content, true).is_ok(),
+        "gate must ACCEPT the path::fn reference; got {:?}",
+        cfg.apply(&content, true)
+    );
+}
+
+/// Why (issue #2442, live false positive #2): a compact issue/PR/SHA ledger
+/// reference like `#2486→PR#2491(e993c18a)` mixes uppercase (`PR`), digits,
+/// and lowercase hex — enough to trip the old unconditional mixed-case+digit
+/// fallback — even though no real credential format contains `#`, arrows, or
+/// parentheses.
+/// What: asserts the exact real-world rejected token (and the full gate,
+/// end-to-end) now passes.
+/// Test: itself.
+#[test]
+fn ledger_reference_token_not_flagged() {
+    let tok = "#2486→PR#2491(e993c18a)";
+    let content = format!("Shipped {tok} closing the retry-loop regression");
+    assert!(
+        find_secret_token(&content).is_none(),
+        "issue/PR/SHA ledger token must NOT be flagged as secret: {content}"
+    );
+    let cfg = FilterConfig::default();
+    assert!(
+        cfg.apply(&content, true).is_ok(),
+        "gate must ACCEPT the ledger reference; got {:?}",
+        cfg.apply(&content, true)
+    );
+}
+
+/// Why (issue #2442 hardening): the ledger/path false-positive fixes must not
+/// weaken detection of real secrets — including ones that happen to sit next
+/// to ledger-shaped punctuation in the same content.
+/// What: asserts a known-prefix secret is still rejected even when the
+/// surrounding content also contains a ledger reference and a path::fn
+/// reference (both now allowlisted individually).
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_alongside_2442_fp_fixes() {
+    let cfg = FilterConfig::default();
+    let content = "See #2486->PR#2491(e993c18a) and crates/foo/bar.rs::baz — deploy secret \
+                    sk-abcdefghijklmnopqrstuvwxyz01234567890123"; // pragma: allowlist secret
+    assert!(
+        matches!(
+            cfg.apply(content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "real credential must still be rejected end-to-end; got {:?}",
+        cfg.apply(content, false)
+    );
+}
+
+/// Why (issue #2442 hardening, path segment): confirm the `:` addition to
+/// `is_word_segment` does not let arbitrary secrets slip through when
+/// wrapped in a slash-path with colons — the wrapping segment must still be
+/// alnum/`-`/`_`/`.`/`:` ONLY. A segment containing `@` (as in a connection
+/// string `user:pass@host`) still fails structural detection.
+/// What: asserts a connection-string-shaped token with an embedded `@` is
+/// still flagged by the base64-symbol fallback.
+/// Test: itself.
+#[test]
+fn connection_string_shaped_token_still_flagged() {
+    let tok = "postgres://user:pass@host/dbname12345678901234567890"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(tok),
+        "connection-string-shaped token must still be flagged: {tok}"
+    );
+}
+
 /// Why (issue #1676): the compositional fix must NOT weaken detection of real
 /// secrets embedded as values in `key=value` tokens. The critical guard is the
 /// `+` early-exit in `is_structural_token`: a `key=base64blob` where the

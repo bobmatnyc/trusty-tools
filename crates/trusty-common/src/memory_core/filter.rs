@@ -87,6 +87,54 @@ pub const GIT_SHA_MIN_LEN: usize = 7;
 /// Test: `git_sha_like_recognises_sha256`, `git_sha_like_rejects_overlong_and_nonhex`.
 pub const GIT_SHA_MAX_LEN: usize = 64;
 
+/// Substring patterns whose presence at the START of drawer content marks it
+/// as low-value auto-capture noise (Claude Code tool-use captures, session
+/// lifecycle events).
+///
+/// Why (issue #220, tightened #2442): auto-capture hooks always emit these
+/// patterns as the literal frame/prefix of the entry, never buried inside
+/// prose. The original write-path gate (`trusty-memory`) and the retroactive
+/// dream-cycle prune pass each carried their own copy of this list, checked
+/// via `str::contains` — a substring-anywhere match that fired on any
+/// legitimate memory that merely QUOTED one of these phrases (e.g. a coding
+/// agent's turn recapping `"Tool use: Bash"` from its own transcript),
+/// silently thinning the recall surface. Issue #2442 consolidates both call
+/// sites onto this single list plus [`blocklist_match`], which anchors the
+/// check to the start of the (whitespace-trimmed) content instead.
+/// What: substring patterns (not regexes), matched case-sensitively because
+/// the auto-capture hooks always emit the exact English prefix.
+/// Test: `blocklist_match_blocks_known_prefixes`,
+/// `blocklist_match_ignores_quoted_mid_text`.
+pub const BLOCKLIST_PATTERNS: &[&str] = &[
+    "Tool use: ",          // Claude Code tool-use captures
+    "Claude Code session", // Session lifecycle events
+];
+
+/// Blocklist gate: returns the matched pattern when `content` is FRAMED
+/// (starts with, after leading-whitespace trim) by a known low-value
+/// auto-capture pattern.
+///
+/// Why (issue #2442): centralises the single source of truth for the
+/// write-path gate (`trusty-memory::tools::helpers::blocklist_gate`) and the
+/// dream-cycle retroactive prune pass
+/// (`memory_core::dream::helpers::is_low_quality_content`), which previously
+/// carried independently-drifting copies of the same list. Anchoring to
+/// `starts_with` (rather than `contains`) is the "structural detection"
+/// fix requested by the issue: auto-capture noise always begins with the
+/// pattern, so prose that merely quotes the phrase mid-text no longer trips
+/// the gate.
+/// What: returns `Some(pat)` for the first pattern in [`BLOCKLIST_PATTERNS`]
+/// where `content.trim_start().starts_with(pat)`, else `None`.
+/// Test: `blocklist_match_blocks_known_prefixes`,
+/// `blocklist_match_ignores_quoted_mid_text`.
+pub fn blocklist_match(content: &str) -> Option<&'static str> {
+    let trimmed = content.trim_start();
+    BLOCKLIST_PATTERNS
+        .iter()
+        .copied()
+        .find(|pat| trimmed.starts_with(pat))
+}
+
 /// Rejection reasons surfaced to the caller.
 ///
 /// Why: Each branch carries enough context for the MCP tool to produce a
@@ -503,13 +551,21 @@ fn is_structural_token(token: &str) -> bool {
     //   `.`  — dot in file extensions and semver (`synthesis.rs`, `v0.6.0`)
     //   `>`  — needed for the `>` in `>=2-medium->REQUEST_CHANGES` which
     //           arrives as the LHS of the `=` split (i.e. the lone `>` char).
-    // All other chars (`<`, `!`, `@`, `#`, `~`, `:`) are excluded — none
+    //   `:`  — Rust/module path separator (`::`) inside a slash-path segment,
+    //           e.g. `client/http_client/error.rs::response_or_body_error`
+    //           (issue #2442 real-world false positive: a source-location
+    //           reference, not a credential). A lone or doubled `:` never
+    //           appears in base64/credential alphabets, so admitting it does
+    //           not widen the entropy-heuristic bypass meaningfully — a
+    //           colon-bearing "path segment" still has to pass the slash-path
+    //           structural shape to be exempted at all.
+    // All other chars (`<`, `!`, `@`, `#`, `~`) are excluded — none
     // appear in paths, slugs, or key=value tokens we need to allow, and
     // admitting them would unnecessarily widen the bypass surface.
     fn is_word_segment(s: &str) -> bool {
         !s.is_empty()
             && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>'))
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>' | ':'))
     }
     // True when every `/`-separated segment of `s` is a word segment.
     // Extracted as a named helper so the `=` branch can use it for the RHS
@@ -618,7 +674,37 @@ fn looks_like_secret(token: &str) -> bool {
     // does NOT catch AWS access key IDs — `AKIAIOSFODNN7EXAMPLE` is // pragma: allowlist secret
     // all-uppercase base32 (`has_lower == false`), so it relies entirely on the
     // `akia`/`asia` entries in SECRET_PREFIXES above.
-    has_lower && has_upper && has_digit
+    //
+    // Issue #2442: this fallback used to fire on ANY ≥20-char token that
+    // mixed case + digit, regardless of what other punctuation it carried.
+    // A real-world false positive: an issue/PR/SHA "ledger" reference like
+    // `#2486→PR#2491(e993c18a)` mixes digits, uppercase (`PR`), and lowercase
+    // hex — but no credential format ever contains `#`, arrows, or parens.
+    // Gate the fallback on [`is_plausible_credential_charset`] so it only
+    // fires for tokens shaped like an actual bare credential (alphanumeric
+    // plus the `-`/`_`/`.` separators used by JWTs and slug-style API keys).
+    has_lower && has_upper && has_digit && is_plausible_credential_charset(token)
+}
+
+/// True when every character in `token` could plausibly appear in a bare
+/// credential/API-key string: ASCII alphanumeric, or one of `-`, `_`, `.`
+/// (hyphen/underscore-delimited key segments, JWT `.`-separated parts).
+///
+/// Why (issue #2442): the mixed-case-plus-digit fallback in
+/// [`looks_like_secret`] must not fire on prose punctuation that a real
+/// credential never contains — issue/PR ledger markers (`#`), arrows (`→`,
+/// `->`), parentheses, etc. Restricting the fallback to tokens built only
+/// from this charset keeps it precise without weakening the base64-symbol
+/// branch (which already requires `+`/`/`/`=` and is unaffected by this gate)
+/// or the known-prefix layer (checked earlier, unaffected).
+/// What: returns `true` iff every char is ASCII alphanumeric or in
+/// `{'-', '_', '.'}`.
+/// Test: `ledger_reference_token_not_flagged`, `secret_token_is_blocked`,
+/// `real_secrets_still_blocked_after_1667_fix`.
+fn is_plausible_credential_charset(token: &str) -> bool {
+    token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Produce a short, non-reversible preview of a flagged secret token.

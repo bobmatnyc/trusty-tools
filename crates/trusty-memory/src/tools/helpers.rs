@@ -64,22 +64,31 @@ pub(crate) fn lookup_palace_name(state: &AppState, palace_id: &str) -> String {
 /// Test: `content_gate_blocks_short_no_context`, `content_gate_keeps_long`.
 pub(crate) const CONTENT_GATE_MIN_WORDS: usize = 4;
 
-/// Gate short standalone content unless a `context` wrapper is supplied.
+/// Gate short standalone content unless a `context` wrapper is supplied or
+/// the caller passes `force = true`.
 ///
 /// Why: single-word or very-short standalone user responses ("yes", "ok")
 /// have no standalone memory value (issue #215). Gate them unless a context
-/// is provided.
-/// What: returns `None` if `content` has fewer than [`CONTENT_GATE_MIN_WORDS`]
-/// whitespace-separated tokens AND `context` is `None` (the write should be
-/// skipped). Returns `Some(combined)` where `combined = "<context>\n\n---\n\n<content>"`
-/// when `context` is `Some` and non-empty after trimming. Returns
-/// `Some(content)` unchanged when `content` has at least
-/// [`CONTENT_GATE_MIN_WORDS`] tokens. Tokens are counted on the trimmed
-/// `content` so trailing whitespace doesn't inflate the count.
+/// is provided. Issue #2442: `memory_remember`'s `force` operator override
+/// must bypass this gate the same way it bypasses `dedup_gate` and the
+/// deep `FilterConfig` noise/secret gate — previously `force` was parsed
+/// AFTER this gate ran, so `force = true` writes of short standalone
+/// content were still silently dropped, contradicting the tool's
+/// documented "bypass all content-quality gates" contract.
+/// What: returns `None` if `force` is `false`, `content` has fewer than
+/// [`CONTENT_GATE_MIN_WORDS`] whitespace-separated tokens, AND `context` is
+/// `None` (the write should be skipped). Returns `Some(combined)` where
+/// `combined = "<context>\n\n---\n\n<content>"` when `context` is `Some` and
+/// non-empty after trimming (context wrapping is formatting, not gating, so
+/// it always applies regardless of `force`). Returns `Some(content)`
+/// unchanged when `content` has at least [`CONTENT_GATE_MIN_WORDS`] tokens,
+/// or when `force` is `true`. Tokens are counted on the trimmed `content` so
+/// trailing whitespace doesn't inflate the count.
 /// Test: `content_gate_blocks_short_no_context`,
 /// `content_gate_wraps_short_with_context`,
-/// `content_gate_keeps_long`, `content_gate_blank_context_treated_as_none`.
-pub(crate) fn content_gate(content: &str, context: Option<&str>) -> Option<String> {
+/// `content_gate_keeps_long`, `content_gate_blank_context_treated_as_none`,
+/// `content_gate_force_bypasses_short_content`.
+pub(crate) fn content_gate(content: &str, context: Option<&str>, force: bool) -> Option<String> {
     let trimmed = content.trim();
     let word_count = trimmed.split_whitespace().count();
     // Treat a context that is empty or whitespace-only as "no context" — a
@@ -90,32 +99,11 @@ pub(crate) fn content_gate(content: &str, context: Option<&str>) -> Option<Strin
     if let Some(ctx) = context_clean {
         return Some(format!("{ctx}\n\n---\n\n{content}"));
     }
-    if word_count < CONTENT_GATE_MIN_WORDS {
+    if !force && word_count < CONTENT_GATE_MIN_WORDS {
         return None;
     }
     Some(content.to_string())
 }
-
-/// Patterns whose content should never be stored as standalone memories.
-///
-/// Why (issue #220): the activity panel was being flooded with low-value
-/// Claude Code auto-captures — `Tool use: Bash`, `Tool use: Edit File: …`,
-/// `Claude Code session ended: <uuid>` — that carry no semantic value once
-/// the surrounding turn is gone. They pollute recall results and burn UI
-/// real estate. A blocklist is the cheapest way to filter them at write
-/// time without coordinating with the auto-capture hook source.
-/// What: substring patterns (not regexes) checked via `str::contains` so
-/// the matcher stays branch-predictable and never panics on malformed
-/// input. Patterns are intentionally lower-case-friendly but matched
-/// case-sensitively because the auto-capture hooks always emit the exact
-/// English prefix.
-/// Test: `blocklist_gate_blocks_tool_use`,
-/// `blocklist_gate_blocks_session_ended`,
-/// `blocklist_gate_passes_normal_content`.
-pub(crate) const BLOCKLIST_PATTERNS: &[&str] = &[
-    "Tool use: ",          // Claude Code tool-use captures
-    "Claude Code session", // Session lifecycle events
-];
 
 /// Rolling-window horizon for the dedup gate.
 ///
@@ -163,20 +151,22 @@ pub(crate) const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 /// Why (issue #1481): returns *which* pattern matched (instead of a bare
 /// `bool`) so the caller can name the trigger in the skip envelope rather than
 /// emitting an opaque "blocked pattern" — callers need to know what to remove.
-/// What: returns `Some(pat)` for the first pattern in `BLOCKLIST_PATTERNS`
-/// where `content.contains(pat)`, else `None`. Trimming uses `str::trim_start`
-/// to keep the substring check predictable (the suffixes after the prefix can
-/// vary).
+/// Why (issue #2442): delegates to
+/// [`trusty_common::memory_core::filter::blocklist_match`], the single
+/// prefix-anchored source of truth shared with the dream-cycle retroactive
+/// prune pass. The old local copy matched via `str::contains`
+/// (substring-anywhere), which fired on legitimate content that merely
+/// QUOTED an auto-capture phrase mid-prose (e.g. a coding agent's turn
+/// recapping `"Tool use: Bash"` from its own transcript) — thinning the
+/// recall surface. `blocklist_match` anchors to the start of the trimmed
+/// content instead.
+/// What: thin wrapper around `blocklist_match`.
 /// Test: `blocklist_gate_blocks_tool_use`,
 /// `blocklist_gate_blocks_session_ended`,
 /// `blocklist_gate_passes_normal_content`,
 /// `blocklist_gate_names_matched_pattern`.
 pub(crate) fn blocklist_gate(content: &str) -> Option<&'static str> {
-    let trimmed = content.trim_start();
-    BLOCKLIST_PATTERNS
-        .iter()
-        .copied()
-        .find(|pat| trimmed.contains(pat))
+    trusty_common::memory_core::filter::blocklist_match(content)
 }
 
 /// Dedup gate: returns true when the new content is a near-duplicate of a
