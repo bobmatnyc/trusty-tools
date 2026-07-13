@@ -264,7 +264,10 @@ async fn try_show_picker(
 /// `source_id`), the managed workspace path (for display), and the git root
 /// path (to pass as `repo_url` so the daemon sets `source_id` correctly even
 /// when `tm` is invoked from a subdirectory — #1705 LOW fix).
-/// What: finds the git root, reads `remote.origin.url`, guards that it is a
+/// What: finds a *usable* git root (via [`usable_git_root`] — an ancestor `.git`
+/// is trusted only when `cwd` is genuinely part of that repo's tracked tree, so
+/// an untracked directory nested inside another repo does NOT inherit that
+/// repo's identity — #2534), reads `remote.origin.url`, guards that it is a
 /// GitHub URL, parses `owner/repo` via `parse_github_path`, and returns
 /// `(source_id, workspace_path, git_root)` where `source_id = "owner/repo"`,
 /// `workspace_path = ~/trusty-mpm-projects/<owner>/<repo>` (the canonical base),
@@ -272,12 +275,13 @@ async fn try_show_picker(
 /// Test: `guided_derive_project_returns_none_for_non_git_dir`,
 /// `guided_derive_project_rejects_non_github_remote`,
 /// `guided_derive_project_accepts_github_https_remote`,
-/// `guided_derive_project_returns_some_from_subdir`.
+/// `guided_derive_project_returns_some_from_subdir`,
+/// `guided_derive_project_returns_none_for_untracked_ancestor_subdir`.
 pub(crate) fn derive_project(
     cwd: &std::path::Path,
 ) -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
     use trusty_mpm::daemon::managed_routes::inproject;
-    let git_root = find_git_root(cwd)?;
+    let git_root = usable_git_root(cwd)?;
     let origin_url = inproject::get_origin_url(&git_root).filter(|u| is_github_remote(u))?;
     let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
@@ -614,6 +618,167 @@ fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     (!root.is_empty()).then_some(std::path::PathBuf::from(root))
 }
 
+// ── Ancestor-repo trust guard (#2534) ────────────────────────────────────────
+
+/// Classification of `cwd` with respect to the nearest enclosing git working tree.
+///
+/// Why: [`find_git_root`] happily walks *up* to an ancestor `.git`. That is
+/// correct for a subdirectory the operator actually committed, but WRONG when
+/// `cwd` is an unrelated directory that merely happens to live inside another
+/// repository's working-tree span — e.g. an untracked notes folder `~/Duetto/cto`
+/// that case-folds onto the enclosing repo's tracked `CTO/` dir on a
+/// case-insensitive filesystem (APFS). Trusting the ancestor there made bare
+/// `tm` silently resolve to the ancestor repo's project and offer its sessions
+/// (#2534). This enum lets both `cwd → project` resolution paths distinguish the
+/// three cases with a single git query.
+/// What: `Usable` = `cwd` is the repo root itself, or a subdirectory that IS part
+/// of the tracked tree — safe to inherit the repo's identity. `UntrackedInsideAncestor`
+/// = `cwd` is a strict subdirectory of a git working tree but is NOT in its
+/// tracked tree — must be treated as a non-project. `NotGit` = `cwd` is not inside
+/// any git working tree.
+/// Test: `guided_classify_cwd_usable_for_tracked_subdir`,
+/// `guided_classify_cwd_untracked_for_uncommitted_subdir`,
+/// `guided_classify_cwd_not_git_for_plain_dir`.
+pub(crate) enum CwdProject {
+    /// `cwd` belongs to this git root's tracked tree (or IS the root).
+    Usable(std::path::PathBuf),
+    /// `cwd` sits inside this git root's working tree but is not tracked by it.
+    UntrackedInsideAncestor(std::path::PathBuf),
+    /// `cwd` is not inside any git working tree.
+    NotGit,
+}
+
+/// Classify `cwd` against its nearest enclosing git working tree, verifying
+/// tracked-tree membership before trusting an *ancestor* repo's identity.
+///
+/// Why: closes the ancestor-`.git` trust gap (#2534). `find_git_root` alone
+/// cannot tell an intentionally-nested tracked subdirectory apart from an
+/// unrelated directory that merely falls inside a repo's path span (the APFS
+/// case-fold collision that made `~/Duetto/cto` resolve to the enclosing
+/// `hotstats/hotstats-knowledgebase` repo). The tracked-tree check does.
+/// What: resolves the git root. When the root IS `cwd` (the common top-level
+/// case) it is trusted unconditionally — behavior UNCHANGED. When the root is a
+/// strict ancestor, `cwd`'s path relative to the root is checked for tracked-tree
+/// membership via [`cwd_is_tracked_within`]; a hit is `Usable`, a miss is
+/// `UntrackedInsideAncestor`. A prefix mismatch (e.g. symlink canonicalisation
+/// differences between `current_dir` and `git rev-parse --show-toplevel`) cannot
+/// yield a relpath, so it conservatively trusts the root (`Usable`) rather than
+/// newly refusing a previously-working checkout.
+/// Test: `guided_classify_cwd_usable_for_tracked_subdir`,
+/// `guided_classify_cwd_untracked_for_uncommitted_subdir`,
+/// `guided_classify_cwd_usable_for_repo_root`.
+pub(crate) fn classify_cwd_project(cwd: &std::path::Path) -> CwdProject {
+    let Some(git_root) = find_git_root(cwd) else {
+        return CwdProject::NotGit;
+    };
+    // `git rev-parse --show-toplevel` canonicalises symlinks (e.g. macOS
+    // /var → /private/var); canonicalise `cwd` the same way so the prefix
+    // comparison is apples-to-apples and a strict subdir is not misread as a
+    // prefix mismatch. Both fall back to the raw path if canonicalisation fails.
+    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let root_canon = git_root.canonicalize().unwrap_or_else(|_| git_root.clone());
+    match cwd_canon.strip_prefix(&root_canon) {
+        // `cwd` IS the repo root (empty relpath): the normal top-level case —
+        // trust it unconditionally, behavior unchanged.
+        Ok(rel) if rel.as_os_str().is_empty() => CwdProject::Usable(git_root),
+        // Strict subdirectory: only trust the ancestor when `cwd` is tracked.
+        Ok(rel) => {
+            if cwd_is_tracked_within(&git_root, rel) {
+                CwdProject::Usable(git_root)
+            } else {
+                CwdProject::UntrackedInsideAncestor(git_root)
+            }
+        }
+        // Prefix mismatch (symlink canonicalisation, etc.): cannot compute a
+        // relpath — preserve the pre-existing trust-the-root behavior.
+        Err(_) => CwdProject::Usable(git_root),
+    }
+}
+
+/// Return the git root for `cwd` only when `cwd` genuinely belongs to that repo.
+///
+/// Why: thin adapter so the `cwd → project` derivation paths that only care about
+/// the *usable* root (e.g. [`derive_project`]) need not match the full
+/// [`CwdProject`] enum. Both an untracked-ancestor `cwd` and a non-git `cwd`
+/// collapse to `None` — neither should inherit a git identity.
+/// What: returns `Some(root)` for [`CwdProject::Usable`], `None` otherwise.
+/// Test: covered transitively via `guided_derive_project_returns_none_for_untracked_ancestor_subdir`
+/// and the `classify_cwd_project` unit tests.
+fn usable_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    match classify_cwd_project(cwd) {
+        CwdProject::Usable(root) => Some(root),
+        CwdProject::UntrackedInsideAncestor(_) | CwdProject::NotGit => None,
+    }
+}
+
+/// Is `relpath` (a strict subdirectory of `git_root`) part of the repo's
+/// tracked tree?
+///
+/// Why: the authoritative test for the ancestor-trust guard (#2534). Git's
+/// index/tree is case-SENSITIVE, so on a case-insensitive filesystem an untracked
+/// `cto` directory that shadows a tracked `CTO` still produces NO tree entry for
+/// `cto` — exactly the discriminator needed to reject the case-fold collision.
+/// What: shells `git -C <git_root> ls-tree -d --name-only HEAD -- <relpath>` and
+/// delegates the yes/no decision to the pure [`ls_tree_reports_tracked_dir`].
+/// Fails CLOSED (returns `false`) when git errors or the repo has no `HEAD`
+/// (e.g. a commit-less repo has no tracked tree to belong to), so an
+/// unverifiable ancestor is never trusted.
+/// Test: decision logic is unit-tested via [`ls_tree_reports_tracked_dir`]; the
+/// live-git path is exercised by `guided_classify_cwd_*` integration tests.
+fn cwd_is_tracked_within(git_root: &std::path::Path, relpath: &std::path::Path) -> bool {
+    let rel = relpath.to_string_lossy();
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(git_root)
+        .args(["ls-tree", "-d", "--name-only", "HEAD", "--"])
+        .arg(rel.as_ref())
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            ls_tree_reports_tracked_dir(&String::from_utf8_lossy(&o.stdout))
+        }
+        _ => false,
+    }
+}
+
+/// Pure predicate: does `git ls-tree -d --name-only HEAD -- <relpath>` stdout
+/// indicate the queried path is a tracked directory?
+///
+/// Why: isolates the decision from the git shell-out so the tracked-vs-untracked
+/// rule is exhaustively unit-testable without a live repo (mirrors the
+/// `is_github_remote` pure-helper pattern). `ls-tree` emits one line naming the
+/// path only when a matching tracked tree object exists; it emits nothing for an
+/// untracked (or case-mismatched) path.
+/// What: returns `true` when any output line is non-empty after trimming, `false`
+/// otherwise. Empty stdout ⇒ untracked ⇒ `false`.
+/// Test: `guided_ls_tree_reports_tracked_dir_true_for_named_entry`,
+/// `guided_ls_tree_reports_tracked_dir_false_for_empty`,
+/// `guided_ls_tree_reports_tracked_dir_false_for_blank_lines`.
+pub(crate) fn ls_tree_reports_tracked_dir(ls_tree_stdout: &str) -> bool {
+    ls_tree_stdout.lines().any(|line| !line.trim().is_empty())
+}
+
+/// Build the operator-facing notice for the untracked-ancestor case (#2534).
+///
+/// Why: when `cwd` sits inside another repository's working tree but is not part
+/// of it, silently launching that ancestor repo's project is the bug we are
+/// fixing. The operator needs to know WHY `tm` declined to adopt the enclosing
+/// repo — extracting the wording into a pure helper keeps it unit-testable.
+/// What: returns a two-line stderr notice naming the enclosing `git_root` as the
+/// reason `tm` is not launching that project, and reassuring the operator that
+/// nothing was written.
+/// Test: `guided_untracked_ancestor_message_names_root`,
+/// `guided_untracked_ancestor_message_does_not_claim_launch`.
+pub(crate) fn untracked_ancestor_message(git_root: &std::path::Path) -> String {
+    format!(
+        "tm: this directory is inside another repository's working tree ({}) \
+         but is not part of it — not launching that project.\n\
+         tm: nothing was touched. (Use an explicit `tm` subcommand, or run `tm` \
+         from a tracked directory of the repo you intend to work in.)",
+        git_root.display()
+    )
+}
+
 /// Daemon-unreachable fallback that protects ALL live git checkouts (#1724).
 ///
 /// Why: the guided default MUST NOT deploy framework files into ANY git
@@ -632,7 +797,8 @@ fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
 ///       consistent with the daemon's local-path fast path.
 /// Test: `guided_fallback_never_pollutes_github_git_checkout`,
 /// `guided_fallback_blocks_non_github_git_checkout`,
-/// `guided_fallback_blocks_github_git_from_subdirectory`, and
+/// `guided_fallback_blocks_github_git_from_subdirectory`,
+/// `guided_fallback_untracked_ancestor_does_not_redirect`, and
 /// `guided_fallback_redirect_success_worktree_not_live_checkout` in
 /// `tests_behavior_b_tests.rs`.
 pub(crate) async fn fallback_protected(
@@ -640,40 +806,52 @@ pub(crate) async fn fallback_protected(
     url: &str,
     cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
-    if let Some(git_root) = find_git_root(cwd) {
-        // cwd is inside a git working tree (at any depth) — protect it.
-        // Read the origin remote from the REPO ROOT so subdirectory calls
-        // find the same remote as top-level calls would.
-        //
-        // NOTE: `parse_github_path` accepts *any* remote URL (not just GitHub);
-        // we therefore gate on `is_github_remote` (github.com substring) to
-        // distinguish GitHub from Gitea/GitLab/bare-SSH remotes.
-        let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root);
-
-        if let Some(ref raw_url) = origin_url
-            && is_github_remote(raw_url)
-        {
-            // GitHub project: redirect deploy to the protected managed clone.
-            return redirect_to_managed_clone(client, url, cwd, raw_url).await;
+    let git_root = match classify_cwd_project(cwd) {
+        CwdProject::Usable(root) => root,
+        CwdProject::UntrackedInsideAncestor(root) => {
+            // cwd is inside another repo's working tree but is NOT part of it
+            // (#2534). Do NOT inherit that ancestor's identity — neither the
+            // managed-clone redirect nor the non-GitHub refusal is appropriate,
+            // because this directory is not that project. Route to the same
+            // clean, non-fatal exit as a plain non-git directory.
+            eprintln!("{}", untracked_ancestor_message(&root));
+            return Ok(());
         }
+        CwdProject::NotGit => {
+            // Not inside a git working tree: print a helpful note and exit cleanly (#1839).
+            eprintln!("{}", super::misc::NON_GIT_FALLBACK_HINT);
+            return Ok(());
+        }
+    };
 
-        // Non-GitHub remote or no remote: refuse to write to the live tree.
-        // NOTE: the daemon's reachability is irrelevant here — this branch is
-        // reached even when the daemon is UP. The real reason for refusal is
-        // that `tm` only auto-manages GitHub repositories (#1777).
-        let remote_desc = origin_url.as_deref().unwrap_or("(no remote configured)");
-        eprintln!("{}", non_github_refusal_message(remote_desc));
-        anyhow::bail!(
-            "not auto-managing: live git checkout at '{}' is a non-GitHub repository — \
-             auto-managed clones require a GitHub remote; \
-             use an explicit `tm` subcommand to work here manually",
-            git_root.display()
-        );
+    // cwd is inside a git working tree it genuinely belongs to — protect it.
+    // Read the origin remote from the REPO ROOT so subdirectory calls
+    // find the same remote as top-level calls would.
+    //
+    // NOTE: `parse_github_path` accepts *any* remote URL (not just GitHub);
+    // we therefore gate on `is_github_remote` (github.com substring) to
+    // distinguish GitHub from Gitea/GitLab/bare-SSH remotes.
+    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root);
+
+    if let Some(ref raw_url) = origin_url
+        && is_github_remote(raw_url)
+    {
+        // GitHub project: redirect deploy to the protected managed clone.
+        return redirect_to_managed_clone(client, url, cwd, raw_url).await;
     }
 
-    // Not inside a git working tree: print a helpful note and exit cleanly (#1839).
-    eprintln!("{}", super::misc::NON_GIT_FALLBACK_HINT);
-    Ok(())
+    // Non-GitHub remote or no remote: refuse to write to the live tree.
+    // NOTE: the daemon's reachability is irrelevant here — this branch is
+    // reached even when the daemon is UP. The real reason for refusal is
+    // that `tm` only auto-manages GitHub repositories (#1777).
+    let remote_desc = origin_url.as_deref().unwrap_or("(no remote configured)");
+    eprintln!("{}", non_github_refusal_message(remote_desc));
+    anyhow::bail!(
+        "not auto-managing: live git checkout at '{}' is a non-GitHub repository — \
+         auto-managed clones require a GitHub remote; \
+         use an explicit `tm` subcommand to work here manually",
+        git_root.display()
+    );
 }
 
 /// Redirect the guided-default fallback to the protected managed-clone workspace.
