@@ -35,11 +35,14 @@
 #       `` `ActivityInfo` `` — rejected for having no underscore or for
 #       CamelCase).
 #   Each surviving candidate is checked with `git grep` (cached per crate —
-#   see the fn-name cache section) for a `fn <name>(` (or `fn <name><...>(`
-#   for a generic fn) definition anywhere under the citing file's own crate
-#   (the nearest ancestor directory containing a Cargo.toml; falls back to
-#   the whole tree if none is found). No match = a dangling pointer,
-#   reported as `file:line: cites <name> (crate <dir>)`.
+#   see the name cache section) for a `fn <name>(` (or `fn <name><...>(` for
+#   a generic fn) OR a `mod <name>;` / `mod <name> {` definition anywhere
+#   under the citing file's own crate (the nearest ancestor directory
+#   containing a Cargo.toml; falls back to the whole tree if none is found)
+#   — citing a whole test MODULE (e.g. `` `ctrl::tests::pm_task_tests` ``) is
+#   an established convention in this codebase, just as valid as citing a
+#   single `fn`. No match = a dangling pointer, reported as
+#   `file:line: cites <name> (crate <dir>)`.
 #
 # PRECISION LIMITS (documented per issue #2458, "pragmatic grep is
 #   acceptable"):
@@ -64,17 +67,24 @@
 #     it is never scanned) rather than as a bare backtick span.
 #
 # ALLOWLIST (ratchet, can only shrink — mirrors .line-cap-allowlist.tsv):
-#   `.test-pointer-allowlist.tsv`, one `<path><TAB><line><TAB><name>` row per
-#   grandfathered dangling pointer. A listed pointer that is STILL dangling
-#   is suppressed (OK). A listed pointer that is NO LONGER dangling (fixed,
-#   or the doc comment was corrected/removed) is a FAIL — remove its entry
-#   (`--update` does this automatically). Ordinary `--update` never ADDS a
-#   row; `--seed` is the one-time bootstrap that grandfathers every
-#   currently-dangling pointer in one shot (refuses to run if the allowlist
-#   already has rows, to avoid clobbering hand-curated entries) — used once,
-#   in the PR that introduced this gate, to grandfather the large body of
-#   pre-existing drift a first-ever run surfaces across a codebase this
-#   size. Prefer fixing the doc comment over adding a new row by hand.
+#   `.test-pointer-allowlist.tsv`, one `<path><TAB><name>` row per
+#   grandfathered dangling pointer — keyed on (path, cited-name), NOT line
+#   number. Line numbers drift on every unrelated edit above a grandfathered
+#   row, which would otherwise turn "someone touched an unrelated function
+#   above this doc comment" into a spurious gate failure (this happened
+#   twice in the PR that introduced this gate). A name cited more than once
+#   in the same file collapses to a single row. A listed (path, name) that
+#   is STILL dangling anywhere in that file is suppressed (OK); a listed
+#   (path, name) with NO matching dangling citation left in that file
+#   (fixed, renamed, or the doc comment corrected/removed) is a FAIL —
+#   remove its entry (`--update` does this automatically). Ordinary
+#   `--update` never ADDS a row; `--seed` is the one-time bootstrap that
+#   grandfathers every currently-dangling pointer in one shot (refuses to
+#   run if the allowlist already has rows, to avoid clobbering hand-curated
+#   entries) — used once, in the PR that introduced this gate, to
+#   grandfather the large body of pre-existing drift a first-ever run
+#   surfaces across a codebase this size. Prefer fixing the doc comment over
+#   adding a new row by hand.
 #
 # Usage:
 #   check_test_pointers.sh              # check mode (default); exit 0 = clean
@@ -242,15 +252,21 @@ crate_cache_file() {
 
 # ---------------------------------------------------------------------------
 # name_exists_in_crate: 0 (true) if `fn <name>` (as a whole identifier,
-# followed by `(` or `<` for a generic fn) is defined anywhere among tracked
-# .rs files under crate root $1. Builds/reuses the crate's fn-name cache.
+# followed by `(` or `<` for a generic fn) OR `mod <name>` (followed by `;`
+# or `{`) is defined anywhere among tracked .rs files under crate root $1.
+# Builds/reuses the crate's name cache.
+#
+# Module citations are an established convention in this codebase (e.g.
+# "Test: `ctrl::tests::pm_task_tests` covers ..." citing a whole test
+# module, not a single test fn) — a citation naming a real `mod` block is
+# just as valid a pointer as one naming a real `fn`.
 # ---------------------------------------------------------------------------
 name_exists_in_crate() {
   local crate="$1" name="$2" cache
   cache="$(crate_cache_file "$crate")"
   if [ ! -f "$cache" ]; then
-    git grep -ohE 'fn[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<]' -- "${crate}/*.rs" 2>/dev/null \
-      | sed -E -e 's/^fn[[:space:]]+//' -e 's/[[:space:]]*[(<]$//' \
+    git grep -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
+      | sed -E -e 's/^(fn|mod)[[:space:]]+//' -e 's/[[:space:]]*[(<{;]$//' \
       | sort -u > "$cache" || : > "$cache"
   fi
   grep -qxF "$name" "$cache"
@@ -277,9 +293,23 @@ is_excluded_path() {
 
 # ---------------------------------------------------------------------------
 # scan: run the full lint over the git repo rooted at cwd. Writes violation
-# lines ("<path>\t<line>\t<name>\t<crate>") to the file named by $1, and
-# stale-allowlist-entry lines ("<path>\t<line>\t<name>") to $2. Both files
-# are truncated first. Returns nothing (caller inspects the files).
+# lines ("<path>\t<line>\t<name>\t<crate>", line kept only for the FAIL
+# message's file:line pointer) to the file named by $1, and stale-allowlist-
+# entry lines ("<path>\t<name>") to $2. Both files are truncated first.
+# Returns nothing (caller inspects the files).
+#
+# The allowlist is keyed on (path, cited-name) — NOT line number. A citation
+# repeated at several lines in the same file collapses to one allowlist row
+# (harmless: they're all-or-nothing the same pointer). This is deliberately
+# more coarse than line-exact matching: line numbers drift on every unrelated
+# edit above a grandfathered row (this PR itself needed two manual re-syncs
+# for that reason), which turns "someone edited an unrelated function above
+# this doc comment" into a spurious gate failure. (path, name) is stable
+# across that churn while still catching real regressions — a NEW dangling
+# citation of a name that already has an allowlisted citation elsewhere in
+# the same file is still just as legitimate to suppress (same rot, same
+# fix), and a genuinely different name at any line is a different key so is
+# never accidentally covered by an unrelated row.
 # ---------------------------------------------------------------------------
 scan() {
   local viol_out="$1" stale_out="$2"
@@ -289,6 +319,9 @@ scan() {
   CRATE_FN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpfncache.XXXXXX")"
 
   local allowlist=".test-pointer-allowlist.tsv"
+  local raw
+  raw="$(mktemp "${TMPDIR:-/tmp}/tpraw.XXXXXX")"
+  : > "$raw"
 
   git ls-files '*.rs' | while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -306,56 +339,74 @@ scan() {
         if grep -qxF "$name" "$seen_file" 2>/dev/null; then continue; fi
         printf '%s\n' "$name" >> "$seen_file"
         if ! name_exists_in_crate "$crate" "$name"; then
-          printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$viol_out"
+          printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
         fi
       done
       rm -f "$seen_file"
     done
   done
 
-  # Apply the allowlist: any violation matching an allowlist row is
-  # suppressed; any allowlist row that is NOT among current violations is
-  # stale (the pointer was fixed, or no longer exists) and must be pruned.
   if [ -f "$allowlist" ]; then
-    local filtered
-    filtered="$(mktemp "${TMPDIR:-/tmp}/tpfilt.XXXXXX")"
-    : > "$filtered"
+    # Build the (path, name) allowlist key set once.
+    local allow_keys
+    allow_keys="$(mktemp "${TMPDIR:-/tmp}/tpkeys.XXXXXX")"
+    awk -F'\t' '$0 !~ /^#/ && NF>=2 {print $1"\t"$2}' "$allowlist" | sort -u > "$allow_keys"
+
+    # Violations = raw dangling citations whose (path, name) key is NOT
+    # allowlisted.
     while IFS=$'\t' read -r p l n c; do
       [ -n "${p:-}" ] || continue
-      if grep -F -q -x -- "$(printf '%s\t%s\t%s' "$p" "$l" "$n")" \
-           <(awk -F'\t' '$0 !~ /^#/ && NF>=3 {print $1"\t"$2"\t"$3}' "$allowlist") 2>/dev/null; then
+      if grep -F -q -x -- "$(printf '%s\t%s' "$p" "$n")" "$allow_keys"; then
         : # allowlisted — suppress
       else
-        printf '%s\t%s\t%s\t%s\n' "$p" "$l" "$n" "$c" >> "$filtered"
+        printf '%s\t%s\t%s\t%s\n' "$p" "$l" "$n" "$c" >> "$viol_out"
       fi
-    done < "$viol_out"
-    mv "$filtered" "$viol_out"
+    done < "$raw"
 
-    # Stale detection: for every allowlist row, check whether it is STILL a
-    # genuine dangling pointer by re-deriving candidates fresh — an
-    # allowlist row is stale if the cited name now resolves (fixed) or the
-    # doc line no longer cites it at all.
-    while IFS=$'\t' read -r p l n; do
+    # Stale = allowlist keys with NO matching raw dangling citation anywhere
+    # in that file anymore (fixed, renamed away, or the doc line was
+    # dropped) — must be pruned via --update.
+    local raw_keys
+    raw_keys="$(mktemp "${TMPDIR:-/tmp}/tprawkeys.XXXXXX")"
+    awk -F'\t' '{print $1"\t"$3}' "$raw" | sort -u > "$raw_keys"
+    while IFS=$'\t' read -r p n; do
       [ -n "${p:-}" ] || continue
-      [ -f "$p" ] || { printf '%s\t%s\t%s\n' "$p" "$l" "$n" >> "$stale_out"; continue; }
-      local crate2 blob2 still_bad
-      crate2="$(crate_root_for "$p")"
-      blob2="$(extract_test_blocks "$p" | awk -F'\t' -v want="$l" '$1==want {sub(/^[^\t]*\t/,""); print}')"
-      still_bad=0
-      if [ -n "$blob2" ]; then
-        while IFS= read -r cand; do
-          [ "$cand" = "$n" ] || continue
-          if ! name_exists_in_crate "$crate2" "$n"; then still_bad=1; fi
-        done < <(candidate_names "$blob2")
+      if ! grep -F -q -x -- "$(printf '%s\t%s' "$p" "$n")" "$raw_keys"; then
+        printf '%s\t%s\n' "$p" "$n" >> "$stale_out"
       fi
-      if [ "$still_bad" -eq 0 ]; then
-        printf '%s\t%s\t%s\n' "$p" "$l" "$n" >> "$stale_out"
-      fi
-    done < <(awk -F'\t' '$0 !~ /^#/ && NF>=3 {print $1"\t"$2"\t"$3}' "$allowlist")
+    done < "$allow_keys"
+    rm -f "$allow_keys" "$raw_keys"
+  else
+    cat "$raw" > "$viol_out"
   fi
 
+  rm -f "$raw"
   rm -rf "$CRATE_FN_CACHE_DIR"
   CRATE_FN_CACHE_DIR=""
+}
+
+# ---------------------------------------------------------------------------
+# prune_stale_from_allowlist: rewrite allowlist file $1 in place, dropping
+# every (path, name) row also present in stale-entries file $2 (as produced
+# by scan()'s stale_out). Comment lines and malformed rows pass through
+# unchanged. Factored out of the `--update` entry-point branch so run_self_test
+# can exercise the exact same pruning logic directly against a fixture
+# allowlist, without recursively invoking this script (which would resolve
+# REPO_ROOT via SCRIPT_DIR back to the real repo, not the fixture — see
+# SCRIPT_DIR's definition above).
+# ---------------------------------------------------------------------------
+prune_stale_from_allowlist() {
+  local allowlist="$1" stale_file="$2" new
+  new="$(mktemp "${TMPDIR:-/tmp}/tpnew.XXXXXX")"
+  awk -F'\t' -v stalefile="$stale_file" '
+    BEGIN {
+      while ((getline line < stalefile) > 0) { stale[line] = 1 }
+    }
+    /^#/ { print; next }
+    NF < 2 { print; next }
+    { key = $1"\t"$2; if (!(key in stale)) print }
+  ' "$allowlist" > "$new"
+  mv "$new" "$allowlist"
 }
 
 # ---------------------------------------------------------------------------
@@ -403,11 +454,26 @@ pub fn self_referential_prose() {}
 /// Test: `real_test_exists` exercises `unrelated_field` / `other_symbol`.
 pub fn trailing_prose_after_real_name() {}
 
+/// Test: `tests::module_style_tests` covers this end-to-end (module
+/// citation, not a single fn — an established convention).
+pub fn module_cited_by_whole_test_module() {}
+
+/// Test: `tests::nonexistent_module_tests` is claimed to cover this but the
+/// module was never written.
+pub fn dangling_module_citation() {}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn real_test_exists() {
         assert!(true);
+    }
+
+    mod module_style_tests {
+        #[test]
+        fn covers_it() {
+            assert!(true);
+        }
     }
 }
 EOF
@@ -418,28 +484,89 @@ EOF
   stale="$(mktemp "${TMPDIR:-/tmp}/tpself.stale.XXXXXX")"
   ( cd "$tmp" && scan "$viol" "$stale" )
 
-  # Expect exactly one violation: dangling_test_missing. Nothing else —
-  # not real_test_exists, not the glob/module-ref/prose-only annotation, not
-  # the trailing-prose patterns (field mentions, self-referential tool
-  # names, or symbols named after the real leading test name) that a naive
-  # whole-blob backtick scan would misfire on.
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "1" ]; then
-    echo "self-test FAIL: expected exactly 1 violation, got:" >&2
+  # Expect exactly two violations: dangling_test_missing (fn citation) and
+  # nonexistent_module_tests (mod citation). Nothing else — not
+  # real_test_exists, not the glob/module-ref/prose-only annotation, not the
+  # trailing-prose patterns (field mentions, self-referential tool names, or
+  # symbols named after the real leading test name) that a naive whole-blob
+  # backtick scan would misfire on, and critically NOT module_style_tests —
+  # a real `mod module_style_tests { ... }` citation must resolve, not just
+  # `fn` citations (this is exactly the case that shipped broken: module
+  # citations only ever passed via the allowlist, never verified for real).
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "2" ]; then
+    echo "self-test FAIL: expected exactly 2 violations, got:" >&2
     cat "$viol" >&2
     ok=0
   elif ! grep -q "dangling_test_missing" "$viol"; then
     echo "self-test FAIL: expected violation to cite dangling_test_missing, got:" >&2
     cat "$viol" >&2
     ok=0
-  elif grep -qE "real_test_exists|field_name|Widget|hint_|self_referential|unrelated_field|other_symbol" "$viol"; then
-    echo "self-test FAIL: a trailing-prose symbol was incorrectly flagged as dangling:" >&2
+  elif ! grep -q "nonexistent_module_tests" "$viol"; then
+    echo "self-test FAIL: expected violation to cite nonexistent_module_tests, got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -qE "real_test_exists|field_name|Widget|hint_|self_referential|unrelated_field|other_symbol|module_style_tests" "$viol"; then
+    echo "self-test FAIL: a trailing-prose symbol or the valid module_style_tests citation was incorrectly flagged as dangling:" >&2
     cat "$viol" >&2
     ok=0
   fi
   rm -f "$viol" "$stale"
 
+  # --- allowlist ratchet: both properties, keyed on (path, name) only -----
+  # 1. A still-genuinely-dangling citation that IS allowlisted must be
+  #    suppressed from violations, while an unrelated, non-allowlisted
+  #    citation in the SAME file (nonexistent_module_tests) must still be
+  #    flagged — proving suppression is scoped to the exact (path, name)
+  #    key, not a blanket per-file pass.
+  # 2. An allowlisted (path, name) row whose name is no longer among the
+  #    file's dangling citations (phantom_fixed_pointer — never cited at
+  #    all, standing in for "the doc comment was corrected") must be
+  #    reported stale, and `--update` must prune exactly that row while
+  #    leaving the still-valid dangling_test_missing row untouched.
+  local allowlist_path="$tmp/.test-pointer-allowlist.tsv"
+  {
+    printf 'crates/fixture/src/lib.rs\tdangling_test_missing\n'
+    printf 'crates/fixture/src/lib.rs\tphantom_fixed_pointer\n'
+  } > "$allowlist_path"
+
+  local viol2 stale2
+  viol2="$(mktemp "${TMPDIR:-/tmp}/tpself.viol2.XXXXXX")"
+  stale2="$(mktemp "${TMPDIR:-/tmp}/tpself.stale2.XXXXXX")"
+  ( cd "$tmp" && scan "$viol2" "$stale2" )
+
+  if grep -q "dangling_test_missing" "$viol2"; then
+    echo "self-test FAIL: dangling_test_missing is allowlisted but was still reported as a violation:" >&2
+    cat "$viol2" >&2
+    ok=0
+  elif ! grep -q "nonexistent_module_tests" "$viol2"; then
+    echo "self-test FAIL: nonexistent_module_tests is NOT allowlisted but was suppressed (allowlist not scoped to (path,name)):" >&2
+    cat "$viol2" >&2
+    ok=0
+  elif [ "$(wc -l < "$stale2" | tr -d ' ')" != "1" ] || ! grep -q "phantom_fixed_pointer" "$stale2"; then
+    echo "self-test FAIL: expected exactly 1 stale entry (phantom_fixed_pointer), got:" >&2
+    cat "$stale2" >&2
+    ok=0
+  fi
+
   if [ "$ok" -eq 1 ]; then
-    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, prose/glob/module-ref ignored)."
+    # Feed scan()'s own stale2 output straight into the real pruning
+    # function — an end-to-end exercise of the exact code path --update
+    # runs, not a hand-rolled duplicate of its expected input.
+    prune_stale_from_allowlist "$allowlist_path" "$stale2"
+    if grep -q "phantom_fixed_pointer" "$allowlist_path"; then
+      echo "self-test FAIL: --update did not prune the stale phantom_fixed_pointer row:" >&2
+      cat "$allowlist_path" >&2
+      ok=0
+    elif ! grep -q "dangling_test_missing" "$allowlist_path"; then
+      echo "self-test FAIL: --update incorrectly pruned the still-valid dangling_test_missing row:" >&2
+      cat "$allowlist_path" >&2
+      ok=0
+    fi
+  fi
+  rm -f "$viol2" "$stale2"
+
+  if [ "$ok" -eq 1 ]; then
+    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose/glob/module-ref ignored, allowlist ratchet suppresses/prunes correctly by (path,name))."
     return 0
   fi
   return 1
@@ -491,7 +618,7 @@ if [ "$MODE" = "seed" ]; then
   # hand-curated entries; use --update to prune, or edit the TSV directly.
   existing_rows=0
   if [ -f "$ALLOWLIST" ]; then
-    existing_rows="$(awk -F'\t' '$0 !~ /^#/ && NF>=3' "$ALLOWLIST" | wc -l | tr -d ' ')"
+    existing_rows="$(awk -F'\t' '$0 !~ /^#/ && NF>=2' "$ALLOWLIST" | wc -l | tr -d ' ')"
   fi
   if [ "${existing_rows:-0}" -gt 0 ]; then
     echo "check_test_pointers --seed: refusing — $ALLOWLIST already has ${existing_rows} row(s). Remove it first (or edit by hand) if you really intend to re-seed." >&2
@@ -500,8 +627,11 @@ if [ "$MODE" = "seed" ]; then
   {
     echo "# .test-pointer-allowlist.tsv — grandfathered dangling Test: doc-comment"
     echo "# pointers (issue #2458)."
-    echo "# Format: <relative/path><TAB><line><TAB><cited-test-name>  (one row per"
-    echo "# grandfathered dangling pointer)."
+    echo "# Format: <relative/path><TAB><cited-test-name>  (one row per grandfathered"
+    echo "# dangling pointer). Keyed on (path, name) — NOT line number: a repeated"
+    echo "# citation of the same name at several lines in one file collapses to a"
+    echo "# single row, and unrelated edits that shift line numbers above a row never"
+    echo "# spuriously fail the gate (see scan()'s doc comment in the script)."
     echo "# A row is grandfathered ONLY when fixing it genuinely requires writing a"
     echo "# new test first — prefer fixing the doc comment (correct the name, or drop"
     echo "# the reference) over adding an entry here."
@@ -513,9 +643,9 @@ if [ "$MODE" = "seed" ]; then
     echo "# this many pre-existing dangling pointers across a workspace where the"
     echo "# Test: convention was never mechanically checked before. New pointers"
     echo "# introduced from this point on are NOT grandfathered — fix them for real."
-    awk -F'\t' '{print $1"\t"$2"\t"$3}' "$VIOL" | sort -u
+    awk -F'\t' '{print $1"\t"$3}' "$VIOL" | sort -u
   } > "$ALLOWLIST"
-  seeded="$(wc -l < "$VIOL" | tr -d ' ')"
+  seeded="$(awk -F'\t' '{print $1"\t"$3}' "$VIOL" | sort -u | wc -l | tr -d ' ')"
   echo "check_test_pointers --seed: wrote $ALLOWLIST with ${seeded} grandfathered row(s)."
   exit 0
 fi
@@ -525,16 +655,7 @@ if [ "$MODE" = "update" ]; then
     echo "check_test_pointers --update: no stale allowlist entries to prune."
     exit 0
   fi
-  NEW="$(mktemp "${TMPDIR:-/tmp}/tpnew.XXXXXX")"
-  awk -F'\t' -v stalefile="$STALE" '
-    BEGIN {
-      while ((getline line < stalefile) > 0) { stale[line] = 1 }
-    }
-    /^#/ { print; next }
-    NF < 3 { print; next }
-    { key = $1"\t"$2"\t"$3; if (!(key in stale)) print }
-  ' "$ALLOWLIST" > "$NEW"
-  mv "$NEW" "$ALLOWLIST"
+  prune_stale_from_allowlist "$ALLOWLIST" "$STALE"
   pruned="$(wc -l < "$STALE" | tr -d ' ')"
   echo "check_test_pointers --update: pruned ${pruned} stale entr$([ "$pruned" = "1" ] && echo y || echo ies) from $ALLOWLIST."
   exit 0
@@ -545,16 +666,16 @@ violations=0
 if [ -s "$VIOL" ]; then
   while IFS=$'\t' read -r p l n c; do
     [ -n "$p" ] || continue
-    echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` found in crate \`${c}\`." >&2
+    echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` or \`mod ${n}\` found in crate \`${c}\`." >&2
     violations=$((violations + 1))
   done < "$VIOL"
 fi
 
 stale=0
 if [ -s "$STALE" ]; then
-  while IFS=$'\t' read -r p l n; do
+  while IFS=$'\t' read -r p n; do
     [ -n "$p" ] || continue
-    echo "FAIL: ${p}:${l}: \`${n}\` is allowlisted in .test-pointer-allowlist.tsv but is no longer dangling — remove its entry (run --update)." >&2
+    echo "FAIL: ${p}: \`${n}\` is allowlisted in .test-pointer-allowlist.tsv but is no longer dangling anywhere in this file — remove its entry (run --update)." >&2
     stale=$((stale + 1))
   done < "$STALE"
 fi
