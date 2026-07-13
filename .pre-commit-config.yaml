@@ -74,7 +74,7 @@ repos:
   - repo: local
     hooks:
       - id: test-pointers
-        name: Test: doc-comment pointer lint
+        name: "Test: doc-comment pointer lint"
         entry: scripts/check_test_pointers.sh
         language: system
         pass_filenames: false

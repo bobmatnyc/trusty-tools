@@ -25,11 +25,11 @@ concurrency:
 
 jobs:
   test-pointers:
-    name: Test: doc-comment pointer lint
+    name: "Test: doc-comment pointer lint"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
 
-      - name: Lint Test: doc-comment pointers against real test names
+      - name: "Lint Test: doc-comment pointers against real test names"
         run: bash scripts/check_test_pointers.sh
