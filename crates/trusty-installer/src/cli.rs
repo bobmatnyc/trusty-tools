@@ -238,11 +238,9 @@ pub enum Commands {
     #[command(subcommand)]
     Stack(StackCmd),
 
-    /// Read-only effective merged config for each member (secrets redacted). (DOC-3 §7)
-    Config {
-        /// Specific member(s); omit for all.
-        members: Vec<String>,
-    },
+    /// Read-only effective merged config for each member (secrets redacted).
+    /// (DOC-3 §7) Also hosts the `keys` sub-feature (#2405).
+    Config(ConfigArgs),
 
     /// One-line stack summary (verdict + stack version). (DOC-4 sugar)
     Status,
@@ -343,6 +341,48 @@ pub enum StackCmd {
         /// Scope the sweep to a single named member.
         member: Option<String>,
     },
+}
+
+/// Args for `trusty-installer config` (DOC-3 §7 + #2405).
+///
+/// Why: `config` already means "read-only effective merged config for each
+/// stack member" here — a different domain than the universal
+/// inference-provider credential CLI (epic #2400). Rather than mount the
+/// whole-grammar `ConfigCommand` (which would collide on the `config` node),
+/// this nests only the embeddable `keys` feature as an optional subcommand
+/// alongside the pre-existing bare `members` positional, so both grammars
+/// coexist: `trusty-installer config [members...]` (unchanged) and
+/// `trusty-installer config keys <verb>` (new).
+/// What: `members` is the pre-existing bare-positional member filter;
+/// `action` is `Some(ConfigSubcommand::Keys(..))` only when the first token
+/// after `config` is literally `keys` — clap's derive tries subcommand
+/// matching before falling back to positional collection, and no stack
+/// member is named `keys`, so the two grammars never collide in practice.
+/// Test: `cli_tests::parse_config` (bare + members unchanged),
+/// `cli_tests::parse_config_keys` (new `keys` nesting).
+#[derive(Debug, clap::Args)]
+pub struct ConfigArgs {
+    /// Specific member(s); omit for all. Not used together with `keys`.
+    pub members: Vec<String>,
+
+    #[command(subcommand)]
+    pub action: Option<ConfigSubcommand>,
+}
+
+/// The `trusty-installer config` sub-feature layer (#2405).
+///
+/// Why: keeps room for future `config` sub-features without touching
+/// [`ConfigArgs`]'s bare-members grammar.
+/// What: today only `keys` — the universal inference-provider credential CLI
+/// (`set`/`list`/`test`/`unset`), nested via trusty-common's embeddable
+/// `ConfigKeysCommand`.
+/// Test: `cli_tests::parse_config_keys`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigSubcommand {
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Keys(trusty_common::inference::config::ConfigKeysCommand),
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────

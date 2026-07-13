@@ -52,6 +52,15 @@ pub enum ConfigAction {
         /// New value in MB, or 0/off/none/disable/unlimited to disable
         value: String,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405). Nested here (rather than as a
+    /// top-level `Config(ConfigCommand)` mount) because `trusty-search`
+    /// already owns `config` for daemon runtime settings (`get`/`set`
+    /// memory-limit above) — see the "mount `keys` under an existing
+    /// `config`" recipe in `trusty_common::inference::config`.
+    Keys(trusty_common::inference::config::ConfigKeysCommand),
 }
 
 /// Supported configuration keys.
@@ -142,6 +151,7 @@ pub async fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Get { key } => handle_config_get(key).await,
         ConfigAction::Set { key, value } => handle_config_set(key, &value).await,
+        ConfigAction::Keys(cmd) => cmd.run().await,
     }
 }
 

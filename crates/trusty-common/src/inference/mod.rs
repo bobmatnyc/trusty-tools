@@ -47,7 +47,7 @@ pub mod types;
 #[cfg(feature = "inference-client")]
 pub use adapter::InferenceAdapter;
 #[cfg(feature = "config-cli")]
-pub use config::ConfigCommand;
+pub use config::{ConfigCommand, ConfigKeysCommand};
 #[cfg(feature = "inference-client")]
 pub use configurator::{AdapterFactory, Configurator, ResolvedProvider, provider_for};
 #[cfg(feature = "inference-client")]

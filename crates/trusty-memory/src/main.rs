@@ -534,12 +534,16 @@ async fn main() -> Result<()> {
     // anything there. `start` self-spawns a detached `serve --foreground` child
     // and exits immediately; the very brief window makes the notice useless.
     // `upgrade` does its own fresh check, so we skip the throttled notice to
-    // avoid a redundant second check on the same run.
+    // avoid a redundant second check on the same run. `config` (#2405, LOW fix
+    // from PR #2528 review) is also excluded — the universal credential CLI
+    // must be genuinely offline, so `config keys list` never triggers a
+    // network update-check call.
     // The check is throttled to once per 24 h (on-disk cache), so on a
     // typical run this is a sub-millisecond cache-hit with no network I/O.
     let is_daemon_path = matches!(cli.command, Command::Serve { .. } | Command::Start);
     let is_upgrade = matches!(cli.command, Command::Upgrade { .. });
-    if !is_daemon_path && !is_upgrade {
+    let is_config = matches!(cli.command, Command::Config(_));
+    if !is_daemon_path && !is_upgrade && !is_config {
         if let Some(info) = trusty_common::update::check_throttled(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),

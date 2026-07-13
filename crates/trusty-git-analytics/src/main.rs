@@ -263,15 +263,22 @@ async fn run() -> anyhow::Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.to_string()));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    // Update check: tga has no MCP stdio transport — all subcommands are
+    // Update check: tga has no MCP stdio transport — all other subcommands are
     // human-facing interactive CLI commands where a release notice is
-    // appropriate. The check is throttled to once per 24 h (on-disk cache) so
-    // on a typical run this costs only a sub-millisecond cache file read.
-    if let Some(info) =
-        trusty_common::update::check_throttled(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-            .await
-    {
-        eprintln!("{}", trusty_common::update::notice(&info));
+    // appropriate. `config` (#2405, LOW fix from PR #2528 review) is the one
+    // exception — the universal credential CLI must be genuinely offline, so
+    // `tga config keys list` never triggers a network update-check call. The
+    // check is throttled to once per 24 h (on-disk cache) so on a typical run
+    // this costs only a sub-millisecond cache file read.
+    if !matches!(cli.command, Commands::Config(_)) {
+        if let Some(info) = trusty_common::update::check_throttled(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        {
+            eprintln!("{}", trusty_common::update::notice(&info));
+        }
     }
 
     // Load configuration (fall back to default if file is missing).
