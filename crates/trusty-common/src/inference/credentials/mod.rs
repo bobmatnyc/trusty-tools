@@ -30,7 +30,10 @@ mod memory_store;
 mod redact;
 mod resolver;
 
-pub use dotenv::{find_workspace_env_local, load_env_from_path, load_env_local_once};
+pub use dotenv::{
+    env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
+    read_var_from_env_local,
+};
 pub use file_store::FileKeyStore;
 #[cfg(feature = "keyring-store")]
 pub use keyring_store::KeyringStore;

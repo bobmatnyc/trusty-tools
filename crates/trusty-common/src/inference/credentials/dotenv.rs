@@ -86,6 +86,48 @@ pub fn load_env_local_once() {
     });
 }
 
+/// Read a single variable's value from a specific `.env.local` file **without**
+/// mutating the process environment.
+///
+/// Why: the `config keys list` verb reports which tier (process env >
+/// `.env.local` > secure store) currently supplies each provider's key. To
+/// distinguish "set in the shell env" from "loaded from `.env.local`" honestly,
+/// the lister must inspect the file directly rather than call
+/// [`load_env_local_once`] (which would fold the file's values into the process
+/// env and erase the distinction). This hermetic, path-injectable reader is that
+/// inspection primitive.
+/// What: parses `path` with `dotenvy`'s non-mutating iterator, skipping malformed
+/// entries, and returns the first non-empty value bound to `var`, or `None` when
+/// the file is unreadable, has no such key, or binds it to an empty value.
+/// Test: `dotenv_tests::read_var_from_env_local_finds_value`,
+/// `dotenv_tests::read_var_from_env_local_absent_is_none`.
+pub fn read_var_from_env_local(path: &Path, var: &str) -> Option<String> {
+    let iter = dotenvy::from_path_iter(path).ok()?;
+    iter.flatten()
+        .find(|(k, _)| k == var)
+        .map(|(_, v)| v)
+        .filter(|v| !v.is_empty())
+}
+
+/// Value of `var` in the nearest ancestor `.env.local`, without mutating the
+/// process environment.
+///
+/// Why: the production `.env.local` tier check for `config keys list` — it must
+/// use the same cwd-upward search [`load_env_local_once`] uses so the reported
+/// tier matches what resolution would actually pick, but observe the file
+/// read-only.
+/// What: searches upward from the current working directory via
+/// [`find_workspace_env_local`] and delegates to [`read_var_from_env_local`];
+/// `None` when there is no `.env.local` or it does not bind `var`.
+/// Test: covered structurally via `read_var_from_env_local` (the cwd-search wrap
+/// is not independently unit tested — it depends on the real cwd, exactly like
+/// [`load_env_local_once`]).
+pub fn env_local_value(var: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let path = find_workspace_env_local(&cwd)?;
+    read_var_from_env_local(&path, var)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +153,34 @@ mod tests {
     fn absent_env_local_returns_none() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert_eq!(find_workspace_env_local(tmp.path()), None);
+    }
+
+    /// Why: the `config keys list` tier check must read a var out of a
+    /// `.env.local` file WITHOUT touching the process environment.
+    /// Test: itself.
+    #[test]
+    fn read_var_from_env_local_finds_value() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join(".env.local");
+        std::fs::write(&path, "OPENAI_API_KEY=from-dotenv\nEMPTY=\n").unwrap();
+        assert_eq!(
+            read_var_from_env_local(&path, "OPENAI_API_KEY"),
+            Some("from-dotenv".to_string())
+        );
+        // The read is non-mutating: the process env is untouched.
+        assert!(std::env::var("OPENAI_API_KEY").is_err());
+    }
+
+    /// Why: an absent key (or one bound to an empty value) must read back as
+    /// `None`, not as a spurious empty-string "configured" signal.
+    /// Test: itself.
+    #[test]
+    fn read_var_from_env_local_absent_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join(".env.local");
+        std::fs::write(&path, "EMPTY=\n").unwrap();
+        assert_eq!(read_var_from_env_local(&path, "EMPTY"), None);
+        assert_eq!(read_var_from_env_local(&path, "MISSING"), None);
     }
 
     /// Why: `load_env_from_path` must set a var not already in the process
