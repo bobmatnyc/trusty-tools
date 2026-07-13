@@ -177,6 +177,13 @@ mod tests {
     /// Why: deleting the user's home directory is catastrophic and must be
     /// impossible regardless of what the managed root is set to.
     /// Test: this function IS the test.
+    ///
+    /// Why serial (issue #2461 sweep): this test reads `dirs::home_dir()`
+    /// itself AND `is_safe_to_remove` reads it again internally — two
+    /// separate reads of the process-wide `HOME` env var that must observe
+    /// the same value. Serialized against other `HOME`-redirecting tests in
+    /// this binary for the same reason as the `core::paths` sweep.
+    #[serial_test::serial]
     #[test]
     fn is_safe_to_remove_rejects_home() {
         if let Some(home) = dirs::home_dir() {

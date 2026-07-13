@@ -91,16 +91,55 @@ struct CacheEntry {
 ///
 /// Why: We need a stable, OS-appropriate location that survives reboots and
 /// is writable without elevated privileges.
-/// What: Returns `<cache_dir>/trusty-tools/update-check/<crate_name>.json`.
-/// Falls back to `<temp_dir>/trusty-tools-update-check/<crate_name>.json`
-/// when `dirs::cache_dir()` returns `None` (rare in containers).
+/// What: Returns `<cache_base>/trusty-tools/update-check/<crate_name>.json`,
+/// where `cache_base` is [`cache_base_dir`] (the real OS cache dir in
+/// production, an isolated per-test-process tempdir under `cfg(test)`).
 /// Test: Indirectly covered by the cache read/write helpers.
 fn cache_path(crate_name: &str) -> PathBuf {
-    let base = dirs::cache_dir()
-        .unwrap_or_else(|| std::env::temp_dir().join("trusty-tools-update-check-fallback"));
-    base.join("trusty-tools")
+    cache_base_dir()
+        .join("trusty-tools")
         .join("update-check")
         .join(format!("{crate_name}.json"))
+}
+
+/// Resolve the base directory [`cache_path`] nests under.
+///
+/// Why: `dirs::cache_dir()` is a single machine-wide, real directory (e.g.
+/// `~/Library/Caches` on macOS). Issue #2460: unit tests that exercise the
+/// cache freshness/round-trip logic previously wrote into that real,
+/// process-external directory, so parallel test threads (all racing to
+/// `create_dir_all` the same parent path for the first time) and even a real
+/// `trusty-*` CLI invocation running concurrently on the same machine could
+/// collide. Falls back to `<temp_dir>/trusty-tools-update-check-fallback`
+/// in production when `dirs::cache_dir()` returns `None` (rare in
+/// containers).
+/// What: In production, resolves the real OS cache dir. Under `cfg(test)`,
+/// resolves to one isolated tempdir per test *process* (not per test),
+/// created exactly once via [`OnceLock`](std::sync::OnceLock) — which is
+/// itself safe against concurrent first-callers — so every test in this
+/// binary shares an isolated base that never touches the real cache dir.
+/// Test: exercised indirectly by every cache test in `tests.rs`;
+/// `cache_fresh_returns_some_when_newer` and `cache_round_trip` are the ones
+/// that previously flaked under `--test-threads` > 1.
+#[cfg(not(test))]
+fn cache_base_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("trusty-tools-update-check-fallback"))
+}
+
+#[cfg(test)]
+fn cache_base_dir() -> PathBuf {
+    use std::sync::OnceLock;
+    static BASE: OnceLock<PathBuf> = OnceLock::new();
+    BASE.get_or_init(|| {
+        // `keep()` persists the tempdir (skips the on-drop cleanup) for the
+        // remaining lifetime of the test process; the OS reclaims it like
+        // any other leftover `TMPDIR` entry.
+        tempfile::tempdir()
+            .expect("create isolated test cache dir")
+            .keep()
+    })
+    .clone()
 }
 
 // --- Cache I/O ---

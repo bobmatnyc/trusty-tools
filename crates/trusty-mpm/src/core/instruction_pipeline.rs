@@ -579,12 +579,41 @@ mod tests {
         assert!(!prompt.contains("ticketing_agent"));
     }
 
+    // Why serial + fake-HOME (extra sweep hit — review-gate report on top of
+    // #2459/#2460/#2461): `install_system_prompt()` resolves `dirs::home_dir()`
+    // internally and previously wrote straight into the REAL
+    // `$HOME/.trusty-mpm/framework/instructions/` — both polluting the
+    // developer's real home directory on every test run AND racing with any
+    // other test in this binary that redirects `HOME` to a temp dir
+    // concurrently (same class as `manifest_expands_tilde`, #2459). Redirect
+    // `HOME` to an isolated temp dir for the duration of the test and join
+    // the crate's shared `#[serial_test::serial]` lock so no other
+    // HOME-mutating test can interleave.
+    #[serial_test::serial]
     #[test]
     fn install_system_prompt_writes_file() {
         // Why: `tm launch` depends on `install_system_prompt` regenerating
         // INSTRUCTIONS.md; this asserts it writes a non-empty file under the
         // expected `~/.trusty-mpm/framework/instructions/` path.
+        let fake_home = TempDir::new().expect("create fake home");
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`, so no other test
+        // thread observes or mutates HOME concurrently. Restored below
+        // regardless of panics via the `HomeGuard` drop impl.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        struct HomeGuard(Option<String>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(p) => unsafe { std::env::set_var("HOME", p) },
+                    None => unsafe { std::env::remove_var("HOME") },
+                }
+            }
+        }
+        let _guard = HomeGuard(prev_home);
+
         let out = install_system_prompt().expect("install succeeds");
+        assert!(out.starts_with(fake_home.path()));
         assert!(out.ends_with("INSTRUCTIONS.md"));
         assert!(out.exists());
         let on_disk = fs::read_to_string(&out).unwrap();
