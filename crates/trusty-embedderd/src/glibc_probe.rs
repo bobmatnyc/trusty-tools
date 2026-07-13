@@ -120,7 +120,14 @@ mod linux_gnu {
 
     /// Fail fast if the host glibc is older than the bundled ONNX Runtime
     /// requires. See the module-level doc for the full rationale.
-    pub(super) fn check_bundled_ort_glibc_compat() -> Result<()> {
+    ///
+    /// `pub(crate)` (not `pub(super)`): this is re-exported via `pub(crate)
+    /// use linux_gnu::check_bundled_ort_glibc_compat;` below so `lib.rs` can
+    /// call it as `glibc_probe::check_bundled_ort_glibc_compat()` — a
+    /// re-export can never widen an item's visibility beyond its own
+    /// declared visibility, so the definition here must be at least as
+    /// permissive (`pub(crate)`) as the re-export.
+    pub(crate) fn check_bundled_ort_glibc_compat() -> Result<()> {
         let Some(raw) = runtime_glibc_version_string() else {
             // Could not determine the version — don't block startup on an
             // unrelated probe failure; fall through to the (still-active)
