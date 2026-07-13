@@ -84,7 +84,7 @@ pub mod worktree_naming;
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{
     DEFAULT_CONSOLE_ADDR, DEFAULT_DAEMON_ADDR, DEFAULT_DAEMON_URL, GATEWAY_PATH,
-    default_daemon_addr, lock_file_path, resolve_daemon_url, resolve_daemon_url_probing,
-    resolve_daemon_url_via_gateway,
+    default_daemon_addr, explicit_url_from_env, lock_file_path, resolve_daemon_url,
+    resolve_daemon_url_probing, resolve_daemon_url_via_gateway,
 };
 pub use error::{Error, Result};

@@ -259,17 +259,25 @@ async fn main() -> anyhow::Result<()> {
 
     let client = reqwest::Client::new();
     // Resolve the daemon URL once with gateway-first probing:
-    //   1. Explicit --url/TRUSTY_MPM_URL that is non-empty AND not equal to
-    //      DEFAULT_DAEMON_URL → use directly, bypassing the gateway.
-    //      (A value equal to DEFAULT_DAEMON_URL is treated as "no real override"
-    //      — the clap-injected default — so the gateway probe still runs.)
+    //   1. Explicit --url/TRUSTY_MPM_URL, whenever it was actually supplied
+    //      (`cli.url` is `Option<String>` — see its doc, #2487) → use it
+    //      directly, bypassing the gateway entirely. There is no comparison
+    //      against DEFAULT_DAEMON_URL: `Some` here always means the operator
+    //      made a real choice, even one that happens to equal the default URL
+    //      verbatim. Before #2487 `cli.url` was a plain `String` with
+    //      `default_value = DEFAULT_URL`, so an explicit
+    //      `TRUSTY_MPM_URL=http://127.0.0.1:7880` was indistinguishable from
+    //      "nothing was set" and fell through to the gateway probe below —
+    //      silently rerouting every `tm` subcommand (including `tm projects
+    //      config … set`) through the trusty-console proxy on port 7788
+    //      instead of the daemon on 7880.
     //   2. trusty-console gateway (`http://{console}/api/mpm`) if the console is
     //      running and the daemon is reachable through it (#1849 Phase 2).
     //   3. Lock file (daemon may bind to an ephemeral port) → default.
     // The gateway path routes all `tm` traffic through the unified web UI while
     // preserving full direct-fallback behaviour when the console is absent.
     // Stale TRUSTY_MPM_URL values (#1731) are still probed before falling back.
-    let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, Some(&cli.url)).await;
+    let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, cli.url.as_deref()).await;
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`
@@ -310,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
             url: tui_url,
             interval_ms,
         }) => {
-            let resolved = trusty_mpm::core::resolve_daemon_url(Some(&tui_url));
+            let resolved = trusty_mpm::core::resolve_daemon_url(tui_url.as_deref());
             trusty_mpm::tui::run(resolved, interval_ms).await
         }
         Some(Command::Gui) => launch_gui(),

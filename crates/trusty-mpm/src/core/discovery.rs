@@ -7,8 +7,26 @@
 //! default. `resolve_daemon_url_via_gateway` additionally tries the
 //! trusty-console gateway first so all traffic can flow through the
 //! unified web UI when it is running.
+//!
+//! Issue #2487: every resolver here takes `explicit: Option<&str>` and MUST
+//! be fed by a caller that only produces `Some` when the operator actually
+//! supplied `--url` / `TRUSTY_MPM_URL` — never by a clap `default_value`
+//! string. Prior to #2487 the resolvers tried to reconstruct that distinction
+//! themselves by comparing the value against [`DEFAULT_DAEMON_URL`], which
+//! silently broke whenever an operator's real override happened to equal the
+//! default (`TRUSTY_MPM_URL=http://127.0.0.1:7880`, itself the documented
+//! default) — the value looked identical to "nothing was passed", so
+//! `resolve_daemon_url_via_gateway` fell through to the trusty-console
+//! gateway probe and rerouted traffic through the console proxy (port 7788)
+//! instead of the daemon (port 7880). The fix: every CLI-facing `url` field
+//! is `Option<String>` with no `default_value` (clap only fills `Some` on a
+//! real flag/env hit), and [`explicit_url_from_env`] is the single shared
+//! helper for the few call sites that read `TRUSTY_MPM_URL` before clap has
+//! even parsed (`tm projects` bare-TUI interception). No resolver in this
+//! module compares `explicit` against `DEFAULT_DAEMON_URL` anymore.
 //! Test: The unit tests below cover all resolution paths, including the
-//! gateway probe, explicit-override bypass, and direct fallback.
+//! gateway probe, explicit-override bypass (including a value equal to the
+//! default), and direct fallback.
 
 use std::path::PathBuf;
 
@@ -95,20 +113,46 @@ pub fn lock_file_path() -> PathBuf {
         .join("daemon.lock")
 }
 
+/// Read `TRUSTY_MPM_URL` directly from the process environment.
+///
+/// Why (#2487): clap's `env = "TRUSTY_MPM_URL"` attribute on an
+/// `Option<String>` field is the normal way a `tm` subcommand picks up the
+/// override, but a couple of call sites resolve the daemon URL BEFORE
+/// `Cli::try_parse()` runs — namely `tm projects` bare-TUI interception
+/// (`commands::projects::launch_bare_tui`), which must fire ahead of clap so
+/// the exact clap "requires a subcommand" usage error is preserved for a
+/// non-interactive bare invocation (see that function's doc). Those sites
+/// need the identical "did the operator actually set this" semantics as
+/// every clap-parsed field, so they call this helper instead of
+/// hand-rolling their own `std::env::var` read (and risking a different
+/// empty-string or trim rule than the rest of the resolvers).
+/// What: `std::env::var("TRUSTY_MPM_URL")`, trimmed, with an empty result
+/// treated the same as "unset" (`None`) — matching every `resolve_daemon_url*`
+/// empty-string check.
+/// Test: `explicit_url_from_env_reads_set_var`,
+/// `explicit_url_from_env_treats_empty_as_unset`.
+pub fn explicit_url_from_env() -> Option<String> {
+    std::env::var("TRUSTY_MPM_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
 /// Resolve the daemon URL in priority order:
-/// 1. `explicit` — from `--url` flag or `TRUSTY_MPM_URL` env var (if Some,
-///    non-empty, AND not just the default). A caller passing the clap default
-///    value is treated the same as passing None so the lock file can win.
+/// 1. `explicit` — from `--url` flag or `TRUSTY_MPM_URL` env var (`Some`,
+///    non-empty). Every CLI-facing `url` field is `Option<String>` with NO
+///    `default_value` (issue #2487) — clap only produces `Some` when the flag
+///    or env var was actually supplied, so `Some` here always means the
+///    operator made a real, deliberate choice, even when that choice happens
+///    to equal [`DEFAULT_DAEMON_URL`] verbatim. There is no longer a
+///    string-equality heuristic trying to guess intent from the value.
 /// 2. Lock file `~/.trusty-mpm/daemon.lock` (if present and PID alive)
 /// 3. `DEFAULT_DAEMON_URL`
 pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
-    // 1. Explicit override wins — but only if it's a real override, not the
-    //    clap-injected default. When the caller passes DEFAULT_DAEMON_URL we
-    //    fall through to the lock file so `tm tui` and `tm status` find a
-    //    daemon running on an ephemeral port.
+    // 1. Explicit override always wins when present and non-empty — the
+    //    caller (a CLI field or the shared env-read helper) already collapsed
+    //    "not supplied" to `None`, so there is nothing left to disambiguate.
     if let Some(url) = explicit
         && !url.is_empty()
-        && url != DEFAULT_DAEMON_URL
     {
         return url.to_string();
     }
@@ -118,11 +162,8 @@ pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
         return url;
     }
 
-    // 3. Fall back to the default (or the explicit default the caller passed).
-    explicit
-        .filter(|u| !u.is_empty())
-        .unwrap_or(DEFAULT_DAEMON_URL)
-        .to_string()
+    // 3. Fall back to the compiled-in default.
+    DEFAULT_DAEMON_URL.to_string()
 }
 
 /// Resolve the daemon URL with reachability probing for explicit overrides.
@@ -138,26 +179,24 @@ pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
 /// What: follows the same three-step priority order as `resolve_daemon_url`,
 /// but step 1 is gated on a 500 ms health probe.
 ///
-/// 1. `explicit` (non-empty, non-default) — accepted only if reachable
+/// 1. `explicit` (non-empty) — accepted only if reachable
 /// 2. Lock file `~/.trusty-mpm/daemon.lock` (if present and PID alive)
 /// 3. `DEFAULT_DAEMON_URL`
 ///
 /// A reachable explicit URL wins immediately without consulting the lock file
 /// so a deliberately non-default daemon address (`--url http://…:9999`) still
-/// works.
+/// works. As of #2487, "explicit" is `Some` if and only if the operator
+/// actually supplied `--url` or `TRUSTY_MPM_URL` — there is no equality check
+/// against [`DEFAULT_DAEMON_URL`] to second-guess that.
 /// Test: `probing_resolver_falls_back_when_explicit_unreachable` and
 /// `probing_resolver_wins_when_explicit_reachable` below.
 pub async fn resolve_daemon_url_probing(
     client: &reqwest::Client,
     explicit: Option<&str>,
 ) -> String {
-    // Step 1: if the caller supplied a real override (non-empty, non-default),
-    // probe it.  Only skip the probe when the "explicit" URL is actually the
-    // clap-injected default — identical behaviour to resolve_daemon_url so
-    // callers that pass DEFAULT_DAEMON_URL always see the lock file win.
+    // Step 1: if the caller supplied a real override (non-empty), probe it.
     if let Some(url) = explicit
         && !url.is_empty()
-        && url != DEFAULT_DAEMON_URL
     {
         if probe_url(client, url).await {
             return url.to_string();
@@ -169,7 +208,7 @@ pub async fn resolve_daemon_url_probing(
         return DEFAULT_DAEMON_URL.to_string();
     }
 
-    // No real explicit override: delegate to the sync resolver.
+    // No explicit override: delegate to the sync resolver (lock file → default).
     resolve_daemon_url(explicit)
 }
 
@@ -185,9 +224,17 @@ pub async fn resolve_daemon_url_probing(
 /// probe so a stale console discovery file never breaks the CLI.
 ///
 /// Precedence:
-///   a) Explicit user override (non-empty, non-default `--url` /
-///      `TRUSTY_MPM_URL`) → use it directly; the operator chose a specific
-///      address, so the gateway is bypassed entirely.
+///   a) Explicit user override (non-empty `--url` / `TRUSTY_MPM_URL`) → use it
+///      directly; the operator chose a specific address, so the gateway is
+///      bypassed entirely. As of #2487 this is a plain `Option::is_some`
+///      check — a value that happens to equal [`DEFAULT_DAEMON_URL`] still
+///      wins, because callers only pass `Some` when the flag/env var was
+///      actually supplied (see [`resolve_daemon_url`]'s doc). Before #2487
+///      this step also compared the value against `DEFAULT_DAEMON_URL` to
+///      guess whether it was "real"; that heuristic is exactly what let
+///      `TRUSTY_MPM_URL=http://127.0.0.1:7880` (the literal default) fall
+///      through to the gateway probe below and get silently rerouted through
+///      the trusty-console proxy on a different port.
 ///   b) Gateway probe: read the console address from its discovery file
 ///      (falling back to `DEFAULT_CONSOLE_ADDR`). Construct
 ///      `http://{console}/api/mpm` and probe `GET .../health` with a 500 ms
@@ -197,6 +244,7 @@ pub async fn resolve_daemon_url_probing(
 ///      absent or the gateway probe fails.
 ///
 /// Test: `resolve_via_gateway_explicit_override_wins`,
+///       `resolve_via_gateway_explicit_override_equal_to_default_still_wins`,
 ///       `resolve_via_gateway_uses_gateway_when_probe_succeeds`,
 ///       `resolve_via_gateway_falls_back_to_direct_on_probe_failure`.
 pub async fn resolve_daemon_url_via_gateway(
@@ -223,12 +271,12 @@ async fn resolve_daemon_url_via_gateway_inner(
     explicit: Option<&str>,
     console_addr: &str,
 ) -> String {
-    // a) Explicit override — same "clap default is not a real override" rule as
-    //    the other resolvers. A non-default, non-empty explicit URL bypasses the
-    //    gateway entirely so `--url http://…:9999` continues to work.
+    // a) Explicit override — any non-empty `Some` bypasses the gateway
+    //    entirely, whether or not the value happens to equal
+    //    `DEFAULT_DAEMON_URL` (#2487). Callers only pass `Some` when the
+    //    operator actually supplied `--url` / `TRUSTY_MPM_URL`.
     if let Some(url) = explicit
         && !url.is_empty()
-        && url != DEFAULT_DAEMON_URL
     {
         return url.to_string();
     }
@@ -364,17 +412,24 @@ mod tests {
     }
 
     #[test]
-    fn default_url_passed_as_explicit_falls_through_to_lock() {
-        // Why: clap injects DEFAULT_DAEMON_URL when the user does not pass --url.
-        // resolve_daemon_url must NOT treat that as a real user override — it must
-        // fall through to the lock file (or the final default when no lock file
-        // exists). We verify this behaviorally: with no lock file present in the
-        // test environment the result must still be a valid HTTP URL (either the
-        // lock-file URL or the compiled-in default).
+    fn explicit_value_equal_to_default_wins_immediately() {
+        // Why (issue #2487): prior to the fix, `resolve_daemon_url` compared the
+        // explicit value against `DEFAULT_DAEMON_URL` by string equality and, on a
+        // match, treated it as "not a real override" — falling through to the lock
+        // file. That heuristic could never distinguish "clap injected the default
+        // because nothing was passed" from "the operator explicitly set
+        // TRUSTY_MPM_URL to the literal default value", so a deliberate
+        // `TRUSTY_MPM_URL=http://127.0.0.1:7880` silently lost to a running lock
+        // file (or, one layer up in `resolve_daemon_url_via_gateway`, to the
+        // trusty-console gateway probe — the exact #2487 symptom). Callers now only
+        // ever pass `Some` when the flag/env var was truly supplied (every
+        // CLI-facing `url` field is `Option<String>` with no `default_value`), so
+        // this function no longer needs — or performs — that comparison: `Some`
+        // always wins, deterministically, with no dependency on lock-file state.
         let result = resolve_daemon_url(Some(DEFAULT_DAEMON_URL));
-        assert!(
-            result.starts_with("http"),
-            "resolve_daemon_url(DEFAULT_DAEMON_URL) must return an HTTP URL: {result}"
+        assert_eq!(
+            result, DEFAULT_DAEMON_URL,
+            "an explicit value equal to the default must win outright, not fall through to the lock file"
         );
     }
 
@@ -484,6 +539,65 @@ mod tests {
         assert_eq!(
             result, explicit,
             "explicit override must win over gateway probe"
+        );
+    }
+
+    /// Regression test for issue #2487: an explicit `TRUSTY_MPM_URL` that
+    /// happens to equal [`DEFAULT_DAEMON_URL`] must still bypass the gateway,
+    /// even when a live console is reachable and would otherwise win.
+    ///
+    /// Why: this is the exact production symptom — `TRUSTY_MPM_URL=http://
+    /// 127.0.0.1:7880` (7880 IS `DEFAULT_DAEMON_URL`) got silently rerouted
+    /// through the trusty-console proxy on port 7788 because the pre-fix
+    /// resolver's `url != DEFAULT_DAEMON_URL` check made it indistinguishable
+    /// from "nothing was passed". This test binds a listener that WOULD win
+    /// the gateway probe (responds 200 to `/api/mpm/health`) to prove the
+    /// explicit value still wins outright and the listener is never even
+    /// contacted.
+    /// What: calls `resolve_daemon_url_via_gateway_inner` with
+    /// `Some(DEFAULT_DAEMON_URL)` and a console address that answers every
+    /// probe with HTTP 200; asserts the result is `DEFAULT_DAEMON_URL`
+    /// verbatim (not the gateway base URL) and that the listener saw zero
+    /// connections.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_via_gateway_explicit_override_equal_to_default_still_wins() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let hit_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hit_count_clone = hit_count.clone();
+        tokio::spawn(async move {
+            // Accept-and-200 loop: if the gateway were (incorrectly) probed,
+            // this would answer successfully and the bug would still be masked.
+            while let Ok((mut sock, _)) = listener.accept().await {
+                hit_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let console_addr = addr.to_string();
+        let result =
+            resolve_daemon_url_via_gateway_inner(&client, Some(DEFAULT_DAEMON_URL), &console_addr)
+                .await;
+
+        assert_eq!(
+            result, DEFAULT_DAEMON_URL,
+            "TRUSTY_MPM_URL equal to the default must win outright, never the gateway URL"
+        );
+        // Give any (incorrect) in-flight probe a moment to land before asserting
+        // the listener was never contacted.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            hit_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the gateway/console must never be probed when an explicit override is present"
         );
     }
 
@@ -619,5 +733,67 @@ mod tests {
             req_line.starts_with("GET /health "),
             "probe must request /health (no double slash); got: {req_line:?}"
         );
+    }
+
+    // ── explicit_url_from_env tests (#2487) ───────────────────────────────
+
+    /// Serialises the `explicit_url_from_env` tests' `TRUSTY_MPM_URL`
+    /// mutation against every other test in the crate that reads/writes
+    /// process env vars — `std::env::set_var`/`remove_var` are not
+    /// thread-safe across concurrently running tests (the known env-race
+    /// flake class in this workspace). Delegates to the crate-wide
+    /// [`crate::core::trusty_tools_config::env_test_lock`] so these tests are
+    /// serialised against env tests in OTHER modules too, not just each
+    /// other.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::core::trusty_tools_config::env_test_lock()
+    }
+
+    #[test]
+    fn explicit_url_from_env_reads_set_var() {
+        let _g = env_lock();
+        // SAFETY: guarded by env_lock; restored to the prior value below.
+        let prior = std::env::var("TRUSTY_MPM_URL").ok();
+        unsafe { std::env::set_var("TRUSTY_MPM_URL", "http://127.0.0.1:7880") };
+        let result = explicit_url_from_env();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("TRUSTY_MPM_URL", v) },
+            None => unsafe { std::env::remove_var("TRUSTY_MPM_URL") },
+        }
+        assert_eq!(
+            result.as_deref(),
+            Some("http://127.0.0.1:7880"),
+            "must read TRUSTY_MPM_URL verbatim, even when it equals the default"
+        );
+    }
+
+    #[test]
+    fn explicit_url_from_env_treats_empty_as_unset() {
+        let _g = env_lock();
+        let prior = std::env::var("TRUSTY_MPM_URL").ok();
+        // SAFETY: guarded by env_lock; restored to the prior value below.
+        unsafe { std::env::set_var("TRUSTY_MPM_URL", "   ") };
+        let result = explicit_url_from_env();
+        match prior {
+            Some(v) => unsafe { std::env::set_var("TRUSTY_MPM_URL", v) },
+            None => unsafe { std::env::remove_var("TRUSTY_MPM_URL") },
+        }
+        assert_eq!(
+            result, None,
+            "a whitespace-only TRUSTY_MPM_URL must resolve to None, same as unset"
+        );
+    }
+
+    #[test]
+    fn explicit_url_from_env_unset_is_none() {
+        let _g = env_lock();
+        let prior = std::env::var("TRUSTY_MPM_URL").ok();
+        // SAFETY: guarded by env_lock; restored to the prior value below.
+        unsafe { std::env::remove_var("TRUSTY_MPM_URL") };
+        let result = explicit_url_from_env();
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("TRUSTY_MPM_URL", v) };
+        }
+        assert_eq!(result, None, "an unset TRUSTY_MPM_URL must resolve to None");
     }
 }
