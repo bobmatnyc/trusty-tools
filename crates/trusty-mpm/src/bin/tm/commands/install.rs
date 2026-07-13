@@ -4,8 +4,8 @@
 //! assembles the PM prompt, deploys agents and skills, and wires Claude Code
 //! hooks — and benefits from its own file so it stays reviewable.
 //! What: `install`, `install_claude_hooks`, `mpm_hook_additions`, `install_to`,
-//! `deploy_report_lines`, `skill_report_lines`, `remove_global_trusty_mpm_hooks`,
-//! `write_project_hooks_for_dir`.
+//! `deploy_report_lines`, `reset_report_lines`, `skill_report_lines`,
+//! `remove_global_trusty_mpm_hooks`, `write_project_hooks_for_dir`.
 //! Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
 //! `install_claude_hooks_is_idempotent`, `install_then_deploy_deploys_skills`.
 
@@ -19,13 +19,22 @@
 /// the full PM system prompt (overwriting the bundle stub — fixes #383),
 /// deploys composed agents and skills, and wires MPM lifecycle hooks into
 /// every Claude Code settings file. All edits are idempotent.
+///
+/// `reset_agents` (issue #2504) is the explicit reconciliation path for
+/// composed agent files a normal deploy conservatively skips because they
+/// predate per-file manifest tracking. `Some(vec![])` (the CLI's `--reset-
+/// agents` with no value) resets every bundled agent; `Some(names)` restricts
+/// the reset to those agents. The normal deploy always runs first — reset
+/// only forces the specific files a plain deploy would otherwise leave
+/// alone, and re-registers everything else it touches.
 /// What: resolves [`FrameworkPaths::default`], calls [`install_to`] then
 /// [`install_system_prompt_to`] to write the real assembled PM prompt,
-/// deploys agents and skills, then calls [`install_claude_hooks`].
+/// deploys agents and skills, optionally resets the requested agent scope,
+/// then calls [`install_claude_hooks`].
 /// Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
 /// `install_claude_hooks_is_idempotent`,
 /// `instruction_pipeline::install_system_prompt_to_writes_assembled`.
-pub(crate) fn install(force: bool) -> anyhow::Result<()> {
+pub(crate) fn install(force: bool, reset_agents: Option<Vec<String>>) -> anyhow::Result<()> {
     let paths = trusty_mpm::core::paths::FrameworkPaths::default();
     let report = install_to(&paths, force)?;
     println!(
@@ -54,6 +63,30 @@ pub(crate) fn install(force: bool) -> anyhow::Result<()> {
     )?;
     for line in deploy_report_lines(&deploy, &paths.agent_source_dir()) {
         println!("  {line}");
+    }
+
+    // Issue #2504: force-recompose the requested agent scope. Runs AFTER the
+    // normal deploy above so it only has to touch files the conservative
+    // deploy left alone (untracked + differing from the bundle); everything
+    // else is already at the fresh composition and gets adopted, not rewritten.
+    if let Some(names) = reset_agents {
+        let filter = if names.is_empty() { None } else { Some(names) };
+        println!(
+            "Resetting agents ({}) into {}",
+            filter
+                .as_ref()
+                .map(|n| n.join(", "))
+                .unwrap_or_else(|| "all".to_string()),
+            paths.claude_agents_dir().display()
+        );
+        let reset = trusty_mpm::core::agent_reset::reset_agents(
+            &paths.agent_source_dir(),
+            &paths.claude_agents_dir(),
+            filter.as_deref(),
+        )?;
+        for line in reset_report_lines(&reset) {
+            println!("  {line}");
+        }
     }
 
     // Deploy bundled skills into `~/.claude/skills/`. The bundle install above
@@ -262,10 +295,18 @@ pub(crate) fn mpm_hook_additions_with_exe(
 /// Render per-file status lines for an agent [`DeployResult`].
 ///
 /// Why: `install` and `session start` both print agent deploy results; one
-/// formatter keeps the output identical and the call sites small.
+/// formatter keeps the output identical and the call sites small. Issue
+/// #2504 added silent adoption of untracked-but-identical files and a
+/// dedicated warning for untracked files that differ from the bundle — the
+/// operator needs to see both without 36 near-duplicate warning lines.
 /// What: a `✓ <file> (composed: a → b → c)` line per deployed agent, a
-/// `~ <file> (skipped — user-modified)` line per skipped one, and a `=` line
-/// per unchanged one; the chain comes from the agent's resolved source chain.
+/// `◆ <file> (adopted — untracked, now managed)` line per silently-adopted
+/// file, a `~ <file> (skipped — user-modified)` line per skipped file the
+/// manifest already tracked with a diverged checksum, a `= <file>
+/// (unchanged)` line per already-current file, and — ONLY when
+/// [`DeployResult::untracked_modified`] is non-empty — one trailing summary
+/// line naming the count and `tm install --reset-agents` (not one line per
+/// file, to stay readable when dozens of files predate manifest tracking).
 /// Test: covered indirectly by `install_writes_all_artifacts`.
 pub(crate) fn deploy_report_lines(
     deploy: &trusty_mpm::core::agent_deployer::DeployResult,
@@ -279,12 +320,67 @@ pub(crate) fn deploy_report_lines(
             .unwrap_or_else(|_| name.to_string());
         lines.push(format!("\u{2713} {file} (composed: {chain})"));
     }
+    for file in &deploy.adopted {
+        lines.push(format!(
+            "\u{25c6} {file} (adopted \u{2014} untracked, now managed)"
+        ));
+    }
     for file in &deploy.skipped {
-        lines.push(format!("~ {file} (skipped \u{2014} user-modified)"));
+        if deploy.untracked_modified.contains(file) {
+            lines.push(format!(
+                "~ {file} (skipped \u{2014} untracked, differs from bundle)"
+            ));
+        } else {
+            lines.push(format!("~ {file} (skipped \u{2014} user-modified)"));
+        }
     }
     for file in &deploy.unchanged {
         lines.push(format!("= {file} (unchanged)"));
     }
+    if !deploy.untracked_modified.is_empty() {
+        lines.push(format!(
+            "\u{26a0} {} untracked agent file(s) differ from the bundle and were skipped; \
+             run `tm install --reset-agents` to review and reconcile them.",
+            deploy.untracked_modified.len()
+        ));
+    }
+    lines
+}
+
+/// Render per-file status lines plus a summary for a [`ResetResult`].
+///
+/// Why: `--reset-agents` (issue #2504) can touch dozens of files at once;
+/// the operator needs both the per-file detail and a one-line total so a
+/// large reset is scannable at a glance.
+/// What: a `\u{27f3} <file> (recomposed, backed up)` or `\u{27f3} <file>
+/// (recomposed)` line per rewritten file, a `\u{25c6} <file> (adopted)` line
+/// per already-current file, and a `? <name>` line per requested name with no
+/// matching source agent — followed by one summary line with the four totals.
+/// Test: `reset_report_lines_summarizes_counts`.
+pub(crate) fn reset_report_lines(
+    reset: &trusty_mpm::core::agent_reset::ResetResult,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for file in &reset.recomposed {
+        if reset.backed_up.contains(file) {
+            lines.push(format!("\u{27f3} {file} (recomposed, backed up)"));
+        } else {
+            lines.push(format!("\u{27f3} {file} (recomposed)"));
+        }
+    }
+    for file in &reset.adopted {
+        lines.push(format!("\u{25c6} {file} (adopted)"));
+    }
+    for name in &reset.not_found {
+        lines.push(format!("? {name} (no matching source agent)"));
+    }
+    lines.push(format!(
+        "reset summary: {} recomposed, {} adopted, {} backed up, {} not found",
+        reset.recomposed.len(),
+        reset.adopted.len(),
+        reset.backed_up.len(),
+        reset.not_found.len()
+    ));
     lines
 }
 

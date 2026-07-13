@@ -267,10 +267,25 @@ pub(crate) enum Command {
         cmd: SlackCmd,
     },
     /// Install the bundled framework artifacts to `~/.trusty-mpm/framework/`.
+    ///
+    /// `--reset-agents` (issue #2504) is the explicit reconciliation path for
+    /// composed agent files that predate per-file manifest tracking: a
+    /// normal deploy conservatively skips any target file absent from the
+    /// manifest (it might be user-owned), which meant such files could never
+    /// receive bundle updates again. Passing `--reset-agents` with no names
+    /// force-recomposes every bundled agent; passing a comma-separated list
+    /// restricts the reset to those agents. Content that cannot be proven to
+    /// already be trusty-mpm's own prior output is backed up (`<file>.bak-
+    /// <unix_nanos>`) before being overwritten — nothing is silently lost.
     Install {
         /// Overwrite artifacts that already exist on disk.
         #[arg(long)]
         force: bool,
+        /// Force-recompose agent files from the current bundle (issue #2504).
+        /// With no value, resets every bundled agent. Pass a comma-separated
+        /// list (e.g. `--reset-agents engineer,qa`) to restrict the scope.
+        #[arg(long, num_args = 0.., value_delimiter = ',')]
+        reset_agents: Option<Vec<String>>,
     },
     /// Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop).
     ///
