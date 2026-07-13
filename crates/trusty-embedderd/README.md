@@ -17,6 +17,20 @@ Three transports share a single `BatchQueue` and a single ONNX session:
 - **HTTP** (`--http addr:port`): for network-capable consumers or cross-host setups.
 - **UDS** (`--socket /path`): low-latency in-host transport via a Unix Domain Socket.
 
+### AL2023 / glibc < 2.38 hosts (issue #2222)
+
+This crate is not installed standalone — it is bundled and built as part of
+`cargo install trusty-search` (see `crates/trusty-search/src/bin/trusty-embedderd.rs`).
+Its `bundled-ort` feature is on by default and links a static ONNX Runtime
+build that requires glibc >= 2.38. On Amazon Linux 2023 (glibc 2.34) or any
+other glibc < 2.38 host, install trusty-search with
+`--no-default-features --features load-dynamic` instead (or use the prebuilt
+`x86_64-linux-al2023` GitHub Release tarball) — see
+`crates/trusty-search/README.md`'s "AL2023 / glibc < 2.38 hosts" section for
+the full instructions. On a mismatched host, startup now fails immediately
+with an explicit glibc-version error instead of hanging for up to
+`TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
+
 ## Running the daemon
 
 ### Stdio sidecar mode (default for trusty-search auto-spawn)

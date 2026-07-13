@@ -52,6 +52,19 @@ The trusty-agents `ctrl/`, `runtime/`, and `workflow/engine/` modules (#170,
 all three have since been split into focused submodules and now serve as the
 worked examples of a clean split.
 
+🟡 **`cargo install trusty-search` / `trusty-analyze` on Amazon Linux 2023
+(or any glibc < 2.38 host)** — the default `bundled-ort` feature statically
+links an ONNX Runtime build that requires glibc >= 2.38; AL2023 ships glibc
+2.34. Either grab the prebuilt `x86_64-linux-al2023` GitHub Release tarball
+(already configured with `load-dynamic`), or reinstall with
+`--no-default-features --features load-dynamic` (`trusty-search`) /
+`--no-default-features --features http-server,load-dynamic`
+(`trusty-analyze`) plus `ORT_DYLIB_PATH` pointing at a host-compatible
+`libonnxruntime.so`. See each crate's README ("AL2023 / glibc < 2.38 hosts")
+and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
+fast with an explicit glibc-version error instead of hanging for up to
+`TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
+
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.

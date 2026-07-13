@@ -94,6 +94,37 @@ Homebrew provides:
 - **macOS with Apple Silicon (M1/M2/M3/M4)**: CoreML GPU acceleration is enabled automatically. No configuration needed. The startup log will confirm: `provider=CoreML (Metal GPU / ANE)`.
 - **NVIDIA GPU (CUDA)**: Install with `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --features cuda --locked`. Requires CUDA toolkit installed on the host. See `CLAUDE.md` in the repository for `ORT_DYLIB_PATH` setup on Amazon Linux 2023.
 
+#### AL2023 / glibc < 2.38 hosts (issue #2222)
+
+`cargo install trusty-search` (no flags) defaults to the `bundled-ort`
+feature, which statically links an ONNX Runtime build that requires
+**glibc >= 2.38**. **Amazon Linux 2023 ships glibc 2.34** — plain `cargo
+install trusty-search` on AL2023 (or any other glibc < 2.38 host) will fail
+to start the embedding daemon. Two working options, in order of preference:
+
+1. **Use the prebuilt `x86_64-linux-al2023` GitHub Release tarball** — it
+   ships the `load-dynamic` build already configured, no flags needed:
+   ```bash
+   curl -LO https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-search-v<version>/trusty-search-<version>-x86_64-linux-al2023.tar.gz
+   tar xzf trusty-search-*-x86_64-linux-al2023.tar.gz
+   ```
+2. **Build from source / crates.io with `load-dynamic`**, then point
+   `ORT_DYLIB_PATH` at a host-compatible `libonnxruntime.so` (e.g. the
+   official ORT 1.20.1 linux-x64 release, built on Ubuntu 20.04 / glibc
+   2.31 — satisfies AL2023's glibc 2.34):
+   ```bash
+   cargo install trusty-search --no-default-features --features load-dynamic --locked
+   export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+   ```
+
+Both binaries this crate installs (`trusty-search` and the bundled
+`trusty-embedderd` sidecar) honour the same feature selection — you do not
+need to configure them separately. If you install the default `bundled-ort`
+build on a glibc < 2.38 host anyway, the daemon now fails fast at startup
+with an explicit glibc-version error (instead of hanging for up to
+`TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`, default 180 s) naming both remediations
+above.
+
 #### Note: UI-Embedded Build
 
 This crate embeds a Svelte admin UI compiled into the binary. The UI is pre-built and included in releases; no additional steps are needed to use the daemon. The `SKIP_UI_BUILD=1` environment variable only applies to CI/development workflows and should not be set by end users.

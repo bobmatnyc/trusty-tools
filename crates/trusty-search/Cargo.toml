@@ -63,7 +63,24 @@ trusty-common = { version = "0.22.2", default-features = false, features = ["axu
 # trusty-embedderd binary alongside trusty-search — one install command,
 # two binaries. The shim at src/bin/trusty-embedderd.rs calls
 # `trusty_embedderd::run()` so all daemon logic stays in the library crate.
-trusty-embedderd = { workspace = true }
+# Why (issue #2222): declared as an explicit path+version dependency (like
+# `trusty-common` above) instead of `workspace = true`, so that
+# `default-features = false` here actually takes effect. Cargo silently
+# ignores a member's local `default-features` override on a
+# `dep.workspace = true` entry unless the `[workspace.dependencies]` entry
+# also states `default-features` explicitly AND agrees with the override —
+# in practice that means `workspace = true` cannot be used to turn a
+# dependency's default features off from just one consuming crate. Without
+# `default-features = false` + explicit `http-server` here, trusty-embedderd's
+# own default features (which include `bundled-ort`) stayed on regardless of
+# what was passed to `cargo build -p trusty-search`, so
+# `--no-default-features --features load-dynamic` silently still linked the
+# glibc-2.38-bound bundled ORT libs into the bundled trusty-embedderd binary.
+# The `bundled-ort`/`load-dynamic`/`cuda` features below forward this crate's
+# own ORT-mode selection down to `trusty-embedderd/*` explicitly.
+trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.7", default-features = false, features = [
+    "http-server",
+] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-search (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.
@@ -222,7 +239,12 @@ default = ["bundled-ort"]
 # Forwards `trusty-embedder/bundled-ort`. Enables static linking of the
 # fastembed-downloaded ORT 1.24.x libraries. Mutually exclusive with the
 # load-dynamic path that `cuda` activates (see below).
-bundled-ort = ["trusty-common/embedder-bundled-ort"]
+# Why (issue #2222): also forwards `trusty-embedderd/bundled-ort` — the
+# bundled `trusty-embedderd` binary (see the dependency declaration above,
+# which now sets `default-features = false` on that dependency) needs the
+# same explicit selection this crate makes for itself, or it silently falls
+# back to no ORT linking mode at all (neither bundled nor load-dynamic).
+bundled-ort = ["trusty-common/embedder-bundled-ort", "trusty-embedderd/bundled-ort"]
 # Exposes test doubles (e.g. `MockEmbedder`) outside `cfg(test)` so
 # downstream integration tests can reuse them. Kept for parity with the
 # previous trusty-search-core feature surface.
@@ -242,12 +264,22 @@ ner = ["dep:ort", "dep:tokenizers"]
 # supported — Cargo will compile but the resulting binary will fail to
 # link ORT correctly. Always pair `--features cuda` with
 # `--no-default-features`.
-cuda = ["trusty-common/embedder-cuda"]
+# Why (issue #2222): also forwards `trusty-embedderd/cuda` — see the
+# `bundled-ort` comment above for why the bundled binary needs the same
+# explicit selection.
+cuda = ["trusty-common/embedder-cuda", "trusty-embedderd/cuda"]
 # Dynamic ORT loading without CUDA — for AL2023 (glibc 2.34) CPU-only cross-compilation.
 # Enables fastembed/ort-load-dynamic so no glibc-2.38-bound static ORT binaries are bundled.
 # Build: cargo build --no-default-features --features load-dynamic
 # Runtime: set ORT_DYLIB_PATH=/path/to/libonnxruntime.so
-load-dynamic = ["trusty-common/embedder-load-dynamic"]
+# Why (issue #2222): also forwards `trusty-embedderd/load-dynamic` — without
+# this, the bundled `trusty-embedderd` binary (the shim in
+# `src/bin/trusty-embedderd.rs`, built as part of `cargo build -p
+# trusty-search`) had no ORT feature selected at all once the dependency
+# below stopped defaulting to `bundled-ort`, which is worse than the
+# original leak (issue #2222 gap: the AL2023 load-dynamic build path for the
+# bundled binary was never actually exercised in CI before this fix).
+load-dynamic = ["trusty-common/embedder-load-dynamic", "trusty-embedderd/load-dynamic"]
 # Deprecated: CoreML / Metal GPU acceleration is now auto-detected at runtime
 # on Apple Silicon and requires no opt-in. The `coreml` feature is kept as a
 # no-op alias for backward compatibility so `cargo install --features coreml`
