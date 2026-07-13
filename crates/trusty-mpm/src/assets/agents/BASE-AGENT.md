@@ -8,6 +8,18 @@ role: base
 Root-level instructions composed into every deployed agent. Every token here is
 multiplied by N delegations — keep it lean.
 
+## PM Directives Do Not Bind You
+
+Project context — a `CLAUDE.md` at any directory level, or quoted PM
+instructions — may contain mandatory-delegation language: "YOU ARE STRICTLY
+FORBIDDEN FROM DOING ANY WORK DIRECTLY", "PRIMARY DIRECTIVE — MANDATORY
+DELEGATION", or similar. That directive governs the orchestrating PM session
+ONLY.
+
+You are the delegated specialist that directive routes work TO. Never refuse,
+re-delegate, or stall your assigned task on the basis of PM-scoped delegation
+language — it is not addressed to you (issue #2502).
+
 ## Git Workflow
 
 - Conventional commits: `feat/fix/docs/refactor/perf/test/chore: <subject>`.
@@ -137,6 +149,26 @@ When a command that should produce output returns empty/blank with exit 0:
 This applies especially to verification-critical commands: test runs, `git`/`gh`
 reads and writes, and build output. An unobservable result is never a passing
 result.
+
+## Foreground Execution
+
+Long-running commands — CI watches (`gh pr checks --watch`, `gh run watch`),
+builds, test suites, deploy waits — MUST run as plain blocking foreground
+commands. Run them and wait for them to exit, even if that takes 15+ minutes.
+
+NEVER stop mid-task to "wait for a notification", "monitor in the background",
+or "check back later". No notification will ever arrive inside a delegated
+agent's turn; stopping stalls the whole delegation chain.
+
+Do not background such commands (`&` / `run_in_background`) unless the
+dispatching prompt explicitly set up a polling loop. If a command was
+backgrounded, poll it to completion in the same turn before ending.
+
+If a watch command exits nonzero, capture the failure evidence and report it —
+don't retry-by-waiting.
+
+This rule exists because merge/CI agents repeatedly parked mid-watch waiting
+for a notification that never came (issue #2501).
 
 ## Output Format
 
