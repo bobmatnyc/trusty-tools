@@ -17,6 +17,7 @@
 use anyhow::Context;
 
 use super::DaemonClient;
+use super::config;
 use super::types::{
     FleetByProjectWireResponse, FleetProjectGroupWire, ManagedActivityResponse,
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
@@ -89,9 +90,21 @@ impl DaemonClient {
 
     /// Spawn a managed session via `POST /api/v1/sessions/managed`.
     ///
-    /// Why: provision an isolated workspace and start a harness in it.
-    /// What: POSTs `req` and returns the daemon's [`ManagedSpawnResponse`].
-    /// Test: live HTTP via `tests/session_manager_mvp.rs`.
+    /// Why: provision an isolated workspace and start a harness in it. The
+    /// server handler runs `WorkspaceProvisioner::provision`/`provision_in`
+    /// SYNCHRONOUSLY inside the request (git clone/fetch, worktree add,
+    /// agent/skill deploy) for both the clone-based and in-project spawn
+    /// paths — a first spawn against a newly-registered project can easily
+    /// exceed [`config::DEFAULT_REQUEST_TIMEOUT`]'s 10s client-level default.
+    /// Applying that default here would hard-fail the client mid-provision
+    /// while the daemon keeps working, orphaning a session the caller
+    /// believes failed, so this call opts into the longer
+    /// [`config::PROVISION_REQUEST_TIMEOUT`] instead (issue #2471 review
+    /// follow-up).
+    /// What: POSTs `req` with the provision-scoped request timeout and
+    /// returns the daemon's [`ManagedSpawnResponse`].
+    /// Test: live HTTP via `tests/session_manager_mvp.rs`;
+    /// `config::tests::default_client_uses_default_bounds` pins the constant.
     pub async fn spawn_managed_session(
         &self,
         req: &ManagedSpawnRequest,
@@ -101,6 +114,7 @@ impl DaemonClient {
             .http
             .post(&url)
             .json(req)
+            .timeout(config::PROVISION_REQUEST_TIMEOUT)
             .send()
             .await?
             .error_for_status()?

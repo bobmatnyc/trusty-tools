@@ -7,11 +7,19 @@
 //! What: [`DaemonClient`] holds a base URL plus a shared `reqwest::Client` and
 //! exposes one async method per daemon endpoint the UIs need — session listing
 //! and lifecycle, the event feed, breaker state, the overseer / tmux / config
-//! analyzer views, and the pairing handshake.
+//! analyzer views, and the pairing handshake. [`Self::new`] builds that
+//! `reqwest::Client` with the bounded connect/request timeouts from
+//! [`config`] (issue #2471) so a daemon that accepts a TCP connection but
+//! never answers cannot hang a caller forever — before this fix the TUI's
+//! poll loop shared a task with keyboard input, so an unbounded hang froze
+//! `q`/Ctrl-C too.
 //! Test: `cargo test -p trusty-mpm-client` checks URL construction and wire-shape
 //! deserialization; live HTTP is exercised by the executor tests against an
-//! in-process test daemon and by the daemon's own API tests.
+//! in-process test daemon and by the daemon's own API tests; `config`'s own
+//! tests exercise the timeout bound against a stalled socket.
 
+mod claude_config;
+mod config;
 pub mod deliverables;
 mod error;
 mod managed;
@@ -50,11 +58,17 @@ impl DaemonClient {
     /// Build a client targeting `base` (e.g. `http://127.0.0.1:7880`).
     ///
     /// Why: a UI is pointed at a daemon address resolved from a flag or the
-    /// service lock file.
-    /// What: stores the base URL and a fresh pooled `reqwest::Client`.
-    /// Test: `base_url_is_stored`.
+    /// service lock file. A daemon that accepted the TCP connection but never
+    /// answers must not be able to hang the caller indefinitely (issue
+    /// #2471) — the TUI polls this client from the same task that reads
+    /// keyboard input, so an unbounded client froze `q`/Ctrl-C along with
+    /// everything else.
+    /// What: stores the base URL and a fresh pooled `reqwest::Client` built
+    /// via [`config::default_client`] with bounded connect/request timeouts.
+    /// Test: `base_url_is_stored`; the timeout bound itself is covered by
+    /// `config::tests::build_client_bounds_a_stalled_connection`.
     pub fn new(base: impl Into<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), base)
+        Self::with_client(config::default_client(), base)
     }
 
     /// Build a client targeting `base`, REUSING an existing `reqwest::Client`.
@@ -504,123 +518,6 @@ impl DaemonClient {
             .unwrap_or(0) as usize)
     }
 
-    /// Analyze a project's Claude Code config via `GET /claude-config`.
-    ///
-    /// Why: the `/config` command surfaces analyzer recommendations.
-    /// What: `GET /claude-config?project=<path>`, returns one
-    /// [`ConfigRecommendation`] per recommendation.
-    /// Test: covered by the executor's config test.
-    pub async fn analyze_config(&self, project: &str) -> anyhow::Result<Vec<ConfigRecommendation>> {
-        let url = format!("{}/claude-config", self.base);
-        let body: serde_json::Value = self
-            .http
-            .get(&url)
-            .query(&[("project", project)])
-            .send()
-            .await?
-            .json()
-            .await?;
-        let recs = body["recommendations"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        Ok(recs
-            .iter()
-            .map(|r| ConfigRecommendation {
-                id: r
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                message: r
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| r.as_str())
-                    .unwrap_or("?")
-                    .to_string(),
-            })
-            .collect())
-    }
-
-    /// Apply a config recommendation via `POST /claude-config/apply`.
-    ///
-    /// Why: lets a UI act on a recommendation without hand-editing JSON.
-    /// What: POSTs the project path and recommendation id; returns the
-    /// checkpoint id on success.
-    /// Test: covered by the daemon's claude-config tests.
-    pub async fn apply_recommendation(
-        &self,
-        project: &str,
-        recommendation_id: &str,
-    ) -> anyhow::Result<String> {
-        let url = format!("{}/claude-config/apply", self.base);
-        let body: serde_json::Value = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({
-                "project": project,
-                "recommendation_id": recommendation_id,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(body
-            .get("checkpoint_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string())
-    }
-
-    /// List a project's config checkpoints via `GET /claude-config/checkpoints`.
-    ///
-    /// Why: a UI offers a restore picker fed by this list.
-    /// What: returns the raw checkpoint JSON array.
-    /// Test: covered by the daemon's claude-config tests.
-    pub async fn list_checkpoints(&self, project: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-        let url = format!("{}/claude-config/checkpoints", self.base);
-        let body: serde_json::Value = self
-            .http
-            .get(&url)
-            .query(&[("project", project)])
-            .send()
-            .await?
-            .json()
-            .await?;
-        Ok(body["checkpoints"].as_array().cloned().unwrap_or_default())
-    }
-
-    /// Deploy a built-in profile via `POST /claude-config/deploy`.
-    ///
-    /// Why: lets a UI apply a configuration preset in one call.
-    /// What: POSTs the project path and profile name; returns the checkpoint id.
-    /// Test: covered by the daemon's claude-config tests.
-    pub async fn deploy_profile(
-        &self,
-        project: &str,
-        profile_name: &str,
-    ) -> anyhow::Result<String> {
-        let url = format!("{}/claude-config/deploy", self.base);
-        let body: serde_json::Value = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({
-                "project": project,
-                "profile_name": profile_name,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(body
-            .get("checkpoint_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string())
-    }
-
     /// Request a one-time pairing code via `POST /pair/request`.
     ///
     /// Why: `tm pair` asks the local daemon for a code to type into the bot.
@@ -661,10 +558,18 @@ impl DaemonClient {
     ///
     /// Why: free-text Telegram messages and the TUI's `/chat` command route to
     /// the daemon's conversational endpoint; the UI owns the rolling history
-    /// and threads it through each turn.
-    /// What: POSTs `{ message, history }`; returns `Ok(Some(outcome))` with the
-    /// reply and updated history on success, `Ok(None)` when the daemon answers
-    /// `503` (LLM chat not configured), and `Err` on transport failure.
+    /// and threads it through each turn. The daemon answers synchronously
+    /// only after its own upstream LLM round trip completes, which is bounded
+    /// at up to 120s (`OPENROUTER_REQUEST_TIMEOUT_SECS` in
+    /// `trusty_common::chat::openai_compat::providers`) — [`config::DEFAULT_REQUEST_TIMEOUT`]
+    /// would abort a legitimate slow completion before the daemon's own
+    /// timeout even fires, so this call opts into
+    /// [`config::CHAT_REQUEST_TIMEOUT`] instead (issue #2471's audit of
+    /// long-running endpoints).
+    /// What: POSTs `{ message, history }` with the chat-scoped request
+    /// timeout; returns `Ok(Some(outcome))` with the reply and updated
+    /// history on success, `Ok(None)` when the daemon answers `503` (LLM chat
+    /// not configured), and `Err` on transport failure.
     /// Test: `llm_chat_response_deserializes` covers the wire shape.
     pub async fn llm_chat(
         &self,
@@ -676,6 +581,7 @@ impl DaemonClient {
             .http
             .post(&url)
             .json(&serde_json::json!({ "message": message, "history": history }))
+            .timeout(config::CHAT_REQUEST_TIMEOUT)
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
@@ -720,7 +626,10 @@ impl DaemonClient {
     /// `Ok(Some(outcome))` on success, `Ok(None)` when the daemon answers `503`
     /// (LLM not configured for a non-prefixed message), and `Err` on transport
     /// failure. On the action path the outcome's `actions_taken` lists any verbs
-    /// that ran.
+    /// that ran. Like [`Self::llm_chat`], this waits on the daemon's own
+    /// upstream LLM round trip (up to 120s), so it opts into
+    /// [`config::CHAT_REQUEST_TIMEOUT`] rather than the shorter client
+    /// default (issue #2471).
     /// Test: `coordinator_chat_outcome_deserializes`,
     /// `coordinator_chat_serializes_actions_flag` cover the wire shape.
     pub async fn coordinator_chat(
@@ -734,6 +643,7 @@ impl DaemonClient {
             .http
             .post(&url)
             .json(&coordinator_chat_body(message, history, actions))
+            .timeout(config::CHAT_REQUEST_TIMEOUT)
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
