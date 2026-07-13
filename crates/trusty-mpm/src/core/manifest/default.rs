@@ -34,6 +34,7 @@ pub fn default_manifest() -> HarnessManifest {
         agents: Some(AgentSet {
             include: Vec::new(), // empty = all available agents
             exclude: Vec::new(),
+            ignore_staleness: Vec::new(),
             source: ContentSource::Bundled,
         }),
         skills: Some(all_skills()),

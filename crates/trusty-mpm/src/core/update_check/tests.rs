@@ -84,6 +84,7 @@ fn detect_unknown_when_never_synced() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(report.unknown, "never-synced must be unknown");
     assert!(!report.stale, "never-synced must not be stale");
@@ -112,6 +113,7 @@ fn detect_not_stale_when_identical() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(!report.unknown, "synced catalog is not unknown");
     assert!(!report.stale, "identical content is not stale: {report:?}");
@@ -142,6 +144,7 @@ fn detect_flags_changed_agent() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(report.stale, "changed agent must be stale");
     assert!(!report.unknown);
@@ -167,6 +170,7 @@ fn detect_flags_new_agent() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(report.stale);
     assert_eq!(report.changes[0].kind, ChangeKind::New);
@@ -189,6 +193,7 @@ fn detect_flags_new_skill() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(report.stale);
     assert_eq!(report.changes.len(), 1);
@@ -215,6 +220,7 @@ fn detect_flags_changed_skill() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(report.stale);
     assert_eq!(report.changes[0].kind, ChangeKind::Changed);
@@ -242,10 +248,43 @@ fn detect_respects_selection() {
         &root.path().join("dep-skills"),
         |name| name == "rust-engineer", // exclude php-engineer
         |_| true,
+        |_| false,
     );
     assert!(
         !report.stale,
         "a deselected new agent must not make the harness stale: {report:?}"
+    );
+}
+
+#[test]
+fn detect_respects_ignore_staleness() {
+    // Issue #2462: an agent matched by `ignore_staleness` must not count toward
+    // staleness, even though it is fully SELECTED (unlike `detect_respects_
+    // selection`, which tests the deploy-roster predicate). This is the
+    // narrower, deploy-preserving exemption `AgentSet::ignore_staleness` adds.
+    let root = TempDir::new().unwrap();
+    let agents = root.path().join("agents");
+    write_agent(&agents, "rust-engineer", "BODY");
+    write_agent(&agents, "engineer", "BODY");
+
+    // Deploy matches rust-engineer; engineer is new (never deployed) but the
+    // operator has flagged it as a known, intentional customization.
+    let dep_agents = deployed_agent_matching(&agents, "rust-engineer");
+
+    let report = detect_staleness(
+        &agents,
+        &root.path().join("skills"),
+        &dep_agents,
+        &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
+        |_| true, // both agents SELECTED (deploy roster unaffected)
+        |_| true,
+        |name| name == "engineer", // but staleness-exempt
+    );
+    assert!(
+        !report.stale,
+        "an ignore_staleness agent must not make the harness stale: {report:?}"
     );
 }
 
@@ -268,6 +307,7 @@ fn detect_caps_change_list() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(report.stale);
     assert_eq!(
@@ -333,6 +373,7 @@ fn detect_unknown_when_only_one_tree_missing_is_not_unknown() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(
         !report.unknown,
@@ -384,6 +425,7 @@ fn detect_reconciles_deployed_but_unmanifested() {
         &dep_skills_dir,
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(!report.unknown);
     assert!(
@@ -418,6 +460,7 @@ fn detect_user_owned_on_disk_not_reported() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(
         !report.stale,
@@ -450,6 +493,7 @@ fn detect_user_modified_managed_not_reported() {
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
+        |_| false,
     );
     assert!(
         !report.stale,

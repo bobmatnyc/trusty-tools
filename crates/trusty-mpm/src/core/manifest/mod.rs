@@ -26,5 +26,5 @@ pub use default::default_manifest;
 pub use resolve::{MANIFEST_FILE, ManifestSources, resolve_manifest};
 pub use schema::{
     AgentSet, ContentSource, HarnessManifest, InstructionLayers, MANIFEST_VERSION, McpServers,
-    ModelTiers, SkillSet, StyleSelection, selection_matches,
+    ModelTiers, SkillSet, StyleSelection, matches_any, selection_matches,
 };

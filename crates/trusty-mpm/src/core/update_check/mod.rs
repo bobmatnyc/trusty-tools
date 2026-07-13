@@ -214,16 +214,18 @@ fn classify_drift(
 /// harness's set). An agent that fails to compose is skipped rather than reported
 /// (it cannot be deployed either, so it is not actionable drift).
 /// Test: `detect_flags_changed_agent`, `detect_not_stale_when_identical`,
-/// `detect_respects_selection`, `detect_reconciles_deployed_but_unmanifested`.
+/// `detect_respects_selection`, `detect_reconciles_deployed_but_unmanifested`,
+/// `detect_respects_ignore_staleness`.
 fn agent_changes(
     catalog_agents: &Path,
     deployed: &AgentManifest,
     deployed_dir: &Path,
     select: &impl Fn(&str) -> bool,
+    ignore_staleness: &impl Fn(&str) -> bool,
     out: &mut Vec<CatalogChange>,
 ) {
     for stem in md_stems(catalog_agents) {
-        if !select(&stem) {
+        if !select(&stem) || ignore_staleness(&stem) {
             continue;
         }
         let Ok(composed) = compose_agent(&stem, catalog_agents) else {
@@ -308,10 +310,14 @@ fn skill_changes(
 /// deployed-but-unmanifested file is reconciled rather than reported as a false
 /// `new` (#1940). `stale` is true iff any selected artifact would be
 /// deployed/refreshed by `apply`. The change list is capped at [`MAX_CHANGES`].
+/// `agent_ignore_staleness` (issue #2462) additionally exempts a selected agent
+/// from drift reporting WITHOUT removing it from `agent_select`'s deploy roster
+/// — see [`crate::core::manifest::AgentSet::ignore_staleness`] for why this is a
+/// separate predicate from selection.
 /// Test: `detect_unknown_when_never_synced`, `detect_flags_changed_agent`,
 /// `detect_flags_new_skill`, `detect_not_stale_when_identical`,
 /// `detect_respects_selection`, `detect_caps_change_list`,
-/// `detect_reconciles_deployed_but_unmanifested`.
+/// `detect_reconciles_deployed_but_unmanifested`, `detect_respects_ignore_staleness`.
 #[allow(clippy::too_many_arguments)]
 pub fn detect_staleness(
     catalog_agents: &Path,
@@ -322,6 +328,7 @@ pub fn detect_staleness(
     deployed_skills_dir: &Path,
     agent_select: impl Fn(&str) -> bool,
     skill_select: impl Fn(&str) -> bool,
+    agent_ignore_staleness: impl Fn(&str) -> bool,
 ) -> StalenessReport {
     // Never-synced: neither source tree is present. Report `unknown` rather than
     // fabricating staleness — there is nothing authoritative to compare against.
@@ -339,6 +346,7 @@ pub fn detect_staleness(
         deployed_agents,
         deployed_agents_dir,
         &agent_select,
+        &agent_ignore_staleness,
         &mut changes,
     );
     skill_changes(
@@ -402,6 +410,7 @@ pub fn detect_for_framework(
         &skills_dir,
         |name| plan.agent_selected(name),
         |name| plan.skill_selected(name),
+        |name| plan.agent_staleness_ignored(name),
     )
 }
 

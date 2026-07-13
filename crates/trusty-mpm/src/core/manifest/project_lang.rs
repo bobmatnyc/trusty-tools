@@ -177,6 +177,7 @@ pub fn language_agent_scope(project_dir: &Path) -> Option<AgentSet> {
     Some(AgentSet {
         include: Vec::new(),
         exclude,
+        ignore_staleness: Vec::new(),
         source: ContentSource::Bundled,
     })
 }

@@ -36,6 +36,12 @@ pub struct HarnessPlan {
     pub agent_include: Vec<String>,
     /// Agent exclude patterns.
     pub agent_exclude: Vec<String>,
+    /// Agent name/glob patterns exempt from catalog-staleness reporting only
+    /// (issue #2462). Does NOT affect [`Self::agent_selected`] — an agent
+    /// listed here still deploys normally; this only silences the drift
+    /// warning for agents the operator has intentionally customized. See
+    /// [`super::schema::AgentSet::ignore_staleness`] for the full rationale.
+    pub agent_ignore_staleness: Vec<String>,
     /// Directory the skill *source* files are read from.
     pub skill_source: PathBuf,
     /// Skill include patterns (empty = all).
@@ -77,16 +83,22 @@ impl HarnessPlan {
         let catalog_agents = catalog_root.join("repo").join(".claude").join("agents");
         let catalog_skills = catalog_root.join("repo").join(".claude").join("skills");
 
-        let (agent_source, agent_include, agent_exclude) = match &manifest.agents {
-            Some(set) => {
-                let source = match set.source {
-                    ContentSource::Bundled => fw.agent_source_dir(),
-                    ContentSource::Catalog => catalog_agents,
-                };
-                (source, set.include.clone(), set.exclude.clone())
-            }
-            None => (fw.agent_source_dir(), Vec::new(), Vec::new()),
-        };
+        let (agent_source, agent_include, agent_exclude, agent_ignore_staleness) =
+            match &manifest.agents {
+                Some(set) => {
+                    let source = match set.source {
+                        ContentSource::Bundled => fw.agent_source_dir(),
+                        ContentSource::Catalog => catalog_agents,
+                    };
+                    (
+                        source,
+                        set.include.clone(),
+                        set.exclude.clone(),
+                        set.ignore_staleness.clone(),
+                    )
+                }
+                None => (fw.agent_source_dir(), Vec::new(), Vec::new(), Vec::new()),
+            };
 
         let (skill_source, skill_include, skill_exclude) = match &manifest.skills {
             Some(set) => {
@@ -114,6 +126,7 @@ impl HarnessPlan {
             agent_source,
             agent_include,
             agent_exclude,
+            agent_ignore_staleness,
             skill_source,
             skill_include,
             skill_exclude,
@@ -132,6 +145,19 @@ impl HarnessPlan {
     /// Test: `plan_selection_filters`.
     pub fn agent_selected(&self, stem: &str) -> bool {
         selection_matches(stem, &self.agent_include, &self.agent_exclude)
+    }
+
+    /// Whether an agent stem is exempt from catalog-staleness reporting.
+    ///
+    /// Why (issue #2462): `detect_staleness` must be able to silence the drift
+    /// warning for an agent the operator deliberately customized WITHOUT that
+    /// exemption also removing the agent from [`Self::agent_selected`]'s deploy
+    /// roster — the two concerns are independent (see
+    /// [`super::schema::AgentSet::ignore_staleness`]).
+    /// What: `true` iff `stem` matches any `agent_ignore_staleness` pattern.
+    /// Test: `plan_ignore_staleness_does_not_affect_agent_selected`.
+    pub fn agent_staleness_ignored(&self, stem: &str) -> bool {
+        super::schema::matches_any(stem, &self.agent_ignore_staleness)
     }
 
     /// Whether a skill stem is selected by this plan.
@@ -178,6 +204,7 @@ mod tests {
                 include: vec![],
                 exclude: vec![],
                 source: ContentSource::Catalog,
+                ..AgentSet::default()
             }),
             ..default_manifest()
         };
@@ -203,6 +230,7 @@ mod tests {
                 include: vec!["*-engineer".into()],
                 exclude: vec!["php-engineer".into()],
                 source: ContentSource::Bundled,
+                ..AgentSet::default()
             }),
             skills: Some(SkillSet {
                 include: vec!["example-skill".into()],
@@ -217,6 +245,35 @@ mod tests {
         assert!(!plan.agent_selected("qa"), "not in include");
         assert!(plan.skill_selected("example-skill"));
         assert!(!plan.skill_selected("tm-doctor"));
+    }
+
+    #[test]
+    fn plan_ignore_staleness_does_not_affect_agent_selected() {
+        // Issue #2462: `ignore_staleness` must silence the staleness-only
+        // predicate while leaving `agent_selected` (the deploy roster) fully
+        // unaffected — the exact confusion that let `exclude = ["engineer"]`
+        // (meant only to silence /health) silently drop `engineer.md` from
+        // every session-local `.claude/agents/`.
+        let fw = FrameworkPaths::under("/base");
+        let manifest = HarnessManifest {
+            agents: Some(AgentSet {
+                include: vec![],
+                exclude: vec![],
+                ignore_staleness: vec!["engineer".into()],
+                source: ContentSource::Bundled,
+            }),
+            ..default_manifest()
+        };
+        let plan = HarnessPlan::from_manifest(&manifest, &fw, std::path::Path::new("/c"));
+        assert!(
+            plan.agent_selected("engineer"),
+            "ignore_staleness must not remove an agent from the deploy roster"
+        );
+        assert!(plan.agent_staleness_ignored("engineer"));
+        assert!(
+            !plan.agent_staleness_ignored("qa"),
+            "unrelated agent unaffected"
+        );
     }
 
     #[test]
