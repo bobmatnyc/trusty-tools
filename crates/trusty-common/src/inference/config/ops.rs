@@ -121,7 +121,16 @@ pub enum ProbeOutcome {
     Unauthorized,
     /// The provider returned 404 for the probe's model slug — the credential
     /// may well be valid, but the model is not found/deployed on this account
-    /// (redacted message attached; issue #2510).
+    /// (redacted message attached; issue #2510). This "404 means the MODEL,
+    /// not the endpoint" assumption holds only because every current adapter
+    /// ([`super::super::providers::openai_compat::OpenAiCompatAdapter`], the
+    /// shared core behind OpenRouter/Fireworks/OpenAI/Together/AtlasCloud)
+    /// puts the model slug in the request BODY against a fixed
+    /// `/chat/completions` path, never in the URL path itself — a future
+    /// adapter that encodes the model in the URL (Bedrock's Converse API does
+    /// this, though Bedrock is keyless and never reaches this probe) would
+    /// need its own 404 classification, since a path-404 there could equally
+    /// mean "wrong route" rather than "model not deployed".
     ModelNotFound(String),
     /// No key resolved for the provider; nothing to probe.
     Unconfigured,
