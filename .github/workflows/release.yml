@@ -836,6 +836,29 @@ jobs:
           SKIP_UI_BUILD: ${{ matrix.skip_ui_build && '1' || '' }}
           HOST_CFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-I/usr/include/x86_64-linux-gnu' || '' }}
           RUSTFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-C link-arg=-lstdc++' || '' }}
+          # numkong (usearch's SIMD backend — a mandatory, non-optional
+          # dependency of trusty-search, unrelated to the bundled-ort /
+          # load-dynamic ORT selection) probes newest-generation x86 ISA
+          # target attributes at build time. Its NK_TARGET_SAPPHIREAMX probe
+          # only checks that gcc accepts `-mamx-tile -mamx-int8` as
+          # command-line flags — both ARE recognized by AL2023's GCC 11 — but
+          # the C source it then unconditionally compiles under
+          # `#if NK_TARGET_SAPPHIREAMX` also uses the `avx512fp16` function
+          # target attribute, which GCC 11 does not support (added in GCC
+          # 12). The probe and the source it gates are out of sync, so the
+          # build fails with `cc1: error: attribute 'avx512fp16' argument
+          # 'target' is unknown` on AL2023 (issue #2222 follow-up). Force the
+          # newest-generation targets off explicitly via numkong's own
+          # `NK_TARGET_FOO=0` override mechanism (build.rs, "Allow env-var
+          # override") — none of Sapphire-AMX / Granite-AMX / Diamond Rapids
+          # / Sierra Forest matter for an AL2023 CPU-baseline build anyway.
+          # An empty string (non-al2023 legs) is treated by numkong's
+          # build.rs as "no override" (falls through to normal probing), so
+          # this is a no-op for every other variant.
+          NK_TARGET_SAPPHIREAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
+          NK_TARGET_GRANITEAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
+          NK_TARGET_DIAMOND: ${{ matrix.variant == 'al2023' && '0' || '' }}
+          NK_TARGET_SIERRA: ${{ matrix.variant == 'al2023' && '0' || '' }}
         run: |
           CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 

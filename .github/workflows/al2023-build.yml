@@ -380,8 +380,28 @@ jobs:
       #    trusty-embedderd LIBRARY crate it depends on — fails this step.
       #    SKIP_UI_BUILD=1 (workflow-level env) skips the Svelte UI build
       #    (committed ui-dist/ is sufficient, same as ci.yml).
+      #
+      #    NK_TARGET_* (issue #2222 follow-up): trusty-search's mandatory
+      #    `usearch` dependency pulls in `numkong` (its SIMD backend) —
+      #    unrelated to the bundled-ort/load-dynamic ORT selection above.
+      #    numkong's NK_TARGET_SAPPHIREAMX capability probe only checks that
+      #    gcc accepts `-mamx-tile -mamx-int8` (AL2023's GCC 11 recognizes
+      #    both), but the C source it then unconditionally compiles under
+      #    `#if NK_TARGET_SAPPHIREAMX` also uses the `avx512fp16` function
+      #    target attribute, which GCC 11 does not support (added in GCC
+      #    12) — probe and source are out of sync. Force the
+      #    newest-generation targets off via numkong's own build.rs
+      #    `NK_TARGET_FOO=0` override mechanism; none of them matter for an
+      #    AL2023 CPU-baseline build. Mirrored in release.yml's AL2023 leg
+      #    (same crate, same failure) so the CI gate and the shipped release
+      #    asset build identically.
       # ------------------------------------------------------------------
       - name: Build trusty-search (load-dynamic, no bundled-ort)
+        env:
+          NK_TARGET_SAPPHIREAMX: "0"
+          NK_TARGET_GRANITEAMX: "0"
+          NK_TARGET_DIAMOND: "0"
+          NK_TARGET_SIERRA: "0"
         run: |
           echo "ORT_DYLIB_PATH=${ORT_DYLIB_PATH}"
           cargo build -p trusty-search \
