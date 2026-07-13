@@ -263,3 +263,138 @@ async fn relocate_index_onto_own_current_root_is_not_a_collision() {
         "relocating an index onto its own current root must succeed, not 409"
     );
 }
+
+// ── issue #2519 review follow-ups ─────────────────────────────────────────
+
+/// Two `create_index_handler` calls racing for the SAME root_path must not
+/// BOTH succeed. The `find_root_path_collision` guard is check-then-act
+/// (issue #2519 review: accepted as documented defense-in-depth rather than
+/// fixed with a registration mutex), so the loser may either be rejected by
+/// the guard itself (`409`) or lose the redb single-open race and hit
+/// `corpus_open_failed` (`500`) — both are acceptable outcomes of the
+/// accepted race window. What must never happen is both requests observing
+/// `200 {"created": true}`, since that would silently register two live
+/// handles over one on-disk corpus (the exact #2305/#2336 hazard).
+#[tokio::test]
+async fn create_index_concurrent_same_root_only_one_wins() {
+    let state = mock_state_async().await;
+    let (_dir, root) = temp_root("ts-2336-race-");
+
+    let state_a = Arc::clone(&state);
+    let root_a = root.clone();
+    let state_b = Arc::clone(&state);
+    let root_b = root.clone();
+
+    let (resp_a, resp_b) = tokio::join!(
+        super::indexes::create_index_handler(State(state_a), Json(create_req("racer-a", root_a)),),
+        super::indexes::create_index_handler(State(state_b), Json(create_req("racer-b", root_b)),),
+    );
+
+    let statuses = [resp_a.status(), resp_b.status()];
+    let successes = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    assert_eq!(
+        successes, 1,
+        "exactly one racing create_index over the same root_path must succeed \
+         (got statuses {statuses:?}) — the check-then-act window is accepted, \
+         but both requests observing 200 would silently double-register one \
+         on-disk corpus"
+    );
+    let loser_status = if statuses[0] == StatusCode::OK {
+        statuses[1]
+    } else {
+        statuses[0]
+    };
+    assert!(
+        loser_status == StatusCode::CONFLICT || loser_status == StatusCode::INTERNAL_SERVER_ERROR,
+        "the losing racer must fail with either 409 (guard caught it) or 500 \
+         (corpus_open_failed ground truth caught it), got {loser_status}"
+    );
+    assert_eq!(
+        state.registry.list().len(),
+        1,
+        "only one of the two racing registrations may end up in the registry"
+    );
+}
+
+/// macOS APFS is case-insensitive-but-case-preserving by default:
+/// `canonicalize()` on a differently-cased spelling of an already-registered
+/// root returns a DIFFERENT string (case is preserved, not normalized) that
+/// nonetheless names the SAME inode. Plain `PathBuf` equality misses this
+/// (issue #2519 review, MAJOR); the `(dev, ino)` identity check in
+/// `find_root_path_collision` must catch it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn create_index_rejects_case_variant_of_registered_root() {
+    let state = mock_state_async().await;
+    let (_dir, root) = temp_root("TS-2336-CaseVariant-");
+
+    let first = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("first-id", root.clone())),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
+
+    // Build a differently-cased spelling of the SAME path. `temp_root`
+    // already canonicalized `root`, so flipping the case of every ASCII
+    // alphabetic byte in the final path component yields a string that
+    // `canonicalize()` will resolve to the identical inode on a
+    // case-insensitive volume, but which is NOT string-equal to `root`.
+    let file_name = root
+        .file_name()
+        .expect("temp root has a final component")
+        .to_str()
+        .expect("temp root component is valid UTF-8");
+    let flipped_case: String = file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    let case_variant_root = root.with_file_name(flipped_case);
+    assert_ne!(
+        case_variant_root, root,
+        "the case-flipped path must be a different string than the original"
+    );
+
+    // Defensive skip: this test's premise (case-insensitive APFS) is the
+    // macOS default but is not guaranteed — a developer or CI runner may
+    // have opted into a case-SENSITIVE APFS volume. On such a volume the
+    // flipped-case path genuinely does not exist, so `validate_root_path`'s
+    // `is_dir` check rejects it with 400 before the collision guard ever
+    // runs, which would be a false test failure unrelated to the dev/ino fix
+    // under test. Skip gracefully rather than assert on an environment this
+    // test cannot control.
+    if std::fs::metadata(&case_variant_root).is_err() {
+        eprintln!(
+            "skipping create_index_rejects_case_variant_of_registered_root: \
+             {case_variant_root:?} does not exist — this volume is case-sensitive, \
+             not the macOS-default case-insensitive APFS this test targets"
+        );
+        return;
+    }
+
+    let second = super::indexes::create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("second-id", case_variant_root)),
+    )
+    .await;
+    assert_eq!(
+        second.status(),
+        StatusCode::CONFLICT,
+        "a case-variant spelling of an already-registered root must still be \
+         rejected as a collision on a case-insensitive filesystem (dev/ino \
+         identity, issue #2519)"
+    );
+    assert_eq!(
+        state.registry.list().len(),
+        1,
+        "only the first index may be registered after a rejected case-variant collision"
+    );
+}

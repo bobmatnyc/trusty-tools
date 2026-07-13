@@ -574,7 +574,8 @@ fn dedup_verbose_no_collision_yields_empty_dropped_and_merged_sets() {
 
 /// Why: `merge_dropped_config_into_survivor` must not duplicate a value that
 /// already appears on the survivor (e.g. both entries were registered with
-/// the same `exclude_globs` pattern).
+/// the same `include_paths` entry) — exercised on a WHITELIST field, which is
+/// the only field type this function still merges (issue #2519 review).
 /// What: survivor and loser share one overlapping value plus one distinct
 /// value each; asserts the merged result has no duplicates.
 /// Test: this test.
@@ -582,24 +583,55 @@ fn dedup_verbose_no_collision_yields_empty_dropped_and_merged_sets() {
 fn merge_dropped_config_deduplicates_overlapping_values() {
     let mut survivor = PersistedIndex {
         id: "survivor".to_string(),
-        exclude_globs: vec!["**/vendor/**".to_string(), "*.lock".to_string()],
+        include_paths: vec!["src/api".to_string(), "src/core".to_string()],
         ..Default::default()
     };
     let dropped = PersistedIndex {
         id: "dropped".to_string(),
-        exclude_globs: vec!["**/vendor/**".to_string(), "*.generated.ts".to_string()],
+        include_paths: vec!["src/api".to_string(), "src/legacy".to_string()],
         ..Default::default()
     };
 
     merge_dropped_config_into_survivor(&mut survivor, &dropped);
 
     assert_eq!(
-        survivor.exclude_globs,
+        survivor.include_paths,
         vec![
-            "**/vendor/**".to_string(),
-            "*.lock".to_string(),
-            "*.generated.ts".to_string(),
+            "src/api".to_string(),
+            "src/core".to_string(),
+            "src/legacy".to_string(),
         ],
         "overlapping value must appear once; new value must be appended"
+    );
+}
+
+/// Why (#2519 review, MEDIUM): `exclude_globs` is a BLOCKLIST, not a
+/// whitelist — union-merging two blocklists narrows the survivor's indexing
+/// scope on the next reindex (it can only ever exclude MORE), which is the
+/// exact silent-scope-change hazard the #2337 merge exists to prevent for the
+/// other list fields. It must stay excluded from the auto-merge and be
+/// surfaced via the operator `warn` log instead (see
+/// `dedup_entries_by_corpus_path_verbose`'s doc).
+/// What: survivor and loser have distinct, non-overlapping `exclude_globs`;
+/// asserts the survivor's `exclude_globs` is unchanged after the merge (not
+/// unioned with the loser's).
+/// Test: this test.
+#[test]
+fn dedup_verbose_does_not_merge_exclude_globs() {
+    let shared = tempfile::tempdir().unwrap();
+
+    let mut winner = colocated_entry("fresh", shared.path(), Some(2));
+    winner.exclude_globs = vec!["**/vendor/**".to_string()];
+
+    let mut loser = colocated_entry("stale", shared.path(), Some(1));
+    loser.exclude_globs = vec!["**/*.generated.ts".to_string()];
+
+    let outcome = dedup_entries_by_corpus_path_verbose(vec![winner, loser]);
+    let survivor = &outcome.survivors[0];
+    assert_eq!(
+        survivor.exclude_globs,
+        vec!["**/vendor/**".to_string()],
+        "exclude_globs must not be auto-merged — merging blocklists would \
+         silently narrow the survivor's indexing scope"
     );
 }

@@ -216,15 +216,36 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
 /// What: `candidate` must already be canonicalized — every caller passes the
 /// output of `validate_root_path`, the same normalization every registered
 /// handle's `root_path` went through (directly at create/relocate time, or
-/// via `canonicalize_best_effort` at warm-boot), so the equality comparison
-/// below is exact with no separate canonicalization step needed here. Linear
-/// scan of `handles` (the registry is small — tens to low hundreds of
-/// entries); returns the first colliding id, skipping `exclude_id` (used by
-/// `relocate_index_handler` so an index is never compared against itself).
+/// via `canonicalize_best_effort` at warm-boot). Adversarial review (#2519)
+/// found that plain `PathBuf` equality on canonicalized paths is NOT a
+/// reliable identity check on case-insensitive-but-case-preserving
+/// filesystems (macOS APFS default): `/Volumes/Data/Proj` and
+/// `/Volumes/Data/PROJ` canonicalize to two different-looking strings that
+/// nonetheless resolve to the SAME inode, so string equality misses the
+/// collision entirely. The fix compares filesystem-truth identity —
+/// `(dev, ino)` from `std::fs::metadata` — whenever both paths currently
+/// exist on disk; this catches case variants AND other alias forms (bind
+/// mounts, hard-linked directories) that resolve to one inode, at the cost of
+/// one extra `stat(2)` per registered handle per call. When either path
+/// doesn't exist (metadata lookup fails), the check falls back to plain
+/// canonicalized-`PathBuf` equality — the pre-fix behavior. This fallback is
+/// a deliberate fail-open/fail-closed tradeoff: it stays fail-closed for the
+/// dominant, security-relevant case (the candidate root always exists —
+/// `validate_root_path` already required `is_dir()` before this is called),
+/// and only degrades to string equality for the exotic case of a handle
+/// whose `root_path` has since vanished from disk (e.g. a device was
+/// unmounted after registration), where dev/ino cannot be computed for one
+/// side. Linear scan of `handles` (the registry is small — tens to low
+/// hundreds of entries); returns the first colliding id, skipping
+/// `exclude_id` (used by `relocate_index_handler` so an index is never
+/// compared against itself).
 /// Test: `create_index_rejects_duplicate_root_path`,
 /// `create_index_same_id_same_root_is_idempotent_not_a_collision`,
 /// `relocate_index_rejects_root_path_owned_by_another_index`,
-/// `relocate_index_onto_own_current_root_is_not_a_collision` in `tests_2336.rs`.
+/// `relocate_index_onto_own_current_root_is_not_a_collision`,
+/// `create_index_concurrent_same_root_only_one_wins` in `tests_2336.rs`; plus
+/// the macOS-gated `create_index_rejects_case_variant_of_registered_root`
+/// exercising the dev/ino path directly.
 pub(super) fn find_root_path_collision(
     handles: &[std::sync::Arc<IndexHandle>],
     candidate: &std::path::Path,
@@ -232,8 +253,49 @@ pub(super) fn find_root_path_collision(
 ) -> Option<IndexId> {
     handles
         .iter()
-        .find(|h| h.root_path == candidate && exclude_id != Some(&h.id))
+        .find(|h| exclude_id != Some(&h.id) && identifies_same_root(&h.root_path, candidate))
         .map(|h| h.id.clone())
+}
+
+/// Decide whether `a` and `b` name the same on-disk root (issue #2519).
+///
+/// Why: see `find_root_path_collision`'s doc for the case-insensitive
+/// filesystem hazard this closes.
+/// What: prefers `(dev, ino)` identity via `same_filesystem_entry` when both
+/// paths exist; falls back to canonicalized-`PathBuf` equality otherwise.
+/// Test: covered transitively by `find_root_path_collision`'s test list.
+fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match same_filesystem_entry(a, b) {
+        Some(same) => same,
+        None => a == b,
+    }
+}
+
+/// Compare `a` and `b` by `(dev, ino)`, returning `None` when either path's
+/// metadata cannot be read (does not exist, permission denied, etc.) so the
+/// caller can fall back to string equality.
+///
+/// Why: `stat(2)`-level identity is the only reliable way to tell whether two
+/// path strings name the same file on a case-insensitive-but-case-preserving
+/// filesystem (macOS APFS default) — canonicalize() preserves the case each
+/// path was spelled with, it does not normalize case, so two differently-cased
+/// spellings of the same directory canonicalize to two different strings.
+/// What: unix-only (`dev`/`ino` via `std::os::unix::fs::MetadataExt`); no
+/// portable equivalent is wired up for non-unix targets, so this always
+/// returns `None` there and callers fall back to path equality.
+/// Test: `create_index_rejects_case_variant_of_registered_root` (macOS-gated)
+/// in `tests_2336.rs`.
+#[cfg(unix)]
+fn same_filesystem_entry(a: &std::path::Path, b: &std::path::Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let meta_a = std::fs::metadata(a).ok()?;
+    let meta_b = std::fs::metadata(b).ok()?;
+    Some(meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino())
+}
+
+#[cfg(not(unix))]
+fn same_filesystem_entry(_a: &std::path::Path, _b: &std::path::Path) -> Option<bool> {
+    None
 }
 
 /// Build a `409 Conflict` response naming the index that already owns

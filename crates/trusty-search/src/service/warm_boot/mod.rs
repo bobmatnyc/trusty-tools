@@ -247,27 +247,33 @@ pub fn dedup_entries_by_corpus_path(entries: Vec<PersistedIndex>) -> Vec<Persist
 
 /// Verbose variant of [`dedup_entries_by_corpus_path`] (issue #2337): also
 /// returns the dropped entries and preserves each dropped entry's per-index
-/// search configuration by merging it into the surviving entry.
+/// WHITELIST search configuration by merging it into the surviving entry.
 ///
 /// Why: survivor selection previously discarded the loser's per-entry search
-/// config (`include_paths`, `exclude_globs`, `extensions`, `domain_terms`,
-/// `path_filter`) even though the redb data is shared and those filters can
+/// config even though the redb data is shared and those filters can
 /// genuinely differ between the two registrations. Silently narrowing the
 /// survivor's scope to whichever entry happened to win recency is a
-/// regression for the loser's callers.
+/// regression for the loser's callers — but only for the WHITELIST fields
+/// (`include_paths`, `extensions`, `domain_terms`, `path_filter`), where
+/// union-merging can only broaden coverage. `exclude_globs` is a BLOCKLIST:
+/// union-merging two blocklists narrows the survivor instead (issue #2519
+/// review), which is the exact hazard this function exists to avoid — so it
+/// is deliberately excluded from the merge, same treatment as the scalar
+/// flags.
 /// What: groups entries by [`corpus_dedup_key`] (colocated only; non-colocated
 /// entries are always kept and can never collide). Within a colliding group,
 /// picks the winner using the same recency-then-id tie-break as before
 /// (highest `warmboot_sort_key`; ties break by lower `id`), then for every
-/// losing entry: unions its list-type config fields into the winner
+/// losing entry: unions its WHITELIST list-type config fields into the winner
 /// (`merge_dropped_config_into_survivor`) and logs its full config — including
-/// the scalar flags `include_docs`/`respect_gitignore`/`lexical_only`/
-/// `skip_kg`, which are deliberately NOT auto-merged (see that function's
-/// doc) — at `warn` for operator reconciliation. Survivors keep their
-/// original input order.
+/// `exclude_globs` and the scalar flags `include_docs`/`respect_gitignore`/
+/// `lexical_only`/`skip_kg`, none of which are auto-merged (see that
+/// function's doc) — at `warn` for operator reconciliation. Survivors keep
+/// their original input order.
 /// Test: `dedup_verbose_reports_dropped_entries`,
 /// `dedup_verbose_merges_list_config_into_survivor`,
 /// `dedup_verbose_does_not_merge_scalar_flags`,
+/// `dedup_verbose_does_not_merge_exclude_globs`,
 /// `dedup_verbose_no_collision_yields_empty_dropped_and_merged_sets` in
 /// `warm_boot_tests.rs`.
 pub fn dedup_entries_by_corpus_path_verbose(entries: Vec<PersistedIndex>) -> DedupOutcome {
@@ -364,31 +370,46 @@ pub fn dedup_entries_by_corpus_path_verbose(entries: Vec<PersistedIndex>) -> Ded
     }
 }
 
-/// Union `dropped`'s list-type search-config fields into `survivor` in place
-/// (issue #2337).
+/// Union `dropped`'s WHITELIST-composed list-type search-config fields into
+/// `survivor` in place (issue #2337; narrowed by the #2519 review).
 ///
 /// Why: two entries that collapse to one redb corpus can carry genuinely
 /// different per-entry filters (e.g. one registration set
 /// `extensions: ["rs"]`, the other `extensions: ["py"]`) even though the
 /// underlying indexed data is one file. Dropping the loser's filters entirely
-/// would silently narrow the survivor's search scope. Scalar flags
-/// (`include_docs`, `respect_gitignore`, `lexical_only`, `skip_kg`) are
-/// deliberately left untouched here — there is no safe "union" semantics for
-/// a boolean pipeline toggle (e.g. OR-ing `lexical_only` could silently
-/// disable the semantic lane for an index that was built with it), so those
-/// are surfaced via the caller's `warn` log for operator reconciliation
+/// would silently narrow the survivor's search scope for `include_paths`,
+/// `extensions`, `domain_terms`, and `path_filter` — each of these is a
+/// whitelist (an ADDITIVE broadening: union-merging can only ever grow what
+/// the survivor covers), so unioning them is safe.
+///
+/// `exclude_globs` is deliberately EXCLUDED from this union (issue #2519
+/// review, MEDIUM): unlike the whitelist fields above, `exclude_globs` is a
+/// blocklist — union-merging two blocklists NARROWS the surviving index (it
+/// can only ever exclude MORE content), which is exactly the silent-scope-
+/// change hazard this function exists to avoid. Auto-merging it would mean
+/// the next reindex quietly drops more files than either original
+/// registration intended. Like the scalar flags below, the dropped entry's
+/// `exclude_globs` is surfaced via the caller's `warn` log (see
+/// `dedup_entries_by_corpus_path_verbose`) for operator reconciliation
 /// instead of being auto-merged.
-/// What: appends every value from each of `dropped`'s list fields
-/// (`include_paths`, `exclude_globs`, `extensions`, `domain_terms`,
-/// `path_filter`) that is not already present in `survivor`'s corresponding
-/// field, preserving order (survivor's existing values first).
+///
+/// Scalar flags (`include_docs`, `respect_gitignore`, `lexical_only`,
+/// `skip_kg`) are likewise left untouched here — there is no safe "union"
+/// semantics for a boolean pipeline toggle (e.g. OR-ing `lexical_only` could
+/// silently disable the semantic lane for an index that was built with it) —
+/// so those are also only surfaced via the `warn` log.
+/// What: appends every value from each of `dropped`'s WHITELIST list fields
+/// (`include_paths`, `extensions`, `domain_terms`, `path_filter`) that is not
+/// already present in `survivor`'s corresponding field, preserving order
+/// (survivor's existing values first). `exclude_globs` is untouched —
+/// `survivor.exclude_globs` keeps exactly its own pre-merge value.
 /// Test: `dedup_verbose_merges_list_config_into_survivor`,
 /// `dedup_verbose_does_not_merge_scalar_flags`,
+/// `dedup_verbose_does_not_merge_exclude_globs`,
 /// `merge_dropped_config_deduplicates_overlapping_values` in
 /// `warm_boot_tests.rs`.
 fn merge_dropped_config_into_survivor(survivor: &mut PersistedIndex, dropped: &PersistedIndex) {
     merge_unique_strings(&mut survivor.include_paths, &dropped.include_paths);
-    merge_unique_strings(&mut survivor.exclude_globs, &dropped.exclude_globs);
     merge_unique_strings(&mut survivor.extensions, &dropped.extensions);
     merge_unique_strings(&mut survivor.domain_terms, &dropped.domain_terms);
     merge_unique_strings(&mut survivor.path_filter, &dropped.path_filter);

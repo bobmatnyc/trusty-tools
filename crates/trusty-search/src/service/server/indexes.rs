@@ -223,12 +223,18 @@ pub(super) async fn create_index_handler(
             }
         };
 
-    // Issue #2336 defense-in-depth: the collision guard above catches the
-    // common case, but `corpus_open_failed` is the ground truth — any other
-    // reason the redb open failed (e.g. a raced collision, or an unrelated
-    // open error) must not be silently registered as a healthy
-    // `200 {"created": true}` handle. Previously this failure was swallowed:
-    // `indexer.corpus_open_failed` was set but never checked here.
+    // Issue #2336 defense-in-depth: the `find_root_path_collision` check
+    // above is BEST-EFFORT ONLY — it is a check-then-act race (issue #2519
+    // review, accepted as documented behavior rather than fixed with a
+    // registration mutex): two concurrent `POST /indexes` calls for the same
+    // root can both pass the guard before either has registered a handle.
+    // `indexer.corpus_open_failed` is the GROUND TRUTH — redb's single-open
+    // semantics mean at most one of the racing opens can ever succeed, so
+    // this check catches every case the best-effort guard misses (the raced
+    // collision above, or any unrelated open error) and must not be silently
+    // registered as a healthy `200 {"created": true}` handle. Previously this
+    // failure was swallowed: `indexer.corpus_open_failed` was set but never
+    // checked here.
     if indexer.corpus_open_failed {
         tracing::error!(
             "create_index: corpus open failed for '{}' at {} — refusing to register a \
