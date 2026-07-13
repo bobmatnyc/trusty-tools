@@ -713,7 +713,23 @@ fn cli_parses_events() {
 #[test]
 fn cli_url_flag_overrides_default() {
     let cli = Cli::try_parse_from(["trusty-mpm", "--url", "http://x:9", "status"]).unwrap();
-    assert_eq!(cli.url, "http://x:9");
+    assert_eq!(cli.url.as_deref(), Some("http://x:9"));
+}
+
+#[test]
+fn cli_url_flag_equal_to_default_is_still_some() {
+    // Regression test for issue #2487: `cli.url` must distinguish "the operator
+    // explicitly passed --url <DEFAULT_URL>" from "nothing was passed at all".
+    // Before the fix, `cli.url` was a plain `String` with
+    // `default_value = DEFAULT_URL`, so both cases produced the identical
+    // string and every downstream resolver had to guess — incorrectly, in
+    // this exact case — which one actually happened.
+    let cli = Cli::try_parse_from(["trusty-mpm", "--url", DEFAULT_URL, "status"]).unwrap();
+    assert_eq!(
+        cli.url.as_deref(),
+        Some(DEFAULT_URL),
+        "an explicit --url equal to the default must still parse as Some, not be lost"
+    );
 }
 
 #[test]
@@ -737,7 +753,7 @@ fn cli_parses_tui_defaults() {
     let cli = Cli::try_parse_from(["trusty-mpm", "tui", "--url", DEFAULT_URL]).unwrap();
     match cli.command.unwrap() {
         Command::Tui { url, interval_ms } => {
-            assert_eq!(url, DEFAULT_URL);
+            assert_eq!(url.as_deref(), Some(DEFAULT_URL));
             assert_eq!(interval_ms, 1000);
         }
         other => panic!("expected Tui, got {other:?}"),

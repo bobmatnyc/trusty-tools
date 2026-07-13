@@ -276,12 +276,16 @@ pub(crate) fn tcp_probe(addr: &str) -> bool {
 /// Why: when the lock file is absent, we still try to probe the well-known
 /// default address so the banner shows the correct online state even when the
 /// daemon was started without a lock file or with a stale PID.
-/// What: reads `TRUSTY_MPM_URL` env var first (falls back to
-/// `DEFAULT_DAEMON_URL`), then calls `url_to_probe_addr` to extract host:port.
+/// What: reads `TRUSTY_MPM_URL` via [`trusty_mpm::core::explicit_url_from_env`]
+/// (falls back to `DEFAULT_DAEMON_URL`), then calls `url_to_probe_addr` to
+/// extract host:port. Using the shared helper (#2487) — rather than a raw
+/// `std::env::var(...).unwrap_or_else(...)` — also fixes a latent edge case:
+/// a whitespace-only `TRUSTY_MPM_URL` now falls through to the default instead
+/// of being probed literally.
 /// Test: `probe_default_addr_handles_url_without_port` (via the inner helper).
 fn probe_default_addr() -> Option<String> {
-    let url = std::env::var("TRUSTY_MPM_URL")
-        .unwrap_or_else(|_| trusty_mpm::core::DEFAULT_DAEMON_URL.to_string());
+    let url = trusty_mpm::core::explicit_url_from_env()
+        .unwrap_or_else(|| trusty_mpm::core::DEFAULT_DAEMON_URL.to_string());
     url_to_probe_addr(&url)
 }
 

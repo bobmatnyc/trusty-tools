@@ -47,15 +47,27 @@ const PROJECT_CTL_INTERVAL_MS: u64 = 1500;
 /// `[subcommands: …]` hint clap derives from richer internal match context),
 /// so delegating to the untouched parse path is the more reliable choice.
 /// What: resolves the daemon URL exactly as the normal dispatch path would
-/// for an unspecified `--url` (a bare invocation has no flags to read one
-/// from) and hands off to `trusty_mpm::tui::project_ctl::run`.
+/// for an unspecified `--url` — reading `TRUSTY_MPM_URL` directly via
+/// [`trusty_mpm::core::explicit_url_from_env`] (a bare invocation runs BEFORE
+/// `Cli::try_parse()`, so there is no `--url` flag to read and no clap-parsed
+/// `Option<String>` field yet) — and hands off to
+/// `trusty_mpm::tui::project_ctl::run`.
+///
+/// Why (#2487): this call site used to pass `Some(crate::cli::DEFAULT_URL)` —
+/// the literal default URL string — relying on the resolvers' old
+/// value-equality heuristic to treat it as "no real override" so the gateway
+/// probe still ran. That heuristic is gone (every resolver now trusts `Some`
+/// unconditionally), and the old call never actually read `TRUSTY_MPM_URL` at
+/// all, so a bare `tm projects` TUI silently ignored the env var even when
+/// the "normal" `tm projects <verb>` dispatch honoured it. Using the shared
+/// env-read helper closes that gap and keeps this path in lockstep with
+/// `main.rs`'s dispatch resolution.
 /// Test: terminal glue, exercised by launching the TUI; the gate condition
 /// itself is [`should_launch_bare_tui`], which IS unit tested.
 pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let url =
-        trusty_mpm::core::resolve_daemon_url_via_gateway(&client, Some(crate::cli::DEFAULT_URL))
-            .await;
+    let explicit = trusty_mpm::core::explicit_url_from_env();
+    let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, explicit.as_deref()).await;
     trusty_mpm::tui::project_ctl::run(url, PROJECT_CTL_INTERVAL_MS).await
 }
 

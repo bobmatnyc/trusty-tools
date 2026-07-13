@@ -10,21 +10,28 @@ use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand};
 
-/// Default daemon URL when `--url` / `TRUSTY_MPM_URL` is unset.
+/// Default daemon URL, for test convenience only (issue #2487).
 ///
-/// Why (issue #1268): this must be the *same* address the daemon binds to by
-/// default, or the client probes a port nothing is listening on and reports
-/// "daemon: unreachable". It is re-exported from the single source of truth in
-/// `core::discovery` (which also drives the daemon `--addr` default) so the two
-/// sides can never drift.
+/// Why (issue #1268, revised #2487): this used to be the `default_value` for
+/// every `--url`/`TRUSTY_MPM_URL` clap field so the client and the daemon's
+/// bind address could never drift. As of #2487 every such field is
+/// `Option<String>` with NO `default_value` — the "no explicit override"
+/// fallback now lives entirely in `core::discovery::resolve_daemon_url*`
+/// (still ultimately `trusty_mpm::core::DEFAULT_DAEMON_URL`), not in clap.
+/// This alias survives purely so tests can assert against the well-known
+/// default value without importing the library constant under a different
+/// name; `#[cfg(test)]` reflects that it has no production callers.
 /// What: alias of [`trusty_mpm::core::DEFAULT_DAEMON_URL`].
-/// Test: `core::discovery::default_url_matches_addr` proves URL and addr agree.
+/// Test: used throughout `tests.rs`; `core::discovery::default_url_matches_addr`
+/// proves URL and addr agree.
+#[cfg(test)]
 pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
 
 /// Default daemon bind address for the `daemon --addr` flag (issue #1268).
 ///
-/// Why: keeps the daemon's bind default tied to the same constant that drives
-/// the client's [`DEFAULT_URL`], so `tm start` and the thin CLI always agree.
+/// Why: keeps the daemon's bind default tied to the same
+/// [`trusty_mpm::core::DEFAULT_DAEMON_URL`] the client resolvers fall back to
+/// (see `core::discovery`), so `tm start` and the thin CLI always agree.
 /// What: alias of [`trusty_mpm::core::DEFAULT_DAEMON_ADDR`].
 /// Test: `core::discovery::default_addr_parses`.
 pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
@@ -44,8 +51,22 @@ pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
 )]
 pub(crate) struct Cli {
     /// Base URL of the trusty-mpm daemon (used by the thin CLI subcommands).
-    #[arg(long, env = "TRUSTY_MPM_URL", default_value = DEFAULT_URL, global = true)]
-    pub(crate) url: String,
+    ///
+    /// Why (#2487): deliberately `Option<String>` with NO `default_value`.
+    /// `None` means "the operator did not pass `--url` and `TRUSTY_MPM_URL`
+    /// is unset" — every downstream resolver (`core::discovery::
+    /// resolve_daemon_url*`) treats that, and only that, as license to fall
+    /// through to the lock file / gateway probe / compiled-in default. A
+    /// `String` with `default_value = DEFAULT_URL` made "unset" and "operator
+    /// explicitly set TRUSTY_MPM_URL to the literal default value" the exact
+    /// same string, which is what let `TRUSTY_MPM_URL=http://127.0.0.1:7880`
+    /// get silently rerouted through the trusty-console gateway proxy instead
+    /// of honoured directly (issue #2487). Matches the pattern already used
+    /// by `SessionAction::Tui::url`.
+    /// What: `Some(v)` exactly when `--url` or `TRUSTY_MPM_URL` was supplied.
+    /// Test: `cli_url_flag_overrides_default`, `cli_url_unset_is_none`.
+    #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
+    pub(crate) url: Option<String>,
 
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
@@ -214,9 +235,11 @@ pub(crate) enum Command {
     Health,
     /// Launch the ratatui multi-session TUI dashboard.
     Tui {
-        /// Base URL of the trusty-mpm daemon.
-        #[arg(long, env = "TRUSTY_MPM_URL", default_value = DEFAULT_URL)]
-        url: String,
+        /// Base URL of the trusty-mpm daemon. `Option<String>`, no
+        /// `default_value` (#2487) — resolved via `resolve_daemon_url`, which
+        /// applies the lock-file / compiled-in-default fallback itself.
+        #[arg(long, env = "TRUSTY_MPM_URL")]
+        url: Option<String>,
         /// Poll interval in milliseconds.
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
@@ -1441,9 +1464,11 @@ pub(crate) enum TelegramCmd {
     Status,
     /// Start the Telegram bot process.
     Start {
-        /// Base URL of the trusty-mpm daemon.
-        #[arg(long, env = "TRUSTY_MPM_URL", default_value = DEFAULT_URL)]
-        url: String,
+        /// Base URL of the trusty-mpm daemon. `Option<String>`, no
+        /// `default_value` (#2487) — resolved via `resolve_daemon_url`, which
+        /// applies the lock-file / compiled-in-default fallback itself.
+        #[arg(long, env = "TRUSTY_MPM_URL")]
+        url: Option<String>,
         /// Telegram bot token. When omitted, resolved from `.env.local` /
         /// `.env` / the `TELEGRAM_BOT_TOKEN` environment variable.
         #[arg(long)]
@@ -1474,9 +1499,11 @@ pub(crate) enum TelegramCmd {
 pub(crate) enum SlackCmd {
     /// Start the Slack bot process (Socket Mode — no public webhook required).
     Start {
-        /// Base URL of the trusty-mpm daemon.
-        #[arg(long, env = "TRUSTY_MPM_URL", default_value = DEFAULT_URL)]
-        url: String,
+        /// Base URL of the trusty-mpm daemon. `Option<String>`, no
+        /// `default_value` (#2487) — resolved via `resolve_daemon_url`, which
+        /// applies the lock-file / compiled-in-default fallback itself.
+        #[arg(long, env = "TRUSTY_MPM_URL")]
+        url: Option<String>,
         /// Slack bot token (`xoxb-…`). When omitted, resolved from `.env.local` /
         /// `.env` / the `SLACK_BOT_TOKEN` environment variable.
         #[arg(long)]
