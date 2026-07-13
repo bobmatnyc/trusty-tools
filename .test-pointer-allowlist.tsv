@@ -216,7 +216,7 @@ crates/trusty-code/src/run_task/recorder.rs	127	recorder_flags_ran_test_command_
 crates/trusty-code/src/runner/in_process.rs	289	with_timeout_secs_overrides_only_timeout
 crates/trusty-code/src/serve/http.rs	153	http_session_events_sse_streams_replay_then_live_event
 crates/trusty-code/src/serve/http.rs	89	http_session_events_sse_streams_replay_then_live_event
-crates/trusty-code/src/session/memory_sink.rs	202	write_turn_passes_force_true_for_memory_remember
+crates/trusty-code/src/session/memory_sink.rs	213	write_turn_passes_force_true_for_memory_remember
 crates/trusty-code/src/session/registry.rs	282	cancel_is_idempotent_on_terminal_session
 crates/trusty-code/src/session/registry.rs	413	detach_stops_the_forwarder
 crates/trusty-code/src/session/registry.rs	709	get_transcript_returns_stored_record
@@ -266,8 +266,8 @@ crates/trusty-common/src/memory_core/dream/recall_benchmark.rs	18	dream_recall_b
 crates/trusty-common/src/memory_core/registry.rs	498	open_hydrates_persisted_palaces
 crates/trusty-common/src/memory_core/registry.rs	540	evict_idle_skips_recently_accessed_handle
 crates/trusty-common/src/memory_core/retrieval/handle.rs	172	palace_handle_read_only_when_locked_by_another_process
-crates/trusty-common/src/memory_core/retrieval/handle.rs	500	remember_classifies_session_events
-crates/trusty-common/src/memory_core/retrieval/handle.rs	672	deferred_embed_backfills_vector_once_embedder_ready
+crates/trusty-common/src/memory_core/retrieval/handle.rs	507	remember_classifies_session_events
+crates/trusty-common/src/memory_core/retrieval/handle.rs	691	deferred_embed_backfills_vector_once_embedder_ready
 crates/trusty-common/src/memory_core/retrieval/handle.rs	76	decay_applied_in_l2_score
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	180	ollama_inference_new_stores_fields
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	87	openrouter_inference_new_stores_fields
@@ -415,10 +415,10 @@ crates/trusty-memory/src/service/types.rs	93	create_palace_accepts_pinned_slug_v
 crates/trusty-memory/src/service/types.rs	93	create_palace_force_bypasses_validation
 crates/trusty-memory/src/service/types.rs	93	create_palace_rejects_mismatch_when_cwd_given
 crates/trusty-memory/src/tools/chat_ops.rs	127	chat_session_get_missing_errors
-crates/trusty-memory/src/tools/helpers.rs	221	dispatch_remember_rejects_short_content
-crates/trusty-memory/src/tools/memory_ops.rs	257	recall_deep_falls_back_to_bm25_and_l0_l1_while_warming
-crates/trusty-memory/src/tools/memory_ops.rs	257	recall_falls_back_to_bm25_and_l0_l1_while_warming
-crates/trusty-memory/src/tools/memory_ops.rs	400	recall_all_falls_back_to_bm25_and_l0_l1_while_warming
+crates/trusty-memory/src/tools/helpers.rs	215	dispatch_remember_rejects_short_content
+crates/trusty-memory/src/tools/memory_ops.rs	281	recall_deep_falls_back_to_bm25_and_l0_l1_while_warming
+crates/trusty-memory/src/tools/memory_ops.rs	281	recall_falls_back_to_bm25_and_l0_l1_while_warming
+crates/trusty-memory/src/tools/memory_ops.rs	424	recall_all_falls_back_to_bm25_and_l0_l1_while_warming
 crates/trusty-memory/src/tools/tests.rs	52	note_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	52	recall_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	52	remember_returns_warming_error_while_state_is_warming
