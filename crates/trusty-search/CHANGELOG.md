@@ -5,6 +5,40 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.32.4] — 2026-07-13
+
+Note: `trusty-search-v0.32.3` was published without a corresponding git tag,
+so `git-cliff`'s `--unreleased` window (scoped to the `trusty-search-v*` tag
+series) walked all the way back to `trusty-search-v0.32.2`. This section
+therefore includes commits already shipped in 0.32.3 in addition to the
+actual new content for this release — the AL2023 CI-gate / glibc-probe fix
+(#2525, refs #2222). Tag `trusty-search-v0.32.4` when publishing to close
+this gap going forward.
+
+### Added
+
+- credential resolver + secure KeyStore (closes #2401) ([#2427](https://github.com/bobmatnyc/trusty-tools/pull/2427)) ([`98d0eb9`](https://github.com/bobmatnyc/trusty-tools/commit/98d0eb993cdaf640842761aaf9299d7013d2ee01))
+- add follow_links symlink policy to indexer ([#2355](https://github.com/bobmatnyc/trusty-tools/pull/2355)) ([`4b95ccc`](https://github.com/bobmatnyc/trusty-tools/commit/4b95ccc45662cdce87367dc708d2a0dbec4a7a09))
+
+### Fixed
+
+- AL2023 close-out — CI gate + startup glibc probe + docs (refs #2222) ([#2525](https://github.com/bobmatnyc/trusty-tools/pull/2525)) ([`db59ebe`](https://github.com/bobmatnyc/trusty-tools/commit/db59ebeb4a4a5148f57ac7a47243247c3bd8c337))
+- index-registry integrity — runtime collision guard + dedup follow-ups (closes #2336, #2337) ([#2519](https://github.com/bobmatnyc/trusty-tools/pull/2519)) ([`1c609cf`](https://github.com/bobmatnyc/trusty-tools/commit/1c609cfbae2d9ca12ca22ab06d90c2cb449bba8f))
+- launchd-aware bridge no-spawn + /health supervised flag (closes #2486) ([#2491](https://github.com/bobmatnyc/trusty-tools/pull/2491)) ([`e993c18`](https://github.com/bobmatnyc/trusty-tools/commit/e993c18ace1fe9a86f4b5315be7887ed767da710))
+- dedup warm-boot entries sharing one redb corpus path (closes #2305) ([#2335](https://github.com/bobmatnyc/trusty-tools/pull/2335)) ([`f0a48cc`](https://github.com/bobmatnyc/trusty-tools/commit/f0a48cc127b8631bc4297a8f7574392b02d5cec2))
+- enable embedder idle-shutdown by default and guard in-flight requests (closes #2315) ([#2320](https://github.com/bobmatnyc/trusty-tools/pull/2320)) ([`0531e9d`](https://github.com/bobmatnyc/trusty-tools/commit/0531e9d944918b1b6eb408dc2c3c08d5e90bd746))
+- warm-boot health reports degraded when corpus fails to open (closes #1870) ([#2307](https://github.com/bobmatnyc/trusty-tools/pull/2307)) ([`9c3e88f`](https://github.com/bobmatnyc/trusty-tools/commit/9c3e88f652ec03a7ee03a266e85862c9c15ac03a))
+- return doc hits for Unknown-intent queries instead of empty (Closes #2203) ([#2287](https://github.com/bobmatnyc/trusty-tools/pull/2287)) ([`89ea057`](https://github.com/bobmatnyc/trusty-tools/commit/89ea05763330a56beb4b90876f27c7c3a5b7f6af))
+
+### Changed
+
+- split 3 files under SLOC caps ([#1195](https://github.com/bobmatnyc/trusty-tools/pull/1195)) ([#2289](https://github.com/bobmatnyc/trusty-tools/pull/2289)) ([`60a58e3`](https://github.com/bobmatnyc/trusty-tools/commit/60a58e326c23b211f93b36d50c603982593e1bb1))
+- split doctor_checks/ruby/review under 500-SLOC cap ([#1195](https://github.com/bobmatnyc/trusty-tools/pull/1195)) ([#2283](https://github.com/bobmatnyc/trusty-tools/pull/2283)) ([`eeabe56`](https://github.com/bobmatnyc/trusty-tools/commit/eeabe562c20172c8b6f4c9d63618a4bcd8838868))
+- release trusty-common 0.22.2 + trusty-mpm 0.19.1 ([#2241](https://github.com/bobmatnyc/trusty-tools/pull/2241)) ([`f7ab5f4`](https://github.com/bobmatnyc/trusty-tools/commit/f7ab5f43c8a5cc41ed4d821e2a53800974e74207))
+
+### Documentation
+
+- add trusty-mpm package metadata + repoint trusty-search CI badge to monorepo ([#2292](https://github.com/bobmatnyc/trusty-tools/pull/2292)) ([`cba43a5`](https://github.com/bobmatnyc/trusty-tools/commit/cba43a5698c03ea611f731b6a5bef0809547a93f))
 
 ## [0.32.3] — 2026-07-09
 

@@ -1,3 +1,29 @@
+# Changelog
+
+All notable changes are documented in this file.
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+---
+## [0.3.8] — 2026-07-13
+
+### Fixed
+
+- AL2023 close-out — CI gate + startup glibc probe + docs (refs #2222) ([#2525](https://github.com/bobmatnyc/trusty-tools/pull/2525)) ([`db59ebe`](https://github.com/bobmatnyc/trusty-tools/commit/db59ebeb4a4a5148f57ac7a47243247c3bd8c337))
+
+  `bundled-ort` was hardcoded unconditionally in `[dependencies]`, so Cargo
+  feature unification pulled the glibc-2.38-bound static ORT libs into any
+  build regardless of `--features load-dynamic` passed to `trusty-search`.
+  It is now gated behind this crate's own `bundled-ort` Cargo feature
+  (still on by default — no runtime behavior change for existing installs).
+  Also adds a fast startup glibc-version probe on Linux/glibc builds that
+  fails loudly before the 180s ORT-init timeout when the host is below the
+  glibc 2.38 floor.
+
+### Documentation (carried from prior Unreleased entry)
+
+- add missing package metadata to 7 crates ([#2293](https://github.com/bobmatnyc/trusty-tools/pull/2293)) ([`ee58b6a`](https://github.com/bobmatnyc/trusty-tools/commit/ee58b6a4ae01e1338e4761aaa5c27053c49f192b))
+
 # Changelog — trusty-embedderd
 
 ## [0.3.7] — 2026-07-09
