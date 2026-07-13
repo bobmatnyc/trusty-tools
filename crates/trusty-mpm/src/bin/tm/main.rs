@@ -261,7 +261,15 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let client = reqwest::Client::new();
+    // #2517: the top-level CLI client must carry the same bounded
+    // connect/request timeouts `DaemonClient` uses (issue #2471/#2512) — a
+    // bare `reqwest::Client::new()` here has NO timeout, so `tm status`
+    // against a daemon that accepts the TCP connection but never answers
+    // hung for the OS-level socket timeout (observed 55.63s live-verify)
+    // instead of the intended ~10s bound. `daemon_healthy` (used by `tm
+    // status`/`tm start`) and the gateway probe below both send through
+    // this SAME client, so both are now bounded too.
+    let client = trusty_mpm::client::http_client::default_client();
     // Resolve the daemon URL once with gateway-first probing:
     //   1. Explicit --url/TRUSTY_MPM_URL, whenever it was actually supplied
     //      (`cli.url` is `Option<String>` — see its doc, #2487) → use it

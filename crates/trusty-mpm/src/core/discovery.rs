@@ -287,11 +287,13 @@ async fn resolve_daemon_url_via_gateway_inner(
     //    forwards to the daemon's `GET /health`.
     //
     //    IMPORTANT: use a **dedicated** short-timeout client for this probe,
-    //    independent of the caller's `client`. The caller's client (from
-    //    `reqwest::Client::new()` in main.rs) carries no timeout by default
-    //    (reqwest's default is effectively unlimited). A slow or unreachable
-    //    console must NEVER stall every `tm` command for up to 30 seconds —
-    //    the gateway probe must fail fast and fall through to the direct path.
+    //    independent of the caller's `client`. Even now that the caller's
+    //    client is bounded (`client::http_client::default_client()`, issue
+    //    #2517 — previously a bare `reqwest::Client::new()` in main.rs with
+    //    no timeout at all), its bound (10s) is tuned for the local daemon,
+    //    not this console-gateway hop. A slow or unreachable console must
+    //    NEVER stall every `tm` command for up to 10 seconds — the gateway
+    //    probe must fail fast (500ms) and fall through to the direct path.
     //    The per-request `.timeout()` in `probe_url` provides a second line of
     //    defense; the client-level timeout here is the primary guarantee.
     let probe_client = reqwest::Client::builder()

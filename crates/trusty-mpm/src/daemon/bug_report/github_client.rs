@@ -8,8 +8,10 @@
 //!       (`SearchItem`, `SearchResponse`, `IssueResponse`, `CreateIssueBody`,
 //!       `CreateCommentBody`), and [`RealGithubClient`] which implements
 //!       [`super::github::GithubApi`] via `reqwest::blocking`.
-//! Test: NOT exercised in unit tests (network is mocked). Integration tests that
-//!       use a real token are gated `#[ignore]`.
+//! Test: request/response handling is NOT exercised in unit tests (network is
+//!       mocked at the `GithubApi` trait boundary). Integration tests that use
+//!       a real token are gated `#[ignore]`. The timeout bound itself (#2517)
+//!       IS unit tested — `tests::http_client_bounds_a_stalled_connection`.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +27,26 @@ const REPO: &str = "bobmatnyc/trusty-tools";
 const API_VERSION: &str = "2022-11-28";
 /// User-agent string for all requests.
 const USER_AGENT: &str = concat!("trusty-mpm/", env!("CARGO_PKG_VERSION"));
+/// Ceiling on establishing the TCP connection to `api.github.com`.
+///
+/// Why (#2517): [`RealGithubClient::http_client`] used to build a
+/// `reqwest::blocking::Client` with no timeout at all — a stalled GitHub API
+/// endpoint would hang the bug-filing pipeline's `spawn_blocking` task
+/// indefinitely. Mirrors the `CONNECT_TIMEOUT_SECS` precedent in
+/// `core::sm::providers::{anthropic, openrouter}` for an external API call
+/// over the public internet.
+/// What: passed to `reqwest::blocking::ClientBuilder::connect_timeout`.
+/// Test: `tests::http_client_bounds_a_stalled_connection`.
+const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Ceiling on one GitHub REST API request/response round trip.
+///
+/// Why (#2517): issue search/create/comment calls normally complete in a
+/// couple of seconds; 30s is generous slack for a loaded API or slow network
+/// path while still bounding a hung request instead of leaving bug-filing
+/// unbounded forever.
+/// What: passed to `reqwest::blocking::ClientBuilder::timeout`.
+/// Test: `tests::http_client_bounds_a_stalled_connection`.
+const GITHUB_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 // ── Private serde types ───────────────────────────────────────────────────────
 
@@ -62,6 +84,53 @@ struct CreateCommentBody<'a> {
     body: &'a str,
 }
 
+/// Build the headered, bounded `reqwest::blocking::Client` [`RealGithubClient::http_client`] uses.
+///
+/// Why (#2517): factored out as a pure function of its bounds (mirrors
+/// `client::http_client::config::build_client`) so the timeout behavior is
+/// unit-testable against tiny durations without waiting out the real
+/// [`GITHUB_CONNECT_TIMEOUT_SECS`]/[`GITHUB_REQUEST_TIMEOUT_SECS`] production
+/// values.
+/// What: sets `Accept`, `Authorization: Bearer <token>`, `X-GitHub-Api-Version`,
+/// `User-Agent`, and the given connect/request timeout bounds.
+/// Test: `tests::http_client_bounds_a_stalled_connection`.
+fn build_github_client(
+    token: &str,
+    connect_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> Result<reqwest::blocking::Client, GithubFilingError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        "application/vnd.github+json".parse().map_err(
+            |e: reqwest::header::InvalidHeaderValue| GithubFilingError::Transport(e.to_string()),
+        )?,
+    );
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {token}")
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                GithubFilingError::Transport(e.to_string())
+            })?,
+    );
+    headers.insert(
+        "X-GitHub-Api-Version",
+        API_VERSION
+            .parse()
+            .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                GithubFilingError::Transport(e.to_string())
+            })?,
+    );
+    reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .default_headers(headers)
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|e| GithubFilingError::Transport(e.to_string()))
+}
+
 // ── RealGithubClient ──────────────────────────────────────────────────────────
 
 /// Production GitHub API client using `reqwest` (blocking).
@@ -92,41 +161,21 @@ impl RealGithubClient {
     /// Build a default `reqwest::blocking::Client` with the required headers.
     ///
     /// Why: centralises header construction so each API method does not repeat
-    ///      the boilerplate.
-    /// What: sets `Accept`, `Authorization: Bearer`, `X-GitHub-Api-Version`, and
-    ///       `User-Agent` on a new blocking client.
-    /// Test: indirectly exercised whenever `GithubApi` methods are called.
+    ///      the boilerplate. Bounded connect/request timeouts (#2517) so a
+    ///      stalled GitHub API endpoint cannot hang the bug-filing pipeline
+    ///      forever — this client used to have NO timeout at all.
+    /// What: sets `Accept`, `Authorization: Bearer`, `X-GitHub-Api-Version`,
+    ///       `User-Agent`, [`GITHUB_CONNECT_TIMEOUT_SECS`], and
+    ///       [`GITHUB_REQUEST_TIMEOUT_SECS`] on a new blocking client.
+    /// Test: indirectly exercised whenever `GithubApi` methods are called;
+    ///       `tests::http_client_bounds_a_stalled_connection` pins the
+    ///       timeout bound itself against a stalled listener.
     fn http_client(&self) -> Result<reqwest::blocking::Client, GithubFilingError> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::ACCEPT,
-            "application/vnd.github+json".parse().map_err(
-                |e: reqwest::header::InvalidHeaderValue| {
-                    GithubFilingError::Transport(e.to_string())
-                },
-            )?,
-        );
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.token).parse().map_err(
-                |e: reqwest::header::InvalidHeaderValue| {
-                    GithubFilingError::Transport(e.to_string())
-                },
-            )?,
-        );
-        headers.insert(
-            "X-GitHub-Api-Version",
-            API_VERSION
-                .parse()
-                .map_err(|e: reqwest::header::InvalidHeaderValue| {
-                    GithubFilingError::Transport(e.to_string())
-                })?,
-        );
-        reqwest::blocking::Client::builder()
-            .user_agent(USER_AGENT)
-            .default_headers(headers)
-            .build()
-            .map_err(|e| GithubFilingError::Transport(e.to_string()))
+        build_github_client(
+            &self.token,
+            std::time::Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECS),
+            std::time::Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECS),
+        )
     }
 }
 
@@ -217,5 +266,57 @@ impl GithubApi for RealGithubClient {
             return Err(GithubFilingError::ApiError { status, body });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why (#2517): `http_client`/`build_github_client` used to build a
+    /// `reqwest::blocking::Client` with no timeout at all — a stalled GitHub
+    /// API endpoint would hang the bug-filing pipeline's `spawn_blocking`
+    /// task indefinitely. Drives a real request against a `TcpListener` that
+    /// accepts but never answers (mirrors
+    /// `client::http_client::config::tests::build_client_bounds_a_stalled_connection`),
+    /// using tiny test-only bounds so the assertion doesn't have to wait out
+    /// the real 10s/30s production values.
+    /// What: builds a client via [`build_github_client`] with 200ms connect /
+    /// 300ms request bounds, issues a GET against the stalled listener (off
+    /// the test thread, since this is a blocking client), and asserts the
+    /// call errors well within a generous CI margin.
+    #[test]
+    fn http_client_bounds_a_stalled_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stalling listener");
+        let addr = listener.local_addr().expect("read local_addr");
+
+        let client = build_github_client(
+            "test-token",
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(300),
+        )
+        .expect("build client");
+        let url = format!("http://{addr}/");
+
+        let start = std::time::Instant::now();
+        let result = client.get(&url).send();
+        let elapsed = start.elapsed();
+
+        // `listener` stays alive (dropped at function end) for the whole
+        // request so the connection stalls rather than being refused outright.
+        assert!(result.is_err(), "expected the stalled request to time out");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "request took {elapsed:?}, expected it to be bounded by the ~300ms timeout"
+        );
+    }
+
+    #[test]
+    fn timeout_constants_are_finite() {
+        // Why (#2517): pins the production constants so a future edit can't
+        // silently widen them back toward "unbounded" without a visible test
+        // failure.
+        assert_eq!(GITHUB_CONNECT_TIMEOUT_SECS, 10);
+        assert_eq!(GITHUB_REQUEST_TIMEOUT_SECS, 30);
     }
 }

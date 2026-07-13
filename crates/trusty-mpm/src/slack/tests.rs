@@ -420,3 +420,43 @@ fn stop_via_pid_file_stale_pid_is_not_running() {
     assert_eq!(stop_via_pid_file(&path), StopOutcome::NotRunning);
     assert!(!path.exists(), "stale PID file should be removed");
 }
+
+#[tokio::test]
+async fn build_slack_client_bounds_a_stalled_connection() {
+    // Why (#2517): the bot's Slack-API `reqwest::Client` used to be a bare
+    // `reqwest::Client::new()` with no timeout at all. Drives a real request
+    // against a `TcpListener` that accepts but never answers (mirrors
+    // `client::http_client::config::tests::build_client_bounds_a_stalled_connection`),
+    // using tiny test-only bounds so the assertion doesn't have to wait out
+    // the real 10s/30s production values.
+    // What: builds a client via [`build_slack_client`] with 200ms connect /
+    // 300ms request bounds, issues a GET against the stalled listener, and
+    // asserts the call errors well within a generous CI margin.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stalling listener");
+    let addr = listener.local_addr().expect("read local_addr");
+
+    let client = build_slack_client(
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(300),
+    );
+    let url = format!("http://{addr}/");
+
+    let start = std::time::Instant::now();
+    let result = client.get(&url).send().await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "expected the stalled request to time out");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "request took {elapsed:?}, expected it to be bounded by the ~300ms timeout"
+    );
+}
+
+#[test]
+fn slack_client_timeout_constants_are_finite() {
+    // Why (#2517): pins the production constants so a future edit can't
+    // silently widen them back toward "unbounded" without a visible test
+    // failure — the exact regression this module exists to prevent.
+    assert_eq!(SLACK_CONNECT_TIMEOUT_SECS, 10);
+    assert_eq!(SLACK_REQUEST_TIMEOUT_SECS, 30);
+}
