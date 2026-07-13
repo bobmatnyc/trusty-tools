@@ -26,6 +26,7 @@ use crate::daemon::api::types::{
     RestoreResponse,
 };
 use crate::daemon::state::DaemonState;
+use crate::session_manager::record::{ManagedSessionState, SessionRecord};
 
 // ---- Claude Code configuration analyzer ---------------------------------
 
@@ -380,6 +381,35 @@ pub struct RestartRequest {
     pub tmux_session: String,
 }
 
+/// Select the `pane_id` to restart into from the full managed-session record
+/// set, given the target tmux session name (#2514 review, minor finding 4).
+///
+/// Why: `tmux_name` is recycled once a session is decommissioned — a fresh
+/// session provisioned later can be assigned the SAME tmux name a
+/// decommissioned record used. A naive `.find(|r| r.tmux_name == name)` over
+/// the full record list can therefore match the stale, decommissioned
+/// tombstone instead of the live record, silently threading a dead/garbage
+/// `pane_id` (or a `None` that masks a real one) into the restart call.
+/// What: filters to records matching `tmux_session` whose state is NOT
+/// `Decommissioned` (the terminal, unresumable state — see
+/// [`ManagedSessionState`]'s doc), then — since more than one non-terminal
+/// record can theoretically share a recycled name during a narrow
+/// provisioning race — prefers the most recently created match. Returns
+/// `None` when no live record matches (unmanaged/legacy session name) or the
+/// surviving record never captured a `pane_id`; the session-scoped restart
+/// fallback then applies exactly as before #2468.
+/// Test: `select_restart_pane_id_skips_decommissioned_record`,
+/// `select_restart_pane_id_prefers_most_recent_when_multiple_live_match`,
+/// `select_restart_pane_id_none_when_no_match`.
+fn select_restart_pane_id(records: &[SessionRecord], tmux_session: &str) -> Option<String> {
+    records
+        .iter()
+        .filter(|r| r.tmux_name == tmux_session)
+        .filter(|r| !matches!(r.state, ManagedSessionState::Decommissioned))
+        .max_by_key(|r| r.created_at)
+        .and_then(|r| r.pane_id.clone())
+}
+
 /// `POST /claude-config/restart` — restart Claude Code in a tmux session.
 ///
 /// Why: after applying config changes the operator wants a clean Claude Code
@@ -389,14 +419,18 @@ pub struct RestartRequest {
 /// pane rather than tmux's session-scoped "active pane" resolution — the
 /// same sibling-window hijack risk #2467 fixed for resume/restart respawn
 /// (issue #2468).
-/// What: looks up `body.tmux_session` against the managed-session store for
-/// a matching `pane_id` (`None` when the session is unmanaged/legacy — the
-/// session-scoped fallback then applies exactly as before #2468), then calls
-/// `ClaudeCodeRestarter::restart_in_session`. tmux being absent, or a
+/// What: looks up `body.tmux_session` against the managed-session store via
+/// [`select_restart_pane_id`], which excludes decommissioned (tombstone)
+/// records and prefers the most recently created live match — a recycled
+/// `tmux_name` can otherwise resolve to a stale decommissioned record (#2514
+/// review). `None` (unmanaged/legacy session, or no matching live record)
+/// falls back to the session-scoped restart exactly as before #2468. Then
+/// calls `ClaudeCodeRestarter::restart_in_session`. tmux being absent, or a
 /// confirmed-gone recorded pane, both surface as `500`.
 /// Test: `restart_claude_code_handles_missing_tmux`;
 /// `ClaudeCodeRestarter::restart_target`'s pane/session decision is
-/// unit-tested directly in `daemon::claude_config::restarter`.
+/// unit-tested directly in `daemon::claude_config::restarter`;
+/// [`select_restart_pane_id`]'s own unit tests cover the stale-record fix.
 #[utoipa::path(
     post,
     path = "/claude-config/restart",
@@ -411,14 +445,8 @@ pub async fn restart_claude_code(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RestartRequest>,
 ) -> Result<Json<RestartResponse>, StatusCode> {
-    let pane_id = state
-        .session_manager()
-        .await
-        .list()
-        .await
-        .into_iter()
-        .find(|r| r.tmux_name == body.tmux_session)
-        .and_then(|r| r.pane_id);
+    let records = state.session_manager().await.list().await;
+    let pane_id = select_restart_pane_id(&records, &body.tmux_session);
     crate::daemon::claude_config::ClaudeCodeRestarter::restart_in_session(
         &body.tmux_session,
         pane_id.as_deref(),
@@ -430,4 +458,106 @@ pub async fn restart_claude_code(
     Ok(Json(RestartResponse {
         restarted: body.tmux_session,
     }))
+}
+
+#[cfg(test)]
+mod restart_pane_selection_tests {
+    use super::*;
+    use crate::session_manager::record::ManagedSessionId;
+
+    /// Builds a minimal, otherwise-default [`SessionRecord`] for the pure
+    /// selection-fn tests below — only `tmux_name`, `state`, `pane_id`, and
+    /// `created_at` matter to [`select_restart_pane_id`].
+    fn make_record(
+        tmux_name: &str,
+        state: ManagedSessionState,
+        pane_id: Option<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: tmux_name.to_string(),
+            cwd: PathBuf::from("/tmp"),
+            task: "task".to_string(),
+            state,
+            created_at,
+            last_activity_at: None,
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: crate::driver::SessionCorrelation::new(),
+            runtime: crate::runtime::RuntimeKind::default(),
+            ephemeral: true,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: pane_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn select_restart_pane_id_skips_decommissioned_record() {
+        // A decommissioned record's tmux_name has been recycled by a live
+        // record; the stale tombstone must never win.
+        let now = chrono::Utc::now();
+        let stale = make_record(
+            "tmpm-proj-1",
+            ManagedSessionState::Decommissioned,
+            Some("%old"),
+            now - chrono::Duration::hours(1),
+        );
+        let live = make_record(
+            "tmpm-proj-1",
+            ManagedSessionState::Active,
+            Some("%new"),
+            now,
+        );
+        let records = vec![stale, live];
+
+        assert_eq!(
+            select_restart_pane_id(&records, "tmpm-proj-1"),
+            Some("%new".to_string())
+        );
+    }
+
+    #[test]
+    fn select_restart_pane_id_prefers_most_recent_when_multiple_live_match() {
+        let now = chrono::Utc::now();
+        let older = make_record(
+            "tmpm-proj-1",
+            ManagedSessionState::Stopped,
+            Some("%older"),
+            now - chrono::Duration::minutes(5),
+        );
+        let newer = make_record(
+            "tmpm-proj-1",
+            ManagedSessionState::Active,
+            Some("%newer"),
+            now,
+        );
+        let records = vec![older, newer];
+
+        assert_eq!(
+            select_restart_pane_id(&records, "tmpm-proj-1"),
+            Some("%newer".to_string())
+        );
+    }
+
+    #[test]
+    fn select_restart_pane_id_none_when_no_match() {
+        let now = chrono::Utc::now();
+        let records = vec![make_record(
+            "tmpm-other",
+            ManagedSessionState::Active,
+            Some("%x"),
+            now,
+        )];
+
+        assert_eq!(select_restart_pane_id(&records, "tmpm-proj-1"), None);
+    }
 }

@@ -1,17 +1,19 @@
-//! Tests for `SessionManager::inject`/`observe` pane-scoped targeting (#2468,
-//! the follow-up to #2467 that closes the same sibling-window hijack risk for
-//! `inject`/`send_input` and `observe`).
+//! Tests for `SessionManager::inject`/`observe`/`answer_decision` pane-scoped
+//! targeting (#2468, the follow-up to #2467 that closes the same
+//! sibling-window hijack risk for `inject`/`send_input`, `observe`, and the
+//! `answer_decision` route added in the #2514 adversarial-review pass).
 //!
 //! Why: `session_manager/tests.rs` and `resume_reattach_tests.rs` already
 //! cover `resume`'s pane-scoped respawn (#2467); this file is the parallel
-//! coverage for the two sites #2467 deliberately left out of scope — typing
-//! into a live session (`inject`) and reading its pane (`observe`) both
-//! addressed "the session" rather than the record's own recorded pane, which
-//! tmux resolves to whichever pane/window is currently ACTIVE.
-//! What: for both `inject` (across all three `Submit` dispatch variants) and
-//! `observe`, proves (a) a known-and-alive `pane_id` routes through the
-//! pane-scoped driver call, never the session-scoped one; (b) a
-//! confirmed-gone `pane_id` refuses loudly with `ManagedError::PaneGone`
+//! coverage for the sites #2467 deliberately left out of scope — typing
+//! into a live session (`inject`), reading its pane (`observe`), and
+//! answering a pending decision (`answer_decision`) all addressed "the
+//! session" rather than the record's own recorded pane, which tmux resolves
+//! to whichever pane/window is currently ACTIVE.
+//! What: for `inject` (across all three `Submit` dispatch variants),
+//! `observe`, and `answer_decision`, proves (a) a known-and-alive `pane_id`
+//! routes through the pane-scoped driver call, never the session-scoped one;
+//! (b) a confirmed-gone `pane_id` refuses loudly with `ManagedError::PaneGone`
 //! WITHOUT ever calling a session-scoped primitive; (c) a legacy record with
 //! no captured `pane_id` falls back to the session-scoped call exactly as
 //! #2467 established for `resume`.
@@ -166,6 +168,74 @@ async fn inject_legacy_record_without_pane_id_falls_back_to_session_target() {
     assert_eq!(
         fake.send_calls.lock().unwrap().as_slice(),
         [(record.tmux_name.clone(), "hello".to_string())],
+        "a legacy record (no captured pane_id) must use the session-scoped \
+         target exactly like pre-#2468 behavior"
+    );
+    assert!(fake.pane_send_calls.lock().unwrap().is_empty());
+}
+
+// ── answer_decision: pane-scoped-when-known / refuse-when-gone / legacy-fallback ──
+
+#[tokio::test]
+async fn answer_decision_targets_pane_when_pane_id_known() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+
+    mgr.answer_decision(&record.id, "rebase")
+        .await
+        .expect("answer_decision");
+
+    assert_eq!(
+        fake.pane_send_calls.lock().unwrap().as_slice(),
+        [(
+            record.tmux_name.clone(),
+            "%6015".to_string(),
+            "rebase".to_string()
+        )]
+    );
+    assert!(
+        fake.send_calls.lock().unwrap().is_empty(),
+        "a known-alive pane_id must never fall through to the session-scoped send"
+    );
+}
+
+#[tokio::test]
+async fn answer_decision_refuses_when_stored_pane_gone() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    *fake.pane_exists_override.lock().unwrap() = Some(false);
+
+    let err = mgr
+        .answer_decision(&record.id, "rebase")
+        .await
+        .expect_err("a confirmed-gone recorded pane must refuse, not fall back");
+
+    assert!(
+        matches!(&err, ManagedError::PaneGone(sid, pid) if sid == &record.id.to_string() && pid == "%6015"),
+        "expected PaneGone(session_id, \"%6015\"), got: {err:?}"
+    );
+    assert!(
+        fake.send_calls.lock().unwrap().is_empty(),
+        "the session-scoped target must NEVER be constructed on refusal"
+    );
+    assert!(
+        fake.pane_send_calls.lock().unwrap().is_empty(),
+        "the pane-scoped call must not fire either — the whole operation refuses"
+    );
+}
+
+#[tokio::test]
+async fn answer_decision_legacy_record_without_pane_id_falls_back_to_session_target() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, None).await;
+
+    mgr.answer_decision(&record.id, "rebase")
+        .await
+        .expect("answer_decision on legacy record");
+
+    assert_eq!(
+        fake.send_calls.lock().unwrap().as_slice(),
+        [(record.tmux_name.clone(), "rebase".to_string())],
         "a legacy record (no captured pane_id) must use the session-scoped \
          target exactly like pre-#2468 behavior"
     );

@@ -254,21 +254,35 @@ impl SessionManager {
     ///
     /// Why: the calling agentic process resolves pending decisions by calling
     /// POST /sessions/{id}/answer; this method persists the answer and clears
-    /// pending_decision/proposed_default so they are not re-surfaced.
-    /// What: looks up the record, sends the answer text to the pane via tmux,
-    /// clears the pending fields, and persists.
-    /// Test: `manager_answer_decision` in tests.
+    /// pending_decision/proposed_default so they are not re-surfaced. This
+    /// route has the exact same sibling-window hijack risk #2468 fixed for
+    /// `inject`/`observe`: a session-scoped `send_line` lands in whichever
+    /// pane tmux currently considers active, not necessarily the pane the
+    /// pending decision was raised in.
+    /// What: looks up the record, [`Self::ensure_pane_alive`]-gates the
+    /// recorded `pane_id`, sends the answer text via `send_line_to_pane` when
+    /// `pane_id` is known (falling back to the session-scoped `send_line` for
+    /// a legacy record with no captured pane), clears the pending fields, and
+    /// persists.
+    /// Test: `manager_answer_decision` in tests;
+    /// `answer_decision_targets_pane_when_pane_id_known`,
+    /// `answer_decision_refuses_when_stored_pane_gone`,
+    /// `answer_decision_legacy_record_without_pane_id_falls_back_to_session_target`
+    /// in `pane_scoped_tests.rs`.
     pub async fn answer_decision(
         &self,
         id: &ManagedSessionId,
         answer: &str,
     ) -> Result<(), ManagedError> {
         let mut record = self.get(id).await?;
+        self.ensure_pane_alive(id, &record)?;
+        match record.pane_id.as_deref() {
+            Some(p) => self.tmux.send_line_to_pane(&record.tmux_name, p, answer),
+            None => self.tmux.send_line(&record.tmux_name, answer),
+        }
+        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         record.pending_decision = None;
         record.proposed_default = None;
-        self.tmux
-            .send_line(&record.tmux_name, answer)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
         Ok(())
