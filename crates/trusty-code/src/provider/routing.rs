@@ -152,15 +152,21 @@ pub const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
 /// Anthropic slug and the Bedrock-routed
 /// `bedrock/us.anthropic.claude-sonnet-4-6` / `-opus-*` inference-profile
 /// format, see `crate::llm::bedrock::bedrock_model_id`) -> 200,000; (2) any
-/// slug containing `gpt-4o` -> 128,000; else (3) [`DEFAULT_CONTEXT_WINDOW`].
-/// Deliberately NOT a config file or per-agent override — the window size is
-/// a property of the model itself, not something an operator should need to
-/// tune per project.
+/// slug beginning with the `atlascloud/` routing prefix -> 1,050,000 (#2536 —
+/// AtlasCloud's catalog default `openai/gpt-5.6-sol` has a 1.05M-token window,
+/// keyed off the routing prefix rather than the nested model id so the whole
+/// AtlasCloud family gets the large window); (3) any slug containing `gpt-4o` ->
+/// 128,000; else (4) [`DEFAULT_CONTEXT_WINDOW`]. Deliberately NOT a config file
+/// or per-agent override — the window size is a property of the model itself, not
+/// something an operator should need to tune per project.
 /// Test: `routing::tests::resolve_context_window_maps_bedrock_sonnet_to_200k`,
+/// `routing::tests::resolve_context_window_maps_atlascloud_to_1m`,
 /// `routing::tests::resolve_context_window_falls_back_to_default_for_unknown_model`.
 pub fn resolve_context_window(model: &str) -> usize {
     if model.contains("claude-sonnet") || model.contains("claude-opus") {
         200_000
+    } else if model.starts_with("atlascloud/") {
+        1_050_000
     } else if model.contains("gpt-4o") {
         128_000
     } else {
@@ -400,6 +406,24 @@ mod tests {
             resolve_context_window("bedrock/us.anthropic.claude-opus-4-6"),
             200_000
         );
+    }
+
+    /// An `atlascloud/*` slug maps to AtlasCloud's 1.05M-token window (#2536),
+    /// including the nested `atlascloud/openai/gpt-5.6-sol` form.
+    ///
+    /// Why: AtlasCloud's default `openai/gpt-5.6-sol` carries a 1,050,000-token
+    /// context window; keying off the `atlascloud/` routing prefix (not the
+    /// nested `gpt-4o`-adjacent model id) gives the whole family the large window
+    /// so compaction scales correctly.
+    /// What: Assert the nested and a bare AtlasCloud slug resolve to 1,050,000.
+    /// Test: this test.
+    #[test]
+    fn resolve_context_window_maps_atlascloud_to_1m() {
+        assert_eq!(
+            resolve_context_window("atlascloud/openai/gpt-5.6-sol"),
+            1_050_000
+        );
+        assert_eq!(resolve_context_window("atlascloud/deepseek-v3"), 1_050_000);
     }
 
     /// An unrecognised model slug falls back to [`DEFAULT_CONTEXT_WINDOW`].

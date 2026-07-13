@@ -1,6 +1,6 @@
-//! Black-box e2e: prove trusty-code's OpenRouter/Fireworks/Together inference
-//! flows through the shared `trusty_common::inference` adapter (#2406, #2494,
-//! epic #2400).
+//! Black-box e2e: prove trusty-code's OpenRouter/Fireworks/Together/AtlasCloud
+//! inference flows through the shared `trusty_common::inference` adapter (#2406,
+//! #2494, #2536, epic #2400).
 //!
 //! Why: #2406's core claim is that tcode's OpenAI-compatible transport is now
 //! the shared adapter, and that Fireworks is reachable; #2494 extends the same
@@ -79,10 +79,11 @@ async fn openrouter_routes_through_shared_adapter_and_injects_usage() {
     let store = MemoryKeyStore::new();
     store.set("openrouter", "sk-or-mock").expect("seed key"); // pragma: allowlist secret
 
-    // OpenRouter → mock; Fireworks and Together base URLs are unused here.
+    // OpenRouter → mock; Fireworks, Together, AtlasCloud base URLs are unused here.
     let client = OpenAiCompatClient::with_config(
         Box::new(store),
         server.url().to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
         "http://127.0.0.1:1/unused".to_string(),
         "http://127.0.0.1:1/unused".to_string(),
     );
@@ -135,11 +136,12 @@ async fn fireworks_routes_through_shared_adapter_strips_prefix_and_omits_usage()
     let store = MemoryKeyStore::new();
     store.set("fireworks", "fw-mock").expect("seed key"); // pragma: allowlist secret
 
-    // Fireworks → mock; OpenRouter and Together base URLs are unused here.
+    // Fireworks → mock; OpenRouter, Together, AtlasCloud base URLs are unused here.
     let client = OpenAiCompatClient::with_config(
         Box::new(store),
         "http://127.0.0.1:1/unused".to_string(),
         server.url().to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
         "http://127.0.0.1:1/unused".to_string(),
     );
 
@@ -185,12 +187,13 @@ async fn together_routes_through_shared_adapter_strips_prefix_and_omits_usage() 
     let store = MemoryKeyStore::new();
     store.set("together", "tgp_v1_mock").expect("seed key"); // pragma: allowlist secret
 
-    // Together → mock; OpenRouter and Fireworks base URLs are unused here.
+    // Together → mock; OpenRouter, Fireworks, AtlasCloud base URLs are unused here.
     let client = OpenAiCompatClient::with_config(
         Box::new(store),
         "http://127.0.0.1:1/unused".to_string(),
         "http://127.0.0.1:1/unused".to_string(),
         server.url().to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
     );
 
     let resp = client
@@ -221,5 +224,66 @@ async fn together_routes_through_shared_adapter_strips_prefix_and_omits_usage() 
     assert!(
         body.get("usage").is_none() || body["usage"].is_null(),
         "Together must NOT receive the OpenRouter-only usage directive"
+    );
+}
+
+/// An AtlasCloud-routed request flows through the shared adapter, which strips
+/// the `atlascloud/` routing prefix down to the AtlasCloud-native slug (here the
+/// nested `openai/gpt-5.6-sol`) and sends NO usage directive (AtlasCloud does not
+/// support the OpenRouter directive).
+///
+/// Why: this is the concrete payoff of #2536 — AtlasCloud is reachable, routed
+/// through the shared adapter, with the correct provider-specific wire shape:
+/// `Bearer` auth, the prefix-stripped model id (only the leading `atlascloud/`
+/// segment removed, the nested `openai/`-shaped id preserved), and no usage
+/// directive.
+/// What: point the AtlasCloud base URL at the mock, chat with a nested
+/// `atlascloud/openai/gpt-5.6-sol` slug, then assert the parsed response AND the
+/// captured wire request (path, auth, stripped model, absent usage directive).
+/// Test: this test.
+#[tokio::test]
+async fn atlascloud_routes_through_shared_adapter_strips_prefix_and_omits_usage() {
+    let server = MockInferenceServer::spawn(200, canned_response())
+        .await
+        .expect("spawn mock");
+
+    let store = MemoryKeyStore::new();
+    store.set("atlascloud", "ac_mock").expect("seed key"); // pragma: allowlist secret
+
+    // AtlasCloud → mock; OpenRouter, Fireworks, Together base URLs are unused here.
+    let client = OpenAiCompatClient::with_config(
+        Box::new(store),
+        "http://127.0.0.1:1/unused".to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
+        server.url().to_string(),
+    );
+
+    let resp = client
+        .chat(&request_for("atlascloud/openai/gpt-5.6-sol"))
+        .await
+        .expect("chat through shared atlascloud adapter");
+
+    // Response flowed back through the tcode conversion.
+    assert_eq!(resp.first_text().as_deref(), Some("pong-mock"));
+    assert_eq!(resp.token_usage().prompt_tokens, 5);
+
+    let captured = server.last_request().expect("one request captured");
+    assert_eq!(captured.method, "POST");
+    assert_eq!(captured.path, "/chat/completions");
+    assert!(
+        captured
+            .header("authorization")
+            .is_some_and(|v| v.starts_with("Bearer ")),
+        "shared adapter must send a Bearer auth header"
+    );
+    let body = captured.body.expect("json body");
+    assert_eq!(
+        body["model"], "openai/gpt-5.6-sol",
+        "only the leading atlascloud/ routing prefix must be stripped, preserving the nested id"
+    );
+    assert!(
+        body.get("usage").is_none() || body["usage"].is_null(),
+        "AtlasCloud must NOT receive the OpenRouter-only usage directive"
     );
 }
