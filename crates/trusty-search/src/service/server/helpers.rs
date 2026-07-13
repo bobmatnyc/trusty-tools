@@ -1,17 +1,21 @@
-//! Shared helpers: root-path validation, chunk containment check, and
-//! embedder status response builders.
+//! Shared helpers: root-path validation, chunk containment check, root_path
+//! collision detection, and embedder status response builders.
 //!
 //! Why: These small helpers are called from multiple handler modules
-//! (`indexes.rs`, `search.rs`, `reindex_handlers.rs`); centralising them
-//! avoids duplication and keeps the 500-line cap on each handler file.
+//! (`indexes.rs`, `indexes_relocate.rs`, `search.rs`, `reindex_handlers.rs`);
+//! centralising them avoids duplication and keeps the 500-line cap on each
+//! handler file.
 //! What: `validate_root_path`, `file_is_within_root`,
+//! `find_root_path_collision`, `root_path_collision_response`,
 //! `embedder_initializing_response`, `embedder_error_response`.
-//! Test: `file_is_within_root_*`, `create_index_canonicalizes_*`, and
-//! `validate_root_path_denylist_*` tests.
+//! Test: `file_is_within_root_*`, `create_index_canonicalizes_*`,
+//! `validate_root_path_denylist_*`, and `tests_2336.rs` tests.
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
+
+use crate::core::registry::{IndexHandle, IndexId};
 
 /// Validate `path` as a safe, canonical root for indexing.
 ///
@@ -194,6 +198,70 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
     }
     !p.components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// Find a registered index whose canonical `root_path` collides with
+/// `candidate`, excluding `exclude_id` (issue #2336).
+///
+/// Why: `create_index_handler` and `relocate_index_handler` previously
+/// guarded only *id* collisions, never *root_path* collisions. Two live
+/// registrations sharing one colocated root resolve to the SAME on-disk
+/// `<root>/.trusty-search/index.redb` — redb is a single-open database, so
+/// the second registration's `build_indexer_from_entry` call would silently
+/// fail its corpus open (`corpus_open_failed`) while the handler still
+/// returned `200 {"created": true}` for the broken handle. This is the exact
+/// runtime recreation of the #2305 double-registration hazard the warm-boot
+/// dedup fixed only for the boot path. This guard rejects the registration
+/// up front instead of building a broken indexer first.
+/// What: `candidate` must already be canonicalized — every caller passes the
+/// output of `validate_root_path`, the same normalization every registered
+/// handle's `root_path` went through (directly at create/relocate time, or
+/// via `canonicalize_best_effort` at warm-boot), so the equality comparison
+/// below is exact with no separate canonicalization step needed here. Linear
+/// scan of `handles` (the registry is small — tens to low hundreds of
+/// entries); returns the first colliding id, skipping `exclude_id` (used by
+/// `relocate_index_handler` so an index is never compared against itself).
+/// Test: `create_index_rejects_duplicate_root_path`,
+/// `create_index_same_id_same_root_is_idempotent_not_a_collision`,
+/// `relocate_index_rejects_root_path_owned_by_another_index`,
+/// `relocate_index_onto_own_current_root_is_not_a_collision` in `tests_2336.rs`.
+pub(super) fn find_root_path_collision(
+    handles: &[std::sync::Arc<IndexHandle>],
+    candidate: &std::path::Path,
+    exclude_id: Option<&IndexId>,
+) -> Option<IndexId> {
+    handles
+        .iter()
+        .find(|h| h.root_path == candidate && exclude_id != Some(&h.id))
+        .map(|h| h.id.clone())
+}
+
+/// Build a `409 Conflict` response naming the index that already owns
+/// `root_path` (issue #2336).
+///
+/// Why: the caller must be told WHICH existing index it collided with so it
+/// can decide whether to reuse that index, delete it first, or pick a
+/// distinct root — a bare 409 with no context forces the operator to
+/// cross-reference `GET /indexes?details=true` by hand.
+/// What: `409 { "error": "...", "existing_id": "..." }`.
+/// Test: see `find_root_path_collision` test list above.
+pub(super) fn root_path_collision_response(
+    existing_id: &IndexId,
+    root_path: &std::path::Path,
+) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!(
+                "root_path {:?} is already registered to index '{}'; two indexes cannot \
+                 share one on-disk corpus (issues #2305, #2336)",
+                root_path.display(),
+                existing_id,
+            ),
+            "existing_id": existing_id.0,
+        })),
+    )
+        .into_response()
 }
 
 /// Build a `503 Service Unavailable` response for handlers that require the

@@ -50,7 +50,10 @@ use std::sync::Arc;
 
 use crate::core::registry::{IndexHandle, IndexId};
 
-use super::helpers::{embedder_error_response, embedder_initializing_response, validate_root_path};
+use super::helpers::{
+    embedder_error_response, embedder_initializing_response, find_root_path_collision,
+    root_path_collision_response, validate_root_path,
+};
 use super::state::{DaemonEvent, SearchAppState};
 
 /// Request body for `PATCH /indexes/:id` — in-place root relocation (#1073).
@@ -114,6 +117,39 @@ pub(super) async fn relocate_index_handler(
         Ok(p) => p,
         Err(resp) => return resp,
     };
+
+    // Issue #2336: relocating onto the index's OWN current root is a no-op —
+    // short-circuit before any rebuild. Without this, rebuilding the indexer
+    // below would try to open the SAME redb file that `existing`'s handle
+    // still has open (it is only swapped out after the rebuild succeeds),
+    // which is exactly the single-open collision the guard below exists to
+    // prevent — just against itself instead of a sibling index. Comparing
+    // canonical paths (both sides of `==` are canonicalized) makes this exact.
+    if new_root == existing.root_path {
+        return Json(serde_json::json!({
+            "id": id,
+            "relocated": true,
+            "new_root_path": new_root.to_string_lossy(),
+            "reason": "already at this root_path (no-op)",
+        }))
+        .into_response();
+    }
+
+    // Issue #2336: reject relocating onto a root_path already owned by a
+    // DIFFERENT registered index. Same hazard as `create_index_handler`: two
+    // live registrations sharing one colocated root resolve to the SAME
+    // on-disk redb corpus. (This index's own root is handled by the no-op
+    // short-circuit above, so `exclude_id` here is defense-in-depth only.)
+    let handles = state.registry.list_handles();
+    if let Some(existing_id) = find_root_path_collision(&handles, &new_root, Some(&index_id)) {
+        tracing::warn!(
+            "relocate[{id}]: refusing to relocate to {} — root_path already owned by '{}' \
+             (issue #2336)",
+            new_root.display(),
+            existing_id,
+        );
+        return root_path_collision_response(&existing_id, &new_root);
+    }
 
     // Require an embedder so we can rebuild the indexer (it needs to open
     // the colocated HNSW/redb at the new location).
@@ -207,6 +243,29 @@ pub(super) async fn relocate_index_handler(
                 .into_response();
         }
     };
+
+    // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
+    // for a broken redb open (a raced collision, or an unrelated open
+    // error) — it must not be silently rebound to as a healthy
+    // `200 {"relocated": true}` handle.
+    if new_indexer.corpus_open_failed {
+        tracing::error!(
+            "relocate[{id}]: corpus open failed at {} — refusing to relocate to a broken \
+             index handle (issue #2336)",
+            new_root.display()
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!(
+                    "corpus open failed for root_path {:?}; refusing to relocate to a broken \
+                     index handle",
+                    new_root.display()
+                )
+            })),
+        )
+            .into_response();
+    }
 
     // Persist the updated entry to indexes.toml BEFORE replacing the handle,
     // so a daemon restart sees the new root even if the in-memory swap below

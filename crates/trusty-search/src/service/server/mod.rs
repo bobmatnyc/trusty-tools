@@ -34,6 +34,8 @@ mod typeahead;
 #[cfg(test)]
 mod tests_1073;
 #[cfg(test)]
+mod tests_2336;
+#[cfg(test)]
 mod tests_829;
 #[cfg(test)]
 mod tests_chunks;

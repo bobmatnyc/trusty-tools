@@ -106,7 +106,16 @@ pub(super) async fn restore_indexes(
     // retry can never clear an in-process holder). Deduping before the split
     // also prevents a dropped duplicate from being parked in the cold store and
     // re-triggering the double-open on first query.
-    let all_entries = crate::service::warm_boot::dedup_entries_by_corpus_path(all_entries);
+    //
+    // Issue #2337 follow-up: the verbose variant also reports which entries
+    // were dropped and which survivors absorbed a dropped entry's config, so
+    // `prune_and_persist_dedup_outcome` can self-heal `indexes.toml` — pruning
+    // the losing rows (otherwise re-discovered/re-warned/re-dropped forever)
+    // and persisting the merged survivor config so it survives future boots.
+    let dedup_outcome =
+        crate::service::warm_boot::dedup_entries_by_corpus_path_verbose(all_entries);
+    prune_and_persist_dedup_outcome(&dedup_outcome);
+    let all_entries = dedup_outcome.survivors;
     let total_discovered = all_entries.len();
 
     let (eager_entries, cold_entries) = select_warmboot_entries(all_entries, max_warmboot);
@@ -268,4 +277,64 @@ pub(super) async fn restore_indexes(
              for the count, then resolve the root cause and restart (issue #764).",
         );
     }
+}
+
+/// Self-heal `indexes.toml` after warm-boot dedup collapses a corpus-path
+/// collision (issue #2337, follow-up to #2305).
+///
+/// Why: without this, a dropped duplicate's `indexes.toml` row survived
+/// forever — re-discovered, re-warned, and re-dropped on every single boot
+/// (log spam plus a ghost registry row that no API acknowledges, since
+/// `GET /indexes` and friends correctly 404 the dropped id). Mirrors the
+/// existing `orphan_reaper::heal_boot_orphans` self-heal pattern that already
+/// does the same kind of `indexes.toml` cleanup for a different orphan shape.
+/// What: no-ops immediately when nothing was dropped (the common case, zero
+/// collisions on most boots). Otherwise: removes every dropped entry's row
+/// via `remove_index_registry_entry` (idempotent no-op if the id never had a
+/// row — e.g. a purely colocated-scan discovery that was never persisted);
+/// for every survivor id in `merged_survivor_ids` (i.e. it actually absorbed
+/// a dropped entry's config), upserts the merged `PersistedIndex` so the
+/// preserved list-type config (issue #2337 part 2) is durable across future
+/// restarts, not just this boot's in-memory restore. Both operations are
+/// best-effort: a write failure is logged and retried on the next boot,
+/// never blocks startup.
+/// Test: `dedup_entries_by_corpus_path_verbose` (the pure decision logic) is
+/// unit-tested in `warm_boot_tests.rs`; this thin IO wrapper mirrors the
+/// already-covered `remove_index_registry_entry` / `upsert_index_registry_entry`
+/// round-trip semantics and is exercised end-to-end by the warm-boot
+/// integration tests.
+fn prune_and_persist_dedup_outcome(outcome: &crate::service::warm_boot::DedupOutcome) {
+    if outcome.dropped.is_empty() {
+        return;
+    }
+
+    for dropped in &outcome.dropped {
+        if let Err(e) = crate::service::persistence::remove_index_registry_entry(&dropped.id) {
+            tracing::warn!(
+                "warm-boot dedup: could not prune indexes.toml row for dropped index '{}': \
+                 {e} (issue #2337; will retry next boot)",
+                dropped.id
+            );
+        }
+    }
+
+    for survivor in &outcome.survivors {
+        if !outcome.merged_survivor_ids.contains(&survivor.id) {
+            continue;
+        }
+        if let Err(e) = crate::service::persistence::upsert_index_registry_entry(survivor.clone()) {
+            tracing::warn!(
+                "warm-boot dedup: could not persist merged config for survivor '{}': {e} \
+                 (issue #2337; the merge still applies for this boot's in-memory restore)",
+                survivor.id
+            );
+        }
+    }
+
+    tracing::info!(
+        "warm-boot dedup: pruned {} indexes.toml row(s), persisted merged config for {} \
+         survivor(s) (issue #2337)",
+        outcome.dropped.len(),
+        outcome.merged_survivor_ids.len(),
+    );
 }
