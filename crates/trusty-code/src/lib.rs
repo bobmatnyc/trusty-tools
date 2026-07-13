@@ -299,6 +299,19 @@ pub mod verify_gate;
 /// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
 pub mod catchup;
 
+/// Shared trusty-memory `tools/call` envelope helpers (#2424).
+///
+/// Why: trusty-memory direct-dispatches only its `TOOL_METHODS` allowlist —
+/// every `chat_*` tool is reachable ONLY via the MCP `tools/call` envelope,
+/// which the #2343 soak found the turn recorder was not using (100% of
+/// durable writes failed `-32601`). One shared implementation of the
+/// envelope build/unwrap keeps the write side (`session::memory_sink`) and
+/// the read side (`tools::recall_session`) on the same verified shape.
+/// What: `tools_call_params`, `parse_tools_call_envelope`,
+/// `call_tool_wrapped`.
+/// Test: `memory_envelope::tests::*`.
+pub mod memory_envelope;
+
 /// System-prompt assembly layer implementing the parity spec.
 ///
 /// Why: The cross-model comparison harness must assemble the same fixed

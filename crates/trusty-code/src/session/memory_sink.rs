@@ -14,10 +14,18 @@
 //! boundary. The drain task calls BOTH `chat_turn_append` (the exact
 //! chronological record) and `memory_remember` (tagged
 //! `["session:<id>", "turn"]`, `force: true` — the semantic recall surface
-//! for #2348) via `trusty_common::mcp::memory_rpc::call_memory_tool_at`,
-//! against a base URL resolved ONCE at construction — never blocking or
-//! failing the calling turn: any RPC failure is logged via `tracing::warn!`
-//! and dropped. (#2363) `memory_remember`'s dedup gate (jaro_winkler >0.92,
+//! for #2348) via the MCP `tools/call` envelope
+//! (`crate::memory_envelope::call_tool_wrapped`; #2424 — trusty-memory's
+//! direct-dispatch allowlist has no `chat_*` methods, so direct dispatch of
+//! `chat_turn_append` fails `-32601` on every write), against a base URL
+//! resolved ONCE at construction — never blocking or failing the calling
+//! turn: any RPC failure is logged via `tracing::warn!` and dropped.
+//! (#2424) Before the FIRST write, the drain task ensures the target palace
+//! exists ([`ensure_palace`]) — `memory_remember` does NOT auto-create a
+//! palace and fails `-32603 "palace metadata missing"` against a missing
+//! one, which is exactly how the #2343 soak lost all 50 turns. The ensure
+//! result is cached on success so steady state adds zero extra RPCs.
+//! (#2363) `memory_remember`'s dedup gate (jaro_winkler >0.92,
 //! 5-min same-palace window) is documented as hostile to sequential
 //! conversational turns, so every turn-recorder write passes `force: true`
 //! to bypass it outright, along with the other content-QUALITY gates
@@ -43,8 +51,9 @@ use std::path::Path;
 
 use serde_json::json;
 use tokio::sync::mpsc;
-use tracing::warn;
-use trusty_common::mcp::memory_rpc::call_memory_tool_at;
+use tracing::{info, warn};
+
+use crate::memory_envelope::call_tool_wrapped;
 
 /// Bounded mpsc queue capacity (#2345 scope: "~50").
 ///
@@ -180,10 +189,74 @@ impl TurnMemorySink {
 }
 
 /// Background drain loop: pop turns off the channel and dual-write each one,
-/// fail-open (see [`write_turn`]).
+/// fail-open (see [`write_turn`]), ensuring the target palace exists before
+/// the first write (#2424).
+///
+/// Why: the ensure lives HERE (drain-task-local state) rather than on the
+/// sink struct so it needs no locking — the drain task is the only writer —
+/// and so a failed ensure is naturally retried on the next turn (the flag is
+/// only set on success), covering a daemon that comes up mid-session.
+/// What: on success `palace_ensured` latches true and steady state adds
+/// zero extra RPCs per turn; on failure the turn's writes are still
+/// attempted (fail-open — they carry their own warnings).
+/// Test: `memory_sink::tests::ensure_palace_creates_missing_palace_once`,
+/// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`.
 async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTurn>) {
+    let mut palace_ensured = false;
     while let Some(turn) = rx.recv().await {
+        if !palace_ensured {
+            palace_ensured = ensure_palace(&base_url, &palace).await;
+        }
         write_turn(&base_url, &palace, &turn).await;
+    }
+}
+
+/// Ensure `palace` exists on the target daemon, creating it if missing
+/// (#2424). Returns `true` when the palace is known to exist afterwards.
+///
+/// Why: `memory_remember` does NOT auto-create its palace — against a
+/// missing one it fails `-32603 "palace metadata missing"`, which silently
+/// killed the semantic half of every soak write. Probe-then-create (rather
+/// than unconditional `palace_create`) because trusty-memory's
+/// `handle_palace_create` OVERWRITES `palace.json` for an existing palace
+/// (resetting `created_at`/`description`) — an existing project palace
+/// shared with the PM catch-up digest must not have its metadata clobbered
+/// on every session start.
+/// What: `palace_info` via `tools/call`; on error (the daemon's signal for
+/// "metadata missing" — or any other failure, in which case the create
+/// simply fails too and we stay fail-open), `palace_create` with
+/// `force: true` (the spec-001 documented bypass for app-managed palaces
+/// whose slug does not match the DAEMON's cwd-derived project slug; a no-op
+/// authz gate in default single-tenant mode) via `tools/call`. Never
+/// propagates an error — failure is logged and reported as `false` so the
+/// caller retries on the next turn.
+/// Test: `memory_sink::tests::ensure_palace_creates_missing_palace_once`,
+/// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`.
+async fn ensure_palace(base_url: &str, palace: &str) -> bool {
+    if call_tool_wrapped(base_url, "palace_info", json!({"palace": palace}))
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    let create_params = json!({
+        "name": palace,
+        "force": true,
+        "description": "trusty-code session turn history (auto-created by the turn recorder)",
+    });
+    match call_tool_wrapped(base_url, "palace_create", create_params).await {
+        Ok(_) => {
+            info!(palace = %palace, "turn_recorder: created missing palace (#2424)");
+            true
+        }
+        Err(e) => {
+            warn!(
+                palace = %palace,
+                error = %e,
+                "turn_recorder: palace ensure failed (fail-open, will retry next turn)"
+            );
+            false
+        }
     }
 }
 
@@ -193,18 +266,27 @@ async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTu
 /// Why: the exact and semantic representations are independent trusty-memory
 /// endpoints; a mid-outage failure of one must not block the other, so each
 /// call's error is handled separately rather than short-circuiting on the
-/// first failure. (#2363) `memory_remember` passes `force: true` because
+/// first failure. (#2424) BOTH calls go through the MCP `tools/call`
+/// envelope (`call_tool_wrapped`) — trusty-memory's direct-dispatch
+/// allowlist (`TOOL_METHODS`) has no `chat_*` entries, so the previous
+/// direct-method dispatch of `chat_turn_append` failed `-32601 Method not
+/// found` on 100% of writes; `memory_remember` IS direct-dispatchable but
+/// uses the same envelope anyway so both halves share one verified shape.
+/// (#2363) `memory_remember` passes `force: true` because
 /// its dedup gate (jaro_winkler >0.92, same-palace, 5-min window) is
 /// documented as hostile to sequential conversational turns — near-duplicate
 /// consecutive turns are the NORMAL case here, not noise; `force: true` also
 /// bypasses the other content-QUALITY gates (blocklist, short-content, noise
 /// pattern). Issue #2520: `force` does NOT bypass secret/credential
 /// detection — a turn whose content looks secret-shaped comes back as an
-/// `Err` from `call_memory_tool_at` (not a `"skipped"` status) and is logged
+/// `Err` from `call_tool_wrapped` (not a `"skipped"` status) and is logged
 /// via the fail-open `Err(e)` arm below, same as any other RPC failure. A
-/// `"status": "skipped"` response (from a quality gate that some OTHER path
-/// still applies) is still checked and warned on so a silently thinned
-/// recall surface is at least observable in logs.
+/// `"status": "skipped"` response (from a gate `force` does NOT bypass, e.g.
+/// a quality/blocklist gate that some OTHER path still applies) is still
+/// checked and warned on so a silently thinned recall surface is at least
+/// observable in logs — (#2424) `call_tool_wrapped` returns the PARSED inner
+/// tool result, so the skipped detection sees the same shape it did under
+/// direct dispatch.
 /// What: never propagates an error — every failure is logged via
 /// `tracing::warn!` and swallowed, matching
 /// `resolve_memory_base_url_or_unreachable`'s fail-open contract (mirrored
@@ -212,7 +294,6 @@ async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTu
 /// caller of [`TurnMemorySink::new`]).
 /// Test: `memory_sink::tests::enqueue_drain_happy_path`,
 /// `memory_sink::tests::write_turn_is_fail_open_on_unreachable_daemon`,
-/// `memory_sink::tests::write_turn_passes_force_true_for_memory_remember`,
 /// `memory_sink::tests::write_turn_warns_on_skipped_status`.
 async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
     let append_params = json!({
@@ -221,7 +302,7 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
         "prompt": turn.prompt,
         "response": turn.response,
     });
-    if let Err(e) = call_memory_tool_at(base_url, "chat_turn_append", append_params).await {
+    if let Err(e) = call_tool_wrapped(base_url, "chat_turn_append", append_params).await {
         warn!(
             session_id = %turn.session_id,
             error = %e,
@@ -235,7 +316,7 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
         "tags": [format!("session:{}", turn.session_id), "turn"],
         "force": true,
     });
-    match call_memory_tool_at(base_url, "memory_remember", remember_params).await {
+    match call_tool_wrapped(base_url, "memory_remember", remember_params).await {
         Ok(result) => {
             if result.get("status").and_then(|v| v.as_str()) == Some("skipped") {
                 let reason = result
