@@ -1396,32 +1396,35 @@ async fn correlate_session_start(
 /// supervisor) type into a pane the outgoing runtime hasn't relinquished yet.
 /// This reuses the EXACT SAME classification the 60-second runtime-exit
 /// reaper already trusts for this question —
-/// [`crate::daemon::runtime_reap::pane_runtime_exited`] (idle-shell allowlist
-/// combined with the [`ChildLivenessProbe`] fail-closed gate) — instead of
-/// inventing a second one, so the two call sites can never disagree about
-/// what "exited" means.
-/// What: finds the pane whose `session_name` matches `tmux_name` in `panes`
-/// and returns `true` (defer) only when a match exists AND
-/// [`pane_runtime_exited`](crate::daemon::runtime_reap::pane_runtime_exited)
-/// reports it as NOT yet exited. When no matching pane is found (already
-/// gone, or tmux/pane enumeration was unavailable and `panes` is empty) this
-/// returns `false` (proceed) — there is nothing to protect from a destructive
-/// teardown here, since `mark_runtime_exited_stopped` never touches the pane
-/// either way; a genuinely vanished session is left to the #1744 reaper as
-/// before. Pure — no I/O — so it is unit-testable without a live tmux.
+/// [`crate::daemon::runtime_reap::session_has_live_pane`] (any-pane-live
+/// aggregation over the idle-shell allowlist and the [`ChildLivenessProbe`]
+/// fail-closed gate) — instead of inventing a second one, so the two call
+/// sites can never disagree about what "exited" means.
+/// What: delegates directly to
+/// [`session_has_live_pane`](crate::daemon::runtime_reap::session_has_live_pane),
+/// which returns `true` (defer) when ANY pane whose `session_name` matches
+/// `tmux_name` is NOT yet exited. Fixed by #2463: this previously used
+/// `panes.iter().find(...)` — the FIRST matching pane only — which
+/// misclassified a manually-split, multi-pane managed session as idle
+/// whenever `tmux list-panes -a` happened to return an idle pane ahead of a
+/// live one. When no matching pane is found (already gone, or tmux/pane
+/// enumeration was unavailable and `panes` is empty) this returns `false`
+/// (proceed) — there is nothing to protect from a destructive teardown here,
+/// since `mark_runtime_exited_stopped` never touches the pane either way; a
+/// genuinely vanished session is left to the #1744 reaper as before. Pure —
+/// no I/O — so it is unit-testable without a live tmux.
 /// Test: `session_end_pane_still_live_true_for_running_agent`,
 /// `session_end_pane_still_live_false_for_idle_shell`,
-/// `session_end_pane_still_live_false_when_pane_missing` in `api_tests.rs`.
+/// `session_end_pane_still_live_false_when_pane_missing`,
+/// `session_end_pane_still_live_true_when_any_of_multiple_panes_live`,
+/// `session_end_pane_still_live_false_when_all_of_multiple_panes_idle` in
+/// `api_tests.rs`.
 fn session_end_pane_still_live(
     tmux_name: &str,
     panes: &[crate::daemon::orphan_gc::PaneInfo],
     probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
 ) -> bool {
-    panes
-        .iter()
-        .find(|p| p.session_name == tmux_name)
-        .map(|p| !crate::daemon::runtime_reap::pane_runtime_exited(p, probe))
-        .unwrap_or(false)
+    crate::daemon::runtime_reap::session_has_live_pane(tmux_name, panes, probe)
 }
 
 /// Immediately mark a managed session Stopped on `SessionEnd`, WITHOUT killing

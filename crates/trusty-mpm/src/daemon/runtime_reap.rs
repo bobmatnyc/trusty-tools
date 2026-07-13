@@ -45,8 +45,8 @@
 //! `graceful_terminate_runtime` and kill the pane, because those are
 //! human/client-initiated teardown requests, not self-healing state reconciles.
 //!
-//! Test: `pane_runtime_exited_*`, `find_runtime_exited_*`, and the end-to-end
-//! `stop_runtime_exited_transitions_active_to_stopped` /
+//! Test: `pane_runtime_exited_*`, `session_has_live_pane_*`, `find_runtime_exited_*`,
+//! and the end-to-end `stop_runtime_exited_transitions_active_to_stopped` /
 //! `stop_runtime_exited_keeps_running_session` /
 //! `stop_runtime_exited_does_not_kill_pane` in the `tests` module below drive a
 //! real [`SessionManager`] backed by [`crate::session_manager::FakeNoopTmuxDriver`]
@@ -75,6 +75,35 @@ use crate::session_manager::{
 /// `pane_runtime_exited_false_for_agent`, `pane_runtime_exited_false_with_live_child`.
 pub fn pane_runtime_exited(pane: &PaneInfo, probe: &dyn ChildLivenessProbe) -> bool {
     is_idle_shell(&pane.pane_current_command) && !probe.has_live_child(pane.pane_pid)
+}
+
+/// True when ANY pane belonging to `tmux_name` still shows a live runtime.
+///
+/// Why (#2463): a manually-split managed session can have more than one pane
+/// sharing the same `tmux_name`. Any single-pane check (e.g. `panes.iter().find(...)`)
+/// is at the mercy of `tmux list-panes -a` ordering — if an idle pane happens to
+/// sort before a live one, a genuinely-live session gets misclassified as idle.
+/// [`find_runtime_exited`] already gets this right by aggregating across every
+/// pane for a session; this helper extracts that same any-pane-live rule as a
+/// single, reusable, per-session primitive so every call site (the runtime
+/// reaper here and the `SessionEnd` gate in `daemon::api`) agrees on what "the
+/// session's pane(s) are live" means.
+/// What: returns `true` iff at least one pane in `panes` has `session_name ==
+/// tmux_name` AND is NOT [`pane_runtime_exited`]. A session with no matching
+/// pane at all (already gone, or enumeration failed) returns `false` — there is
+/// nothing to protect. Pure — no I/O.
+/// Test: `session_has_live_pane_true_when_any_pane_live`,
+/// `session_has_live_pane_false_when_all_panes_idle`,
+/// `session_has_live_pane_false_when_no_pane_matches`.
+pub fn session_has_live_pane(
+    tmux_name: &str,
+    panes: &[PaneInfo],
+    probe: &dyn ChildLivenessProbe,
+) -> bool {
+    panes
+        .iter()
+        .filter(|p| p.session_name == tmux_name)
+        .any(|p| !pane_runtime_exited(p, probe))
 }
 
 /// Collect the ids of `Active` sessions whose tmux pane is present but exited.
@@ -293,6 +322,52 @@ mod tests {
         assert!(!pane_runtime_exited(
             &pane("tmpm-a", "zsh"),
             &AlwaysLiveProbe
+        ));
+    }
+
+    #[test]
+    fn session_has_live_pane_true_when_any_pane_live() {
+        // #2463: a manually-split session where `tmux list-panes -a` returns the
+        // IDLE pane before the LIVE one must still be classified as live overall —
+        // ordering must never matter.
+        let panes = vec![pane("tmpm-split", "zsh"), pane("tmpm-split", "claude")];
+        assert!(
+            session_has_live_pane("tmpm-split", &panes, &AlwaysIdleProbe),
+            "any live pane in the session must make the whole session live"
+        );
+    }
+
+    #[test]
+    fn session_has_live_pane_false_when_all_panes_idle() {
+        let panes = vec![pane("tmpm-split", "zsh"), pane("tmpm-split", "-bash")];
+        assert!(
+            !session_has_live_pane("tmpm-split", &panes, &AlwaysIdleProbe),
+            "a session whose every pane is idle must not be classified as live"
+        );
+    }
+
+    #[test]
+    fn session_has_live_pane_false_when_no_pane_matches() {
+        let panes = vec![pane("some-other-session", "claude")];
+        assert!(
+            !session_has_live_pane("tmpm-gone", &panes, &AlwaysIdleProbe),
+            "no matching pane means nothing to protect — must fail open (not live)"
+        );
+    }
+
+    #[test]
+    fn session_has_live_pane_single_pane_unchanged() {
+        // Parity check: single-pane sessions (the common case) behave exactly as
+        // the old `.find()`-based check did.
+        assert!(session_has_live_pane(
+            "tmpm-a",
+            &[pane("tmpm-a", "claude")],
+            &AlwaysIdleProbe
+        ));
+        assert!(!session_has_live_pane(
+            "tmpm-a",
+            &[pane("tmpm-a", "zsh")],
+            &AlwaysIdleProbe
         ));
     }
 
