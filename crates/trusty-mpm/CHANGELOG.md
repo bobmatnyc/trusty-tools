@@ -5,6 +5,67 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- Test-pointer lint gate (closes #2458) ([#2529](https://github.com/bobmatnyc/trusty-tools/pull/2529)) ([`9876b44`](https://github.com/bobmatnyc/trusty-tools/commit/9876b44d72d2a68dd9df213e027d2f15a119e2b9))
+- deterministic project configurator — tm projects config CLI + TUI form ([#2484](https://github.com/bobmatnyc/trusty-tools/pull/2484)) ([`bfb58a6`](https://github.com/bobmatnyc/trusty-tools/commit/bfb58a61db392eea868828492b532dde9bf41750))
+- PATCH /api/v1/projects/{name} — registry-B field-level config update ([#2481](https://github.com/bobmatnyc/trusty-tools/pull/2481)) ([`6e2cc38`](https://github.com/bobmatnyc/trusty-tools/commit/6e2cc38d2fb91dddc001de5c2b7dccd470564481))
+- TUI Deliverable glyph + read-only Deliverable/Milestone view ([#2473](https://github.com/bobmatnyc/trusty-tools/pull/2473)) ([`fed11da`](https://github.com/bobmatnyc/trusty-tools/commit/fed11da19b3e05935363228882c6885dd014d00f))
+- TUI live-refresh + activity-pane wiring ([#2469](https://github.com/bobmatnyc/trusty-tools/pull/2469)) ([`7430bd8`](https://github.com/bobmatnyc/trusty-tools/commit/7430bd877e8d692af2bdbc9be1f695e5433652e5))
+- multipane TUI skeleton — 4-pane projects control plane ([#2465](https://github.com/bobmatnyc/trusty-tools/pull/2465)) ([`ea89558`](https://github.com/bobmatnyc/trusty-tools/commit/ea8955859b36b6182bc0d047c1e465584a9a6049))
+- SessionRecord.deliverable_id + --deliverable launch wiring (WI-13, closes #2379) ([#2439](https://github.com/bobmatnyc/trusty-tools/pull/2439)) ([`0c4799b`](https://github.com/bobmatnyc/trusty-tools/commit/0c4799be8914098d9d60063b3dfaf95c27d0fdd7))
+- deliverable/milestone status histograms on project status endpoint ([#2429](https://github.com/bobmatnyc/trusty-tools/pull/2429)) ([`d92dd67`](https://github.com/bobmatnyc/trusty-tools/commit/d92dd67b013756316fe4b03e24ea3c6a3c9f881b))
+- tm projects CLI — list/register/show/status + deliverables/milestones subtrees (closes #2115, #2381) ([#2428](https://github.com/bobmatnyc/trusty-tools/pull/2428)) ([`cca7216`](https://github.com/bobmatnyc/trusty-tools/commit/cca72166d9eaeabc24b8097fdebdd7589ace0e64))
+- common tmux entry point + generous scrollback ([#2399](https://github.com/bobmatnyc/trusty-tools/pull/2399)) ([`2651fb3`](https://github.com/bobmatnyc/trusty-tools/commit/2651fb33622a077fa4323238daf5ad24484105bc))
+- Deliverable/Milestone data model, central stores, CRUD API + state-machine enforcement (closes #2378, #2380) ([#2395](https://github.com/bobmatnyc/trusty-tools/pull/2395)) ([`359fb79`](https://github.com/bobmatnyc/trusty-tools/commit/359fb797d1fe73917c34f8d5be869c54aa3d22a0))
+- canonical tm sessions namespace with deprecated tm session alias ([#2394](https://github.com/bobmatnyc/trusty-tools/pull/2394)) ([`9b4ba83`](https://github.com/bobmatnyc/trusty-tools/commit/9b4ba83a7aec7bbb2dee5a8960e8aacf65761670))
+- deterministic project status-aggregation endpoint (closes #2117) ([#2396](https://github.com/bobmatnyc/trusty-tools/pull/2396)) ([`8ec8898`](https://github.com/bobmatnyc/trusty-tools/commit/8ec88983695583230e7d4cff82ba118bfda1e0de))
+- tm-issues-prune skill organizes, prioritizes, and suggests next tasks ([#2393](https://github.com/bobmatnyc/trusty-tools/pull/2393)) ([`1266097`](https://github.com/bobmatnyc/trusty-tools/commit/1266097f2c70417270aa15c58599a7e42b20cd48))
+- Telegram focused-session free-text routing (TELUI-6, #1440) ([#2372](https://github.com/bobmatnyc/trusty-tools/pull/2372)) ([`362cb72`](https://github.com/bobmatnyc/trusty-tools/commit/362cb72af874f7783fd84f105eec55574b6e6db3))
+- align PM identity string to tm-<project>-<n> naming (closes #2325) ([#2328](https://github.com/bobmatnyc/trusty-tools/pull/2328)) ([`e20b878`](https://github.com/bobmatnyc/trusty-tools/commit/e20b878f6cb7f6a590a0aed92bd94d29dc97b14c))
+- bundled tm CLI operations skill incl. MCP management (closes #2321) ([#2323](https://github.com/bobmatnyc/trusty-tools/pull/2323)) ([`970ebde`](https://github.com/bobmatnyc/trusty-tools/commit/970ebdea59cc29a0f900ad5dff1883cc59fb8dd3))
+- tm mcp test verifies MCP servers via stdio handshake (closes #2311) ([#2316](https://github.com/bobmatnyc/trusty-tools/pull/2316)) ([`e1eb9a6`](https://github.com/bobmatnyc/trusty-tools/commit/e1eb9a657c077d41835d06c676755263fce48375))
+- add delete action to interactive tm ls session picker (closes #2304) ([#2310](https://github.com/bobmatnyc/trusty-tools/pull/2310)) ([`5e0af0a`](https://github.com/bobmatnyc/trusty-tools/commit/5e0af0a8227cec3d24fbb694e702dcc63977a968))
+- inject CLAUDE_CODE_OAUTH_TOKEN into managed sessions — fix login loop (closes #2246) ([#2256](https://github.com/bobmatnyc/trusty-tools/pull/2256)) ([`07a9085`](https://github.com/bobmatnyc/trusty-tools/commit/07a90857da5eba20e356326b14fac371098d4647))
+- tm ls becomes session connector; alias list moves to tm ls --projects/-p ([#2297](https://github.com/bobmatnyc/trusty-tools/pull/2297)) ([`0365a1b`](https://github.com/bobmatnyc/trusty-tools/commit/0365a1bd1133a68911ec0a61ff03f76a05f18082))
+- tm mcp add|remove|list for user-level MCP servers in tm config dir ([#2286](https://github.com/bobmatnyc/trusty-tools/pull/2286)) ([`a2cf543`](https://github.com/bobmatnyc/trusty-tools/commit/a2cf543feae45700b4bab8a6e6a0af64122ea2d5))
+
+### Fixed
+
+- guided-default no longer inherits an ancestor repo's project when cwd is untracked ([#2535](https://github.com/bobmatnyc/trusty-tools/pull/2535)) ([`9bba5ee`](https://github.com/bobmatnyc/trusty-tools/commit/9bba5eecc7a1a2b65368e4a743dca2f9436919bf))
+- route tm CLI top-level client through bounded config (closes #2517) ([#2524](https://github.com/bobmatnyc/trusty-tools/pull/2524)) ([`9200bc5`](https://github.com/bobmatnyc/trusty-tools/commit/9200bc5e605070780dd78e5026dcd2d758d40bce))
+- non-zero exit on session spawn failure (closes #2457) ([#2521](https://github.com/bobmatnyc/trusty-tools/pull/2521)) ([`74f95c7`](https://github.com/bobmatnyc/trusty-tools/commit/74f95c78653bc3a1ae5b220e2e8ff6b8d9877450))
+- SessionEnd gate aggregates any-pane-live like the runtime reaper ([#2516](https://github.com/bobmatnyc/trusty-tools/pull/2516)) ([`e30c686`](https://github.com/bobmatnyc/trusty-tools/commit/e30c68665cca7185c5198186526eb8a84e7a56c8))
+- harden inject/observe/dashboard-restart against active-pane ambiguity (closes #2468) ([#2514](https://github.com/bobmatnyc/trusty-tools/pull/2514)) ([`47b8387`](https://github.com/bobmatnyc/trusty-tools/commit/47b8387b23a8cdf2121aaf3619bcfd63be39005d))
+- per-request DaemonClient timeouts + TUI input protection (closes #2471) ([#2512](https://github.com/bobmatnyc/trusty-tools/pull/2512)) ([`8ccb867`](https://github.com/bobmatnyc/trusty-tools/commit/8ccb867a152016858bd7d2643d11a606da7978c4))
+- TUI activity pane — explicit unavailable state instead of perpetual loading ([#2513](https://github.com/bobmatnyc/trusty-tools/pull/2513)) ([`99ee122`](https://github.com/bobmatnyc/trusty-tools/commit/99ee122fcc680bd168c057a49f2cad01057bd31c))
+- agent-manifest adoption + tm install --reset-agents ([#2505](https://github.com/bobmatnyc/trusty-tools/pull/2505)) ([`2d78f8e`](https://github.com/bobmatnyc/trusty-tools/commit/2d78f8e6ff251ff8d0f1bcf88b419410c0d65b0c))
+- bundled agent guidance — foreground execution + PM-directive scoping (closes #2501, #2502) ([#2503](https://github.com/bobmatnyc/trusty-tools/pull/2503)) ([`d37aaf9`](https://github.com/bobmatnyc/trusty-tools/commit/d37aaf9300e52bfba262a0d684d6b8811f33b522))
+- uniform TRUSTY_MPM_URL resolution across tm CLI client construction ([#2499](https://github.com/bobmatnyc/trusty-tools/pull/2499)) ([`8a985df`](https://github.com/bobmatnyc/trusty-tools/commit/8a985dff46117465bd38f574580095aea8978a20))
+- drop decommissioned sessions from TUI Sessions pane ([#2497](https://github.com/bobmatnyc/trusty-tools/pull/2497)) ([`13cbb2b`](https://github.com/bobmatnyc/trusty-tools/commit/13cbb2b68d7a1196dadb76559fc2e6ada0466c26))
+- surface server error bodies in DaemonClient PATCH/mutation errors ([#2496](https://github.com/bobmatnyc/trusty-tools/pull/2496)) ([`9ae5388`](https://github.com/bobmatnyc/trusty-tools/commit/9ae5388cc3d4356b76bdaf243193fb845502f368))
+- launchd-aware bridge no-spawn + /health supervised flag (closes #2486) ([#2491](https://github.com/bobmatnyc/trusty-tools/pull/2491)) ([`e993c18`](https://github.com/bobmatnyc/trusty-tools/commit/e993c18ace1fe9a86f4b5315be7887ed767da710))
+- target stored pane_id on resume/restart respawn ([#2467](https://github.com/bobmatnyc/trusty-tools/pull/2467)) ([`10fd418`](https://github.com/bobmatnyc/trusty-tools/commit/10fd4187309dee58a2cef689704eb38ff4b95ed0))
+- reconcile stale-Active session before refusing in-place relaunch ([#2456](https://github.com/bobmatnyc/trusty-tools/pull/2456)) ([`16d4365`](https://github.com/bobmatnyc/trusty-tools/commit/16d4365dd963fa26b9fb2799714993e7b01fdf3b))
+- SessionEnd hook uses non-destructive pane-preserving stop ([#2455](https://github.com/bobmatnyc/trusty-tools/pull/2455)) ([`d8c70a9`](https://github.com/bobmatnyc/trusty-tools/commit/d8c70a9449dfdc1c6315cb7c7cdd344e3939bba2))
+- force_new opt-out so the picker's "launch new session" never adopts a live session (closes #2450) ([#2451](https://github.com/bobmatnyc/trusty-tools/pull/2451)) ([`b07b1ba`](https://github.com/bobmatnyc/trusty-tools/commit/b07b1babeca5701769ff5908ebfc6cbd39ca2801))
+- SM context-engine round loss under concurrency + graceful no-memory degradation ([#2360](https://github.com/bobmatnyc/trusty-tools/pull/2360)) ([`ccc028a`](https://github.com/bobmatnyc/trusty-tools/commit/ccc028a9b7b8ae571bc05842b09e0375fbec0f3f))
+- inject --task into spawned session pane (turnkey execution) ([#2361](https://github.com/bobmatnyc/trusty-tools/pull/2361)) ([`f95f044`](https://github.com/bobmatnyc/trusty-tools/commit/f95f04423d4fa46664621ad7d39dadf5161bf504))
+- dedup stale duplicate session records per project in reconcile_on_boot (closes #2306) ([#2338](https://github.com/bobmatnyc/trusty-tools/pull/2338)) ([`a8b040c`](https://github.com/bobmatnyc/trusty-tools/commit/a8b040cdd1e5e4cf7c68d68a4475f05fde92af03))
+- strip leading -- separator from tm mcp args at write and read (closes #2326) ([#2329](https://github.com/bobmatnyc/trusty-tools/pull/2329)) ([`df981bf`](https://github.com/bobmatnyc/trusty-tools/commit/df981bf29a9e2fcbe0f82560e784e872c8a7f8f2))
+- strip stale-hash mpm hook entries so managed hook-merge is idempotent (closes #2235) ([#2301](https://github.com/bobmatnyc/trusty-tools/pull/2301)) ([`c2ba862`](https://github.com/bobmatnyc/trusty-tools/commit/c2ba862b65dc32511054312472da8a1e87d469c8))
+- resolve clippy 1.97.0 lint regressions blocking CI ([#2284](https://github.com/bobmatnyc/trusty-tools/pull/2284)) ([`8b50ac2`](https://github.com/bobmatnyc/trusty-tools/commit/8b50ac25837d5d95244fe94ed913bc3093a2ce86))
+
+### Changed
+
+- mount config command on all 10 primary binaries ([#2528](https://github.com/bobmatnyc/trusty-tools/pull/2528)) ([`a58ea52`](https://github.com/bobmatnyc/trusty-tools/commit/a58ea5223167553f0d90fb5258d582d510dca316))
+- migrate root CLAUDE.md to .trusty-mpm/INSTRUCTIONS.md ([#2300](https://github.com/bobmatnyc/trusty-tools/pull/2300)) ([`d484967`](https://github.com/bobmatnyc/trusty-tools/commit/d484967e50c6585f02dee2893ab325ac59cc71ee))
+
+### Documentation
+
+- add trusty-mpm package metadata + repoint trusty-search CI badge to monorepo ([#2292](https://github.com/bobmatnyc/trusty-tools/pull/2292)) ([`cba43a5`](https://github.com/bobmatnyc/trusty-tools/commit/cba43a5698c03ea611f731b6a5bef0809547a93f))
 
 ## [0.19.4] — 2026-07-09
 
