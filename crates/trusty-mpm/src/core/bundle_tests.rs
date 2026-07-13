@@ -552,6 +552,70 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
 }
 
 #[test]
+fn base_agent_guidance_sections_survive_composition() {
+    // Regression for #2501/#2502: BASE-AGENT.md's "Foreground Execution" and
+    // "PM Directives Do Not Bind You" sections must propagate into every
+    // composed agent via the real bundled asset chain — not just exist in
+    // the source file. Uses version-control (a representative leaf agent)
+    // composed from the real assets dir so a future refactor of the
+    // compose/extends pipeline can't silently drop either section.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+
+    let composed = compose_agent("version-control", &assets_dir)
+        .expect("compose_agent(version-control) must succeed");
+
+    assert!(
+        composed.contains("## Foreground Execution"),
+        "composed version-control is missing the Foreground Execution section"
+    );
+    assert!(
+        composed.contains("stalls the whole delegation chain"),
+        "composed version-control is missing the foreground-execution no-parking guidance"
+    );
+    assert!(
+        composed.contains("## PM Directives Do Not Bind You"),
+        "composed version-control is missing the PM Directives Do Not Bind You section"
+    );
+    assert!(
+        composed.contains("governs the orchestrating PM session"),
+        "composed version-control is missing the PM-directive-scope guidance"
+    );
+
+    // Position assertions: guard the section ORDER, not just presence, so a
+    // future compose/extends refactor can't silently reorder BASE-AGENT.md
+    // content into an incoherent sequence.
+    let pm_directives_idx = composed
+        .find("## PM Directives Do Not Bind You")
+        .expect("PM Directives Do Not Bind You marker must be present");
+    let git_workflow_idx = composed
+        .find("## Git Workflow")
+        .expect("Git Workflow marker must be present");
+    assert!(
+        pm_directives_idx < git_workflow_idx,
+        "PM Directives Do Not Bind You ({pm_directives_idx}) must appear before \
+         Git Workflow ({git_workflow_idx})"
+    );
+
+    let foreground_execution_idx = composed
+        .find("## Foreground Execution")
+        .expect("Foreground Execution marker must be present");
+    let output_format_idx = composed
+        .find("## Output Format")
+        .expect("Output Format marker must be present");
+    assert!(
+        foreground_execution_idx < output_format_idx,
+        "Foreground Execution ({foreground_execution_idx}) must appear before \
+         Output Format ({output_format_idx})"
+    );
+}
+
+#[test]
 fn no_mpm_guidance_skills_remain_in_bundle() {
     // The tm-skills-portfolio epic removed the 11 Phase 1 (#770) mpm-*
     // guidance skills in favor of the /tm- portfolio; assert none linger.
