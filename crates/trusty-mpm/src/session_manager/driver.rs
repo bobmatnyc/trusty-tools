@@ -79,6 +79,37 @@ pub trait ManagedTmuxDriver: Send + Sync {
         self.send_line(name, text)
     }
 
+    /// Send literal text WITHOUT a trailing Enter to a SPECIFIC pane (#2468,
+    /// same rationale as [`Self::send_line_to_pane`]).
+    ///
+    /// What: the pane-scoped counterpart to [`Self::send_keys_literal`],
+    /// used by `SessionManager::inject`'s `Submit::NoSubmit` dispatch when
+    /// `record.pane_id` is known. The default returns an explicit
+    /// `TmuxUnavailable` error rather than silently falling back to
+    /// `send_keys_literal(name, text)` (#2514 review, minor finding 5): a
+    /// silent session-scoped fallback here is exactly the sibling-window
+    /// hijack #2468 exists to close, and a future driver that forgets to
+    /// override this method would silently REGAIN the vulnerability with no
+    /// compiler signal. Mirrors the fail-closed pattern already used by
+    /// [`Self::send_keys_literal`]'s own default. Any driver actually used
+    /// with a known `pane_id` MUST override this — both
+    /// [`super::real_tmux::RealTmuxDriver`] and the test-only
+    /// `FakeTmuxDriver` do.
+    /// Test: `inject_nosubmit_targets_pane_when_pane_id_known` in
+    /// `pane_scoped_tests.rs`; `send_keys_literal_to_pane_default_fails_closed`
+    /// in this module's tests.
+    fn send_keys_literal_to_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        let _ = (name, pane_id, text);
+        Err(ManagedError::TmuxUnavailable(
+            "send_keys_literal_to_pane not implemented for this driver".into(),
+        ))
+    }
+
     /// Report whether `pane_id` still exists as a live pane within `name`'s
     /// tmux session.
     ///
@@ -125,6 +156,31 @@ pub trait ManagedTmuxDriver: Send + Sync {
         ))
     }
 
+    /// Send Ctrl-C to a SPECIFIC pane rather than the session (#2468, same
+    /// rationale as [`Self::send_line_to_pane`]).
+    ///
+    /// What: the pane-scoped counterpart to [`Self::send_interrupt`], used by
+    /// `SessionManager::inject`'s `Submit::Interrupt` dispatch when
+    /// `record.pane_id` is known. The default returns an explicit
+    /// `TmuxUnavailable` error rather than silently falling back to
+    /// `send_interrupt(name)` (#2514 review, minor finding 5) — the same
+    /// fail-closed rationale as [`Self::send_keys_literal_to_pane`]'s default:
+    /// a silent session-scoped fallback would regain the sibling-window
+    /// hijack #2468 fixed, with no compiler signal warning a future driver
+    /// that it forgot to override this. Any driver actually used with a known
+    /// `pane_id` MUST override this — both
+    /// [`super::real_tmux::RealTmuxDriver`] and the test-only
+    /// `FakeTmuxDriver` do.
+    /// Test: `inject_interrupt_targets_pane_when_pane_id_known` in
+    /// `pane_scoped_tests.rs`; `send_interrupt_to_pane_default_fails_closed`
+    /// in this module's tests.
+    fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
+        let _ = (name, pane_id);
+        Err(ManagedError::TmuxUnavailable(
+            "send_interrupt_to_pane not implemented for this driver".into(),
+        ))
+    }
+
     /// Capture the last `lines` of pane output for the session named `name`.
     ///
     /// `lines` is `usize` to match the harness-agnostic
@@ -133,6 +189,38 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// tmux `-S` argv requires is confined to the real-tmux driver edge, so no
     /// caller in the observe path needs a `try_from`.
     fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError>;
+
+    /// Capture the last `lines` of output from a SPECIFIC pane rather than
+    /// whichever pane the session name currently resolves to (#2468).
+    ///
+    /// Why: `SessionManager::observe`'s LLM-free pane read had the same
+    /// sibling-window-hijack hole #2467 fixed for resume/restart — a
+    /// session-scoped capture reads whatever pane tmux considers active,
+    /// which need not be the pane this record is actually about.
+    /// What: the pane-scoped counterpart to [`Self::capture`]. The default
+    /// returns an explicit `TmuxUnavailable` error rather than silently
+    /// falling back to `capture(name, lines)` (session-scoped) (#2514 review,
+    /// minor finding 5) — the same fail-closed rationale as
+    /// [`Self::send_keys_literal_to_pane`]'s default: a silent session-scoped
+    /// fallback would regain the sibling-window hijack #2468 fixed for reads
+    /// too, with no compiler signal warning a future driver that it forgot to
+    /// override this. Any driver actually used with a known `pane_id` MUST
+    /// override this — both [`super::real_tmux::RealTmuxDriver`] and the
+    /// test-only `FakeTmuxDriver` do.
+    /// Test: `observe_captures_pane_scoped_when_pane_id_known` in
+    /// `pane_scoped_tests.rs`; `capture_pane_default_fails_closed` in this
+    /// module's tests.
+    fn capture_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let _ = (name, pane_id, lines);
+        Err(ManagedError::TmuxUnavailable(
+            "capture_pane not implemented for this driver".into(),
+        ))
+    }
 
     /// Return the pane's current working directory for snapshot-before-stop (#1816).
     ///
@@ -284,5 +372,66 @@ pub trait ManagedTmuxDriver: Send + Sync {
             // No pid — best effort interrupt via tmux send-keys.
             let _ = self.send_interrupt(name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal driver that overrides only the REQUIRED (non-defaulted)
+    /// trait methods, so `send_keys_literal_to_pane`, `send_interrupt_to_pane`,
+    /// and `capture_pane` all run the trait's own default bodies — exactly
+    /// the "a driver forgot to override this" scenario minor finding 5
+    /// (#2514 review) is guarding against.
+    struct MinimalDriver;
+
+    impl ManagedTmuxDriver for MinimalDriver {
+        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn send_keys_literal_to_pane_default_fails_closed() {
+        let err = MinimalDriver
+            .send_keys_literal_to_pane("sess", "%1", "text")
+            .expect_err(
+                "a driver that does not override this must fail loudly, never \
+                 silently fall back to the session-scoped send",
+            );
+        assert!(matches!(err, ManagedError::TmuxUnavailable(_)));
+    }
+
+    #[test]
+    fn send_interrupt_to_pane_default_fails_closed() {
+        let err = MinimalDriver
+            .send_interrupt_to_pane("sess", "%1")
+            .expect_err(
+                "a driver that does not override this must fail loudly, never \
+                 silently fall back to the session-scoped interrupt",
+            );
+        assert!(matches!(err, ManagedError::TmuxUnavailable(_)));
+    }
+
+    #[test]
+    fn capture_pane_default_fails_closed() {
+        let err = MinimalDriver.capture_pane("sess", "%1", 50).expect_err(
+            "a driver that does not override this must fail loudly, never \
+                 silently fall back to the session-scoped capture",
+        );
+        assert!(matches!(err, ManagedError::TmuxUnavailable(_)));
     }
 }

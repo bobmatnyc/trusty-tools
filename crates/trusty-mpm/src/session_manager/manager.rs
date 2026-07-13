@@ -254,21 +254,35 @@ impl SessionManager {
     ///
     /// Why: the calling agentic process resolves pending decisions by calling
     /// POST /sessions/{id}/answer; this method persists the answer and clears
-    /// pending_decision/proposed_default so they are not re-surfaced.
-    /// What: looks up the record, sends the answer text to the pane via tmux,
-    /// clears the pending fields, and persists.
-    /// Test: `manager_answer_decision` in tests.
+    /// pending_decision/proposed_default so they are not re-surfaced. This
+    /// route has the exact same sibling-window hijack risk #2468 fixed for
+    /// `inject`/`observe`: a session-scoped `send_line` lands in whichever
+    /// pane tmux currently considers active, not necessarily the pane the
+    /// pending decision was raised in.
+    /// What: looks up the record, [`Self::ensure_pane_alive`]-gates the
+    /// recorded `pane_id`, sends the answer text via `send_line_to_pane` when
+    /// `pane_id` is known (falling back to the session-scoped `send_line` for
+    /// a legacy record with no captured pane), clears the pending fields, and
+    /// persists.
+    /// Test: `manager_answer_decision` in tests;
+    /// `answer_decision_targets_pane_when_pane_id_known`,
+    /// `answer_decision_refuses_when_stored_pane_gone`,
+    /// `answer_decision_legacy_record_without_pane_id_falls_back_to_session_target`
+    /// in `pane_scoped_tests.rs`.
     pub async fn answer_decision(
         &self,
         id: &ManagedSessionId,
         answer: &str,
     ) -> Result<(), ManagedError> {
         let mut record = self.get(id).await?;
+        self.ensure_pane_alive(id, &record)?;
+        match record.pane_id.as_deref() {
+            Some(p) => self.tmux.send_line_to_pane(&record.tmux_name, p, answer),
+            None => self.tmux.send_line(&record.tmux_name, answer),
+        }
+        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         record.pending_decision = None;
         record.proposed_default = None;
-        self.tmux
-            .send_line(&record.tmux_name, answer)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
         Ok(())
@@ -353,16 +367,28 @@ impl SessionManager {
     /// Stopped/Decommissioned guard as [`send_input`](Self::send_input) so input
     /// is never sent to a dead pane.
     /// What: looks up the record, rejects Stopped/Decommissioned sessions, then
-    /// dispatches: [`Submit::Enter`] → `send_line` (literal + Enter),
-    /// [`Submit::NoSubmit`] → `send_keys_literal` (literal only),
-    /// [`Submit::Interrupt`] → `send_interrupt` (Ctrl-C). Bumps
-    /// `last_activity_at` ONLY for `Enter`/`NoSubmit`: an `Interrupt` (Ctrl-C) is
-    /// a STOP signal, not forward progress, so treating it as activity would
-    /// mislead the idle/orphan-GC reconciliation into believing a stalled session
-    /// is still working.
+    /// [`Self::ensure_pane_alive`]-gates the record's recorded `pane_id`
+    /// (issue #2468 — the same sibling-window hijack risk #2467 fixed for
+    /// resume/restart: typing into "the session" lands in whichever pane
+    /// tmux considers active, possibly an unrelated sibling shell) before
+    /// dispatching: [`Submit::Enter`] → `send_line`/`send_line_to_pane`
+    /// (literal + Enter), [`Submit::NoSubmit`] →
+    /// `send_keys_literal`/`send_keys_literal_to_pane` (literal only),
+    /// [`Submit::Interrupt`] → `send_interrupt`/`send_interrupt_to_pane`
+    /// (Ctrl-C) — the pane-scoped variant is used whenever `record.pane_id`
+    /// is known, the session-scoped one otherwise (legacy record, matching
+    /// #2467's fallback). Bumps `last_activity_at` ONLY for
+    /// `Enter`/`NoSubmit`: an `Interrupt` (Ctrl-C) is a STOP signal, not
+    /// forward progress, so treating it as activity would mislead the
+    /// idle/orphan-GC reconciliation into believing a stalled session is
+    /// still working.
     /// Test: `inject_dispatch_enter_sends_literal_then_enter`,
     /// `inject_dispatch_nosubmit_sends_literal_only`,
-    /// `inject_dispatch_interrupt_sends_ctrl_c` in tests/session_control_api.rs.
+    /// `inject_dispatch_interrupt_sends_ctrl_c` in tests/session_control_api.rs;
+    /// `inject_targets_pane_when_pane_id_known`,
+    /// `inject_refuses_when_stored_pane_gone`,
+    /// `inject_legacy_record_without_pane_id_falls_back_to_session_target`
+    /// in `pane_scoped_tests.rs`.
     pub async fn inject(
         &self,
         id: &ManagedSessionId,
@@ -379,10 +405,18 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
-        let result = match submit {
-            Submit::Enter => self.tmux.send_line(&record.tmux_name, text),
-            Submit::NoSubmit => self.tmux.send_keys_literal(&record.tmux_name, text),
-            Submit::Interrupt => self.tmux.send_interrupt(&record.tmux_name),
+        self.ensure_pane_alive(id, &record)?;
+        let pane_id = record.pane_id.clone();
+        let result = match (submit, pane_id.as_deref()) {
+            (Submit::Enter, Some(p)) => self.tmux.send_line_to_pane(&record.tmux_name, p, text),
+            (Submit::Enter, None) => self.tmux.send_line(&record.tmux_name, text),
+            (Submit::NoSubmit, Some(p)) => {
+                self.tmux
+                    .send_keys_literal_to_pane(&record.tmux_name, p, text)
+            }
+            (Submit::NoSubmit, None) => self.tmux.send_keys_literal(&record.tmux_name, text),
+            (Submit::Interrupt, Some(p)) => self.tmux.send_interrupt_to_pane(&record.tmux_name, p),
+            (Submit::Interrupt, None) => self.tmux.send_interrupt(&record.tmux_name),
         };
         result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         // Interrupt is a STOP signal, not activity — do not bump last_activity_at.
@@ -399,20 +433,30 @@ impl SessionManager {
     /// actually showing (pane + liveness + any pending escalation) WITHOUT an LLM
     /// key. This bundles the three reads the managed activity route already does
     /// into one manager helper so `SessionControl::observe` is a thin mapping.
-    /// What: captures the last `lines` pane rows (empty string if the pane is
-    /// gone), probes `runtime_active` via `session_exists`, and reads the record's
+    /// [`Self::ensure_pane_alive`]-gates the recorded `pane_id` first (issue
+    /// #2468, same sibling-window hijack risk #2467 fixed for resume/restart):
+    /// capturing "the session" without this check could silently read a
+    /// sibling window's pane instead of the one this record actually owns.
+    /// What: captures the last `lines` pane rows via the pane-scoped
+    /// `capture_pane` when `record.pane_id` is known (session-scoped `capture`
+    /// otherwise — legacy record, matching #2467's fallback), probes
+    /// `runtime_active` via `session_exists`, and reads the record's
     /// `pending_decision` / `proposed_default`. Never calls the LLM.
-    /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`.
+    /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`,
+    /// `observe_captures_pane_scoped_when_pane_id_known`,
+    /// `observe_refuses_when_stored_pane_gone` in `pane_scoped_tests.rs`.
     pub async fn observe(
         &self,
         id: &ManagedSessionId,
         lines: usize,
     ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
         let record = self.get(id).await?;
-        let raw_pane = self
-            .tmux
-            .capture(&record.tmux_name, lines)
-            .unwrap_or_default();
+        self.ensure_pane_alive(id, &record)?;
+        let raw_pane = match record.pane_id.as_deref() {
+            Some(p) => self.tmux.capture_pane(&record.tmux_name, p, lines),
+            None => self.tmux.capture(&record.tmux_name, lines),
+        }
+        .unwrap_or_default();
         let runtime_active = self.tmux.session_exists(&record.tmux_name);
         Ok(crate::core::sm::control::RawObservation {
             raw_pane,
@@ -446,6 +490,51 @@ impl SessionManager {
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session stopped (workspace intact)");
         Ok(record)
+    }
+
+    /// Confirm the record's recorded `pane_id` (when known) is still alive,
+    /// refusing loudly rather than letting a caller fall through to a
+    /// session-scoped tmux target that could resolve to an unrelated pane
+    /// (sibling-window hijack, follow-up to #2456/#2467, issue #2468).
+    ///
+    /// Why: `resume`, `inject`/`send_input`, and `observe` all address a
+    /// session's tmux pane, and all three share the SAME hole — a tmux
+    /// session stays "alive" as long as ANY pane/window in it is open, so
+    /// [`ManagedTmuxDriver::session_exists`] cannot tell "the recorded pane
+    /// survived" apart from "an unrelated sibling window is keeping the
+    /// session alive". #2467 closed this for the resume/restart respawn
+    /// path only; #2468 centralises the same check here so `inject` and
+    /// `observe` share it instead of duplicating (and risking drifting)
+    /// the logic.
+    /// What: a no-op (`Ok(())`) when `record.pane_id` is `None` — a legacy
+    /// record (pre-#2453) has no stronger signal than `session_exists`, so
+    /// it keeps the prior session-scoped behavior exactly as #2467
+    /// established — or when [`ManagedTmuxDriver::pane_exists`] confirms the
+    /// pane is present. Returns `Err(ManagedError::PaneGone(id, pane_id))`
+    /// when the pane is confirmed gone.
+    /// Test: `resume_refuses_when_stored_pane_gone_but_session_alive`
+    /// (`resume_reattach_tests.rs`); `inject_refuses_when_stored_pane_gone`,
+    /// `observe_refuses_when_stored_pane_gone`,
+    /// `inject_legacy_record_without_pane_id_falls_back_to_session_target`
+    /// (`pane_scoped_tests.rs`).
+    fn ensure_pane_alive(
+        &self,
+        id: &ManagedSessionId,
+        record: &SessionRecord,
+    ) -> Result<(), ManagedError> {
+        if let Some(pane_id) = record.pane_id.as_deref()
+            && !self.tmux.pane_exists(&record.tmux_name, pane_id)
+        {
+            warn!(
+                id = %id,
+                name = %record.tmux_name,
+                pane_id = %pane_id,
+                "recorded pane is gone but the tmux session is still alive (sibling window) \
+                 — refusing to operate on an unrelated active pane"
+            );
+            return Err(ManagedError::PaneGone(id.to_string(), pane_id.to_string()));
+        }
+        Ok(())
     }
 
     /// Mark a runtime-exited session `Stopped` WITHOUT killing its tmux pane (#2023 A).
@@ -679,22 +768,9 @@ impl SessionManager {
             // Sibling-window hijack fix (follow-up to #2456): `session_exists`
             // only proves SOME pane in this tmux session is alive — it says
             // nothing about whether it is the SPECIFIC pane this record is
-            // bound to. When a `pane_id` was captured, confirm that exact
-            // pane is still there before trusting the reuse; a legacy record
-            // with no captured `pane_id` (pre-#2453) has no stronger signal
-            // available and keeps the prior session-scoped behavior.
-            if let Some(pane_id) = record.pane_id.as_deref()
-                && !self.tmux.pane_exists(&record.tmux_name, pane_id)
-            {
-                warn!(
-                    id = %id,
-                    name = %record.tmux_name,
-                    pane_id = %pane_id,
-                    "resume: recorded pane is gone but the tmux session is still alive \
-                     (sibling window) — refusing to respawn into an unrelated active pane"
-                );
-                return Err(ManagedError::PaneGone(id.to_string(), pane_id.to_string()));
-            }
+            // bound to. `ensure_pane_alive` confirms that before trusting the
+            // reuse (see its doc for the legacy-record fallback).
+            self.ensure_pane_alive(id, &record)?;
             info!(
                 id = %id,
                 name = %record.tmux_name,

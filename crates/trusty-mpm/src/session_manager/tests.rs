@@ -1,7 +1,11 @@
 //! Unit tests for the session manager.
 //!
 //! Why: tests in a separate file keep manager.rs under the 500 SLOC production
-//! cap while the 1500 SLOC test cap gives the test suite room to grow.
+//! cap while the 1500 SLOC test cap gives the test suite room to grow. The
+//! `manager_adopt_existing_*` tests were extracted to `adopt_existing_tests.rs`
+//! (issue #2468, same reason `reload_error_tests.rs` was split out — staying
+//! under this file's own 1500-SLOC test cap after the pane-scoped inject/observe
+//! `FakeTmuxDriver` additions).
 //! What: full lifecycle tests for create, stop (keep workspace), resume
 //! (re-spawn in existing workspace), decommission (remove workspace from disk),
 //! send_input, reconcile (gone tmux → Stopped), answer_decision,
@@ -74,6 +78,17 @@ pub struct FakeTmuxDriver {
     /// Records every `send_line_to_pane` call as `(session_name, pane_id,
     /// text)` (sibling-window hijack fix, follow-up to #2456).
     pub pane_send_calls: Mutex<Vec<(String, String, String)>>,
+    /// Records every `send_keys_literal_to_pane` call as `(session_name,
+    /// pane_id, text)` (issue #2468).
+    pub pane_literal_calls: Mutex<Vec<(String, String, String)>>,
+    /// Records every `send_interrupt_to_pane` call as `(session_name,
+    /// pane_id)` (issue #2468).
+    pub pane_interrupt_calls: Mutex<Vec<(String, String)>>,
+    /// Records every `capture_pane` call as `(session_name, pane_id)`; the
+    /// returned body is looked up from `capture_responses` BY PANE ID (not
+    /// session name), so a test can assert the pane-scoped path returns
+    /// pane-owned content distinct from a session-keyed response (#2468).
+    pub pane_capture_calls: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeTmuxDriver {
@@ -91,6 +106,9 @@ impl FakeTmuxDriver {
             pane_id_override: Mutex::new(None),
             pane_exists_override: Mutex::new(None),
             pane_send_calls: Mutex::new(Vec::new()),
+            pane_literal_calls: Mutex::new(Vec::new()),
+            pane_interrupt_calls: Mutex::new(Vec::new()),
+            pane_capture_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -201,6 +219,68 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             text.to_owned(),
         ));
         Ok(())
+    }
+
+    /// Overrides the trait default (which errors "not implemented") so
+    /// `inject`'s `Submit::NoSubmit` legacy (no `pane_id`) path is testable;
+    /// records `(name, text)` into `send_calls` — the SAME session-scoped log
+    /// `send_line` uses — so a legacy-record test can assert a session-scoped
+    /// call landed without caring which literal-vs-Enter primitive it was.
+    fn send_keys_literal(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        self.send_calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), text.to_owned()));
+        Ok(())
+    }
+
+    /// Records `(name, pane_id, text)` (issue #2468) — proves `inject`'s
+    /// `Submit::NoSubmit` dispatch chose the pane-scoped path.
+    fn send_keys_literal_to_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        self.pane_literal_calls.lock().unwrap().push((
+            name.to_owned(),
+            pane_id.to_owned(),
+            text.to_owned(),
+        ));
+        Ok(())
+    }
+
+    /// Records `(name, pane_id)` (issue #2468) — proves `inject`'s
+    /// `Submit::Interrupt` dispatch chose the pane-scoped path.
+    fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
+        self.pane_interrupt_calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), pane_id.to_owned()));
+        Ok(())
+    }
+
+    /// Records `(name, pane_id)` and returns the response keyed BY PANE ID —
+    /// deliberately a different keyspace than `capture`'s session-name
+    /// lookup, so a test can prove `observe` returned pane-owned content
+    /// rather than session-scoped content (issue #2468).
+    fn capture_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        _lines: usize,
+    ) -> Result<String, ManagedError> {
+        self.pane_capture_calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), pane_id.to_owned()));
+        Ok(self
+            .capture_responses
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -1161,151 +1241,6 @@ async fn manager_get_reflects_out_of_process_write() {
 /// What: seeds a live tmux name on the fake driver, adopts it, and asserts the
 /// record is `Active`, NOT created via `create_session`, and is retrievable.
 /// Test: this function IS the test.
-#[tokio::test]
-async fn manager_adopt_existing_registers_active() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, fake) = make_manager(&dir).await;
-
-    // The pane already exists (operator started it outside trusty-mpm).
-    fake.seeded_names
-        .lock()
-        .unwrap()
-        .push("tmpm-hand-started".into());
-
-    let record = mgr
-        .adopt_existing(
-            "tmpm-hand-started",
-            PathBuf::from("/Users/op/work/proj"),
-            "drive my hand-started session".into(),
-            crate::runtime::RuntimeKind::default(),
-            false,
-        )
-        .await
-        .expect("adopt existing");
-
-    assert_eq!(record.tmux_name, "tmpm-hand-started");
-    assert_eq!(record.state, ManagedSessionState::Active);
-    assert_eq!(record.cwd, PathBuf::from("/Users/op/work/proj"));
-    assert_eq!(record.task, "drive my hand-started session");
-
-    // Adoption must NOT spawn a new tmux session — the pane already exists.
-    assert!(
-        fake.create_cwd_calls.lock().unwrap().is_empty(),
-        "adopt_existing must NOT call create_session; calls: {:?}",
-        fake.create_cwd_calls.lock().unwrap()
-    );
-
-    // The record is durably queryable.
-    let got = mgr.get(&record.id).await.expect("get adopted");
-    assert_eq!(got.id, record.id);
-    assert_eq!(got.state, ManagedSessionState::Active);
-}
-
-/// Adopting a tmux name that does NOT exist on the host must error — you cannot
-/// adopt a pane that is not there (#1433).
-///
-/// Why: this is the inverse of `create`'s NameCollision guard. The error must be
-/// the dedicated `TmuxSessionMissing` variant so the HTTP layer maps it to a 404.
-/// What: adopts a name the driver does not report and asserts the typed error.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn manager_adopt_existing_missing_tmux_errors() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, _fake) = make_manager(&dir).await;
-
-    let err = mgr
-        .adopt_existing(
-            "tmpm-not-here",
-            PathBuf::from("/tmp/x"),
-            String::new(),
-            crate::runtime::RuntimeKind::default(),
-            false,
-        )
-        .await
-        .expect_err("adopting a nonexistent pane must fail");
-
-    assert!(
-        matches!(err, ManagedError::TmuxSessionMissing(ref n) if n == "tmpm-not-here"),
-        "expected TmuxSessionMissing, got {err:?}"
-    );
-}
-
-/// Adopting a tmux name the store ALREADY tracks must error — no double records
-/// for one pane (#1433).
-///
-/// Why: a second record for the same pane would split ownership and confuse every
-/// downstream verb. The dedicated `AlreadyAdopted` variant lets the HTTP layer map
-/// it to a 409 Conflict.
-/// What: adopts once (succeeds), then adopts the same live name again and asserts
-/// the second call returns `AlreadyAdopted`.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn manager_adopt_existing_double_adopt_errors() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, fake) = make_manager(&dir).await;
-
-    fake.seeded_names.lock().unwrap().push("tmpm-once".into());
-
-    mgr.adopt_existing(
-        "tmpm-once",
-        PathBuf::from("/tmp/once"),
-        String::new(),
-        crate::runtime::RuntimeKind::default(),
-        false,
-    )
-    .await
-    .expect("first adopt succeeds");
-
-    let err = mgr
-        .adopt_existing(
-            "tmpm-once",
-            PathBuf::from("/tmp/once"),
-            String::new(),
-            crate::runtime::RuntimeKind::default(),
-            false,
-        )
-        .await
-        .expect_err("second adopt of the same pane must fail");
-
-    assert!(
-        matches!(err, ManagedError::AlreadyAdopted(ref n) if n == "tmpm-once"),
-        "expected AlreadyAdopted, got {err:?}"
-    );
-}
-
-/// The explicit adopt path must allow NON-`tmpm-` names (unlike reconcile, which
-/// filters to the `tmpm-` prefix for safe automatic adoption) (#1433).
-///
-/// Why: an operator naming a pane explicitly knows what they are adopting; the
-/// `tmpm-` prefix filter exists only to make AUTOMATIC boot adoption safe. The
-/// explicit path must not reject a session just because it lacks the prefix.
-/// What: seeds a non-`tmpm-` live name, adopts it, and asserts success.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn manager_adopt_existing_allows_non_tmpm_name() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, fake) = make_manager(&dir).await;
-
-    fake.seeded_names
-        .lock()
-        .unwrap()
-        .push("my-cli-session".into());
-
-    let record = mgr
-        .adopt_existing(
-            "my-cli-session",
-            PathBuf::from("/Users/op/repo"),
-            "adopt non-prefixed".into(),
-            crate::runtime::RuntimeKind::default(),
-            false,
-        )
-        .await
-        .expect("non-tmpm names are adoptable on the explicit path");
-
-    assert_eq!(record.tmux_name, "my-cli-session");
-    assert_eq!(record.state, ManagedSessionState::Active);
-}
-
 /// Corrupt the manager's backing `sessions.json` so the next reload-on-read
 /// fails. Writing garbage (a) changes the file length so `reload_if_changed`
 /// detects a change and re-reads, and (b) makes `serde_json::from_str` fail with
@@ -1504,37 +1439,6 @@ async fn manager_create_persists_ephemeral_flag() {
     assert!(
         !mgr.get(&durable.id).await.unwrap().ephemeral,
         "durable stays false"
-    );
-}
-
-/// `adopt_existing` persists the caller-supplied `ephemeral` flag (#1508).
-///
-/// Why: the e2e harness adopts panes as ephemeral; the flag must reach the record.
-/// What: seeds a live pane, adopts it with `ephemeral=true`, asserts it persisted.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn manager_adopt_existing_persists_ephemeral_flag() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, fake) = make_manager(&dir).await;
-    fake.seeded_names
-        .lock()
-        .unwrap()
-        .push("tmpm-eph-adopt".into());
-
-    let record = mgr
-        .adopt_existing(
-            "tmpm-eph-adopt",
-            PathBuf::from("/tmp/adopt"),
-            "throwaway adopt".into(),
-            crate::runtime::RuntimeKind::default(),
-            true,
-        )
-        .await
-        .expect("adopt ephemeral");
-
-    assert!(
-        mgr.get(&record.id).await.unwrap().ephemeral,
-        "adopted ephemeral flag persisted"
     );
 }
 
