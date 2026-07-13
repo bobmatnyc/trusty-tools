@@ -186,7 +186,6 @@ crates/trusty-code/src/run_task/mod.rs	resolve_agent_model_slug_honours_override
 crates/trusty-code/src/run_task/recorder.rs	recorder_flags_ran_test_command_on_matching_bash_call
 crates/trusty-code/src/runner/in_process.rs	with_timeout_secs_overrides_only_timeout
 crates/trusty-code/src/serve/http.rs	http_session_events_sse_streams_replay_then_live_event
-crates/trusty-code/src/session/memory_sink.rs	write_turn_passes_force_true_for_memory_remember
 crates/trusty-code/src/session/registry.rs	cancel_is_idempotent_on_terminal_session
 crates/trusty-code/src/session/registry.rs	detach_stops_the_forwarder
 crates/trusty-code/src/session/registry.rs	get_transcript_returns_stored_record
