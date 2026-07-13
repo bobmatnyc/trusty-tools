@@ -5,7 +5,11 @@
 //! lives in `indexes_relocate` to keep this file under the 500-line cap.
 //! What: `list_indexes_handler`, `create_index_handler`, and the types they use
 //! (`ListIndexesParams`, `IndexListResponse`, `IndexDetailEntry`).
-//! Test: `create_index_rejects_relative_root_path` and related tests.
+//! Issue #2336: `create_index_handler` also guards against registering a
+//! second index over a `root_path` already owned by a different registered
+//! id (409), and refuses to register a handle whose corpus open failed.
+//! Test: `create_index_rejects_relative_root_path`, `tests_2336.rs`, and
+//! related tests.
 use axum::{
     extract::{Query, State},
     response::{IntoResponse, Json, Response},
@@ -15,7 +19,10 @@ use std::sync::Arc;
 
 use crate::core::registry::{IndexHandle, IndexId};
 
-use super::helpers::{embedder_error_response, embedder_initializing_response, validate_root_path};
+use super::helpers::{
+    embedder_error_response, embedder_initializing_response, find_root_path_collision,
+    root_path_collision_response, validate_root_path,
+};
 use super::router::{CreateIndexRequest, IndexDetailEntry, IndexListResponse};
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_disk_and_mtime;
@@ -132,6 +139,24 @@ pub(super) async fn create_index_handler(
         }))
         .into_response();
     }
+    // Issue #2336: reject a second live index over the same canonical
+    // root_path. Two registrations sharing one colocated root resolve to the
+    // SAME on-disk redb corpus (`<root>/.trusty-search/index.redb`); redb is
+    // single-open, so building this index's indexer would silently fail its
+    // corpus open while this handler still returned `200 {"created": true}`
+    // — recreating the #2305 double-registration hazard at runtime instead
+    // of only at warm-boot. Checked before the (expensive) indexer build.
+    let handles = state.registry.list_handles();
+    if let Some(existing_id) = find_root_path_collision(&handles, &req.root_path, Some(&id)) {
+        tracing::warn!(
+            "create_index: refusing to register '{}' at {} — root_path already owned by \
+             '{}' (issue #2336)",
+            req.id,
+            req.root_path.display(),
+            existing_id,
+        );
+        return root_path_collision_response(&existing_id, &req.root_path);
+    }
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -197,6 +222,38 @@ pub(super) async fn create_index_handler(
                     .into_response();
             }
         };
+
+    // Issue #2336 defense-in-depth: the `find_root_path_collision` check
+    // above is BEST-EFFORT ONLY — it is a check-then-act race (issue #2519
+    // review, accepted as documented behavior rather than fixed with a
+    // registration mutex): two concurrent `POST /indexes` calls for the same
+    // root can both pass the guard before either has registered a handle.
+    // `indexer.corpus_open_failed` is the GROUND TRUTH — redb's single-open
+    // semantics mean at most one of the racing opens can ever succeed, so
+    // this check catches every case the best-effort guard misses (the raced
+    // collision above, or any unrelated open error) and must not be silently
+    // registered as a healthy `200 {"created": true}` handle. Previously this
+    // failure was swallowed: `indexer.corpus_open_failed` was set but never
+    // checked here.
+    if indexer.corpus_open_failed {
+        tracing::error!(
+            "create_index: corpus open failed for '{}' at {} — refusing to register a \
+             broken index handle (issue #2336)",
+            req.id,
+            req.root_path.display()
+        );
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "error": format!(
+                    "corpus open failed for root_path {:?}; refusing to register a broken \
+                     index handle",
+                    req.root_path.display()
+                )
+            })),
+        )
+            .into_response();
+    }
 
     // Resolve repo-config filters (issue: trusty-search.yaml wiring). The
     // CLI sends `paths:` as relative strings; resolve them against `root_path`

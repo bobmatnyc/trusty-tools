@@ -445,3 +445,193 @@ fn dedup_by_corpus_path_keeps_most_recent() {
         "the most-recently-active entry must be the survivor"
     );
 }
+
+// ── dedup_entries_by_corpus_path_verbose (issue #2337) ────────────────────
+
+/// Why (#2337 part 1): callers need the dropped entries to prune their
+/// `indexes.toml` rows — otherwise they are re-discovered/re-warned/re-dropped
+/// forever.
+/// What: two entries share a root; asserts `dropped` contains exactly the
+/// losing entry and `survivors` contains exactly the winner.
+/// Test: this test.
+#[test]
+fn dedup_verbose_reports_dropped_entries() {
+    let shared = tempfile::tempdir().unwrap();
+
+    let entries = vec![
+        colocated_entry("stale", shared.path(), Some(1)),
+        colocated_entry("fresh", shared.path(), Some(2)),
+    ];
+
+    let outcome = dedup_entries_by_corpus_path_verbose(entries);
+    assert_eq!(outcome.survivors.len(), 1, "one survivor");
+    assert_eq!(outcome.survivors[0].id, "fresh");
+    assert_eq!(outcome.dropped.len(), 1, "one dropped entry");
+    assert_eq!(outcome.dropped[0].id, "stale");
+    assert!(
+        outcome.merged_survivor_ids.contains("fresh"),
+        "the survivor must be flagged as having absorbed a dropped entry's config"
+    );
+}
+
+/// Why (#2337 part 2): a genuine collision keeps only the redb data, but the
+/// two entries' list-type search filters can legitimately differ; dropping
+/// them entirely would silently narrow the survivor's search scope.
+/// What: the loser has distinct `extensions`/`domain_terms`; asserts the
+/// survivor's fields are the union (with survivor's own values first).
+/// Test: this test.
+#[test]
+fn dedup_verbose_merges_list_config_into_survivor() {
+    let shared = tempfile::tempdir().unwrap();
+
+    let mut winner = colocated_entry("fresh", shared.path(), Some(2));
+    winner.extensions = vec!["rs".to_string()];
+    winner.domain_terms = vec!["daemon".to_string()];
+
+    let mut loser = colocated_entry("stale", shared.path(), Some(1));
+    loser.extensions = vec!["py".to_string()];
+    loser.domain_terms = vec!["daemon".to_string(), "corpus".to_string()];
+    loser.include_paths = vec!["src/legacy".to_string()];
+
+    let outcome = dedup_entries_by_corpus_path_verbose(vec![winner, loser]);
+    assert_eq!(outcome.survivors.len(), 1);
+    let survivor = &outcome.survivors[0];
+    assert_eq!(survivor.id, "fresh");
+    assert_eq!(
+        survivor.extensions,
+        vec!["rs".to_string(), "py".to_string()],
+        "extensions must be the union, survivor's own values first"
+    );
+    assert_eq!(
+        survivor.domain_terms,
+        vec!["daemon".to_string(), "corpus".to_string()],
+        "domain_terms must be de-duplicated across the union"
+    );
+    assert_eq!(
+        survivor.include_paths,
+        vec!["src/legacy".to_string()],
+        "include_paths present only on the loser must still be adopted"
+    );
+}
+
+/// Why (#2337 part 2): scalar pipeline toggles (`lexical_only`, `skip_kg`,
+/// `include_docs`, `respect_gitignore`) have no safe "union" semantics — an
+/// automatic OR/AND could silently disable a lane the survivor was built
+/// with. These must be left exactly as the survivor had them; the loser's
+/// values are surfaced via a log line instead (not asserted here — this test
+/// pins the "not merged" behavior).
+/// What: loser sets `lexical_only = true` / `skip_kg = true` while the
+/// survivor has both `false`; asserts the survivor's scalar flags are
+/// unchanged after the merge.
+/// Test: this test.
+#[test]
+fn dedup_verbose_does_not_merge_scalar_flags() {
+    let shared = tempfile::tempdir().unwrap();
+
+    let mut winner = colocated_entry("fresh", shared.path(), Some(2));
+    winner.lexical_only = false;
+    winner.skip_kg = false;
+    winner.include_docs = true;
+    winner.respect_gitignore = true;
+
+    let mut loser = colocated_entry("stale", shared.path(), Some(1));
+    loser.lexical_only = true;
+    loser.skip_kg = true;
+    loser.include_docs = false;
+    loser.respect_gitignore = false;
+
+    let outcome = dedup_entries_by_corpus_path_verbose(vec![winner, loser]);
+    let survivor = &outcome.survivors[0];
+    assert!(!survivor.lexical_only, "lexical_only must not be merged");
+    assert!(!survivor.skip_kg, "skip_kg must not be merged");
+    assert!(survivor.include_docs, "include_docs must not be merged");
+    assert!(
+        survivor.respect_gitignore,
+        "respect_gitignore must not be merged"
+    );
+}
+
+/// Why: the common case (no collision at all) must be a cheap no-op — callers
+/// use `dropped.is_empty()` to skip all `indexes.toml` IO.
+/// What: two entries at distinct roots; asserts both survive with empty
+/// `dropped` and `merged_survivor_ids`.
+/// Test: this test.
+#[test]
+fn dedup_verbose_no_collision_yields_empty_dropped_and_merged_sets() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+
+    let entries = vec![
+        colocated_entry("a", a.path(), Some(1)),
+        colocated_entry("b", b.path(), Some(2)),
+    ];
+
+    let outcome = dedup_entries_by_corpus_path_verbose(entries);
+    assert_eq!(outcome.survivors.len(), 2);
+    assert!(outcome.dropped.is_empty());
+    assert!(outcome.merged_survivor_ids.is_empty());
+}
+
+/// Why: `merge_dropped_config_into_survivor` must not duplicate a value that
+/// already appears on the survivor (e.g. both entries were registered with
+/// the same `include_paths` entry) — exercised on a WHITELIST field, which is
+/// the only field type this function still merges (issue #2519 review).
+/// What: survivor and loser share one overlapping value plus one distinct
+/// value each; asserts the merged result has no duplicates.
+/// Test: this test.
+#[test]
+fn merge_dropped_config_deduplicates_overlapping_values() {
+    let mut survivor = PersistedIndex {
+        id: "survivor".to_string(),
+        include_paths: vec!["src/api".to_string(), "src/core".to_string()],
+        ..Default::default()
+    };
+    let dropped = PersistedIndex {
+        id: "dropped".to_string(),
+        include_paths: vec!["src/api".to_string(), "src/legacy".to_string()],
+        ..Default::default()
+    };
+
+    merge_dropped_config_into_survivor(&mut survivor, &dropped);
+
+    assert_eq!(
+        survivor.include_paths,
+        vec![
+            "src/api".to_string(),
+            "src/core".to_string(),
+            "src/legacy".to_string(),
+        ],
+        "overlapping value must appear once; new value must be appended"
+    );
+}
+
+/// Why (#2519 review, MEDIUM): `exclude_globs` is a BLOCKLIST, not a
+/// whitelist — union-merging two blocklists narrows the survivor's indexing
+/// scope on the next reindex (it can only ever exclude MORE), which is the
+/// exact silent-scope-change hazard the #2337 merge exists to prevent for the
+/// other list fields. It must stay excluded from the auto-merge and be
+/// surfaced via the operator `warn` log instead (see
+/// `dedup_entries_by_corpus_path_verbose`'s doc).
+/// What: survivor and loser have distinct, non-overlapping `exclude_globs`;
+/// asserts the survivor's `exclude_globs` is unchanged after the merge (not
+/// unioned with the loser's).
+/// Test: this test.
+#[test]
+fn dedup_verbose_does_not_merge_exclude_globs() {
+    let shared = tempfile::tempdir().unwrap();
+
+    let mut winner = colocated_entry("fresh", shared.path(), Some(2));
+    winner.exclude_globs = vec!["**/vendor/**".to_string()];
+
+    let mut loser = colocated_entry("stale", shared.path(), Some(1));
+    loser.exclude_globs = vec!["**/*.generated.ts".to_string()];
+
+    let outcome = dedup_entries_by_corpus_path_verbose(vec![winner, loser]);
+    let survivor = &outcome.survivors[0];
+    assert_eq!(
+        survivor.exclude_globs,
+        vec!["**/vendor/**".to_string()],
+        "exclude_globs must not be auto-merged — merging blocklists would \
+         silently narrow the survivor's indexing scope"
+    );
+}

@@ -200,6 +200,26 @@ fn corpus_dedup_key(entry: &PersistedIndex) -> Option<PathBuf> {
     Some(canonicalize_best_effort(&entry.root_path))
 }
 
+/// Outcome of [`dedup_entries_by_corpus_path_verbose`] (issue #2337).
+///
+/// Why: [`dedup_entries_by_corpus_path`] discards the dropped entries, which
+/// was fine while the only consumer was the in-memory eager/cold split. Issue
+/// #2337 needs the dropped entries so `restore_indexes` can prune their
+/// `indexes.toml` rows — without this they are re-discovered, re-warned, and
+/// re-dropped on every boot forever — and needs to know which survivors
+/// absorbed a dropped entry's config so only those rows need rewriting.
+/// What: `survivors` is the deduplicated set in original relative order
+/// (identical to what [`dedup_entries_by_corpus_path`] returns); `dropped` is
+/// every losing entry, pre-merge; `merged_survivor_ids` names the survivor
+/// ids that actually absorbed at least one dropped entry's config (a plain
+/// pass-through entry with no collision is never listed here).
+/// Test: `dedup_verbose_*` in `warm_boot_tests.rs`.
+pub struct DedupOutcome {
+    pub survivors: Vec<PersistedIndex>,
+    pub dropped: Vec<PersistedIndex>,
+    pub merged_survivor_ids: HashSet<String>,
+}
+
 /// Collapse warm-boot entries that resolve to the SAME on-disk redb corpus file
 /// down to a single entry, keeping the most-recently-active one (issue #2305).
 ///
@@ -215,67 +235,195 @@ fn corpus_dedup_key(entry: &PersistedIndex) -> Option<PathBuf> {
 /// layout that needs independent handles to one file, so we collapse the
 /// duplicates to one healthy entry *before* any open is attempted, guaranteeing
 /// zero `DatabaseAlreadyOpen` on warm boot.
-/// What: groups entries by [`corpus_dedup_key`] (colocated only; non-colocated
-/// entries are always kept). Within a colliding group keeps the entry with the
-/// highest `warmboot_sort_key` (most recent query/index activity; ties break by
-/// `id` ascending for determinism) and drops the rest with a `warn` naming both
-/// ids and the shared path. Survivors keep their original input order so the
-/// downstream recency split (`select_warmboot_entries`) and the
-/// legacy/colocated partition are unaffected.
+/// What: thin wrapper over [`dedup_entries_by_corpus_path_verbose`] that keeps
+/// only the survivor set — the shape every existing caller/test expects.
 /// Test: `dedup_by_corpus_path_collapses_same_root`,
 /// `dedup_by_corpus_path_keeps_distinct_roots`,
 /// `dedup_by_corpus_path_keeps_non_colocated`,
 /// `dedup_by_corpus_path_keeps_most_recent` in `warm_boot_tests.rs`.
 pub fn dedup_entries_by_corpus_path(entries: Vec<PersistedIndex>) -> Vec<PersistedIndex> {
+    dedup_entries_by_corpus_path_verbose(entries).survivors
+}
+
+/// Verbose variant of [`dedup_entries_by_corpus_path`] (issue #2337): also
+/// returns the dropped entries and preserves each dropped entry's per-index
+/// WHITELIST search configuration by merging it into the surviving entry.
+///
+/// Why: survivor selection previously discarded the loser's per-entry search
+/// config even though the redb data is shared and those filters can
+/// genuinely differ between the two registrations. Silently narrowing the
+/// survivor's scope to whichever entry happened to win recency is a
+/// regression for the loser's callers — but only for the WHITELIST fields
+/// (`include_paths`, `extensions`, `domain_terms`, `path_filter`), where
+/// union-merging can only broaden coverage. `exclude_globs` is a BLOCKLIST:
+/// union-merging two blocklists narrows the survivor instead (issue #2519
+/// review), which is the exact hazard this function exists to avoid — so it
+/// is deliberately excluded from the merge, same treatment as the scalar
+/// flags.
+/// What: groups entries by [`corpus_dedup_key`] (colocated only; non-colocated
+/// entries are always kept and can never collide). Within a colliding group,
+/// picks the winner using the same recency-then-id tie-break as before
+/// (highest `warmboot_sort_key`; ties break by lower `id`), then for every
+/// losing entry: unions its WHITELIST list-type config fields into the winner
+/// (`merge_dropped_config_into_survivor`) and logs its full config — including
+/// `exclude_globs` and the scalar flags `include_docs`/`respect_gitignore`/
+/// `lexical_only`/`skip_kg`, none of which are auto-merged (see that
+/// function's doc) — at `warn` for operator reconciliation. Survivors keep
+/// their original input order.
+/// Test: `dedup_verbose_reports_dropped_entries`,
+/// `dedup_verbose_merges_list_config_into_survivor`,
+/// `dedup_verbose_does_not_merge_scalar_flags`,
+/// `dedup_verbose_does_not_merge_exclude_globs`,
+/// `dedup_verbose_no_collision_yields_empty_dropped_and_merged_sets` in
+/// `warm_boot_tests.rs`.
+pub fn dedup_entries_by_corpus_path_verbose(entries: Vec<PersistedIndex>) -> DedupOutcome {
     use crate::service::persistence::warmboot_sort_key;
     use std::collections::HashMap;
 
-    // First pass: pick the winning entry index per corpus-path key.
-    let mut winner_by_key: HashMap<PathBuf, usize> = HashMap::new();
-    // Entries with no dedup key (non-colocated) are always retained.
-    let mut always_keep: Vec<bool> = vec![false; entries.len()];
-
+    // First pass: group entry indices by corpus-path key. Entries with no key
+    // (non-colocated) are always retained and can never be a collision member.
+    let mut groups: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     for (i, entry) in entries.iter().enumerate() {
-        let Some(key) = corpus_dedup_key(entry) else {
-            always_keep[i] = true;
-            continue;
-        };
-        match winner_by_key.get(&key).copied() {
-            None => {
-                winner_by_key.insert(key, i);
-            }
-            Some(prev) => {
-                let cur = &entries[i];
-                let old = &entries[prev];
-                let cur_key = warmboot_sort_key(cur);
-                let old_key = warmboot_sort_key(old);
-                // Keep the more-recently-active entry; tie → lower id wins.
-                let cur_wins = cur_key > old_key || (cur_key == old_key && cur.id < old.id);
-                let winner = if cur_wins { i } else { prev };
-                tracing::warn!(
-                    "warm-boot: indexes '{}' and '{}' both resolve to the same redb corpus \
-                     under {} — collapsing to '{}' to avoid an in-process double-open \
-                     (DatabaseAlreadyOpen, issue #2305). The dropped registration is a \
-                     duplicate of the same on-disk index; re-register it at a distinct \
-                     root_path if the two were meant to be separate indexes.",
-                    cur.id,
-                    old.id,
-                    key.display(),
-                    entries[winner].id,
-                );
-                winner_by_key.insert(key, winner);
-            }
+        if let Some(key) = corpus_dedup_key(entry) {
+            groups.entry(key).or_default().push(i);
         }
     }
 
-    // Second pass: rebuild in original order, keeping winners + non-colocated.
-    let kept: std::collections::HashSet<usize> = winner_by_key.values().copied().collect();
-    entries
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| always_keep[*i] || kept.contains(i))
-        .map(|(_, e)| e)
-        .collect()
+    let mut opt_entries: Vec<Option<PersistedIndex>> = entries.into_iter().map(Some).collect();
+    let mut dropped: Vec<PersistedIndex> = Vec::new();
+    let mut merged_survivor_ids: HashSet<String> = HashSet::new();
+
+    for (key, idxs) in &groups {
+        if idxs.len() < 2 {
+            continue; // no collision in this group — nothing to drop or merge.
+        }
+
+        // Resolve the winner via the same recency-then-id tie-break rule the
+        // original single-pass implementation used.
+        let mut winner_idx = idxs[0];
+        for &i in &idxs[1..] {
+            let cur = opt_entries[i].as_ref().expect("group index not yet taken");
+            let old = opt_entries[winner_idx]
+                .as_ref()
+                .expect("group index not yet taken");
+            let cur_key = warmboot_sort_key(cur);
+            let old_key = warmboot_sort_key(old);
+            let cur_wins = cur_key > old_key || (cur_key == old_key && cur.id < old.id);
+            if cur_wins {
+                winner_idx = i;
+            }
+        }
+        let survivor_id = opt_entries[winner_idx]
+            .as_ref()
+            .expect("winner not yet taken")
+            .id
+            .clone();
+
+        for &i in idxs {
+            if i == winner_idx {
+                continue;
+            }
+            let loser = opt_entries[i].take().expect("loser not yet taken");
+            tracing::warn!(
+                "warm-boot: indexes '{}' and '{}' both resolve to the same redb corpus under \
+                 {} — collapsing to '{}' to avoid an in-process double-open \
+                 (DatabaseAlreadyOpen, issue #2305). List-type search config from '{}' is \
+                 merged into the survivor (issue #2337); scalar flags — include_docs={} \
+                 respect_gitignore={} lexical_only={} skip_kg={} — are logged here for \
+                 operator reconciliation and are NOT auto-merged. Dropped list fields: \
+                 include_paths={:?} exclude_globs={:?} extensions={:?} domain_terms={:?} \
+                 path_filter={:?}. Re-register at a distinct root_path if the two were \
+                 meant to be separate indexes.",
+                loser.id,
+                survivor_id,
+                key.display(),
+                survivor_id,
+                loser.id,
+                loser.include_docs,
+                loser.respect_gitignore,
+                loser.lexical_only,
+                loser.skip_kg,
+                loser.include_paths,
+                loser.exclude_globs,
+                loser.extensions,
+                loser.domain_terms,
+                loser.path_filter,
+            );
+            let survivor = opt_entries[winner_idx]
+                .as_mut()
+                .expect("winner not yet taken");
+            merge_dropped_config_into_survivor(survivor, &loser);
+            merged_survivor_ids.insert(survivor_id.clone());
+            dropped.push(loser);
+        }
+    }
+
+    // Survivors keep their original relative order — iterating opt_entries in
+    // index order and skipping the taken (dropped) slots achieves this for
+    // free, no separate reordering pass needed.
+    let survivors: Vec<PersistedIndex> = opt_entries.into_iter().flatten().collect();
+
+    DedupOutcome {
+        survivors,
+        dropped,
+        merged_survivor_ids,
+    }
+}
+
+/// Union `dropped`'s WHITELIST-composed list-type search-config fields into
+/// `survivor` in place (issue #2337; narrowed by the #2519 review).
+///
+/// Why: two entries that collapse to one redb corpus can carry genuinely
+/// different per-entry filters (e.g. one registration set
+/// `extensions: ["rs"]`, the other `extensions: ["py"]`) even though the
+/// underlying indexed data is one file. Dropping the loser's filters entirely
+/// would silently narrow the survivor's search scope for `include_paths`,
+/// `extensions`, `domain_terms`, and `path_filter` — each of these is a
+/// whitelist (an ADDITIVE broadening: union-merging can only ever grow what
+/// the survivor covers), so unioning them is safe.
+///
+/// `exclude_globs` is deliberately EXCLUDED from this union (issue #2519
+/// review, MEDIUM): unlike the whitelist fields above, `exclude_globs` is a
+/// blocklist — union-merging two blocklists NARROWS the surviving index (it
+/// can only ever exclude MORE content), which is exactly the silent-scope-
+/// change hazard this function exists to avoid. Auto-merging it would mean
+/// the next reindex quietly drops more files than either original
+/// registration intended. Like the scalar flags below, the dropped entry's
+/// `exclude_globs` is surfaced via the caller's `warn` log (see
+/// `dedup_entries_by_corpus_path_verbose`) for operator reconciliation
+/// instead of being auto-merged.
+///
+/// Scalar flags (`include_docs`, `respect_gitignore`, `lexical_only`,
+/// `skip_kg`) are likewise left untouched here — there is no safe "union"
+/// semantics for a boolean pipeline toggle (e.g. OR-ing `lexical_only` could
+/// silently disable the semantic lane for an index that was built with it) —
+/// so those are also only surfaced via the `warn` log.
+/// What: appends every value from each of `dropped`'s WHITELIST list fields
+/// (`include_paths`, `extensions`, `domain_terms`, `path_filter`) that is not
+/// already present in `survivor`'s corresponding field, preserving order
+/// (survivor's existing values first). `exclude_globs` is untouched —
+/// `survivor.exclude_globs` keeps exactly its own pre-merge value.
+/// Test: `dedup_verbose_merges_list_config_into_survivor`,
+/// `dedup_verbose_does_not_merge_scalar_flags`,
+/// `dedup_verbose_does_not_merge_exclude_globs`,
+/// `merge_dropped_config_deduplicates_overlapping_values` in
+/// `warm_boot_tests.rs`.
+fn merge_dropped_config_into_survivor(survivor: &mut PersistedIndex, dropped: &PersistedIndex) {
+    merge_unique_strings(&mut survivor.include_paths, &dropped.include_paths);
+    merge_unique_strings(&mut survivor.extensions, &dropped.extensions);
+    merge_unique_strings(&mut survivor.domain_terms, &dropped.domain_terms);
+    merge_unique_strings(&mut survivor.path_filter, &dropped.path_filter);
+}
+
+/// Append every string in `from` that is not already present in `into`,
+/// preserving `into`'s existing order and `from`'s relative order for the
+/// appended tail.
+fn merge_unique_strings(into: &mut Vec<String>, from: &[String]) {
+    for item in from {
+        if !into.contains(item) {
+            into.push(item.clone());
+        }
+    }
 }
 
 /// Collect index entries from the durable `indexes.toml` registry only.

@@ -1,17 +1,21 @@
-//! Shared helpers: root-path validation, chunk containment check, and
-//! embedder status response builders.
+//! Shared helpers: root-path validation, chunk containment check, root_path
+//! collision detection, and embedder status response builders.
 //!
 //! Why: These small helpers are called from multiple handler modules
-//! (`indexes.rs`, `search.rs`, `reindex_handlers.rs`); centralising them
-//! avoids duplication and keeps the 500-line cap on each handler file.
+//! (`indexes.rs`, `indexes_relocate.rs`, `search.rs`, `reindex_handlers.rs`);
+//! centralising them avoids duplication and keeps the 500-line cap on each
+//! handler file.
 //! What: `validate_root_path`, `file_is_within_root`,
+//! `find_root_path_collision`, `root_path_collision_response`,
 //! `embedder_initializing_response`, `embedder_error_response`.
-//! Test: `file_is_within_root_*`, `create_index_canonicalizes_*`, and
-//! `validate_root_path_denylist_*` tests.
+//! Test: `file_is_within_root_*`, `create_index_canonicalizes_*`,
+//! `validate_root_path_denylist_*`, and `tests_2336.rs` tests.
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
+
+use crate::core::registry::{IndexHandle, IndexId};
 
 /// Validate `path` as a safe, canonical root for indexing.
 ///
@@ -194,6 +198,132 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
     }
     !p.components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// Find a registered index whose canonical `root_path` collides with
+/// `candidate`, excluding `exclude_id` (issue #2336).
+///
+/// Why: `create_index_handler` and `relocate_index_handler` previously
+/// guarded only *id* collisions, never *root_path* collisions. Two live
+/// registrations sharing one colocated root resolve to the SAME on-disk
+/// `<root>/.trusty-search/index.redb` — redb is a single-open database, so
+/// the second registration's `build_indexer_from_entry` call would silently
+/// fail its corpus open (`corpus_open_failed`) while the handler still
+/// returned `200 {"created": true}` for the broken handle. This is the exact
+/// runtime recreation of the #2305 double-registration hazard the warm-boot
+/// dedup fixed only for the boot path. This guard rejects the registration
+/// up front instead of building a broken indexer first.
+/// What: `candidate` must already be canonicalized — every caller passes the
+/// output of `validate_root_path`, the same normalization every registered
+/// handle's `root_path` went through (directly at create/relocate time, or
+/// via `canonicalize_best_effort` at warm-boot). Adversarial review (#2519)
+/// found that plain `PathBuf` equality on canonicalized paths is NOT a
+/// reliable identity check on case-insensitive-but-case-preserving
+/// filesystems (macOS APFS default): `/Volumes/Data/Proj` and
+/// `/Volumes/Data/PROJ` canonicalize to two different-looking strings that
+/// nonetheless resolve to the SAME inode, so string equality misses the
+/// collision entirely. The fix compares filesystem-truth identity —
+/// `(dev, ino)` from `std::fs::metadata` — whenever both paths currently
+/// exist on disk; this catches case variants AND other alias forms (bind
+/// mounts, hard-linked directories) that resolve to one inode, at the cost of
+/// one extra `stat(2)` per registered handle per call. When either path
+/// doesn't exist (metadata lookup fails), the check falls back to plain
+/// canonicalized-`PathBuf` equality — the pre-fix behavior. This fallback is
+/// a deliberate fail-open/fail-closed tradeoff: it stays fail-closed for the
+/// dominant, security-relevant case (the candidate root always exists —
+/// `validate_root_path` already required `is_dir()` before this is called),
+/// and only degrades to string equality for the exotic case of a handle
+/// whose `root_path` has since vanished from disk (e.g. a device was
+/// unmounted after registration), where dev/ino cannot be computed for one
+/// side. Linear scan of `handles` (the registry is small — tens to low
+/// hundreds of entries); returns the first colliding id, skipping
+/// `exclude_id` (used by `relocate_index_handler` so an index is never
+/// compared against itself).
+/// Test: `create_index_rejects_duplicate_root_path`,
+/// `create_index_same_id_same_root_is_idempotent_not_a_collision`,
+/// `relocate_index_rejects_root_path_owned_by_another_index`,
+/// `relocate_index_onto_own_current_root_is_not_a_collision`,
+/// `create_index_concurrent_same_root_only_one_wins` in `tests_2336.rs`; plus
+/// the macOS-gated `create_index_rejects_case_variant_of_registered_root`
+/// exercising the dev/ino path directly.
+pub(super) fn find_root_path_collision(
+    handles: &[std::sync::Arc<IndexHandle>],
+    candidate: &std::path::Path,
+    exclude_id: Option<&IndexId>,
+) -> Option<IndexId> {
+    handles
+        .iter()
+        .find(|h| exclude_id != Some(&h.id) && identifies_same_root(&h.root_path, candidate))
+        .map(|h| h.id.clone())
+}
+
+/// Decide whether `a` and `b` name the same on-disk root (issue #2519).
+///
+/// Why: see `find_root_path_collision`'s doc for the case-insensitive
+/// filesystem hazard this closes.
+/// What: prefers `(dev, ino)` identity via `same_filesystem_entry` when both
+/// paths exist; falls back to canonicalized-`PathBuf` equality otherwise.
+/// Test: covered transitively by `find_root_path_collision`'s test list.
+fn identifies_same_root(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match same_filesystem_entry(a, b) {
+        Some(same) => same,
+        None => a == b,
+    }
+}
+
+/// Compare `a` and `b` by `(dev, ino)`, returning `None` when either path's
+/// metadata cannot be read (does not exist, permission denied, etc.) so the
+/// caller can fall back to string equality.
+///
+/// Why: `stat(2)`-level identity is the only reliable way to tell whether two
+/// path strings name the same file on a case-insensitive-but-case-preserving
+/// filesystem (macOS APFS default) — canonicalize() preserves the case each
+/// path was spelled with, it does not normalize case, so two differently-cased
+/// spellings of the same directory canonicalize to two different strings.
+/// What: unix-only (`dev`/`ino` via `std::os::unix::fs::MetadataExt`); no
+/// portable equivalent is wired up for non-unix targets, so this always
+/// returns `None` there and callers fall back to path equality.
+/// Test: `create_index_rejects_case_variant_of_registered_root` (macOS-gated)
+/// in `tests_2336.rs`.
+#[cfg(unix)]
+fn same_filesystem_entry(a: &std::path::Path, b: &std::path::Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let meta_a = std::fs::metadata(a).ok()?;
+    let meta_b = std::fs::metadata(b).ok()?;
+    Some(meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino())
+}
+
+#[cfg(not(unix))]
+fn same_filesystem_entry(_a: &std::path::Path, _b: &std::path::Path) -> Option<bool> {
+    None
+}
+
+/// Build a `409 Conflict` response naming the index that already owns
+/// `root_path` (issue #2336).
+///
+/// Why: the caller must be told WHICH existing index it collided with so it
+/// can decide whether to reuse that index, delete it first, or pick a
+/// distinct root — a bare 409 with no context forces the operator to
+/// cross-reference `GET /indexes?details=true` by hand.
+/// What: `409 { "error": "...", "existing_id": "..." }`.
+/// Test: see `find_root_path_collision` test list above.
+pub(super) fn root_path_collision_response(
+    existing_id: &IndexId,
+    root_path: &std::path::Path,
+) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": format!(
+                "root_path {:?} is already registered to index '{}'; two indexes cannot \
+                 share one on-disk corpus (issues #2305, #2336)",
+                root_path.display(),
+                existing_id,
+            ),
+            "existing_id": existing_id.0,
+        })),
+    )
+        .into_response()
 }
 
 /// Build a `503 Service Unavailable` response for handlers that require the
