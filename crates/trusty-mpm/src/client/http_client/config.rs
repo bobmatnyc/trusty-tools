@@ -18,8 +18,9 @@
 //! delegates to [`build_client`] (a pure function of the two `Duration`
 //! bounds) so the timeout behavior itself is unit-testable against tiny
 //! durations rather than the real 3s/10s production values.
-//! [`CHAT_REQUEST_TIMEOUT`] is a longer, explicit per-request override for
-//! the two endpoints that legitimately run long (see its own doc).
+//! [`CHAT_REQUEST_TIMEOUT`] and [`PROVISION_REQUEST_TIMEOUT`] are longer,
+//! explicit per-request overrides for the endpoints that legitimately run
+//! long (see each constant's own doc).
 //! Test: `tests::build_client_bounds_a_stalled_connection` drives a real
 //! request against a `TcpListener` that accepts but never answers, and
 //! asserts it errors within the (small, test-only) configured bound rather
@@ -74,6 +75,28 @@ pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`DEFAULT_REQUEST_TIMEOUT`].
 pub(super) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 
+/// Per-request timeout override for session-provisioning endpoints.
+///
+/// Why: `DaemonClient::spawn_managed_session` (`POST
+/// /api/v1/sessions/managed`) has a server handler that runs
+/// `WorkspaceProvisioner::provision`/`provision_in` SYNCHRONOUSLY inside the
+/// request — a git clone/fetch plus worktree add plus agent/skill deploy. The
+/// first spawn against a newly-registered project pays a full clone and can
+/// easily exceed [`DEFAULT_REQUEST_TIMEOUT`]'s 10s, which would hard-fail the
+/// client mid-provision while the daemon keeps working, orphaning a session
+/// the caller believes failed. 180s is bounded but generous: well above any
+/// legitimate clone/worktree/deploy sequence on a slow network or loaded
+/// machine, while still being a hard, finite bound (never the pre-#2471 "no
+/// timeout at all").
+/// What: passed to `reqwest::RequestBuilder::timeout` at the
+/// `spawn_managed_session` call site — a per-request override, not a change
+/// to the client-level default every other endpoint uses. Mirrors the
+/// [`CHAT_REQUEST_TIMEOUT`] pattern for the same reason: the endpoint's own
+/// server-side work legitimately runs long.
+/// Test: `tests::default_client_uses_default_bounds` asserts it exceeds
+/// [`DEFAULT_REQUEST_TIMEOUT`].
+pub(super) const PROVISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Build the `reqwest::Client` [`super::DaemonClient::new`] uses by default.
 ///
 /// Why: the one production call site for [`build_client`], pinned to this
@@ -97,7 +120,10 @@ pub(super) fn default_client() -> reqwest::Client {
 /// (practically unreachable — no TLS backend to fail to initialize for a
 /// plain-HTTP loopback client) builder error, matching
 /// `trusty_common::monitor::memory_client::MemoryClient::new`'s precedent
-/// rather than `unwrap()`-ing in library code.
+/// rather than `unwrap()`-ing in library code. The fallback is logged at
+/// `warn` level (issue #2512 review) so a silent regression back to an
+/// UNBOUNDED default client — the exact failure mode this module exists to
+/// prevent — can never happen without a trace.
 /// Test: `tests::build_client_bounds_a_stalled_connection`.
 pub(super) fn build_client(
     connect_timeout: Duration,
@@ -107,7 +133,14 @@ pub(super) fn build_client(
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
         .build()
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "DaemonClient: reqwest::ClientBuilder::build failed, falling back to an \
+                 UNBOUNDED default client (connect_timeout/timeout bounds are NOT applied)"
+            );
+            reqwest::Client::default()
+        })
 }
 
 #[cfg(test)]
@@ -150,9 +183,11 @@ mod tests {
 
     /// Why: pins the production constants and their delegation so a future
     /// edit can't silently widen [`DEFAULT_REQUEST_TIMEOUT`] back toward
-    /// "unbounded" or shrink [`CHAT_REQUEST_TIMEOUT`] below the daemon's own
-    /// upstream bound without a visible test failure.
-    /// What: asserts the three constants' values and that `default_client`
+    /// "unbounded" or shrink [`CHAT_REQUEST_TIMEOUT`]/[`PROVISION_REQUEST_TIMEOUT`]
+    /// below the bound each exists to protect (the daemon's own upstream chat
+    /// timeout, and a worst-case first-clone provisioning respectively)
+    /// without a visible test failure.
+    /// What: asserts the four constants' values and that `default_client`
     /// builds without panicking.
     #[test]
     fn default_client_uses_default_bounds() {
@@ -161,6 +196,11 @@ mod tests {
         assert!(
             CHAT_REQUEST_TIMEOUT > DEFAULT_REQUEST_TIMEOUT,
             "the chat override must be longer than the default, not shorter"
+        );
+        assert_eq!(PROVISION_REQUEST_TIMEOUT, Duration::from_secs(180));
+        assert!(
+            PROVISION_REQUEST_TIMEOUT > DEFAULT_REQUEST_TIMEOUT,
+            "the provisioning override must be longer than the default, not shorter"
         );
         let _ = default_client();
     }
