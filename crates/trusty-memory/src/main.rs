@@ -772,12 +772,18 @@ async fn run_serve(
     // `Writer` — a second daemon instance then fails loud instead of silently
     // degrading to read-only snapshot mode. Bug-reporting #478 wires the
     // ErrorStore; #156/#193 opt into the BM25 lexical lane when enabled.
+    // Issue #2223: `with_multi_tenant_mode_from_env()` reads
+    // `TRUSTY_MEMORY_MULTI_TENANT=1` and was defined + unit-tested (issue
+    // #1714 / PR #2221) but never called here, so the opt-in authz seam was
+    // dead in the shipped binary. Wiring it here is additive-only: default
+    // (unset) preserves today's single-tenant behaviour exactly.
     let state = AppState::new(data_root)
         .with_writer_intent()
         .with_default_palace(palace)
         .with_log_buffer(log_buffer)
         .with_error_store(error_store)
-        .with_bm25_client_from_env();
+        .with_bm25_client_from_env()
+        .with_multi_tenant_mode_from_env();
     spawn_startup_tasks(&state);
     if let Some(addr) = http {
         run_http(state, addr).await

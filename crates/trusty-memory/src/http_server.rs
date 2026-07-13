@@ -15,8 +15,17 @@
 use crate::AppState;
 use anyhow::Result;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+// Why (issue #2319): `Path` (unlike `PathBuf`, used unconditionally by
+//      `http_addr_path` above) is only referenced by `write_http_addr_file`,
+//      which is itself gated behind `axum-server`. An ungated `use` here
+//      breaks `cargo check -p trusty-memory --no-default-features` under
+//      `-D warnings` (the single-package / feature-unification build CI
+//      runs) with an unused-import error. Mirrors the `tracing::info` gate
+//      immediately below.
+#[cfg(feature = "axum-server")]
+use std::path::Path;
 #[cfg(feature = "axum-server")]
 use tracing::info;
 
