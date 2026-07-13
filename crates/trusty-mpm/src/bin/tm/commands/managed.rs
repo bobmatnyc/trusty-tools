@@ -207,9 +207,14 @@ fn short_timestamp(s: &str) -> String {
 /// always returned for the calling agentic process to reason over. The LLM
 /// classification is shown when available (OpenRouter key set); when absent,
 /// `classification: null` and the raw pane are still returned with no error.
+/// A truly missing id is a genuine failure (#2457) — printing "not found" and
+/// returning `Ok(())` let a script/CI check treat a nonexistent id as success,
+/// so this now returns `Err` (non-zero exit) instead.
 /// What: GETs `/api/v1/sessions/managed/{id}/activity` and prints the raw pane,
-/// structured state, classification (or "no classifier"), and pending decision.
-/// Test: HTTP path covered by the integration test.
+/// structured state, classification (or "no classifier"), and pending decision;
+/// a 404 bails with an error instead of printing "not found".
+/// Test: HTTP path covered by the integration test;
+/// `session_activity_not_found_errors` covers the #2457 exit-code fix.
 pub(crate) async fn session_activity(
     client: &reqwest::Client,
     url: &str,
@@ -224,8 +229,7 @@ pub(crate) async fn session_activity(
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        println!("not found");
-        return Ok(());
+        anyhow::bail!("managed session '{id}' not found");
     }
     let a: trusty_mpm::client::ManagedActivityResponse = resp.error_for_status()?.json().await?;
     let runtime_str = if a.runtime_active {
@@ -274,10 +278,17 @@ pub(crate) async fn session_activity(
 ///
 /// Why: a session ENDURES beyond its runtime; `stop` kills only the tmux session
 /// and claude process, preserving the workspace for later `resume`. Renamed from
-/// the verbose `runtime-stop` in #1205 (which remains a deprecated alias).
-/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
+/// the verbose `runtime-stop` in #1205 (which remains a deprecated alias). A
+/// missing id is a genuine failure to stop the requested session (#2457) —
+/// printing "not found" and returning `Ok(())` let a script/CI check treat it
+/// as success, so this now returns `Err` (non-zero exit) instead. `prune.rs`'s
+/// bulk teardown loop (the only other caller) already propagates this `Err`
+/// with `?`, matching its established fail-closed convention (#1508).
+/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`; a 404 bails with
+/// an error instead of printing "not found".
 /// Test: HTTP path covered by the integration test; parse by
-/// `cli_parses_session_managed_stop_verb`.
+/// `cli_parses_session_managed_stop_verb`; `session_stop_not_found_errors`
+/// covers the #2457 exit-code fix.
 pub(crate) async fn session_stop(
     client: &reqwest::Client,
     url: &str,
@@ -288,8 +299,7 @@ pub(crate) async fn session_stop(
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        println!("not found");
-        return Ok(());
+        anyhow::bail!("managed session '{id}' not found");
     }
     resp.error_for_status()?;
     println!("runtime stopped {id} (workspace intact; use 'resume' to restart)");
@@ -300,10 +310,20 @@ pub(crate) async fn session_stop(
 ///
 /// Why: after `stop`, the workspace is still on disk; `resume` re-spawns the
 /// runtime there without re-cloning. Renamed from the verbose `managed-resume`
-/// in #1205 (which remains a deprecated alias).
-/// What: POSTs `/api/v1/sessions/managed/{id}/resume`.
+/// in #1205 (which remains a deprecated alias). A missing id or a rejected
+/// resume (daemon `InvalidState`, e.g. the session isn't stopped) are both
+/// genuine failures to perform the requested resume (#2457) — printing a
+/// message and returning `Ok(())` let a script/CI check treat either as
+/// success, so both now return `Err` (non-zero exit) instead, mirroring the
+/// symmetric project-session resume path's own 404 handling just above this
+/// call site in `session.rs`.
+/// What: POSTs `/api/v1/sessions/managed/{id}/resume`; a 404 or 409 bails with
+/// an error instead of printing a status line.
 /// Test: HTTP path covered by the integration test; parse by
-/// `cli_parses_session_managed_resume_verb`.
+/// `cli_parses_session_managed_resume_verb`; `session_resume_not_found_errors`
+/// covers the #2457 exit-code fix for the 404 branch (the identical 409/conflict
+/// fix needs a session seeded into a non-resumable state — see
+/// `managed_tests.rs`'s module doc for why that is left uncovered here).
 pub(crate) async fn session_resume(
     client: &reqwest::Client,
     url: &str,
@@ -314,13 +334,11 @@ pub(crate) async fn session_resume(
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        println!("not found");
-        return Ok(());
+        anyhow::bail!("managed session '{id}' not found");
     }
     if resp.status() == reqwest::StatusCode::CONFLICT {
         let msg = resp.text().await.unwrap_or_default();
-        println!("cannot resume: {msg}");
-        return Ok(());
+        anyhow::bail!("cannot resume: {msg}");
     }
     let body: ManagedSessionSummary = resp.error_for_status()?.json().await?;
     println!("resumed {} ({}) [{}]", body.name, body.id, body.state);
@@ -341,8 +359,15 @@ pub(crate) async fn session_resume(
 /// prints a message that accurately reflects what happened. When `workspace_removed`
 /// is `true` and `workspace_path_was` is present, runs `git worktree prune` on
 /// the parent directory (best-effort; errors are silently suppressed).
+/// A missing id is a genuine failure to decommission the requested session
+/// (#2457) — printing "not found" and returning `Ok(())` let a script/CI
+/// check treat it as success, so this now returns `Err` (non-zero exit)
+/// instead. `prune.rs`'s bulk teardown loop (the only other caller) already
+/// propagates this `Err` with `?`, matching its established fail-closed
+/// convention (#1508).
 /// Test: `decommission_message_reflects_workspace_removed` (unit);
-/// HTTP path covered by the integration test.
+/// HTTP path covered by the integration test;
+/// `session_decommission_not_found_errors` covers the #2457 exit-code fix.
 pub(crate) async fn session_decommission(
     client: &reqwest::Client,
     url: &str,
@@ -353,8 +378,7 @@ pub(crate) async fn session_decommission(
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        println!("not found");
-        return Ok(());
+        anyhow::bail!("managed session '{id}' not found");
     }
     let body: serde_json::Value = resp.error_for_status()?.json().await?;
     let workspace_removed = body
@@ -660,57 +684,9 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Unit tests live in managed_tests.rs (test-file budget: 1500 SLOC) —
+// extracted from an inline `mod tests` so #2457's new HTTP-round-trip
+// coverage doesn't push this production file toward the 500-SLOC cap.
 #[cfg(test)]
-mod tests {
-    use super::{short_timestamp, truncate};
-
-    #[test]
-    fn truncate_clips_and_appends_ellipsis() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 5), "hell\u{2026}");
-        assert_eq!(truncate("", 5), "");
-        assert_eq!(truncate("abcde", 5), "abcde");
-    }
-
-    #[test]
-    fn short_timestamp_formats_correctly() {
-        assert_eq!(short_timestamp("2025-06-27T14:32:00Z"), "2025-06-27 14:32");
-        assert_eq!(short_timestamp("short"), "short");
-        assert_eq!(short_timestamp("2025-06-27T14:32"), "2025-06-27 14:32");
-    }
-
-    #[test]
-    fn decommission_message_reflects_workspace_removed() {
-        // Guard that the key field names used in session_decommission match the
-        // daemon's DecommissionResponse serde output. If the daemon renames those
-        // keys this test catches the drift before the JSON decodes silently to None.
-        let owned_removed = serde_json::json!({
-            "id": "abc-123",
-            "workspace_removed": true,
-            "workspace_path_was": "/some/workspace/path"
-        });
-        assert_eq!(
-            owned_removed
-                .get("workspace_removed")
-                .and_then(|v| v.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            owned_removed
-                .get("workspace_path_was")
-                .and_then(|v| v.as_str()),
-            Some("/some/workspace/path")
-        );
-        let adopted_not_removed = serde_json::json!({
-            "id": "xyz-456",
-            "workspace_removed": false
-        });
-        assert_eq!(
-            adopted_not_removed
-                .get("workspace_removed")
-                .and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        assert!(adopted_not_removed.get("workspace_path_was").is_none());
-    }
-}
+#[path = "managed_tests.rs"]
+mod tests;
