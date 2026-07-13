@@ -64,7 +64,7 @@ pub(crate) struct Cli {
     /// of honoured directly (issue #2487). Matches the pattern already used
     /// by `SessionAction::Tui::url`.
     /// What: `Some(v)` exactly when `--url` or `TRUSTY_MPM_URL` was supplied.
-    /// Test: `cli_url_flag_overrides_default`, `cli_url_unset_is_none`.
+    /// Test: `cli_url_flag_overrides_default`, `cli_url_flag_equal_to_default_is_still_some`.
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
     pub(crate) url: Option<String>,
 

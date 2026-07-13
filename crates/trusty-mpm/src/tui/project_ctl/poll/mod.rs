@@ -304,10 +304,9 @@ fn classify_activity_error(err: &anyhow::Error) -> ActivityFetchFailure {
 /// `state.activity` itself: mark `stale = true` if it already targets
 /// `session_id`, else clear it (nothing recent enough to show as stale) —
 /// unchanged from the pre-#2470 behavior.
-/// Test: `apply_activity_outcome_success_resets_streak_and_shows_data`,
+/// Test: `apply_activity_outcome_success_after_failures_resets_streak_and_shows_data`,
 /// `apply_activity_outcome_non_transport_failures_reach_unavailable_threshold`,
 /// `apply_activity_outcome_transport_failure_never_advances_streak`,
-/// `apply_activity_outcome_success_after_failures_resets_streak`,
 /// `apply_activity_outcome_session_switch_starts_a_fresh_streak`.
 fn apply_activity_outcome(
     state: &mut ProjectCtlState,
