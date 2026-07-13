@@ -43,6 +43,7 @@ can resolve a changed file back to the section that governs it.
 | DOC-32 | `SPEC-TOOLPROXY-01~draft` | [Live Tool-Output Interception Seam for Native `tm` Sessions](./tool-output-interception-seam.md) | trusty-mpm / trusty-agents — MCP tool-output proxy / live token compression |
 | DOC-33 | `SPEC-METALOG-01~draft` … `-04~draft` | [tm Meta-Harness Logging — Per-Delegation Observability, Verbosity CLI, and Log Pruning](./tm-meta-harness-logging.md) | trusty-mpm — observability / CLI / log retention |
 | DOC-35 | `SPEC-PROJCTL-01~draft` … `-08~draft` | [`tm project`: Deterministic Project/Session Control Plane (CLI + Multipane TUI)](./tm-project-control-plane.md) | trusty-mpm — control plane / CLI / TUI / daemon API |
+| DOC-36 | `SPEC-TMMGR-01~draft` … `-06~draft` | [`tm manager`: Layer-3 Chat-Based Portfolio Project Manager](./tm-manager-vision.md) | trusty-mpm — daemon / inference layer / external channels |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
