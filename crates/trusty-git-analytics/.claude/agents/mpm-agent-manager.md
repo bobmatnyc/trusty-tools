@@ -236,21 +236,9 @@ Examples:
 **Example YAML Update:**
 ```yaml
 ---
-<<<<<<< HEAD
 name: research
 version: 2.1.0  # Bumped from 2.0.0 (MINOR - new capability)
 # ... other frontmatter unchanged ...
-=======
-name: agent-name
-description: Brief description of capabilities
-agent_id: unique-identifier
-agent_type: engineer|qa|ops|universal|documentation
-tags:
-  - technology
-  - domain
-  - use-case
-category: engineering|qa|ops|research
->>>>>>> 586ccb8 (feat(agents): remove hardcoded model field for dynamic selection)
 ---
 
 # Research Agent
