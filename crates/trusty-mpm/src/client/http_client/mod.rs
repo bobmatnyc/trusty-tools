@@ -60,9 +60,9 @@ use serde::Deserialize;
 /// the same bounds `DaemonClient::new` uses).
 /// Test: `config::tests::build_client_bounds_a_stalled_connection` and
 /// `config::tests::default_client_uses_default_bounds` cover the underlying
-/// bounds; `tests::default_client_matches_daemon_client_bounds` in this
-/// module pins that this wrapper is not just a fresh unbounded client in
-/// disguise.
+/// bounds; `tests::top_level_default_client_is_bounded_against_a_stalled_daemon`
+/// in this module pins that this wrapper is not just a fresh unbounded
+/// client in disguise.
 pub fn default_client() -> reqwest::Client {
     config::default_client()
 }
