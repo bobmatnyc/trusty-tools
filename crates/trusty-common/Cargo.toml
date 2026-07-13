@@ -69,6 +69,16 @@ name = "config_keys_cli"
 path = "tests/config_keys_cli.rs"
 required-features = ["config-cli", "axum-server"]
 
+# Bedrock Converse adapter integration suite (issue #2407). Drives the offline
+# configurator wiring — `register_bedrock_factory` + `Configurator::build` for a
+# `bedrock/*` slug — proving the adapter registers and constructs without any AWS
+# call (the client is lazy). Needs the `bedrock-client` feature; `required-features`
+# skips it otherwise.
+[[test]]
+name = "inference_bedrock"
+path = "tests/inference_bedrock.rs"
+required-features = ["bedrock-client"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -184,11 +194,15 @@ rpassword = { workspace = true, optional = true }
 serde_yaml = { workspace = true, optional = true }
 strsim = { workspace = true, optional = true }
 
-# Optional: enabled by the `bedrock` feature. AWS Bedrock Converse API
-# client — provides `BedrockProvider` implementing `ChatProvider`.
+# Optional: enabled by the `bedrock` feature (streaming `ChatProvider`) and the
+# `bedrock-client` feature (the `inference::bedrock` Converse adapter, #2407).
+# AWS Bedrock Converse API client + credential chain. `aws-smithy-types` is
+# additionally required by the `bedrock-client` adapter for the `Document` <->
+# JSON tool-argument/schema conversion.
 aws-config = { workspace = true, optional = true }
 aws-sdk-bedrockruntime = { workspace = true, optional = true }
 aws-types = { workspace = true, optional = true }
+aws-smithy-types = { workspace = true, optional = true }
 
 # Optional: enabled by the `catchup` feature (DOC-28 cutover bridge, #1762).
 # rusqlite is used only by the `mpm_registry` submodule to read the
@@ -466,11 +480,16 @@ update-check = []
 # Default builds that do NOT enable `bug-capture` pull in zero new deps.
 bug-capture = ["dep:sha2"]
 # Enables the `chat::BedrockProvider`: AWS Bedrock `Converse` API backend
-# for the `ChatProvider` trait. Pulls in `aws-config` (credential chain) and
-# `aws-sdk-bedrockruntime` (Converse SDK). Auth via the standard AWS credential
-# chain (env vars, ~/.aws/credentials, IAM roles, SSO) — no API key required.
-# Without this feature, `BedrockProvider::new` returns a clear error message
-# instructing the operator to rebuild with `--features bedrock`.
+# for the (streaming-oriented) `ChatProvider` trait, consumed by trusty-analyze.
+# Pulls in `aws-config` (credential chain) and `aws-sdk-bedrockruntime` (Converse
+# SDK). Auth via the standard AWS credential chain (env vars, ~/.aws/credentials,
+# IAM roles, SSO) — no API key required. Without this feature, `BedrockProvider::new`
+# returns a clear error message instructing the operator to rebuild with
+# `--features bedrock`. NOT the same feature as `bedrock-client` below (#2407):
+# that one is the non-streaming `InferenceAdapter`-shaped Converse adapter tcode
+# consumes via `Configurator`/`register_bedrock_factory`. The two features are
+# independent (each pulls its own copy of the AWS deps) and may be enabled
+# together or separately depending on which trait surface a consumer needs.
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
 
 # Promotes `StdioMcpClient` (JSON-RPC 2.0 over child stdio) to a shared module
@@ -520,6 +539,27 @@ keyring-store = ["credentials", "dep:keyring"]
 # is not pulled in by this feature, keeping the base surface HTTP-server-free.
 # Concrete provider adapters (OpenRouter/Fireworks/Bedrock) land in #2403/#2407.
 inference-client = ["credentials"]
+# Enables the `inference::bedrock` adapter (issue #2407, epic #2400 Wave 2): the
+# AWS Bedrock Converse-API `BedrockAdapter` implementing `InferenceAdapter`, the
+# wire-format conversion + `cachePoint` prompt-cache translation ported from
+# tcode's proven `llm::bedrock` transport, and `register_bedrock_factory` (which
+# wires the adapter into a `Configurator` under `ProviderId::Bedrock` — kept
+# separate from the OpenAI-dialect `register_default_factories`). Implies
+# `inference-client` (the trait + registry + configurator) and pulls in the AWS
+# SDK stack (`aws-config`/`aws-sdk-bedrockruntime`/`aws-types`/`aws-smithy-types`).
+# Auth is the standard AWS credential chain (env/`~/.aws/credentials`/IMDS/SSO) —
+# no API key. The client is constructed lazily on first `chat`, so a default
+# (no-features) build and a `Configurator` that only registers the factory never
+# touch AWS credentials. NOT the same feature as `bedrock` above: that one is
+# the streaming `ChatProvider`-shaped backend trusty-analyze consumes. The two
+# features are independent (each pulls its own copy of the AWS deps).
+bedrock-client = [
+    "inference-client",
+    "dep:aws-config",
+    "dep:aws-sdk-bedrockruntime",
+    "dep:aws-types",
+    "dep:aws-smithy-types",
+]
 # Enables the `inference::config` module (issue #2404, epic #2400 Wave 1): the
 # universal `config` clap command (`ConfigCommand`) that any binary mounts with
 # two lines, exposing `config keys set/list/test/unset` for inference-provider

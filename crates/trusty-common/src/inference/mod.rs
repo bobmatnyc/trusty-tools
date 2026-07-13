@@ -26,6 +26,8 @@ pub mod credentials;
 
 #[cfg(feature = "inference-client")]
 pub mod adapter;
+#[cfg(feature = "bedrock-client")]
+pub mod bedrock;
 #[cfg(feature = "config-cli")]
 pub mod config;
 #[cfg(feature = "inference-client")]
@@ -46,6 +48,8 @@ pub mod types;
 // reaching into each submodule.
 #[cfg(feature = "inference-client")]
 pub use adapter::InferenceAdapter;
+#[cfg(feature = "bedrock-client")]
+pub use bedrock::{BedrockAdapter, register_bedrock_factory};
 #[cfg(feature = "config-cli")]
 pub use config::{ConfigCommand, ConfigKeysCommand};
 #[cfg(feature = "inference-client")]

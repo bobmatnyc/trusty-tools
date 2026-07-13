@@ -1,33 +1,34 @@
-//! Unit tests for the Bedrock Converse transport (#1021 phase 1).
+//! Unit tests for the Bedrock Converse adapter (#2407, ported from tcode).
 //!
-//! Why: Extracted to a separate file (mirroring
-//! `trusty-review::llm::bedrock::tests`) so `mod.rs`/`convert.rs` stay under
-//! the 500-SLOC production cap.
-//! What: Region resolution, message/tool-choice/response conversion — all
-//! unit-level, no real AWS calls — plus one `#[ignore]`-gated live Converse
-//! call.
+//! Why: co-located in a `tests.rs` sibling (via `#[path]`) so `mod.rs`/
+//! `convert.rs`/`cache.rs` stay under the 500-SLOC production cap while the
+//! conversion logic keeps full coverage.
+//! What: region resolution, message/tool-choice/response conversion, the
+//! cachePoint translation, and the adapter surface (`name`, `map_tool_choice`,
+//! lazy construction) — all offline, no real AWS — plus one `#[ignore]`-gated
+//! live Converse call.
 
 use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseOutputResponse;
 use aws_sdk_bedrockruntime::types::{
-    ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage, StopReason,
-    SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool, ToolChoice as SdkToolChoice,
-    ToolResultStatus,
+    CachePointType, ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage,
+    StopReason, SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool,
+    ToolChoice as SdkToolChoice, ToolResultStatus,
 };
 use serde_json::json;
 
-use super::cache::MIN_CACHEABLE_TOKENS;
+use super::cache::{MIN_CACHEABLE_TOKENS, cache_point_block, system_cacheable, tools_cacheable};
 use super::convert::{
     build_converse_messages, build_tool_config, converse_output_to_chat_response,
     document_to_json_string, json_to_document,
 };
-use super::{bedrock_model_id, resolve_bedrock_region};
-use crate::llm::{
-    CacheControl, ChatMessage, ChatRequest, FunctionCall, FunctionDefinition, ToolCall,
+use super::{BedrockAdapter, bedrock_model_id, resolve_bedrock_region};
+use crate::inference::adapter::InferenceAdapter;
+use crate::inference::types::{
+    CacheControl, ChatMessage, ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolChoice,
     ToolDefinition,
 };
 
-/// Serializes every test that mutates the process-wide region env vars —
-/// mirrors `provider::routing::RUN_DEADLINE_ENV_LOCK`'s identical rationale.
+/// Serializes every test that mutates the process-wide region env vars.
 static REGION_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn with_region_env<T>(trusty: Option<&str>, aws: Option<&str>, f: impl FnOnce() -> T) -> T {
@@ -59,8 +60,66 @@ fn minimal_request(messages: Vec<ChatMessage>) -> ChatRequest {
         max_tokens: Some(256),
         tools: None,
         tool_choice: None,
+        stop: None,
         usage: None,
     }
+}
+
+// ─── Adapter surface ────────────────────────────────────────────────────────
+
+#[test]
+fn name_is_bedrock() {
+    assert_eq!(BedrockAdapter::new(None).name(), "bedrock");
+}
+
+/// Constructing a `BedrockAdapter` never touches AWS — the lazy client cell
+/// stays empty until the first `chat`.
+///
+/// Why: pins the "default configuration works standalone" guarantee (#2245) — a
+/// `Configurator` that registers the Bedrock factory must not require AWS
+/// credentials just because the adapter exists.
+/// What: build the adapter; assert the internal `OnceCell` is still empty.
+/// Test: this test.
+#[test]
+fn new_does_not_touch_aws() {
+    let adapter = BedrockAdapter::new(Some("us-east-1"));
+    assert!(
+        adapter.client.get().is_none(),
+        "the AWS client cell must be lazy — untouched at construction"
+    );
+    assert_eq!(adapter.region(), "us-east-1");
+    assert_eq!(
+        adapter.capabilities().id,
+        crate::inference::ProviderId::Bedrock
+    );
+}
+
+/// `map_tool_choice` maps the scalar policies to Converse's own JSON shape (NOT
+/// the OpenAI shape).
+///
+/// Why: this is the exact JSON [`super::convert::build_tool_config`] interprets;
+/// a wrong shape here would silently fail to force/suppress tool calls.
+/// What: map each scalar variant, assert the JSON value.
+/// Test: this test.
+#[test]
+fn map_tool_choice_scalars() {
+    let a = BedrockAdapter::new(None);
+    assert_eq!(a.map_tool_choice(ToolChoice::None), json!("none"));
+    assert_eq!(a.map_tool_choice(ToolChoice::Auto), json!({"auto": {}}));
+    assert_eq!(a.map_tool_choice(ToolChoice::Required), json!({"any": {}}));
+}
+
+/// `map_tool_choice(Function)` produces Converse's specific-tool selector object.
+///
+/// Why: forcing a specific tool requires Converse's `{"tool":{"name":...}}`
+/// shape, not OpenAI's `{"type":"function","function":{"name":...}}`.
+/// What: map `Function("search_code")`, assert the object structure.
+/// Test: this test.
+#[test]
+fn map_tool_choice_function() {
+    let a = BedrockAdapter::new(None);
+    let v = a.map_tool_choice(ToolChoice::Function("search_code".into()));
+    assert_eq!(v, json!({"tool": {"name": "search_code"}}));
 }
 
 // ─── Region resolution ──────────────────────────────────────────────────────
@@ -122,7 +181,6 @@ fn build_converse_messages_merges_consecutive_tool_results() {
         ChatMessage::system("s"),
         ChatMessage::user("do two things"),
     ]);
-    // Assistant turn with two tool calls.
     req.messages.push(ChatMessage {
         role: "assistant".into(),
         content: None,
@@ -148,7 +206,6 @@ fn build_converse_messages_merges_consecutive_tool_results() {
         name: None,
         cache_control: None,
     });
-    // Two consecutive tool-role results answering both calls.
     req.messages
         .push(ChatMessage::tool_result("call_1", "get_weather", "72F"));
     req.messages
@@ -156,7 +213,6 @@ fn build_converse_messages_merges_consecutive_tool_results() {
 
     let (_, messages) = build_converse_messages(&req).expect("convert");
 
-    // user(task), assistant(2 tool uses), user(2 merged tool results)
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[1].role().as_str(), "assistant");
     assert_eq!(messages[1].content().len(), 2);
@@ -206,13 +262,6 @@ fn build_converse_messages_maps_tool_use_arguments_to_document() {
 
 // ─── ToolUse/ToolResult pairing backstop (#2278 Fix B) ─────────────────────
 
-/// Assert `build_converse_messages`'s output always satisfies Bedrock's
-/// pairing invariant: every `ToolResult` has an earlier matching `ToolUse`
-/// (no orphans survive), and every `ToolUse` has a matching `ToolResult`
-/// SOMEWHERE in the output (none left unanswered).
-///
-/// Why: Shared assertion for all three `enforce_tool_pairing_*` tests below
-/// so the invariant itself is defined once, not re-derived per test.
 fn assert_tool_pairing_invariant(messages: &[aws_sdk_bedrockruntime::types::Message]) {
     let mut introduced: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -242,20 +291,6 @@ fn assert_tool_pairing_invariant(messages: &[aws_sdk_bedrockruntime::types::Mess
     }
 }
 
-/// A `tool`-role result whose `tool_call_id` was never introduced by any
-/// preceding assistant `tool_calls` entry is dropped, not passed through as
-/// an orphan `ToolResult`.
-///
-/// Why: This is exactly the corrupted shape a naive count-based compaction
-/// cutoff can produce (#2278): the assistant entry carrying the matching
-/// `tool_calls` got folded into a compacted-span summary while the
-/// answering `tool`-role entry survived verbatim. Bedrock's Converse API
-/// rejects any orphan `ToolResult` with `ValidationException`, so the
-/// backstop must drop it rather than forward it.
-/// What: Build a request with a `tool`-role message whose `tool_call_id` has
-/// no matching prior `ToolUse`; assert the pairing invariant holds and that
-/// no `ToolResult` for that id appears in the output.
-/// Test: this test.
 #[test]
 fn enforce_tool_pairing_drops_orphan_tool_result() {
     let req = minimal_request(vec![
@@ -279,18 +314,6 @@ fn enforce_tool_pairing_drops_orphan_tool_result() {
     }
 }
 
-/// An assistant `ToolUse` with NO following `ToolResult` at all gets a
-/// synthesized placeholder `ToolResult` appended immediately after it.
-///
-/// Why: The other half of the #2278 orphan shape — the answering `tool`-role
-/// entry itself was the one folded into a compacted-span summary (or never
-/// recorded at all). Without a synthesized answer, Bedrock rejects the
-/// request outright for a missing `toolResult`.
-/// What: Build a request with an assistant `tool_calls` entry and
-/// deliberately no matching `tool_result` entry; assert the pairing
-/// invariant holds, a placeholder `ToolResult` for that call id exists in
-/// the immediately-following message, and it carries `status: Error`.
-/// Test: this test.
 #[test]
 fn enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use() {
     let mut req = minimal_request(vec![ChatMessage::system("s"), ChatMessage::user("do it")]);
@@ -309,7 +332,6 @@ fn enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use() {
         name: None,
         cache_control: None,
     });
-    // Deliberately no matching tool_result entry.
 
     let (_, messages) = build_converse_messages(&req).expect("convert");
 
@@ -339,17 +361,6 @@ fn enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use() {
     ));
 }
 
-/// A conversation whose tool calls are already fully paired is left
-/// unchanged by the backstop — no dropped blocks, no synthesized
-/// placeholders.
-///
-/// Why: The fix must be a no-op on the overwhelmingly common valid case;
-/// regression guard against an overzealous implementation mangling healthy
-/// conversations.
-/// What: Build a request with one assistant `tool_calls` entry immediately
-/// answered by its `tool_result`; assert the message shape and the real
-/// result's content are unchanged (no `Error` status stamped onto it).
-/// Test: this test.
 #[test]
 fn enforce_tool_pairing_leaves_valid_conversation_unchanged() {
     let mut req = minimal_request(vec![ChatMessage::system("s"), ChatMessage::user("go")]);
@@ -392,28 +403,73 @@ fn enforce_tool_pairing_leaves_valid_conversation_unchanged() {
     }
 }
 
-// ─── cachePoint (#2260) ─────────────────────────────────────────────────────
+// ─── cachePoint (#2260) — direct unit tests on `cache` primitives ──────────
 
-/// Build a system message carrying `build_request`'s cache-eligibility
-/// marker (`cache_control: Some(...)`), exactly as
-/// `agent_loop::mark_cache_breakpoint_on_system` produces it.
+/// `cache_point_block` always builds the one shape ever sent: `type: default`,
+/// no explicit TTL.
+///
+/// Why: this is the exact wire shape Bedrock expects for every checkpoint;
+/// a wrong `r#type` or a stray TTL would silently change caching behaviour.
+/// What: build the block, assert `r#type() == CachePointType::Default` and
+/// `ttl().is_none()`.
+/// Test: this test.
+#[test]
+fn cache_point_block_is_default_type() {
+    let block = cache_point_block();
+    assert_eq!(block.r#type(), &CachePointType::Default);
+    assert!(block.ttl().is_none());
+}
+
+/// `system_cacheable` respects the `MIN_CACHEABLE_TOKENS` floor: `false` below
+/// it, `true` at/above it.
+///
+/// Why: a checkpoint on a too-small prefix can never produce a cache hit and
+/// wastes one of Bedrock's 4-per-request slots; this pins the pure boundary
+/// the `build_converse_messages` cachePoint-emission tests rely on.
+/// What: assert a short prompt is not cacheable and a prompt well above the
+/// floor is.
+/// Test: this test.
+#[test]
+fn system_cacheable_respects_floor() {
+    let small = "short prompt";
+    let large = "x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100);
+    assert!(!system_cacheable(small));
+    assert!(system_cacheable(&large));
+}
+
+/// `tools_cacheable` respects the same floor, applied to the combined
+/// JSON-Schema bodies of a tool set.
+///
+/// Why: guards `build_tool_config` against wasting a checkpoint on a small
+/// tool set (e.g. a single-tool test fixture); this pins the pure boundary.
+/// What: assert a tiny single-tool set is not cacheable and a tool set with a
+/// large description is.
+/// Test: this test.
+#[test]
+fn tools_cacheable_respects_floor() {
+    let tiny_tool = ToolDefinition::function(FunctionDefinition {
+        name: "ping".into(),
+        description: None,
+        parameters: None,
+        cache_control: None,
+    });
+    assert!(!tools_cacheable(&[tiny_tool]));
+
+    let big_tool = ToolDefinition::function(FunctionDefinition {
+        name: "write_file".into(),
+        description: Some("x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100)),
+        parameters: None,
+        cache_control: None,
+    });
+    assert!(tools_cacheable(&[big_tool]));
+}
+
 fn cached_system_message(text: &str) -> ChatMessage {
     let mut msg = ChatMessage::system(text);
     msg.cache_control = Some(CacheControl::ephemeral());
     msg
 }
 
-/// A large-enough system prompt, marked cache-eligible, gets a Bedrock
-/// `cachePoint` block immediately after its `Text` block.
-///
-/// Why: This is the core #2260 wire-shape translation — without it,
-/// `supports_prompt_caching() == true` would be a lie: `agent_loop` would
-/// mark the request as cache-eligible but the Converse transport would never
-/// emit the native breakpoint that actually makes Bedrock cache it.
-/// What: Convert a request whose system message is marked and exceeds
-/// `MIN_CACHEABLE_TOKENS`; assert `system` has exactly two entries — the
-/// original `Text` followed by a `CachePoint`.
-/// Test: this test.
 #[test]
 fn build_converse_messages_emits_cache_point_after_large_cached_system() {
     let large_system = "x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100);
@@ -428,15 +484,6 @@ fn build_converse_messages_emits_cache_point_after_large_cached_system() {
     assert!(matches!(system[1], SystemContentBlock::CachePoint(_)));
 }
 
-/// A system prompt marked cache-eligible but BELOW the minimum-cacheable
-/// size never gets a `cachePoint` (the size guard).
-///
-/// Why: Anthropic's minimum-cacheable-prefix floor means a checkpoint below
-/// it can never produce a cache hit — emitting one would waste one of
-/// Bedrock's 4-per-request checkpoint slots for zero benefit.
-/// What: Convert a request whose (short) system message is marked; assert
-/// `system` has exactly one entry (just the `Text` block).
-/// Test: this test.
 #[test]
 fn build_converse_messages_omits_cache_point_for_small_cached_system() {
     let req = minimal_request(vec![
@@ -452,14 +499,6 @@ fn build_converse_messages_omits_cache_point_for_small_cached_system() {
     );
 }
 
-/// A system prompt NOT marked cache-eligible never gets a `cachePoint`,
-/// regardless of size — the #2156 regression guard applied to Bedrock.
-///
-/// Why: Parity mode / a non-cache-eligible run must produce byte-identical
-/// Converse requests to pre-#2260 behaviour.
-/// What: Convert a request with a large but UNMARKED system message; assert
-/// `system` has exactly one entry.
-/// Test: this test.
 #[test]
 fn build_converse_messages_omits_cache_point_when_not_marked() {
     let large_system = "x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100);
@@ -476,21 +515,6 @@ fn build_converse_messages_omits_cache_point_when_not_marked() {
     );
 }
 
-/// A non-system message marked cache-eligible (`cache_control: Some(...)`,
-/// exactly as `agent_loop::mark_cache_breakpoint_on_history` produces it)
-/// gets a trailing Bedrock `cachePoint` content block appended after its own
-/// content, inside the SAME `Message` — the rolling-history follow-up to
-/// #2260.
-///
-/// Why: Without this, `agent_loop`'s rolling-history marker would be a lie
-/// on the Bedrock transport: the growing transcript (the dominant token
-/// cost) would never actually get a native `cachePoint`, so cache_read would
-/// stay 0 regardless of what `build_request` marks.
-/// What: Convert a request with an unmarked user message followed by a
-/// marked assistant message; assert the assistant `Message`'s content ends
-/// with a `CachePoint` block immediately after its `Text` block, and the
-/// user `Message` (unmarked) has no such block.
-/// Test: this test.
 #[test]
 fn build_converse_messages_emits_cache_point_after_marked_history_message() {
     let mut assistant_msg = ChatMessage::assistant("on it");
@@ -502,7 +526,6 @@ fn build_converse_messages_emits_cache_point_after_marked_history_message() {
     ]);
     let (_, messages) = build_converse_messages(&req).expect("convert");
 
-    // user(unmarked), assistant(marked) — different roles, not merged.
     assert_eq!(messages.len(), 2);
     assert_eq!(
         messages[0].content().len(),
@@ -523,17 +546,6 @@ fn build_converse_messages_emits_cache_point_after_marked_history_message() {
     ));
 }
 
-/// A non-system message WITHOUT `cache_control` set never gets a
-/// `cachePoint`, regardless of role or content — the regression guard for
-/// the rolling-history follow-up to #2260.
-///
-/// Why: A run outside the cache-eligible gate (Parity mode, or a
-/// provider/model that hasn't verified the passthrough) must produce
-/// byte-identical Converse requests to pre-rolling-history behaviour.
-/// What: Convert a request with ordinary (unmarked) user/assistant/tool
-/// messages; assert none of the resulting Converse messages contain a
-/// `CachePoint` block.
-/// Test: this test.
 #[test]
 fn build_converse_messages_omits_cache_point_for_unmarked_history_messages() {
     let req = minimal_request(vec![
@@ -553,16 +565,6 @@ fn build_converse_messages_omits_cache_point_for_unmarked_history_messages() {
     }
 }
 
-/// A large-enough LAST tool definition, marked cache-eligible, gets a
-/// Bedrock `cachePoint` appended after all `ToolSpec` entries.
-///
-/// Why: Mirrors `mark_cache_breakpoint_on_tools`'s OpenRouter placement —
-/// marking only the last tool caches the entire (byte-stable) tools array
-/// as one prefix.
-/// What: Build tool config from one large tool definition with
-/// `function.cache_control` set; assert `config.tools()` has two entries —
-/// the `ToolSpec` followed by a `CachePoint`.
-/// Test: this test.
 #[test]
 fn build_tool_config_emits_cache_point_for_large_cached_last_tool() {
     let tool = ToolDefinition::function(FunctionDefinition {
@@ -582,14 +584,6 @@ fn build_tool_config_emits_cache_point_for_large_cached_last_tool() {
     ));
 }
 
-/// A LAST tool marked cache-eligible but whose combined schema is BELOW the
-/// minimum-cacheable size never gets a `cachePoint` (the size guard).
-///
-/// Why: Same rationale as the system-prompt guard — a checkpoint below the
-/// floor wastes a slot.
-/// What: Build tool config from one small marked tool; assert
-/// `config.tools()` has exactly one entry.
-/// Test: this test.
 #[test]
 fn build_tool_config_omits_cache_point_for_small_cached_tool() {
     let tool = ToolDefinition::function(FunctionDefinition {
@@ -609,15 +603,6 @@ fn build_tool_config_omits_cache_point_for_small_cached_tool() {
     );
 }
 
-/// Tools NOT marked cache-eligible never get a `cachePoint` — the #2156
-/// regression guard applied to Bedrock's tool config.
-///
-/// Why: `sample_tool()` (used throughout this file's existing tool-choice
-/// tests) has `cache_control: None`; this pins that the new cachePoint logic
-/// never fires for it, so every pre-#2260 assertion in this file
-/// (`config.tools().len() == 1`) stays correct.
-/// What: Build tool config from `sample_tool()`; assert one entry.
-/// Test: this test.
 #[test]
 fn build_tool_config_omits_cache_point_when_not_marked() {
     let config = build_tool_config(&[sample_tool()], None)
@@ -757,7 +742,11 @@ fn converse_output_to_chat_response_extracts_text_and_finish_reason() {
     let output = output_with_text("hello world", StopReason::EndTurn, None);
     let resp = converse_output_to_chat_response(&output, "us.anthropic.claude-sonnet-4-6");
     assert_eq!(resp.first_text().as_deref(), Some("hello world"));
-    assert_eq!(resp.finish_reason(), Some("end_turn"));
+    assert_eq!(
+        resp.choices[0].finish_reason.as_deref(),
+        Some("end_turn"),
+        "stopReason must be lowercased into finish_reason"
+    );
     assert!(resp.first_tool_calls().is_empty());
     assert_eq!(resp.model, "us.anthropic.claude-sonnet-4-6");
 }
@@ -790,7 +779,7 @@ fn converse_output_to_chat_response_extracts_tool_use() {
     let parsed: serde_json::Value =
         serde_json::from_str(&calls[0].function.arguments).expect("parse");
     assert_eq!(parsed["location"], "Seattle");
-    assert_eq!(resp.finish_reason(), Some("tool_use"));
+    assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_use"));
 }
 
 #[test]
@@ -806,35 +795,24 @@ fn converse_output_to_chat_response_maps_usage() {
     let output = output_with_text("ok", StopReason::EndTurn, Some(usage));
 
     let resp = converse_output_to_chat_response(&output, "us.anthropic.claude-sonnet-4-6");
-    let token_usage = resp.token_usage();
-    assert_eq!(token_usage.prompt_tokens, 100);
-    assert_eq!(token_usage.completion_tokens, 20);
-    assert_eq!(token_usage.cache_read_tokens, 30);
-    assert_eq!(token_usage.cache_creation_tokens, 10);
+    let usage = resp.usage();
+    assert_eq!(usage.prompt_tokens, 100);
+    assert_eq!(usage.completion_tokens, 20);
+    assert_eq!(usage.cache_read_tokens, 30);
+    assert_eq!(usage.cache_creation_tokens, 10);
 }
 
 #[test]
 fn converse_output_to_chat_response_no_usage_is_zeroed() {
     let output = output_with_text("ok", StopReason::EndTurn, None);
     let resp = converse_output_to_chat_response(&output, "m");
-    let usage = resp.token_usage();
+    let usage = resp.usage();
     assert_eq!(usage.prompt_tokens, 0);
     assert_eq!(usage.completion_tokens, 0);
 }
 
-// ─── Model id prefix stripping (#2247 follow-up: ValidationException fix) ────
+// ─── Model id prefix stripping ──────────────────────────────────────────────
 
-/// `bedrock_model_id` strips the `bedrock/` dispatch-routing prefix so the
-/// value handed to AWS Bedrock's Converse `model_id` is the bare id.
-///
-/// Why: This is the exact regression that shipped in PR #2247: the full
-/// dispatch slug (`bedrock/us.anthropic.claude-sonnet-4-6`) was sent
-/// verbatim to `.model_id(...)`, and AWS rejects that with
-/// `ValidationException: The provided model identifier is invalid` —
-/// confirmed live. This test locks in the fix at the pure-function level so
-/// it fails loudly if the strip is ever removed or broken.
-/// What: Assert the prefixed slug maps to the bare inference-profile id.
-/// Test: this test.
 #[test]
 fn bedrock_model_id_strips_prefix() {
     assert_eq!(
@@ -843,14 +821,6 @@ fn bedrock_model_id_strips_prefix() {
     );
 }
 
-/// `bedrock_model_id` passes a slug through unchanged when it has no
-/// `bedrock/` prefix.
-///
-/// Why: Defensive — some callers (e.g. the `live_bedrock_call` test, or a
-/// future caller that already resolved the bare id) may hand over an
-/// unprefixed slug; the strip must not mangle or panic on that input.
-/// What: Assert a bare model id round-trips unchanged.
-/// Test: this test.
 #[test]
 fn bedrock_model_id_passthrough_without_prefix() {
     assert_eq!(
@@ -886,28 +856,20 @@ fn json_to_document_rejects_non_object_top_level() {
 
 /// Live integration test: send a trivial prompt to Bedrock via Converse.
 ///
-/// Why: End-to-end validation that `BedrockChatClient::chat` produces a
-/// non-empty assistant response and non-zero usage against the real service.
-/// Uses the FULL `bedrock/`-prefixed dispatch slug (matching what
-/// `DispatchingLlmClient` actually passes through in production) so this
-/// also exercises [`super::bedrock_model_id`]'s strip on the live path, not
-/// just the bare id.
-/// What: Requires AWS credentials resolvable by the default chain (e.g.
-/// `AWS_PROFILE=cto`) and a reachable `us.anthropic.claude-*` inference
-/// profile; skipped (not failed) when credential resolution or the call
-/// itself fails, so CI (which never sets AWS credentials) is unaffected.
-/// Test: Run with `cargo test -p trusty-code -- --include-ignored bedrock`.
+/// Why: end-to-end validation that [`BedrockAdapter::chat`] produces a non-empty
+/// assistant response against the real service. Uses the FULL `bedrock/`-prefixed
+/// dispatch slug so it also exercises [`super::bedrock_model_id`]'s strip on the
+/// live path.
+/// What: requires AWS credentials resolvable by the default chain (e.g.
+/// `AWS_PROFILE=cto`) and a reachable `us.anthropic.claude-*` inference profile;
+/// skipped (not failed) when the call fails, so CI (which never sets AWS
+/// credentials) is unaffected.
+/// Test: run with `cargo test -p trusty-common --features bedrock-client -- \
+///        --include-ignored bedrock`.
 #[tokio::test]
 #[ignore = "requires AWS credentials; skipped in CI"]
 async fn live_bedrock_call() {
-    let client = match super::BedrockChatClient::from_env().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("skipping live_bedrock_call: could not build client: {e}");
-            return;
-        }
-    };
-
+    let adapter = BedrockAdapter::new(None);
     let req = ChatRequest {
         model: "bedrock/us.anthropic.claude-haiku-4-5".into(),
         messages: vec![
@@ -918,10 +880,11 @@ async fn live_bedrock_call() {
         max_tokens: Some(16),
         tools: None,
         tool_choice: None,
+        stop: None,
         usage: None,
     };
 
-    match client.chat(&req).await {
+    match adapter.chat(&req).await {
         Ok(resp) => {
             let text = resp.first_text().unwrap_or_default();
             eprintln!("live_bedrock_call passed — text: {text:?}");

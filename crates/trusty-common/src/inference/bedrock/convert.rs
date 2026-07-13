@@ -1,31 +1,31 @@
-//! `ChatRequest`/`ChatResponse` <-> AWS Bedrock Converse API conversion.
+//! [`ChatRequest`]/[`ChatResponse`] <-> AWS Bedrock Converse API conversion.
 //!
-//! Why: `BedrockChatClient` (in `super::mod`) must speak the same
-//! `ChatRequest`/`ChatResponse` wire-neutral types every other transport
-//! uses, so `AgentLoop` and the rest of trusty-code never branch on the
-//! backend. This module is the entire translation seam: tcode's
-//! OpenAI-shaped messages/tools/tool_choice become Converse's
-//! `Message`/`Tool`/`ToolChoice` request shapes, and a Converse response
-//! becomes a `ChatResponse` indistinguishable (to callers) from an
-//! OpenRouter one.
+//! Why: [`super::BedrockAdapter`] must speak the same provider-neutral
+//! [`ChatRequest`]/[`ChatResponse`] types every other [`crate::inference::InferenceAdapter`]
+//! uses, so callers never branch on the backend. This module is the entire
+//! translation seam: the OpenAI-shaped messages/tools/tool_choice become
+//! Converse's `Message`/`Tool`/`ToolChoice` request shapes, and a Converse
+//! response becomes a [`ChatResponse`] indistinguishable (to callers) from an
+//! OpenRouter one. Ported byte-for-byte from tcode's proven `llm::bedrock::convert`
+//! (#2407) — only the type family (tcode wire types → `crate::inference::types`)
+//! and the error type ([`LlmError::Bedrock`] → [`InferenceError::Provider`])
+//! change, so the M3 bake-off L1+L2 semantics are preserved.
 //! What: [`build_converse_messages`] walks `ChatRequest.messages`, splitting
 //! `system`-role entries into Converse's separate system-prompt array and
-//! merging consecutive same-role turns (Converse requires strict
-//! user/assistant alternation; tcode's `tool`-role results are Converse
-//! `ToolResult` blocks nested inside a `user`-role message).
-//! [`build_tool_config`] maps `ChatRequest.tools` + `ChatRequest.tool_choice`
-//! into a Converse `ToolConfiguration`, interpreting `tool_choice` generically
-//! (OpenAI-shaped strings/objects, and the Converse-shaped JSON
-//! `BedrockProvider::map_tool_choice` produces) so either input flows
-//! correctly. [`converse_output_to_chat_response`] maps the Converse
-//! response's content blocks and token usage back into `ChatResponse`.
+//! merging consecutive same-role turns (Converse requires strict user/assistant
+//! alternation; `tool`-role results are Converse `ToolResult` blocks nested
+//! inside a `user`-role message). [`build_tool_config`] maps `ChatRequest.tools`
+//! and `ChatRequest.tool_choice` into a Converse `ToolConfiguration`, interpreting
+//! `tool_choice` generically (OpenAI-shaped strings/objects, and the
+//! Converse-shaped JSON [`super::BedrockAdapter::map_tool_choice`] produces) so
+//! either input flows correctly. [`converse_output_to_chat_response`] maps the
+//! Converse response's content blocks and token usage back into [`ChatResponse`].
 //! (#2260) Both [`build_converse_messages`] and [`build_tool_config`] also
-//! translate `build_request`'s `cache_control` markers into Bedrock-native
-//! `cachePoint` blocks via `super::cache` — see that module's doc for the
-//! wire-shape translation and minimum-size guard.
-//! Test: `bedrock::tests::*` (this module has no inline tests — see the
-//! module-level SLOC-cap convention already used by
-//! `trusty-review::llm::bedrock`).
+//! translate `cache_control` markers into Bedrock-native `cachePoint` blocks via
+//! [`super::cache`] — see that module's doc for the wire-shape translation and
+//! minimum-size guard.
+//! Test: `super::tests::*` (this module has no inline tests — kept below the
+//! 500-SLOC production cap by co-locating tests in the sibling `tests.rs`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,36 +38,36 @@ use aws_sdk_bedrockruntime::types::{
 use aws_smithy_types::{Document, Number};
 use serde_json::Value;
 
-use super::super::{
-    AssistantMessage, ChatChoice, ChatMessage, ChatRequest, ChatResponse, FunctionCall, LlmError,
-    ToolCall, ToolDefinition, UsageBlock,
-};
 use super::cache;
+use crate::inference::error::InferenceError;
+use crate::inference::types::{
+    AssistantMessage, ChatChoice, ChatMessage, ChatRequest, ChatResponse, FunctionCall, ToolCall,
+    ToolDefinition, UsageBlock,
+};
 
-/// Split `req.messages` into Converse's system-prompt array and the
-/// alternating user/assistant message list.
+/// Split `req.messages` into Converse's system-prompt array and the alternating
+/// user/assistant message list.
 ///
 /// Why: Converse rejects a message list that doesn't strictly alternate
 /// `user`/`assistant` roles, and has no `system`-role message type — system
-/// content is a separate top-level field. tcode's transcript can contain
-/// several `system`-role entries (the seed system prompt, plus any
-/// compaction-summary messages, #2070) and consecutive `tool`-role results
-/// answering a multi-tool-call turn; both must be handled without violating
-/// alternation.
+/// content is a separate top-level field. A transcript can contain several
+/// `system`-role entries (the seed system prompt, plus any compaction-summary
+/// messages) and consecutive `tool`-role results answering a multi-tool-call
+/// turn; both must be handled without violating alternation.
 /// What: `system`-role entries become `SystemContentBlock::Text` (appended in
-/// order, wherever they occur — Converse's system array has no per-turn
-/// position semantics). Every other message maps to Converse role `User`
-/// (`user` and `tool` roles) or `Assistant` (`assistant` role); consecutive
-/// messages of the same Converse role are merged into ONE `Message` with
-/// multiple content blocks, which is exactly what happens for a run of
-/// `tool`-role results answering one assistant turn's tool calls. (#2278)
-/// Before the final return, [`enforce_tool_pairing`] rewrites `messages` so
-/// the emitted request always satisfies Bedrock's ToolUse/ToolResult
-/// pairing invariant, regardless of what produced the input history.
-/// Test: `bedrock::tests::*`.
+/// order, wherever they occur — Converse's system array has no per-turn position
+/// semantics). Every other message maps to Converse role `User` (`user` and
+/// `tool` roles) or `Assistant` (`assistant` role); consecutive messages of the
+/// same Converse role are merged into ONE `Message` with multiple content
+/// blocks, which is exactly what happens for a run of `tool`-role results
+/// answering one assistant turn's tool calls. (#2278) Before the final return,
+/// [`enforce_tool_pairing`] rewrites `messages` so the emitted request always
+/// satisfies Bedrock's ToolUse/ToolResult pairing invariant, regardless of what
+/// produced the input history.
+/// Test: `super::tests::*`.
 pub(super) fn build_converse_messages(
     req: &ChatRequest,
-) -> Result<(Vec<SystemContentBlock>, Vec<Message>), LlmError> {
+) -> Result<(Vec<SystemContentBlock>, Vec<Message>), InferenceError> {
     let mut system_blocks = Vec::new();
     let mut messages = Vec::new();
     let mut current_role: Option<ConversationRole> = None;
@@ -78,21 +78,20 @@ pub(super) fn build_converse_messages(
             // (#2278) Flush the in-progress same-role batch BEFORE diverting
             // this entry to the system-prompt array, rather than bare
             // `continue`. A mid-conversation system-role entry (e.g. a
-            // compaction-summary placeholder, #2070) has no in-conversation
-            // home on Converse either way — the system array has no
-            // per-turn position semantics — but failing to flush here
-            // silently merges content that occurred BEFORE this entry with
-            // content that occurs AFTER it into one artificial message,
-            // corrupting ordering beyond just losing the placeholder text.
+            // compaction-summary placeholder) has no in-conversation home on
+            // Converse either way — the system array has no per-turn position
+            // semantics — but failing to flush here silently merges content
+            // that occurred BEFORE this entry with content that occurs AFTER it
+            // into one artificial message, corrupting ordering beyond just
+            // losing the placeholder text.
             flush_message(&mut messages, &mut current_role, &mut current_blocks)?;
             if let Some(text) = &msg.content {
                 system_blocks.push(SystemContentBlock::Text(text.clone()));
-                // (#2260) `agent_loop::build_request` marks exactly one
-                // system-role entry (the seed system prompt) with
-                // `cache_control` when the run is cache-eligible; translate
-                // that marker into a Bedrock-native cachePoint immediately
-                // after its Text block, guarded by the minimum-size floor so
-                // a too-small prompt never wastes a checkpoint slot.
+                // (#2260) A cache-eligible run marks exactly one system-role
+                // entry (the seed system prompt) with `cache_control`; translate
+                // that marker into a Bedrock-native cachePoint immediately after
+                // its Text block, guarded by the minimum-size floor so a
+                // too-small prompt never wastes a checkpoint slot.
                 if msg.cache_control.is_some() && cache::system_cacheable(text) {
                     system_blocks.push(SystemContentBlock::CachePoint(cache::cache_point_block()));
                 }
@@ -113,16 +112,14 @@ pub(super) fn build_converse_messages(
 
         append_content_blocks(msg, &mut current_blocks)?;
 
-        // (rolling-history follow-up to #2260) `agent_loop::build_request`
-        // marks the last two non-system messages with `cache_control` when
-        // the run is cache-eligible (`mark_cache_breakpoint_on_history`);
-        // translate that marker into a trailing Bedrock-native cachePoint
-        // content block for THIS message, appended after its own content so
-        // it lands inside the right (possibly same-role-merged) `Message`
-        // once `flush_message` runs. Unlike the system/tools breakpoints,
-        // no minimum-size floor is applied here — the history segments this
-        // marks are, by construction, the dominant token cost, never a
-        // too-small fixture.
+        // (rolling-history follow-up to #2260) A cache-eligible run marks the
+        // last two non-system messages with `cache_control`; translate that
+        // marker into a trailing Bedrock-native cachePoint content block for
+        // THIS message, appended after its own content so it lands inside the
+        // right (possibly same-role-merged) `Message` once `flush_message`
+        // runs. Unlike the system/tools breakpoints, no minimum-size floor is
+        // applied here — the history segments this marks are, by construction,
+        // the dominant token cost, never a too-small fixture.
         if msg.cache_control.is_some() {
             current_blocks.push(ContentBlock::CachePoint(cache::cache_point_block()));
         }
@@ -137,33 +134,24 @@ pub(super) fn build_converse_messages(
 /// role-merged Converse message list (#2278 Fix B — the Bedrock-specific
 /// backstop).
 ///
-/// Why: `agent_loop::transcript::Transcript::maybe_compact` can (before Fix
-/// A) fold an assistant's `tool_calls` entry into a compaction summary while
-/// one of its answering `tool`-role entries survives verbatim, or vice
-/// versa — a count-based compaction cutoff has no tool-call awareness. Any
-/// unpaired `ToolUse`/`ToolResult` in the request makes Bedrock's Converse
-/// API reject the whole call with `ValidationException: ... toolResult`.
-/// This runs unconditionally on every request as a last-resort guarantee
-/// that the WIRE shape is always valid, independent of whatever produced
-/// the input history — it is not solely a compensating control for the
-/// transcript bug Fix A addresses.
-/// What: Two passes over `messages` (already strictly alternating
-/// `User`/`Assistant` — `build_converse_messages` merges consecutive
-/// same-role turns before this runs, so a `ToolUse`'s only possible
-/// answering window is the immediately-following message). Pass 1 walks
-/// every content block in encounter order, tracking every `tool_use_id`
-/// introduced by a `ToolUse` block; a `ToolResult` whose `tool_use_id` was
-/// never introduced by an earlier (or same, block-order) `ToolUse` is an
-/// orphan and is dropped — there is no call left to attach it to on the
-/// model's side, and Bedrock rejects an orphan just as strictly as a
-/// missing result. Pass 2 walks every `ToolUse` block and, for each whose
-/// `tool_use_id` has no matching `ToolResult` in the immediately-following
-/// message, synthesizes a placeholder `ToolResult` (status `Error`, text
-/// noting the result is unavailable) appended to that following message —
-/// or, if there is no following message at all, a brand-new trailing `User`
-/// message carrying just the placeholders.
-/// Test: `bedrock::tests::enforce_tool_pairing_*`.
-fn enforce_tool_pairing(messages: &mut Vec<Message>) -> Result<(), LlmError> {
+/// Why: a count-based compaction cutoff can fold an assistant's `tool_calls`
+/// entry into a summary while one of its answering `tool`-role entries survives
+/// verbatim, or vice versa. Any unpaired `ToolUse`/`ToolResult` in the request
+/// makes Bedrock's Converse API reject the whole call with `ValidationException`.
+/// This runs unconditionally on every request as a last-resort guarantee that
+/// the WIRE shape is always valid, independent of whatever produced the input
+/// history.
+/// What: two passes over `messages` (already strictly alternating
+/// `User`/`Assistant`). Pass 1 walks every content block in encounter order,
+/// tracking every `tool_use_id` introduced by a `ToolUse` block; a `ToolResult`
+/// whose id was never introduced by an earlier (or same, block-order) `ToolUse`
+/// is an orphan and is dropped. Pass 2 walks every `ToolUse` and, for each whose
+/// id has no matching `ToolResult` in the immediately-following message,
+/// synthesizes a placeholder `ToolResult` (status `Error`) appended to that
+/// following message — or, if there is no following message, a brand-new
+/// trailing `User` message carrying just the placeholders.
+/// Test: `super::tests::enforce_tool_pairing_*`.
+fn enforce_tool_pairing(messages: &mut Vec<Message>) -> Result<(), InferenceError> {
     // Pass 1: drop orphan ToolResult blocks; record every tool_use_id ever
     // introduced, in block encounter order.
     let mut introduced: HashSet<String> = HashSet::new();
@@ -187,7 +175,7 @@ fn enforce_tool_pairing(messages: &mut Vec<Message>) -> Result<(), LlmError> {
             .role(role)
             .set_content(Some(kept))
             .build()
-            .map_err(|e| LlmError::Bedrock(format!("rebuild Message: {e}")))?;
+            .map_err(|e| InferenceError::Provider(format!("rebuild Message: {e}")))?;
     }
 
     // Pass 2: for each ToolUse, compute any missing answers in the
@@ -246,13 +234,13 @@ fn enforce_tool_pairing(messages: &mut Vec<Message>) -> Result<(), LlmError> {
                 .role(ConversationRole::User)
                 .set_content(Some(content))
                 .build()
-                .map_err(|e| LlmError::Bedrock(format!("rebuild Message: {e}")))?;
+                .map_err(|e| InferenceError::Provider(format!("rebuild Message: {e}")))?;
         } else {
             let new_msg = Message::builder()
                 .role(ConversationRole::User)
                 .set_content(Some(placeholders))
                 .build()
-                .map_err(|e| LlmError::Bedrock(format!("build placeholder Message: {e}")))?;
+                .map_err(|e| InferenceError::Provider(format!("build placeholder Message: {e}")))?;
             messages.insert(i + 1, new_msg);
         }
     }
@@ -260,18 +248,18 @@ fn enforce_tool_pairing(messages: &mut Vec<Message>) -> Result<(), LlmError> {
     Ok(())
 }
 
-/// Build one synthesized placeholder `ToolResult` block for a `tool_use_id`
-/// that reached the end of its answering window with no real result.
+/// Build one synthesized placeholder `ToolResult` block for a `tool_use_id` that
+/// reached the end of its answering window with no real result.
 ///
-/// Why: Bedrock requires every `ToolUse` to have a matching `ToolResult`;
-/// when the real result was dropped (compaction splitting a turn group, or
-/// any other history-drift source), the model still needs SOME result to
-/// keep the conversation valid — an explicit "unavailable" marker is honest
-/// about what happened, unlike silently fabricating a fake success.
-/// What: A `ToolResultBlock` keyed by `tool_use_id`, `status: Error`, and a
+/// Why: Bedrock requires every `ToolUse` to have a matching `ToolResult`; when
+/// the real result was dropped (compaction splitting a turn group, or any other
+/// history-drift source), the model still needs SOME result to keep the
+/// conversation valid — an explicit "unavailable" marker is honest about what
+/// happened, unlike silently fabricating a fake success.
+/// What: a `ToolResultBlock` keyed by `tool_use_id`, `status: Error`, and a
 /// single text content block saying the result is unavailable.
-/// Test: `bedrock::tests::enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use`.
-fn placeholder_tool_result(tool_use_id: &str) -> Result<ContentBlock, LlmError> {
+/// Test: `super::tests::enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use`.
+fn placeholder_tool_result(tool_use_id: &str) -> Result<ContentBlock, InferenceError> {
     let block = ToolResultBlock::builder()
         .tool_use_id(tool_use_id)
         .content(ToolResultContentBlock::Text(
@@ -279,27 +267,27 @@ fn placeholder_tool_result(tool_use_id: &str) -> Result<ContentBlock, LlmError> 
         ))
         .status(ToolResultStatus::Error)
         .build()
-        .map_err(|e| LlmError::Bedrock(format!("build placeholder ToolResultBlock: {e}")))?;
+        .map_err(|e| InferenceError::Provider(format!("build placeholder ToolResultBlock: {e}")))?;
     Ok(ContentBlock::ToolResult(block))
 }
 
 /// Append one `ChatMessage`'s content as Converse `ContentBlock`s onto the
 /// in-progress same-role batch.
 ///
-/// Why: `user`, `tool`, and `assistant` messages each carry their payload in
-/// a different `ChatMessage` shape (plain text; a tool result keyed by
+/// Why: `user`, `tool`, and `assistant` messages each carry their payload in a
+/// different `ChatMessage` shape (plain text; a tool result keyed by
 /// `tool_call_id`; text plus zero or more tool calls) that must become the
 /// matching Converse content-block variant.
 /// What: `assistant` -> a `Text` block for non-empty `content`, plus one
 /// `ToolUse` block per `tool_calls` entry (arguments parsed from the OpenAI
-/// JSON-string shape into a `Document`). `tool` -> one `ToolResult` block
-/// keyed by `tool_call_id`. Anything else (`user`) -> a `Text` block for
-/// `content` when present.
-/// Test: `bedrock::tests::*`.
+/// JSON-string shape into a `Document`). `tool` -> one `ToolResult` block keyed
+/// by `tool_call_id`. Anything else (`user`) -> a `Text` block for `content`
+/// when present.
+/// Test: `super::tests::*`.
 fn append_content_blocks(
     msg: &ChatMessage,
     blocks: &mut Vec<ContentBlock>,
-) -> Result<(), LlmError> {
+) -> Result<(), InferenceError> {
     match msg.role.as_str() {
         "assistant" => {
             if let Some(text) = &msg.content
@@ -320,7 +308,7 @@ fn append_content_blocks(
                 .tool_use_id(tool_use_id)
                 .content(ToolResultContentBlock::Text(content_text))
                 .build()
-                .map_err(|e| LlmError::Bedrock(format!("build ToolResultBlock: {e}")))?;
+                .map_err(|e| InferenceError::Provider(format!("build ToolResultBlock: {e}")))?;
             blocks.push(ContentBlock::ToolResult(result));
         }
         _ => {
@@ -334,14 +322,14 @@ fn append_content_blocks(
 
 /// Build one Converse `ToolUseBlock` from an assistant turn's `ToolCall`.
 ///
-/// Why: Re-sending prior assistant tool calls as history requires the exact
+/// Why: re-sending prior assistant tool calls as history requires the exact
 /// `tool_use_id`/`name`/`input` triple Converse expects — `input` as a
-/// `Document`, not the OpenAI JSON-string shape tcode stores it in.
-/// What: Parses `call.function.arguments` as JSON (falling back to an empty
+/// `Document`, not the OpenAI JSON-string shape.
+/// What: parses `call.function.arguments` as JSON (falling back to an empty
 /// object on parse failure — a malformed prior call must not abort the whole
 /// request) and converts it to a `Document` via [`json_to_document`].
-/// Test: `bedrock::tests::*`.
-fn tool_use_block(call: &ToolCall) -> Result<ToolUseBlock, LlmError> {
+/// Test: `super::tests::*`.
+fn tool_use_block(call: &ToolCall) -> Result<ToolUseBlock, InferenceError> {
     let parsed: Value = serde_json::from_str(&call.function.arguments)
         .unwrap_or_else(|_| Value::Object(Default::default()));
     let input = json_to_document(&parsed).unwrap_or_else(|| Document::Object(HashMap::new()));
@@ -350,21 +338,22 @@ fn tool_use_block(call: &ToolCall) -> Result<ToolUseBlock, LlmError> {
         .name(&call.function.name)
         .input(input)
         .build()
-        .map_err(|e| LlmError::Bedrock(format!("build ToolUseBlock: {e}")))
+        .map_err(|e| InferenceError::Provider(format!("build ToolUseBlock: {e}")))
 }
 
 /// Flush the in-progress same-role content-block batch into `messages`.
 ///
-/// Why: Shared by the per-message loop (on a role change) and the final
-/// call after the loop ends, so the "merge consecutive same-role turns"
-/// logic lives in exactly one place.
-/// What: No-op when `blocks` is empty; otherwise builds one `Message` from
-/// the accumulated blocks and role, pushes it, and clears both.
+/// Why: shared by the per-message loop (on a role change) and the final call
+/// after the loop ends, so the "merge consecutive same-role turns" logic lives
+/// in exactly one place.
+/// What: no-op when `blocks` is empty; otherwise builds one `Message` from the
+/// accumulated blocks and role, pushes it, and clears both.
+/// Test: exercised by every `super::tests::build_converse_messages_*`.
 fn flush_message(
     messages: &mut Vec<Message>,
     current_role: &mut Option<ConversationRole>,
     blocks: &mut Vec<ContentBlock>,
-) -> Result<(), LlmError> {
+) -> Result<(), InferenceError> {
     if blocks.is_empty() {
         return Ok(());
     }
@@ -373,20 +362,21 @@ fn flush_message(
         .role(role)
         .set_content(Some(std::mem::take(blocks)))
         .build()
-        .map_err(|e| LlmError::Bedrock(format!("build Message: {e}")))?;
+        .map_err(|e| InferenceError::Provider(format!("build Message: {e}")))?;
     messages.push(message);
     Ok(())
 }
 
-/// The provider-neutral decision `interpret_tool_choice` resolves
+/// The provider-neutral decision [`interpret_tool_choice`] resolves
 /// `ChatRequest.tool_choice` to.
 ///
 /// Why: `ChatRequest.tool_choice` is a generic `serde_json::Value` so every
-/// transport can share the field; this enum is the Bedrock transport's own
+/// adapter can share the field; this enum is the Bedrock adapter's own
 /// intermediate representation before building the SDK's `ToolChoice`.
-/// What: Mirrors Converse's three real choices plus `Suppress` (tcode's/
-/// OpenAI's `"none"`, which Converse has no equivalent for — the transport
-/// omits `toolConfig` entirely instead).
+/// What: mirrors Converse's three real choices plus `Suppress` (OpenAI's
+/// `"none"`, which Converse has no equivalent for — the adapter omits
+/// `toolConfig` entirely instead).
+/// Test: exercised via `super::tests::build_tool_config_*`.
 #[derive(Debug, PartialEq, Eq)]
 enum ToolChoiceDecision {
     Auto,
@@ -395,23 +385,20 @@ enum ToolChoiceDecision {
     Suppress,
 }
 
-/// Interpret `ChatRequest.tool_choice` generically across both wire shapes
-/// this transport may see.
+/// Interpret `ChatRequest.tool_choice` generically across both wire shapes this
+/// adapter may see.
 ///
-/// Why: `agent_loop::build_request` currently sends the bare OpenAI string
-/// `"auto"` for every provider (#1021 doesn't rewire that), while
-/// [`super::super::super::provider::BedrockProvider::map_tool_choice`]
-/// produces the Converse-shaped JSON (`{"auto":{}}`, `{"any":{}}`,
-/// `{"tool":{"name":...}}`) for direct callers/tests. Interpreting both here
-/// means the transport is correct today AND once `build_request` is wired to
-/// call the provider's mapping.
+/// Why: a caller may send the bare OpenAI string `"auto"` for every provider, or
+/// the Converse-shaped JSON that [`super::BedrockAdapter::map_tool_choice`]
+/// produces (`{"auto":{}}`, `{"any":{}}`, `{"tool":{"name":...}}`). Interpreting
+/// both here means the adapter is correct regardless of which the caller sends.
 /// What: `None` (or an unrecognised shape) defaults to `Auto` — the safe,
-/// permissive default. `"auto"`/`"required"`/`"any"`/`"none"` strings map
-/// per the OpenAI convention (`"required"` and Converse's `"any"` naming
-/// both mean "must call some tool"). A JSON object naming a tool under
-/// either `tool.name` (Converse shape) or `function.name` (OpenAI
-/// function-selector shape) maps to [`ToolChoiceDecision::Named`].
-/// Test: `bedrock::tests::*`.
+/// permissive default. `"auto"`/`"required"`/`"any"`/`"none"` strings map per the
+/// OpenAI convention (`"required"` and Converse's `"any"` naming both mean "must
+/// call some tool"). A JSON object naming a tool under either `tool.name`
+/// (Converse shape) or `function.name` (OpenAI function-selector shape) maps to
+/// [`ToolChoiceDecision::Named`].
+/// Test: `super::tests::build_tool_config_*`.
 fn interpret_tool_choice(value: Option<&Value>) -> ToolChoiceDecision {
     let Some(value) = value else {
         return ToolChoiceDecision::Auto;
@@ -449,19 +436,19 @@ fn interpret_tool_choice(value: Option<&Value>) -> ToolChoiceDecision {
 
 /// Build a Converse `ToolConfiguration` from `ChatRequest.tools`/`tool_choice`.
 ///
-/// Why: The Converse request only carries a `toolConfig` at all when tools
-/// are being offered; an empty tool list or a `"none"`-equivalent choice
-/// must omit it entirely rather than sending an empty/meaningless config.
-/// What: Returns `Ok(None)` when `tools` is empty or `tool_choice` resolves
-/// to [`ToolChoiceDecision::Suppress`]; otherwise builds one `Tool::ToolSpec`
-/// per [`ToolDefinition`] (JSON-Schema `parameters` converted to a
-/// `Document` via [`json_to_document`]; a missing schema falls back to an
-/// empty object schema) plus the resolved `ToolChoice`.
-/// Test: `bedrock::tests::*`.
+/// Why: the Converse request only carries a `toolConfig` at all when tools are
+/// being offered; an empty tool list or a `"none"`-equivalent choice must omit
+/// it entirely rather than sending an empty/meaningless config.
+/// What: returns `Ok(None)` when `tools` is empty or `tool_choice` resolves to
+/// [`ToolChoiceDecision::Suppress`]; otherwise builds one `Tool::ToolSpec` per
+/// [`ToolDefinition`] (JSON-Schema `parameters` converted to a `Document` via
+/// [`json_to_document`]; a missing schema falls back to an empty object schema)
+/// plus the resolved `ToolChoice`.
+/// Test: `super::tests::build_tool_config_*`.
 pub(super) fn build_tool_config(
     tools: &[ToolDefinition],
     tool_choice: Option<&Value>,
-) -> Result<Option<ToolConfiguration>, LlmError> {
+) -> Result<Option<ToolConfiguration>, InferenceError> {
     if tools.is_empty() {
         return Ok(None);
     }
@@ -479,7 +466,7 @@ pub(super) fn build_tool_config(
             .clone()
             .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
         let doc = json_to_document(&schema).ok_or_else(|| {
-            LlmError::Bedrock(format!(
+            InferenceError::Provider(format!(
                 "tool {:?} parameters must be a JSON object",
                 def.function.name
             ))
@@ -489,16 +476,15 @@ pub(super) fn build_tool_config(
             .set_description(def.function.description.clone())
             .input_schema(ToolInputSchema::Json(doc))
             .build()
-            .map_err(|e| LlmError::Bedrock(format!("build ToolSpecification: {e}")))?;
+            .map_err(|e| InferenceError::Provider(format!("build ToolSpecification: {e}")))?;
         builder = builder.tools(Tool::ToolSpec(spec));
     }
 
-    // (#2260) `agent_loop::build_request` marks the LAST tool definition's
-    // `function.cache_control` when the run is cache-eligible; translate
-    // that marker into a Bedrock-native cachePoint appended after all
-    // `ToolSpec` entries, so the entire (byte-stable) tools array caches as
-    // one unit — mirroring `mark_cache_breakpoint_on_tools`'s OpenRouter
-    // placement. Guarded by the minimum-size floor.
+    // (#2260) A cache-eligible run marks the LAST tool definition's
+    // `function.cache_control`; translate that marker into a Bedrock-native
+    // cachePoint appended after all `ToolSpec` entries, so the entire
+    // (byte-stable) tools array caches as one unit. Guarded by the
+    // minimum-size floor.
     if tools
         .last()
         .is_some_and(|def| def.function.cache_control.is_some())
@@ -514,7 +500,7 @@ pub(super) fn build_tool_config(
             SpecificToolChoice::builder()
                 .name(name)
                 .build()
-                .map_err(|e| LlmError::Bedrock(format!("build SpecificToolChoice: {e}")))?,
+                .map_err(|e| InferenceError::Provider(format!("build SpecificToolChoice: {e}")))?,
         ),
         ToolChoiceDecision::Suppress => unreachable!("handled above"),
     };
@@ -523,23 +509,23 @@ pub(super) fn build_tool_config(
     builder
         .build()
         .map(Some)
-        .map_err(|e| LlmError::Bedrock(format!("build ToolConfiguration: {e}")))
+        .map_err(|e| InferenceError::Provider(format!("build ToolConfiguration: {e}")))
 }
 
-/// Map a Converse response into tcode's provider-neutral `ChatResponse`.
+/// Map a Converse response into the provider-neutral [`ChatResponse`].
 ///
-/// Why: Every downstream consumer (`AgentLoop`, `Transcript`, `PerfCollector`
-/// via `Provider::extract_usage`) speaks `ChatResponse`; this is the single
+/// Why: every downstream consumer speaks [`ChatResponse`]; this is the single
 /// place a Converse response becomes indistinguishable from an OpenRouter one.
-/// What: Joins `Text` content blocks (newline-separated) into
+/// What: joins `Text` content blocks (newline-separated) into
 /// `AssistantMessage.content`; maps each `ToolUse` block into a `ToolCall`
 /// (arguments re-serialised to the OpenAI JSON-string shape via
-/// [`document_to_json_string`]); `finish_reason` is the raw, lowercased
-/// Converse `stopReason` string; `usage` maps `TokenUsage`'s
-/// input/output/cache fields into `UsageBlock` (OpenRouter-only fields —
-/// `prompt_tokens_details`, `cost` — stay `None`, matching the
-/// direct/Bedrock path's existing `UsageBlock` contract).
-/// Test: `bedrock::tests::*`.
+/// [`document_to_json_string`]); `finish_reason` is the raw, lowercased Converse
+/// `stopReason` string; `usage` maps `TokenUsage`'s input/output/cache fields
+/// into [`UsageBlock`]. The camelCase Anthropic/Bedrock usage payload is
+/// hand-constructed here (not deserialised through the OpenAI-shaped serde,
+/// which would yield zeros — see #2403 review); OpenRouter-only fields
+/// (`prompt_tokens_details`, `cost`) stay `None`.
+/// Test: `super::tests::converse_output_to_chat_response_*`.
 pub(super) fn converse_output_to_chat_response(
     output: &ConverseResponse,
     requested_model: &str,
@@ -607,13 +593,13 @@ pub(super) fn converse_output_to_chat_response(
 
 /// Convert a `serde_json::Value` object to an AWS smithy `Document`.
 ///
-/// Why: Bedrock's `ToolInputSchema::Json` and `ToolUseBlock.input` both take
-/// a `Document`; tcode carries JSON Schemas and tool arguments as
+/// Why: Bedrock's `ToolInputSchema::Json` and `ToolUseBlock.input` both take a
+/// `Document`; the neutral types carry JSON Schemas and tool arguments as
 /// `serde_json::Value`/JSON strings.
-/// What: Recursively converts the value tree. Returns `None` when the
-/// top-level value is not a JSON object (Bedrock requires an object at the
-/// top level for both a tool's input schema and its arguments).
-/// Test: `bedrock::tests::*`.
+/// What: recursively converts the value tree. Returns `None` when the top-level
+/// value is not a JSON object (Bedrock requires an object at the top level for
+/// both a tool's input schema and its arguments).
+/// Test: `super::tests::json_to_document_*`.
 pub(super) fn json_to_document(value: &Value) -> Option<Document> {
     match value {
         Value::Object(map) => Some(Document::Object(
@@ -650,13 +636,13 @@ fn json_value_to_doc(v: &Value) -> Document {
 
 /// Convert an AWS smithy `Document` to a JSON string.
 ///
-/// Why: `ToolUseBlock.input` is a `Document`; tcode's `ToolCall.function.arguments`
-/// is a JSON string (the OpenAI wire shape every other transport already uses),
-/// so a Bedrock tool call must be re-serialised into that shape for the rest
-/// of the pipeline (schema validation, tool dispatch) to consume unchanged.
-/// What: Recursively converts to `serde_json::Value`, then serialises.
-/// Returns `None` only on a (should-be-unreachable) serialisation failure.
-/// Test: `bedrock::tests::*`.
+/// Why: `ToolUseBlock.input` is a `Document`; a `ToolCall.function.arguments` is
+/// a JSON string (the OpenAI wire shape every other adapter uses), so a Bedrock
+/// tool call must be re-serialised into that shape for the rest of the pipeline
+/// (schema validation, tool dispatch) to consume unchanged.
+/// What: recursively converts to `serde_json::Value`, then serialises. Returns
+/// `None` only on a (should-be-unreachable) serialisation failure.
+/// Test: `super::tests::json_to_document_round_trips_nested_object`.
 pub(super) fn document_to_json_string(doc: &Document) -> Option<String> {
     serde_json::to_string(&doc_to_json_value(doc)).ok()
 }
