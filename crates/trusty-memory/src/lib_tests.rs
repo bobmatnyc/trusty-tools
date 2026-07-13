@@ -1047,6 +1047,66 @@ async fn bm25_client_enabled_when_env_set() {
     }
 }
 
+/// Why (issue #2223): `with_multi_tenant_mode_from_env()` existed and was
+/// unit-tested at the `authz` level (manual field assignment) but was never
+/// wired into `main.rs` startup, so the env-var parsing path itself had no
+/// coverage. This pins the opt-out default: unset `TRUSTY_MEMORY_MULTI_TENANT`
+/// must leave `multi_tenant_mode = false`, preserving today's single-tenant
+/// behaviour exactly.
+/// What: builds an `AppState` with `with_multi_tenant_mode_from_env()` while
+/// the env var is unset; asserts the field stays `false`.
+/// Test: this test.
+#[tokio::test]
+async fn multi_tenant_mode_disabled_by_default() {
+    // Serialise with the sibling `multi_tenant_mode_enabled_when_env_set`
+    // test so they don't race on the shared `TRUSTY_MEMORY_MULTI_TENANT` env
+    // var (mirrors the BM25 env-test pattern above).
+    let _guard = crate::commands::env_test_lock().lock().await;
+    // SAFETY: this test exercises std::env::remove_var which is unsafe in
+    // 2024 edition because the global env is shared. We restore the
+    // pre-test value at the end so neighbours are unaffected.
+    let prev = std::env::var("TRUSTY_MEMORY_MULTI_TENANT").ok();
+    unsafe {
+        std::env::remove_var("TRUSTY_MEMORY_MULTI_TENANT");
+    }
+    let (state, _tmp) = test_state();
+    let state = state.with_multi_tenant_mode_from_env();
+    assert!(
+        !state.multi_tenant_mode,
+        "multi_tenant_mode must be false when TRUSTY_MEMORY_MULTI_TENANT is unset"
+    );
+    if let Some(v) = prev {
+        unsafe {
+            std::env::set_var("TRUSTY_MEMORY_MULTI_TENANT", v);
+        }
+    }
+}
+
+/// Why (issue #2223): when the operator opts in via
+/// `TRUSTY_MEMORY_MULTI_TENANT=1`, the builder must flip `multi_tenant_mode`
+/// to `true` so `authz::authorize_force_palace_create` starts failing closed
+/// on `force=true` (see `authz.rs`'s own tests for that enforcement).
+/// What: sets the env var, runs the builder, asserts `true`.
+/// Test: this test.
+#[tokio::test]
+async fn multi_tenant_mode_enabled_when_env_set() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    let prev = std::env::var("TRUSTY_MEMORY_MULTI_TENANT").ok();
+    unsafe {
+        std::env::set_var("TRUSTY_MEMORY_MULTI_TENANT", "1");
+    }
+    let (state, _tmp) = test_state();
+    let state = state.with_multi_tenant_mode_from_env();
+    assert!(
+        state.multi_tenant_mode,
+        "multi_tenant_mode must be true when TRUSTY_MEMORY_MULTI_TENANT=1"
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("TRUSTY_MEMORY_MULTI_TENANT", v) },
+        None => unsafe { std::env::remove_var("TRUSTY_MEMORY_MULTI_TENANT") },
+    }
+}
+
 // -------------------------------------------------------------------------
 // Issues #910 / #911 — DaemonReadiness
 // -------------------------------------------------------------------------
