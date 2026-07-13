@@ -321,9 +321,9 @@ pub(crate) async fn session_stop(
 /// an error instead of printing a status line.
 /// Test: HTTP path covered by the integration test; parse by
 /// `cli_parses_session_managed_resume_verb`; `session_resume_not_found_errors`
-/// covers the #2457 exit-code fix for the 404 branch (the identical 409/conflict
-/// fix needs a session seeded into a non-resumable state — see
-/// `managed_tests.rs`'s module doc for why that is left uncovered here).
+/// covers the #2457 exit-code fix for the 404 branch; `session_resume_conflict_state_errors`
+/// (in `managed_tests.rs`, #2521) covers the identical 409/conflict fix by
+/// seeding a session into a non-resumable state.
 pub(crate) async fn session_resume(
     client: &reqwest::Client,
     url: &str,

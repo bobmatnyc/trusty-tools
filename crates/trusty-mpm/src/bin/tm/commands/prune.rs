@@ -330,19 +330,237 @@ pub(crate) async fn prune_idle(
         return Ok(());
     }
 
-    // 5) Execute the actionable rows by REUSING the existing managed operations.
-    for p in &plan {
-        match p.action {
-            PruneAction::Stop => {
-                super::managed::session_stop(client, url, p.id.clone()).await?;
-            }
-            PruneAction::Decommission => {
-                super::managed::session_decommission(client, url, p.id.clone()).await?;
-            }
-            PruneAction::Skip(_) => {}
-        }
+    // 5) Execute the actionable rows by REUSING the existing managed operations,
+    //    best-effort: a single session vanishing mid-sweep (raced by the idle
+    //    reaper, a concurrent stop, or an overlapping prune) must not abort the
+    //    REST of the sweep (#2521 review). `execute_plan` catches each row's
+    //    error instead of `?`-propagating it, so every actionable row is
+    //    attempted regardless of earlier failures.
+    let executed = execute_plan(client, url, &plan).await;
+    if json {
+        println!("{}", render_execution_summary_json(&executed)?);
+    } else {
+        print!("{}", render_execution_summary_text(&executed));
+    }
+
+    // The command still fails overall (non-zero exit, matching #2457's
+    // fail-closed spirit) when ANY row failed — but only after the sweep has
+    // run to completion, and the summary above already reported which rows.
+    let (_, failed, _) = summarize_execution(&executed);
+    if failed > 0 {
+        anyhow::bail!(
+            "prune sweep completed with {failed} failure(s) out of {} session(s); see summary above",
+            executed.len()
+        );
     }
     Ok(())
+}
+
+/// Outcome of attempting one planned action against the daemon.
+///
+/// Why: the #2521 review found the live-execute loop `?`-propagated the FIRST
+/// per-session failure, aborting the rest of the sweep while the
+/// pre-execution "acted on N of M" line kept describing only the intention.
+/// Tracking a per-row outcome lets the sweep run best-effort to completion and
+/// lets the post-execution summary report what ACTUALLY happened.
+/// What: `Succeeded`/`Failed(reason)` for attempted (stop/decommission) rows,
+/// `Skipped` for rows the policy already excluded from execution.
+/// Test: `execute_plan_is_best_effort_and_reports_accurately` in `prune_tests.rs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExecOutcome {
+    /// The stop/decommission call succeeded.
+    Succeeded,
+    /// The stop/decommission call failed; carries the error's `Display` text.
+    Failed(String),
+    /// The policy decided to skip this session — never attempted.
+    Skipped,
+}
+
+/// One executed row: the session identity plus its actual outcome.
+///
+/// Why: the post-execution summary (text or JSON) needs the id/name alongside
+/// the outcome so it can name exactly which sessions failed.
+/// What: carries `id`, `name`, and the row's [`ExecOutcome`].
+/// Test: produced by `execute_plan`; rendered by `render_execution_summary_*`.
+struct ExecutedRow {
+    id: String,
+    name: String,
+    outcome: ExecOutcome,
+}
+
+/// Execute every row in the plan, never aborting the sweep on a per-row error.
+///
+/// Why: this IS the fix for the #2521 review finding — a raced session
+/// disappearing between planning and execution must not stop the sweep from
+/// acting on the rest of the fleet. Each failure is (a) logged to stderr
+/// immediately, for an operator watching live output, and (b) captured in the
+/// returned row so the post-sweep summary is accurate rather than aspirational.
+/// What: for each [`PlannedAction`], calls the matching
+/// `managed::session_stop` / `managed::session_decommission` handler and
+/// catches (does not propagate) its `Err`; `Skip` rows are recorded as
+/// `Skipped` without an HTTP call.
+/// Test: `execute_plan_is_best_effort_and_reports_accurately`.
+async fn execute_plan(
+    client: &reqwest::Client,
+    url: &str,
+    plan: &[PlannedAction],
+) -> Vec<ExecutedRow> {
+    let mut results = Vec::with_capacity(plan.len());
+    for p in plan {
+        let outcome = match &p.action {
+            PruneAction::Stop => {
+                match super::managed::session_stop(client, url, p.id.clone()).await {
+                    Ok(()) => ExecOutcome::Succeeded,
+                    Err(e) => {
+                        eprintln!(
+                            "prune: failed to stop session {} ({}): {e}",
+                            p.name,
+                            short_id(&p.id)
+                        );
+                        ExecOutcome::Failed(e.to_string())
+                    }
+                }
+            }
+            PruneAction::Decommission => {
+                match super::managed::session_decommission(client, url, p.id.clone()).await {
+                    Ok(()) => ExecOutcome::Succeeded,
+                    Err(e) => {
+                        eprintln!(
+                            "prune: failed to decommission session {} ({}): {e}",
+                            p.name,
+                            short_id(&p.id)
+                        );
+                        ExecOutcome::Failed(e.to_string())
+                    }
+                }
+            }
+            PruneAction::Skip(_) => ExecOutcome::Skipped,
+        };
+        results.push(ExecutedRow {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            outcome,
+        });
+    }
+    results
+}
+
+/// Count succeeded/failed/skipped rows (pure).
+///
+/// Why: shared by both the text and JSON post-execution renderers so the
+/// counts can never drift between the two output modes, and by `prune_idle`'s
+/// final exit-code decision.
+/// What: returns `(succeeded, failed, skipped)`.
+/// Test: `render_execution_summary_text_reports_failures`,
+/// `render_execution_summary_json_reports_failures`.
+fn summarize_execution(rows: &[ExecutedRow]) -> (usize, usize, usize) {
+    let succeeded = rows
+        .iter()
+        .filter(|r| r.outcome == ExecOutcome::Succeeded)
+        .count();
+    let failed = rows
+        .iter()
+        .filter(|r| matches!(r.outcome, ExecOutcome::Failed(_)))
+        .count();
+    let skipped = rows
+        .iter()
+        .filter(|r| r.outcome == ExecOutcome::Skipped)
+        .count();
+    (succeeded, failed, skipped)
+}
+
+/// Render the post-execution outcome as an operator-readable summary.
+///
+/// Why: the pre-execution plan line ("acted on N of M") states an INTENTION;
+/// this renders what ACTUALLY happened, naming every row that failed so a
+/// partial sweep is never silently hidden behind the earlier optimistic line.
+/// What: one `FAILED  name (short-id)  reason` line per failed row, followed
+/// by a `succeeded/failed/skipped of total` summary line.
+/// Test: `render_execution_summary_text_reports_failures`.
+fn render_execution_summary_text(rows: &[ExecutedRow]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        if let ExecOutcome::Failed(reason) = &r.outcome {
+            out.push_str(&format!(
+                "FAILED        {} ({})  {reason}\n",
+                r.name,
+                short_id(&r.id)
+            ));
+        }
+    }
+    let (succeeded, failed, skipped) = summarize_execution(rows);
+    out.push_str(&format!(
+        "prune sweep complete: {succeeded} succeeded, {failed} failed, {skipped} skipped of {} session(s)\n",
+        rows.len()
+    ));
+    out
+}
+
+/// JSON row for the post-execution `--json` summary.
+///
+/// Why: mirrors [`JsonRow`]'s flat shape so programmatic callers get a stable,
+/// self-describing per-session outcome for the ACTUAL sweep result.
+/// What: `id`, `name`, `outcome` (`"succeeded"`/`"failed"`/`"skipped"`), and
+/// `error` (the failure reason, empty for non-failed rows).
+/// Test: `render_execution_summary_json_reports_failures`.
+#[derive(Debug, Serialize)]
+struct ExecutionJsonRow {
+    id: String,
+    name: String,
+    outcome: String,
+    error: String,
+}
+
+/// Top-level JSON document for the post-execution `--json` summary.
+///
+/// Why: printed AFTER the pre-execution plan JSON, only for live (non-dry-run)
+/// runs, so a programmatic caller (e.g. the claude-mpm pause skill) can tell
+/// "what was planned" apart from "what actually happened".
+/// What: `succeeded`/`failed`/`skipped`/`total` counts plus the per-session
+/// `sessions` rows.
+/// Test: `render_execution_summary_json_reports_failures`.
+#[derive(Debug, Serialize)]
+struct ExecutionSummaryJson {
+    succeeded: usize,
+    failed: usize,
+    skipped: usize,
+    total: usize,
+    sessions: Vec<ExecutionJsonRow>,
+}
+
+/// Render the post-execution outcome as a single JSON object.
+///
+/// Why: JSON companion to [`render_execution_summary_text`] — programmatic
+/// callers need the ACTUAL result of a live sweep, not just the pre-execution
+/// plan that was already printed.
+/// What: serializes an [`ExecutionSummaryJson`].
+/// Test: `render_execution_summary_json_reports_failures`.
+fn render_execution_summary_json(rows: &[ExecutedRow]) -> anyhow::Result<String> {
+    let (succeeded, failed, skipped) = summarize_execution(rows);
+    let sessions = rows
+        .iter()
+        .map(|r| {
+            let (outcome, error) = match &r.outcome {
+                ExecOutcome::Succeeded => ("succeeded", String::new()),
+                ExecOutcome::Failed(e) => ("failed", e.clone()),
+                ExecOutcome::Skipped => ("skipped", String::new()),
+            };
+            ExecutionJsonRow {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                outcome: outcome.to_string(),
+                error,
+            }
+        })
+        .collect::<Vec<_>>();
+    let doc = ExecutionSummaryJson {
+        succeeded,
+        failed,
+        skipped,
+        total: rows.len(),
+        sessions,
+    };
+    Ok(serde_json::to_string_pretty(&doc)?)
 }
 
 /// A managed-session id+name pair as read from the list endpoint.
@@ -515,186 +733,10 @@ async fn fetch_verdict(client: &reqwest::Client, url: &str, id: &str) -> Option<
     body.classification.or(body.state)
 }
 
+// Unit tests live in prune_tests.rs (test-file budget: 1500 SLOC) — extracted
+// from an inline `mod tests` (mirroring managed.rs/managed_tests.rs) so the
+// #2521 best-effort-sweep HTTP-round-trip coverage doesn't push this
+// production file toward the 500-SLOC cap.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(id: &str, name: &str, verdict: Option<&str>) -> SessionVerdict {
-        SessionVerdict {
-            id: id.to_string(),
-            name: name.to_string(),
-            verdict: verdict.map(str::to_string),
-        }
-    }
-
-    /// Why: prove the orchestration maps every verdict through the policy
-    /// (idle→stop, done→decommission, working/none→skip) in one pass.
-    /// What: builds a plan over mixed rows and asserts each chosen action.
-    /// Test: this test.
-    #[test]
-    fn build_plan_maps_each_verdict() {
-        let rows = vec![
-            row("11111111-a", "alpha", Some("idle")),
-            row("22222222-b", "bravo", Some("done")),
-            row("33333333-c", "charlie", Some("working")),
-            row("44444444-d", "delta", None),
-        ];
-        let plan = build_plan(&rows);
-        assert_eq!(plan[0].action, PruneAction::Stop);
-        assert_eq!(plan[1].action, PruneAction::Decommission);
-        assert!(matches!(plan[2].action, PruneAction::Skip(_)));
-        assert!(matches!(plan[3].action, PruneAction::Skip(_)));
-        assert_eq!(plan[3].verdict, "none");
-    }
-
-    /// Why: the plan order must mirror the daemon's list order for stable output.
-    /// What: asserts ids appear in input order.
-    /// Test: this test.
-    #[test]
-    fn build_plan_preserves_order() {
-        let rows = vec![
-            row("aaaa-1", "a", Some("idle")),
-            row("bbbb-2", "b", Some("idle")),
-        ];
-        let plan = build_plan(&rows);
-        assert_eq!(plan[0].id, "aaaa-1");
-        assert_eq!(plan[1].id, "bbbb-2");
-    }
-
-    /// Why: `--dry-run` correctness — building the plan is pure and yields the
-    /// SAME actionable set the live path would execute, with no side effects.
-    /// What: asserts the dry-run plan equals the live plan (same input → same
-    /// decisions) and that only stop/decommission rows are counted actionable.
-    /// Test: this test.
-    #[test]
-    fn build_plan_dry_run_matches_live_plan() {
-        let rows = vec![
-            row("1-a", "a", Some("idle")),
-            row("2-b", "b", Some("done")),
-            row("3-c", "c", Some("errored")),
-        ];
-        // The function is pure: calling it twice (as dry-run then live would)
-        // produces identical decisions, proving dry-run previews the live action.
-        let dry = build_plan(&rows);
-        let live = build_plan(&rows);
-        let labels = |p: &[PlannedAction]| p.iter().map(|x| x.action.label()).collect::<Vec<_>>();
-        assert_eq!(labels(&dry), labels(&live));
-        assert_eq!(actionable_count(&dry), 2);
-    }
-
-    /// Why: the summary counter must exclude skips.
-    /// What: asserts the actionable count over a mixed plan.
-    /// Test: this test.
-    #[test]
-    fn actionable_count_excludes_skips() {
-        let rows = vec![
-            row("1", "a", Some("idle")),
-            row("2", "b", Some("working")),
-            row("3", "c", Some("done")),
-        ];
-        assert_eq!(actionable_count(&build_plan(&rows)), 2);
-    }
-
-    /// Why: the text plan must show each session with its verdict and action.
-    /// What: asserts the rendered table contains the names, verbs, and short id.
-    /// Test: this test.
-    #[test]
-    fn render_plan_text_lists_actions() {
-        let rows = vec![
-            row("11111111-aaaa", "alpha", Some("idle")),
-            row("22222222-bbbb", "bravo", Some("working")),
-        ];
-        let out = render_plan_text(&build_plan(&rows), true);
-        assert!(out.contains("stop"));
-        assert!(out.contains("alpha"));
-        assert!(out.contains("11111111"));
-        assert!(out.contains("skip"));
-        assert!(out.contains("bravo"));
-        assert!(out.contains("dry run"));
-        assert!(out.contains("would act on 1 of 2"));
-    }
-
-    /// Why: an empty fleet must render a clear no-op line, not a blank.
-    /// What: asserts the empty-plan message.
-    /// Test: this test.
-    #[test]
-    fn render_plan_text_empty() {
-        assert_eq!(
-            render_plan_text(&[], true),
-            "no managed sessions to prune\n"
-        );
-    }
-
-    /// Why: the JSON contract for the claude-mpm pause skill must be stable.
-    /// What: parses the rendered JSON and asserts the document shape and a row.
-    /// Test: this test.
-    #[test]
-    fn render_plan_json_shape() {
-        let rows = vec![
-            row("1-a", "alpha", Some("idle")),
-            row("2-b", "bravo", Some("working")),
-        ];
-        let json = render_plan_json(&build_plan(&rows), true).expect("json");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        assert_eq!(v["dry_run"], true);
-        assert_eq!(v["actionable"], 1);
-        assert_eq!(v["total"], 2);
-        assert_eq!(v["sessions"][0]["action"], "stop");
-        assert_eq!(v["sessions"][0]["verdict"], "idle");
-        assert_eq!(v["sessions"][1]["action"], "skip");
-        assert_eq!(v["sessions"][1]["reason"], "working");
-    }
-
-    /// Why: the concurrent verdict fan-out (`JoinSet`) completes tasks in
-    /// nondeterministic order, but the plan must mirror the daemon's list order.
-    /// `reorder_by_index` is the pure piece that restores it; proving it sorts
-    /// out-of-order completions back to input order guarantees deterministic
-    /// plans (and byte-identical dry-run/live output) regardless of scheduling.
-    /// What: feeds `(index, row)` pairs in shuffled order and asserts the result
-    /// is in ascending-index (i.e. original list) order.
-    /// Test: this test.
-    #[test]
-    fn fetch_verdicts_preserves_order() {
-        // Tasks "completed" out of order: indices 2, 0, 1.
-        let shuffled = vec![
-            (2, row("c", "charlie", Some("done"))),
-            (0, row("a", "alpha", Some("idle"))),
-            (1, row("b", "bravo", Some("working"))),
-        ];
-        let ordered = reorder_by_index(shuffled);
-        let ids: Vec<&str> = ordered.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["a", "b", "c"]);
-    }
-
-    /// Why: the SM-unavailable `--json` branch must emit the SAME serde schema as
-    /// the available path (issue #1313 review finding #4) — never a hand-rolled
-    /// literal. The only difference is `sm_available: false` and empty counts.
-    /// What: parses `render_unavailable_json` and asserts every field the
-    /// available-path `render_plan_json_shape` test checks, plus `sm_available`.
-    /// Test: this test.
-    #[test]
-    fn render_unavailable_json_shape() {
-        let json = render_unavailable_json(true).expect("json");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        // Same schema/keys as the available path…
-        assert_eq!(v["dry_run"], true);
-        assert_eq!(v["actionable"], 0);
-        assert_eq!(v["total"], 0);
-        assert!(v["sessions"].is_array());
-        assert_eq!(v["sessions"].as_array().expect("array").len(), 0);
-        // …distinguished only by the availability flag.
-        assert_eq!(v["sm_available"], false);
-        // The available path sets the same flag to `true`.
-        let avail = render_plan_json(&[], false).expect("json");
-        let av: serde_json::Value = serde_json::from_str(&avail).expect("parse");
-        assert_eq!(av["sm_available"], true);
-    }
-
-    /// Why: the graceful no-op exit code must stay the documented constant.
-    /// What: asserts the value the pause skill branches on.
-    /// Test: this test.
-    #[test]
-    fn unavailable_exit_code_is_stable() {
-        assert_eq!(EXIT_SM_UNAVAILABLE, 75);
-    }
-}
+#[path = "prune_tests.rs"]
+mod tests;
