@@ -214,9 +214,13 @@ pub(crate) fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, cont
 /// What: Clones the default filter and bumps `min_tokens` to `MCP_MIN_TOKENS`.
 /// Test: `dispatch_remember_rejects_short_content`;
 /// `remember_succeeds_and_defers_embedding_while_state_is_warming` covers
-/// `defer_embedding`; `dispatch_remember_force_still_blocks_secret`,
-/// `dispatch_remember_allow_secret_like_bypasses_secret_gate` cover
-/// `allow_secret_like`.
+/// `defer_embedding`; `dispatch_remember_force_still_blocks_secret` and
+/// `dispatch_remember_allow_secret_like_bypasses_secret_gate` (this crate's
+/// `tools::tests`) cover `allow_secret_like` end-to-end through MCP dispatch;
+/// `remember_force_still_blocks_secret` and
+/// `remember_force_and_allow_secret_like_stores_secret_shaped_content`
+/// (`trusty_common::memory_core::retrieval::tests`) cover the same split at
+/// the library layer.
 pub(crate) fn mcp_remember_opts(
     force: bool,
     defer_embedding: bool,

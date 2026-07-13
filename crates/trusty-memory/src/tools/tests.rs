@@ -1521,6 +1521,85 @@ async fn dispatch_remember_force_bypasses_short_content_gate() {
     );
 }
 
+/// Why (issue #2520, two-tier `force` MAJOR fix): `force = true` bypasses
+/// the QUALITY gates (blocklist, short-content, noise) but must NEVER
+/// silently bypass secret detection — an automated writer that always sets
+/// `force: true` (e.g. trusty-code's per-turn memory sink) would otherwise
+/// persist raw credentials with zero screening.
+/// What: dispatch a `force: true` write of secret-shaped content over the
+/// MCP surface and assert the call still errors naming the secret; no
+/// drawer lands.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_force_still_blocks_secret() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "sec-force"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "sec-force",
+            "text": "deploy uses token AbCd1234EfGh5678IjKl9012 for the prod webhook auth", // pragma: allowlist secret
+            "force": true,
+        }),
+    )
+    .await
+    .expect_err("force=true must still reject secret-shaped content");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("secret"),
+        "expected a secret-gate rejection even under force; got: {msg}"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "sec-force", "limit": 10}),
+    )
+    .await
+    .expect("memory_list");
+    let drawers = listed["drawers"].as_array().expect("drawers array");
+    assert!(
+        drawers.is_empty(),
+        "no drawer should be written for a secret, even under force"
+    );
+}
+
+/// Why (issue #2520, two-tier `force` MAJOR fix): the separate
+/// `allow_secret_like` MCP arg is the only way to bypass the secret gate —
+/// asserts it works end-to-end through the dispatch surface (arg parsing in
+/// `handle_memory_remember` through to `RememberOptions::allow_secret_like`).
+/// What: dispatch a write with both `force: true` and `allow_secret_like:
+/// true` set and assert the secret-shaped content is `stored`.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_allow_secret_like_bypasses_secret_gate() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "sec-allow"}))
+        .await
+        .expect("palace_create");
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "sec-allow",
+            "text": "deploy uses token AbCd1234EfGh5678IjKl9012 for the prod webhook auth", // pragma: allowlist secret
+            "force": true,
+            "allow_secret_like": true,
+        }),
+    )
+    .await
+    .expect("force + allow_secret_like must bypass the secret gate too");
+    assert_eq!(
+        res["status"], "stored",
+        "allow_secret_like=true must let secret-shaped content through; got {res:?}"
+    );
+}
+
 /// Why (issue #2442, live false positives): two real-world memories were
 /// rejected by the secret heuristic during trusty-mpm orchestration despite
 /// containing no actual credential — a Rust source-location reference
