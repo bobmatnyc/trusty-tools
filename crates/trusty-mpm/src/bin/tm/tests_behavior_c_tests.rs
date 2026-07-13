@@ -26,10 +26,10 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    CwdProject, classify_cwd_project, derive_project, fallback_protected, github_host,
-    is_github_remote, ls_tree_reports_tracked_dir, nested_guard_notice, nested_managed_match,
-    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
-    tty_gate, untracked_ancestor_message,
+    CwdProject, classify_cwd_project, cwd_owns_git_entry, derive_project, fallback_protected,
+    github_host, is_github_remote, ls_tree_reports_tracked_dir, nested_guard_notice,
+    nested_managed_match, non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint,
+    print_project_context, tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -484,6 +484,151 @@ fn guided_derive_project_returns_none_for_untracked_ancestor_subdir() {
         derive_project(&untracked).is_none(),
         "derive_project must return None for an untracked ancestor subdir"
     );
+}
+
+// ── #2542: own-repo-wins (cwd's own `.git` beats an ancestor's) ───────────────
+
+#[test]
+fn guided_cwd_owns_git_entry_true_for_dir() {
+    // Why: a `.git` DIRECTORY is the normal repository marker.
+    let tmp = tempdir_with_name("trusty_test_owns_git_dir_2542");
+    std::fs::create_dir_all(tmp.join(".git")).unwrap();
+    assert!(cwd_owns_git_entry(&tmp));
+}
+
+#[test]
+fn guided_cwd_owns_git_entry_true_for_pointer_file() {
+    // Why: a `.git` FILE is a linked-worktree / submodule gitlink — still a
+    // working-tree root. Even a dangling pointer (target moved by a rescue)
+    // means "this dir is its own repo", so it must count as owned.
+    let tmp = tempdir_with_name("trusty_test_owns_git_file_2542");
+    std::fs::write(tmp.join(".git"), b"gitdir: ./moved-away\n").unwrap();
+    assert!(cwd_owns_git_entry(&tmp));
+}
+
+#[test]
+fn guided_cwd_owns_git_entry_false_for_dotgit_prefixed_sibling() {
+    // Why: the exact-name guarantee — a `.git`-PREFIXED sibling such as
+    // `.git.hotstats-backup-20260713` (a preserved gitdir from a rescue) is NOT
+    // a repo marker. A `starts_with(".git")`/glob test would be the bug.
+    let tmp = tempdir_with_name("trusty_test_owns_git_prefixed_2542");
+    std::fs::create_dir_all(tmp.join(".git.hotstats-backup-20260713")).unwrap();
+    assert!(
+        !cwd_owns_git_entry(&tmp),
+        "a `.git`-prefixed sibling must NOT be treated as owning a repo"
+    );
+}
+
+#[test]
+fn guided_cwd_owns_git_entry_false_when_absent() {
+    // Why: a plain directory owns no repo.
+    let tmp = tempdir_with_name("trusty_test_owns_git_absent_2542");
+    assert!(!cwd_owns_git_entry(&tmp));
+}
+
+#[test]
+fn guided_classify_cwd_own_git_wins_over_ancestor() {
+    // Why: the #2542 differential. `cwd` owns a `.git` entry that is present but
+    // transiently INVALID (an empty, partially-reconstructed gitdir — the exact
+    // shape a concurrent `git` rescue leaves). `git rev-parse --show-toplevel`
+    // walks PAST it up to the enclosing `outer` repo (asserted below), so the
+    // pre-fix code classified this as `UntrackedInsideAncestor(outer)` and bare
+    // `tm` wrongly reported "inside another repository's working tree". Own-repo
+    // -wins must classify it as `Usable(cwd)` — its OWN repo, never the ancestor.
+    let outer = tempdir_with_name("trusty_test_own_git_wins_2542");
+    if !git_init_with_commit(&outer) {
+        return; // git unavailable — skip
+    }
+    let inner = outer.join("inner");
+    std::fs::create_dir_all(inner.join(".git")).unwrap(); // present-but-invalid gitdir
+
+    // Precondition: git's upward walk skips the invalid `inner/.git` and lands
+    // on `outer` — the exact behavior the fast-path overrides.
+    if let Some(walked) = find_git_root_via_cli(&inner) {
+        let walked = walked.canonicalize().unwrap_or(walked);
+        let outer_c = outer.canonicalize().unwrap_or_else(|_| outer.clone());
+        assert_eq!(
+            walked, outer_c,
+            "precondition: git walks up to the ancestor"
+        );
+    }
+
+    match classify_cwd_project(&inner) {
+        CwdProject::Usable(root) => {
+            let root = root.canonicalize().unwrap_or(root);
+            let inner_c = inner.canonicalize().unwrap_or_else(|_| inner.clone());
+            assert_eq!(
+                root, inner_c,
+                "must resolve to cwd's OWN repo, not the ancestor"
+            );
+        }
+        other => panic!("cwd owning a `.git` must be Usable(cwd), got {other:?}"),
+    }
+}
+
+#[test]
+fn guided_classify_cwd_own_git_ignores_dotgit_prefixed_sibling() {
+    // Why: task guarantee (a)+(b) — an inner repo with a `.git`-suffixed sibling
+    // dir in its ancestor resolves to ITSELF, never the sibling or the ancestor.
+    let outer = tempdir_with_name("trusty_test_own_git_sibling_2542");
+    if !git_init_with_commit(&outer) {
+        return;
+    }
+    // A `.git`-prefixed backup sibling in the ancestor — must be inert.
+    std::fs::create_dir_all(outer.join(".git.backup-20260713")).unwrap();
+    let inner = outer.join("inner");
+    std::fs::create_dir_all(inner.join(".git")).unwrap();
+    match classify_cwd_project(&inner) {
+        CwdProject::Usable(root) => {
+            let root = root.canonicalize().unwrap_or(root);
+            let inner_c = inner.canonicalize().unwrap_or_else(|_| inner.clone());
+            assert_eq!(root, inner_c);
+        }
+        other => panic!("inner repo must be Usable(inner), got {other:?}"),
+    }
+}
+
+#[test]
+fn guided_classify_cwd_own_git_worktree_pointer_file() {
+    // Why: a `.git` POINTER FILE (linked worktree / submodule gitlink) is a
+    // working-tree root just like a `.git` directory — must be Usable(cwd).
+    let outer = tempdir_with_name("trusty_test_own_git_ptr_2542");
+    if !git_init_with_commit(&outer) {
+        return;
+    }
+    let inner = outer.join("wt");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(inner.join(".git"), b"gitdir: /somewhere/else\n").unwrap();
+    match classify_cwd_project(&inner) {
+        CwdProject::Usable(root) => {
+            let root = root.canonicalize().unwrap_or(root);
+            let inner_c = inner.canonicalize().unwrap_or_else(|_| inner.clone());
+            assert_eq!(root, inner_c);
+        }
+        other => panic!("cwd with a `.git` pointer file must be Usable(cwd), got {other:?}"),
+    }
+}
+
+#[test]
+fn guided_classify_cwd_untracked_ancestor_still_refuses_without_own_git() {
+    // Why: the #2534 guarantee must survive the #2542 fast-path. An untracked
+    // directory that has NO own `.git`, nested in a REAL ancestor repo, must
+    // still be `UntrackedInsideAncestor` — the fast-path only fires when cwd
+    // owns a `.git`, so this path is unchanged.
+    let outer = tempdir_with_name("trusty_test_untracked_still_refuses_2542");
+    if !git_init_with_commit(&outer) {
+        return;
+    }
+    let untracked = outer.join("notes");
+    std::fs::create_dir_all(&untracked).unwrap();
+    assert!(
+        !cwd_owns_git_entry(&untracked),
+        "precondition: untracked dir owns no `.git`"
+    );
+    match classify_cwd_project(&untracked) {
+        CwdProject::UntrackedInsideAncestor(_) => {}
+        other => panic!("#2534 case must still refuse the ancestor, got {other:?}"),
+    }
 }
 
 /// Local helper: resolve the git working-tree root via the CLI (mirrors the

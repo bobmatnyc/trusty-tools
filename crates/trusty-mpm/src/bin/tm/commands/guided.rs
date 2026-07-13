@@ -639,6 +639,7 @@ fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
 /// Test: `guided_classify_cwd_usable_for_tracked_subdir`,
 /// `guided_classify_cwd_untracked_for_uncommitted_subdir`,
 /// `guided_classify_cwd_not_git_for_plain_dir`.
+#[derive(Debug)]
 pub(crate) enum CwdProject {
     /// `cwd` belongs to this git root's tracked tree (or IS the root).
     Usable(std::path::PathBuf),
@@ -648,26 +649,69 @@ pub(crate) enum CwdProject {
     NotGit,
 }
 
+/// Does `cwd` directly own a `.git` entry — i.e. is `cwd` itself a working-tree
+/// root, whose identity must never be inherited from an enclosing ancestor?
+///
+/// Why: the own-repo-wins guard (#2542). A `.git` entry is either a directory
+/// (normal repository) or a *file* (a linked-worktree / submodule gitlink whose
+/// content is `gitdir: <path>`) — BOTH mean `cwd` is a working-tree root. The
+/// match MUST be on the EXACT entry name `.git`: a `.git`-prefixed sibling such as
+/// `.git.hotstats-backup-20260713` (a preserved gitdir from a rescue) is NOT a
+/// repo marker and must be ignored, so a `starts_with(".git")`/glob test would be
+/// a bug. `Path::join(".git")` composes the exact name and `try_exists` follows a
+/// `.git` symlink to its target while still reporting a broken/absent entry as
+/// not-owned.
+/// What: returns `true` when `cwd/.git` exists as any file-system entry (dir,
+/// file, or a symlink resolving to one), `false` when it is absent or a query
+/// error occurs (fail-open to the git-walk path — never falsely claim ownership).
+/// Test: `guided_cwd_owns_git_entry_true_for_dir`,
+/// `guided_cwd_owns_git_entry_true_for_pointer_file`,
+/// `guided_cwd_owns_git_entry_false_for_dotgit_prefixed_sibling`,
+/// `guided_cwd_owns_git_entry_false_when_absent`.
+pub(crate) fn cwd_owns_git_entry(cwd: &std::path::Path) -> bool {
+    cwd.join(".git").try_exists().unwrap_or(false)
+}
+
 /// Classify `cwd` against its nearest enclosing git working tree, verifying
 /// tracked-tree membership before trusting an *ancestor* repo's identity.
 ///
-/// Why: closes the ancestor-`.git` trust gap (#2534). `find_git_root` alone
-/// cannot tell an intentionally-nested tracked subdirectory apart from an
-/// unrelated directory that merely falls inside a repo's path span (the APFS
-/// case-fold collision that made `~/Duetto/cto` resolve to the enclosing
+/// Why: closes the ancestor-`.git` trust gap (#2534) AND the inverse gap where a
+/// directory that DOES own its repo was wrongly adopted into an ancestor (#2542).
+/// `find_git_root` alone cannot tell an intentionally-nested tracked subdirectory
+/// apart from an unrelated directory that merely falls inside a repo's path span
+/// (the APFS case-fold collision that made `~/Duetto/cto` resolve to the enclosing
 /// `hotstats/hotstats-knowledgebase` repo). The tracked-tree check does.
-/// What: resolves the git root. When the root IS `cwd` (the common top-level
-/// case) it is trusted unconditionally — behavior UNCHANGED. When the root is a
-/// strict ancestor, `cwd`'s path relative to the root is checked for tracked-tree
-/// membership via [`cwd_is_tracked_within`]; a hit is `Usable`, a miss is
-/// `UntrackedInsideAncestor`. A prefix mismatch (e.g. symlink canonicalisation
-/// differences between `current_dir` and `git rev-parse --show-toplevel`) cannot
-/// yield a relpath, so it conservatively trusts the root (`Usable`) rather than
-/// newly refusing a previously-working checkout.
-/// Test: `guided_classify_cwd_usable_for_tracked_subdir`,
+/// Separately, `git rev-parse --show-toplevel` walks *past* a `cwd/.git` that is
+/// present but transiently invalid (e.g. a partially-reconstructed gitdir left by
+/// a concurrent `git` rescue) all the way up to an ancestor repo — observed live
+/// as `~/Duetto/cto` (its own repo) being reported as "inside another repository's
+/// working tree (`~/Duetto`)". A directory that physically contains a `.git` entry
+/// IS a working-tree root; its identity is its OWN repo, never an ancestor's.
+/// What: (0) OWN-REPO-WINS — if `cwd` directly contains a `.git` entry (a
+/// directory for a normal repo, or a worktree/submodule gitlink *file*; matched by
+/// EXACT name via [`cwd_owns_git_entry`], never a `.git`-prefixed sibling such as
+/// `.git.backup`), classify `Usable(cwd)` immediately without consulting git's
+/// upward walk. Otherwise (1) resolve the git root; when the root IS `cwd` it is
+/// trusted unconditionally; when the root is a strict ancestor, `cwd`'s relative
+/// path is checked for tracked-tree membership via [`cwd_is_tracked_within`] — a
+/// hit is `Usable`, a miss is `UntrackedInsideAncestor`. A prefix mismatch (e.g.
+/// symlink canonicalisation differences) conservatively trusts the root
+/// (`Usable`) rather than newly refusing a previously-working checkout.
+/// Test: `guided_classify_cwd_own_git_wins_over_ancestor` (#2542 differential),
+/// `guided_classify_cwd_own_git_ignores_dotgit_prefixed_sibling` (#2542),
+/// `guided_classify_cwd_own_git_worktree_pointer_file` (#2542 gitlink file),
+/// `guided_classify_cwd_usable_for_tracked_subdir`,
 /// `guided_classify_cwd_untracked_for_uncommitted_subdir`,
 /// `guided_classify_cwd_usable_for_repo_root`.
 pub(crate) fn classify_cwd_project(cwd: &std::path::Path) -> CwdProject {
+    // (0) Own-repo-wins (#2542): a `.git` entry directly in `cwd` means `cwd` is a
+    // working-tree root — resolve to its OWN repo and never let git's upward walk
+    // adopt an enclosing ancestor. This is deterministic and independent of
+    // whether `cwd/.git` is currently a *valid* gitdir (it may be mid-rescue),
+    // which is exactly the transient that made the walk skip past it.
+    if cwd_owns_git_entry(cwd) {
+        return CwdProject::Usable(cwd.to_path_buf());
+    }
     let Some(git_root) = find_git_root(cwd) else {
         return CwdProject::NotGit;
     };
