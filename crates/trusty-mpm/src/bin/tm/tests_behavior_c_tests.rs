@@ -26,9 +26,10 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    derive_project, fallback_protected, github_host, is_github_remote, nested_guard_notice,
-    nested_managed_match, non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint,
-    print_project_context, tty_gate,
+    CwdProject, classify_cwd_project, derive_project, fallback_protected, github_host,
+    is_github_remote, ls_tree_reports_tracked_dir, nested_guard_notice, nested_managed_match,
+    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
+    tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -326,6 +327,8 @@ fn guided_derive_project_returns_some_from_subdir() {
     // repo, and the returned git_root must be the repo root (not the subdir)
     // so that `launch_new_session_and_attach` passes the git root as repo_url
     // and the daemon finds .git, sets source_id correctly (#1705 LOW fix).
+    // The subdir here is TRACKED (committed) — an untracked ancestor subdir is
+    // deliberately rejected as of #2534 (see the dedicated test below).
     let tmp = tempdir_with_name("trusty_test_subdir_1705");
     let ok = git_init_with_commit(&tmp);
     if !ok {
@@ -333,9 +336,10 @@ fn guided_derive_project_returns_some_from_subdir() {
     }
     git_remote_add(&tmp, "https://github.com/owner/my-repo.git");
 
-    // Create a nested subdirectory and call derive_project from it.
+    // Create a nested subdirectory, TRACK it, then call derive_project from it.
     let subdir = tmp.join("src").join("lib");
     std::fs::create_dir_all(&subdir).unwrap();
+    git_track_dir(&tmp, "src/lib");
 
     let result = derive_project(&subdir);
     match result {
@@ -352,6 +356,149 @@ fn guided_derive_project_returns_some_from_subdir() {
         }
         None => panic!("expected Some when calling derive_project from a subdir"),
     }
+}
+
+// ── Ancestor-repo trust guard (#2534) ─────────────────────────────────────────
+
+#[test]
+fn guided_ls_tree_reports_tracked_dir_true_for_named_entry() {
+    // Why: git prints the queried path (one line) when it names a tracked tree.
+    assert!(ls_tree_reports_tracked_dir("CTO\n"));
+    assert!(ls_tree_reports_tracked_dir("src/lib\n"));
+}
+
+#[test]
+fn guided_ls_tree_reports_tracked_dir_false_for_empty() {
+    // Why: an untracked (or case-mismatched) path yields empty stdout — the
+    // exact discriminator for the APFS `cto` vs tracked `CTO` collision (#2534).
+    assert!(!ls_tree_reports_tracked_dir(""));
+}
+
+#[test]
+fn guided_ls_tree_reports_tracked_dir_false_for_blank_lines() {
+    // Why: whitespace-only output must not be mistaken for a tracked entry.
+    assert!(!ls_tree_reports_tracked_dir("\n  \n\t\n"));
+}
+
+#[test]
+fn guided_untracked_ancestor_message_names_root() {
+    // Why: the operator must see WHICH enclosing repo was declined.
+    let msg = untracked_ancestor_message(std::path::Path::new("/Users/masa/Duetto"));
+    assert!(
+        msg.contains("/Users/masa/Duetto"),
+        "message must name the enclosing git root: {msg}"
+    );
+    assert!(
+        msg.contains("not part of it"),
+        "message must explain the untracked-ancestor reason: {msg}"
+    );
+}
+
+#[test]
+fn guided_untracked_ancestor_message_does_not_claim_launch() {
+    // Why: the whole point is that we did NOT launch the ancestor project.
+    let msg = untracked_ancestor_message(std::path::Path::new("/repo"));
+    assert!(
+        msg.contains("not launching that project"),
+        "message must state the project was not launched: {msg}"
+    );
+}
+
+#[test]
+fn guided_classify_cwd_not_git_for_plain_dir() {
+    // Why: a directory outside any git working tree is NotGit.
+    let tmp = tempdir_with_name("trusty_test_classify_plain_2534");
+    // Skip if the temp dir happens to be inside a git tree (dev machines vary).
+    if find_git_root_via_cli(&tmp).is_some() {
+        return;
+    }
+    assert!(matches!(classify_cwd_project(&tmp), CwdProject::NotGit));
+}
+
+#[test]
+fn guided_classify_cwd_usable_for_repo_root() {
+    // Why: the top-level case is trusted unconditionally — behavior unchanged.
+    let tmp = tempdir_with_name("trusty_test_classify_root_2534");
+    if !git_init_with_commit(&tmp) {
+        return;
+    }
+    let canonical = tmp.canonicalize().unwrap_or_else(|_| tmp.clone());
+    match classify_cwd_project(&canonical) {
+        CwdProject::Usable(root) => {
+            let root = root.canonicalize().unwrap_or(root);
+            assert_eq!(root, canonical, "repo root must classify as Usable(root)");
+        }
+        _ => panic!("repo root must be Usable"),
+    }
+}
+
+#[test]
+fn guided_classify_cwd_usable_for_tracked_subdir() {
+    // Why: a committed subdirectory genuinely belongs to the repo — Usable.
+    let tmp = tempdir_with_name("trusty_test_classify_tracked_2534");
+    if !git_init_with_commit(&tmp) {
+        return;
+    }
+    git_track_dir(&tmp, "src/lib");
+    let subdir = tmp.join("src").join("lib");
+    match classify_cwd_project(&subdir) {
+        CwdProject::Usable(_) => {}
+        _ => panic!("tracked subdir must be Usable"),
+    }
+}
+
+#[test]
+fn guided_classify_cwd_untracked_for_uncommitted_subdir() {
+    // Why: the core #2534 regression — a directory that physically exists inside
+    // a repo's working tree but is NOT in its tracked tree (the same shape as the
+    // APFS `~/Duetto/cto` case-fold collision) must be UntrackedInsideAncestor,
+    // NOT trusted as part of the enclosing repo.
+    let tmp = tempdir_with_name("trusty_test_classify_untracked_2534");
+    if !git_init_with_commit(&tmp) {
+        return;
+    }
+    // Create a subdir but never `git add` it → not in HEAD's tree.
+    let untracked = tmp.join("notes");
+    std::fs::create_dir_all(&untracked).unwrap();
+    match classify_cwd_project(&untracked) {
+        CwdProject::UntrackedInsideAncestor(_) => {}
+        CwdProject::Usable(_) => {
+            panic!("untracked subdir must NOT be trusted as part of the ancestor repo")
+        }
+        CwdProject::NotGit => panic!("subdir is inside a git tree — must not be NotGit"),
+    }
+}
+
+#[test]
+fn guided_derive_project_returns_none_for_untracked_ancestor_subdir() {
+    // Why: the end-to-end #2534 guarantee — bare `tm` from an untracked directory
+    // nested inside a GitHub repo must NOT resolve to that ancestor's project.
+    let tmp = tempdir_with_name("trusty_test_derive_untracked_2534");
+    if !git_init_with_commit(&tmp) {
+        return;
+    }
+    git_remote_add(&tmp, "https://github.com/owner/my-repo.git");
+    let untracked = tmp.join("notes");
+    std::fs::create_dir_all(&untracked).unwrap();
+    assert!(
+        derive_project(&untracked).is_none(),
+        "derive_project must return None for an untracked ancestor subdir"
+    );
+}
+
+/// Local helper: resolve the git working-tree root via the CLI (mirrors the
+/// production `find_git_root`) so the NotGit test can skip when a dev machine's
+/// temp dir happens to sit inside a git tree.
+fn find_git_root_via_cli(dir: &PathBuf) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
 // ── print_project_context / print_non_tty_hint ────────────────────────────────
@@ -464,6 +611,25 @@ fn git_remote_add(dir: &PathBuf, url: &str) {
     std::process::Command::new("git")
         .args(["remote", "add", "origin", url])
         .current_dir(dir)
+        .status()
+        .ok();
+}
+
+/// Create `<repo>/<rel>/.keep`, stage it, and commit so `<rel>` becomes a
+/// tracked directory in the repo's HEAD tree. Used to distinguish a genuinely
+/// tracked subdir from an untracked ancestor subdir (#2534).
+fn git_track_dir(repo: &PathBuf, rel: &str) {
+    let dir = repo.join(rel);
+    std::fs::create_dir_all(&dir).expect("create tracked subdir");
+    std::fs::write(dir.join(".keep"), b"").expect("write .keep");
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .status()
+        .ok();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "track", "-q"])
+        .current_dir(repo)
         .status()
         .ok();
 }

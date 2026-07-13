@@ -1070,6 +1070,91 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
     );
 }
 
+/// Why (#2534): bare `tm` run from a directory that physically sits inside a
+/// GitHub repo's working tree but is NOT part of its tracked tree (the same shape
+/// as the APFS `~/Duetto/cto` case-fold collision) must NOT inherit the enclosing
+/// repo's identity. It must NOT redirect to that repo's managed clone (which would
+/// attempt a real `git clone` of the github.com URL and fail on the network); it
+/// must route to the clean non-git fallback and return `Ok(())` without writing
+/// any framework files.
+/// What: inits a real git repo with a committed file + a github.com remote, then
+/// creates an UNTRACKED subdir inside it and calls `fallback_protected` from that
+/// subdir. Asserts `Ok(())`, no framework artifacts, and no managed-clone attempt.
+/// Test: this is the test.
+#[tokio::test]
+async fn guided_fallback_untracked_ancestor_does_not_redirect() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // git init + identity + an initial commit (so HEAD's tree exists).
+    let git_ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(project)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_ok {
+        eprintln!(
+            "guided_fallback_untracked_ancestor_does_not_redirect: git unavailable, skipping"
+        );
+        return;
+    }
+    for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+        let _ = std::process::Command::new("git")
+            .args(["config", k, v])
+            .current_dir(project)
+            .status();
+    }
+    std::fs::write(project.join("README.md"), b"x").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(project)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init", "-q"])
+        .current_dir(project)
+        .status();
+    // A github.com remote — if the ancestor were (wrongly) trusted, the fallback
+    // would try to clone THIS into the managed workspace.
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ])
+        .current_dir(project)
+        .status();
+
+    // An UNTRACKED sibling directory inside the working tree — never `git add`ed.
+    let untracked = project.join("cto");
+    std::fs::create_dir_all(&untracked).unwrap();
+
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", &untracked)
+            .await;
+
+    // Must exit cleanly (non-git fallback), NOT Err (non-github refusal) and NOT
+    // a redirect (which would network-fail cloning the github remote).
+    assert!(
+        result.is_ok(),
+        "#2534: untracked ancestor subdir must route to the clean non-git \
+         fallback (Ok), not the ancestor's managed-clone redirect; got: {result:?}"
+    );
+    // No framework artifacts anywhere.
+    for p in ["CLAUDE.md", ".mcp.json", ".trusty-mpm", ".claude"] {
+        assert!(
+            !untracked.join(p).exists(),
+            "#2534: {p} must NOT be written to the untracked directory"
+        );
+        assert!(
+            !project.join(p).exists(),
+            "#2534: {p} must NOT be written to the enclosing repo"
+        );
+    }
+}
+
 /// Why (#1724 non-git path + #1839 Fix 2): the protected-checkout guarantee applies
 /// only to git projects. A plain directory (no `.git`) should exit cleanly with a
 /// helpful hint rather than attempting `launch()` which would fail with a confusing
@@ -1132,6 +1217,12 @@ async fn guided_fallback_blocks_github_git_from_subdirectory() {
         eprintln!("guided_fallback_blocks_github_git_from_subdirectory: git unavailable, skipping");
         return;
     }
+    for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+        let _ = std::process::Command::new("git")
+            .args(["config", k, v])
+            .current_dir(repo_dir.path())
+            .status();
+    }
     let _ = std::process::Command::new("git")
         .args([
             "remote",
@@ -1142,9 +1233,21 @@ async fn guided_fallback_blocks_github_git_from_subdirectory() {
         .current_dir(repo_dir.path())
         .status();
 
-    // Run from a NESTED subdirectory inside the repo.
+    // Run from a NESTED, TRACKED subdirectory inside the repo. The subdir is
+    // committed so it genuinely belongs to the repo's tracked tree — as of #2534
+    // an UNTRACKED ancestor subdir instead routes to the clean non-git fallback
+    // (covered by `guided_fallback_untracked_ancestor_does_not_redirect`).
     let subdir = repo_dir.path().join("src").join("module");
     std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(subdir.join(".keep"), b"").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo_dir.path())
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init", "-q"])
+        .current_dir(repo_dir.path())
+        .status();
 
     let client = reqwest::Client::new();
     let result =
