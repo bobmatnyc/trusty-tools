@@ -11,7 +11,9 @@
 //! (a `OnceLock` — repeated calls across a process are free), searches from
 //! the current working directory upward for a `.env.local` file (mirroring
 //! Cargo/git's own upward-search convention for "workspace root" discovery),
-//! and calls `dotenvy::from_path` on the first hit. Because `dotenvy` never
+//! bounded at the first repository/workspace root so it can never wander past
+//! this checkout into an unrelated ancestor or `$HOME` (issue #2474 — see
+//! [`is_repo_boundary`]), and calls `dotenvy::from_path` on the first hit. Because `dotenvy` never
 //! overrides an already-set environment variable, this naturally implements
 //! "process env beats `.env.local`" — the resolver's tier check
 //! (`std::env::var`) is what actually observes the precedence; this loader
@@ -24,15 +26,31 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Search `start` and each ancestor directory for a `.env.local` file.
+/// Search `start` and each ancestor directory for a `.env.local` file, never
+/// climbing past the first repository/workspace root.
 ///
-/// Why: the hermetic core for [`load_env_local_once`]; also directly usable
-/// by tests that want to point the search at a temp directory tree instead
-/// of the real cwd.
-/// What: returns the first `.env.local` found walking upward from `start`,
-/// or `None` if no ancestor has one.
+/// Why: issue #2474 — the previous unbounded walk climbed `parent()` all the
+/// way to the filesystem root with no repo-root boundary. In this
+/// worktree-heavy repo (`.claude/worktrees/*`, `.worktrees/*` nested several
+/// levels deep) that could accidentally load a `.env.local` from an unrelated
+/// ancestor directory (or `$HOME`), substituting the wrong credentials — a
+/// footgun against the intended "repo-root, gitignored" contract. This is
+/// also the hermetic core for [`load_env_local_once`]; tests point it at a
+/// temp directory tree instead of the real cwd.
+/// What: returns the first `.env.local` found walking upward from `start`.
+/// Each candidate directory is checked BEFORE the boundary test, so a
+/// `.env.local` sitting directly in the boundary directory itself is still
+/// found. Once a directory satisfies [`is_repo_boundary`] (a `.git` entry —
+/// file or directory, since a linked worktree's `.git` is a pointer file — or
+/// a workspace-root `Cargo.toml`), the walk stops rather than continuing to a
+/// parent that is unrelated to this checkout. `None` if no ancestor up to
+/// (and including) the boundary has a `.env.local`.
 /// Test: `dotenv_tests::finds_env_local_in_ancestor`,
-/// `dotenv_tests::absent_env_local_returns_none`.
+/// `dotenv_tests::absent_env_local_returns_none`,
+/// `dotenv_tests::walk_stops_at_git_dir_boundary`,
+/// `dotenv_tests::walk_stops_at_git_file_boundary`,
+/// `dotenv_tests::walk_finds_env_local_at_the_boundary_itself`,
+/// `dotenv_tests::workspace_cargo_toml_is_a_boundary`.
 pub fn find_workspace_env_local(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start.to_path_buf());
     while let Some(d) = dir {
@@ -40,9 +58,36 @@ pub fn find_workspace_env_local(start: &Path) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
+        if is_repo_boundary(&d) {
+            return None;
+        }
         dir = d.parent().map(Path::to_path_buf);
     }
     None
+}
+
+/// Whether `dir` marks a repository/workspace root the upward
+/// [`find_workspace_env_local`] search must not climb past.
+///
+/// Why: factored out of the walk so the boundary rule is independently
+/// testable and documents exactly what counts as a root — the fix for
+/// issue #2474.
+/// What: `true` when `dir` contains a `.git` entry (a directory for a normal
+/// checkout, or a file for a linked worktree — `git worktree add` writes a
+/// `gitdir: …` pointer file there, not a directory) OR a `Cargo.toml` whose
+/// contents contain a `[workspace]` table header. The `Cargo.toml` check is a
+/// cheap substring heuristic (not a full TOML parse) sufficient for a
+/// footgun-prevention boundary — false positives/negatives are not a security
+/// concern here, unlike a directory-traversal check.
+/// Test: `dotenv_tests::walk_stops_at_git_dir_boundary`,
+/// `dotenv_tests::walk_stops_at_git_file_boundary`,
+/// `dotenv_tests::workspace_cargo_toml_is_a_boundary`.
+fn is_repo_boundary(dir: &Path) -> bool {
+    if dir.join(".git").exists() {
+        return true;
+    }
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .is_ok_and(|contents| contents.contains("[workspace]"))
 }
 
 /// Load a specific `.env.local` path into the process environment.
@@ -153,6 +198,111 @@ mod tests {
     fn absent_env_local_returns_none() {
         let tmp = tempfile::TempDir::new().unwrap();
         assert_eq!(find_workspace_env_local(tmp.path()), None);
+    }
+
+    /// Why: issue #2474 — a `.env.local` sitting OUTSIDE the repo root (an
+    /// ancestor beyond the `.git` boundary) must never be picked up, even
+    /// though the old unbounded walk would have found it. This is the exact
+    /// footgun scenario: an unrelated ancestor (or `$HOME`) carrying a stray
+    /// `.env.local`.
+    /// What: builds `outer/.env.local` and `outer/repo/.git/` (a directory
+    /// boundary) and `outer/repo/nested/`, then asserts the search from
+    /// `nested` stops at `repo` and never reaches `outer/.env.local`.
+    /// Test: itself.
+    #[test]
+    fn walk_stops_at_git_dir_boundary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "OUTER=1\n").unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let nested = repo.join("nested").join("deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_workspace_env_local(&nested), None);
+    }
+
+    /// Why: a linked git worktree's `.git` is a FILE (a `gitdir: …` pointer),
+    /// not a directory — the boundary check must recognise both shapes, since
+    /// this repo's own worktrees (`.claude/worktrees/*`) are exactly this
+    /// case.
+    /// What: same shape as [`walk_stops_at_git_dir_boundary`] but `.git` is
+    /// written as a file.
+    /// Test: itself.
+    #[test]
+    fn walk_stops_at_git_file_boundary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "OUTER=1\n").unwrap();
+        let repo = tmp.path().join("worktree");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_workspace_env_local(&nested), None);
+    }
+
+    /// Why: the boundary directory itself is still a legitimate place for the
+    /// intended "repo-root, gitignored" `.env.local` — the fix must not
+    /// exclude the boundary directory's own file, only ancestors BEYOND it.
+    /// What: `.env.local` lives in the same directory as `.git`; the search
+    /// from a nested child must still find it.
+    /// Test: itself.
+    #[test]
+    fn walk_finds_env_local_at_the_boundary_itself() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".env.local"), "X=1\n").unwrap();
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let found = find_workspace_env_local(&nested).unwrap();
+        assert_eq!(found, repo.join(".env.local"));
+    }
+
+    /// Why: a workspace root without an initialised `.git` (e.g. an extracted
+    /// tarball, or a crate checked out standalone) must still bound the walk
+    /// via its workspace `Cargo.toml`, per the issue spec ("`.git` (or
+    /// workspace `Cargo.toml`) marker").
+    /// What: `outer/.env.local` sits beyond `outer/repo/Cargo.toml` (a
+    /// `[workspace]` manifest, no `.git`); the search from a nested child must
+    /// stop at `repo` and never reach `outer/.env.local`.
+    /// Test: itself.
+    #[test]
+    fn workspace_cargo_toml_is_a_boundary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "OUTER=1\n").unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_workspace_env_local(&nested), None);
+    }
+
+    /// Why: a plain (non-workspace) `Cargo.toml` — an ordinary crate manifest
+    /// with no `[workspace]` table — must NOT be treated as a boundary; only a
+    /// workspace root or a `.git` root should stop the walk.
+    /// What: `repo/Cargo.toml` has a `[package]` table only; the walk must
+    /// climb past it and still find `outer/.env.local`.
+    /// Test: itself.
+    #[test]
+    fn plain_package_cargo_toml_is_not_a_boundary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "OUTER=1\n").unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let found = find_workspace_env_local(&nested).unwrap();
+        assert_eq!(found, tmp.path().join(".env.local"));
     }
 
     /// Why: the `config keys list` tier check must read a var out of a

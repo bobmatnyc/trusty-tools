@@ -323,6 +323,50 @@ async fn test_probe_401_is_unauthorized() {
     assert!(!out_string(&out).contains(FAKE_KEY));
 }
 
+/// Why: issue #2510 — a 404 on the probe's own request means the registry's
+/// `default_model` is not found/deployed on THIS account (observed live:
+/// Fireworks' seeded default 404'd on the owner's account), which is a
+/// different failure class than an invalid credential. It must classify as
+/// the dedicated `ModelNotFound` outcome (not the generic `Failed` catch-all)
+/// with a message that actionably points at overriding the model, and must
+/// still never leak the key.
+/// Test: itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn test_probe_404_is_model_not_found() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(
+        404,
+        serde_json::json!({"error": "Model not found, inaccessible, and/or not deployed"}),
+    )
+    .await
+    .expect("spawn");
+    let cfg = mock_configurator(server.url().to_string());
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", FAKE_KEY).unwrap();
+
+    let outcome = ops::probe(&store, &cfg, "openrouter").await.expect("probe");
+    let ProbeOutcome::ModelNotFound(reason) = &outcome else {
+        panic!("expected ModelNotFound for a 404 response, got {outcome:?}");
+    };
+    assert!(!reason.contains(FAKE_KEY), "leaked the key: {reason}");
+    assert!(
+        outcome.clone().into_result().is_err(),
+        "404 must be a failure exit"
+    );
+
+    let mut out = Vec::new();
+    ops::report_probe("openrouter", &outcome, &mut out).expect("report");
+    let s = out_string(&out);
+    assert!(!s.contains(FAKE_KEY), "report_probe leaked the key: {s}");
+    assert!(s.contains("MODEL NOT FOUND"), "{s}");
+    assert!(
+        s.contains("set an explicit"),
+        "label should be actionable: {s}"
+    );
+}
+
 /// Why: `InferenceError::Api`'s `Display` embeds the raw, provider-controlled
 /// response BODY verbatim. A provider that echoes the offending credential back
 /// in a non-401/403 error body (landing on the `ProbeOutcome::Failed` catch-all)
