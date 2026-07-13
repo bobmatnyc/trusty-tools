@@ -864,13 +864,23 @@ impl AppState {
     ///
     /// Why: mirrors `with_bm25_client_from_env`'s pattern of keeping env-var
     /// gating in one place. Unset (the default) preserves today's
-    /// single-tenant behaviour with zero change for existing callers.
+    /// single-tenant behaviour with zero change for existing callers. Issue
+    /// #2522 review: activation is silent otherwise, which makes a
+    /// misconfigured (or unexpectedly enabled) deployment hard to diagnose
+    /// from logs alone — log once at startup when the mode flips on.
     /// What: sets `multi_tenant_mode` from `TRUSTY_MEMORY_MULTI_TENANT=1`; see
-    /// the `authz` module for what the flag then enforces.
+    /// the `authz` module for what the flag then enforces. Logs via
+    /// `tracing::info!` (stderr only) when enabled; stays silent when
+    /// disabled (the default).
     /// Test: `authorize_force_palace_create_denies_multi_tenant_without_capability`.
     #[must_use]
     pub fn with_multi_tenant_mode_from_env(mut self) -> Self {
         self.multi_tenant_mode = std::env::var("TRUSTY_MEMORY_MULTI_TENANT").as_deref() == Ok("1");
+        if self.multi_tenant_mode {
+            tracing::info!(
+                "multi-tenant mode enabled (TRUSTY_MEMORY_MULTI_TENANT=1): force=true palace_create will be refused"
+            );
+        }
         self
     }
 
