@@ -14,6 +14,7 @@ pub mod agent_builder;
 pub mod agent_deployer;
 pub mod agent_manifest;
 pub mod agent_reset;
+pub mod agent_reset_workspace;
 pub mod artifact;
 pub mod auto_resume;
 pub mod budget;

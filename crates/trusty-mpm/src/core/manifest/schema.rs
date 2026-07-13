@@ -77,17 +77,40 @@ pub struct HarnessManifest {
 /// without enumerating every agent.
 /// What: `include` is a list of agent names or glob patterns (`*` wildcard); an
 /// empty or absent `include` means "all available agents". `exclude` removes
-/// names/patterns from the included set and always wins over `include`. `source`
-/// selects where the agent *source files* come from (`bundled` or `catalog`).
-/// Test: `selection_matches`, `agent_set_source_default_is_bundled`.
+/// names/patterns from the included set and always wins over `include` — this is
+/// the DEPLOY-ROSTER filter: an excluded agent is never written to ANY deploy
+/// destination `agent_selected` gates (session/worktree launches, `tm catalog
+/// apply`, pruning). `ignore_staleness` (issue #2462) is a SEPARATE, narrower
+/// concern: it only suppresses the `/health`/`tm catalog apply` drift warning for
+/// an agent the operator has deliberately customized, WITHOUT removing it from
+/// any deploy roster. Do not put a name in `exclude` merely to silence a
+/// staleness warning — that also deletes it from every filtered deploy
+/// destination (the exact drift #2462 diagnosed: `exclude = ["engineer"]`,
+/// written only to quiet `/health`, silently dropped `engineer.md` from every
+/// session-local `.claude/agents/`). `source` selects where the agent *source
+/// files* come from (`bundled` or `catalog`).
+/// Test: `selection_matches`, `agent_set_source_default_is_bundled`,
+/// `plan_ignore_staleness_does_not_affect_agent_selected`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AgentSet {
     /// Agent names or glob patterns to deploy. Empty → all available.
     #[serde(default)]
     pub include: Vec<String>,
-    /// Agent names or glob patterns to drop. Wins over `include`.
+    /// Agent names or glob patterns to drop from every deploy destination.
+    /// Wins over `include`. Does NOT affect staleness reporting — use
+    /// `ignore_staleness` to quiet drift warnings for a customized agent that
+    /// should still deploy.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Agent names or glob patterns to exempt from catalog-staleness
+    /// reporting ONLY (issue #2462). An agent listed here still deploys
+    /// normally (subject to `include`/`exclude` and the conservative
+    /// user-modified-file skip) — this list purely silences the `/health` /
+    /// `tm catalog apply` "this agent drifted from the catalog" warning, for
+    /// agents the operator has intentionally customized. Distinct from
+    /// `exclude`, which removes an agent from deploy entirely.
+    #[serde(default)]
+    pub ignore_staleness: Vec<String>,
     /// Where the agent source files are read from.
     #[serde(default)]
     pub source: ContentSource,
@@ -345,9 +368,22 @@ fn merge_optional<T>(lower: Option<T>, higher: Option<T>, f: impl FnOnce(T, T) -
 /// exact name or a trailing/leading `*` glob via [`glob_matches`].
 /// Test: `selection_matches`.
 pub fn selection_matches(name: &str, include: &[String], exclude: &[String]) -> bool {
-    let included = include.is_empty() || include.iter().any(|p| glob_matches(p, name));
-    let excluded = exclude.iter().any(|p| glob_matches(p, name));
+    let included = include.is_empty() || matches_any(name, include);
+    let excluded = matches_any(name, exclude);
     included && !excluded
+}
+
+/// Whether `name` matches any pattern in `patterns` (exact name or `*`-glob).
+///
+/// Why: [`AgentSet::ignore_staleness`] needs a plain membership test against the
+/// same glob vocabulary [`selection_matches`] uses for include/exclude, without
+/// the include/exclude pairing — factoring it out keeps both callers on
+/// identical match semantics.
+/// What: `true` iff any entry in `patterns` matches `name` via [`glob_matches`].
+/// Test: `selection_matches` (via `selection_matches`'s reuse of this helper),
+/// `plan_ignore_staleness_does_not_affect_agent_selected`.
+pub fn matches_any(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| glob_matches(p, name))
 }
 
 /// Match `name` against a simple glob `pattern` supporting any number of `*`.
@@ -425,6 +461,7 @@ mod tests {
             agents: Some(AgentSet {
                 include: vec!["rust-engineer".into(), "qa".into()],
                 exclude: vec!["*-ops".into()],
+                ignore_staleness: vec!["engineer".into()],
                 source: ContentSource::Catalog,
             }),
             skills: Some(SkillSet {

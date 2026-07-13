@@ -27,14 +27,25 @@
 /// the reset to those agents. The normal deploy always runs first — reset
 /// only forces the specific files a plain deploy would otherwise leave
 /// alone, and re-registers everything else it touches.
+///
+/// `reset_agents_workspaces` (issue #2508) additionally sweeps every intact
+/// session workspace's project-local `.claude/agents/` through the SAME
+/// reset, each gated by that workspace's OWN resolved harness plan (so an
+/// agent one project's manifest excludes is never resurrected there — the
+/// #2462 cross-warning). Only takes effect when `reset_agents` is `Some`.
 /// What: resolves [`FrameworkPaths::default`], calls [`install_to`] then
 /// [`install_system_prompt_to`] to write the real assembled PM prompt,
-/// deploys agents and skills, optionally resets the requested agent scope,
-/// then calls [`install_claude_hooks`].
+/// deploys agents and skills, optionally resets the requested agent scope
+/// (user-level, then every intact session workspace when requested), then
+/// calls [`install_claude_hooks`].
 /// Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
 /// `install_claude_hooks_is_idempotent`,
 /// `instruction_pipeline::install_system_prompt_to_writes_assembled`.
-pub(crate) fn install(force: bool, reset_agents: Option<Vec<String>>) -> anyhow::Result<()> {
+pub(crate) async fn install(
+    force: bool,
+    reset_agents: Option<Vec<String>>,
+    reset_agents_workspaces: bool,
+) -> anyhow::Result<()> {
     let paths = trusty_mpm::core::paths::FrameworkPaths::default();
     let report = install_to(&paths, force)?;
     println!(
@@ -86,6 +97,40 @@ pub(crate) fn install(force: bool, reset_agents: Option<Vec<String>>) -> anyhow:
         )?;
         for line in reset_report_lines(&reset) {
             println!("  {line}");
+        }
+
+        // Issue #2508: the user-level reset above never touches a project's
+        // own `.claude/agents/` — sweep every intact session workspace through
+        // the identical reset, each gated by ITS OWN resolved harness plan.
+        if reset_agents_workspaces {
+            println!("Resetting agents in every intact session workspace…");
+            let outcomes = trusty_mpm::core::agent_reset_workspace::reset_active_workspace_agents(
+                &paths.root,
+                filter.as_deref(),
+            )
+            .await?;
+            if outcomes.is_empty() {
+                println!("  (no intact session workspaces found)");
+            }
+            for outcome in &outcomes {
+                println!(
+                    "  {} ({})",
+                    outcome.tmux_name,
+                    outcome.workspace_path.display()
+                );
+                // Issue #1511: a session the ownership gate rejected is
+                // reported explicitly (never silently absent) and its
+                // `result` is always empty — do not run it through
+                // `reset_report_lines`, which would print a misleading
+                // all-zero summary instead of the actual reason.
+                if let Some(reason) = &outcome.skipped_reason {
+                    println!("    {reason}");
+                    continue;
+                }
+                for line in reset_report_lines(&outcome.result) {
+                    println!("    {line}");
+                }
+            }
         }
     }
 
@@ -354,9 +399,13 @@ pub(crate) fn deploy_report_lines(
 /// large reset is scannable at a glance.
 /// What: a `\u{27f3} <file> (recomposed, backed up)` or `\u{27f3} <file>
 /// (recomposed)` line per rewritten file, a `\u{25c6} <file> (adopted)` line
-/// per already-current file, and a `? <name>` line per requested name with no
-/// matching source agent — followed by one summary line with the four totals.
-/// Test: `reset_report_lines_summarizes_counts`.
+/// per already-current file, a `? <name>` line per requested name with no
+/// matching source agent, and — for a [`reset_project_agents`](trusty_mpm::core::agent_reset::reset_project_agents)
+/// result (issue #2508) — a `\u{2298} <name> (excluded by this workspace's
+/// manifest)` line per requested name the target's own harness plan rejected,
+/// followed by one summary line with all five totals.
+/// Test: `reset_report_lines_summarizes_counts`,
+/// `reset_report_lines_shows_deselected`.
 pub(crate) fn reset_report_lines(
     reset: &trusty_mpm::core::agent_reset::ResetResult,
 ) -> Vec<String> {
@@ -374,12 +423,18 @@ pub(crate) fn reset_report_lines(
     for name in &reset.not_found {
         lines.push(format!("? {name} (no matching source agent)"));
     }
+    for name in &reset.deselected {
+        lines.push(format!(
+            "\u{2298} {name} (excluded by this workspace's manifest)"
+        ));
+    }
     lines.push(format!(
-        "reset summary: {} recomposed, {} adopted, {} backed up, {} not found",
+        "reset summary: {} recomposed, {} adopted, {} backed up, {} not found, {} deselected",
         reset.recomposed.len(),
         reset.adopted.len(),
         reset.backed_up.len(),
-        reset.not_found.len()
+        reset.not_found.len(),
+        reset.deselected.len()
     ));
     lines
 }
