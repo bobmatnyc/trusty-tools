@@ -110,6 +110,10 @@ tar = "0.4"
 # Semantic-version parsing for GitHub release tag comparison (trusty-installer Phase 2).
 semver = { version = "1", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+# Hidden (no-echo) terminal input for the universal `config keys set` verb
+# (issue #2404), gated behind trusty-common's `config-cli` feature. Reads a
+# secret from the TTY without echoing it so keys never land in shell history.
+rpassword = "7"
 toml = "0.8"
 libc = "0.2"
 unicode-width = "0.2"

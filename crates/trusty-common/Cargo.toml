@@ -59,6 +59,16 @@ name = "inference_adapters"
 path = "tests/inference_adapters.rs"
 required-features = ["inference-client", "axum-server"]
 
+# Universal `config keys` CLI suite (issue #2404). Drives the `config keys`
+# argv grammar + the set/list/test/unset operations through the injectable
+# `inference::config::ops` seam, with the live `test` probe hitting the axum
+# `MockInferenceServer`. Needs BOTH `config-cli` (the command + ops) and
+# `axum-server` (the HTTP mock); `required-features` skips it otherwise.
+[[test]]
+name = "config_keys_cli"
+path = "tests/config_keys_cli.rs"
+required-features = ["config-cli", "axum-server"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -159,6 +169,13 @@ dotenvy = { workspace = true, optional = true }
 # Optional: enabled by the `keyring-store` feature (issue #2401). OS-keychain
 # backend for `inference::credentials::KeyringStore`.
 keyring = { workspace = true, optional = true }
+# Optional: enabled by the `config-cli` feature (issue #2404). `clap` provides
+# the derive surface for the universal `config` command; `rpassword` reads a key
+# from the TTY without echo for `config keys set`. Both are workspace deps used
+# elsewhere; gating them keeps the base library (and its `inference-client`
+# consumers) free of a clap/CLI dependency.
+clap = { workspace = true, optional = true }
+rpassword = { workspace = true, optional = true }
 
 # Optional: enabled by the `cli-help` feature. Declarative help-config parsing
 # (YAML → `HelpConfig`) plus the "did you mean?" suggester for unknown
@@ -503,3 +520,11 @@ keyring-store = ["credentials", "dep:keyring"]
 # is not pulled in by this feature, keeping the base surface HTTP-server-free.
 # Concrete provider adapters (OpenRouter/Fireworks/Bedrock) land in #2403/#2407.
 inference-client = ["credentials"]
+# Enables the `inference::config` module (issue #2404, epic #2400 Wave 1): the
+# universal `config` clap command (`ConfigCommand`) that any binary mounts with
+# two lines, exposing `config keys set/list/test/unset` for inference-provider
+# credentials. Implies `inference-client` (it builds adapters for the live `test`
+# probe) and pulls in `clap` (the derive surface) plus `rpassword` (hidden TTY
+# input for `set`). A default (no-features) `trusty-common` build compiles
+# neither this module nor `clap`; only binaries that mount the command enable it.
+config-cli = ["inference-client", "dep:clap", "dep:rpassword"]

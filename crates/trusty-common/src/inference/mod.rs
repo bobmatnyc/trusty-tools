@@ -26,6 +26,8 @@ pub mod credentials;
 
 #[cfg(feature = "inference-client")]
 pub mod adapter;
+#[cfg(feature = "config-cli")]
+pub mod config;
 #[cfg(feature = "inference-client")]
 pub mod configurator;
 #[cfg(feature = "inference-client")]
@@ -44,6 +46,8 @@ pub mod types;
 // reaching into each submodule.
 #[cfg(feature = "inference-client")]
 pub use adapter::InferenceAdapter;
+#[cfg(feature = "config-cli")]
+pub use config::ConfigCommand;
 #[cfg(feature = "inference-client")]
 pub use configurator::{AdapterFactory, Configurator, ResolvedProvider, provider_for};
 #[cfg(feature = "inference-client")]
