@@ -871,18 +871,35 @@ async fn kg_bootstrap_seeds_workspace_facts() {
 /// Test: itself.
 #[test]
 fn content_gate_blocks_short_no_context() {
-    assert_eq!(content_gate("yes", None), None);
-    assert_eq!(content_gate("ok", None), None);
+    assert_eq!(content_gate("yes", None, false), None);
+    assert_eq!(content_gate("ok", None, false), None);
     assert_eq!(
-        content_gate("  no thanks  ", None),
+        content_gate("  no thanks  ", None, false),
         None,
         "2 words still < 4"
     );
     assert_eq!(
-        content_gate("one two three", None),
+        content_gate("one two three", None, false),
         None,
         "3 words still < 4"
     );
+}
+
+/// Why (issue #2442): `force = true` is an explicit operator override and
+/// must bypass the short-content rejection the same way it bypasses the
+/// blocklist and dedup gates — app-managed writers (e.g. tcode's turn
+/// recorder, #2424) need deterministic storage even for short content.
+/// What: passes single-word content with `force = true` and no context;
+/// asserts the content passes through unchanged instead of being rejected.
+/// Test: itself.
+#[test]
+fn content_gate_force_bypasses_short_content() {
+    assert_eq!(
+        content_gate("yes", None, true),
+        Some("yes".to_string()),
+        "force=true must bypass the short-content gate"
+    );
+    assert_eq!(content_gate("ok", None, true), Some("ok".to_string()));
 }
 
 /// Why: when the caller wraps a short answer with `context`, the gate
@@ -895,6 +912,7 @@ fn content_gate_wraps_short_with_context() {
     let combined = content_gate(
         "yes",
         Some("Do you want to enable auto-bootstrap on new palaces?"),
+        false,
     )
     .expect("context should unlock the gate");
     assert_eq!(
@@ -906,6 +924,7 @@ fn content_gate_wraps_short_with_context() {
     let combined = content_gate(
         "the quick brown fox jumps over the lazy dog",
         Some("Famous typing pangram"),
+        false,
     )
     .expect("long content + context still combines");
     assert!(combined.starts_with("Famous typing pangram"));
@@ -922,11 +941,14 @@ fn content_gate_wraps_short_with_context() {
 #[test]
 fn content_gate_keeps_long() {
     let body = "User prefers snake_case for python";
-    let kept = content_gate(body, None).expect(">= 4 words passes");
+    let kept = content_gate(body, None, false).expect(">= 4 words passes");
     assert_eq!(kept, body, "passing content must round-trip verbatim");
     // Exactly four words is the boundary — it must pass.
     let boundary = "one two three four";
-    assert_eq!(content_gate(boundary, None).as_deref(), Some(boundary));
+    assert_eq!(
+        content_gate(boundary, None, false).as_deref(),
+        Some(boundary)
+    );
 }
 
 /// Why: an empty or whitespace-only `context` argument must be treated
@@ -937,9 +959,9 @@ fn content_gate_keeps_long() {
 /// Test: itself.
 #[test]
 fn content_gate_blank_context_treated_as_none() {
-    assert_eq!(content_gate("yes", Some("")), None);
-    assert_eq!(content_gate("yes", Some("   ")), None);
-    assert_eq!(content_gate("yes", Some("\n\t")), None);
+    assert_eq!(content_gate("yes", Some(""), false), None);
+    assert_eq!(content_gate("yes", Some("   "), false), None);
+    assert_eq!(content_gate("yes", Some("\n\t"), false), None);
 }
 
 /// Why: the dispatch path must return a structured "skipped" envelope
@@ -1104,11 +1126,18 @@ fn blocklist_gate_passes_normal_content() {
     assert!(blocklist_gate("User prefers snake_case for python").is_none());
     assert!(blocklist_gate("Quokkas are the happiest marsupials in Australia").is_none());
     assert!(blocklist_gate("Note: refactor the dispatcher next sprint").is_none());
-    // Substring-only — a tool-use mention inside legitimate prose is
-    // still blocked. This is intentional: the prefix is rare enough
-    // outside the auto-capture path that the false-positive rate is
-    // acceptable, and a future regex upgrade can tighten it.
-    assert!(blocklist_gate("I used Tool use: Bash here").is_some());
+    // Issue #2442: the gate is now anchored to the START of the content
+    // (`starts_with`, not `contains`) — a coding agent's turn text that
+    // merely QUOTES an auto-capture phrase mid-prose (recapping tool
+    // output it just ran) is legitimate content and must NOT be dropped.
+    // This was the "sharper problem" the issue reported: the old
+    // substring-anywhere match silently thinned the recall surface for
+    // exactly this realistic case.
+    assert!(blocklist_gate("I used Tool use: Bash here").is_none());
+    assert!(
+        blocklist_gate("The transcript quoted \"Claude Code session\" lifecycle events twice")
+            .is_none()
+    );
 }
 
 /// Why (issue #1481): a blocked write must name *which* pattern tripped the
@@ -1426,6 +1455,196 @@ async fn dispatch_remember_blocks_real_secret() {
     assert!(
         drawers.is_empty(),
         "no drawer should be written for a secret"
+    );
+}
+
+/// Why (issue #2442): `force = true` is documented as bypassing ALL
+/// content-quality gates, including the blocklist. Before this fix,
+/// `force` was parsed AFTER `blocklist_gate` ran, so a `force = true`
+/// write of blocklisted content was still silently skipped.
+/// What: dispatch a `"Tool use: Bash"` payload with `force: true` and
+/// assert the write is `stored` (not `skipped`), and the drawer lands.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_force_bypasses_blocklist_gate() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "blk-force"}))
+        .await
+        .expect("palace_create");
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({"palace": "blk-force", "text": "Tool use: Bash", "force": true}),
+    )
+    .await
+    .expect("memory_remember (forced)");
+    assert_eq!(
+        res["status"], "stored",
+        "force=true must bypass the blocklist gate; got {res:?}"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "blk-force", "limit": 10}),
+    )
+    .await
+    .expect("memory_list");
+    let drawers = listed["drawers"].as_array().expect("drawers array");
+    assert_eq!(drawers.len(), 1, "the forced write must land");
+}
+
+/// Why (issue #2442): `force = true` must also bypass the short-content
+/// (issue #215) gate — before this fix `force` was parsed after that gate
+/// ran too.
+/// What: dispatch a single-word payload with `force: true` and no
+/// `context`; assert the write is `stored`.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_force_bypasses_short_content_gate() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "short-force"}))
+        .await
+        .expect("palace_create");
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({"palace": "short-force", "text": "yes", "force": true}),
+    )
+    .await
+    .expect("memory_remember (forced short content)");
+    assert_eq!(
+        res["status"], "stored",
+        "force=true must bypass the short-content gate; got {res:?}"
+    );
+}
+
+/// Why (issue #2520, two-tier `force` MAJOR fix): `force = true` bypasses
+/// the QUALITY gates (blocklist, short-content, noise) but must NEVER
+/// silently bypass secret detection — an automated writer that always sets
+/// `force: true` (e.g. trusty-code's per-turn memory sink) would otherwise
+/// persist raw credentials with zero screening.
+/// What: dispatch a `force: true` write of secret-shaped content over the
+/// MCP surface and assert the call still errors naming the secret; no
+/// drawer lands.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_force_still_blocks_secret() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "sec-force"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "sec-force",
+            "text": "deploy uses token AbCd1234EfGh5678IjKl9012 for the prod webhook auth", // pragma: allowlist secret
+            "force": true,
+        }),
+    )
+    .await
+    .expect_err("force=true must still reject secret-shaped content");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("secret"),
+        "expected a secret-gate rejection even under force; got: {msg}"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "sec-force", "limit": 10}),
+    )
+    .await
+    .expect("memory_list");
+    let drawers = listed["drawers"].as_array().expect("drawers array");
+    assert!(
+        drawers.is_empty(),
+        "no drawer should be written for a secret, even under force"
+    );
+}
+
+/// Why (issue #2520, two-tier `force` MAJOR fix): the separate
+/// `allow_secret_like` MCP arg is the only way to bypass the secret gate —
+/// asserts it works end-to-end through the dispatch surface (arg parsing in
+/// `handle_memory_remember` through to `RememberOptions::allow_secret_like`).
+/// What: dispatch a write with both `force: true` and `allow_secret_like:
+/// true` set and assert the secret-shaped content is `stored`.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_allow_secret_like_bypasses_secret_gate() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "sec-allow"}))
+        .await
+        .expect("palace_create");
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "sec-allow",
+            "text": "deploy uses token AbCd1234EfGh5678IjKl9012 for the prod webhook auth", // pragma: allowlist secret
+            "force": true,
+            "allow_secret_like": true,
+        }),
+    )
+    .await
+    .expect("force + allow_secret_like must bypass the secret gate too");
+    assert_eq!(
+        res["status"], "stored",
+        "allow_secret_like=true must let secret-shaped content through; got {res:?}"
+    );
+}
+
+/// Why (issue #2442, live false positives): two real-world memories were
+/// rejected by the secret heuristic during trusty-mpm orchestration despite
+/// containing no actual credential — a Rust source-location reference
+/// (`client/http_client/error.rs::response_or_body_error`) and a compact
+/// issue/PR/SHA ledger reference (`#2486→PR#2491(e993c18a)`). Both had to be
+/// reworded to store. This test drives the exact strings end-to-end through
+/// the MCP dispatch surface (no `force` needed) to lock in the fix.
+/// What: `memory_remember` prose containing each token and assert `stored`.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_accepts_live_false_positive_tokens() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "fp2442"}))
+        .await
+        .expect("palace_create");
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "fp2442",
+            "text": "Fixed the retry loop in client/http_client/error.rs::response_or_body_error \
+                      so transient errors no longer abort the batch",
+        }),
+    )
+    .await
+    .expect("memory_remember (path::fn reference)");
+    assert_eq!(
+        res["status"], "stored",
+        "Rust path::fn reference must be stored, not rejected as a secret; got {res:?}"
+    );
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "fp2442",
+            "text": "Milestone: shipped #2486→PR#2491(e993c18a) today, closing the retry-loop regression report finally",
+        }),
+    )
+    .await
+    .expect("memory_remember (ledger reference)");
+    assert_eq!(
+        res["status"], "stored",
+        "issue/PR/SHA ledger reference must be stored, not rejected as a secret; got {res:?}"
     );
 }
 

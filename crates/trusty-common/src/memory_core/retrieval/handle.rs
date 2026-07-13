@@ -13,7 +13,7 @@ use super::types::{L1_CAP, RememberOptions};
 use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
-use crate::memory_core::filter::{FilterReject, classify};
+use crate::memory_core::filter::{FilterReject, check_secret, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg::KnowledgeGraph;
@@ -493,12 +493,21 @@ impl PalaceHandle {
     /// way for `memory_note` to bypass only the token-length gate (keeping
     /// the noise patterns). Hoisting the policy into `RememberOptions` keeps
     /// the surface explicit without forking three near-identical methods.
+    /// Issue #2520 (two-tier `force`): `force` is now a QUALITY-gate bypass
+    /// only (noise patterns, short-content, non-alphabetic ratio) — it no
+    /// longer implicitly disables secret detection. An automated writer that
+    /// always passes `force: true` (e.g. trusty-code's per-turn memory sink)
+    /// must still have raw credentials rejected; only the separate, explicit
+    /// `RememberOptions::allow_secret_like` opt-in bypasses the secret gate.
     /// What: Applies the supplied `FilterConfig` (skipping it entirely when
-    /// `force == true`), classifies the content, sets the appropriate TTL
-    /// when the result is a `SessionEvent`, then runs the original
-    /// embed/upsert/persist pipeline.
+    /// `force == true`), THEN — unless `allow_secret_like == true` — always
+    /// runs [`check_secret`] regardless of `force`, classifies the content,
+    /// sets the appropriate TTL when the result is a `SessionEvent`, then
+    /// runs the original embed/upsert/persist pipeline.
     /// Test: `remember_rejects_short_content`,
-    /// `remember_force_bypasses_filter`, `remember_classifies_session_events`.
+    /// `remember_force_bypasses_filter`, `remember_classifies_session_events`,
+    /// `remember_force_still_blocks_secret`,
+    /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`.
     pub async fn remember_with_options(
         &self,
         content: String,
@@ -541,7 +550,8 @@ impl PalaceHandle {
         )
         .await?;
 
-        // Issue #61: signal/noise gate. `force == true` bypasses entirely.
+        // Issue #61: signal/noise gate. `force == true` bypasses the QUALITY
+        // gates (noise patterns, short-content, non-alphabetic ratio) below.
         // `enforce_min_tokens` lets `memory_note` keep the noise patterns
         // while permitting short curated facts ("User prefers snake_case").
         if !opts.force {
@@ -556,6 +566,15 @@ impl PalaceHandle {
                     | FilterReject::NonAlphabetic { .. }
                     | FilterReject::PotentialSecret { .. } => anyhow::anyhow!("{reject}"),
                 })?;
+        } else if !opts.allow_secret_like {
+            // Issue #2520 (two-tier force, BLOCKER fix): `force` bypasses the
+            // quality gates above unconditionally, but must NEVER silently
+            // bypass secret detection too — an automated writer (trusty-code's
+            // per-turn recorder always sets `force: true`) would otherwise
+            // persist raw credentials with zero screening. Run the secret
+            // gate on its own here; only the separate, explicit
+            // `allow_secret_like` opt-in — never `force` alone — skips it.
+            check_secret(&content).map_err(|reject: FilterReject| anyhow::anyhow!("{reject}"))?;
         }
 
         // Encode RoomType into the room_id deterministically by hashing the

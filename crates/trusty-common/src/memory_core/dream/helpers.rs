@@ -15,25 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-/// Substring patterns whose presence in a drawer's content marks it as
-/// low-value auto-capture noise that retroactive dreaming should drop.
-///
-/// Why: PR #221 introduced an identical blocklist at the write path
-/// (`trusty-memory/src/tools.rs`) so new writes never land. But drawers
-/// captured before that gate shipped — `Tool use: Bash`, `Claude Code session
-/// ended: <uuid>`, etc. — already pollute existing palaces. The dream cycle
-/// is the right place to retroactively enforce the same policy without
-/// requiring an admin migration script.
-/// What: Substring patterns (not regexes) checked via `str::contains` after
-/// `str::trim_start`. Mirrors the write-path list exactly so both gates stay
-/// in lock-step. Patterns are matched case-sensitively because the
-/// auto-capture hooks always emit the exact English prefix.
-/// Test: `dream_content_prune_drops_blocklist_drawer`.
-pub(crate) const CONTENT_BLOCKLIST: &[&str] = &[
-    "Tool use: ",          // Claude Code tool-use captures
-    "Claude Code session", // Session lifecycle events
-];
-
 /// Stop-word filter for closet keyword extraction.
 pub(crate) const STOP_WORDS: &[&str] = &[
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "of", "in", "on", "at",
@@ -81,16 +62,22 @@ pub fn extract_keywords(content: &str) -> Vec<String> {
 /// (`trusty-memory::tools::blocklist_gate` plus a minimum word-count
 /// floor) so a drawer that wouldn't be written today is also a drawer
 /// that should not survive the next dream cycle.
+/// Issue #2442: previously carried its own `CONTENT_BLOCKLIST` copy checked
+/// via `str::contains` (substring-anywhere), which could retroactively prune
+/// a drawer that merely QUOTED an auto-capture phrase mid-prose — thinning
+/// the recall surface the same way the write-path over-match did. Now
+/// delegates to [`crate::memory_core::filter::blocklist_match`], the single
+/// prefix-anchored source of truth shared with the write path.
 /// What: Trims leading whitespace, then returns true iff the trimmed content
-/// contains any `CONTENT_BLOCKLIST` substring, OR the whitespace-delimited
-/// word count is strictly less than `min_words`. An empty `content` (zero
-/// words) is always low-quality whenever `min_words >= 1`.
+/// is FRAMED by a known blocklist pattern (see `blocklist_match`), OR the
+/// whitespace-delimited word count is strictly less than `min_words`. An
+/// empty `content` (zero words) is always low-quality whenever
+/// `min_words >= 1`.
 /// Test: `dream_content_prune_drops_blocklist_drawer`,
 /// `dream_content_prune_drops_short_drawer`,
 /// `dream_content_prune_keeps_good_drawer`.
 pub(crate) fn is_low_quality_content(content: &str, min_words: usize) -> bool {
-    let trimmed = content.trim_start();
-    if CONTENT_BLOCKLIST.iter().any(|pat| trimmed.contains(pat)) {
+    if crate::memory_core::filter::blocklist_match(content).is_some() {
         return true;
     }
     let word_count = content.split_whitespace().count();

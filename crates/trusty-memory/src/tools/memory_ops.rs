@@ -44,24 +44,48 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
         .to_string();
+
+    // Issue #2442: `force` must be parsed BEFORE any content-quality gate
+    // runs so it can bypass every one of them uniformly — it is an explicit
+    // operator override ("app-managed writers need deterministic storage"),
+    // not just a dedup-window bypass. Previously `force` was parsed after
+    // `blocklist_gate`/`content_gate` had already run unconditionally, so
+    // `force = true` writes of blocklisted or short standalone content were
+    // still silently dropped, contradicting the tool schema's documented
+    // "bypass all content-quality gates" contract.
+    // Issue #2520 (two-tier force): `force` now bypasses QUALITY gates only
+    // (this gate, the blocklist gate below, dedup, and the short-content
+    // check). The SECRET gate inside the deep `FilterConfig`/`check_secret`
+    // pass always runs — even under `force` — unless the caller ALSO sets
+    // the separate `allow_secret_like` opt-in, a deliberate override for
+    // callers that genuinely need to persist secret-shaped content.
+    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow_secret_like = args
+        .get("allow_secret_like")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Issue #220: blocklist gate — silently drop content matching
     // known low-value auto-capture patterns (e.g. `Tool use: Bash`,
     // `Claude Code session ended: …`). Logged at debug so operators
-    // can audit when investigating missing writes.
-    if let Some(pattern) = blocklist_gate(&raw_text) {
-        // Issue #1481: name the matched pattern so callers can see exactly
-        // what tripped the gate instead of an opaque "blocked pattern".
-        let reason = format!("content gate: skipped (blocked pattern: {pattern:?})");
-        tracing::debug!(palace = %palace, pattern = %pattern, "{reason}");
-        return Ok(skipped_envelope(palace, &reason));
+    // can audit when investigating missing writes. Issue #2442: `force`
+    // bypasses this gate, matching the other content-quality gates below.
+    if !force {
+        if let Some(pattern) = blocklist_gate(&raw_text) {
+            // Issue #1481: name the matched pattern so callers can see exactly
+            // what tripped the gate instead of an opaque "blocked pattern".
+            let reason = format!("content gate: skipped (blocked pattern: {pattern:?})");
+            tracing::debug!(palace = %palace, pattern = %pattern, "{reason}");
+            return Ok(skipped_envelope(palace, &reason));
+        }
     }
     // Issue #215: content gate — drop very short standalone content
-    // unless the caller supplied a `context` wrapper. When skipped,
-    // return a success envelope with an explanatory status so the
-    // caller can see the write was a no-op without having to parse
-    // a custom error shape.
+    // unless the caller supplied a `context` wrapper or `force = true`
+    // (issue #2442). When skipped, return a success envelope with an
+    // explanatory status so the caller can see the write was a no-op
+    // without having to parse a custom error shape.
     let ctx = args.get("context").and_then(|v| v.as_str());
-    let text = match content_gate(&raw_text, ctx) {
+    let text = match content_gate(&raw_text, ctx, force) {
         Some(t) => t,
         None => {
             return Ok(skipped_envelope(
@@ -80,8 +104,6 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // reserved `creator:session=<first-8>` slot so the activity
     // panel can surface it without inspecting every tag.
     attach_mcp_attribution(&mut tags);
-
-    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // Issue #230: serialise the dedup-check + write sequence per-palace
     // so two concurrent identical writes can't both pass the gate. The
@@ -124,7 +146,7 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             tags,
             room,
             importance: 0.5,
-            opts: mcp_remember_opts(force, defer_embedding),
+            opts: mcp_remember_opts(force, defer_embedding, allow_secret_like),
             room_label_for_kg,
         },
     )
@@ -167,7 +189,9 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // standalone content is silently dropped with an explanatory
     // status envelope.
     let ctx = args.get("context").and_then(|v| v.as_str());
-    let content = match content_gate(&raw_content, ctx) {
+    // memory_note has no `force` arg (see the dedup-gate comment above), so
+    // the content gate always runs with `force = false`.
+    let content = match content_gate(&raw_content, ctx, false) {
         Some(c) => c,
         None => {
             return Ok(skipped_envelope(

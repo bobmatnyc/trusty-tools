@@ -30,10 +30,11 @@ use uuid::Uuid;
 /// cleanup; the dream cycle is the right place for retroactive quality
 /// enforcement so palaces self-heal without admin migrations.
 /// What: Snapshots the in-memory drawer table, applies the same content
-/// rule the write path uses (trim leading whitespace, substring-check
-/// against `CONTENT_BLOCKLIST`) plus a word-count floor, and forgets each
-/// matching drawer via `PalaceHandle::forget`. Respects the per-cycle
-/// wall-clock `budget` deadline.
+/// rule the write path uses (`filter::blocklist_match` — a prefix-anchored
+/// `starts_with` check against `BLOCKLIST_PATTERNS`, not a substring match)
+/// plus a word-count floor, and forgets each matching drawer via
+/// `PalaceHandle::forget`. Respects the per-cycle wall-clock `budget`
+/// deadline.
 /// Test: `dream_content_prune_drops_blocklist_drawer`,
 /// `dream_content_prune_drops_short_drawer`,
 /// `dream_content_prune_keeps_good_drawer`.
