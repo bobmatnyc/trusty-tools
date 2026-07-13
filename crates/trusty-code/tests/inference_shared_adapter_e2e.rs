@@ -1,23 +1,27 @@
-//! Black-box e2e: prove trusty-code's OpenRouter/Fireworks inference flows
-//! through the shared `trusty_common::inference` adapter (#2406, epic #2400).
+//! Black-box e2e: prove trusty-code's OpenRouter/Fireworks/Together inference
+//! flows through the shared `trusty_common::inference` adapter (#2406, #2494,
+//! epic #2400).
 //!
 //! Why: #2406's core claim is that tcode's OpenAI-compatible transport is now
-//! the shared adapter, and that Fireworks is reachable. tcode's standing
-//! directive requires that claim be proven end-to-end, black-box, offline, and
-//! deterministic — not merely via internal code paths. This drives tcode's real
-//! production transport (`OpenAiCompatClient`, the same type `main.rs` and
-//! `task::mock_llm` construct) over a REAL loopback socket served by the shared
+//! the shared adapter, and that Fireworks is reachable; #2494 extends the same
+//! claim to Together. tcode's standing directive requires that claim be proven
+//! end-to-end, black-box, offline, and deterministic — not merely via internal
+//! code paths. This drives tcode's real production transport
+//! (`OpenAiCompatClient`, the same type `main.rs` and `task::mock_llm`
+//! construct) over a REAL loopback socket served by the shared
 //! `test_support::MockInferenceServer`, then asserts on the exact wire request
 //! the shared adapter emitted. That request shape (endpoint path, `Bearer` auth,
-//! provider-specific `usage` directive, and the Fireworks prefix-stripped model)
-//! is producible ONLY by the shared adapter — so a green run is direct evidence
-//! the migration is wired correctly.
-//! What: two cases — OpenRouter (asserts the shared adapter injected
-//! `usage:{include:true}` and sent the slug verbatim) and Fireworks (asserts NO
+//! provider-specific `usage` directive, and the Fireworks/Together
+//! prefix-stripped model) is producible ONLY by the shared adapter — so a green
+//! run is direct evidence the migration is wired correctly.
+//! What: three cases — OpenRouter (asserts the shared adapter injected
+//! `usage:{include:true}` and sent the slug verbatim), Fireworks (asserts NO
 //! usage directive and the `fireworks/` routing prefix stripped to the
-//! provider-native model id). Credentials come from an injected `MemoryKeyStore`
-//! and base URLs from `OpenAiCompatClient::with_config`, so the test mutates no
-//! process env and is fully parallel-safe.
+//! provider-native model id), and Together (asserts NO usage directive, `Bearer`
+//! auth, and the `together/` routing prefix stripped to the bare Together
+//! catalog slug). Credentials come from an injected `MemoryKeyStore` and base
+//! URLs from `OpenAiCompatClient::with_config`, so the test mutates no process
+//! env and is fully parallel-safe.
 //! Test: this file (`cargo test -p trusty-code --test inference_shared_adapter_e2e`).
 
 use serde_json::json;
@@ -75,10 +79,11 @@ async fn openrouter_routes_through_shared_adapter_and_injects_usage() {
     let store = MemoryKeyStore::new();
     store.set("openrouter", "sk-or-mock").expect("seed key"); // pragma: allowlist secret
 
-    // OpenRouter → mock; Fireworks base URL is unused in this case.
+    // OpenRouter → mock; Fireworks and Together base URLs are unused here.
     let client = OpenAiCompatClient::with_config(
         Box::new(store),
         server.url().to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
         "http://127.0.0.1:1/unused".to_string(),
     );
 
@@ -130,11 +135,12 @@ async fn fireworks_routes_through_shared_adapter_strips_prefix_and_omits_usage()
     let store = MemoryKeyStore::new();
     store.set("fireworks", "fw-mock").expect("seed key"); // pragma: allowlist secret
 
-    // Fireworks → mock; OpenRouter base URL is unused in this case.
+    // Fireworks → mock; OpenRouter and Together base URLs are unused here.
     let client = OpenAiCompatClient::with_config(
         Box::new(store),
         "http://127.0.0.1:1/unused".to_string(),
         server.url().to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
     );
 
     let resp = client
@@ -156,5 +162,64 @@ async fn fireworks_routes_through_shared_adapter_strips_prefix_and_omits_usage()
     assert!(
         body.get("usage").is_none() || body["usage"].is_null(),
         "Fireworks must NOT receive the OpenRouter-only usage directive"
+    );
+}
+
+/// A Together-routed request flows through the shared adapter, which strips the
+/// `together/` routing prefix to the bare Together catalog slug and sends NO
+/// usage directive (Together does not support the OpenRouter directive).
+///
+/// Why: this is the concrete payoff of #2494 — Together is reachable, routed
+/// through the shared adapter, with the correct provider-specific wire shape:
+/// `Bearer` auth, the prefix-stripped model id, and no usage directive.
+/// What: point the Together base URL at the mock, chat with a `together/` slug,
+/// then assert the parsed response AND the captured wire request (path, auth,
+/// stripped model, absent usage directive).
+/// Test: this test.
+#[tokio::test]
+async fn together_routes_through_shared_adapter_strips_prefix_and_omits_usage() {
+    let server = MockInferenceServer::spawn(200, canned_response())
+        .await
+        .expect("spawn mock");
+
+    let store = MemoryKeyStore::new();
+    store.set("together", "tgp_v1_mock").expect("seed key"); // pragma: allowlist secret
+
+    // Together → mock; OpenRouter and Fireworks base URLs are unused here.
+    let client = OpenAiCompatClient::with_config(
+        Box::new(store),
+        "http://127.0.0.1:1/unused".to_string(),
+        "http://127.0.0.1:1/unused".to_string(),
+        server.url().to_string(),
+    );
+
+    let resp = client
+        .chat(&request_for(
+            "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        ))
+        .await
+        .expect("chat through shared together adapter");
+
+    // Response flowed back through the tcode conversion.
+    assert_eq!(resp.first_text().as_deref(), Some("pong-mock"));
+    assert_eq!(resp.token_usage().prompt_tokens, 5);
+
+    let captured = server.last_request().expect("one request captured");
+    assert_eq!(captured.method, "POST");
+    assert_eq!(captured.path, "/chat/completions");
+    assert!(
+        captured
+            .header("authorization")
+            .is_some_and(|v| v.starts_with("Bearer ")),
+        "shared adapter must send a Bearer auth header"
+    );
+    let body = captured.body.expect("json body");
+    assert_eq!(
+        body["model"], "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "the together/ routing prefix must be stripped to the bare Together slug"
+    );
+    assert!(
+        body.get("usage").is_none() || body["usage"].is_null(),
+        "Together must NOT receive the OpenRouter-only usage directive"
     );
 }

@@ -122,9 +122,10 @@ impl LlmClientTrait for DispatchingLlmClient {
     /// Why: the single method every caller (`AgentLoop`, `run_task`,
     /// `task::executor`) invokes through `Arc<dyn LlmClientTrait>`.
     /// What: `bedrock/*` slugs go through [`Self::bedrock`]; every other slug
-    /// (OpenRouter default and `fireworks/*`) goes through the
-    /// `OpenAiCompatClient`, which handles the OpenRouter-vs-Fireworks split and
-    /// surfaces a missing credential as `LlmError::MissingConfig` at this point.
+    /// (OpenRouter default, `fireworks/*`, and `together/*`) goes through the
+    /// `OpenAiCompatClient`, which handles the OpenRouter/Fireworks/Together split
+    /// and surfaces a missing credential as `LlmError::MissingConfig` at this
+    /// point.
     /// Test: `dispatch::tests::*`.
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         if Self::routes_to_bedrock(&req.model) {
@@ -155,12 +156,13 @@ mod tests {
     }
 
     /// `routes_to_bedrock` is `false` for every non-Bedrock slug family,
-    /// including `fireworks/*` (which routes through the OpenAI-compat transport,
-    /// not Bedrock).
+    /// including `fireworks/*` and `together/*` (which route through the
+    /// OpenAI-compat transport, not Bedrock).
     ///
-    /// Why: guards against a routing regression sending ordinary OpenRouter or
-    /// Fireworks traffic to the (credential-less) Bedrock cell.
-    /// What: assert `false` for representative OpenRouter and Fireworks slugs.
+    /// Why: guards against a routing regression sending ordinary OpenRouter,
+    /// Fireworks, or Together traffic to the (credential-less) Bedrock cell.
+    /// What: assert `false` for representative OpenRouter, Fireworks, and
+    /// Together slugs.
     /// Test: this test.
     #[test]
     fn routes_non_bedrock_prefix_false() {
@@ -169,6 +171,7 @@ mod tests {
             "openai/gpt-4o-mini",
             "qwen/qwen-2.5-coder-32b-instruct",
             "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+            "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
         ] {
             assert!(
                 !DispatchingLlmClient::routes_to_bedrock(slug),

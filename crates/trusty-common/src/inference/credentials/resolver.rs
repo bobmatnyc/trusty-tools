@@ -44,6 +44,7 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         "openrouter" => Some("OPENROUTER_API_KEY"),
         "anthropic" => Some("ANTHROPIC_API_KEY"),
         "openai" => Some("OPENAI_API_KEY"),
+        "together" => Some("TOGETHER_API_KEY"),
         _ => None,
     }
 }
@@ -134,6 +135,7 @@ mod tests {
         assert_eq!(env_var_for("OpenRouter"), Some("OPENROUTER_API_KEY"));
         assert_eq!(env_var_for("anthropic"), Some("ANTHROPIC_API_KEY"));
         assert_eq!(env_var_for("OPENAI"), Some("OPENAI_API_KEY"));
+        assert_eq!(env_var_for("together"), Some("TOGETHER_API_KEY"));
     }
 
     /// Why: an unmapped provider must not panic or synthesise a guess.
