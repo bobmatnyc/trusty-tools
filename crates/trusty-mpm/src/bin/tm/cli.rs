@@ -277,6 +277,16 @@ pub(crate) enum Command {
     /// restricts the reset to those agents. Content that cannot be proven to
     /// already be trusty-mpm's own prior output is backed up (`<file>.bak-
     /// <unix_nanos>`) before being overwritten — nothing is silently lost.
+    ///
+    /// `--reset-agents-workspaces` (issue #2508) extends the SAME reset to
+    /// every intact session workspace's PROJECT-LOCAL `.claude/agents/` —
+    /// without it, `--reset-agents` only ever reconciles the USER-LEVEL
+    /// `~/.claude/agents/` copy, leaving every already-provisioned session
+    /// worktree stale. Each workspace is reset through its OWN resolved
+    /// harness plan, so an agent that workspace's manifest deliberately
+    /// excludes is never resurrected (issue #2462's `[agents].exclude` roster
+    /// filter). Requires `--reset-agents` (there is nothing "workspace" to
+    /// reset without it).
     Install {
         /// Overwrite artifacts that already exist on disk.
         #[arg(long)]
@@ -286,6 +296,10 @@ pub(crate) enum Command {
         /// list (e.g. `--reset-agents engineer,qa`) to restrict the scope.
         #[arg(long, num_args = 0.., value_delimiter = ',')]
         reset_agents: Option<Vec<String>>,
+        /// Also reset every intact session workspace's project-local
+        /// `.claude/agents/` (issue #2508). Requires `--reset-agents`.
+        #[arg(long, requires = "reset_agents")]
+        reset_agents_workspaces: bool,
     },
     /// Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop).
     ///

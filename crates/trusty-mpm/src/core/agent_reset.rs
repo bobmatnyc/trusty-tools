@@ -17,10 +17,18 @@
 //! content differs from BOTH the manifest's last-known checksum (if any) AND
 //! the fresh composition is backed up to `<file>.bak-<unix_nanos>` before
 //! being overwritten, so no content is ever silently discarded.
+//! [`reset_project_agents`] (issue #2508) is the project/session-worktree-safe
+//! variant: it narrows the reset to a resolved harness plan's `agent_selected`
+//! roster BEFORE delegating to [`reset_agents`], so it can reconcile a
+//! project-local `.claude/agents/` dir without resurrecting an agent the
+//! project's manifest deliberately excludes.
 //! Test: `reset_writes_all_by_default`, `reset_filters_by_name`,
 //! `reset_adopts_matching_untracked_file`, `reset_backs_up_diverged_file`,
 //! `reset_recomposes_without_backup_when_matching_manifest_checksum`,
-//! `reset_reports_unknown_names`.
+//! `reset_reports_unknown_names`,
+//! `reset_project_agents_respects_plan_selection`,
+//! `reset_project_agents_reports_deselected_requested_name`,
+//! `reset_project_agents_defaults_to_all_selected`.
 
 use std::path::{Path, PathBuf};
 
@@ -52,6 +60,11 @@ pub struct ResetResult {
     pub backed_up: Vec<String>,
     /// Requested names with no matching source agent file.
     pub not_found: Vec<String>,
+    /// Requested names that exist in the source but were rejected by the
+    /// target harness's `agent_selected` roster filter (issue #2508/#2462).
+    /// Only ever populated by [`reset_project_agents`] — always empty for a
+    /// plain [`reset_agents`] call, which has no roster filter to apply.
+    pub deselected: Vec<String>,
 }
 
 /// Suffix template for reset backups: `<file>.bak-<unix_nanos>`.
@@ -126,18 +139,7 @@ pub fn reset_agents(
     };
     let now = chrono::Utc::now().to_rfc3339();
 
-    let mut available: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(source_dir)? {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        if entry.file_type()?.is_file() && is_agent_file(name) {
-            available.push(name.trim_end_matches(".md").to_string());
-        }
-    }
-    available.sort_unstable();
+    let available = available_agent_names(source_dir)?;
 
     let targets: Vec<String> = match names {
         None => available.clone(),
@@ -219,6 +221,86 @@ pub fn reset_agents(
         other => AgentBuildError::FrontmatterParse(other.to_string()),
     })?;
 
+    Ok(result)
+}
+
+/// List the `.md` agent stems directly under `source_dir`, sorted.
+///
+/// Why: [`reset_agents`] and [`reset_project_agents`] both need the same
+/// "what can be reset" enumeration; factoring it out keeps the scan logic
+/// single-sourced.
+/// What: reads `source_dir`, keeps regular files [`is_agent_file`] accepts,
+/// strips the `.md` suffix, and returns the sorted stems.
+/// Test: exercised indirectly by every `reset_*` test.
+fn available_agent_names(source_dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut available: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(source_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if entry.file_type()?.is_file() && is_agent_file(name) {
+            available.push(name.trim_end_matches(".md").to_string());
+        }
+    }
+    available.sort_unstable();
+    Ok(available)
+}
+
+/// Force-recompose agent files into a PROJECT-LOCAL `.claude/agents/` dir,
+/// respecting a harness plan's deploy-roster selection (issue #2508).
+///
+/// Why: [`reset_agents`] alone is unsafe to point at a project/session-worktree
+/// target — a project's resolved [`crate::core::manifest::HarnessPlan`] may
+/// `exclude` an agent from that harness's roster (issue #2462's root cause:
+/// `[agents].exclude` is the SAME predicate `deploy_agents_filtered` honors for
+/// session/worktree launches). Resetting "all bundled agents" into a project dir
+/// without that filter would silently resurrect an agent the operator
+/// deliberately excluded, trading the #2508 staleness bug for a roster-exclusion
+/// regression (flagged in the #2508/#2462 cross-review). This function threads
+/// the SAME `agent_selected` predicate `prepare_session` uses, so a project-level
+/// reset can never deploy an agent that harness's own launch path would not.
+/// What: computes the candidate set exactly as [`reset_agents`] does (every
+/// available source agent, or the caller's `names` filter), then narrows it to
+/// stems `agent_selected` accepts — any requested name the plan rejects is
+/// recorded in [`ResetResult::deselected`] instead of being silently dropped —
+/// and delegates the actual compose/backup/adopt/write logic to [`reset_agents`]
+/// with that narrowed set (so the two entry points can never diverge in
+/// backup/adoption semantics).
+/// Test: `reset_project_agents_respects_plan_selection`,
+/// `reset_project_agents_reports_deselected_requested_name`,
+/// `reset_project_agents_defaults_to_all_selected`.
+pub fn reset_project_agents(
+    source_dir: &Path,
+    target_dir: &Path,
+    names: Option<&[String]>,
+    agent_selected: impl Fn(&str) -> bool,
+) -> Result<ResetResult, AgentBuildError> {
+    if !source_dir.is_dir() {
+        return Ok(ResetResult::default());
+    }
+    let available = available_agent_names(source_dir)?;
+    let candidates: Vec<String> = match names {
+        None => available.clone(),
+        Some(requested) => requested.to_vec(),
+    };
+
+    let mut deselected = Vec::new();
+    let mut effective = Vec::new();
+    for name in candidates {
+        // A name absent from `available` is left for `reset_agents` to report
+        // as `not_found` — only a plan REJECTION is `deselected` here.
+        if available.contains(&name) && !agent_selected(&name) {
+            deselected.push(name);
+        } else {
+            effective.push(name);
+        }
+    }
+    deselected.sort_unstable();
+
+    let mut result = reset_agents(source_dir, target_dir, Some(&effective))?;
+    result.deselected = deselected;
     Ok(result)
 }
 
@@ -401,5 +483,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, ResetResult::default());
+    }
+
+    #[test]
+    fn reset_project_agents_respects_plan_selection() {
+        // Issue #2508 cross-warning: a project-level reset must never write an
+        // agent the harness plan excludes, even with no explicit `names` filter.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+
+        let result =
+            reset_project_agents(src.path(), tgt.path(), None, |name| name != "engineer").unwrap();
+
+        assert_eq!(result.recomposed, vec!["base-agent.md".to_string()]);
+        assert_eq!(result.deselected, vec!["engineer".to_string()]);
+        assert!(
+            !tgt.path().join("engineer.md").exists(),
+            "a plan-excluded agent must never be written to a project dir"
+        );
+    }
+
+    #[test]
+    fn reset_project_agents_reports_deselected_requested_name() {
+        // An explicitly-requested name the plan rejects is reported as
+        // `deselected`, not silently dropped or conflated with `not_found`.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+
+        let result = reset_project_agents(
+            src.path(),
+            tgt.path(),
+            Some(&["engineer".to_string()]),
+            |name| name != "engineer",
+        )
+        .unwrap();
+
+        assert!(result.recomposed.is_empty());
+        assert!(result.not_found.is_empty(), "engineer DOES exist in source");
+        assert_eq!(result.deselected, vec!["engineer".to_string()]);
+    }
+
+    #[test]
+    fn reset_project_agents_defaults_to_all_selected() {
+        // A plan that selects everything must behave exactly like a plain
+        // `reset_agents(..., None)` — zero regression for the common case.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+
+        let result = reset_project_agents(src.path(), tgt.path(), None, |_| true).unwrap();
+
+        assert_eq!(result.recomposed.len(), 2);
+        assert!(result.deselected.is_empty());
+        assert!(tgt.path().join("engineer.md").exists());
+        assert!(tgt.path().join("base-agent.md").exists());
     }
 }

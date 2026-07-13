@@ -104,6 +104,7 @@ fn reset_report_lines_summarizes_counts() {
         adopted: vec!["c.md".to_string()],
         backed_up: vec!["b.md".to_string()],
         not_found: vec!["missing-agent".to_string()],
+        deselected: vec![],
     };
 
     let lines = reset_report_lines(&result);
@@ -119,7 +120,64 @@ fn reset_report_lines_summarizes_counts() {
         lines.iter().any(|l| l.contains("2 recomposed")
             && l.contains("1 adopted")
             && l.contains("1 backed up")
-            && l.contains("1 not found")),
+            && l.contains("1 not found")
+            && l.contains("0 deselected")),
         "lines = {lines:?}"
     );
+}
+
+#[test]
+fn reset_report_lines_shows_deselected() {
+    // Issue #2508: a `reset_project_agents` result that DESELECTED a
+    // manifest-excluded agent must surface it distinctly, not silently.
+    let result = trusty_mpm::core::agent_reset::ResetResult {
+        recomposed: vec!["base-agent.md".to_string()],
+        adopted: vec![],
+        backed_up: vec![],
+        not_found: vec![],
+        deselected: vec!["engineer".to_string()],
+    };
+
+    let lines = reset_report_lines(&result);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("engineer") && l.contains("excluded")),
+        "lines = {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("1 deselected")),
+        "lines = {lines:?}"
+    );
+}
+
+#[test]
+fn cli_parses_install_reset_agents_workspaces() {
+    // Issue #2508: `--reset-agents-workspaces` requires `--reset-agents` and
+    // defaults to false when omitted.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "install",
+        "--reset-agents",
+        "--reset-agents-workspaces",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Install {
+            reset_agents,
+            reset_agents_workspaces,
+            ..
+        } => {
+            assert_eq!(reset_agents, Some(vec![]));
+            assert!(reset_agents_workspaces);
+        }
+        other => panic!("expected Install, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_rejects_reset_agents_workspaces_without_reset_agents() {
+    // The flag is meaningless (and forbidden) without `--reset-agents`.
+    let result = Cli::try_parse_from(["trusty-mpm", "install", "--reset-agents-workspaces"]);
+    assert!(result.is_err());
 }
