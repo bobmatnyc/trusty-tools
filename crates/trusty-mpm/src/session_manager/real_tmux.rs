@@ -87,10 +87,33 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_exists(name, pane_id)
     }
 
+    /// Type literal text with NO trailing Enter into a SPECIFIC pane
+    /// (overrides the trait default so `inject`'s `Submit::NoSubmit`
+    /// dispatch actually lands in the recorded pane; #2468).
+    fn send_keys_literal_to_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        self.driver
+            .send_keys_literal(&TmuxTarget::pane(name, pane_id), text)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     /// Send Ctrl-C to the session (overrides the no-op trait default; #1461).
     fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
         self.driver
             .send_interrupt(&TmuxTarget::session(name))
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Send Ctrl-C to a SPECIFIC pane (overrides the trait default so
+    /// `inject`'s `Submit::Interrupt` dispatch actually targets the recorded
+    /// pane instead of tmux's session-scoped "active pane" resolution; #2468).
+    fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_interrupt(&TmuxTarget::pane(name, pane_id))
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
@@ -102,6 +125,21 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         let lines = u32::try_from(lines).unwrap_or(u32::MAX);
         self.driver
             .capture(&TmuxTarget::session(name), Some(lines))
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Capture a SPECIFIC pane's output (overrides the trait default so
+    /// `observe` actually reads the recorded pane instead of tmux's
+    /// session-scoped "active pane" resolution; #2468).
+    fn capture_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let lines = u32::try_from(lines).unwrap_or(u32::MAX);
+        self.driver
+            .capture(&TmuxTarget::pane(name, pane_id), Some(lines))
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 

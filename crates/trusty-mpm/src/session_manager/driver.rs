@@ -79,6 +79,28 @@ pub trait ManagedTmuxDriver: Send + Sync {
         self.send_line(name, text)
     }
 
+    /// Send literal text WITHOUT a trailing Enter to a SPECIFIC pane (#2468,
+    /// same rationale as [`Self::send_line_to_pane`]).
+    ///
+    /// What: the pane-scoped counterpart to [`Self::send_keys_literal`],
+    /// used by `SessionManager::inject`'s `Submit::NoSubmit` dispatch when
+    /// `record.pane_id` is known. The default falls back to
+    /// `send_keys_literal(name, text)` (session-scoped) — correct for a
+    /// legacy record or a driver that predates pane-level addressing.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to build an actual
+    /// pane-scoped `TmuxTarget`.
+    /// Test: `inject_dispatch_nosubmit_targets_pane_when_known` in
+    /// `pane_scoped_tests.rs`.
+    fn send_keys_literal_to_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        let _ = pane_id;
+        self.send_keys_literal(name, text)
+    }
+
     /// Report whether `pane_id` still exists as a live pane within `name`'s
     /// tmux session.
     ///
@@ -125,6 +147,23 @@ pub trait ManagedTmuxDriver: Send + Sync {
         ))
     }
 
+    /// Send Ctrl-C to a SPECIFIC pane rather than the session (#2468, same
+    /// rationale as [`Self::send_line_to_pane`]).
+    ///
+    /// What: the pane-scoped counterpart to [`Self::send_interrupt`], used by
+    /// `SessionManager::inject`'s `Submit::Interrupt` dispatch when
+    /// `record.pane_id` is known. The default falls back to
+    /// `send_interrupt(name)` (session-scoped) for a legacy record or a
+    /// driver that predates pane-level addressing.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to build an actual
+    /// pane-scoped `TmuxTarget`.
+    /// Test: `inject_dispatch_interrupt_targets_pane_when_known` in
+    /// `pane_scoped_tests.rs`.
+    fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
+        let _ = pane_id;
+        self.send_interrupt(name)
+    }
+
     /// Capture the last `lines` of pane output for the session named `name`.
     ///
     /// `lines` is `usize` to match the harness-agnostic
@@ -133,6 +172,30 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// tmux `-S` argv requires is confined to the real-tmux driver edge, so no
     /// caller in the observe path needs a `try_from`.
     fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError>;
+
+    /// Capture the last `lines` of output from a SPECIFIC pane rather than
+    /// whichever pane the session name currently resolves to (#2468).
+    ///
+    /// Why: `SessionManager::observe`'s LLM-free pane read had the same
+    /// sibling-window-hijack hole #2467 fixed for resume/restart — a
+    /// session-scoped capture reads whatever pane tmux considers active,
+    /// which need not be the pane this record is actually about.
+    /// What: the pane-scoped counterpart to [`Self::capture`]. The default
+    /// falls back to `capture(name, lines)` (session-scoped) for a legacy
+    /// record or a driver that predates pane-level addressing.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to build an actual
+    /// pane-scoped `TmuxTarget`.
+    /// Test: `observe_captures_pane_scoped_when_pane_id_known` in
+    /// `pane_scoped_tests.rs`.
+    fn capture_pane(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let _ = pane_id;
+        self.capture(name, lines)
+    }
 
     /// Return the pane's current working directory for snapshot-before-stop (#1816).
     ///

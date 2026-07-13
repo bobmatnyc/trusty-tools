@@ -75,6 +75,12 @@ mod runtime_exit_reconcile_tests;
 #[cfg(test)]
 mod reload_error_tests;
 
+#[cfg(test)]
+mod pane_scoped_tests;
+
+#[cfg(test)]
+mod adopt_existing_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]

@@ -383,10 +383,20 @@ pub struct RestartRequest {
 /// `POST /claude-config/restart` — restart Claude Code in a tmux session.
 ///
 /// Why: after applying config changes the operator wants a clean Claude Code
-/// process; this sends Ctrl-C then `claude` into the session's pane.
-/// What: calls `ClaudeCodeRestarter::restart_in_session`. tmux being absent
-/// surfaces as `500`.
-/// Test: `restart_claude_code_handles_missing_tmux`.
+/// process; this sends Ctrl-C then `claude` into the session's pane. The
+/// managed-session record's `pane_id`, when one is tracked for this tmux
+/// session, is threaded through so the restart lands in the record's OWN
+/// pane rather than tmux's session-scoped "active pane" resolution — the
+/// same sibling-window hijack risk #2467 fixed for resume/restart respawn
+/// (issue #2468).
+/// What: looks up `body.tmux_session` against the managed-session store for
+/// a matching `pane_id` (`None` when the session is unmanaged/legacy — the
+/// session-scoped fallback then applies exactly as before #2468), then calls
+/// `ClaudeCodeRestarter::restart_in_session`. tmux being absent, or a
+/// confirmed-gone recorded pane, both surface as `500`.
+/// Test: `restart_claude_code_handles_missing_tmux`;
+/// `ClaudeCodeRestarter::restart_target`'s pane/session decision is
+/// unit-tested directly in `daemon::claude_config::restarter`.
 #[utoipa::path(
     post,
     path = "/claude-config/restart",
@@ -398,14 +408,25 @@ pub struct RestartRequest {
     )
 )]
 pub async fn restart_claude_code(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Json(body): Json<RestartRequest>,
 ) -> Result<Json<RestartResponse>, StatusCode> {
-    crate::daemon::claude_config::ClaudeCodeRestarter::restart_in_session(&body.tmux_session)
-        .map_err(|e| {
-            tracing::warn!("restart in {} failed: {e}", body.tmux_session);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let pane_id = state
+        .session_manager()
+        .await
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.tmux_name == body.tmux_session)
+        .and_then(|r| r.pane_id);
+    crate::daemon::claude_config::ClaudeCodeRestarter::restart_in_session(
+        &body.tmux_session,
+        pane_id.as_deref(),
+    )
+    .map_err(|e| {
+        tracing::warn!("restart in {} failed: {e}", body.tmux_session);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(RestartResponse {
         restarted: body.tmux_session,
     }))
