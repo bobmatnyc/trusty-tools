@@ -1,6 +1,6 @@
 [package]
 name = "trusty-embedderd"
-version = "0.3.7"
+version = "0.3.8"
 publish = true
 edition = "2021"
 license.workspace = true
