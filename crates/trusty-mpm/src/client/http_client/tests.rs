@@ -46,6 +46,57 @@ async fn connect_session_errors_when_daemon_unreachable() {
     assert!(result.is_err(), "expected connect to fail with no daemon");
 }
 
+/// Spawn the daemon's real HTTP API on a random loopback port, rooted in a
+/// throwaway temp directory with an isolated (empty) managed-session store.
+///
+/// Why: mirrors `client::executor::tests::spawn_test_daemon` — a real bind is
+/// needed to prove `spawn_managed_session` reads the response BODY (via
+/// [`super::error::response_or_body_error`]), not just the status line.
+async fn spawn_test_daemon() -> String {
+    use std::future::IntoFuture as _;
+
+    use crate::daemon::{api, state::DaemonState};
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let router = api::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    format!("http://{addr}")
+}
+
+/// #2457 follow-up to #2496: a rejected spawn must surface the daemon's body
+/// message, not collapse to a bare "404 Not Found" the way `error_for_status`
+/// alone would. No project is registered for `repo_url` here, so the daemon's
+/// deliverable pre-check (`validate_deliverable_scope`, run BEFORE any
+/// provisioning) rejects with `DaemonError::ProjectNotFoundForRepoUrl` — a 404
+/// whose body names the offending repo_url.
+#[tokio::test]
+async fn spawn_managed_session_surfaces_daemon_error_body() {
+    let url = spawn_test_daemon().await;
+    let client = DaemonClient::new(url);
+    let req = ManagedSpawnRequest {
+        repo_url: "https://github.com/acme/unregistered".to_string(),
+        git_ref: "main".to_string(),
+        task: "do it".to_string(),
+        name_hint: None,
+        runtime: None,
+        inject_task: None,
+        deliverable_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+        force_new: false,
+    };
+    let err = client
+        .spawn_managed_session(&req)
+        .await
+        .expect_err("no project is registered for this repo_url");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("acme/unregistered") || msg.contains("unregistered"),
+        "error should carry the daemon's body message, not just the bare status: {msg}"
+    );
+    assert!(msg.contains("404"), "{msg}");
+}
+
 #[test]
 fn session_row_deserializes_tmux_name() {
     let json = serde_json::json!({

@@ -18,6 +18,7 @@ use anyhow::Context;
 
 use super::DaemonClient;
 use super::config;
+use super::error::response_or_body_error;
 use super::types::{
     FleetByProjectWireResponse, FleetProjectGroupWire, ManagedActivityResponse,
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
@@ -102,9 +103,16 @@ impl DaemonClient {
     /// [`config::PROVISION_REQUEST_TIMEOUT`] instead (issue #2471 review
     /// follow-up).
     /// What: POSTs `req` with the provision-scoped request timeout and
-    /// returns the daemon's [`ManagedSpawnResponse`].
+    /// returns the daemon's [`ManagedSpawnResponse`]. A non-success status
+    /// goes through [`response_or_body_error`] (#2457 follow-up to #2496's
+    /// call-site sweep, which explicitly deferred `managed.rs`) so the
+    /// daemon's rejection reason — e.g. `DeliverableNotFound`'s "deliverable
+    /// not found: {id}", or `ProjectNotFoundForRepoUrl`'s message naming the
+    /// offending repo_url — survives instead of being discarded down to a
+    /// bare "404 Not Found" by `error_for_status`.
     /// Test: live HTTP via `tests/session_manager_mvp.rs`;
-    /// `config::tests::default_client_uses_default_bounds` pins the constant.
+    /// `config::tests::default_client_uses_default_bounds` pins the constant;
+    /// `spawn_managed_session_surfaces_daemon_error_body` in `tests.rs`.
     pub async fn spawn_managed_session(
         &self,
         req: &ManagedSpawnRequest,
@@ -116,11 +124,9 @@ impl DaemonClient {
             .json(req)
             .timeout(config::PROVISION_REQUEST_TIMEOUT)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
-        Ok(resp)
+        let resp = response_or_body_error(resp).await?;
+        Ok(resp.json().await?)
     }
 
     /// Adopt an EXISTING tmux session via `POST /api/v1/sessions/managed/adopt`

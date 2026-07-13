@@ -220,15 +220,27 @@ pub(crate) async fn resolve_project_session_id(
 
 /// Execute a managed [`SessionAction`] through chat-core and print the result.
 ///
-/// Why: the single entry point the `session` dispatcher calls for every managed
-/// verb — it keeps the dispatcher a thin match and concentrates the
-/// map → execute → render flow here.
-/// What: maps `action` via [`to_command`], runs it on a [`CommandExecutor`] built
-/// from the CLI's client, and prints [`render_cli`] to stdout. Returns `false`
-/// when `action` is not a managed verb this module routes (so the caller can
-/// handle it on the project path); `true` once it has handled and printed.
-/// Test: parsing/mapping by `to_command_maps_*`; rendering by `render_cli_*`; the
-/// HTTP path by the executor tests and `tests/session_manager_mvp.rs`.
+/// Why (#2457): the single entry point the `session` dispatcher calls for
+/// every managed verb — it keeps the dispatcher a thin match and concentrates
+/// the map → execute → render flow here. Before this fix a failed spawn (or
+/// any other managed verb) — an unreachable daemon, a rejected spawn, a 404
+/// deliverable-not-found — came back from [`CommandExecutor::execute`] as
+/// `CommandResult::Error`, which this function printed and then returned
+/// `Ok(true)` regardless: the process exited 0 even though the operation
+/// failed, so scripts/CI checking the exit code silently treated the failure
+/// as success.
+/// What: maps `action` via [`to_command`], runs it on a [`CommandExecutor`]
+/// built from the CLI's client. A [`CommandResult::Error`] is now propagated
+/// as `Err` (via the same `anyhow` path every other CLI failure uses) instead
+/// of merely being printed, so `main`'s default error handler reports it and
+/// exits non-zero; every other result is rendered via [`render_cli`] and
+/// printed to stdout as before. Returns `Ok(false)` when `action` is not a
+/// managed verb this module routes (so the caller can handle it on the
+/// project path); `Ok(true)` once it has handled and printed a successful
+/// result.
+/// Test: parsing/mapping by `to_command_maps_*`; rendering by `render_cli_*`;
+/// `run_propagates_error_result_as_err` covers the exit-code fix; the HTTP
+/// path by the executor tests and `tests/session_manager_mvp.rs`.
 pub(crate) async fn run(
     client: &reqwest::Client,
     url: &str,
@@ -238,6 +250,9 @@ pub(crate) async fn run(
         return Ok(false);
     };
     let result = executor(client, url).execute(cmd).await;
+    if let CommandResult::Error(msg) = &result {
+        anyhow::bail!("{msg}");
+    }
     println!("{}", render_cli(&result));
     Ok(true)
 }
@@ -515,6 +530,28 @@ mod tests {
         assert_eq!(
             render_cli(&CommandResult::Error("managed session x not found".into())),
             "managed session x not found"
+        );
+    }
+
+    /// #2457: `run` must propagate a `CommandResult::Error` as `Err`, not
+    /// print it and return `Ok(true)` — that was the exact bug (a failed
+    /// `sessions new`, or any other managed verb routed here, exited 0).
+    /// Port 1 on loopback is not listening, so this deterministically drives
+    /// the executor's "daemon unreachable" error path without needing a real
+    /// daemon.
+    #[tokio::test]
+    async fn run_propagates_error_result_as_err() {
+        let client = reqwest::Client::new();
+        let action = SessionAction::Send {
+            id: "nonexistent".into(),
+            text: "hi".into(),
+        };
+        let err = run(&client, "http://127.0.0.1:1", &action)
+            .await
+            .expect_err("a CommandResult::Error must propagate as Err, not be swallowed");
+        assert!(
+            err.to_string().contains("daemon unreachable"),
+            "unexpected error: {err}"
         );
     }
 }

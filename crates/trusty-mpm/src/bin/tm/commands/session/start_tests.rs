@@ -59,16 +59,19 @@ const UNREACHABLE_URL: &str = "http://127.0.0.1:1";
 /// source directory itself — the exact regression the issue reported.
 ///
 /// Why: this is the acceptance criterion from issue #1916 item (a) — proving
-/// the fix without requiring a live daemon. `managed_route::run` soft-fails
-/// (prints a `CommandResult::Error`, returns `Ok(())`) when the daemon is
-/// unreachable, so `start_session` returning `Ok(())` here confirms the
-/// PROTECTED branch was taken (the in-place fallback hard-fails instead — see
-/// the sibling test below) — and the crucial assertion is that the source
-/// directory was never touched.
+/// the fix without requiring a live daemon. Before #2457, `managed_route::run`
+/// soft-failed (printed a `CommandResult::Error`, returned `Ok(())`) on a
+/// daemon-unreachable spawn — a `tm session start` against a down daemon
+/// silently reported success. #2457 fixed `run` to propagate that
+/// `CommandResult::Error` as `Err`, so this test now asserts `Err` (matching
+/// the in-place fallback's existing hard-fail — see the sibling test) while
+/// still proving the PROTECTED branch was taken via the crucial assertion:
+/// the source directory was never touched.
 /// What: creates a real temp git repo with a `github.com` origin remote (so
 /// `derive_project` recognizes it), calls `start_session` against it with an
-/// unreachable daemon URL, and asserts `.trusty-mpm/` and
-/// `.claude/settings.json` were never created inside the repo.
+/// unreachable daemon URL, and asserts (1) it returns `Err` and (2)
+/// `.trusty-mpm/` and `.claude/settings.json` were never created inside the
+/// repo.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn session_start_dispatches_managed_new_for_github_repo() {
@@ -93,14 +96,13 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
     )
     .await;
 
-    // The managed path never hard-errors on daemon-unreachable (it renders a
-    // `CommandResult::Error` and returns, matching `session new`'s existing
-    // soft-fail behavior via `managed_route::run`) — so `Ok` here proves the
-    // PROTECTED branch was taken, not the in-place fallback (which hard-fails
-    // — see the sibling test).
+    // #2457: a daemon-unreachable spawn is a genuine failure and must
+    // propagate as `Err` (not the pre-#2457 soft-fail `Ok`) — proving the
+    // PROTECTED branch was taken (the in-place fallback also hard-fails, but
+    // via a different code path — see the sibling test).
     assert!(
-        result.is_ok(),
-        "expected soft-fail Ok from the managed route, got {result:?}"
+        result.is_err(),
+        "expected a hard Err from the managed route on daemon-unreachable, got {result:?}"
     );
 
     // The #1916 regression this fix closes: no tm artifacts written into the
