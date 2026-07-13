@@ -23,10 +23,18 @@
 //! [`rows::activity_from_response`]) live in the [`rows`] submodule (split
 //! out by #2476 to keep this file under the 500-SLOC production cap) and are
 //! re-exported here so existing callers keep using `poll::project_to_row`
-//! etc.
-//! Test: `tests` covers the daemon-down / stale-keep branches against a
-//! guaranteed-dead client (mirroring
-//! `tui::coordinator::poll::tests::poll_marks_unreachable_clears_sessions`);
+//! etc. A PERSISTENT non-transport `/activity` fetch failure for the
+//! selected session (an older daemon lacking the endpoint, a GC'd session, a
+//! malformed body) is classified by [`classify_activity_error`] and tracked
+//! by [`super::state::ActivityFailureStreak`] so the pane can eventually
+//! report it explicitly instead of rendering "loading…" forever (#2470); see
+//! [`apply_activity_outcome`] for the pure state-transition rules.
+//! Test: `tests` (split into the sibling `tests.rs` file, a recognized
+//! test-file path under the 1500-SLOC test cap, to keep THIS file under the
+//! 500-SLOC production cap once the #2470 tests were added) covers the
+//! daemon-down / stale-keep branches against a guaranteed-dead client
+//! (mirroring `tui::coordinator::poll::tests::poll_marks_unreachable_clears_sessions`)
+//! plus the failure-classification and failure-streak state machine;
 //! [`rows`]'s own `tests` covers the pure projections; the daemon-UP path is
 //! exercised manually / by launching the TUI.
 
@@ -40,7 +48,7 @@ pub(crate) use rows::{activity_from_response, live_session_rows, project_to_row}
 #[cfg(test)]
 pub(crate) use rows::session_to_row;
 
-use crate::client::DaemonClient;
+use crate::client::{DaemonClient, ManagedActivityResponse};
 use crate::project::Project;
 
 #[cfg(test)]
@@ -206,28 +214,116 @@ fn sync_open_view_deliverables(state: &mut ProjectCtlState, project_name: &str) 
 /// larger poll function. Runs AFTER the project/session refresh above so
 /// `state.selected_session()` reflects the just-synced navigation, not a
 /// pre-refresh selection that may have shrunk out of range.
-/// What: no selection → clears `state.activity`. A selection with the daemon
-/// unreachable, or whose fetch errors, → if `state.activity` already targets
-/// this session id it is marked `stale` (kept, not discarded, per the
-/// graceful-daemon-down requirement); otherwise cleared (nothing recent
-/// enough to show as stale). A successful fetch replaces `state.activity`
-/// outright with a fresh, non-stale [`ActivityInfo`].
+/// What: no selection → clears `state.activity` and the failure streak. A
+/// daemon-unreachable poll is treated as a [`ActivityFetchFailure::Transport`]
+/// outcome (the whole daemon looks down, same as a connect/timeout error);
+/// otherwise the fetch's `Result` is classified via
+/// [`classify_activity_error`] and handed to [`apply_activity_outcome`],
+/// which owns the actual stale-keep / failure-streak / unavailable rules
+/// (#2470).
 /// Test: `refresh_activity_marks_existing_activity_stale_on_fetch_failure`,
-/// `refresh_activity_clears_when_no_session_is_selected`.
+/// `refresh_activity_clears_when_no_session_is_selected`;
+/// [`apply_activity_outcome`]'s own doc covers the failure-streak rules.
 async fn refresh_activity(state: &mut ProjectCtlState, client: &DaemonClient) {
     let Some(session_id) = state.selected_session().map(|s| s.id.clone()) else {
         state.activity = None;
+        state.activity_failures.reset();
         return;
     };
 
-    if state.daemon_reachable {
-        match client.managed_session_activity(&session_id).await {
-            Ok(resp) => {
-                state.activity = Some(activity_from_response(session_id, resp));
-                return;
-            }
-            Err(_) => { /* fall through to the stale-or-clear handling below */ }
+    if !state.daemon_reachable {
+        apply_activity_outcome(state, session_id, Err(ActivityFetchFailure::Transport));
+        return;
+    }
+
+    let outcome = client
+        .managed_session_activity(&session_id)
+        .await
+        .map_err(|e| classify_activity_error(&e));
+    apply_activity_outcome(state, session_id, outcome);
+}
+
+/// Coarse classification of a `/activity` fetch failure (#2470).
+///
+/// Why: distinguishes "the whole daemon looks down or is restarting"
+/// (transport — connection refused/timeout) from "the daemon answered, but
+/// THIS session's activity fetch is itself broken" (non-transport — an HTTP
+/// error status or an undecodable body: an older daemon lacking the
+/// endpoint, a GC'd session, a malformed payload). Only the latter should
+/// ever advance [`super::state::ActivityFailureStreak`] — a transport
+/// failure means the daemon itself is unreachable, which the existing
+/// stale-keep path already covers on its own, and flapping connectivity must
+/// never be mistaken for "this session's activity is permanently gone".
+/// What: [`classify_activity_error`] walks the `anyhow::Error` cause chain
+/// for a [`reqwest::Error`] whose `is_connect()` or `is_timeout()` is `true`
+/// → [`Self::Transport`]; anything else (a status/body error from
+/// [`crate::client::http_client::error::response_or_body_error`], a decode
+/// error, or no `reqwest::Error` in the chain at all) → [`Self::NonTransport`].
+/// Test: `classify_status_error_is_non_transport`,
+/// `classify_connect_error_is_transport` (in `tests`, below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityFetchFailure {
+    /// Connection refused/timeout — the whole daemon looks down.
+    Transport,
+    /// The daemon answered; this session's activity fetch failed anyway.
+    NonTransport,
+}
+
+/// See [`ActivityFetchFailure`]'s own doc.
+fn classify_activity_error(err: &anyhow::Error) -> ActivityFetchFailure {
+    let is_transport = err
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|e| e.is_connect() || e.is_timeout());
+    if is_transport {
+        ActivityFetchFailure::Transport
+    } else {
+        ActivityFetchFailure::NonTransport
+    }
+}
+
+/// Apply one `/activity` fetch's outcome to `state.activity` and
+/// `state.activity_failures` (#2470).
+///
+/// Why: pulled out of [`refresh_activity`] as a pure, synchronously testable
+/// function — no daemon, no async, no `reqwest` types in its signature — so
+/// the exact state-transition rules (stale-keep vs. reset vs. crossing the
+/// unavailable threshold) are unit-testable with typed inputs, mirroring how
+/// [`rows::activity_from_response`] keeps the pure DTO projection out of the
+/// async fetch.
+/// What: `Ok(resp)` → replaces `state.activity` with a fresh, non-stale
+/// [`ActivityInfo`] and resets the failure streak
+/// ([`super::state::ActivityFailureStreak::reset`]).
+/// `Err(ActivityFetchFailure::NonTransport)` → records one failure in the
+/// streak for `session_id` ([`super::state::ActivityFailureStreak::record_failure`]);
+/// once that streak crosses [`super::state::ACTIVITY_UNAVAILABLE_THRESHOLD`],
+/// [`ProjectCtlState::activity_unavailable_for_selected`] flips to `true`
+/// and the Activity pane renders "unavailable" instead of "loading…"/stale
+/// data. `Err(ActivityFetchFailure::Transport)` → never touches the streak.
+/// Both `Err` arms then apply the SAME stale-keep-or-clear rule to
+/// `state.activity` itself: mark `stale = true` if it already targets
+/// `session_id`, else clear it (nothing recent enough to show as stale) —
+/// unchanged from the pre-#2470 behavior.
+/// Test: `apply_activity_outcome_success_resets_streak_and_shows_data`,
+/// `apply_activity_outcome_non_transport_failures_reach_unavailable_threshold`,
+/// `apply_activity_outcome_transport_failure_never_advances_streak`,
+/// `apply_activity_outcome_success_after_failures_resets_streak`,
+/// `apply_activity_outcome_session_switch_starts_a_fresh_streak`.
+fn apply_activity_outcome(
+    state: &mut ProjectCtlState,
+    session_id: String,
+    outcome: Result<ManagedActivityResponse, ActivityFetchFailure>,
+) {
+    match outcome {
+        Ok(resp) => {
+            state.activity = Some(activity_from_response(session_id, resp));
+            state.activity_failures.reset();
+            return;
         }
+        Err(ActivityFetchFailure::NonTransport) => {
+            state.activity_failures.record_failure(&session_id);
+        }
+        Err(ActivityFetchFailure::Transport) => { /* never touches the streak */ }
     }
 
     match &mut state.activity {
@@ -303,222 +399,4 @@ async fn fetch_projects_and_sessions(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::client::ManagedSessionSummary;
-
-    fn summary(id: &str, state: &str) -> ManagedSessionSummary {
-        ManagedSessionSummary {
-            id: id.to_string(),
-            name: format!("s-{id}"),
-            state: state.to_string(),
-            workspace_path: None,
-            repo_url: None,
-            branch: Some("main".to_string()),
-            created_at: None,
-            last_activity_at: None,
-            pending_decision: None,
-            proposed_default: None,
-            source_id: None,
-            task: Some("do the thing".to_string()),
-            cwd: None,
-            claude_session_id: None,
-            deliverable_id: None,
-            pane_id: None,
-        }
-    }
-
-    // ---- daemon-down branches (guaranteed-dead client, no live daemon needed) ---
-
-    /// A `127.0.0.1` URL bound to an ephemeral port, then immediately dropped
-    /// so a later connect is refused — mirrors
-    /// `tui::coordinator::tests::dead_loopback_url`.
-    fn dead_loopback_url() -> String {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
-        let port = listener.local_addr().expect("read bound local addr").port();
-        drop(listener);
-        format!("http://127.0.0.1:{port}")
-    }
-
-    #[tokio::test]
-    async fn poll_marks_unreachable_clears_state() {
-        let discovered = crate::core::resolve_daemon_url(None);
-        let probe = DaemonClient::new(discovered.clone());
-        if probe.is_healthy().await {
-            eprintln!("skipping: a reachable daemon was discovered at {discovered}");
-            return;
-        }
-
-        let mut state = ProjectCtlState {
-            projects: vec![ProjectRow {
-                name: "widget".to_string(),
-                repo_url: "https://github.com/acme/widget".to_string(),
-                live_count: 1,
-                total_count: 1,
-            }],
-            daemon_reachable: true, // pretend a prior poll had succeeded
-            ..Default::default()
-        };
-        state
-            .sessions_by_project
-            .insert("widget".to_string(), vec![]);
-        let mut client = DaemonClient::new(dead_loopback_url());
-
-        project_ctl_poll_daemon(&mut state, &mut client).await;
-
-        assert!(!state.daemon_reachable);
-        assert!(state.projects.is_empty());
-        assert!(state.sessions_by_project.is_empty());
-    }
-
-    fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
-        let mut state = ProjectCtlState {
-            projects: vec![ProjectRow {
-                name: "widget".to_string(),
-                repo_url: "https://github.com/acme/widget".to_string(),
-                live_count: 1,
-                total_count: 1,
-            }],
-            daemon_reachable: true,
-            ..Default::default()
-        };
-        state.sessions_by_project.insert(
-            "widget".to_string(),
-            vec![session_to_row(summary(session_id, "active"))],
-        );
-        state.projects_nav.sync_len(state.projects.len());
-        state.sessions_nav.sync_len(state.current_sessions().len());
-        state
-    }
-
-    /// `refresh_activity` is called directly (bypassing `project_ctl_poll_daemon`'s
-    /// own health probe) so this test stays deterministic regardless of whether
-    /// a real daemon happens to be discoverable on this machine — it only needs
-    /// the `/activity` HTTP call itself to fail, which a dead loopback port
-    /// guarantees.
-    #[tokio::test]
-    async fn refresh_activity_marks_existing_activity_stale_on_fetch_failure() {
-        let mut state = seeded_activity_state("s1");
-        state.activity = Some(ActivityInfo {
-            session_id: "s1".to_string(),
-            state: "working".to_string(),
-            summary: "last known summary".to_string(),
-            pending_decision: None,
-            proposed_default: None,
-            raw_pane_tail: vec!["$ cargo test".to_string()],
-            stale: false,
-        });
-        let client = DaemonClient::new(dead_loopback_url());
-
-        refresh_activity(&mut state, &client).await;
-
-        let activity = state
-            .activity
-            .expect("last-known activity must be kept, not discarded");
-        assert!(activity.stale, "a failed fetch must mark it stale");
-        assert_eq!(
-            activity.summary, "last known summary",
-            "the last-known data must be kept, not cleared"
-        );
-    }
-
-    #[tokio::test]
-    async fn refresh_activity_clears_when_no_session_is_selected() {
-        let mut state = ProjectCtlState {
-            daemon_reachable: true,
-            activity: Some(ActivityInfo {
-                session_id: "orphaned".to_string(),
-                state: "working".to_string(),
-                summary: "stale from a since-deselected session".to_string(),
-                pending_decision: None,
-                proposed_default: None,
-                raw_pane_tail: vec![],
-                stale: false,
-            }),
-            ..Default::default()
-        };
-        let client = DaemonClient::new(dead_loopback_url());
-
-        refresh_activity(&mut state, &client).await;
-
-        assert!(state.activity.is_none());
-    }
-
-    #[tokio::test]
-    async fn refresh_deliverables_clears_when_no_project_selected() {
-        let mut state = ProjectCtlState {
-            daemon_reachable: true,
-            deliverables: Some(vec![]),
-            ..Default::default()
-        };
-        let client = DaemonClient::new(dead_loopback_url());
-
-        refresh_deliverables(&mut state, &client).await;
-
-        assert!(state.deliverables.is_none());
-    }
-
-    #[tokio::test]
-    async fn refresh_deliverables_clears_on_daemon_down() {
-        let mut state = seeded_activity_state("s1");
-        state.daemon_reachable = false;
-        let client = DaemonClient::new(dead_loopback_url());
-
-        refresh_deliverables(&mut state, &client).await;
-
-        assert!(
-            state.deliverables.is_none(),
-            "a project IS selected here, but daemon_reachable=false must still reset to \
-             Unknown, matching state.projects/sessions_by_project's own daemon-down handling"
-        );
-    }
-
-    /// THE review-required regression test: `daemon_reachable == true` (the
-    /// daemon is otherwise healthy — the earlier health probe succeeded) but
-    /// `list_deliverables` itself fails on this one tick. Previously this
-    /// cleared `state.deliverables` outright, which made
-    /// `deliverable_link_state` report every previously-resolved session as
-    /// `Dangling` — a false "the Deliverable was deleted" signal for what was
-    /// really just one dropped HTTP call. The fix: keep the last-known-good
-    /// `Some(list)` untouched, mirroring `refresh_activity`'s stale-keep
-    /// pattern for `ActivityInfo`.
-    #[tokio::test]
-    async fn refresh_deliverables_keeps_stale_list_on_transient_fetch_failure() {
-        let mut state = seeded_activity_state("s1");
-        let known_id = crate::deliverable::DeliverableId::new();
-        state.deliverables = Some(vec![crate::deliverable::Deliverable {
-            id: known_id,
-            project_name: "widget".to_string(),
-            name: "OAuth2 flow".to_string(),
-            description: String::new(),
-            kind: crate::deliverable::DeliverableKind::Feature,
-            ticket_ref: None,
-            spec_ref: None,
-            status: crate::deliverable::DeliverableStatus::InProgress,
-            estimated_effort: crate::deliverable::EstimationTier::M,
-            created_at: chrono::Utc::now(),
-            target_date: None,
-        }]);
-        // `seeded_activity_state` leaves `daemon_reachable = true` — the
-        // failure here is scoped to `list_deliverables` alone, via a dead
-        // loopback client, exactly the "endpoint fails, daemon otherwise up"
-        // case the review flagged.
-        let client = DaemonClient::new(dead_loopback_url());
-
-        refresh_deliverables(&mut state, &client).await;
-
-        let kept = state
-            .deliverables
-            .as_ref()
-            .expect("a transient fetch failure must KEEP the last-known-good list, not clear it");
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].id, known_id);
-        assert_eq!(
-            state.deliverable_link_state(&known_id.to_string()),
-            crate::tui::project_ctl::state::DeliverableLinkState::Resolved,
-            "a previously-resolved link must stay Resolved through one bad poll, \
-             never flip to Dangling"
-        );
-    }
-}
+mod tests;
