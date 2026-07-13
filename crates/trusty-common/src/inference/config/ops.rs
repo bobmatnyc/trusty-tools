@@ -26,17 +26,33 @@ use crate::inference::types::{ChatMessage, ChatRequest};
 ///
 /// Why: `config keys list` must report WHERE a key comes from (so an operator
 /// knows whether it is pinned in the shell, committed to `.env.local`, or held
-/// in the secure store) — using the same precedence the resolver applies.
-/// What: the three keyed tiers, highest-precedence first. Rendered via
-/// [`Self::label`]; never carries a value.
+/// in the secure store) — using the same precedence the resolver applies. A
+/// mounting binary that pre-loads `.env.local` at startup (as trusty-search and
+/// trusty-agents already do — see [`Self::EnvOrEnvLocal`]) folds the file's
+/// values into the process env BEFORE `config` ever runs, so a bare "process env
+/// var is set" check cannot tell "independently exported in the shell" apart
+/// from "loaded from `.env.local` by the binary itself". Rather than assert a
+/// precise-but-possibly-wrong tier in that case, [`detect_tier`] reports the
+/// honest ambiguity.
+/// What: [`Self::Env`] and [`Self::EnvLocal`] are the unambiguous single-source
+/// tiers; [`Self::EnvOrEnvLocal`] covers the double-signal case; [`Self::Store`]
+/// is the secure-store fallback. Rendered via [`Self::label`]; never carries a
+/// value.
 /// Test: `classify_tier_follows_precedence`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyTier {
-    /// A process environment variable (highest precedence).
+    /// A process environment variable, with no matching `.env.local` entry
+    /// found — unambiguously an independently-set env var.
     Env,
-    /// A repo-root `.env.local` entry.
+    /// A repo-root `.env.local` entry, with no value in the process env.
     EnvLocal,
-    /// The secure key store (File-0600 / OS keyring).
+    /// The key is present BOTH in the process env AND in the `.env.local` file.
+    /// Ambiguous: it may be an independently-exported shell var, or it may be
+    /// the `.env.local` value the mounting binary already folded into its own
+    /// env at startup (trusty-search/trusty-agents both do this today). See the
+    /// [`list`] docs for the long-term fix landing with #2405.
+    EnvOrEnvLocal,
+    /// The secure key store (File-0600 / OS keyring) — lowest precedence.
     Store,
 }
 
@@ -45,12 +61,14 @@ impl KeyTier {
     ///
     /// Why: the list is for humans; the tier needs a clear label, not an enum
     /// name.
-    /// What: a short phrase per tier.
+    /// What: a short phrase per tier; [`Self::EnvOrEnvLocal`] spells out the
+    /// ambiguity rather than picking one guess.
     /// Test: `classify_tier_follows_precedence` (values are asserted via callers).
     pub fn label(self) -> &'static str {
         match self {
             Self::Env => "environment variable",
             Self::EnvLocal => ".env.local",
+            Self::EnvOrEnvLocal => "environment variable or .env.local (ambiguous)",
             Self::Store => "secure store",
         }
     }
@@ -60,11 +78,17 @@ impl KeyTier {
 ///
 /// Why: the pure decision at the heart of `list`'s tier reporting — separated so
 /// it is unit-testable without touching the environment, a file, or a store.
-/// What: env beats `.env.local` beats store (matching
-/// [`resolve_key_with`]/`resolve_key`); `None` when no tier supplies the key.
+/// What: when both `env` and `env_local` are true, the tier is the ambiguous
+/// [`KeyTier::EnvOrEnvLocal`] (a mounting binary may have folded the file into
+/// its env at startup — see [`KeyTier`] docs); otherwise env alone beats
+/// `.env.local` alone beats store (matching
+/// [`resolve_key_with`]/`resolve_key`'s actual precedence); `None` when no tier
+/// supplies the key.
 /// Test: `classify_tier_follows_precedence`.
 pub fn classify_tier(env: bool, env_local: bool, store: bool) -> Option<KeyTier> {
-    if env {
+    if env && env_local {
+        Some(KeyTier::EnvOrEnvLocal)
+    } else if env {
         Some(KeyTier::Env)
     } else if env_local {
         Some(KeyTier::EnvLocal)
@@ -198,12 +222,25 @@ pub fn unset(store: &dyn KeyStore, provider: &str, out: &mut dyn Write) -> anyho
 ///
 /// Why: the `list` verb. It answers "which providers can I use, and where does
 /// each key come from" WITHOUT ever revealing a value — names and tiers only.
+///
+/// NOTE for mounting binaries (#2405): if your `main()` pre-loads `.env.local`
+/// into the process env before dispatching to `config` — as trusty-search
+/// (`main.rs`) and trusty-agents (`runtime/startup.rs`) already do via their own
+/// ad hoc `dotenvy` calls — this verb cannot tell "you exported this in your
+/// shell" apart from "your binary loaded it from `.env.local` at startup" for a
+/// key present in both places; it reports [`KeyTier::EnvOrEnvLocal`] rather than
+/// guessing. The clean long-term fix is for every binary to route its startup
+/// dotenv load through the shared `credentials::load_env_local_once` (so this
+/// module owns the one loader and can observe load order); that migration lands
+/// alongside #2405.
 /// What: walks the capability registry ([`all`]); for keyed providers reports the
-/// resolution tier via [`detect_tier`] (env > `.env.local` > store) or
+/// resolution tier via [`detect_tier`] (env-only > `.env.local`-only > store,
+/// with the ambiguous both-present case reported honestly — see [`KeyTier`]) or
 /// "not configured"; for the keyless Bedrock chain reports that it uses AWS
 /// credentials. Writes to `out`.
 /// Test: `config_keys_cli.rs::set_then_list_reports_store_tier_without_value`,
-/// `list_reports_env_tier`.
+/// `list_reports_env_tier`,
+/// `list_reports_ambiguous_tier_when_env_and_env_local_both_present`.
 pub fn list(store: &dyn KeyStore, out: &mut dyn Write) -> anyhow::Result<()> {
     writeln!(
         out,
@@ -234,9 +271,14 @@ pub fn list(store: &dyn KeyStore, out: &mut dyn Write) -> anyhow::Result<()> {
 /// two-stage resolver will not fall back), builds the adapter from `cfg`, and
 /// issues a minimal 1-token chat as the auth probe. A 401/403 is
 /// [`ProbeOutcome::Unauthorized`]; a not-yet-wired provider is
-/// [`ProbeOutcome::Unsupported`]; any other error is [`ProbeOutcome::Failed`]
-/// (never carrying the key). Returns `Err` only on an unknown provider.
-/// Test: `config_keys_cli.rs` OK / 401 / unconfigured probe cases.
+/// [`ProbeOutcome::Unsupported`]; any other error is [`ProbeOutcome::Failed`],
+/// its message run through [`scrub_key`] first — a provider's non-2xx response
+/// BODY is attacker/provider-controlled and could echo the credential back
+/// (some providers include the offending header value in a 401/400 body); the
+/// scrub guarantees the resolved key never reaches `Failed`'s message even in
+/// that case. Returns `Err` only on an unknown provider.
+/// Test: `config_keys_cli.rs` OK / 401 / unconfigured probe cases,
+/// `probe_error_body_never_leaks_the_resolved_key`.
 pub async fn probe(
     store: &dyn KeyStore,
     cfg: &Configurator,
@@ -254,10 +296,11 @@ pub async fn probe(
         )));
     }
 
-    // Clean degrade when nothing resolves.
-    if resolve_key_with(name, store).is_none() {
+    // Clean degrade when nothing resolves. Keep the resolved value so any error
+    // text surfaced below can be scrubbed of it (see `scrub_key`).
+    let Some(resolved_key) = resolve_key_with(name, store) else {
         return Ok(ProbeOutcome::Unconfigured);
-    }
+    };
 
     // Prefix the slug so the resolver picks THIS provider (its key resolves, so
     // stage 1 wins and there is no OpenRouter fallback).
@@ -270,7 +313,12 @@ pub async fn probe(
             )));
         }
         Err(InferenceError::MissingCredential { .. }) => return Ok(ProbeOutcome::Unconfigured),
-        Err(err) => return Ok(ProbeOutcome::Failed(err.to_string())),
+        Err(err) => {
+            return Ok(ProbeOutcome::Failed(scrub_key(
+                &err.to_string(),
+                &resolved_key,
+            )));
+        }
     };
 
     // Minimal, cheap 1-token request as the auth probe.
@@ -282,8 +330,33 @@ pub async fn probe(
         Err(InferenceError::Api {
             status: 401 | 403, ..
         }) => Ok(ProbeOutcome::Unauthorized),
-        Err(err) => Ok(ProbeOutcome::Failed(err.to_string())),
+        Err(err) => Ok(ProbeOutcome::Failed(scrub_key(
+            &err.to_string(),
+            &resolved_key,
+        ))),
     }
+}
+
+/// Remove any occurrence of `key` from `message`, defensively.
+///
+/// Why: [`InferenceError::Api`]'s `Display` embeds the provider's raw,
+/// non-2xx response BODY verbatim — provider-controlled content that could
+/// (accidentally or via a misbehaving/malicious endpoint) echo the credential
+/// back, e.g. in a "your key `sk-…` is invalid" message. `Failed`'s message
+/// reaches stdout unredacted via [`report_probe`], so this is the one place in
+/// the credential-management CLI that must never let that happen. Generic
+/// substring removal (rather than a provider-specific parser) keeps the guard
+/// correct for every current and future adapter.
+/// What: returns `message` with every occurrence of `key` replaced by
+/// `[REDACTED]`; a no-op when `key` is empty (an empty needle would match
+/// everywhere) or does not occur in `message`.
+/// Test: `probe_error_body_never_leaks_the_resolved_key`,
+/// `scrub_key_is_noop_for_empty_key`.
+fn scrub_key(message: &str, key: &str) -> String {
+    if key.is_empty() {
+        return message.to_string();
+    }
+    message.replace(key, "[REDACTED]")
 }
 
 /// Write a probe outcome as a value-free status line.
@@ -340,13 +413,15 @@ fn known_keyed_provider(provider: &str) -> anyhow::Result<&'static ProviderCapab
 ///
 /// Why: the production tier lookup behind `list`. It reads the process env and
 /// the `.env.local` file INDEPENDENTLY (rather than after loading the file into
-/// the env) so it can tell the two tiers apart honestly — see the `list`/`run`
-/// contract about not pre-loading `.env.local`.
+/// the env) so it CAN tell the two tiers apart when only one of them supplies
+/// the key. It cannot, however, un-fold a value a mounting binary already
+/// merged into its own env at startup — when both signals are true, the result
+/// is [`KeyTier::EnvOrEnvLocal`], not a guess (see [`KeyTier`]/[`list`] docs).
 /// What: checks a non-empty process env var, a non-empty `.env.local` entry (via
 /// [`env_local_value`], non-mutating), and store presence, then defers to
 /// [`classify_tier`].
-/// Test: the pure classifier is unit-tested; the env and store tiers are covered
-/// by `config_keys_cli.rs`.
+/// Test: the pure classifier is unit-tested; the env, `.env.local`, ambiguous,
+/// and store tiers are covered by `config_keys_cli.rs`.
 fn detect_tier(env_var: &str, provider: &str, store: &dyn KeyStore) -> Option<KeyTier> {
     let env = std::env::var(env_var)
         .ok()
@@ -377,12 +452,19 @@ fn known_names() -> String {
 mod tests {
     use super::*;
 
-    /// Why: `list`'s tier report must follow the resolver's precedence exactly —
-    /// env over `.env.local` over store — and report `None` when absent.
+    /// Why: `list`'s tier report must follow the resolver's precedence exactly
+    /// for single-signal cases — env-only over `.env.local`-only over store —
+    /// report the honest ambiguity when BOTH env and `.env.local` supply the
+    /// key (a mounting binary may have folded the file into its env at
+    /// startup), and report `None` when absent everywhere.
     /// Test: itself.
     #[test]
     fn classify_tier_follows_precedence() {
-        assert_eq!(classify_tier(true, true, true), Some(KeyTier::Env));
+        assert_eq!(
+            classify_tier(true, true, true),
+            Some(KeyTier::EnvOrEnvLocal)
+        );
+        assert_eq!(classify_tier(true, false, true), Some(KeyTier::Env));
         assert_eq!(classify_tier(false, true, true), Some(KeyTier::EnvLocal));
         assert_eq!(classify_tier(false, false, true), Some(KeyTier::Store));
         assert_eq!(classify_tier(false, false, false), None);
@@ -395,5 +477,26 @@ mod tests {
     fn read_key_line_strips_newline() {
         let mut reader = std::io::Cursor::new(b"sk-piped-value\n".to_vec()); // pragma: allowlist secret
         assert_eq!(read_key_line(&mut reader).unwrap(), "sk-piped-value");
+    }
+
+    /// Why: a probe-error message that echoes the resolved key verbatim (e.g. a
+    /// provider that includes the offending credential in its error body) must
+    /// have every occurrence of the key removed, never partially redacted.
+    /// Test: itself.
+    #[test]
+    fn scrub_key_removes_every_occurrence() {
+        let key = "sk-or-verysecret1234"; // pragma: allowlist secret
+        let msg = format!("inference API error 400: bad key {key}, retry without {key}");
+        let scrubbed = scrub_key(&msg, key);
+        assert!(!scrubbed.contains(key), "leaked: {scrubbed}");
+        assert_eq!(scrubbed.matches("[REDACTED]").count(), 2);
+    }
+
+    /// Why: an empty key must never be treated as a wildcard needle — that would
+    /// corrupt every message it touches.
+    /// Test: itself.
+    #[test]
+    fn scrub_key_is_noop_for_empty_key() {
+        assert_eq!(scrub_key("some message", ""), "some message");
     }
 }

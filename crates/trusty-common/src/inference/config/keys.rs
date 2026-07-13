@@ -106,6 +106,15 @@ impl KeysCommand {
         let stdout = std::io::stdout();
         match self.verb {
             KeysVerb::Set(args) => {
+                if args.value.is_some() {
+                    // Best-effort nudge: an inline VALUE argument lands in shell
+                    // history/process-list on most systems. Warn on stderr (never
+                    // the value itself) without blocking the scriptable path.
+                    eprintln!(
+                        "warning: passing the key inline may leave it in your shell history; \
+                         omit VALUE for a hidden prompt, or pipe it via stdin."
+                    );
+                }
                 let value = source_set_value(args.value)?;
                 ops::set(store.as_ref(), &args.provider, &value, &mut stdout.lock())
             }

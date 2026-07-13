@@ -190,6 +190,54 @@ fn list_reports_env_tier() {
     unsafe { std::env::remove_var("OPENAI_API_KEY") };
 }
 
+/// Why: some mounting binaries (trusty-search `main.rs`, trusty-agents
+/// `runtime/startup.rs`) already `dotenvy::from_filename(".env.local")` at
+/// startup, folding the file's values into the process env BEFORE `config`
+/// ever runs. When a provider's key is present in BOTH the process env AND the
+/// `.env.local` file, `list` cannot honestly tell "independently exported in
+/// the shell" apart from "the binary's own startup load" — it must report the
+/// ambiguous tier rather than confidently (and possibly wrongly) claiming
+/// "environment variable".
+/// Test: itself.
+#[test]
+#[serial(dotenv_credential_env)]
+fn list_reports_ambiguous_tier_when_env_and_env_local_both_present() {
+    clear_provider_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join(".env.local"),
+        "ANTHROPIC_API_KEY=file-value\n",
+    )
+    .expect("write .env.local");
+
+    let prior_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(tmp.path()).expect("chdir into tempdir");
+    // SAFETY: guarded by `#[serial(dotenv_credential_env)]`; the same guard
+    // also protects this test's exclusive use of the process cwd within this
+    // test binary (every other test in this file is annotated the same way).
+    unsafe { std::env::set_var("ANTHROPIC_API_KEY", "env-value") };
+
+    let store = MemoryKeyStore::new();
+    let mut out = Vec::new();
+    let list_result = ops::list(&store, &mut out);
+
+    // Restore process-global state before any assertion/panic can leak it into
+    // other tests.
+    unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    std::env::set_current_dir(&prior_cwd).expect("restore cwd");
+
+    list_result.expect("list ok");
+    let s = out_string(&out);
+    assert!(
+        s.contains("anthropic") && s.contains(KeyTier::EnvOrEnvLocal.label()),
+        "anthropic should report the ambiguous env/.env.local tier: {s}"
+    );
+    assert!(
+        !s.contains("env-value") && !s.contains("file-value"),
+        "list leaked a value: {s}"
+    );
+}
+
 /// Why: `set`/`unset` must reject a provider that does not use an API key
 /// (Bedrock — AWS chain) and an unknown provider, with an actionable message.
 /// Test: itself.
@@ -273,6 +321,48 @@ async fn test_probe_401_is_unauthorized() {
     let mut out = Vec::new();
     ops::report_probe("openrouter", &outcome, &mut out).expect("report");
     assert!(!out_string(&out).contains(FAKE_KEY));
+}
+
+/// Why: `InferenceError::Api`'s `Display` embeds the raw, provider-controlled
+/// response BODY verbatim. A provider that echoes the offending credential back
+/// in a non-401/403 error body (landing on the `ProbeOutcome::Failed` catch-all)
+/// must NOT have that value reach `report_probe`'s output — the one place in
+/// this credential-management CLI that must never leak a key. This drives the
+/// full probe→report pipeline with a mock body that CONTAINS the fake key and
+/// asserts it never surfaces.
+/// Test: itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn probe_error_body_never_leaks_the_resolved_key() {
+    clear_provider_env();
+    // 400 (not 401/403) so this lands on the `Failed` catch-all, not
+    // `Unauthorized` — and the body echoes the key back, as a misbehaving or
+    // overly-verbose provider error page might.
+    let server = MockInferenceServer::spawn(
+        400,
+        serde_json::json!({"error": {"message": format!("invalid credential: {FAKE_KEY}")}}),
+    )
+    .await
+    .expect("spawn");
+    let cfg = mock_configurator(server.url().to_string());
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", FAKE_KEY).unwrap();
+
+    let outcome = ops::probe(&store, &cfg, "openrouter").await.expect("probe");
+    let ProbeOutcome::Failed(reason) = &outcome else {
+        panic!("expected a Failed outcome for a 400 response, got {outcome:?}");
+    };
+    assert!(
+        !reason.contains(FAKE_KEY),
+        "ProbeOutcome::Failed leaked the key: {reason}"
+    );
+
+    let mut out = Vec::new();
+    ops::report_probe("openrouter", &outcome, &mut out).expect("report");
+    let s = out_string(&out);
+    assert!(!s.contains(FAKE_KEY), "report_probe leaked the key: {s}");
+    assert!(s.contains("ERROR"), "{s}");
 }
 
 /// Why: probing a provider with no key configured must degrade cleanly to
