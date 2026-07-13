@@ -68,7 +68,7 @@ pub fn factory(resolved: &ResolvedProvider) -> Result<Box<dyn InferenceAdapter>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::types::SecretString;
+    use crate::inference::types::{ChatMessage, ChatRequest, SecretString};
 
     fn resolved(key: &str) -> ResolvedProvider {
         ResolvedProvider::new(
@@ -104,5 +104,54 @@ mod tests {
                 provider: ProviderId::OpenAI
             }
         ));
+    }
+
+    /// Live smoke test: send a trivial prompt to a cheap OpenAI model.
+    ///
+    /// Why: end-to-end validation against the real first-party OpenAI API that
+    /// the OpenAI-direct config + shared core produce a non-empty response and
+    /// non-zero usage. Ignored so CI stays offline; run locally with a real key.
+    /// What: reads `OPENAI_API_KEY` from env and SKIPS (does not fail) when
+    /// absent/empty; otherwise builds the adapter via [`build`] and asserts a
+    /// non-empty reply with `prompt_tokens > 0`.
+    /// Test: `cargo test -p trusty-common --features inference-client,axum-server \
+    ///        openai -- --ignored --nocapture` (with `OPENAI_API_KEY` set).
+    #[tokio::test]
+    #[ignore = "requires OPENAI_API_KEY; skipped in CI"]
+    async fn live_openai_call() {
+        let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+            eprintln!("OPENAI_API_KEY not set — skipping live test");
+            return;
+        };
+        if key.trim().is_empty() {
+            eprintln!("OPENAI_API_KEY is empty — skipping live test");
+            return;
+        }
+
+        let resolved = ResolvedProvider::new(
+            ProviderId::OpenAI,
+            "gpt-4o-mini".to_string(),
+            Some(SecretString::new(key)),
+        );
+        let adapter = build(&resolved, OPENAI_BASE_URL).expect("build adapter");
+
+        let mut req = ChatRequest::new(
+            "gpt-4o-mini",
+            vec![
+                ChatMessage::system("You are a concise assistant."),
+                ChatMessage::user("Reply with exactly the word: pong"),
+            ],
+        );
+        req.temperature = Some(0.0);
+        req.max_tokens = Some(16);
+
+        let resp = adapter.chat(&req).await.expect("live chat");
+        let text = resp.first_text().expect("assistant text");
+        assert!(!text.is_empty(), "assistant text was empty");
+        assert!(
+            resp.usage().prompt_tokens > 0,
+            "prompt_tokens should be > 0"
+        );
+        eprintln!("live openai ok — text: {text:?}, usage: {:?}", resp.usage());
     }
 }

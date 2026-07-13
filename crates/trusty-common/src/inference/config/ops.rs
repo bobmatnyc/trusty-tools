@@ -104,17 +104,34 @@ pub fn classify_tier(env: bool, env_local: bool, store: bool) -> Option<KeyTier>
 /// Why: a structured result so both the human-facing report and the process exit
 /// code derive from one classification, and so tests can assert the outcome
 /// directly without scraping stdout.
-/// What: `Ok` (accepted), `Unauthorized` (401/403), `Unconfigured` (no key
-/// resolved — the clean-degrade case), `Unsupported` (no probeable adapter, e.g.
-/// Bedrock's AWS chain or a not-yet-wired provider), and `Failed` (any other
-/// error — never contains the key, since [`InferenceError`] never does).
-/// Test: `crates/trusty-common/tests/config_keys_cli.rs` (OK / 401 / unconfigured).
+/// What: `Ok` (accepted), `Unauthorized` (401/403), `ModelNotFound` (404 on the
+/// probe's own request — the provider rejected the MODEL, not the credential;
+/// see issue #2510, where a registry `default_model` slug was not deployed on
+/// the probing account), `Unconfigured` (no key resolved — the clean-degrade
+/// case), `Unsupported` (no probeable adapter, e.g. Bedrock's AWS chain or a
+/// not-yet-wired provider), and `Failed` (any other error — never contains the
+/// key, since [`InferenceError`] never does).
+/// Test: `crates/trusty-common/tests/config_keys_cli.rs` (OK / 401 / 404 /
+/// unconfigured).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// The provider accepted the credential.
     Ok,
     /// The provider rejected the credential (HTTP 401/403).
     Unauthorized,
+    /// The provider returned 404 for the probe's model slug — the credential
+    /// may well be valid, but the model is not found/deployed on this account
+    /// (redacted message attached; issue #2510). This "404 means the MODEL,
+    /// not the endpoint" assumption holds only because every current adapter
+    /// ([`super::super::providers::openai_compat::OpenAiCompatAdapter`], the
+    /// shared core behind OpenRouter/Fireworks/OpenAI/Together/AtlasCloud)
+    /// puts the model slug in the request BODY against a fixed
+    /// `/chat/completions` path, never in the URL path itself — a future
+    /// adapter that encodes the model in the URL (Bedrock's Converse API does
+    /// this, though Bedrock is keyless and never reaches this probe) would
+    /// need its own 404 classification, since a path-404 there could equally
+    /// mean "wrong route" rather than "model not deployed".
+    ModelNotFound(String),
     /// No key resolved for the provider; nothing to probe.
     Unconfigured,
     /// The provider cannot be probed by this verb (reason attached).
@@ -127,14 +144,21 @@ impl ProbeOutcome {
     /// Human-readable, value-free status line for `report_probe`.
     ///
     /// Why: each outcome needs an actionable one-liner (and the `Unconfigured`
-    /// case must point the operator at `set`).
-    /// What: a short phrase; the `Unsupported`/`Failed` variants embed their
-    /// (already key-free) reason.
+    /// case must point the operator at `set`; the `ModelNotFound` case must
+    /// point the operator at overriding the model rather than re-checking the
+    /// key — issue #2510's clearer-error-mapping fix).
+    /// What: a short phrase; the `Unsupported`/`Failed`/`ModelNotFound`
+    /// variants embed their (already key-free) reason.
     /// Test: asserted in `config_keys_cli.rs` probe tests.
     pub fn label(&self) -> String {
         match self {
             Self::Ok => "OK — credentials accepted".to_string(),
             Self::Unauthorized => "UNAUTHORIZED — provider rejected the key (401/403)".to_string(),
+            Self::ModelNotFound(reason) => format!(
+                "MODEL NOT FOUND — the provider's default model is not found/deployed on this \
+                 account ({reason}); set an explicit, account-available model instead of relying \
+                 on the built-in default"
+            ),
             Self::Unconfigured => {
                 "UNCONFIGURED — no key resolved; set one with `config keys set <provider>`"
                     .to_string()
@@ -269,15 +293,21 @@ pub fn list(store: &dyn KeyStore, out: &mut dyn Write) -> anyhow::Result<()> {
 /// caller's prior load > `store`); a miss is [`ProbeOutcome::Unconfigured`]. Then
 /// forces this exact provider by prefixing its slug (a resolvable key means the
 /// two-stage resolver will not fall back), builds the adapter from `cfg`, and
-/// issues a minimal 1-token chat as the auth probe. A 401/403 is
-/// [`ProbeOutcome::Unauthorized`]; a not-yet-wired provider is
-/// [`ProbeOutcome::Unsupported`]; any other error is [`ProbeOutcome::Failed`],
-/// its message run through [`scrub_key`] first — a provider's non-2xx response
-/// BODY is attacker/provider-controlled and could echo the credential back
-/// (some providers include the offending header value in a 401/400 body); the
-/// scrub guarantees the resolved key never reaches `Failed`'s message even in
-/// that case. Returns `Err` only on an unknown provider.
-/// Test: `config_keys_cli.rs` OK / 401 / unconfigured probe cases,
+/// issues a minimal 1-token chat AGAINST `caps.default_model` as the auth probe.
+/// A 401/403 is [`ProbeOutcome::Unauthorized`]; a 404 is
+/// [`ProbeOutcome::ModelNotFound`] — distinguished from a generic failure
+/// because the registry's `default_model` is a best-effort catalog suggestion,
+/// NOT guaranteed to be deployed on every account (issue #2510: Fireworks'
+/// default 404'd on a real account whose deployed-model list did not include
+/// it), so the credential itself may be perfectly valid; a not-yet-wired
+/// provider is [`ProbeOutcome::Unsupported`]; any other error is
+/// [`ProbeOutcome::Failed`]. Every non-2xx-derived message is run through
+/// [`scrub_key`] first — a provider's non-2xx response BODY is
+/// attacker/provider-controlled and could echo the credential back (some
+/// providers include the offending header value in a 401/400 body); the scrub
+/// guarantees the resolved key never reaches `Failed`'s or `ModelNotFound`'s
+/// message even in that case. Returns `Err` only on an unknown provider.
+/// Test: `config_keys_cli.rs` OK / 401 / 404 / unconfigured probe cases,
 /// `probe_error_body_never_leaks_the_resolved_key`.
 pub async fn probe(
     store: &dyn KeyStore,
@@ -330,6 +360,9 @@ pub async fn probe(
         Err(InferenceError::Api {
             status: 401 | 403, ..
         }) => Ok(ProbeOutcome::Unauthorized),
+        Err(err @ InferenceError::Api { status: 404, .. }) => Ok(ProbeOutcome::ModelNotFound(
+            scrub_key(&err.to_string(), &resolved_key),
+        )),
         Err(err) => Ok(ProbeOutcome::Failed(scrub_key(
             &err.to_string(),
             &resolved_key,

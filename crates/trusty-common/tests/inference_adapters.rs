@@ -16,7 +16,9 @@
 use serde_json::{Value, json};
 use serial_test::serial;
 use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
-use trusty_common::inference::providers::{atlascloud, fireworks, openai, openrouter, together};
+use trusty_common::inference::providers::{
+    anthropic, atlascloud, fireworks, openai, openrouter, together,
+};
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{
     CacheControl, ChatMessage, ChatRequest, Configurator, FunctionDefinition, InferenceError,
@@ -407,6 +409,167 @@ async fn atlascloud_round_trip_no_usage_directive() {
     );
 }
 
+// ── Anthropic-direct: native Messages-API wire format ────────────────────────────
+
+/// A minimal successful Anthropic `/v1/messages` response body (text turn).
+fn anthropic_text_response_body() -> Value {
+    json!({
+        "id": "msg_mock",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-5",
+        "content": [{"type": "text", "text": "pong"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 12, "output_tokens": 3}
+    })
+}
+
+/// Why: driving Anthropic-direct through the `Configurator` must (a) POST to the
+/// `/messages` endpoint with the `x-api-key` + `anthropic-version` headers (NOT
+/// an OpenAI `Authorization: Bearer`), (b) hoist `system` to the top-level param
+/// and strip the `anthropic/` routing prefix from the model, and (c) parse the
+/// native response text back — the full resolve→build→chat→usage cycle against a
+/// real socket, exercising the bespoke (non-OpenAI) wire format.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn anthropic_direct_translates_messages_api_request() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, anthropic_text_response_body())
+        .await
+        .expect("spawn mock");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    // Anthropic key present AND explicit anthropic/ prefix → resolves to Anthropic.
+    store.set("anthropic", "sk-ant-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Anthropic,
+        Box::new(move |r: &ResolvedProvider| anthropic::build(r, &base)),
+    );
+
+    let adapter = cfg
+        .build("anthropic/claude-sonnet-4-5", &store)
+        .expect("build");
+    assert_eq!(adapter.name(), "anthropic");
+    assert_eq!(adapter.capabilities().id, ProviderId::Anthropic);
+
+    let req = ChatRequest::new(
+        "anthropic/claude-sonnet-4-5",
+        vec![ChatMessage::system("be terse"), ChatMessage::user("ping")],
+    );
+    let resp = adapter.chat(&req).await.expect("chat ok");
+
+    // Native response parsing.
+    assert_eq!(resp.first_text().as_deref(), Some("pong"));
+    assert_eq!(resp.usage().prompt_tokens, 12);
+    assert_eq!(resp.usage().completion_tokens, 3);
+
+    // Request translation captured by the mock.
+    let sent = server.last_request().expect("captured request");
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.path, "/messages");
+    assert_eq!(sent.header("x-api-key"), Some("sk-ant-fake")); // pragma: allowlist secret
+    assert_eq!(sent.header("anthropic-version"), Some("2023-06-01"));
+    // Anthropic-direct authenticates via x-api-key, NOT an OpenAI bearer header.
+    assert!(sent.header("authorization").is_none());
+    let body = sent.body.expect("json body");
+    // Model prefix stripped; system hoisted; max_tokens defaulted.
+    assert_eq!(body["model"], "claude-sonnet-4-5");
+    assert_eq!(body["system"], "be terse");
+    assert!(body["max_tokens"].is_number());
+    // The system turn is NOT in the messages array.
+    assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "ping");
+}
+
+/// Why: the Anthropic-native usage payload (`input_tokens`/`output_tokens` plus
+/// flat cache fields) must map into the normalized `Usage` (NOT deserialise to
+/// zero through the OpenAI-shaped block — the #2403-review trap), a `tool_use`
+/// content block must parse into an OpenAI-style tool call, and a caller-set
+/// `cache_control` breakpoint must render on the wire as an ephemeral marker.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn anthropic_direct_parses_native_usage_and_tool_use() {
+    clear_provider_env();
+    let body = json!({
+        "id": "msg_tool",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-5",
+        "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+             "input": {"loc": "SEA"}}
+        ],
+        "stop_reason": "tool_use",
+        "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 40,
+            "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 300
+        }
+    });
+    let server = MockInferenceServer::spawn(200, body).await.expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("anthropic", "sk-ant-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Anthropic,
+        Box::new(move |r: &ResolvedProvider| anthropic::build(r, &base)),
+    );
+    let adapter = cfg
+        .build("anthropic/claude-sonnet-4-5", &store)
+        .expect("build");
+
+    // Caller marks the system prefix as a cache breakpoint and supplies a tool.
+    let mut sys = ChatMessage::system("cache me");
+    sys.cache_control = Some(CacheControl::ephemeral());
+    let mut req = ChatRequest::new(
+        "anthropic/claude-sonnet-4-5",
+        vec![sys, ChatMessage::user("weather?")],
+    );
+    req.tools = Some(vec![ToolDefinition::function(FunctionDefinition {
+        name: "get_weather".into(),
+        description: Some("look up weather".into()),
+        parameters: Some(json!({"type": "object"})),
+        cache_control: None,
+    })]);
+    req.tool_choice = Some(adapter.map_tool_choice(ToolChoice::Auto));
+
+    let resp = adapter.chat(&req).await.expect("chat ok");
+
+    // Native usage mapped correctly (input/output → prompt/completion, cache).
+    let usage = resp.usage();
+    assert_eq!(usage.prompt_tokens, 1200);
+    assert_eq!(usage.completion_tokens, 40);
+    assert_eq!(usage.cache_read_tokens, 900);
+    assert_eq!(usage.cache_creation_tokens, 300);
+
+    // tool_use block parsed into an OpenAI-style tool call.
+    let calls = resp.first_tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].function.name, "get_weather");
+
+    // Wire translation: system as a cache-annotated block array, Anthropic
+    // tool shape, and the Anthropic tool_choice dialect.
+    let sent = server.last_request().expect("captured");
+    let body = sent.body.expect("json");
+    assert_eq!(
+        body["system"],
+        json!([{
+            "type": "text",
+            "text": "cache me",
+            "cache_control": {"type": "ephemeral"}
+        }])
+    );
+    assert_eq!(body["tools"][0]["name"], "get_weather");
+    assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    assert_eq!(body["tool_choice"], json!({"type": "auto"}));
+}
+
 // ── Error classification through a real socket ───────────────────────────────────
 
 /// Why: a non-2xx provider status must surface as a classified `InferenceError`
@@ -484,4 +647,29 @@ fn default_factories_register_openai_dialect() {
             provider: ProviderId::Bedrock
         }
     ));
+}
+
+/// Why: `register_default_factories` must also wire Anthropic-direct (#2408) so
+/// an explicit `anthropic/` slug (with a resolvable `ANTHROPIC_API_KEY`) builds a
+/// real native Anthropic adapter through the public entry point.
+#[test]
+#[serial(dotenv_credential_env)]
+fn default_factories_register_anthropic_direct() {
+    clear_provider_env();
+    let store = MemoryKeyStore::new();
+    store.set("anthropic", "sk-ant-fake").unwrap(); // pragma: allowlist secret
+
+    let mut cfg = Configurator::new();
+    register_default_factories(&mut cfg);
+
+    let anthropic = cfg
+        .build("anthropic/claude-sonnet-4-5", &store)
+        .expect("build anthropic");
+    assert_eq!(anthropic.name(), "anthropic");
+    assert_eq!(anthropic.capabilities().id, ProviderId::Anthropic);
+    // Native Anthropic dialect: `Required` → `{type:any}`, not OpenAI's "required".
+    assert_eq!(
+        anthropic.map_tool_choice(ToolChoice::Required),
+        serde_json::json!({"type": "any"})
+    );
 }
