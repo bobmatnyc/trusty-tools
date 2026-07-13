@@ -405,24 +405,66 @@ pub fn encode_jwt_rs256(pem: &str, claims: &AppJwtClaims) -> anyhow::Result<Stri
 
 // ── Real GitHub API exchange ──────────────────────────────────────────────────
 
+/// Ceiling on establishing the TCP connection to `api.github.com`.
+///
+/// Why (#2517): [`real_exchange_installation_token`] used to build its
+/// `reqwest::blocking::Client` with no timeout at all — a stalled GitHub API
+/// endpoint would hang installation-token exchange (and the bug-filing
+/// pipeline behind it) indefinitely. Mirrors the `CONNECT_TIMEOUT_SECS`
+/// precedent in `core::sm::providers::{anthropic, openrouter}`.
+/// What: passed to `reqwest::blocking::ClientBuilder::connect_timeout`.
+/// Test: `tests::exchange_client_bounds_a_stalled_connection`.
+const GITHUB_APP_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Ceiling on one GitHub App token-exchange request/response round trip.
+///
+/// Why (#2517): `POST /app/installations/{id}/access_tokens` normally
+/// completes in well under a second; 30s is generous slack for a loaded API
+/// or slow network path while still bounding a hung request.
+/// What: passed to `reqwest::blocking::ClientBuilder::timeout`.
+/// Test: `tests::exchange_client_bounds_a_stalled_connection`.
+const GITHUB_APP_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Build the bounded `reqwest::blocking::Client` [`real_exchange_installation_token`] uses.
+///
+/// Why (#2517): factored out as a pure function of its bounds (mirrors
+/// `client::http_client::config::build_client`) so the timeout behavior is
+/// unit-testable against tiny durations without waiting out the real
+/// production values.
+/// What: `reqwest::blocking::Client::builder().user_agent(..).connect_timeout(..).timeout(..).build()`.
+/// Test: `tests::exchange_client_bounds_a_stalled_connection`.
+fn build_exchange_client(
+    connect_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> anyhow::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("trusty-mpm/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .map_err(|e| anyhow::anyhow!("reqwest client build: {e}"))
+}
+
 /// Exchange a signed App JWT for a GitHub installation access token.
 ///
 /// Why: the production path that calls `POST /app/installations/{id}/access_tokens`
 ///      with `Authorization: Bearer <jwt>`.
 /// What: calls the GitHub API using `reqwest::blocking`; parses the `token` and
 ///       `expires_at` fields from the JSON response; converts `expires_at` (ISO
-///       8601) to a Unix timestamp.
+///       8601) to a Unix timestamp. Bounded connect/request timeouts (#2517)
+///       via [`build_exchange_client`] — this client used to have NO timeout
+///       at all.
 /// Test: NOT called in unit tests — mocked via `GithubAppTokenProvider::with_injected`.
-///       Integration tests are gated `#[ignore]`.
+///       Integration tests are gated `#[ignore]`. The timeout bound itself IS
+///       unit tested — `tests::exchange_client_bounds_a_stalled_connection`.
 fn real_exchange_installation_token(
     jwt: &str,
     installation_id: u64,
 ) -> anyhow::Result<(String, i64)> {
     let url = format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("trusty-mpm/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| anyhow::anyhow!("reqwest client build: {e}"))?;
+    let client = build_exchange_client(
+        std::time::Duration::from_secs(GITHUB_APP_CONNECT_TIMEOUT_SECS),
+        std::time::Duration::from_secs(GITHUB_APP_REQUEST_TIMEOUT_SECS),
+    )?;
 
     let resp = client
         .post(&url)
@@ -849,5 +891,49 @@ mod tests {
         assert_eq!(decoded.claims.iss, "999");
         assert_eq!(decoded.claims.iat, now);
         assert_eq!(decoded.claims.exp, now + 600);
+    }
+
+    #[test]
+    fn exchange_client_bounds_a_stalled_connection() {
+        // Why (#2517): `real_exchange_installation_token` used to build its
+        // `reqwest::blocking::Client` with no timeout at all — a stalled
+        // GitHub API endpoint would hang installation-token exchange
+        // indefinitely. Drives a real request against a `TcpListener` that
+        // accepts but never answers (mirrors
+        // `client::http_client::config::tests::build_client_bounds_a_stalled_connection`),
+        // using tiny test-only bounds so the assertion doesn't have to wait
+        // out the real 10s/30s production values.
+        // What: builds a client via [`build_exchange_client`] with 200ms
+        // connect / 300ms request bounds, issues a GET against the stalled
+        // listener, and asserts the call errors well within a generous CI
+        // margin.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stalling listener");
+        let addr = listener.local_addr().expect("read local_addr");
+
+        let client = build_exchange_client(
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(300),
+        )
+        .expect("build client");
+        let url = format!("http://{addr}/");
+
+        let start = std::time::Instant::now();
+        let result = client.get(&url).send();
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected the stalled request to time out");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "request took {elapsed:?}, expected it to be bounded by the ~300ms timeout"
+        );
+    }
+
+    #[test]
+    fn github_app_timeout_constants_are_finite() {
+        // Why (#2517): pins the production constants so a future edit can't
+        // silently widen them back toward "unbounded" without a visible test
+        // failure.
+        assert_eq!(GITHUB_APP_CONNECT_TIMEOUT_SECS, 10);
+        assert_eq!(GITHUB_APP_REQUEST_TIMEOUT_SECS, 30);
     }
 }

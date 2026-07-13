@@ -34,6 +34,57 @@ use crate::client::{ChatMessage, CommandExecutor, CommandResult, TrustyCommand};
 use commands::{SlackCommand, parse_slash};
 use formatter::SlackFormatter;
 
+/// Ceiling on establishing the TCP connection to `slack.com`.
+///
+/// Why (#2517): the bot's `reqwest::Client` used to be a bare
+/// `reqwest::Client::new()` with no timeout — a stalled Slack API endpoint
+/// would hang [`open_socket_url`]/[`post_message`] indefinitely. Mirrors the
+/// `CONNECT_TIMEOUT_SECS` precedent in `core::sm::providers::{anthropic,
+/// openrouter}` for an external API call over the public internet (wider
+/// than the 3s loopback-daemon bound in `client::http_client::config`).
+/// What: passed to `reqwest::ClientBuilder::connect_timeout` below.
+/// Test: `tests::build_slack_client_bounds_a_stalled_connection`.
+const SLACK_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Ceiling on one Slack API request/response round trip.
+///
+/// Why (#2517): `chat.postMessage` and `apps.connections.open` normally
+/// complete in well under a second; 30s is generous slack for a loaded Slack
+/// API or a slow network path while still bounding a hung request instead of
+/// leaving the bot's message-send/reconnect path unbounded forever.
+/// What: passed to `reqwest::ClientBuilder::timeout` below.
+/// Test: `tests::build_slack_client_bounds_a_stalled_connection`.
+const SLACK_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Build the `reqwest::Client` [`run`] uses for outbound Slack API calls.
+///
+/// Why: factored out as a pure function of its bounds (mirrors
+/// `client::http_client::config::build_client`) so the timeout behavior is
+/// unit-testable against tiny durations without waiting out the real 10s/30s
+/// production values.
+/// What: `reqwest::Client::builder().connect_timeout(..).timeout(..).build()`,
+/// falling back to `Client::default()` (unbounded) on the (practically
+/// unreachable) builder error, logged at `warn` so a silent regression back
+/// to an unbounded client is never silent.
+/// Test: `tests::build_slack_client_bounds_a_stalled_connection`.
+fn build_slack_client(
+    connect_timeout: std::time::Duration,
+    request_timeout: std::time::Duration,
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                "slack: reqwest::ClientBuilder::build failed, falling back to an \
+                 UNBOUNDED default client (connect_timeout/timeout bounds are NOT applied)"
+            );
+            reqwest::Client::default()
+        })
+}
+
 /// Per-channel coordinator conversation history, keyed by Slack channel id.
 ///
 /// Why: free-text (non-command) messages route to the action-capable
@@ -763,7 +814,11 @@ pub async fn run(
         anyhow::anyhow!("SLACK_APP_TOKEN is required (or pass --check to validate config)")
     })?;
 
-    let http = reqwest::Client::new();
+    // #2517: bounded — see [`build_slack_client`].
+    let http = build_slack_client(
+        std::time::Duration::from_secs(SLACK_CONNECT_TIMEOUT_SECS),
+        std::time::Duration::from_secs(SLACK_REQUEST_TIMEOUT_SECS),
+    );
     let executor = Arc::new(CommandExecutor::new(url));
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
 

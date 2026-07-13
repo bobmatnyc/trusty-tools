@@ -658,7 +658,12 @@ pub async fn run_alert_loop(
     config: AlertConfig,
     shutdown: CancellationToken,
 ) {
-    let client = reqwest::Client::new();
+    // #2517: this client polls the LOCAL daemon (`daemon_url`) exclusively
+    // (sessions/events/overseer); a bare `reqwest::Client::new()` here has no
+    // timeout, so a wedged daemon hangs the poll indefinitely inside the
+    // `tokio::select!` arm below, delaying `shutdown.cancelled()` responsiveness
+    // along with it — the same failure class as #2471's TUI freeze.
+    let client = crate::client::http_client::default_client();
     let last_seen = Arc::new(Mutex::new(LastSeen::new()));
     let mut session_tick = tokio::time::interval(SESSION_POLL_INTERVAL);
     let mut overseer_tick = tokio::time::interval(OVERSEER_POLL_INTERVAL);

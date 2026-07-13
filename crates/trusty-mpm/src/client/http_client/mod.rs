@@ -41,6 +41,32 @@ pub use types::{
 
 use serde::Deserialize;
 
+/// Build the shared bounded-timeout `reqwest::Client` [`DaemonClient::new`] uses.
+///
+/// Why: issue #2517 (a live-verify gap in #2471/#2512): the `DaemonClient`
+/// used by every daemon-facing UI got bounded connect/request timeouts via
+/// [`config::default_client`], but the top-level `tm` CLI in
+/// `bin/tm/main.rs` still minted its OWN bare `reqwest::Client::new()` for
+/// the gateway-probe / `daemon_healthy` codepaths (`tm status`, `tm start`),
+/// which are outside `DaemonClient` entirely. That bare client has no
+/// timeout at all, so a daemon that accepts the TCP connection but never
+/// answers hangs `tm status` for the OS-level socket timeout (observed
+/// 55.63s) instead of the intended ~10s bound. This function is the single
+/// public seam a crate-external caller — a `[[bin]]` target is a distinct
+/// crate from the library even within the same package, so `pub(crate)`
+/// does not reach it — can use to get the exact same bounds without
+/// duplicating the constants.
+/// What: delegates to [`config::default_client`] (3s connect / 10s request,
+/// the same bounds `DaemonClient::new` uses).
+/// Test: `config::tests::build_client_bounds_a_stalled_connection` and
+/// `config::tests::default_client_uses_default_bounds` cover the underlying
+/// bounds; `tests::default_client_matches_daemon_client_bounds` in this
+/// module pins that this wrapper is not just a fresh unbounded client in
+/// disguise.
+pub fn default_client() -> reqwest::Client {
+    config::default_client()
+}
+
 /// HTTP client for one trusty-mpm daemon.
 ///
 /// Why: a thin wrapper so any UI can be pointed at any daemon address.

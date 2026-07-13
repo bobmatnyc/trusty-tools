@@ -65,7 +65,11 @@ const PROJECT_CTL_INTERVAL_MS: u64 = 1500;
 /// Test: terminal glue, exercised by launching the TUI; the gate condition
 /// itself is [`should_launch_bare_tui`], which IS unit tested.
 pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    // #2517: same bounded client as `main.rs` — this feeds the `tm projects`
+    // bare TUI's poll loop, which shares a task with keyboard input
+    // (`tui/project_ctl/mod.rs`), so a bare `reqwest::Client::new()` here
+    // reproduces the exact #2471 freeze (a wedged daemon hangs `q`/Ctrl-C too).
+    let client = trusty_mpm::client::http_client::default_client();
     let explicit = trusty_mpm::core::explicit_url_from_env();
     let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, explicit.as_deref()).await;
     trusty_mpm::tui::project_ctl::run(url, PROJECT_CTL_INTERVAL_MS).await

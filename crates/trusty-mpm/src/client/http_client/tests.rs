@@ -1,5 +1,41 @@
 use super::*;
 
+#[tokio::test]
+async fn top_level_default_client_is_bounded_against_a_stalled_daemon() {
+    // Why: issue #2517 — the top-level `tm` CLI (`bin/tm/main.rs`) used to
+    // mint its own bare, unbounded `reqwest::Client::new()` instead of
+    // reusing `DaemonClient`'s bounded client, so `tm status` against a
+    // daemon that accepts the TCP connection but never answers hung for the
+    // OS-level socket timeout (observed 55.63s live-verify) instead of the
+    // intended ~10s request bound. `main.rs` now calls
+    // `client::http_client::default_client()` directly — the SAME function
+    // `DaemonClient::new` calls — so this test exercises the real
+    // production bounds (not `config`'s scaled-down test bounds) end-to-end
+    // against a stalled listener, pinning that the public wrapper is not
+    // accidentally an unbounded client in disguise.
+    // What: builds a client via `default_client()`, issues a GET against a
+    // `TcpListener` that accepts but never answers, and asserts the call
+    // errors comfortably within the 10s production request bound.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stalling listener");
+    let addr = listener.local_addr().expect("read local_addr");
+
+    let client = default_client();
+    let url = format!("http://{addr}/");
+
+    let start = std::time::Instant::now();
+    let result = client.get(&url).send().await;
+    let elapsed = start.elapsed();
+
+    // `listener` stays alive (dropped at function end) for the whole
+    // request so the connection stalls rather than being refused outright.
+    assert!(result.is_err(), "expected the stalled request to time out");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "request took {elapsed:?}, expected it to be bounded by the ~10s production \
+         timeout, not the OS-level socket timeout (issue #2517 regression)"
+    );
+}
+
 #[test]
 fn base_url_is_stored() {
     let client = DaemonClient::new("http://127.0.0.1:7880");
