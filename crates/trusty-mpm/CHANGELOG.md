@@ -9,6 +9,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- reconcile agent roster drift across deploy destinations ([#2547](https://github.com/bobmatnyc/trusty-tools/pull/2547)) ([`8d8b042`](https://github.com/bobmatnyc/trusty-tools/commit/8d8b04230a646f8c7941754c7cd4684f57d32089))
+- pane-scope session capture reads to the recorded harness pane ([#2545](https://github.com/bobmatnyc/trusty-tools/pull/2545)) ([`18bf5b2`](https://github.com/bobmatnyc/trusty-tools/commit/18bf5b28f8ee47491c3660593195b5ca02ec8883))
+## [Unreleased]
+
+### Fixed
+
 - guided-default cwd's own repo wins over an ancestor ([#2542](https://github.com/bobmatnyc/trusty-tools/pull/2542)) ([#2543](https://github.com/bobmatnyc/trusty-tools/pull/2543)) ([`51f5041`](https://github.com/bobmatnyc/trusty-tools/commit/51f50417e23c76a4bea4beabc854c4e75cacd526))
 ## [Unreleased]
 
