@@ -1,4 +1,6 @@
-//! Activity pane (bottom strip, 4 rows) — DOC-35 §5 pane 3, live-wired (#2119).
+//! Activity pane (bottom strip, 4 rows) — DOC-35 §5 pane 3, live-wired
+//! (#2119). Explicit "unavailable" state after persistent per-session fetch
+//! failures (#2470).
 //!
 //! Why: DOC-35 §5.4 sources this pane from `GET .../{id}/activity` (`state`,
 //! `summary`, `pending_decision`, `proposed_default`, plus a short
@@ -8,17 +10,25 @@
 //! now prefers [`ProjectCtlState::activity_for_selected`] (populated by
 //! [`super::super::poll::refresh_activity`] on the same poll cadence as the
 //! Projects/Sessions panes) and falls back to the static [`SessionRow`]
-//! fields — with an explanatory suffix, never silently — for the two windows
-//! where no live snapshot is available yet: right after a selection changes
-//! (the fetch for the new selection has not landed) and while the daemon is
-//! down with no prior live fetch to show as stale.
+//! fields — with an explanatory suffix, never silently — for the windows
+//! where no live snapshot is available: right after a selection changes (the
+//! fetch for the new selection has not landed), while the daemon is down
+//! with no prior live fetch to show as stale, and — #2470 — when the daemon
+//! IS reachable but this session's `/activity` fetch has failed
+//! non-transport-classified [`super::super::state::ACTIVITY_UNAVAILABLE_THRESHOLD`]
+//! times in a row (a 404 from an older daemon lacking the endpoint, a GC'd
+//! session, a malformed body): without this branch, `activity_for_selected`
+//! stays `None` forever and the pane would render "loading…" indefinitely
+//! instead of ever surfacing the persistent failure.
 //! What: [`activity_lines`] is a pure builder (unit tested without a
-//! terminal) covering four shapes: no session selected; live data available
+//! terminal) covering five shapes: no session selected; live data available
 //! (optionally suffixed `[stale]` when the last fetch failed but a prior one
-//! is being kept); daemon reachable but no live fetch has landed for this
-//! selection yet ("loading…"); daemon down with nothing live to show yet
-//! ("daemon unreachable"). [`render`] wraps it in a bordered `Paragraph`.
-//! Test: `tests` covers all four shapes above.
+//! is being kept); no live snapshot and the failure streak has crossed the
+//! threshold ("activity unavailable for this session"); daemon reachable, no
+//! live snapshot yet, streak below threshold ("loading…"); daemon down with
+//! nothing live to show yet ("daemon unreachable"). [`render`] wraps it in a
+//! bordered `Paragraph`.
+//! Test: `tests` covers all five shapes above.
 
 use ratatui::{
     Frame,
@@ -54,8 +64,13 @@ fn decision_segment(pending: &Option<String>, proposed: &Option<String>) -> Stri
 /// What: no selection → a placeholder. A live snapshot that matches the
 /// current selection (`state.activity_for_selected()`) → header, `state:
 /// <word><decision segment>[ [stale]]`, `summary: <text>`, then the raw-pane
-/// tail lines verbatim. No live snapshot yet, daemon reachable → header plus
-/// the static record's state/decision segment suffixed `· loading live
+/// tail lines verbatim. No live snapshot, and
+/// `state.activity_unavailable_for_selected()` (#2470) → header plus an
+/// explicit "activity unavailable for this session" line — checked BEFORE
+/// the loading/daemon-down fallbacks below, since a persistent per-session
+/// failure is a more specific, more useful signal than either. No live
+/// snapshot yet, daemon reachable, streak below threshold → header plus the
+/// static record's state/decision segment suffixed `· loading live
 /// activity…`. No live snapshot yet, daemon down → header plus an explicit
 /// "daemon unreachable" line (DOC-35's graceful-daemon-down requirement: an
 /// explicit message, never a silent blank pane).
@@ -63,7 +78,8 @@ fn decision_segment(pending: &Option<String>, proposed: &Option<String>) -> Stri
 /// `activity_lines_shows_pending_decision_from_live_activity`,
 /// `activity_lines_marks_stale_activity`,
 /// `activity_lines_falls_back_while_loading`,
-/// `activity_lines_reports_daemon_unreachable_with_no_prior_fetch`.
+/// `activity_lines_reports_daemon_unreachable_with_no_prior_fetch`,
+/// `activity_lines_reports_unavailable_after_persistent_failures`.
 pub fn activity_lines(state: &ProjectCtlState) -> Vec<String> {
     let Some(session) = state.selected_session() else {
         return vec![
@@ -87,6 +103,15 @@ pub fn activity_lines(state: &ProjectCtlState) -> Vec<String> {
         ];
         lines.extend(activity.raw_pane_tail.iter().cloned());
         return lines;
+    }
+
+    if state.activity_unavailable_for_selected() {
+        return vec![
+            header,
+            "activity unavailable for this session".to_string(),
+            "(the daemon is reachable, but repeated fetches for this session's activity failed)"
+                .to_string(),
+        ];
     }
 
     if state.daemon_reachable {
@@ -259,5 +284,26 @@ mod tests {
         let lines = activity_lines(&state);
         assert!(lines.iter().any(|l| l.contains("daemon unreachable")));
         assert!(lines.iter().any(|l| l.contains("last known state: active")));
+    }
+
+    /// #2470 — a persistent per-session `/activity` failure (daemon healthy,
+    /// this session's fetch itself keeps failing) must eventually stop
+    /// rendering "loading…" forever and report an explicit unavailable
+    /// state instead.
+    #[test]
+    fn activity_lines_reports_unavailable_after_persistent_failures() {
+        let session = base_session();
+        let mut state = state_with_session(session.clone());
+        state.daemon_reachable = true;
+        for _ in 0..3 {
+            state.activity_failures.record_failure(&session.id);
+        }
+        let lines = activity_lines(&state);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("activity unavailable for this session"))
+        );
+        assert!(!lines.iter().any(|l| l.contains("loading live activity")));
     }
 }

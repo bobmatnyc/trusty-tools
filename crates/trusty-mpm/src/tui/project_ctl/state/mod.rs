@@ -180,6 +180,62 @@ pub struct ActivityInfo {
     pub stale: bool,
 }
 
+/// Consecutive-failure threshold before the Activity pane gives up on
+/// "loading…"/"stale" and reports the fetch as unavailable for the selected
+/// session (#2470).
+pub(crate) const ACTIVITY_UNAVAILABLE_THRESHOLD: u8 = 3;
+
+/// Per-session consecutive-failure tracking for the `/activity` fetch,
+/// independent of [`ActivityInfo`]/[`ProjectCtlState::activity`] (#2470).
+///
+/// Why: a session whose `/activity` fetch has NEVER succeeded leaves
+/// `ProjectCtlState::activity == None`, which is indistinguishable from
+/// "not fetched yet" — the exact bug this streak fixes. A PERSISTENT
+/// non-transport failure (404 from an older daemon lacking the endpoint, a
+/// GC'd session, a malformed body) while the daemon is otherwise healthy
+/// must eventually surface as an explicit "unavailable" state instead of an
+/// infinite "loading live activity…". A transport failure (connection
+/// refused/timeout — the whole daemon looks down or is restarting) never
+/// advances this streak; see `poll::refresh_activity`.
+/// What: tracks the session id the streak currently belongs to and how many
+/// consecutive non-transport failures it has accumulated.
+/// [`Self::record_failure`] increments it (resetting to 1 first if
+/// `session_id` differs from the one already tracked — a session switch
+/// implicitly starts a fresh streak). [`Self::reset`] clears it outright on
+/// a successful fetch or when no session is selected.
+/// [`Self::is_unavailable_for`] reports whether the streak, for the given
+/// session id, has crossed [`ACTIVITY_UNAVAILABLE_THRESHOLD`].
+/// Test: `poll::tests::activity_failure_streak_*`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ActivityFailureStreak {
+    session_id: Option<String>,
+    consecutive_failures: u8,
+}
+
+impl ActivityFailureStreak {
+    /// Record one non-transport failure for `session_id`, resetting the
+    /// streak first if it belonged to a different (or no) session.
+    pub(crate) fn record_failure(&mut self, session_id: &str) {
+        if self.session_id.as_deref() != Some(session_id) {
+            self.session_id = Some(session_id.to_string());
+            self.consecutive_failures = 0;
+        }
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    /// Clear the streak — a successful fetch, or no session selected.
+    pub(crate) fn reset(&mut self) {
+        self.session_id = None;
+        self.consecutive_failures = 0;
+    }
+
+    /// Whether `session_id` has crossed [`ACTIVITY_UNAVAILABLE_THRESHOLD`].
+    fn is_unavailable_for(&self, session_id: &str) -> bool {
+        self.session_id.as_deref() == Some(session_id)
+            && self.consecutive_failures >= ACTIVITY_UNAVAILABLE_THRESHOLD
+    }
+}
+
 /// Which destructive verb a [`PendingConfirm`] is gating.
 ///
 /// Why: DOC-35 §5.2 requires a confirmation gate before `k` (kill) executes
@@ -293,6 +349,11 @@ pub struct ProjectCtlState {
     /// mismatched (stale-selection) snapshot is never rendered under the
     /// wrong session's header.
     pub activity: Option<ActivityInfo>,
+    /// Consecutive-non-transport-failure tracking for the `/activity` fetch
+    /// (#2470) — see [`ActivityFailureStreak`]'s own doc for why this must
+    /// live independent of `activity` itself. Read it through
+    /// [`Self::activity_unavailable_for_selected`], not directly.
+    pub(crate) activity_failures: ActivityFailureStreak,
     /// The currently selected project's Deliverables, refreshed on the same
     /// poll cadence as `projects`/`sessions_by_project` (DOC-35 §10.6,
     /// #2383). `None` means UNKNOWN — no project selected, the selection just
@@ -414,6 +475,23 @@ impl ProjectCtlState {
         self.activity
             .as_ref()
             .filter(|a| &a.session_id == selected_id)
+    }
+
+    /// Whether the Activity pane should report "unavailable" for the
+    /// currently selected session (#2470) — i.e. its `/activity` fetch has
+    /// failed [`ACTIVITY_UNAVAILABLE_THRESHOLD`]-or-more times in a row with
+    /// no intervening success, while the daemon itself was reachable (a
+    /// transport failure — the whole daemon down — never counts; see
+    /// [`ActivityFailureStreak`]).
+    /// What: `false` when no session is selected or the streak belongs to a
+    /// different session id; otherwise delegates to
+    /// [`ActivityFailureStreak::is_unavailable_for`].
+    /// Test: `poll::tests::activity_failure_streak_*`.
+    pub fn activity_unavailable_for_selected(&self) -> bool {
+        let Some(selected_id) = self.selected_session().map(|s| s.id.as_str()) else {
+            return false;
+        };
+        self.activity_failures.is_unavailable_for(selected_id)
     }
 
     /// Re-sync the Sessions-pane navigation to a freshly selected project.
