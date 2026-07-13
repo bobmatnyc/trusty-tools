@@ -896,3 +896,40 @@ fn key_equals_secret_still_blocked_after_1676_fix() {
         );
     }
 }
+
+/// Why (issue #2520 review, BLOCKER): `is_plausible_credential_charset`'s
+/// allowed set (alnum + `-`/`_`/`.`) excluded `:`, so ANY colon anywhere in a
+/// token — even a colon that is not part of any structural shape recognised
+/// by `is_structural_token` — flunked the `.all()` check and disabled the
+/// mixed-case+digit fallback entirely. On `origin/main` (pre-#2442, no
+/// charset gate at all) `token:aBc123XyZ987uvW456QrS` was correctly flagged;
+/// after #2442 added the charset gate it silently stopped being flagged
+/// (`find_secret_token` returned `None`) — a real false-negative regression.
+/// The `path::fn` false positive this PR fixes is handled by a DIFFERENT,
+/// earlier code path (`is_structural_token`'s slash-path branch, which
+/// short-circuits `looks_like_secret` before the charset gate is ever
+/// reached), so the two functions do not need to (and must not be made to)
+/// share behaviour here — restoring `:` to the credential charset closes the
+/// regression without reopening the path::fn or ledger-reference false
+/// positives.
+/// What: asserts a bare colon-bearing credential-shaped token is flagged by
+/// both `find_secret_token` and the end-to-end `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn colon_bearing_credential_is_flagged() {
+    let tok = "key:aBc123XyZ987uvW456QrS"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(tok).is_some(),
+        "bare colon-bearing credential-shaped token must be flagged: {tok}"
+    );
+    let cfg = FilterConfig::default();
+    let content = format!("Config: {tok}");
+    assert!(
+        matches!(
+            cfg.apply(&content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "colon-bearing credential must be rejected end-to-end; got {:?}",
+        cfg.apply(&content, false)
+    );
+}

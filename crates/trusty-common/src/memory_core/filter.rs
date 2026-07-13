@@ -292,10 +292,11 @@ impl FilterConfig {
         // tokens, long base64) before the token/non-alpha heuristics so the
         // caller gets the most specific, actionable diagnosis. Git-SHA-shaped
         // hex tokens are explicitly allowlisted inside `find_secret_token` and
-        // never reach this branch.
-        if let Some(token) = find_secret_token(trimmed) {
-            return Err(FilterReject::PotentialSecret { token });
-        }
+        // never reach this branch. Issue #2520: extracted to the standalone
+        // [`check_secret`] so the two-tier `force` design in
+        // `PalaceHandle::remember_with_options` can run this exact check on
+        // its own, independent of the quality gates below.
+        check_secret(trimmed)?;
         let tokens = count_meaningful_tokens(content);
         if enforce_min_tokens && tokens < self.min_tokens as usize {
             return Err(FilterReject::TooShort { tokens });
@@ -436,6 +437,32 @@ pub fn find_secret_token(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Standalone secret gate: `Ok(())` when `content` carries no
+/// [`find_secret_token`] hit, `Err(FilterReject::PotentialSecret)` otherwise.
+///
+/// Why (issue #2520, two-tier `force` design): `RememberOptions::force`
+/// bypasses the QUALITY gates (noise patterns, short-content, non-alphabetic
+/// ratio) but must never bypass secret detection — otherwise an automated
+/// writer that always passes `force: true` (e.g. trusty-code's per-turn
+/// recorder) would persist raw credentials with zero screening. Extracting
+/// this single-purpose check out of [`FilterConfig::apply`] lets
+/// `PalaceHandle::remember_with_options` call it on its own when `force` is
+/// set but the caller has NOT also set the explicit `allow_secret_like`
+/// opt-in.
+/// What: thin wrapper around [`find_secret_token`] that packages a hit into
+/// the same [`FilterReject::PotentialSecret`] variant `apply` returns, so
+/// both call sites produce an identical, actionable error message.
+/// Test: exercised via `FilterConfig::apply`'s existing secret-detection
+/// tests (this function is `apply`'s sole secret-check code path) and
+/// directly by the two-tier `force` tests in
+/// `trusty-common::memory_core::retrieval::handle`.
+pub fn check_secret(content: &str) -> Result<(), FilterReject> {
+    if let Some(token) = find_secret_token(content) {
+        return Err(FilterReject::PotentialSecret { token });
+    }
+    Ok(())
 }
 
 /// Known credential prefixes that should always be treated as secrets.
@@ -687,8 +714,9 @@ fn looks_like_secret(token: &str) -> bool {
 }
 
 /// True when every character in `token` could plausibly appear in a bare
-/// credential/API-key string: ASCII alphanumeric, or one of `-`, `_`, `.`
-/// (hyphen/underscore-delimited key segments, JWT `.`-separated parts).
+/// credential/API-key string: ASCII alphanumeric, or one of `-`, `_`, `.`,
+/// `:` (hyphen/underscore-delimited key segments, JWT `.`-separated parts,
+/// colon-delimited `user:secret` / `Bearer:token` shapes).
 ///
 /// Why (issue #2442): the mixed-case-plus-digit fallback in
 /// [`looks_like_secret`] must not fire on prose punctuation that a real
@@ -697,14 +725,29 @@ fn looks_like_secret(token: &str) -> bool {
 /// from this charset keeps it precise without weakening the base64-symbol
 /// branch (which already requires `+`/`/`/`=` and is unaffected by this gate)
 /// or the known-prefix layer (checked earlier, unaffected).
+///
+/// Why `:` is included (issue #2520 review, BLOCKER regression fix): the
+/// first cut of this function omitted `:`, which meant ANY colon in a token
+/// — including a bare colon-delimited credential like
+/// `token:aBc123XyZ987uvW456QrS` — flunked the `.all()` check and silently
+/// disabled the fallback (`find_secret_token` returned `None` where
+/// `origin/main`'s pre-#2442 code, which had no charset gate at all,
+/// correctly returned `Some`). The `path::fn` false positive this module
+/// fixes is handled entirely by `is_structural_token`'s slash-path branch
+/// (checked earlier in [`looks_like_secret`] and gated on `/` being
+/// present), so admitting `:` here does not reopen it — a bare
+/// `path::fn`-shaped token with no digit/mixed-case never reaches the
+/// fallback in the first place, and one that DOES contain a `/` short-
+/// circuits via `is_structural_token` before this function is ever called.
 /// What: returns `true` iff every char is ASCII alphanumeric or in
-/// `{'-', '_', '.'}`.
+/// `{'-', '_', '.', ':'}`.
 /// Test: `ledger_reference_token_not_flagged`, `secret_token_is_blocked`,
-/// `real_secrets_still_blocked_after_1667_fix`.
+/// `real_secrets_still_blocked_after_1667_fix`,
+/// `colon_bearing_credential_is_flagged`.
 fn is_plausible_credential_charset(token: &str) -> bool {
     token
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
 }
 
 /// Produce a short, non-reversible preview of a flagged secret token.

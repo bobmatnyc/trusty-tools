@@ -20,10 +20,16 @@
 //! and dropped. (#2363) `memory_remember`'s dedup gate (jaro_winkler >0.92,
 //! 5-min same-palace window) is documented as hostile to sequential
 //! conversational turns, so every turn-recorder write passes `force: true`
-//! to bypass it outright; a `"status":"skipped"` response is still checked
-//! and warned on as a belt-and-braces guard in case some OTHER gate (e.g.
-//! the content/blocklist gates, which `force` does not bypass) still skips
-//! the write. [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] expose
+//! to bypass it outright, along with the other content-QUALITY gates
+//! (blocklist, short-content, noise pattern). Issue #2520 (two-tier
+//! `force`): `force: true` no longer bypasses secret/credential detection —
+//! this sink deliberately does NOT set the separate `allow_secret_like`
+//! opt-in, so a turn whose raw LLM/tool-use content looks secret-shaped is
+//! correctly REJECTED rather than persisted; this is a behavior change from
+//! when `force` was a blanket bypass and is the intended safe default for an
+//! automated writer. A `"status":"skipped"` response is still checked and
+//! warned on as a belt-and-braces guard in case a gate skips the write.
+//! [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] expose
 //! this sink's already-resolved binding so #2348's `recall_session` tool can
 //! target the SAME daemon/palace the turn recorder writes into, without a
 //! second, independent resolution.
@@ -190,10 +196,15 @@ async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTu
 /// first failure. (#2363) `memory_remember` passes `force: true` because
 /// its dedup gate (jaro_winkler >0.92, same-palace, 5-min window) is
 /// documented as hostile to sequential conversational turns — near-duplicate
-/// consecutive turns are the NORMAL case here, not noise. A `"status":
-/// "skipped"` response (from a gate `force` does NOT bypass, e.g. the
-/// content/blocklist gates) is still checked and warned on so a silently
-/// thinned recall surface is at least observable in logs.
+/// consecutive turns are the NORMAL case here, not noise; `force: true` also
+/// bypasses the other content-QUALITY gates (blocklist, short-content, noise
+/// pattern). Issue #2520: `force` does NOT bypass secret/credential
+/// detection — a turn whose content looks secret-shaped comes back as an
+/// `Err` from `call_memory_tool_at` (not a `"skipped"` status) and is logged
+/// via the fail-open `Err(e)` arm below, same as any other RPC failure. A
+/// `"status": "skipped"` response (from a quality gate that some OTHER path
+/// still applies) is still checked and warned on so a silently thinned
+/// recall surface is at least observable in logs.
 /// What: never propagates an error — every failure is logged via
 /// `tracing::warn!` and swallowed, matching
 /// `resolve_memory_base_url_or_unreachable`'s fail-open contract (mirrored

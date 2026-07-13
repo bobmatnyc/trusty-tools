@@ -49,7 +49,9 @@ pub(super) const L1_CAP: usize = 15;
 /// Bundling them lets future knobs (e.g. per-call decay overrides) attach
 /// without breaking the call surface again.
 /// What: `filter` defaults to `FilterConfig::default()`; `force` skips the
-/// gate entirely; `enforce_min_tokens` lets `memory_note` keep noise rejects
+/// QUALITY gates (noise patterns, short-content, non-alphabetic ratio) —
+/// see [`Self::allow_secret_like`] for the secret gate, which `force` does
+/// NOT skip; `enforce_min_tokens` lets `memory_note` keep noise rejects
 /// while accepting short content; `classify_as` pins the resulting
 /// `DrawerType` (used by `memory_note` to force `UserFact`);
 /// `defer_embedding` (issue #1970) tells `remember_with_options` to skip the
@@ -58,7 +60,9 @@ pub(super) const L1_CAP: usize = 15;
 /// 30-120s ONNX/CoreML compile just to persist a drawer.
 /// Test: See `remember_force_bypasses_filter` and friends in this file;
 /// `deferred_embed_backfills_vector_once_embedder_ready` covers
-/// `defer_embedding`.
+/// `defer_embedding`; `remember_force_still_blocks_secret`,
+/// `remember_force_and_allow_secret_like_stores_secret_shaped_content` cover
+/// the two-tier `force`/`allow_secret_like` split (issue #2520).
 #[derive(Debug, Clone)]
 pub struct RememberOptions {
     pub filter: FilterConfig,
@@ -66,6 +70,29 @@ pub struct RememberOptions {
     pub enforce_min_tokens: bool,
     pub classify_as: Option<DrawerType>,
     pub defer_embedding: bool,
+    /// Explicit, separate opt-in that bypasses the SECRET gate specifically.
+    ///
+    /// Why (issue #2520): `force = true` originally bypassed every
+    /// content-quality gate uniformly, including secret detection — which
+    /// meant an automated writer that always sets `force` (e.g.
+    /// trusty-code's per-turn memory sink, which needs deterministic
+    /// storage and cannot tolerate quality-gate false positives) also
+    /// silently disabled credential screening on every write. Splitting
+    /// `force` (quality gates) from `allow_secret_like` (the secret gate)
+    /// means the common case — "store this even though it looks noisy" —
+    /// stays safe by default, and only a caller that DELIBERATELY wants to
+    /// persist secret-shaped content (rare; e.g. a redacted example that
+    /// still matches the credential heuristic) has to opt in explicitly.
+    /// What: when `false` (the default), `remember_with_options` runs
+    /// [`crate::memory_core::filter::check_secret`] even when `force` is
+    /// `true`, and returns `Err` on a hit. When `true`, the secret gate is
+    /// skipped entirely (in addition to whatever `force` already skips).
+    /// Has no effect when `force` is `false` — in that case the secret gate
+    /// already runs as part of the normal `FilterConfig::apply` pipeline
+    /// regardless of this flag.
+    /// Test: `remember_force_still_blocks_secret`,
+    /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`.
+    pub allow_secret_like: bool,
 }
 
 impl Default for RememberOptions {
@@ -76,6 +103,7 @@ impl Default for RememberOptions {
             enforce_min_tokens: true,
             classify_as: None,
             defer_embedding: false,
+            allow_secret_like: false,
         }
     }
 }
@@ -98,6 +126,7 @@ impl RememberOptions {
             enforce_min_tokens: false,
             classify_as: Some(DrawerType::UserFact),
             defer_embedding: false,
+            allow_secret_like: false,
         }
     }
 

@@ -207,11 +207,21 @@ pub(crate) fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, cont
 /// Issue #1970: `defer_embedding` is threaded through separately so callers
 /// can key it off the live `AppState::readiness()` at dispatch time rather
 /// than baking a stale snapshot into this helper.
+/// Issue #2520 (two-tier `force`): `allow_secret_like` is threaded through
+/// separately from `force` — the MCP `force` arg only bypasses quality
+/// gates now; a caller must set the distinct `allow_secret_like` arg to
+/// also bypass secret detection.
 /// What: Clones the default filter and bumps `min_tokens` to `MCP_MIN_TOKENS`.
 /// Test: `dispatch_remember_rejects_short_content`;
 /// `remember_succeeds_and_defers_embedding_while_state_is_warming` covers
-/// `defer_embedding`.
-pub(crate) fn mcp_remember_opts(force: bool, defer_embedding: bool) -> RememberOptions {
+/// `defer_embedding`; `dispatch_remember_force_still_blocks_secret`,
+/// `dispatch_remember_allow_secret_like_bypasses_secret_gate` cover
+/// `allow_secret_like`.
+pub(crate) fn mcp_remember_opts(
+    force: bool,
+    defer_embedding: bool,
+    allow_secret_like: bool,
+) -> RememberOptions {
     let filter = FilterConfig {
         min_tokens: MCP_MIN_TOKENS,
         ..FilterConfig::default()
@@ -220,6 +230,7 @@ pub(crate) fn mcp_remember_opts(force: bool, defer_embedding: bool) -> RememberO
         filter,
         force,
         defer_embedding,
+        allow_secret_like,
         ..RememberOptions::default()
     }
 }

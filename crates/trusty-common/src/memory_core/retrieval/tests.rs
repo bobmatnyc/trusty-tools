@@ -787,6 +787,63 @@ async fn remember_force_bypasses_filter() {
     assert_ne!(id, uuid::Uuid::nil());
 }
 
+/// Why (issue #2520, two-tier `force` MAJOR fix): `force = true` must bypass
+/// the QUALITY gates (noise/short-content/non-alphabetic) but must NEVER
+/// silently bypass secret detection — an automated writer (trusty-code's
+/// per-turn memory sink) always sets `force: true` and would otherwise
+/// persist raw credentials with zero screening.
+/// What: asserts a `force: true` write of secret-shaped content is still
+/// rejected, with the error naming it as a `PotentialSecret`.
+/// Test: itself.
+#[tokio::test]
+async fn remember_force_still_blocks_secret() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let err = handle
+        .remember_with_options(
+            "sk-abcdefghijklmnopqrstuvwxyz01234567890123".to_string(), // pragma: allowlist secret
+            RoomType::General,
+            vec![],
+            0.5,
+            RememberOptions::forced(),
+        )
+        .await
+        .expect_err("force=true must still reject secret-shaped content");
+    assert!(
+        format!("{err:#}").to_lowercase().contains("secret"),
+        "expected a secret-gate rejection, got: {err:#}"
+    );
+}
+
+/// Why (issue #2520, two-tier `force` MAJOR fix): the separate
+/// `allow_secret_like` opt-in is the ONLY way to bypass the secret gate — a
+/// caller that sets both `force` and `allow_secret_like` gets the full
+/// bypass (quality gates AND secret gate).
+/// What: asserts a write with both flags set successfully stores
+/// secret-shaped content that `remember_force_still_blocks_secret` proves is
+/// otherwise rejected.
+/// Test: itself.
+#[tokio::test]
+async fn remember_force_and_allow_secret_like_stores_secret_shaped_content() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let mut opts = RememberOptions::forced();
+    opts.allow_secret_like = true;
+    let id = handle
+        .remember_with_options(
+            "sk-abcdefghijklmnopqrstuvwxyz01234567890123".to_string(), // pragma: allowlist secret
+            RoomType::General,
+            vec![],
+            0.5,
+            opts,
+        )
+        .await
+        .expect("force + allow_secret_like must bypass the secret gate too");
+    assert_ne!(id, uuid::Uuid::nil());
+}
+
 /// Issue #61: `memory_note` preset accepts short curated facts but
 /// classifies them as `UserFact`.
 #[tokio::test]

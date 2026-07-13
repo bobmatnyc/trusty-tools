@@ -53,7 +53,17 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // `force = true` writes of blocklisted or short standalone content were
     // still silently dropped, contradicting the tool schema's documented
     // "bypass all content-quality gates" contract.
+    // Issue #2520 (two-tier force): `force` now bypasses QUALITY gates only
+    // (this gate, the blocklist gate below, dedup, and the short-content
+    // check). The SECRET gate inside the deep `FilterConfig`/`check_secret`
+    // pass always runs — even under `force` — unless the caller ALSO sets
+    // the separate `allow_secret_like` opt-in, a deliberate override for
+    // callers that genuinely need to persist secret-shaped content.
     let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allow_secret_like = args
+        .get("allow_secret_like")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Issue #220: blocklist gate — silently drop content matching
     // known low-value auto-capture patterns (e.g. `Tool use: Bash`,
@@ -136,7 +146,7 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             tags,
             room,
             importance: 0.5,
-            opts: mcp_remember_opts(force, defer_embedding),
+            opts: mcp_remember_opts(force, defer_embedding, allow_secret_like),
             room_label_for_kg,
         },
     )
