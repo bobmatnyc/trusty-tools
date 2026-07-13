@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- guided-default cwd's own repo wins over an ancestor ([#2542](https://github.com/bobmatnyc/trusty-tools/pull/2542)) ([#2543](https://github.com/bobmatnyc/trusty-tools/pull/2543)) ([`51f5041`](https://github.com/bobmatnyc/trusty-tools/commit/51f50417e23c76a4bea4beabc854c4e75cacd526))
+## [Unreleased]
+
 ### Added
 
 - Test-pointer lint gate (closes #2458) ([#2529](https://github.com/bobmatnyc/trusty-tools/pull/2529)) ([`9876b44`](https://github.com/bobmatnyc/trusty-tools/commit/9876b44d72d2a68dd9df213e027d2f15a119e2b9))
