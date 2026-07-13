@@ -57,6 +57,10 @@ mod tests_behavior_d;
 mod tests_behavior_e;
 
 #[cfg(test)]
+#[path = "tests_behavior_reset_agents_tests.rs"]
+mod tests_behavior_reset_agents;
+
+#[cfg(test)]
 #[path = "tests_projects.rs"]
 mod tests_projects;
 
@@ -324,7 +328,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Gui) => launch_gui(),
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
-        Some(Command::Install { force }) => install(force),
+        Some(Command::Install {
+            force,
+            reset_agents,
+        }) => install(force, reset_agents),
         Some(Command::Hook { pm_guard }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await

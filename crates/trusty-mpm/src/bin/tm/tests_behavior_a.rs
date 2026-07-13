@@ -64,7 +64,7 @@ fn project_init_keeps_existing_config() {
 fn cli_parses_install_no_force() {
     let cli = Cli::try_parse_from(["trusty-mpm", "install"]).unwrap();
     match cli.command.unwrap() {
-        Command::Install { force } => assert!(!force),
+        Command::Install { force, .. } => assert!(!force),
         other => panic!("expected Install, got {other:?}"),
     }
 }
@@ -73,7 +73,7 @@ fn cli_parses_install_no_force() {
 fn cli_parses_install_with_force() {
     let cli = Cli::try_parse_from(["trusty-mpm", "install", "--force"]).unwrap();
     match cli.command.unwrap() {
-        Command::Install { force } => assert!(force),
+        Command::Install { force, .. } => assert!(force),
         other => panic!("expected Install, got {other:?}"),
     }
 }

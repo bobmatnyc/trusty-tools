@@ -25,17 +25,31 @@ use crate::core::agent_manifest::{
 ///
 /// Why: the CLI prints per-file status; callers need the file lists split by
 /// outcome to render that summary and to know whether any work was skipped.
-/// What: filenames grouped into freshly written, skipped (user-modified), and
-/// unchanged (checksum already current).
+/// What: filenames grouped into freshly written, skipped (user-modified),
+/// unchanged (checksum already current), and silently adopted (untracked but
+/// byte-identical to the fresh composition — see [`adopted`]).
+/// [`untracked_modified`] is a subset of `skipped`: files that were absent
+/// from the manifest AND differ from the fresh composition, which is the
+/// specific case `--reset-agents` exists to resolve (issue #2504).
 /// Test: every `deploy_*` test asserts on these vectors.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeployResult {
     /// Filenames successfully (re)written this run.
     pub deployed: Vec<String>,
-    /// Filenames skipped because the user modified them.
+    /// Filenames skipped because the user modified them, or because they were
+    /// untracked and differ from the fresh composition.
     pub skipped: Vec<String>,
     /// Filenames left untouched because their checksum already matched.
     pub unchanged: Vec<String>,
+    /// Filenames that were untracked by the manifest but byte-identical to
+    /// the fresh composition — registered into the manifest without a
+    /// rewrite (issue #2504 adoption path).
+    pub adopted: Vec<String>,
+    /// Filenames that were untracked by the manifest AND differ from the
+    /// fresh composition — skipped conservatively, but flagged so the
+    /// operator knows `tm install --reset-agents` is available to reconcile
+    /// them. Always a subset of `skipped`.
+    pub untracked_modified: Vec<String>,
 }
 
 /// Whether a source filename names a trusty-mpm agent to compose.
@@ -44,7 +58,7 @@ pub struct DeployResult {
 /// and the manifest file (if it ever appears there) must be ignored.
 /// What: returns `true` for `*.md` files other than the manifest.
 /// Test: covered indirectly by `deploy_new_agent`.
-fn is_agent_file(name: &str) -> bool {
+pub(crate) fn is_agent_file(name: &str) -> bool {
     name.ends_with(".md")
 }
 
@@ -143,8 +157,30 @@ pub fn deploy_agents_filtered(
         // Classify the existing target file, if any.
         if target_path.exists() {
             if !manifest.is_managed(&filename) {
-                // User dropped their own file here — never touch it.
-                result.skipped.push(filename);
+                // Untracked (issue #2504): the manifest predates per-file
+                // tracking for this file, or it was never registered. Rather
+                // than permanently orphaning it, compare against the fresh
+                // composition — if byte-identical, silently adopt it (the
+                // content already matches what trusty-mpm would have written,
+                // so registering it is safe and reconciles the manifest gap).
+                // Otherwise keep the conservative skip (it may be genuinely
+                // user-owned) but flag it for the `--reset-agents` warning.
+                let current = std::fs::read_to_string(&target_path)?;
+                if checksum(&current) == checksum(&composed) {
+                    manifest.managed.insert(
+                        filename.clone(),
+                        ManifestEntry {
+                            source_chain: source_chain(&name, source_dir)?,
+                            checksum: checksum(&composed),
+                            deployed_at: now.clone(),
+                            origin: Origin::Bundled,
+                        },
+                    );
+                    result.adopted.push(filename);
+                } else {
+                    result.skipped.push(filename.clone());
+                    result.untracked_modified.push(filename);
+                }
                 continue;
             }
             let current = std::fs::read_to_string(&target_path)?;
@@ -181,6 +217,28 @@ pub fn deploy_agents_filtered(
             },
         );
         result.deployed.push(filename);
+    }
+
+    // Issue #2504: warn ONCE with a count + short preview rather than one
+    // line per untracked-modified file (this set can be dozens of files wide
+    // on a machine that predates per-file manifest tracking) — actionable
+    // without spamming the operator's terminal.
+    if !result.untracked_modified.is_empty() {
+        let count = result.untracked_modified.len();
+        let preview = result
+            .untracked_modified
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ellipsis = if count > 5 { ", …" } else { "" };
+        tracing::warn!(
+            count,
+            "{count} agent file(s) untracked by the deploy manifest differ from the \
+             bundled composition and were skipped: {preview}{ellipsis}. Run \
+             `tm install --reset-agents` to review and reconcile them."
+        );
     }
 
     manifest.save(target_dir).map_err(|e| match e {
@@ -263,6 +321,78 @@ mod tests {
 
         let still = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
         assert!(still.contains("USER HAND-EDIT"));
+    }
+
+    #[test]
+    fn deploy_adopts_untracked_byte_identical_file() {
+        // Issue #2504: a target file present on disk but absent from the
+        // manifest (predates per-file tracking) must be silently adopted
+        // when its content already equals the fresh composition — no
+        // rewrite, just registration — so a later bundle change can reach it.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+
+        // Pre-create the target with exactly what compose_agent would
+        // produce, simulating a file deployed before manifest tracking
+        // existed for it.
+        let composed = crate::core::agent_builder::compose_agent("engineer", src.path()).unwrap();
+        fs::write(tgt.path().join("engineer.md"), &composed).unwrap();
+        let before = fs::metadata(tgt.path().join("engineer.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert!(result.adopted.contains(&"engineer.md".to_string()));
+        assert!(!result.skipped.contains(&"engineer.md".to_string()));
+        assert!(!result.deployed.contains(&"engineer.md".to_string()));
+
+        // Not rewritten — adoption is registration-only.
+        let after = fs::metadata(tgt.path().join("engineer.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after, "adopted file must not be rewritten");
+
+        // Now registered — a subsequent bundle change must be able to reach
+        // it (the whole point of adoption).
+        let manifest = AgentManifest::load(tgt.path());
+        assert!(manifest.is_managed("engineer.md"));
+
+        fs::write(
+            src.path().join("engineer.md"),
+            "---\nname: engineer\nrole: engineer\nextends: base-agent\nmodel: sonnet\n---\n\n# Engineer\n\nUPDATED.\n",
+        )
+        .unwrap();
+        let second = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert!(second.deployed.contains(&"engineer.md".to_string()));
+        let updated = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
+        assert!(updated.contains("UPDATED."));
+    }
+
+    #[test]
+    fn deploy_flags_untracked_modified_file_for_reset() {
+        // An untracked file whose content differs from the fresh composition
+        // must be skipped AND recorded in `untracked_modified` so the CLI can
+        // point the operator at `tm install --reset-agents`.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+        fs::write(
+            tgt.path().join("engineer.md"),
+            "PRE-EXISTING, NOT TRUSTY-MPM'S CURRENT COMPOSITION\n",
+        )
+        .unwrap();
+
+        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert!(result.skipped.contains(&"engineer.md".to_string()));
+        assert!(
+            result
+                .untracked_modified
+                .contains(&"engineer.md".to_string())
+        );
+        assert!(!AgentManifest::load(tgt.path()).is_managed("engineer.md"));
     }
 
     #[test]
