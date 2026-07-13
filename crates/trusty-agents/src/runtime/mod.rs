@@ -113,6 +113,16 @@ use cli_def::{Cli, HELP, argv_as_task_text};
 pub async fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    // #2405: the universal `config` credential CLI is a lightweight, daemon-less
+    // command. Dispatch it BEFORE `run_startup_init` so `tagent config …` never
+    // spins up the agent runtime (message bus), mutates project state
+    // (`.trusty-agents/state/`), or loads `.env.local` at startup — the last of
+    // which would otherwise skew `config keys list`'s tier report by folding the
+    // file into the process env before the verb inspects it.
+    if args.len() > 1 && args[1] == "config" {
+        return subcommands::run_config_subcommand(&args[1..]).await;
+    }
+
     // All pre-parse bootstrapping (env loading, tracing, the early-exit
     // `--version`/`--api`/`--search-service` dispatches, state-dir + run-id
     // setup, migrations, and the background message bus) lives in `startup`.

@@ -155,6 +155,11 @@ enum Commands {
     ///
     /// Always dry-run safe: never posts to GitHub.
     Calibrate(CalibrateArgs),
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -202,6 +207,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         #[cfg(feature = "report")]
         Commands::Report(args) => cli_report::cmd_report(config, args).await,
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
+        Commands::Config(cmd) => cmd.run().await,
         // Port is handled synchronously in `main` before this function is
         // called; this arm is unreachable at runtime but required for
         // exhaustive match.

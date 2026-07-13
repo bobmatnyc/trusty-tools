@@ -134,6 +134,11 @@ enum Commands {
     Incidents(IncidentsSubcommandArgs),
     /// Compute and display DORA metrics (lead time, deployment frequency, MTTR, CFR).
     Dora(DoraArgs),
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Run config validation and decide whether the caller should exit.
@@ -258,15 +263,22 @@ async fn run() -> anyhow::Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.to_string()));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    // Update check: tga has no MCP stdio transport — all subcommands are
+    // Update check: tga has no MCP stdio transport — all other subcommands are
     // human-facing interactive CLI commands where a release notice is
-    // appropriate. The check is throttled to once per 24 h (on-disk cache) so
-    // on a typical run this costs only a sub-millisecond cache file read.
-    if let Some(info) =
-        trusty_common::update::check_throttled(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-            .await
-    {
-        eprintln!("{}", trusty_common::update::notice(&info));
+    // appropriate. `config` (#2405, LOW fix from PR #2528 review) is the one
+    // exception — the universal credential CLI must be genuinely offline, so
+    // `tga config keys list` never triggers a network update-check call. The
+    // check is throttled to once per 24 h (on-disk cache) so on a typical run
+    // this costs only a sub-millisecond cache file read.
+    if !matches!(cli.command, Commands::Config(_)) {
+        if let Some(info) = trusty_common::update::check_throttled(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        {
+            eprintln!("{}", trusty_common::update::notice(&info));
+        }
     }
 
     // Load configuration (fall back to default if file is missing).
@@ -286,6 +298,13 @@ async fn run() -> anyhow::Result<()> {
     // `tga.db` cannot block bootstrapping a fresh project.
     if let Commands::Install(args) = cli.command {
         return commands::install::run(config, args);
+    }
+
+    // #2405: the universal `config` command manages inference provider keys and
+    // never needs the analytics database — short-circuit before the DB open so
+    // `tga config keys …` works even without a `tga.db` present.
+    if let Commands::Config(cmd) = cli.command {
+        return cmd.run().await;
     }
 
     // Pre-flight validation for the long-running commands. `--validate-only`
@@ -341,6 +360,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),
+        Commands::Config(_) => unreachable!("config dispatched above"),
     }
 
     Ok(())

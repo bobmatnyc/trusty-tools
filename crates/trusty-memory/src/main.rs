@@ -27,10 +27,8 @@ use trusty_memory::commands::note::handle_note;
 use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
-use trusty_memory::commands::setup::handle_setup;
-use trusty_memory::commands::start::handle_start;
-use trusty_memory::commands::stop::handle_stop;
 use trusty_memory::commands::upgrade::handle_upgrade;
+use trusty_memory::commands::{setup::handle_setup, start::handle_start, stop::handle_stop};
 use trusty_memory::{
     foreground::run_http_foreground, resolve_palace_registry_dir, run_http, run_http_dynamic,
     AppState,
@@ -432,6 +430,11 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -531,12 +534,16 @@ async fn main() -> Result<()> {
     // anything there. `start` self-spawns a detached `serve --foreground` child
     // and exits immediately; the very brief window makes the notice useless.
     // `upgrade` does its own fresh check, so we skip the throttled notice to
-    // avoid a redundant second check on the same run.
+    // avoid a redundant second check on the same run. `config` (#2405, LOW fix
+    // from PR #2528 review) is also excluded — the universal credential CLI
+    // must be genuinely offline, so `config keys list` never triggers a
+    // network update-check call.
     // The check is throttled to once per 24 h (on-disk cache), so on a
     // typical run this is a sub-millisecond cache-hit with no network I/O.
     let is_daemon_path = matches!(cli.command, Command::Serve { .. } | Command::Start);
     let is_upgrade = matches!(cli.command, Command::Upgrade { .. });
-    if !is_daemon_path && !is_upgrade {
+    let is_config = matches!(cli.command, Command::Config(_));
+    if !is_daemon_path && !is_upgrade && !is_config {
         if let Some(info) = trusty_common::update::check_throttled(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
@@ -616,6 +623,7 @@ async fn main() -> Result<()> {
             trusty_memory::commands::port::handle_port(format)
         }
         Command::Upgrade { check, yes } => handle_upgrade(check, yes).await,
+        Command::Config(cmd) => cmd.run().await,
     }
 }
 

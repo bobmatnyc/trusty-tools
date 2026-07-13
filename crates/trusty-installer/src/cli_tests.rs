@@ -13,7 +13,7 @@
 
 use clap::Parser;
 
-use crate::cli::{AnalyzeCoreArg, Cli, Commands, ScopeArg, StackCmd};
+use crate::cli::{AnalyzeCoreArg, Cli, Commands, ConfigSubcommand, ScopeArg, StackCmd};
 
 /// Parse `trusty-installer up` — selects `Commands::Up` with all flags defaulted off.
 #[test]
@@ -258,11 +258,51 @@ fn parse_restart() {
     assert!(matches!(cli.command, Commands::Restart { .. }));
 }
 
-/// Parse `trusty-installer config`.
+/// Parse `trusty-installer config` (bare — no members, no `keys`).
 #[test]
 fn parse_config() {
     let cli = Cli::try_parse_from(["trusty-installer", "config"]).expect("config parses");
-    assert!(matches!(cli.command, Commands::Config { .. }));
+    match cli.command {
+        Commands::Config(args) => {
+            assert!(args.members.is_empty());
+            assert!(args.action.is_none());
+        }
+        other => panic!("expected Commands::Config, got {other:?}"),
+    }
+}
+
+/// Parse `trusty-installer config <member>` — the pre-existing bare-members
+/// grammar must survive the #2405 `keys` nesting unchanged.
+#[test]
+fn parse_config_with_members() {
+    let cli = Cli::try_parse_from(["trusty-installer", "config", "search", "memory"])
+        .expect("config with members parses");
+    match cli.command {
+        Commands::Config(args) => {
+            assert_eq!(
+                args.members,
+                vec!["search".to_string(), "memory".to_string()]
+            );
+            assert!(args.action.is_none());
+        }
+        other => panic!("expected Commands::Config, got {other:?}"),
+    }
+}
+
+/// Parse `trusty-installer config keys list` (#2405) — the new embeddable
+/// `keys` sub-feature nests under `config` without colliding with the
+/// pre-existing bare-members grammar (no stack member is named `keys`).
+#[test]
+fn parse_config_keys() {
+    let cli = Cli::try_parse_from(["trusty-installer", "config", "keys", "list"])
+        .expect("config keys list parses");
+    match cli.command {
+        Commands::Config(args) => {
+            assert!(args.members.is_empty());
+            assert!(matches!(args.action, Some(ConfigSubcommand::Keys(_))));
+        }
+        other => panic!("expected Commands::Config, got {other:?}"),
+    }
 }
 
 /// Parse `trusty-installer port`.

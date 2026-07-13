@@ -11214,7 +11214,6 @@ dependencies = [
  "crossbeam-utils",
  "dashmap 5.5.3",
  "dirs 5.0.1",
- "dotenvy",
  "eventsource-stream",
  "filetime",
  "fs4 0.8.4",

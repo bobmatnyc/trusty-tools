@@ -16,10 +16,10 @@
 
 use clap::Parser;
 use trusty_installer::{
-    cli::{Cli, Commands, StackCmd},
+    cli::{Cli, Commands, ConfigSubcommand, StackCmd},
     commands::{
-        config, doctor, ensure, install, lifecycle, passthrough, port, run_up, self_update, stack,
-        status, ui, updates, upgrade, version,
+        config, doctor, ensure, install, lifecycle, passthrough, port, run_up, runtime,
+        self_update, stack, status, ui, updates, upgrade, version,
     },
 };
 
@@ -142,9 +142,17 @@ fn dispatch(cli: Cli) {
             std::process::exit(lifecycle::run_restart(&members, yes, json));
         }
 
-        Commands::Config { members } => {
-            std::process::exit(config::run(&members, json));
-        }
+        Commands::Config(args) => match args.action {
+            Some(ConfigSubcommand::Keys(cmd)) => {
+                if let Err(e) = runtime::block_on(cmd.run()) {
+                    eprintln!("{e:#}");
+                    std::process::exit(1);
+                }
+            }
+            None => {
+                std::process::exit(config::run(&args.members, json));
+            }
+        },
 
         Commands::Port {
             member,

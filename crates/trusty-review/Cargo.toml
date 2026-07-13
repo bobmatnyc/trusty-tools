@@ -84,7 +84,7 @@ clap         = { workspace = true }
 # #1359) calls it to surface the resolved ticket/spec intent as a review context
 # source.  The ISR is feature-gated in trusty-common so the 11 non-consumer
 # dependents pay nothing; trusty-review opts in here.
-trusty-common = { workspace = true, features = ["intent-source"] }
+trusty-common = { workspace = true, features = ["intent-source", "config-cli"] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.

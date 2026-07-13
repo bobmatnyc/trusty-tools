@@ -141,6 +141,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // #2405 (LOW fix from PR #2528 review): the universal `config` credential
+    // CLI is a lightweight, daemon-less command. Dispatch it BEFORE any
+    // daemon-URL resolution (#2517's bounded client + gateway-first
+    // `resolve_daemon_url_via_gateway` probe below) so `tm config keys …`
+    // never pays a loopback daemon probe or the tracing/migration setup that
+    // follows. Mirrors the tagent/tga early config short-circuit (#2405).
+    if let Some(Command::Config(cmd)) = cli.command {
+        return cmd.run().await;
+    }
+
     // Long-running daemon mode: init file-rotating tracing + bug-capture layer
     // (identical to the former trusty-mpmd binary). Short-lived CLI invocations
     // skip subscriber init entirely — they have no meaningful log volume and
@@ -511,6 +521,11 @@ async fn main() -> anyhow::Result<()> {
                 commands::mcp::test_cmd(root.as_deref(), name.as_deref(), json).await
             }
         },
+        // Unreachable at runtime: `Command::Config` is dispatched — and
+        // `cli.command` returned early — before this match ever runs (see the
+        // #2405 early short-circuit above, right after `Cli::try_parse`).
+        // The arm still must exist for match exhaustiveness over `Command`.
+        Some(Command::Config(_)) => unreachable!("config dispatched before daemon-URL resolution"),
     };
 
     // Top-level exit-code translation: a `tm session prune-idle` that found the

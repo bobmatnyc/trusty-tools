@@ -298,6 +298,11 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Subcommands for `trusty-analyzer service` (macOS launchd integration).
@@ -376,11 +381,17 @@ async fn main() -> Result<()> {
     // - `mcp`: standalone MCP stdio server pointed at the analyzer daemon
     // In both cases stderr noise may disrupt clients that relay stderr. For
     // `serve` without `--mcp` (HTTP daemon only), the process is long-running
-    // with no interactive user to read a banner, so we skip it there too. The
+    // with no interactive user to read a banner, so we skip it there too.
+    // `config` (#2405, LOW fix from PR #2528 review) is also excluded — the
+    // universal credential CLI must be genuinely offline, with no network
+    // update-check call, so `config keys list` never touches the network. The
     // check is throttled to once per 24 h (on-disk cache) so it is a
     // sub-millisecond cache read on typical invocations.
-    let is_mcp_path = matches!(cli.cmd, Cmd::Serve { .. } | Cmd::Mcp { .. });
-    if !is_mcp_path {
+    let skip_update_check = matches!(
+        cli.cmd,
+        Cmd::Serve { .. } | Cmd::Mcp { .. } | Cmd::Config(_)
+    );
+    if !skip_update_check {
         if let Some(info) = trusty_common::update::check_throttled(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
@@ -625,5 +636,6 @@ async fn main() -> Result<()> {
             post_comment,
             format,
         } => run_review_pr(repo, pr, index_id, post_comment, format).await,
+        Cmd::Config(cmd) => cmd.run().await,
     }
 }

@@ -93,6 +93,15 @@ impl KeysCommand {
     /// the default provider [`Configurator`], so a mounting binary supplies
     /// nothing. Every operation is delegated to the injectable [`super::ops`]
     /// seam so this method stays a thin, side-effecting shell.
+    ///
+    /// `pub` (issue #2405): a binary that already owns a top-level `config`
+    /// command in a different domain (e.g. trusty-search's daemon
+    /// memory-limit `config get/set`, trusty-installer's stack-member
+    /// `config <members>`) cannot mount the whole-grammar [`super::ConfigCommand`]
+    /// without colliding with its existing verbs. Exposing `KeysCommand` (and
+    /// this method) directly lets such a binary nest ONLY the credential `keys`
+    /// feature under its own `config` enum instead — see the "mount `keys`
+    /// under an existing `config`" recipe in the parent module's docs.
     /// What: builds `stdout` as the output sink and dispatches. `set` sources its
     /// value via [`source_set_value`] (hidden prompt / stdin pipe / arg); `test`
     /// first loads `.env.local` (so the env tier reflects it) and registers the
@@ -101,7 +110,7 @@ impl KeysCommand {
     /// from the `.env.local` tier honestly.
     /// Test: exercised end-to-end through `super::ops` in
     /// `crates/trusty-common/tests/config_keys_cli.rs`.
-    pub(crate) async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> anyhow::Result<()> {
         let store = default_store();
         let stdout = std::io::stdout();
         match self.verb {

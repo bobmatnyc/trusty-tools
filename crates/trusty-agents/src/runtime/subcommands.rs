@@ -98,6 +98,8 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         // #442: launch Tauri desktop dashboard GUI ("dash" is an alias)
         "dashboard",
         "dash",
+        // #2405: universal inference-provider credential CLI (`config keys …`).
+        "config",
     ];
     if args.len() > 1 {
         let candidate = &args[1];
@@ -174,6 +176,13 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         return Ok(false);
     }
 
+    // #2405 note: `tagent config keys …` is dispatched even earlier — in
+    // `runtime::run` BEFORE `startup::run_startup_init` — so the credential CLI
+    // never spins up the agent runtime, mutates project state, or skews its own
+    // key-tier report with startup's `.env.local` preload. See
+    // `run_config_subcommand` below. `"config"` stays in `KNOWN_SUBCOMMANDS`
+    // above only so a near-miss typo still gets a suggestion.
+
     // #449: `trusty-agents eval run --suite <path>` — run a behavior eval suite.
     if args.len() > 1 && args[1] == "eval" {
         registry_cmds::run_eval_subcommand(&args[2..]).await?;
@@ -221,6 +230,38 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+/// Parse and run the universal `config` command (#2405) from an argv tail.
+///
+/// Why: trusty-agents dispatches subcommands on argv *before* the top-level
+/// clap parse, so the shared `ConfigCommand` (a `clap::Args`, not a top-level
+/// `Parser`) is flattened into a thin throwaway `Parser` here and handed the
+/// `config …` argv tail. This mounts the one inference-provider credential CLI
+/// every primary binary shares (epic #2400 Wave 1) without disturbing the
+/// crate's existing hand-rolled dispatch.
+/// What: `argv_tail` starts at the literal `config` token (clap treats it as
+/// the program name), so `["config","keys","list"]` parses the `keys list`
+/// verb. `parse_from` renders help/version/errors and exits as clap normally
+/// would; on success the parsed command runs against the shared secure store.
+/// Test: `crates/trusty-agents/tests/config_mount.rs` drives the built binary
+/// with `config --help` and `config keys list`.
+pub(super) async fn run_config_subcommand(argv_tail: &[String]) -> Result<()> {
+    use clap::Parser as _;
+
+    /// Thin `Parser` wrapper so the shared `ConfigCommand` args can be parsed
+    /// from an argv tail in this pre-clap dispatcher.
+    #[derive(clap::Parser)]
+    #[command(
+        name = "tagent config",
+        about = "Manage inference provider configuration (API keys)."
+    )]
+    struct ConfigParser {
+        #[command(flatten)]
+        cmd: trusty_common::inference::config::ConfigCommand,
+    }
+
+    ConfigParser::parse_from(argv_tail).cmd.run().await
 }
 
 // #409: Find the subcommand position even when preceded by mode flags.

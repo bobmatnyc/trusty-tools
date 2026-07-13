@@ -46,18 +46,67 @@
 //! [`ConfigFeature`] variant here — mount sites do not change (the
 //! extensibility contract in the acceptance criteria).
 //!
+//! # Mount recipe for a binary that already owns `config` (#2405)
+//!
+//! trusty-search (`config get/set memory-limit`, daemon runtime config) and
+//! trusty-installer (`config <members>`, stack-member config) each already
+//! have a top-level `config` command in a DIFFERENT domain. Mounting the
+//! whole-grammar [`ConfigCommand`] there would collide with their existing
+//! verb, so nest just the credential feature — [`ConfigKeysCommand`] (a public
+//! alias of [`keys::KeysCommand`]) — as a new variant under your EXISTING
+//! `config` subcommand enum instead:
+//!
+//! ```ignore
+//! use trusty_common::inference::config::ConfigKeysCommand;
+//!
+//! #[derive(clap::Subcommand)]
+//! enum ConfigAction {
+//!     // … your existing verbs (Get, Set, …) …
+//!     /// Manage inference provider API keys (set / list / test / unset).
+//!     Keys(ConfigKeysCommand),           // line 1: mount
+//! }
+//! ```
+//!
+//! ```ignore
+//! match action {
+//!     // … your existing arms …
+//!     ConfigAction::Keys(cmd) => cmd.run().await?,   // line 2: dispatch
+//! }
+//! ```
+//!
+//! Same `config-cli` feature requirement as the whole-command recipe above.
+//! Every other primary binary should prefer the whole-grammar [`ConfigCommand`]
+//! recipe — this one exists solely for the pre-existing-`config` collision case.
+//!
 //! Enable the `config-cli` feature in the mounting binary's dependency on
 //! `trusty-common`. It implies `inference-client`; a default (no-features)
 //! `trusty-common` build compiles neither this module nor `clap`.
 //!
 //! Test: `ops` inline tests + `crates/trusty-common/tests/config_keys_cli.rs`
 //! (argv parsing, set→list→test→unset flow, tier reporting, and the
-//! never-print-a-value guarantee).
+//! never-print-a-value guarantee); the embeddable-`keys` mount path is
+//! exercised by `crates/trusty-search/tests/config_mount.rs` and
+//! `crates/trusty-installer/tests/config_mount.rs`.
 
 pub mod keys;
 pub mod ops;
 
 use keys::KeysCommand;
+
+/// Public alias for [`keys::KeysCommand`] — the embeddable `keys` feature on
+/// its own, for binaries that mount it directly (see the second mount recipe
+/// above) instead of the whole-grammar [`ConfigCommand`].
+///
+/// Why: `crate::inference::config::keys::KeysCommand` is a mouthful and an
+/// internal-looking path; this re-export at the module's public surface names
+/// the type the way a mounting binary should reach for it, matching
+/// [`ConfigCommand`]'s own re-export at [`crate::inference`].
+/// What: identical type to [`keys::KeysCommand`] — clap `Args` wrapping the
+/// `set`/`list`/`test`/`unset` verbs, with a `pub async fn run(self)`.
+/// Test: covered transitively by `keys`' own tests; the embeddable-mount path
+/// is exercised by `crates/trusty-search/tests/config_mount.rs` and
+/// `crates/trusty-installer/tests/config_mount.rs` (#2405).
+pub use keys::KeysCommand as ConfigKeysCommand;
 
 /// The universal `config` subcommand a binary mounts as one enum variant.
 ///
