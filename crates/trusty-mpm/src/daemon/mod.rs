@@ -346,19 +346,19 @@ struct DaemonVerdictProvider {
 impl idle_reaper::IdleVerdictProvider for DaemonVerdictProvider {
     async fn verdict(&self, session_name: &str) -> Option<String> {
         use crate::activity::ActivityState;
-        // Capture the most recent pane output via the tmux driver (300 lines is
-        // enough for the LLM classifier). Note: TmuxDriver::capture() shells out
-        // via std::process::Command — the same blocking pattern used throughout
-        // the daemon (observe(), reap_loop, etc.); sub-millisecond latency is
-        // acceptable here and is consistent with the existing codebase.
+        // Capture the most recent output of the session's RECORDED harness pane
+        // (300 lines is enough for the LLM classifier). Routing through
+        // `capture_pane_by_tmux_name` rather than the raw session-scoped
+        // `tmux_driver().capture()` (#2515) ensures we classify the pane this
+        // record actually owns, not whichever sibling window an operator left
+        // active — otherwise a busy session can be auto-stopped as idle (or a
+        // quiet one kept alive). `None` when no live record matches the name, the
+        // recorded pane is confirmed gone, or the capture is empty: in every case
+        // we skip this poll rather than act on ambiguous content.
         let pane_text = self
             .mgr
-            .tmux_driver()
-            .capture(session_name, 300)
-            .unwrap_or_default();
-        if pane_text.is_empty() {
-            return None;
-        }
+            .capture_pane_by_tmux_name(session_name, 300)
+            .await?;
         // Use the shared ActivityMonitor (hash-cached — no LLM call if content unchanged).
         let monitor = self.state.activity_monitor();
         match monitor.check(session_name, &pane_text).await {

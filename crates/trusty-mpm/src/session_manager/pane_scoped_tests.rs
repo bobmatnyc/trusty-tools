@@ -297,3 +297,146 @@ async fn observe_legacy_record_without_pane_id_falls_back_to_session_capture() {
     assert_eq!(obs.raw_pane, "session-scoped output");
     assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
 }
+
+// ── capture_pane (by id): the shared read behind activity/mcp/cli/supervisor ──
+// (issue #2515 — same three-way contract as observe, applied to the read helper
+// every non-observe consumer routes through).
+
+#[tokio::test]
+async fn capture_pane_targets_recorded_pane_when_pane_id_known() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    // Keyed by PANE id — proves the read used the pane-scoped capture, not the
+    // session-scoped one (which the fake keys by session name).
+    fake.capture_responses
+        .lock()
+        .unwrap()
+        .insert("%6015".to_string(), "pane-owned output".to_string());
+
+    let text = mgr
+        .capture_pane(&record.id, 60)
+        .await
+        .expect("capture_pane");
+
+    assert_eq!(text, "pane-owned output");
+    assert_eq!(
+        fake.pane_capture_calls.lock().unwrap().as_slice(),
+        [(record.tmux_name.clone(), "%6015".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn capture_pane_refuses_when_stored_pane_gone() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    *fake.pane_exists_override.lock().unwrap() = Some(false);
+
+    let err = mgr
+        .capture_pane(&record.id, 60)
+        .await
+        .expect_err("a confirmed-gone recorded pane must refuse the read too");
+
+    assert!(
+        matches!(&err, ManagedError::PaneGone(sid, pid) if sid == &record.id.to_string() && pid == "%6015"),
+        "expected PaneGone(session_id, \"%6015\"), got: {err:?}"
+    );
+    assert!(
+        fake.pane_capture_calls.lock().unwrap().is_empty(),
+        "the pane-scoped capture must not fire on refusal — the whole read refuses"
+    );
+}
+
+#[tokio::test]
+async fn capture_pane_legacy_record_falls_back_to_session_capture() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, None).await;
+    // Keyed by SESSION name — the legacy/session-scoped lookup path.
+    fake.capture_responses.lock().unwrap().insert(
+        record.tmux_name.clone(),
+        "session-scoped output".to_string(),
+    );
+
+    let text = mgr
+        .capture_pane(&record.id, 60)
+        .await
+        .expect("capture_pane");
+
+    assert_eq!(text, "session-scoped output");
+    assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
+}
+
+// ── capture_pane_by_tmux_name: the idle-reaper read keyed by tmux name ───────
+// (issue #2515 — the reaper knows a session only by tmux name; resolve the
+// record, then apply the same pane-scoped-or-refuse contract).
+
+#[tokio::test]
+async fn capture_pane_by_tmux_name_targets_recorded_pane() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    fake.capture_responses
+        .lock()
+        .unwrap()
+        .insert("%6015".to_string(), "pane-owned output".to_string());
+
+    let text = mgr
+        .capture_pane_by_tmux_name(&record.tmux_name, 300)
+        .await
+        .expect("live record with an alive pane yields pane content");
+
+    assert_eq!(text, "pane-owned output");
+    assert_eq!(
+        fake.pane_capture_calls.lock().unwrap().as_slice(),
+        [(record.tmux_name.clone(), "%6015".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn capture_pane_by_tmux_name_refuses_when_pane_gone() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    *fake.pane_exists_override.lock().unwrap() = Some(false);
+
+    let out = mgr.capture_pane_by_tmux_name(&record.tmux_name, 300).await;
+
+    assert!(
+        out.is_none(),
+        "a confirmed-gone recorded pane must yield None (no verdict), not a sibling read"
+    );
+    assert!(
+        fake.pane_capture_calls.lock().unwrap().is_empty(),
+        "the pane-scoped capture must not fire when the pane is gone"
+    );
+}
+
+#[tokio::test]
+async fn capture_pane_by_tmux_name_legacy_falls_back_to_session() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake, record) = make_active_session(&dir, None).await;
+    fake.capture_responses.lock().unwrap().insert(
+        record.tmux_name.clone(),
+        "session-scoped output".to_string(),
+    );
+
+    let text = mgr
+        .capture_pane_by_tmux_name(&record.tmux_name, 300)
+        .await
+        .expect("legacy record falls back to session-scoped capture");
+
+    assert_eq!(text, "session-scoped output");
+    assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn capture_pane_by_tmux_name_none_for_unmanaged_name() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake, _record) = make_active_session(&dir, Some("%6015")).await;
+
+    let out = mgr
+        .capture_pane_by_tmux_name("tm-no-such-session", 300)
+        .await;
+
+    assert!(
+        out.is_none(),
+        "an unmanaged/unknown tmux name with no live record and no seeded capture yields None"
+    );
+}
