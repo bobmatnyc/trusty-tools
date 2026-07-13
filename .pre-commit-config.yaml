@@ -65,6 +65,21 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Test: doc-comment pointer lint (issue #2458). Fails the commit when a
+  # `/// Test:`/`//! Test:` annotation cites a test name that doesn't exist
+  # as `fn <name>(` anywhere in the citing file's crate, or when an
+  # allowlisted (grandfathered) pointer in .test-pointer-allowlist.tsv is no
+  # longer dangling (remove its entry). Runs against the whole tracked tree
+  # (pass_filenames: false), matching the line-cap hook's holistic scan.
+  - repo: local
+    hooks:
+      - id: test-pointers
+        name: Test: doc-comment pointer lint
+        entry: scripts/check_test_pointers.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Empirical commit-effort scoring — appends Effort/Effort-Score/
   # Effort-Breakdown trailers to commit messages. Non-destructive: never
   # blocks a commit; computation failures log a warning and exit 0.

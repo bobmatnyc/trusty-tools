@@ -1,0 +1,35 @@
+# Test-pointer gate for the trusty-tools workspace (issue #2458).
+#
+# Lints `/// Test:` / `//! Test:` doc-comment pointers (the Why/What/Test
+# convention in CLAUDE.md) against real test names:
+#   - a NEW dangling pointer (cites a test that doesn't exist as `fn <name>(`
+#     anywhere in the citing file's crate) fails the job;
+#   - an allowlisted (grandfathered) pointer in .test-pointer-allowlist.tsv
+#     that is no longer dangling (fixed) also fails — remove its entry.
+#
+# Pure text scanning — no Rust toolchain or build needed, so this runs as
+# its own lightweight job (matches ci.yml / line-cap.yml's checkout style).
+name: Test pointers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches
+# line-cap.yml).
+concurrency:
+  group: test-pointers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-pointers:
+    name: Test: doc-comment pointer lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint Test: doc-comment pointers against real test names
+        run: bash scripts/check_test_pointers.sh
