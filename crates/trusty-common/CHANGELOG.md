@@ -7,6 +7,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- universal config keys CLI module (set/list/test/unset) ([#2518](https://github.com/bobmatnyc/trusty-tools/pull/2518)) ([`17f0aa9`](https://github.com/bobmatnyc/trusty-tools/commit/17f0aa950bb0ed71c5364e1b55b1dc0503e4c0b2))
+- route together/* models through the shared Together adapter ([#2495](https://github.com/bobmatnyc/trusty-tools/pull/2495)) ([`2bdfccf`](https://github.com/bobmatnyc/trusty-tools/commit/2bdfccfa65c7a5c34cd325b88e3ce78ba4c3c427))
+- add Together.ai as an OpenAI-compat inference provider ([#2490](https://github.com/bobmatnyc/trusty-tools/pull/2490)) ([`98405bb`](https://github.com/bobmatnyc/trusty-tools/commit/98405bbaada82f62bb59805d54f3a9cd0f35236e))
+- OpenAI-compat adapter core + OpenRouter + Fireworks adapters ([#2482](https://github.com/bobmatnyc/trusty-tools/pull/2482)) ([`3101b36`](https://github.com/bobmatnyc/trusty-tools/commit/3101b36e452fca82a275368a1eb0a2a9e9b1c5fe))
+- inference foundation — types, InferenceAdapter trait, capability registry, configurator ([#2478](https://github.com/bobmatnyc/trusty-tools/pull/2478)) ([`e5d71f0`](https://github.com/bobmatnyc/trusty-tools/commit/e5d71f075e480c6714a39bd6bec8212e22c70347))
+- credential resolver + secure KeyStore (closes #2401) ([#2427](https://github.com/bobmatnyc/trusty-tools/pull/2427)) ([`98d0eb9`](https://github.com/bobmatnyc/trusty-tools/commit/98d0eb993cdaf640842761aaf9299d7013d2ee01))
+- fading-memories resurface pass in dream cycle ([#2353](https://github.com/bobmatnyc/trusty-tools/pull/2353)) ([`4dbc0c2`](https://github.com/bobmatnyc/trusty-tools/commit/4dbc0c235043b78159b4a24960259242dc215651))
+
+### Fixed
+
+- force:true honors its contract + secret/blocklist heuristics stop over-matching (closes #2442) ([#2520](https://github.com/bobmatnyc/trusty-tools/pull/2520)) ([`2671f10`](https://github.com/bobmatnyc/trusty-tools/commit/2671f107b256c353940e793e65eb947b99acb4d1))
+- launchd-aware bridge no-spawn + /health supervised flag (closes #2486) ([#2491](https://github.com/bobmatnyc/trusty-tools/pull/2491)) ([`e993c18`](https://github.com/bobmatnyc/trusty-tools/commit/e993c18ace1fe9a86f4b5315be7887ed767da710))
+
+### Changed
+
+- mount config command on all 10 primary binaries ([#2528](https://github.com/bobmatnyc/trusty-tools/pull/2528)) ([`a58ea52`](https://github.com/bobmatnyc/trusty-tools/commit/a58ea5223167553f0d90fb5258d582d510dca316))
+## [Unreleased]
+
 ### Fixed
 
 - idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
