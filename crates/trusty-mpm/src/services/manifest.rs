@@ -405,8 +405,37 @@ services:
     }
 
     /// `~/foo` in log_path must expand to `<home>/foo`.
+    ///
+    /// Why (issue #2459): `expand_paths()` resolves `dirs::home_dir()`
+    /// internally, and this test independently reads `dirs::home_dir()` again
+    /// to compute the expected value. Two separate reads of the process-wide
+    /// `HOME` env var are only guaranteed consistent if nothing else in the
+    /// same test binary can mutate `HOME` between them — several other tests
+    /// in this crate do exactly that (redirecting `HOME` to a temp dir) and
+    /// are marked `#[serial_test::serial]`. This test must join that same
+    /// serial group AND redirect `HOME` to its own temp dir itself, so its
+    /// two `dirs::home_dir()` reads are isolated from both other tests and
+    /// the real ambient `$HOME` of whoever is running the suite.
+    #[serial_test::serial]
     #[test]
     fn manifest_expands_tilde() {
+        let fake_home = tempfile::TempDir::new().expect("create fake home");
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`, so no other test
+        // thread observes or mutates `HOME` concurrently. Restored below
+        // regardless of panics via the `HomeGuard` drop impl.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        struct HomeGuard(Option<String>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(p) => unsafe { std::env::set_var("HOME", p) },
+                    None => unsafe { std::env::remove_var("HOME") },
+                }
+            }
+        }
+        let _guard = HomeGuard(prev_home);
+
         let home = dirs::home_dir().expect("home dir available in test");
         let yaml = r#"
 version: 1

@@ -397,6 +397,15 @@ mod tests {
         assert!(paths.framework.starts_with(&paths.root));
     }
 
+    // Why (issue #2461 sweep): calls `FrameworkPaths::default()` — which
+    // reads `dirs::home_dir()` — twice and asserts the two results are
+    // identical. If any other test in this binary redirects `HOME` to a temp
+    // dir between the two calls, the assertion spuriously fails. Several
+    // such tests exist elsewhere in this crate (e.g.
+    // `core::home_trust_seed::tests::is_idempotent`) and are marked
+    // `#[serial_test::serial]`; this test must join the same serial group so
+    // it can never observe a mid-flight `HOME` mutation from them.
+    #[serial_test::serial]
     #[test]
     fn default_is_a_single_global_path_never_project_relative() {
         // Regression guard (owner feedback on #1905): the #1905 stale-skill
@@ -569,6 +578,14 @@ mod tests {
     // root (the daemon's single home-relative framework install), matching
     // `for_managed_project_keeps_framework_source_at_managed_root`'s guarantee
     // for the sibling standalone constructor.
+    //
+    // Why serial (issue #2461 sweep): `FrameworkPaths::default()` is called
+    // directly AND indirectly (via `for_managed_workspace` -> `default().root`)
+    // — two separate `dirs::home_dir()` reads that must agree. Serialized
+    // against other `HOME`-redirecting tests in this binary; reproduced
+    // failing under `--test-threads=32` before this fix (left: temp-dir root,
+    // right: real `$HOME` root).
+    #[serial_test::serial]
     #[test]
     fn for_managed_workspace_keeps_framework_source_at_default_root() {
         let default_paths = FrameworkPaths::default();
@@ -660,6 +677,11 @@ mod tests {
         assert_eq!(paths.claude_home_dir(), PathBuf::from("/base"));
     }
 
+    // Why (issue #2461 sweep): reads `dirs::home_dir()` twice — once inside
+    // `FrameworkPaths::default()`, once directly — and compares the results.
+    // Serialized against other `HOME`-redirecting tests in this binary for
+    // the same reason as `default_is_a_single_global_path_never_project_relative`.
+    #[serial_test::serial]
     #[test]
     fn claude_home_dir_matches_default_home() {
         // The home-relative resolver's `claude_home_dir()` must equal the real

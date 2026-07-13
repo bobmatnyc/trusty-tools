@@ -124,6 +124,16 @@ impl TokenProvider for FixedTokenProvider {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+// Why serial (extra sweep hit — review-gate report on top of #2459/#2460/#2461):
+// this and `token_resolution_from_file` below mutate the process-wide
+// TOKEN_ENV_VAR / TOKEN_FILE_ENV_VAR env vars that
+// `crate::daemon::bug_report::token`'s own test module ALSO mutates (and
+// already marks `#[serial_test::serial]` for exactly this reason).
+// `serial_test::serial` without an explicit name shares one global lock per
+// binary, so tagging these two tests joins the SAME lock token.rs's tests
+// already hold — closing the last gap between two files in the same
+// `trusty-mpm` lib test binary that were previously free to interleave.
+#[serial_test::serial]
 #[test]
 fn token_resolution_from_env() {
     // Test that the env var is read when present.
@@ -131,13 +141,10 @@ fn token_resolution_from_env() {
     // so the fall-through path is exercised regardless of process env state.
     // The primary assertion is that setting TOKEN_ENV_VAR is sufficient.
     //
-    // SAFETY: this test runs single-threaded in isolation; the env var is
-    // cleaned up before the test returns. Token-resolution tests share a
-    // process so we accept they may interfere; that is why we assert
-    // `is_some()` (a value was set) rather than a specific value that
-    // another test might have left in the env.
+    // SAFETY: serialized via `#[serial_test::serial]`, so no other test
+    // thread observes or mutates TOKEN_ENV_VAR concurrently; the env var is
+    // cleaned up before the test returns.
     let sentinel = "ghp_test_token_from_env_unique_trusty_phase3"; // pragma: allowlist secret
-    // SAFETY: isolated test, cleaned up on drop path.
     unsafe { std::env::set_var(TOKEN_ENV_VAR, sentinel) };
     let token = EnvFileTokenProvider.token();
     unsafe { std::env::remove_var(TOKEN_ENV_VAR) };
@@ -160,25 +167,23 @@ fn token_resolution_absent_uses_fixed_provider() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn token_resolution_from_file() {
     // Write a token to a temp file, point TOKEN_FILE_ENV_VAR at it,
     // ensure the provider reads it back.
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), "ghp_from_file_xyz\n").unwrap();
-    // SAFETY: we point TOKEN_FILE_ENV_VAR at the temp file; TOKEN_ENV_VAR
-    // is cleared first so the file path is the resolution source.
+    // SAFETY: serialized via `#[serial_test::serial]`; TOKEN_ENV_VAR is
+    // cleared first so the file path is deterministically the resolution
+    // source — no other test can race in a concurrent env mutation.
     unsafe {
         std::env::remove_var(TOKEN_ENV_VAR);
         std::env::set_var(TOKEN_FILE_ENV_VAR, tmp.path().as_os_str());
     }
     let token = EnvFileTokenProvider.token();
-    // SAFETY: cleanup.
+    // SAFETY: cleanup, still under the serial lock.
     unsafe { std::env::remove_var(TOKEN_FILE_ENV_VAR) };
-    // Token env var may be re-set by another test that ran concurrently;
-    // what we assert is that the file token is at minimum included when
-    // TOKEN_ENV_VAR is absent. If TOKEN_ENV_VAR was set concurrently the
-    // env-var path wins — still a valid Some(_).
     assert!(
         token.is_some(),
         "expected a token from file (or env): {token:?}"
