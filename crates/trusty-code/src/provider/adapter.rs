@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use super::atlascloud::AtlasCloudProvider;
 use super::bedrock::BedrockProvider;
 use super::fireworks::FireworksProvider;
 use super::openrouter::OpenRouterProvider;
@@ -27,17 +28,21 @@ const FIREWORKS_PREFIX: &str = "fireworks/";
 /// Slug prefix that routes to the Together.ai backend (#2494).
 const TOGETHER_PREFIX: &str = "together/";
 
+/// Slug prefix that routes to the AtlasCloud backend (#2536).
+const ATLASCLOUD_PREFIX: &str = "atlascloud/";
+
 /// Select the provider implementation for a model slug.
 ///
 /// Why: The loop must stay backend-agnostic; this factory is the only place that
 /// knows how to map a slug to a backend, so adding a backend touches one site.
 /// What: Returns [`BedrockProvider`] for slugs beginning with `bedrock/`,
 /// [`FireworksProvider`] for slugs beginning with `fireworks/` (#2406),
-/// [`TogetherProvider`] for slugs beginning with `together/` (#2494), and the
+/// [`TogetherProvider`] for slugs beginning with `together/` (#2494),
+/// [`AtlasCloudProvider`] for slugs beginning with `atlascloud/` (#2536), and the
 /// default [`OpenRouterProvider`] (carrying the slug for its
-/// `supports_native_tools` decision) for everything else. The `together/` check
-/// sits alongside `fireworks/` — after `bedrock/` — so no `together/*` slug can
-/// fall through to the OpenRouter default.
+/// `supports_native_tools` decision) for everything else. The `together/` and
+/// `atlascloud/` checks sit alongside `fireworks/` — after `bedrock/` — so no
+/// `together/*` or `atlascloud/*` slug can fall through to the OpenRouter default.
 /// Test: `adapter::tests::provider_for_routes_*`.
 pub fn provider_for(slug: &str) -> Arc<dyn Provider> {
     if slug.starts_with(BEDROCK_PREFIX) {
@@ -46,6 +51,8 @@ pub fn provider_for(slug: &str) -> Arc<dyn Provider> {
         Arc::new(FireworksProvider::new())
     } else if slug.starts_with(TOGETHER_PREFIX) {
         Arc::new(TogetherProvider::new())
+    } else if slug.starts_with(ATLASCLOUD_PREFIX) {
+        Arc::new(AtlasCloudProvider::new())
     } else {
         Arc::new(OpenRouterProvider::new(slug))
     }
@@ -93,8 +100,27 @@ mod tests {
         assert_eq!(p.name(), "together");
     }
 
-    /// Non-Bedrock, non-Fireworks, non-Together slugs route to OpenRouter (the
-    /// default).
+    /// `atlascloud/*` slugs route to the AtlasCloud provider (#2536), including
+    /// the nested `atlascloud/openai/gpt-5.6-sol` form whose model id is itself
+    /// `vendor/model`-shaped.
+    ///
+    /// Why: per-agent routing must direct AtlasCloud-hosted models to the
+    /// AtlasCloud normalisation profile, not the OpenRouter default — and the
+    /// nested `openai/`-shaped model id must NOT re-home the slug to OpenRouter.
+    /// What: Resolve both the nested and a bare `atlascloud/...` slug, assert
+    /// `name() == "atlascloud"`.
+    /// Test: this test.
+    #[test]
+    fn provider_for_routes_atlascloud() {
+        assert_eq!(
+            provider_for("atlascloud/openai/gpt-5.6-sol").name(),
+            "atlascloud"
+        );
+        assert_eq!(provider_for("atlascloud/deepseek-v3").name(), "atlascloud");
+    }
+
+    /// Non-Bedrock, non-Fireworks, non-Together, non-AtlasCloud slugs route to
+    /// OpenRouter (the default).
     ///
     /// Why: Qwen/DeepSeek/Gemma/OpenAI/Anthropic-via-OR all go through
     /// OpenRouter; verify the default branch for several families.

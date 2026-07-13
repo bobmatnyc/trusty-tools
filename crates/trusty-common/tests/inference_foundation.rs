@@ -49,6 +49,7 @@ fn registry_seeds_all_providers() {
         (ProviderId::Anthropic, "anthropic", true),
         (ProviderId::OpenAI, "openai", true),
         (ProviderId::Together, "together", true),
+        (ProviderId::AtlasCloud, "atlascloud", true),
     ];
     for (id, name, has_key_env) in expected {
         let by_id = capabilities(id);

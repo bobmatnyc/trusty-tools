@@ -46,6 +46,8 @@ pub enum ProviderId {
     OpenAI,
     /// Together.ai (OpenAI-compatible inference; extension provider, #2488).
     Together,
+    /// AtlasCloud (OpenAI-compatible inference; extension provider, #2536).
+    AtlasCloud,
 }
 
 impl ProviderId {
@@ -55,7 +57,7 @@ impl ProviderId {
     /// Why: one canonical spelling per provider that never changes across
     /// releases.
     /// What: `"openrouter"`, `"fireworks"`, `"bedrock"`, `"anthropic"`,
-    /// `"openai"`, `"together"`.
+    /// `"openai"`, `"together"`, `"atlascloud"`.
     /// Test: `provider_id_round_trips`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -65,6 +67,7 @@ impl ProviderId {
             Self::Anthropic => "anthropic",
             Self::OpenAI => "openai",
             Self::Together => "together",
+            Self::AtlasCloud => "atlascloud",
         }
     }
 
@@ -88,7 +91,7 @@ impl ProviderId {
     ///
     /// Why: stage 1 of the configurator's two-stage resolver keys off the slug
     /// prefix (`bedrock/`, `fireworks/`, `anthropic/`, `openai/`, `together/`,
-    /// `openrouter/`); this is the single mapping it uses.
+    /// `atlascloud/`, `openrouter/`); this is the single mapping it uses.
     /// What: matches the segment before the first `/` case-insensitively;
     /// returns `None` for a bare slug or an unrecognised prefix (the caller then
     /// falls back to the OpenRouter default).
@@ -102,6 +105,7 @@ impl ProviderId {
             "anthropic" => Some(Self::Anthropic),
             "openai" => Some(Self::OpenAI),
             "together" => Some(Self::Together),
+            "atlascloud" => Some(Self::AtlasCloud),
             _ => None,
         }
     }
@@ -188,7 +192,7 @@ pub struct ProviderCapabilities {
 /// trusty-review's model notes (structured output).
 /// What: one entry per [`ProviderId`], indexed by [`capabilities`].
 /// Test: `all_providers_seeded`.
-const SEED: [ProviderCapabilities; 6] = [
+const SEED: [ProviderCapabilities; 7] = [
     ProviderCapabilities {
         id: ProviderId::OpenRouter,
         native_tool_calling: true,
@@ -276,6 +280,27 @@ const SEED: [ProviderCapabilities; 6] = [
         default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         credential_env: Some("TOGETHER_API_KEY"),
     },
+    // AtlasCloud (#2536) — OpenAI-compatible `/chat/completions`, Bearer auth,
+    // native OpenAI-style tool calling. Modeled exactly like Together/OpenAI-direct:
+    // `prompt_caching = true` (caching happens provider-side; the caller cannot
+    // place `cache_control` breakpoints) and `detailed_usage_accounting = false`
+    // (the `usage:{include:true}` directive is OpenRouter-specific — a live probe
+    // is confirming AtlasCloud's `usage` shape; flip this only if it reports
+    // cost/cache fields). Default model + context window are AtlasCloud's own
+    // catalog numbers for `openai/gpt-5.6-sol` (1.05M-token window).
+    ProviderCapabilities {
+        id: ProviderId::AtlasCloud,
+        native_tool_calling: true,
+        tool_dialect: ToolDialect::OpenAiFunctions,
+        streaming: true,
+        prompt_caching: true,
+        structured_output: true,
+        vision: false,
+        detailed_usage_accounting: false,
+        max_context_window: 1_050_000,
+        default_model: "openai/gpt-5.6-sol",
+        credential_env: Some("ATLASCLOUD_API_KEY"),
+    },
 ];
 
 /// Look up the capability descriptor for a provider.
@@ -331,6 +356,7 @@ mod tests {
             ProviderId::Anthropic,
             ProviderId::OpenAI,
             ProviderId::Together,
+            ProviderId::AtlasCloud,
         ] {
             assert_eq!(id.to_string(), id.as_str());
             assert_eq!(ProviderId::from_slug_prefix(&format!("{id}/x")), Some(id));
@@ -373,7 +399,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn all_providers_seeded() {
-        assert_eq!(all().len(), 6);
+        assert_eq!(all().len(), 7);
         for id in [
             ProviderId::OpenRouter,
             ProviderId::Fireworks,
@@ -381,6 +407,7 @@ mod tests {
             ProviderId::Anthropic,
             ProviderId::OpenAI,
             ProviderId::Together,
+            ProviderId::AtlasCloud,
         ] {
             let caps = capabilities(id);
             assert_eq!(caps.id, id);
@@ -408,6 +435,38 @@ mod tests {
             Some(ProviderId::Together)
         );
         assert_eq!(ProviderId::Together.credential_name(), Some("together"));
+    }
+
+    /// Why: AtlasCloud (#2536) must resolve by id, by name, and by slug prefix,
+    /// carry its OpenAI-compat capability posture (native tools, OpenAI dialect,
+    /// `ATLASCLOUD_API_KEY` credential env), and expose its catalog defaults
+    /// (`openai/gpt-5.6-sol`, 1.05M-token window). The nested `openai/`-shaped
+    /// default model must NOT trip the prefix resolver — the routing prefix is
+    /// `atlascloud/`, not the model id.
+    /// Test: itself.
+    #[test]
+    fn atlascloud_seeded_with_openai_compat_posture() {
+        assert_eq!(
+            ProviderId::from_slug_prefix("atlascloud/openai/gpt-5.6-sol"),
+            Some(ProviderId::AtlasCloud)
+        );
+        assert_eq!(
+            ProviderId::from_slug_prefix("atlascloud/deepseek-v3"),
+            Some(ProviderId::AtlasCloud)
+        );
+        let caps = capabilities(ProviderId::AtlasCloud);
+        assert_eq!(caps.id, ProviderId::AtlasCloud);
+        assert!(caps.native_tool_calling);
+        assert_eq!(caps.tool_dialect, ToolDialect::OpenAiFunctions);
+        assert!(!caps.detailed_usage_accounting);
+        assert_eq!(caps.credential_env, Some("ATLASCLOUD_API_KEY"));
+        assert_eq!(caps.default_model, "openai/gpt-5.6-sol");
+        assert_eq!(caps.max_context_window, 1_050_000);
+        assert_eq!(
+            capabilities_for("AtlasCloud").map(|c| c.id),
+            Some(ProviderId::AtlasCloud)
+        );
+        assert_eq!(ProviderId::AtlasCloud.credential_name(), Some("atlascloud"));
     }
 
     /// Why: the by-name query must be case-insensitive and total for knowns.

@@ -15,6 +15,7 @@
 //! Test: each submodule's inline `tests` + the offline mock-server round-trip in
 //! `crates/trusty-common/tests/inference_adapters.rs`.
 
+pub mod atlascloud;
 pub mod fireworks;
 pub mod openai;
 pub mod openai_compat;
@@ -32,8 +33,8 @@ use crate::inference::registry::ProviderId;
 /// adapter this ticket ships, rather than remembering each `register` line. The
 /// configurator stays empty by default (no implicit adapters) — this is the
 /// explicit opt-in that turns resolution into live adapters.
-/// What: registers the OpenRouter, Fireworks, OpenAI, and Together (#2488)
-/// production factories (each pointed at its real base URL) under their
+/// What: registers the OpenRouter, Fireworks, OpenAI, Together (#2488), and
+/// AtlasCloud (#2536) production factories (each pointed at its real base URL) under their
 /// [`ProviderId`]. Bedrock and Anthropic-direct are intentionally NOT registered
 /// here (later waves).
 /// Test: `crates/trusty-common/tests/inference_adapters.rs::default_factories_register_openai_dialect`.
@@ -42,4 +43,5 @@ pub fn register_default_factories(cfg: &mut Configurator) {
     cfg.register(ProviderId::Fireworks, Box::new(fireworks::factory));
     cfg.register(ProviderId::OpenAI, Box::new(openai::factory));
     cfg.register(ProviderId::Together, Box::new(together::factory));
+    cfg.register(ProviderId::AtlasCloud, Box::new(atlascloud::factory));
 }

@@ -16,7 +16,7 @@
 use serde_json::{Value, json};
 use serial_test::serial;
 use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
-use trusty_common::inference::providers::{fireworks, openai, openrouter, together};
+use trusty_common::inference::providers::{atlascloud, fireworks, openai, openrouter, together};
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{
     CacheControl, ChatMessage, ChatRequest, Configurator, FunctionDefinition, InferenceError,
@@ -32,6 +32,7 @@ fn clear_provider_env() {
         "OPENAI_API_KEY",
         "FIREWORKS_API_KEY",
         "TOGETHER_API_KEY",
+        "ATLASCLOUD_API_KEY",
     ] {
         // SAFETY: every caller is `#[serial(dotenv_credential_env)]`, matching
         // the lock the credential resolver's own env-mutating tests use.
@@ -356,6 +357,56 @@ async fn together_tool_call_round_trip_no_usage_directive() {
     );
 }
 
+// ── AtlasCloud: bare OpenAI body, no usage directive, nested-slug routing ────────
+
+/// Why: driving AtlasCloud through the `Configurator` must (a) resolve the
+/// `atlascloud/openai/gpt-5.6-sol` slug (whose model id is itself `vendor/model`
+/// shaped) to the AtlasCloud adapter, (b) send a bare OpenAI-shaped body (bearer
+/// auth, no attribution headers, NO detailed-usage directive), and (c) parse the
+/// response text back — the full resolve→build→chat→usage cycle against a real
+/// socket, exactly like the Together e2e.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn atlascloud_round_trip_no_usage_directive() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    // AtlasCloud key present AND explicit atlascloud/ prefix → resolves to AtlasCloud.
+    store.set("atlascloud", "ac_fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::AtlasCloud,
+        Box::new(move |r: &ResolvedProvider| atlascloud::build(r, &base)),
+    );
+
+    let adapter = cfg
+        .build("atlascloud/openai/gpt-5.6-sol", &store)
+        .expect("build");
+    assert_eq!(adapter.name(), "atlascloud");
+    assert_eq!(adapter.capabilities().id, ProviderId::AtlasCloud);
+
+    let req = ChatRequest::new("openai/gpt-5.6-sol", vec![ChatMessage::user("ping")]);
+    let resp = adapter.chat(&req).await.expect("chat ok");
+    assert_eq!(resp.first_text().as_deref(), Some("pong"));
+
+    // Request translation: bearer auth, no attribution, NO detailed-usage directive.
+    let sent = server.last_request().expect("captured");
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.path, "/chat/completions");
+    assert_eq!(sent.header("authorization"), Some("Bearer ac_fake")); // pragma: allowlist secret
+    assert!(sent.header("http-referer").is_none());
+    let body = sent.body.expect("json");
+    assert_eq!(body["model"], "openai/gpt-5.6-sol");
+    assert!(
+        body.get("usage").is_none() || body["usage"].is_null(),
+        "AtlasCloud must not send the detailed-usage directive: {body}"
+    );
+}
+
 // ── Error classification through a real socket ───────────────────────────────────
 
 /// Why: a non-2xx provider status must surface as a classified `InferenceError`
@@ -401,6 +452,7 @@ fn default_factories_register_openai_dialect() {
     let store = MemoryKeyStore::new();
     store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
     store.set("together", "tgp_v1_fake").unwrap(); // pragma: allowlist secret
+    store.set("atlascloud", "ac_fake").unwrap(); // pragma: allowlist secret
 
     let mut cfg = Configurator::new();
     register_default_factories(&mut cfg);
@@ -414,6 +466,13 @@ fn default_factories_register_openai_dialect() {
         .build("together/meta-llama/Llama-3.3-70B-Instruct-Turbo", &store)
         .expect("build together");
     assert_eq!(together.name(), "together");
+
+    // AtlasCloud (#2536) is registered by the default set.
+    let atlascloud = cfg
+        .build("atlascloud/openai/gpt-5.6-sol", &store)
+        .expect("build atlascloud");
+    assert_eq!(atlascloud.name(), "atlascloud");
+    assert_eq!(atlascloud.capabilities().id, ProviderId::AtlasCloud);
 
     // Bedrock is intentionally not registered by the default set.
     let Err(err) = cfg.build("bedrock/us.anthropic.claude-sonnet-4-5", &store) else {
