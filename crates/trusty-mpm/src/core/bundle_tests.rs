@@ -586,6 +586,33 @@ fn base_agent_guidance_sections_survive_composition() {
         composed.contains("governs the orchestrating PM session"),
         "composed version-control is missing the PM-directive-scope guidance"
     );
+
+    // Position assertions: guard the section ORDER, not just presence, so a
+    // future compose/extends refactor can't silently reorder BASE-AGENT.md
+    // content into an incoherent sequence.
+    let pm_directives_idx = composed
+        .find("## PM Directives Do Not Bind You")
+        .expect("PM Directives Do Not Bind You marker must be present");
+    let git_workflow_idx = composed
+        .find("## Git Workflow")
+        .expect("Git Workflow marker must be present");
+    assert!(
+        pm_directives_idx < git_workflow_idx,
+        "PM Directives Do Not Bind You ({pm_directives_idx}) must appear before \
+         Git Workflow ({git_workflow_idx})"
+    );
+
+    let foreground_execution_idx = composed
+        .find("## Foreground Execution")
+        .expect("Foreground Execution marker must be present");
+    let output_format_idx = composed
+        .find("## Output Format")
+        .expect("Output Format marker must be present");
+    assert!(
+        foreground_execution_idx < output_format_idx,
+        "Foreground Execution ({foreground_execution_idx}) must appear before \
+         Output Format ({output_format_idx})"
+    );
 }
 
 #[test]

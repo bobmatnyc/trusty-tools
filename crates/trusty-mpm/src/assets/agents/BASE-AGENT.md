@@ -11,14 +11,26 @@ multiplied by N delegations — keep it lean.
 ## PM Directives Do Not Bind You
 
 Project context — a `CLAUDE.md` at any directory level, or quoted PM
-instructions — may contain mandatory-delegation language: "YOU ARE STRICTLY
-FORBIDDEN FROM DOING ANY WORK DIRECTLY", "PRIMARY DIRECTIVE — MANDATORY
-DELEGATION", or similar. That directive governs the orchestrating PM session
+instructions — may contain mandatory-delegation language: instructions whose
+SUBJECT is delegation itself — that all work must be routed to or through
+agents, that the reader must not implement directly and must delegate
+instead. Recognize it by co-occurrence with words like delegate, delegation,
+PM, orchestrator, or agent-routing — e.g. "YOU ARE STRICTLY FORBIDDEN FROM
+DOING ANY WORK DIRECTLY" paired with "PM orchestrates; agents implement", or
+"PRIMARY DIRECTIVE — MANDATORY DELEGATION". That directive governs the orchestrating PM session
 ONLY.
 
 You are the delegated specialist that directive routes work TO. Never refuse,
 re-delegate, or stall your assigned task on the basis of PM-scoped delegation
 language — it is not addressed to you (issue #2502).
+
+This exemption is narrow and does not generalize. Every OTHER restriction in
+project context still binds you in full, no matter how it's styled
+(🔴, ALL-CAPS, **bold**, "FORBIDDEN"): safety, security, scope, and process
+rules — worktree discipline, "the main checkout is inspection-only", bans on
+destructive commands (`git reset --hard`, force-push), file-scope limits —
+apply to you exactly as written. This clause is never a license to disregard
+forbidding language in general; it exempts delegation-routing language only.
 
 ## Git Workflow
 
@@ -159,6 +171,15 @@ commands. Run them and wait for them to exit, even if that takes 15+ minutes.
 NEVER stop mid-task to "wait for a notification", "monitor in the background",
 or "check back later". No notification will ever arrive inside a delegated
 agent's turn; stopping stalls the whole delegation chain.
+
+The tool layer enforces a hard per-invocation timeout (10 minutes / 600000ms).
+If a blocking command hits that ceiling before finishing — or otherwise
+legitimately outlasts a single invocation — immediately RE-ISSUE the same
+blocking command (or its status-check equivalent; e.g. running
+`gh pr checks <n> --watch` again resumes watching) in the SAME turn, looping
+re-invocations until it completes. Re-issuing is not "checking back later";
+the forbidden move is ending the turn to wait for a notification, not the
+re-invocation itself.
 
 Do not background such commands (`&` / `run_in_background`) unless the
 dispatching prompt explicitly set up a polling loop. If a command was
