@@ -906,21 +906,93 @@ impl SessionManager {
         self.tmux.clone()
     }
 
-    /// Capture the last `lines` of pane output for a session.
+    /// Capture the last `lines` of the session's RECORDED harness pane.
     ///
-    /// Why: the activity route needs the pane content to classify activity state.
-    /// What: looks up the session's tmux_name and delegates to the driver's
-    /// `capture` method.
-    /// Test: covered by handler_activity_cache_hit in session_manager_mvp.rs.
+    /// Why: activity classification (`managed_routes/activity`), the MCP
+    /// `session_activity` read (`mcp_session`), the CLI transcript
+    /// (`sm_stdio/control`, `bin/tm/commands/meta/launch`), and the supervisor
+    /// idle classifier (`supervisor/poller`) all read "the session's pane" to
+    /// decide state or show output. A session-scoped `capture` resolves to
+    /// whichever pane tmux considers ACTIVE — which need not be the harness pane
+    /// this record owns (an operator's sibling window keeps the session alive
+    /// but steals the active-pane slot). That silently fed wrong-pane content to
+    /// every one of those consumers and could misclassify a busy session as idle
+    /// (issue #2515). This shares the exact pane-scoping [`Self::observe`] uses.
+    /// What: [`Self::ensure_pane_alive`]-gates the recorded `pane_id` first
+    /// (refusing with `ManagedError::PaneGone` rather than reading a sibling
+    /// pane when the recorded pane is confirmed gone but the session lives on),
+    /// then captures the last `lines` rows via the pane-scoped `capture_pane`
+    /// when `record.pane_id` is known, or the session-scoped `capture` otherwise
+    /// (a legacy pre-#2453 record with no captured pane_id — same fallback
+    /// #2467/#2468 established). Every consumer already degrades a capture error
+    /// to empty/no-verdict, so a `PaneGone` refusal fails closed, never louder.
+    /// Test: `capture_pane_targets_recorded_pane_when_pane_id_known`,
+    /// `capture_pane_refuses_when_stored_pane_gone`,
+    /// `capture_pane_legacy_record_falls_back_to_session_capture` in
+    /// `pane_scoped_tests.rs`.
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
         lines: usize,
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
-        self.tmux
-            .capture(&record.tmux_name, lines)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+        self.ensure_pane_alive(id, &record)?;
+        match record.pane_id.as_deref() {
+            Some(pane_id) => self.tmux.capture_pane(&record.tmux_name, pane_id, lines),
+            None => self.tmux.capture(&record.tmux_name, lines),
+        }
+        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Capture the recorded harness pane for the LIVE managed session whose tmux
+    /// session name is `tmux_name`, pane-scoped when a `pane_id` is tracked.
+    ///
+    /// Why: the idle reaper (`daemon::mod::DaemonVerdictProvider::verdict`) knows
+    /// a session only by its tmux name and captured via the raw driver's
+    /// session-scoped `capture`, which tmux resolves to whichever pane is ACTIVE
+    /// — a sibling operator window could make a busy session read as idle and be
+    /// auto-stopped, or a quiet one read as busy (issue #2515). Unlike
+    /// [`Self::capture_pane`] the reaper has no `ManagedSessionId`, so this
+    /// resolves the record from the tmux name first.
+    /// What: selects the record whose `tmux_name` matches and whose state is NOT
+    /// `Decommissioned` (a `tmux_name` is recycled after decommission, so a naive
+    /// match can hit a stale tombstone — same guard as
+    /// `daemon::api::claude_config_routes::select_restart_pane_id`, #2514),
+    /// preferring the most recently created on the narrow provisioning-race
+    /// overlap. With a tracked `pane_id` it captures pane-scoped, returning `None`
+    /// (no verdict — fail closed) when [`ManagedTmuxDriver::pane_exists`] reports
+    /// the recorded pane gone rather than reading a sibling. A legacy record
+    /// (no `pane_id`) or an unmanaged/legacy tmux name with no live record falls
+    /// back to the session-scoped `capture`, exactly as before #2515. `None` on
+    /// any capture error or empty output so the caller skips the poll.
+    /// Test: `capture_pane_by_tmux_name_targets_recorded_pane`,
+    /// `capture_pane_by_tmux_name_refuses_when_pane_gone`,
+    /// `capture_pane_by_tmux_name_legacy_falls_back_to_session` in
+    /// `pane_scoped_tests.rs`.
+    pub async fn capture_pane_by_tmux_name(&self, tmux_name: &str, lines: usize) -> Option<String> {
+        let record = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|r| r.tmux_name == tmux_name)
+            .filter(|r| !matches!(r.state, ManagedSessionState::Decommissioned))
+            .max_by_key(|r| r.created_at);
+        let text = match record.as_ref().and_then(|r| r.pane_id.as_deref()) {
+            Some(pane_id) => {
+                if !self.tmux.pane_exists(tmux_name, pane_id) {
+                    warn!(
+                        name = %tmux_name,
+                        pane_id = %pane_id,
+                        "idle-reaper capture: recorded pane is gone but the tmux session is \
+                         still alive (sibling window) — refusing to read an unrelated pane"
+                    );
+                    return None;
+                }
+                self.tmux.capture_pane(tmux_name, pane_id, lines).ok()?
+            }
+            None => self.tmux.capture(tmux_name, lines).ok()?,
+        };
+        (!text.is_empty()).then_some(text)
     }
 
     /// Mark a session as errored with a message.
