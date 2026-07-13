@@ -43,6 +43,23 @@ pub mod uds_server;
 #[cfg(feature = "http-server")]
 mod readiness;
 
+// Why (issue #2222): a pre-init glibc probe that fails immediately (instead
+// of waiting out the full `readiness::run_bounded` timeout) when the host
+// glibc is too old for the bundled ONNX Runtime. Private, same `http-server`
+// gate as `readiness` — see `glibc_probe`'s module doc for the full
+// rationale and why only the Linux/glibc + `bundled-ort` call site actually
+// invokes the check. Also compiled under `cfg(test)` regardless of target so
+// the pure version-parsing/comparison unit tests run on every dev/CI
+// platform (e.g. this workspace's macOS dev machines), not just Linux/gnu —
+// on a non-Linux/gnu *non-test* build the module would otherwise be
+// unreachable dead code, since the only call site is behind the same
+// Linux/gnu `cfg`.
+#[cfg(all(
+    feature = "http-server",
+    any(all(target_os = "linux", target_env = "gnu"), test)
+))]
+mod glibc_probe;
+
 // Why (issue #250): the daemon's HTTP startup sequence (`run`, `run_with_args`,
 // `AppState`, `health_handler`, `embed_handler`, and the `Args` clap struct
 // that drives them) only compiles under the `http-server` feature, mirroring
@@ -249,6 +266,19 @@ pub async fn run_with_args(args: Args) -> Result<()> {
             config.batch_window.as_millis(),
         );
     }
+
+    // Why (issue #2222): fail immediately if this host's glibc is too old
+    // for the bundled (statically-linked) ONNX Runtime, instead of letting
+    // `FastEmbedder::new()` below run into the AL2023/glibc-2.34
+    // provider-init deadlock and wait out the full `run_bounded` timeout —
+    // a host with a stale glibc can never succeed, so there is no reason to
+    // wait. Only applies to Linux/glibc builds compiled with the
+    // `bundled-ort` feature; a `load-dynamic` build dlopens a
+    // host-supplied `libonnxruntime.so` at runtime, so the bundled-ORT
+    // glibc floor does not apply to it. See `glibc_probe` for the full
+    // rationale.
+    #[cfg(all(target_os = "linux", target_env = "gnu", feature = "bundled-ort"))]
+    glibc_probe::check_bundled_ort_glibc_compat()?;
 
     // Load the ONNX model (expensive one-time init), bounded so a
     // provider-init deadlock (issue #1633 — AL2023/glibc 2.34) fails loudly

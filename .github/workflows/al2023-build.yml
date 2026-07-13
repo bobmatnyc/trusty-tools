@@ -1,30 +1,42 @@
-# Amazon Linux 2023 / glibc 2.34 build gate for trusty-analyze (issue #605).
+# Amazon Linux 2023 / glibc 2.34 build gate for trusty-analyze (issue #605)
+# and trusty-search / trusty-embedderd (issue #2222).
 #
-# WHY this job exists:
-#   The default `bundled-ort` feature of trusty-analyze downloads a prebuilt
-#   ONNX Runtime binary (ORT 1.24.2 as of fastembed 5.x) that was compiled
-#   against glibc 2.38. Amazon Linux 2023 ships glibc 2.34, which is lower —
-#   so the prebuilt ORT binary references `__isoc23_strtol`, a glibc 2.38
-#   symbol, causing a link failure on AL2023.
+# WHY this workflow exists:
+#   The default `bundled-ort` feature downloads a prebuilt ONNX Runtime
+#   binary (ORT 1.24.2 as of fastembed 5.x) that was compiled against glibc
+#   2.38. Amazon Linux 2023 ships glibc 2.34, which is lower — so the
+#   prebuilt ORT binary references `__isoc23_strtol`, a glibc 2.38 symbol,
+#   causing a link failure on AL2023.
 #
-#   The fix is to build with `--no-default-features --features http-server,
-#   load-dynamic`, which tells the `ort` crate to dlopen a system-installed
-#   `libonnxruntime.so` at runtime instead of linking the bundled static libs.
-#   That system library just needs to satisfy the glibc present on the host.
+#   The fix is to build with `--no-default-features --features
+#   http-server,load-dynamic` (trusty-analyze) or
+#   `--no-default-features --features load-dynamic` (trusty-search), which
+#   tells the `ort` crate to dlopen a system-installed `libonnxruntime.so` at
+#   runtime instead of linking the bundled static libs. That system library
+#   just needs to satisfy the glibc present on the host.
 #
-#   This job proves the load-dynamic build path compiles AND links (not just
-#   `cargo check`) on a real AL2023 container — so the regression cannot
-#   return silently (refs #605).
+#   This workflow proves the load-dynamic build path compiles AND links (not
+#   just `cargo check`) on a real AL2023 container for BOTH crates — so the
+#   regression cannot return silently (refs #605, #2222).
 #
-# WHAT it does:
-#   1. Runs in an `amazonlinux:2023` container (glibc 2.34 — the exact platform
-#      that triggered #605).
+#   Issue #2222 gap this closes: trusty-search bundles a second binary
+#   (`trusty-embedderd`, built from `crates/trusty-search/src/bin/
+#   trusty-embedderd.rs` against the `trusty-embedderd` library crate) inside
+#   the same `cargo install trusty-search` — but until this job existed, only
+#   trusty-analyze's load-dynamic build was ever verified against a real
+#   AL2023 container. The `al2023-load-dynamic-search` job below exercises
+#   the same link step for `-p trusty-search`, which also builds the bundled
+#   `trusty-embedderd` binary target.
+#
+# WHAT each job does:
+#   1. Runs in an `amazonlinux:2023` container (glibc 2.34 — the exact
+#      platform that triggered #605 / #2222).
 #   2. Installs Rust 1.91 (workspace MSRV) via rustup inside the container.
 #   3. Downloads the official ORT 1.20.1 linux-x64 tarball (built on Ubuntu
 #      20.04 / glibc 2.31 — compatible with AL2023's glibc 2.34) and exports
 #      ORT_DYLIB_PATH pointing at the extracted libonnxruntime.so.
-#   4. Runs `cargo build -p trusty-analyze --no-default-features
-#      --features http-server,load-dynamic` — full link step, not just check.
+#   4. Runs the crate-specific `cargo build ... --no-default-features
+#      --features ...` invocation — full link step, not just check.
 #
 # ORT version choice (1.20.1):
 #   The workspace Cargo.lock resolves `ort` to 2.0.0-rc.12, which downloads ORT
@@ -36,10 +48,12 @@
 #   with glibc >= 2.31 — including AL2023 (glibc 2.34).
 #
 # TRIGGERS:
-#   - push / PR touching crates/trusty-analyze/** or this workflow file.
+#   - push / PR touching crates/trusty-analyze/**, crates/trusty-search/**,
+#     crates/trusty-embedderd/**, crates/trusty-common/** (the shared
+#     `embedder-*` feature definitions live here), or this workflow file.
 #   - workflow_dispatch (manual re-run from the Actions UI).
-#   Deliberately NOT on every push to main — the container build is slow (~5 min)
-#   and only trusty-analyze changes can affect the load-dynamic build path.
+#   Deliberately NOT on every push to main — the container build is slow (~5
+#   min per job) and only these crates can affect the load-dynamic build path.
 
 name: AL2023 load-dynamic build gate
 
@@ -48,11 +62,17 @@ on:
     branches: [main]
     paths:
       - "crates/trusty-analyze/**"
+      - "crates/trusty-search/**"
+      - "crates/trusty-embedderd/**"
+      - "crates/trusty-common/**"
       - ".github/workflows/al2023-build.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/trusty-analyze/**"
+      - "crates/trusty-search/**"
+      - "crates/trusty-embedderd/**"
+      - "crates/trusty-common/**"
       - ".github/workflows/al2023-build.yml"
   workflow_dispatch:
     # Allow manual trigger from the Actions UI for ad-hoc validation.
@@ -228,3 +248,162 @@ jobs:
           cargo build -p trusty-analyze \
             --no-default-features \
             --features http-server,load-dynamic
+
+  # --------------------------------------------------------------------------
+  # al2023-load-dynamic-search: prove `cargo build -p trusty-search
+  # --no-default-features --features load-dynamic` compiles AND links on
+  # Amazon Linux 2023 (glibc 2.34) — issue #2222.
+  #
+  # `cargo build -p trusty-search` builds BOTH `[[bin]]` targets declared in
+  # crates/trusty-search/Cargo.toml: the `trusty-search` binary itself and
+  # the bundled `trusty-embedderd` binary (src/bin/trusty-embedderd.rs, a
+  # thin shim over the `trusty-embedderd` library crate). This job is the
+  # only CI coverage that actually links the `trusty-embedderd` binary
+  # against a real AL2023 (glibc 2.34) toolchain — see the file-level
+  # comment for why that gap mattered (a Cargo feature-unification bug used
+  # to leak `embedder-bundled-ort` into this build regardless of the
+  # `--features load-dynamic` flag; fixed alongside this job, see
+  # crates/trusty-search/Cargo.toml and crates/trusty-embedderd/Cargo.toml).
+  #
+  # Mirrors release.yml's AL2023 asset build flags for trusty-search
+  # (`--no-default-features --features load-dynamic`, no `http-server` in the
+  # feature list — unlike trusty-analyze, trusty-search has a bare
+  # `load-dynamic` feature with no separate `http-server` gate at the
+  # trusty-search level).
+  # --------------------------------------------------------------------------
+  al2023-load-dynamic-search:
+    name: AL2023 load-dynamic (glibc 2.34) — trusty-search
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: amazonlinux:2023
+
+    steps:
+      # ------------------------------------------------------------------
+      # 0. Install tar/gzip BEFORE actions/checkout (see al2023-load-dynamic
+      #    job above for rationale — amazonlinux:2023 ships without them).
+      # ------------------------------------------------------------------
+      - name: Install tar/gzip (required by actions/checkout)
+        run: dnf install -y tar gzip
+
+      # ------------------------------------------------------------------
+      # 1. Checkout the repo inside the container.
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ------------------------------------------------------------------
+      # 2. Install build prerequisites via dnf. Same set release.yml's
+      #    AL2023 asset-build job installs for trusty-search (gcc-c++ covers
+      #    usearch's C++ core and the tree-sitter grammars; binutils
+      #    supplies `ar`/`strip` for the native link + package step).
+      # ------------------------------------------------------------------
+      - name: Install build prerequisites (dnf)
+        run: |
+          dnf install -y --allowerasing \
+            gcc \
+            gcc-c++ \
+            make \
+            openssl-devel \
+            perl \
+            curl \
+            tar \
+            gzip \
+            pkg-config \
+            findutils \
+            binutils
+
+      # ------------------------------------------------------------------
+      # 3. Install Rust 1.91 (workspace MSRV) via rustup inside the container.
+      # ------------------------------------------------------------------
+      - name: Install Rust 1.91 (MSRV) via rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain 1.91
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # ------------------------------------------------------------------
+      # 4. Cache cargo registry + build artefacts. Distinct cache key prefix
+      #    from the trusty-analyze job so the two large dependency graphs
+      #    (trusty-search pulls in tree-sitter grammars, usearch, etc.) don't
+      #    thrash a shared cache entry.
+      # ------------------------------------------------------------------
+      - name: Cache cargo registry and build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: al2023-1.91-search-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            al2023-1.91-search-
+
+      # ------------------------------------------------------------------
+      # 5. Download the official ORT 1.20.1 linux-x64 tarball and export
+      #    ORT_DYLIB_PATH — identical to the trusty-analyze job above.
+      # ------------------------------------------------------------------
+      - name: Download ONNX Runtime ${{ env.ORT_VERSION }} (glibc 2.31 build)
+        run: |
+          ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
+          ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
+
+          echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
+          curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${ORT_TARBALL}" "${ORT_URL}"
+
+          mkdir -p "${ORT_DIR}"
+          tar -xzf "/tmp/${ORT_TARBALL}" -C "${ORT_DIR}" --strip-components=1
+          rm "/tmp/${ORT_TARBALL}"
+
+          DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so.${ORT_VERSION}" | head -1)
+          if [ -z "${DYLIB_PATH}" ]; then
+            DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so" | head -1)
+          fi
+          if [ -z "${DYLIB_PATH}" ]; then
+            echo "ERROR: libonnxruntime.so not found in ${ORT_DIR}/lib after extraction."
+            find "${ORT_DIR}" -name "*.so*" || true
+            exit 1
+          fi
+
+          echo "ORT_DYLIB_PATH=${DYLIB_PATH}" >> "$GITHUB_ENV"
+          echo "Found libonnxruntime.so at: ${DYLIB_PATH}"
+          ldd "${DYLIB_PATH}" | head -5 || true
+
+      # ------------------------------------------------------------------
+      # 6. Build trusty-search with load-dynamic, no bundled-ort.
+      #
+      #    `-p trusty-search` builds both `[[bin]]` targets in that crate's
+      #    Cargo.toml (`trusty-search` and the bundled `trusty-embedderd`
+      #    shim), so a link failure in either binary — or in the
+      #    trusty-embedderd LIBRARY crate it depends on — fails this step.
+      #    SKIP_UI_BUILD=1 (workflow-level env) skips the Svelte UI build
+      #    (committed ui-dist/ is sufficient, same as ci.yml).
+      #
+      #    NK_TARGET_* (issue #2222 follow-up): trusty-search's mandatory
+      #    `usearch` dependency pulls in `numkong` (its SIMD backend) —
+      #    unrelated to the bundled-ort/load-dynamic ORT selection above.
+      #    numkong's NK_TARGET_SAPPHIREAMX capability probe only checks that
+      #    gcc accepts `-mamx-tile -mamx-int8` (AL2023's GCC 11 recognizes
+      #    both), but the C source it then unconditionally compiles under
+      #    `#if NK_TARGET_SAPPHIREAMX` also uses the `avx512fp16` function
+      #    target attribute, which GCC 11 does not support (added in GCC
+      #    12) — probe and source are out of sync. Force the
+      #    newest-generation targets off via numkong's own build.rs
+      #    `NK_TARGET_FOO=0` override mechanism; none of them matter for an
+      #    AL2023 CPU-baseline build. Mirrored in release.yml's AL2023 leg
+      #    (same crate, same failure) so the CI gate and the shipped release
+      #    asset build identically.
+      # ------------------------------------------------------------------
+      - name: Build trusty-search (load-dynamic, no bundled-ort)
+        env:
+          NK_TARGET_SAPPHIREAMX: "0"
+          NK_TARGET_GRANITEAMX: "0"
+          NK_TARGET_DIAMOND: "0"
+          NK_TARGET_SIERRA: "0"
+        run: |
+          echo "ORT_DYLIB_PATH=${ORT_DYLIB_PATH}"
+          cargo build -p trusty-search \
+            --no-default-features \
+            --features load-dynamic
