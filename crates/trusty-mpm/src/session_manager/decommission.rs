@@ -81,11 +81,16 @@ pub(crate) const GIT_WORKTREE_REMOVE_TIMEOUT: std::time::Duration =
 /// paths like `<base>/.worktrees/deep/nested` where `.worktrees` is a grandparent.
 /// Test: `is_session_worktree_detects_dot_worktrees_component`.
 ///
-/// Visibility (#2033): `pub(super)` — reused by `session_manager::search_gc`
-/// so the "is this path a disposable in-project worktree?" rule lives in
-/// exactly one place and the search-index lifecycle (delete-on-decommission,
-/// orphan sweep) can never diverge from the filesystem-removal safety gate.
-pub(super) fn is_session_worktree(path: &Path) -> bool {
+/// Visibility (#2033, widened #2508): `pub(crate)` — reused by
+/// `session_manager::search_gc` (same "disposable workspace?" rule for the
+/// search-index lifecycle) and by `core::agent_reset_workspace` (the same
+/// rule gates which session workspaces `--reset-agents-workspaces` is
+/// allowed to force-recompose files into — a local-path/adopted session's
+/// real, long-lived checkout must never be mistaken for a disposable
+/// SM-provisioned one, the #1511 incident class). Keeping this in exactly one
+/// place means the filesystem-removal guard, the search-index GC guard, and
+/// the agent-reset guard can never diverge.
+pub(crate) fn is_session_worktree(path: &Path) -> bool {
     path.parent()
         .and_then(|p| p.file_name())
         .map(|n| n == WORKTREES_DIRNAME)

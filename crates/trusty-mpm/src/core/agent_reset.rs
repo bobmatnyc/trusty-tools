@@ -17,11 +17,16 @@
 //! content differs from BOTH the manifest's last-known checksum (if any) AND
 //! the fresh composition is backed up to `<file>.bak-<unix_nanos>` before
 //! being overwritten, so no content is ever silently discarded.
-//! [`reset_project_agents`] (issue #2508) is the project/session-worktree-safe
-//! variant: it narrows the reset to a resolved harness plan's `agent_selected`
-//! roster BEFORE delegating to [`reset_agents`], so it can reconcile a
-//! project-local `.claude/agents/` dir without resurrecting an agent the
-//! project's manifest deliberately excludes.
+//! [`reset_project_agents`] (issue #2508) is the ROSTER-safe variant: it
+//! narrows the reset to a resolved harness plan's `agent_selected` roster
+//! BEFORE delegating to [`reset_agents`], so it never resurrects an agent
+//! the target's manifest deliberately excludes. It is NOT, by itself,
+//! workspace-OWNERSHIP-safe — it will happily force-recompose files into
+//! whatever `target_dir` it is given. The caller owns verifying that
+//! `target_dir` is a workspace trusty-mpm actually provisioned before
+//! calling this function; [`crate::core::agent_reset_workspace::
+//! reset_active_workspace_agents`] is the caller that does so (issue #1511
+//! incident class — see that module's doc comment for the ownership gate).
 //! Test: `reset_writes_all_by_default`, `reset_filters_by_name`,
 //! `reset_adopts_matching_untracked_file`, `reset_backs_up_diverged_file`,
 //! `reset_recomposes_without_backup_when_matching_manifest_checksum`,
@@ -248,8 +253,10 @@ fn available_agent_names(source_dir: &Path) -> std::io::Result<Vec<String>> {
     Ok(available)
 }
 
-/// Force-recompose agent files into a PROJECT-LOCAL `.claude/agents/` dir,
-/// respecting a harness plan's deploy-roster selection (issue #2508).
+/// Force-recompose agent files into a target `.claude/agents/` dir,
+/// respecting a harness plan's deploy-roster selection (issue #2508). This
+/// function is ROSTER-safe, NOT workspace-ownership-safe — see the caller
+/// contract below.
 ///
 /// Why: [`reset_agents`] alone is unsafe to point at a project/session-worktree
 /// target — a project's resolved [`crate::core::manifest::HarnessPlan`] may
@@ -268,6 +275,18 @@ fn available_agent_names(source_dir: &Path) -> std::io::Result<Vec<String>> {
 /// and delegates the actual compose/backup/adopt/write logic to [`reset_agents`]
 /// with that narrowed set (so the two entry points can never diverge in
 /// backup/adoption semantics).
+///
+/// CALLER CONTRACT (issue #1511 incident class): this function does NOT check
+/// whether `target_dir` belongs to a workspace trusty-mpm actually
+/// provisioned — it will force-recompose into whatever directory it is
+/// given. A local-path/adopted session's workspace is the operator's REAL,
+/// long-lived checkout, not a disposable trusty-mpm clone/worktree. The
+/// CALLER must verify workspace ownership (`workspace_owned ||
+/// is_session_worktree(path)` — the same predicate
+/// `session_manager::decommission` and `session_manager::search_gc` gate on)
+/// BEFORE calling this function.
+/// [`crate::core::agent_reset_workspace::reset_active_workspace_agents`] is
+/// the only caller that sweeps multiple sessions, and it enforces this gate.
 /// Test: `reset_project_agents_respects_plan_selection`,
 /// `reset_project_agents_reports_deselected_requested_name`,
 /// `reset_project_agents_defaults_to_all_selected`.

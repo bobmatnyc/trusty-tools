@@ -118,6 +118,15 @@ pub(crate) async fn install(
                     outcome.tmux_name,
                     outcome.workspace_path.display()
                 );
+                // Issue #1511: a session the ownership gate rejected is
+                // reported explicitly (never silently absent) and its
+                // `result` is always empty — do not run it through
+                // `reset_report_lines`, which would print a misleading
+                // all-zero summary instead of the actual reason.
+                if let Some(reason) = &outcome.skipped_reason {
+                    println!("    {reason}");
+                    continue;
+                }
                 for line in reset_report_lines(&outcome.result) {
                     println!("    {line}");
                 }

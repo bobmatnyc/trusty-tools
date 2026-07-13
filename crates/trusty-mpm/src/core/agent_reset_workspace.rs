@@ -14,18 +14,33 @@
 //! the user-level reset, using the session's OWN resolved harness plan so an
 //! agent one project's manifest excludes is never resurrected there (the
 //! #2462 cross-warning) even while a sibling project's copy IS refreshed.
+//!
+//! CRITICAL SAFETY GATE (#1511 incident class): NOT every session's
+//! `workspace_path` is a directory trusty-mpm provisioned. A local-path/
+//! adopted session's `workspace_path` points at the OPERATOR'S REAL, live
+//! checkout — the very same directory class `session_manager::decommission`
+//! refuses to `remove_dir_all` and `session_manager::search_gc` refuses to
+//! drop the search index for. This module reuses that IDENTICAL ownership
+//! predicate (`workspace_owned || is_session_worktree(path)`) before ever
+//! writing a byte into a workspace's `.claude/agents/` — a sweep must never
+//! force-recompose the bundled roster into a real repository the operator
+//! did not hand to trusty-mpm to manage.
 //! What: [`reset_active_workspace_agents`] loads the on-disk session store
 //! (the SAME `sessions.json` the daemon and CLI both read — no live daemon
-//! required), filters to sessions with an intact `workspace_path`, resolves
-//! each one's [`crate::core::manifest::HarnessPlan`] exactly as
+//! required), filters to sessions with an intact `workspace_path`, SKIPS any
+//! session that fails the ownership gate above (recording a
+//! [`WorkspaceResetOutcome`] with `skipped_reason` set so the operator sees a
+//! deliberate exclusion rather than silent absence), resolves each remaining
+//! session's [`crate::core::manifest::HarnessPlan`] exactly as
 //! [`super::session_launch::prepare_session`] does, and calls
 //! [`super::agent_reset::reset_project_agents`] against that workspace's
 //! `.claude/agents/` with the plan's `agent_selected` predicate. Returns one
-//! [`WorkspaceResetOutcome`] per swept workspace so the CLI can render a
-//! per-session report.
+//! [`WorkspaceResetOutcome`] per considered workspace (reset OR skipped) so
+//! the CLI can render a per-session report.
 //! Test: `sweep_resets_intact_workspace`, `sweep_skips_decommissioned_session`,
 //! `sweep_skips_session_without_workspace`,
-//! `sweep_respects_per_workspace_manifest_exclude`.
+//! `sweep_respects_per_workspace_manifest_exclude`,
+//! `sweep_skips_unowned_non_worktree_session`.
 
 use std::path::{Path, PathBuf};
 
@@ -33,24 +48,34 @@ use crate::core::agent_builder::AgentBuildError;
 use crate::core::agent_reset::{ResetResult, reset_project_agents};
 use crate::core::manifest::{HarnessPlan, ManifestSources, resolve_manifest};
 use crate::core::paths::FrameworkPaths;
+use crate::session_manager::decommission::is_session_worktree;
 use crate::session_manager::{ManagedSessionState, SessionStore, StoreError};
 
-/// The outcome of resetting one session's project-local agent roster.
+/// The outcome of considering one session's project-local agent roster.
 ///
 /// Why: the CLI reports per-session results (which session, which workspace,
-/// what changed) so an operator sweeping dozens of sessions can see exactly
-/// which ones were touched.
-/// What: the session's tmux name (human-identifiable), its workspace path, and
-/// the [`ResetResult`] `reset_project_agents` produced for it.
-/// Test: `sweep_resets_intact_workspace`.
+/// what changed OR why it was skipped) so an operator sweeping dozens of
+/// sessions can see exactly which ones were touched and which were
+/// deliberately excluded by the #1511 ownership gate.
+/// What: the session's tmux name (human-identifiable), its workspace path,
+/// the [`ResetResult`] `reset_project_agents` produced for it (empty/default
+/// when skipped), and `skipped_reason` — `None` for a normal reset, `Some`
+/// human-readable explanation when the ownership gate rejected this session.
+/// Test: `sweep_resets_intact_workspace`,
+/// `sweep_skips_unowned_non_worktree_session`.
 #[derive(Debug, Clone)]
 pub struct WorkspaceResetOutcome {
     /// The session's tmux name (e.g. `tm-quiet-falcon`).
     pub tmux_name: String,
-    /// The workspace/worktree directory the reset targeted.
+    /// The workspace/worktree directory the reset targeted (or would have).
     pub workspace_path: PathBuf,
-    /// The reset result for this workspace's `.claude/agents/`.
+    /// The reset result for this workspace's `.claude/agents/`. Default
+    /// (all-empty) when `skipped_reason` is `Some`.
     pub result: ResetResult,
+    /// `Some(reason)` when the #1511 ownership gate excluded this session
+    /// from the reset — the workspace was NOT touched. `None` for a normal
+    /// reset attempt.
+    pub skipped_reason: Option<String>,
 }
 
 /// A failure raised while sweeping session workspaces.
@@ -100,7 +125,8 @@ pub enum WorkspaceSweepError {
 /// session-store iteration order.
 /// Test: `sweep_resets_intact_workspace`, `sweep_skips_decommissioned_session`,
 /// `sweep_skips_session_without_workspace`,
-/// `sweep_respects_per_workspace_manifest_exclude`.
+/// `sweep_respects_per_workspace_manifest_exclude`,
+/// `sweep_skips_unowned_non_worktree_session`.
 pub async fn reset_active_workspace_agents(
     fw_root: &Path,
     names: Option<&[String]>,
@@ -123,6 +149,28 @@ pub async fn reset_active_workspace_agents(
             continue;
         }
 
+        // CRITICAL (#1511 incident class): only ever write into a workspace
+        // trusty-mpm itself provisioned — a clone it owns, or an in-project
+        // `.worktrees/<id>` worktree it created. A local-path/adopted
+        // session's `workspace_path` is the operator's REAL, long-lived
+        // checkout; force-recomposing the bundled roster into it would
+        // silently overwrite real project files. Mirrors the identical
+        // guard `session_manager::decommission`'s filesystem-removal path
+        // and `session_manager::search_gc`'s index-lifecycle path both use.
+        if !(session.workspace_owned || is_session_worktree(workspace_path)) {
+            outcomes.push(WorkspaceResetOutcome {
+                tmux_name: session.tmux_name,
+                workspace_path: workspace_path.clone(),
+                result: ResetResult::default(),
+                skipped_reason: Some(
+                    "skipped — not tm-owned (adopted/local-path session; refusing to \
+                     force-recompose files into a real checkout)"
+                        .to_string(),
+                ),
+            });
+            continue;
+        }
+
         let sources = ManifestSources::resolve(workspace_path, fw_root, &catalog_root);
         let manifest = resolve_manifest(&sources);
         let fw = FrameworkPaths::for_managed_project(fw_root, workspace_path);
@@ -141,6 +189,7 @@ pub async fn reset_active_workspace_agents(
             tmux_name: session.tmux_name,
             workspace_path: workspace_path.clone(),
             result,
+            skipped_reason: None,
         });
     }
 
@@ -199,11 +248,16 @@ mod tests {
         }
     }
 
-    /// Build a minimal intact `SessionRecord` pointing at `workspace`.
+    /// Build a minimal intact, tm-OWNED `SessionRecord` pointing at
+    /// `workspace` (simulates an SM-provisioned clone — passes the #1511
+    /// ownership gate). Use [`bare_session`] directly (or set
+    /// `workspace_owned: false` on an unqualified path) to build a
+    /// gate-rejected fixture instead.
     fn intact_session(tmux_name: &str, workspace: &Path) -> SessionRecord {
         SessionRecord {
             workspace_path: Some(workspace.to_path_buf()),
             state: ManagedSessionState::Active,
+            workspace_owned: true,
             ..bare_session(tmux_name)
         }
     }
@@ -283,6 +337,71 @@ mod tests {
 
         let outcomes = reset_active_workspace_agents(&fw_root, None).await.unwrap();
         assert!(outcomes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_unowned_non_worktree_session() {
+        // CRITICAL (#1511 incident class): an adopted-shaped session —
+        // `workspace_owned: false`, and a workspace path whose immediate
+        // parent is NOT `.worktrees` (so `is_session_worktree` also says
+        // no) — is the operator's REAL, long-lived checkout. The sweep must
+        // neither touch its `.claude/agents/` contents NOR silently drop it
+        // from the report: it must appear with `skipped_reason` set.
+        let fw_base = TempDir::new().unwrap();
+        let fw_root = fw_root_under(&fw_base);
+        write_sources(&fw_root.join("framework").join("agents"));
+
+        // A "real" checkout: NOT nested under `.worktrees`.
+        let real_repo = TempDir::new().unwrap();
+        assert_ne!(
+            real_repo
+                .path()
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some(".worktrees"),
+            "fixture must not accidentally look like a session worktree"
+        );
+        let agents_dir = real_repo.path().join(".claude").join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        let sentinel_path = agents_dir.join("my-custom-agent.md");
+        let original_bytes = b"---\nname: my-custom-agent\n---\n\nHand-authored, not bundled.\n";
+        fs::write(&sentinel_path, original_bytes).unwrap();
+
+        let mut session = intact_session("tm-adopted-real-repo", real_repo.path());
+        session.workspace_owned = false;
+        seed_sessions(&fw_root, vec![session]).await;
+
+        let outcomes = reset_active_workspace_agents(&fw_root, None).await.unwrap();
+
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "the skipped session must still be reported, not silently absent"
+        );
+        assert_eq!(outcomes[0].tmux_name, "tm-adopted-real-repo");
+        let reason = outcomes[0]
+            .skipped_reason
+            .as_deref()
+            .expect("unowned non-worktree session must carry a skip reason");
+        assert!(reason.contains("not tm-owned"), "reason = {reason:?}");
+        assert!(
+            outcomes[0].result.recomposed.is_empty(),
+            "a skipped session must not report any recomposed files"
+        );
+
+        // The decisive assertion: the real file's bytes are byte-for-byte
+        // untouched — no `engineer.md`/`base-agent.md` were ever written.
+        let after_bytes = fs::read(&sentinel_path).unwrap();
+        assert_eq!(
+            after_bytes, original_bytes,
+            "a real, unowned checkout must never be written to"
+        );
+        assert!(
+            !agents_dir.join("engineer.md").exists(),
+            "the bundled roster must never be force-recomposed into a real checkout"
+        );
+        assert!(!agents_dir.join("base-agent.md").exists());
     }
 
     #[tokio::test]
