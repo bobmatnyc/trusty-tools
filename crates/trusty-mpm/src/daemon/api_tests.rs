@@ -1829,3 +1829,38 @@ fn session_end_pane_still_live_false_when_pane_missing() {
         "a missing pane must fail open (not classified as still-live)"
     );
 }
+
+#[test]
+fn session_end_pane_still_live_true_when_any_of_multiple_panes_live() {
+    // Why (#2463): a manually-split managed session has multiple panes
+    // sharing the same `tmux_name`. If `tmux list-panes -a` returns the IDLE
+    // pane before the LIVE one, the old `.find()`-based check picked the
+    // first match and misclassified a genuinely-live session as idle. The
+    // gate must aggregate across ALL panes for the session, exactly like
+    // `runtime_reap::find_runtime_exited`.
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    let panes = vec![
+        pane_for_gate_test("tmpm-split", "zsh"),
+        pane_for_gate_test("tmpm-split", "claude"),
+    ];
+    assert!(
+        session_end_pane_still_live("tmpm-split", &panes, &AlwaysIdleProbe),
+        "an idle pane listed before a live sibling pane must not mask the live one"
+    );
+}
+
+#[test]
+fn session_end_pane_still_live_false_when_all_of_multiple_panes_idle() {
+    // Why (#2463): the multi-pane aggregation must still return `false` when
+    // every pane for the session is genuinely idle — parity with the
+    // single-pane case, not an over-broad "any pane present" check.
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    let panes = vec![
+        pane_for_gate_test("tmpm-split", "zsh"),
+        pane_for_gate_test("tmpm-split", "-bash"),
+    ];
+    assert!(
+        !session_end_pane_still_live("tmpm-split", &panes, &AlwaysIdleProbe),
+        "a session whose every pane is idle must not be classified as still-live"
+    );
+}
