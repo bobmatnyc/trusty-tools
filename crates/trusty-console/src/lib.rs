@@ -82,6 +82,10 @@ pub enum Commands {
     Serve(ServeArgs),
     /// Report the console's bound (or default) HTTP port and exit.
     Port(PortArgs),
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Arguments for `trusty-console port`.
@@ -181,6 +185,7 @@ pub async fn run_from(argv: Vec<String>) -> Result<()> {
     match cli.command {
         Commands::Serve(args) => run_serve(args).await,
         Commands::Port(args) => run_port(args),
+        Commands::Config(cmd) => cmd.run().await,
     }
 }
 

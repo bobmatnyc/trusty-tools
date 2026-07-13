@@ -27,10 +27,8 @@ use trusty_memory::commands::note::handle_note;
 use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
-use trusty_memory::commands::setup::handle_setup;
-use trusty_memory::commands::start::handle_start;
-use trusty_memory::commands::stop::handle_stop;
 use trusty_memory::commands::upgrade::handle_upgrade;
+use trusty_memory::commands::{setup::handle_setup, start::handle_start, stop::handle_stop};
 use trusty_memory::{
     foreground::run_http_foreground, resolve_palace_registry_dir, run_http, run_http_dynamic,
     AppState,
@@ -432,6 +430,11 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -616,6 +619,7 @@ async fn main() -> Result<()> {
             trusty_memory::commands::port::handle_port(format)
         }
         Command::Upgrade { check, yes } => handle_upgrade(check, yes).await,
+        Command::Config(cmd) => cmd.run().await,
     }
 }
 

@@ -212,6 +212,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// `tcode session <action>` subcommands (#2060).
@@ -346,6 +351,8 @@ async fn main() -> Result<()> {
             )
             .await
         }
+
+        Command::Config(cmd) => cmd.run().await,
     }
 }
 

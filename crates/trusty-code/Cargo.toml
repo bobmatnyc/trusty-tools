@@ -75,7 +75,7 @@ regex = { workspace = true }
 # (env > .env.local > secure store), and the capability registry. It composes
 # with `axum-server` to expose `inference::test_support::MockInferenceServer`
 # for the offline black-box e2e in `tests/inference_shared_adapter_e2e.rs`.
-trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server", "inference-client"] }
+trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server", "inference-client", "config-cli"] }
 
 # `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
 # CLAUDE.md, axum stays feature-gated in *library* crates

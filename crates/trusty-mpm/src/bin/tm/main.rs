@@ -511,6 +511,7 @@ async fn main() -> anyhow::Result<()> {
                 commands::mcp::test_cmd(root.as_deref(), name.as_deref(), json).await
             }
         },
+        Some(Command::Config(cmd)) => cmd.run().await,
     };
 
     // Top-level exit-code translation: a `tm session prune-idle` that found the

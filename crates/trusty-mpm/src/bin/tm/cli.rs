@@ -918,6 +918,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: McpCmd,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    ///
+    /// Boundary note: this is the inference-provider credential store, distinct
+    /// from tm's MCP-native `config_read`/`config_write` daemon config tools —
+    /// different domain, deliberately not merged.
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Verbs for the `tm mcp` user-scope MCP-server registry command group.

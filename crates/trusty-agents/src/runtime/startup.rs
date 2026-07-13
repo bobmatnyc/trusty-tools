@@ -111,7 +111,16 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // self-project directory so the harness picks up its own `.env.local`
     // regardless of the user's cwd. dotenvy does NOT override existing env vars
     // by default, so cwd-local `.env.local` still wins when both exist.
-    dotenvy::from_filename(".env.local").ok();
+    //
+    // #2405: the `.env.local` load now routes through the ONE shared, idempotent
+    // loader in trusty-common (`credentials::load_env_local_once`), retiring the
+    // bespoke `dotenvy::from_filename` copy the #2404 review flagged so
+    // `config keys list`'s tier reporting has a single controlled load order.
+    // Behaviour is preserved: the shared loader walks cwd upward for `.env.local`
+    // (a superset of the old cwd-only lookup) and, like all dotenvy loads, never
+    // overrides an already-set process env var. The plain `.env` load and the
+    // detected self-project `.env.local` load below are kept as-is.
+    trusty_common::inference::credentials::load_env_local_once();
     dotenvy::dotenv().ok();
     if let Some(project_dir) = ctrl::detect_self_project() {
         let project_env = project_dir.join(".env.local");

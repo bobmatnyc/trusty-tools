@@ -156,6 +156,8 @@ trusty-common = { workspace = true, features = [
     # daemon-restart-race supervision signal (see daemon_run.rs / api/types.rs).
     # Zero extra transitive deps — see the feature's Cargo.toml comment.
     "update-check",
+    # #2405: the universal `tm config keys …` inference-provider credential CLI.
+    "config-cli",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by

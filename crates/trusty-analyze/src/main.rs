@@ -298,6 +298,11 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
     },
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Subcommands for `trusty-analyzer service` (macOS launchd integration).
@@ -625,5 +630,6 @@ async fn main() -> Result<()> {
             post_comment,
             format,
         } => run_review_pr(repo, pr, index_id, post_comment, format).await,
+        Cmd::Config(cmd) => cmd.run().await,
     }
 }

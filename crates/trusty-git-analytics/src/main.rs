@@ -134,6 +134,11 @@ enum Commands {
     Incidents(IncidentsSubcommandArgs),
     /// Compute and display DORA metrics (lead time, deployment frequency, MTTR, CFR).
     Dora(DoraArgs),
+
+    /// Manage inference provider configuration (API keys) — the universal
+    /// `config keys set/list/test/unset` surface shared by every trusty-*
+    /// binary (epic #2400 Wave 1, #2405).
+    Config(trusty_common::inference::config::ConfigCommand),
 }
 
 /// Run config validation and decide whether the caller should exit.
@@ -288,6 +293,13 @@ async fn run() -> anyhow::Result<()> {
         return commands::install::run(config, args);
     }
 
+    // #2405: the universal `config` command manages inference provider keys and
+    // never needs the analytics database — short-circuit before the DB open so
+    // `tga config keys …` works even without a `tga.db` present.
+    if let Commands::Config(cmd) = cli.command {
+        return cmd.run().await;
+    }
+
     // Pre-flight validation for the long-running commands. `--validate-only`
     // exits with status 0 on success or 1 on errors before opening the DB.
     // `--no-validate` skips the check entirely (for CI environments that
@@ -341,6 +353,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),
+        Commands::Config(_) => unreachable!("config dispatched above"),
     }
 
     Ok(())

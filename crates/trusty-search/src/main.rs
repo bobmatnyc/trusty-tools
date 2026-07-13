@@ -1152,7 +1152,14 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
     });
 
 async fn run() -> Result<()> {
-    dotenvy::from_filename(".env.local").ok();
+    // #2405: route the `.env.local` startup load through the ONE shared,
+    // idempotent loader in trusty-common (`credentials::load_env_local_once`)
+    // instead of an ad hoc `dotenvy::from_filename` call. This retires the
+    // bespoke copy the #2404 review flagged, so `config keys list`'s tier
+    // reporting is driven by a single controlled load order. Semantics are
+    // preserved: dotenvy never overrides an already-set process env var, so
+    // `env > .env.local > store` precedence is unchanged.
+    trusty_common::inference::credentials::load_env_local_once();
 
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion to clap's standard error rendering before
