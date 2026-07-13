@@ -290,12 +290,10 @@ fn append_content_blocks(
 ) -> Result<(), InferenceError> {
     match msg.role.as_str() {
         "assistant" => {
-            // NOTE: a `match` guard rather than a let-chain — trusty-common is
-            // edition 2021 (no let-chains) and a nested `if let { if … }` trips
-            // clippy::collapsible_if (whose only fix IS a let-chain).
-            match &msg.content {
-                Some(text) if !text.is_empty() => blocks.push(ContentBlock::Text(text.clone())),
-                _ => {}
+            if let Some(text) = &msg.content
+                && !text.is_empty()
+            {
+                blocks.push(ContentBlock::Text(text.clone()));
             }
             if let Some(calls) = &msg.tool_calls {
                 for call in calls {

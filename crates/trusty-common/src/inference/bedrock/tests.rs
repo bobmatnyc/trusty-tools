@@ -10,13 +10,13 @@
 
 use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseOutputResponse;
 use aws_sdk_bedrockruntime::types::{
-    ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage, StopReason,
-    SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool, ToolChoice as SdkToolChoice,
-    ToolResultStatus,
+    CachePointType, ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage,
+    StopReason, SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool,
+    ToolChoice as SdkToolChoice, ToolResultStatus,
 };
 use serde_json::json;
 
-use super::cache::MIN_CACHEABLE_TOKENS;
+use super::cache::{MIN_CACHEABLE_TOKENS, cache_point_block, system_cacheable, tools_cacheable};
 use super::convert::{
     build_converse_messages, build_tool_config, converse_output_to_chat_response,
     document_to_json_string, json_to_document,
@@ -403,7 +403,66 @@ fn enforce_tool_pairing_leaves_valid_conversation_unchanged() {
     }
 }
 
-// ─── cachePoint (#2260) ─────────────────────────────────────────────────────
+// ─── cachePoint (#2260) — direct unit tests on `cache` primitives ──────────
+
+/// `cache_point_block` always builds the one shape ever sent: `type: default`,
+/// no explicit TTL.
+///
+/// Why: this is the exact wire shape Bedrock expects for every checkpoint;
+/// a wrong `r#type` or a stray TTL would silently change caching behaviour.
+/// What: build the block, assert `r#type() == CachePointType::Default` and
+/// `ttl().is_none()`.
+/// Test: this test.
+#[test]
+fn cache_point_block_is_default_type() {
+    let block = cache_point_block();
+    assert_eq!(block.r#type(), &CachePointType::Default);
+    assert!(block.ttl().is_none());
+}
+
+/// `system_cacheable` respects the `MIN_CACHEABLE_TOKENS` floor: `false` below
+/// it, `true` at/above it.
+///
+/// Why: a checkpoint on a too-small prefix can never produce a cache hit and
+/// wastes one of Bedrock's 4-per-request slots; this pins the pure boundary
+/// the `build_converse_messages` cachePoint-emission tests rely on.
+/// What: assert a short prompt is not cacheable and a prompt well above the
+/// floor is.
+/// Test: this test.
+#[test]
+fn system_cacheable_respects_floor() {
+    let small = "short prompt";
+    let large = "x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100);
+    assert!(!system_cacheable(small));
+    assert!(system_cacheable(&large));
+}
+
+/// `tools_cacheable` respects the same floor, applied to the combined
+/// JSON-Schema bodies of a tool set.
+///
+/// Why: guards `build_tool_config` against wasting a checkpoint on a small
+/// tool set (e.g. a single-tool test fixture); this pins the pure boundary.
+/// What: assert a tiny single-tool set is not cacheable and a tool set with a
+/// large description is.
+/// Test: this test.
+#[test]
+fn tools_cacheable_respects_floor() {
+    let tiny_tool = ToolDefinition::function(FunctionDefinition {
+        name: "ping".into(),
+        description: None,
+        parameters: None,
+        cache_control: None,
+    });
+    assert!(!tools_cacheable(&[tiny_tool]));
+
+    let big_tool = ToolDefinition::function(FunctionDefinition {
+        name: "write_file".into(),
+        description: Some("x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100)),
+        parameters: None,
+        cache_control: None,
+    });
+    assert!(tools_cacheable(&[big_tool]));
+}
 
 fn cached_system_message(text: &str) -> ChatMessage {
     let mut msg = ChatMessage::system(text);

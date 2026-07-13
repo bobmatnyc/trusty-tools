@@ -18,8 +18,11 @@
 //! [`trusty_common::inference::InferenceError`] back to [`LlmError`] via
 //! [`super::convert::map_error`], and converts the response via
 //! [`super::convert::from_shared_response`]. The shared adapter constructs its
-//! AWS client lazily on first `chat`, so [`Self::from_env`] touches no AWS
-//! credentials.
+//! AWS client lazily on first `chat`, so [`Self::from_env`]/[`Self::new`] touch
+//! no AWS credentials. [`Self::new`]/[`Self::region`] are thin passthroughs kept
+//! for public-API compatibility with the pre-#2407 local transport (no in-tree
+//! caller uses them post-migration, but this is a published rlib crate and the
+//! surface removal would otherwise be undocumented/silent).
 //! Test: `bedrock::tests::*` (offline construction) plus the shared adapter's own
 //! conversion + `#[ignore]`-gated live coverage in
 //! `trusty_common::inference::bedrock`.
@@ -48,20 +51,42 @@ pub struct BedrockChatClient {
 }
 
 impl BedrockChatClient {
+    /// Construct a `BedrockChatClient` for an explicit (or default) region.
+    ///
+    /// Why: public-API compatibility passthrough — the pre-#2407 local transport
+    /// exposed this constructor; no in-tree caller uses it today (everything goes
+    /// through [`Self::from_env`] via `DispatchingLlmClient`), but this is a
+    /// published rlib crate, so the constructor is kept rather than silently
+    /// dropped.
+    /// What: wraps [`BedrockAdapter::new`] with `region`. Async + `Result` to
+    /// match the pre-migration signature; never actually fails.
+    /// Test: `bedrock::tests::new_constructs_offline`.
+    pub async fn new(region: Option<&str>) -> Result<Self, LlmError> {
+        Ok(Self {
+            inner: BedrockAdapter::new(region),
+        })
+    }
+
     /// Construct a `BedrockChatClient` from the environment.
     ///
     /// Why: the convenience entry point `DispatchingLlmClient` lazily calls on
     /// the first `bedrock/*` request. Region resolves from
     /// `TRUSTY_AWS_REGION`/`AWS_REGION`/default; credentials come from the AWS
     /// chain, resolved lazily on the first `chat`, so this never touches AWS.
-    /// What: wraps a [`BedrockAdapter::new`] with no explicit region. Async +
-    /// `Result` to preserve the exact signature `DispatchingLlmClient::bedrock`'s
-    /// `OnceCell::get_or_try_init` expects; it never actually fails.
+    /// What: delegates to [`Self::new`] with `region: None`.
     /// Test: `bedrock::tests::from_env_constructs_offline`.
     pub async fn from_env() -> Result<Self, LlmError> {
-        Ok(Self {
-            inner: BedrockAdapter::new(None),
-        })
+        Self::new(None).await
+    }
+
+    /// The AWS region this client is configured for.
+    ///
+    /// Why: public-API compatibility passthrough (see [`Self::new`]) — exposed
+    /// for diagnostics and telemetry by any caller that held the pre-#2407 type.
+    /// What: delegates to the shared adapter's `region()`.
+    /// Test: `bedrock::tests::region_reports_resolved_value`.
+    pub fn region(&self) -> &str {
+        self.inner.region()
     }
 
     /// Execute one Converse call and return the response.
@@ -99,5 +124,30 @@ mod tests {
     #[tokio::test]
     async fn from_env_constructs_offline() {
         assert!(BedrockChatClient::from_env().await.is_ok());
+    }
+
+    /// `new` with an explicit region builds a client without touching AWS.
+    ///
+    /// Why: pins the public-API-compatibility constructor's lazy-construction
+    /// guarantee, matching [`from_env_constructs_offline`].
+    /// What: call `new(Some("us-west-2"))`; assert it succeeds.
+    /// Test: this test.
+    #[tokio::test]
+    async fn new_constructs_offline() {
+        assert!(BedrockChatClient::new(Some("us-west-2")).await.is_ok());
+    }
+
+    /// `region()` reports the resolved region, explicit value preferred.
+    ///
+    /// Why: pins the public-API-compatibility accessor actually reflects what
+    /// the shared adapter resolved, not a stale/default value.
+    /// What: build with an explicit region; assert `region()` returns it.
+    /// Test: this test.
+    #[tokio::test]
+    async fn region_reports_resolved_value() {
+        let client = BedrockChatClient::new(Some("eu-west-1"))
+            .await
+            .expect("build");
+        assert_eq!(client.region(), "eu-west-1");
     }
 }
