@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
-use super::{record_to_json, record_to_summary};
+use super::{checked_summaries, record_to_json, record_to_summary};
 use crate::session_manager::{
     InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
 };
@@ -287,3 +287,66 @@ fn injection_status_wire_stringifies_other_variants() {
 // `unresumable_response`'s header-tagging behavior is unit-tested beside its
 // definition in `resume_error.rs` (#2577 review) — see
 // `resume_error::tests::unresumable_response_tags_reason_header_per_failure_class`.
+
+/// #2595 review (PR #2652, MEDIUM finding 4): [`checked_summaries`] fans its
+/// per-record `unresumable` probes out concurrently via `JoinSet`, which
+/// yields completed tasks in COMPLETION order, not submission order — this
+/// pins that the returned `Vec<SessionSummary>` is nonetheless rebuilt in the
+/// SAME order as the input `records` slice, and that only the genuinely-dead
+/// record among a live/dead/healthy-stopped trio gets flagged.
+#[tokio::test]
+async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() {
+    // r0: Active — the state gate alone skips the filesystem probe.
+    let mut r0 = make_record(None);
+    r0.state = ManagedSessionState::Active;
+
+    // r1: Stopped with NO existing workdir candidate — must end up dead.
+    let mut r1 = make_record(None);
+    r1.state = ManagedSessionState::Stopped;
+    r1.cwd = PathBuf::from("/nonexistent/checked-summaries-order-r1");
+    r1.workspace_path = None;
+    r1.last_cwd = None;
+
+    // r2: Errored but its `cwd` genuinely exists — must stay resumable.
+    let real_dir = tempfile::TempDir::new().expect("tempdir for r2");
+    let mut r2 = make_record(None);
+    r2.state = ManagedSessionState::Errored;
+    r2.cwd = real_dir.path().to_path_buf();
+    r2.workspace_path = None;
+    r2.last_cwd = None;
+
+    let records = vec![r0.clone(), r1.clone(), r2.clone()];
+    let summaries = checked_summaries(&records).await;
+
+    assert_eq!(summaries.len(), 3, "one summary per input record");
+    // Order must match the input slice exactly, regardless of which probe
+    // task happened to finish first.
+    assert_eq!(
+        summaries[0].id,
+        r0.id.to_string(),
+        "r0 must stay at index 0"
+    );
+    assert_eq!(
+        summaries[1].id,
+        r1.id.to_string(),
+        "r1 must stay at index 1"
+    );
+    assert_eq!(
+        summaries[2].id,
+        r2.id.to_string(),
+        "r2 must stay at index 2"
+    );
+
+    assert!(
+        !summaries[0].unresumable,
+        "an Active session must never be flagged, regardless of probe fan-out"
+    );
+    assert!(
+        summaries[1].unresumable,
+        "a stopped session with no existing workdir candidate must be flagged dead"
+    );
+    assert!(
+        !summaries[2].unresumable,
+        "an errored session with a REAL existing cwd must stay resumable"
+    );
+}

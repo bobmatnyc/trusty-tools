@@ -464,6 +464,24 @@ fn managed_session_summary_deserializes() {
     assert!(s.source_id.is_none());
 }
 
+/// #2595: `unresumable` must round-trip when present, and default `false`
+/// (never spuriously flag a session dead) when an older daemon omits it.
+#[test]
+fn managed_session_summary_deserializes_unresumable_flag() {
+    let with_flag = serde_json::json!({
+        "id": "x", "name": "n", "state": "stopped", "unresumable": true
+    });
+    let s: ManagedSessionSummary = serde_json::from_value(with_flag).unwrap();
+    assert!(s.unresumable, "unresumable: true must deserialize to true");
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert!(
+        !s.unresumable,
+        "an older daemon omitting `unresumable` must default to false"
+    );
+}
+
 #[test]
 fn managed_list_response_deserializes() {
     let json = serde_json::json!({

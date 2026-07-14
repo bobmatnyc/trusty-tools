@@ -70,7 +70,9 @@ pub use prune::{
 pub use reactivate::reactivate_managed_session;
 pub use resume_error::ResumeManagedError;
 pub use summary::record_to_json;
-use summary::{attach_cmd_for, parse_id, record_to_summary, record_to_summary_checked};
+use summary::{
+    attach_cmd_for, checked_summaries, parse_id, record_to_summary, record_to_summary_checked,
+};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -652,7 +654,10 @@ pub async fn adopt_existing_session(
 /// `session_manager::resume_workdir::is_unresumable`, which short-circuits to
 /// `false` without any I/O for every state other than `Stopped`/`Errored` — so
 /// every picker/list surface reading this endpoint sees dead sessions flagged
-/// up front rather than discovering them via a failed resume.
+/// up front rather than discovering them via a failed resume. The per-session
+/// probes run CONCURRENTLY via [`summary::checked_summaries`] (#2595 review,
+/// MEDIUM finding 4) rather than one-at-a-time, so a large fleet's response
+/// latency does not scale with its count of stopped/errored sessions.
 /// Test: list handler test; list-with-source-id-filter test;
 /// `list_marks_dead_stopped_session_unresumable`,
 /// `list_leaves_live_and_healthy_stopped_sessions_unmarked`.
@@ -662,14 +667,13 @@ pub async fn list_managed_sessions(
 ) -> impl IntoResponse {
     let mgr = state.session_manager().await;
     let sid_filter = q.get("source_id").map(String::as_str);
-    let records = mgr.list().await;
-    let mut sessions = Vec::new();
-    for r in records
-        .iter()
+    let records: Vec<_> = mgr
+        .list()
+        .await
+        .into_iter()
         .filter(|r| sid_filter.is_none_or(|sid| r.source_id.as_deref() == Some(sid)))
-    {
-        sessions.push(record_to_summary_checked(r).await);
-    }
+        .collect();
+    let sessions = checked_summaries(&records).await;
     Json(ListSessionsResponse { sessions })
 }
 

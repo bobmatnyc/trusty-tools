@@ -98,9 +98,11 @@ pub(crate) fn live_session_rows(sessions: Vec<ManagedSessionSummary>) -> Vec<Ses
 /// [`super::refresh_activity`]), never the whole list.
 /// What: derives the 8-hex short id via [`session_short_id`] and copies the
 /// rest through unchanged, including `deliverable_id` (DOC-35 §10.6, #2383 —
-/// drives the Sessions-pane deliverable glyph).
+/// drives the Sessions-pane deliverable glyph) and `unresumable` (#2595 —
+/// gates the `r` resume key).
 /// Test: `session_to_row_derives_short_id_and_copies_fields`,
-/// `session_to_row_carries_deliverable_id`.
+/// `session_to_row_carries_deliverable_id`,
+/// `session_to_row_carries_unresumable_flag`.
 pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
     let short_id = session_short_id(&s.id);
     SessionRow {
@@ -113,6 +115,7 @@ pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
         pending_decision: s.pending_decision,
         proposed_default: s.proposed_default,
         deliverable_id: s.deliverable_id,
+        unresumable: s.unresumable,
     }
 }
 
@@ -251,6 +254,22 @@ mod tests {
 
         let none_row = session_to_row(summary("aaaaaaaabbbb", "active"));
         assert!(none_row.deliverable_id.is_none());
+    }
+
+    /// #2595: the `unresumable` flag must survive the DTO → row projection —
+    /// this is what lets `events::request_resume` refuse a dead session.
+    #[test]
+    fn session_to_row_carries_unresumable_flag() {
+        let mut s = summary("dead0001", "stopped");
+        s.unresumable = true;
+        let row = session_to_row(s);
+        assert!(row.unresumable, "unresumable must copy through as true");
+
+        let healthy_row = session_to_row(summary("healthy1", "stopped"));
+        assert!(
+            !healthy_row.unresumable,
+            "a healthy session must copy through as false"
+        );
     }
 
     // ---- #2476: decommissioned sessions never reach the Sessions pane ----
