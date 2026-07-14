@@ -19,10 +19,11 @@ use crate::api::services::{account_of, opt_str, require_str};
 /// Valid `predefinedLayout` values accepted by `create_slide`.
 ///
 /// Why: The Slides API rejects unknown layout strings with an opaque 400;
-/// constraining the input to the known-good set (mirroring the Python
-/// upstream's 10 layouts) fails fast with an actionable message and lets the
+/// constraining the input to the known-good set (the full 11-value
+/// `PredefinedLayout` enum, matching the Python upstream's `content.py`
+/// `apply_layout` set) fails fast with an actionable message and lets the
 /// tool schema advertise the enum.
-/// What: The ten predefined Slides layouts exposed for slide creation.
+/// What: The eleven predefined Slides layouts exposed for slide creation.
 /// Test: `validate_layout_*` below.
 pub(crate) const VALID_LAYOUTS: &[&str] = &[
     "BLANK",
@@ -35,6 +36,7 @@ pub(crate) const VALID_LAYOUTS: &[&str] = &[
     "SECTION_TITLE_AND_DESCRIPTION",
     "ONE_COLUMN_TEXT",
     "MAIN_POINT",
+    "BIG_NUMBER",
 ];
 
 /// Why: Every Slides read starts here; the shape depends on how much detail the
@@ -65,13 +67,23 @@ pub async fn get_slides(client: &BaseClient, args: Value) -> Result<Value> {
                 .ok_or_else(|| anyhow!("missing required field: slide_index"))?;
             let index = usize::try_from(index)
                 .map_err(|_| anyhow!("slide_index must be a non-negative integer"))?;
-            let url = format!("{SLIDES_API_BASE}/presentations/{id}");
+            let url = format!(
+                "{SLIDES_API_BASE}/presentations/{id}?fields={}",
+                encode("slides(objectId,pageElements)")
+            );
             let presentation = client.get(&url, account).await?;
             extract_slide(&presentation, index)
         }
         "get_text" => {
             let id = require_str(&args, "presentation_id")?;
-            let url = format!("{SLIDES_API_BASE}/presentations/{id}");
+            // Note: deliberately not narrowed to `shape.text` only — `collect_text`
+            // walks generically so it also picks up table-cell text, which nests
+            // under `pageElements.table...`; narrowing further would silently
+            // drop that text.
+            let url = format!(
+                "{SLIDES_API_BASE}/presentations/{id}?fields={}",
+                encode("slides(objectId,pageElements)")
+            );
             let presentation = client.get(&url, account).await?;
             Ok(extract_all_text(&presentation))
         }

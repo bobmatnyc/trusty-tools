@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::api::client::BaseClient;
 use crate::api::constants::SLIDES_API_BASE;
+use crate::api::services::slides::core::validate_layout;
 use crate::api::services::{account_of, opt_str, require_str};
 
 /// Why: Content authoring is the most common Slides op; one tool with a `type`
@@ -42,11 +43,7 @@ pub async fn add_slide_content(client: &BaseClient, args: Value) -> Result<Value
             let image_url = require_str(&args, "image_url")?;
             image_request(slide_id, image_url)
         }
-        "bulleted_list" => {
-            let items = extract_items(&args)?;
-            let layout = opt_str(&args, "layout").unwrap_or("BLANK");
-            bulleted_list_request(&items, layout)
-        }
+        "bulleted_list" => build_bulleted_list_body(&args)?,
         other => bail!("unknown content type for add_slide_content: {other}"),
     };
 
@@ -189,6 +186,20 @@ fn image_request(slide_id: &str, image_url: &str) -> Value {
             }
         }]
     })
+}
+
+/// Why: `bulleted_list` accepts a caller-supplied `layout` just like
+/// `manage_slides`' `create_slide`; without validating it here too, an
+/// invalid value would surface as an opaque Slides API 400 instead of the
+/// same fail-fast error `create_slide` gives.
+/// What: Extracts items, resolves `layout` (default `BLANK`), validates it
+/// against `VALID_LAYOUTS`, then builds the request.
+/// Test: `build_bulleted_list_body_*` below.
+fn build_bulleted_list_body(args: &Value) -> Result<Value> {
+    let items = extract_items(args)?;
+    let layout = opt_str(args, "layout").unwrap_or("BLANK");
+    validate_layout(layout)?;
+    Ok(bulleted_list_request(&items, layout))
 }
 
 /// Why: A bulleted list is the quickest way to seed a content slide; the
@@ -359,6 +370,33 @@ mod tests {
         assert_eq!(
             reqs[1]["createShape"]["objectId"],
             reqs[3]["createParagraphBullets"]["objectId"]
+        );
+    }
+
+    #[test]
+    fn build_bulleted_list_body_accepts_valid_layout() {
+        let args = json!({ "items": ["a", "b"], "layout": "BIG_NUMBER" });
+        let body = build_bulleted_list_body(&args).unwrap();
+        assert_eq!(
+            body["requests"][0]["createSlide"]["slideLayoutReference"]["predefinedLayout"],
+            "BIG_NUMBER"
+        );
+    }
+
+    #[test]
+    fn build_bulleted_list_body_rejects_invalid_layout() {
+        let args = json!({ "items": ["a"], "layout": "NOT_A_LAYOUT" });
+        let err = build_bulleted_list_body(&args).unwrap_err().to_string();
+        assert!(err.contains("invalid layout 'NOT_A_LAYOUT'"));
+    }
+
+    #[test]
+    fn build_bulleted_list_body_defaults_layout_to_blank() {
+        let args = json!({ "items": ["a"] });
+        let body = build_bulleted_list_body(&args).unwrap();
+        assert_eq!(
+            body["requests"][0]["createSlide"]["slideLayoutReference"]["predefinedLayout"],
+            "BLANK"
         );
     }
 
