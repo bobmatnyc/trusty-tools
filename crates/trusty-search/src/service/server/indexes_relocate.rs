@@ -219,6 +219,13 @@ pub(super) async fn relocate_index_handler(
         // the cold tail on the next selective warm-boot start.
         last_queried_unix: on_disk_last_queried,
         last_indexed_unix: on_disk_last_indexed,
+        // DOC-37: re-derive the canonical repo identity for the NEW root (a
+        // relocation can move within the same repo or to a different one), and
+        // fall back to the previously-stored identity when the new root has none
+        // derivable — never regress a known identity to `None`.
+        repo_identity: trusty_common::repo_identity::RepoIdentity::derive(&new_root)
+            .map(|r| r.canonical())
+            .or_else(|| on_disk.as_ref().and_then(|e| e.repo_identity.clone())),
     };
 
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
