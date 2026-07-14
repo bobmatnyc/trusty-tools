@@ -189,6 +189,12 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
 - [ ] Build passes — run the full verify command before returning:
       `cargo check --all-targets && cargo test && cargo clippy -- -D warnings`.
 
+Run that verify/quality-gate command as a BLOCKING FOREGROUND call and wait for it
+to exit — even 15+ minutes. NEVER end your turn to "wait for the gate to finish"
+or hand it to a background monitor: nothing wakes a stopped agent, so the run
+strands until a human resumes you. See BASE-AGENT "Foreground Execution — NEVER
+End Your Turn To Wait" (issues #2501, #2610).
+
 ## Output Requirements
 
 - Actual code, not pseudocode. Include error handling and logging.

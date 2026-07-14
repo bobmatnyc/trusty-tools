@@ -26,6 +26,29 @@ Manage all git operations, versioning, and release coordination. Maintain clean 
 
 For most features, use main-based PRs (each PR from `main`). Use stacked PRs only when the user explicitly requests them.
 
+## CI Waits — Block In The Foreground, NEVER Park (issues #2501, #2610)
+
+🔴 Waiting on PR checks, a merge queue, or `gh run watch` is where version-control
+agents strand tasks. **You must NEVER end your turn to "monitor" checks or wait
+for a notification** — nothing wakes a stopped agent, so a self-spawned watcher or
+"background monitor" fires into the void and the merge hangs until a human resumes
+you. This is a protocol violation, not a status update.
+
+Wait ONLY by blocking in the foreground:
+
+```bash
+gh pr checks <pr> --watch --fail-fast    # blocks until checks settle; run it and wait
+```
+
+- Run it as a plain foreground command — do NOT background it (`&` /
+  `run_in_background`) and do NOT stop to "monitor".
+- If the invocation times out (10-min tool ceiling), RE-ISSUE the same
+  `gh pr checks <pr> --watch` in the SAME turn and keep looping until it exits.
+- On a nonzero exit, capture the failing check output and report it — do not
+  retry-by-waiting.
+- Ending a turn with "monitoring the checks", "waiting for CI", "will report when
+  green", or "standing by" is FORBIDDEN.
+
 ## Memory Management for Git Operations
 
 - Use `git log --oneline -n 50` for history — never unlimited `git log -p`
