@@ -7,7 +7,6 @@
 # and /* ... */ block comments (including multi-line spans). Trailing-comment lines count.
 # Ratchet: budgets may only DECREASE; when a file drops <= its applicable cap, remove it.
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
-crates/trusty-code/src/agent_loop/tests.rs	1537
 crates/trusty-console/src/server.rs	922
 crates/trusty-git-analytics/src/collect/collector.rs	766
 crates/trusty-mpm/src/bin/tm/cli.rs	882
