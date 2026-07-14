@@ -703,3 +703,73 @@ async fn focus_is_scoped_per_thread() {
     assert!(proxy.current_focus(&thread_conv).is_some());
     assert!(proxy.current_focus(&focus::conv("C1", None)).is_none());
 }
+
+#[tokio::test]
+async fn threaded_reply_falls_back_to_channel_focus() {
+    // #2565 review, MEDIUM-HIGH: `/focus` via a slash command keys by the bare
+    // channel (no thread context). A reply posted INSIDE a thread must still
+    // reach that channel-focused session — end-to-end through reply_for_event,
+    // not just the effective_conv unit — proving the fallback is actually wired
+    // into the message-routing path, not merely unit-tested in isolation.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+    let executor = offline_executor();
+    let histories = empty_histories();
+
+    // Channel-level focus (no thread).
+    reply_for_event(&executor, &histories, &proxy, &slash("/focus", "api", "C1"))
+        .await
+        .expect("focus reply");
+
+    // A message INSIDE a thread of that same channel.
+    let (_channel, body) = reply_for_event(
+        &executor,
+        &histories,
+        &proxy,
+        &message("run tests", "C1", Some("169.42")),
+    )
+    .await
+    .expect("threaded message yields a reply");
+
+    // It must INJECT (reach the backend's send), not silently fall through to
+    // the coordinator.
+    assert!(body.contains("run tests"), "{body}");
+    assert!(
+        backend
+            .calls()
+            .contains(&"send:id-api:run tests".to_string()),
+        "expected the threaded reply to inject via the channel's focus, got {:?}",
+        backend.calls()
+    );
+}
+
+#[tokio::test]
+async fn thread_focus_does_not_leak_to_parent_channel_message() {
+    // #2565 review: the OTHER direction — a thread-specific focus must stay
+    // thread-scoped and never satisfy a plain, non-threaded channel message
+    // (the channel itself was never focused). Proven end-to-end: a message with
+    // no thread context must NOT reach the backend's `send` at all.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+
+    // Focus only the thread (never the channel).
+    let thread_conv = focus::conv("C1", Some("169.42"));
+    proxy.focus(&thread_conv, "api").await;
+
+    let executor = offline_executor();
+    let histories = empty_histories();
+    // A plain, non-threaded message in the same channel.
+    let _ = reply_for_event(
+        &executor,
+        &histories,
+        &proxy,
+        &message("run tests", "C1", None),
+    )
+    .await;
+
+    assert!(
+        !backend.calls().iter().any(|c| c.starts_with("send:")),
+        "a thread-scoped focus must never satisfy a non-threaded channel message, got {:?}",
+        backend.calls()
+    );
+}

@@ -522,3 +522,26 @@ pub(crate) fn short_id(id: &str) -> String {
         head
     }
 }
+
+/// Escape the three `mrkdwn`-significant characters for a Slack message body.
+///
+/// Why (#2565 review): the proxy binding (`slack::focus`) interpolates
+/// backend-controlled and operator-supplied text — session names, `/focus`
+/// arguments, error strings, activity summaries — directly into `mrkdwn`
+/// replies. Slack's markup treats `<...>` as a special link/mention/broadcast
+/// span (e.g. `<!channel>` broadcast-pings the whole channel, `<@U123>`
+/// mentions a user); an unescaped session named `<!channel> pwned` would
+/// broadcast-ping the channel from every proxy reply. Mirrors the Telegram
+/// binding's `html_escape` (`telegram::formatter::html_escape`), which the
+/// Telegram proxy binding applies to the identical set of fields.
+/// What: replaces `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, in that order (so
+/// the `&` produced by the `<`/`>` substitutions is never re-escaped). Slack
+/// unescapes exactly these three entities in `mrkdwn` bodies, matching
+/// Slack's own documented escaping contract for `chat.postMessage`.
+/// Test: `mrkdwn_escape_escapes_ampersand_lt_gt`,
+/// `mrkdwn_escape_neutralizes_channel_broadcast_span`.
+pub(crate) fn mrkdwn_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}

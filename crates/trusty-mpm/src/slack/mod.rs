@@ -565,7 +565,12 @@ async fn reply_for_event(
             thread,
             ..
         } => {
-            let conv = focus::conv(channel, thread.as_deref());
+            // #2565 review: a reply INSIDE a thread keys by `channel:ts`, a
+            // DIFFERENT key from a channel-level `/focus`; effective_conv falls
+            // back to the bare-channel key when the thread key itself has no
+            // focus, so a threaded reply still reaches a channel-focused
+            // session (thread-specific focus, when set, still wins).
+            let conv = focus::effective_conv(proxy, channel, thread.as_deref());
             let has_focus = proxy.current_focus(&conv).is_some();
             let body = match route_free_text(text, has_focus) {
                 // A focused conversation injects the line straight to that session.

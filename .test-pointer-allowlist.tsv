@@ -618,7 +618,6 @@ crates/trusty-mpm/src/session_manager/store.rs	store_cached_all_returns_last_kno
 crates/trusty-mpm/src/session_manager/tests.rs	graceful_stop_sends_sigterm_then_kill
 crates/trusty-mpm/src/session_manager/tests.rs	graceful_stop_skips_sigterm_when_no_pid
 crates/trusty-mpm/src/slack/commands.rs	all_names_parse_back
-crates/trusty-mpm/src/slack/mod.rs	write_then_read_pid_file_round_trips
 crates/trusty-mpm/src/supervisor/metrics.rs	metrics_run_stats_accumulate
 crates/trusty-mpm/src/supervisor/mod.rs	supervisor_fleet_resume_e2e
 crates/trusty-mpm/src/telegram/focus.rs	handle_unfocus_clears_and_reports

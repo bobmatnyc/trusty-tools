@@ -10,17 +10,23 @@
 //! logic lives here — only presentation and the per-conversation key convention.
 //! What: [`handle_focus`]/[`handle_unfocus`]/[`handle_summary`]/[`inject_reply`]
 //! call the shared [`SessionProxy`] and render its outcome as a `mrkdwn` reply
-//! body. [`conv`] is the Slack conversation-key convention (channel id, plus the
-//! thread timestamp when the message is in a thread). [`ProxyVerb`]/[`proxy_verb`]
-//! classify the three slash verbs (`/focus`, `/unfocus`, `/summary`) the adapter
-//! routes to the proxy instead of projecting onto a [`crate::client::TrustyCommand`].
-//! Test: `focus/tests.rs` covers the render mapping for each outcome and the
-//! verb/key conventions; the state machine and daemon paths are covered by
-//! `client::proxy::tests`, and the inbound-event routing by `slack::tests`.
+//! body, escaping every user/backend-controlled field with [`mrkdwn_escape`] (a
+//! Slack session named `<!channel> pwned` must never broadcast-ping the channel
+//! from a proxy reply — mirrors `telegram::formatter::html_escape`'s escape
+//! sites). [`conv`] is the Slack conversation-key convention (channel id, plus
+//! the thread timestamp when the message is in a thread); [`effective_conv`]
+//! adds thread-to-channel FALLBACK for message routing, so a threaded reply
+//! still reaches a channel-level focus. [`ProxyVerb`]/[`proxy_verb`] classify
+//! the three slash verbs (`/focus`, `/unfocus`, `/summary`) the adapter routes
+//! to the proxy instead of projecting onto a [`crate::client::TrustyCommand`].
+//! Test: `focus/tests.rs` covers the render mapping (including hostile-name
+//! escaping) for each outcome and the verb/key/fallback conventions; the state
+//! machine and daemon paths are covered by `client::proxy::tests`, and the
+//! inbound-event routing by `slack::tests`.
 
 use crate::client::{FocusOutcome, InjectOutcome, SessionProxy, SummarizeOutcome};
 
-use super::formatter::short_id;
+use super::formatter::{mrkdwn_escape, short_id};
 
 /// The prompt shown when a proxy action needs a focused session but none is set.
 ///
@@ -75,6 +81,45 @@ pub fn conv(channel: &str, thread: Option<&str>) -> String {
         Some(ts) if !ts.is_empty() => format!("{channel}:{ts}"),
         _ => channel.to_string(),
     }
+}
+
+/// Resolve the proxy conversation key to use for an inbound MESSAGE, applying
+/// thread-to-channel focus fallback.
+///
+/// Why (#2565 review, MEDIUM-HIGH): `/focus` arrives via a slash command with no
+/// thread context and always keys by the bare channel ([`conv`]`(channel, None)`).
+/// A plain-text reply posted INSIDE a thread keys by
+/// [`conv`]`(channel, Some(ts))` — a DIFFERENT key. Without a fallback, that
+/// thread key never carries the channel's focus and every threaded reply
+/// silently misroutes to the action-capable coordinator instead of the
+/// channel-focused session — a silent misroute, not an error. Falling back from
+/// the thread key to the bare-channel key, but ONLY when the thread key itself
+/// has no focus, restores the expected behavior while preserving thread-scoped
+/// focus when a thread was explicitly `/focus`ed (checked first, so a
+/// thread-specific focus always wins over the channel's).
+/// What: with no `thread`, [`conv`]`(channel, thread)` already equals the bare
+/// channel key, so this is a no-op passthrough. With a `thread`: if the
+/// thread-scoped key already has a focus, returns it unchanged (thread wins).
+/// Otherwise, if the bare-channel key has a focus, returns THAT key instead
+/// (fallback). If neither has a focus, returns the thread-scoped key (so the
+/// caller's `current_focus` check reports `None` and free text falls through to
+/// the coordinator, same as today). This is for MESSAGE routing (`inject`/
+/// `summarize`) only — `/focus`/`/unfocus` always target the caller's literal
+/// `conv` and never fall back.
+/// Test: `effective_conv_falls_back_to_channel_when_thread_unfocused`,
+/// `effective_conv_prefers_thread_when_thread_focused`,
+/// `effective_conv_stays_channel_key_with_no_thread`,
+/// `effective_conv_thread_key_when_neither_focused`.
+pub fn effective_conv(proxy: &SessionProxy, channel: &str, thread: Option<&str>) -> String {
+    let thread_key = conv(channel, thread);
+    let has_thread = thread.is_some_and(|t| !t.is_empty());
+    if has_thread && proxy.current_focus(&thread_key).is_none() {
+        let channel_key = conv(channel, None);
+        if proxy.current_focus(&channel_key).is_some() {
+            return channel_key;
+        }
+    }
+    thread_key
 }
 
 /// The three slash verbs the Slack adapter routes to the session-manager PROXY.
@@ -141,7 +186,7 @@ pub fn handle_unfocus(proxy: &SessionProxy, conv: &str) -> String {
     match proxy.unfocus(conv) {
         Some(f) => format!(
             "✅ Unfocused *{}*. Plain messages now go to the coordinator.",
-            f.name,
+            mrkdwn_escape(&f.name),
         ),
         None => "No session was focused.".to_string(),
     }
@@ -171,26 +216,30 @@ pub async fn inject_reply(proxy: &SessionProxy, conv: &str, text: &str) -> Strin
 /// Render a [`FocusOutcome`] as a Slack `mrkdwn` reply.
 ///
 /// Test: `render_focus_focused_names_session`, `render_focus_current_none_hints_usage`,
-/// `render_focus_not_found_reports`.
+/// `render_focus_not_found_reports`, `render_focus_escapes_hostile_session_name`.
 fn render_focus(outcome: &FocusOutcome) -> String {
     match outcome {
         FocusOutcome::Focused(f) => format!(
             "🎯 Focused on *{}* (`{}`).\n\
              Plain messages now route to this session; `/unfocus` to stop.",
-            f.name,
+            mrkdwn_escape(&f.name),
             short_id(&f.id),
         ),
         FocusOutcome::Current(Some(f)) => format!(
             "🎯 Focused on *{}* (`{}`).\n\
              Plain messages route here; `/unfocus` to stop.",
-            f.name,
+            mrkdwn_escape(&f.name),
             short_id(&f.id),
         ),
         FocusOutcome::Current(None) => "Usage: `/focus <session>` — focus a managed session so \
              plain messages route straight to it."
             .to_string(),
         FocusOutcome::NotFound { target, error } => {
-            format!("❌ Cannot focus `{target}`: {error}")
+            format!(
+                "❌ Cannot focus `{}`: {}",
+                mrkdwn_escape(target),
+                mrkdwn_escape(error),
+            )
         }
     }
 }
@@ -198,22 +247,25 @@ fn render_focus(outcome: &FocusOutcome) -> String {
 /// Render an [`InjectOutcome`] as a Slack `mrkdwn` reply.
 ///
 /// Test: `render_inject_sent_echoes_text`, `render_inject_auto_unfocused_signals_gone`,
-/// `render_inject_failed_keeps_focus_prose`, `render_inject_no_focus_hints`.
+/// `render_inject_failed_keeps_focus_prose`, `render_inject_no_focus_hints`,
+/// `render_inject_escapes_hostile_session_name`.
 fn render_inject(outcome: &InjectOutcome) -> String {
     match outcome {
         InjectOutcome::Sent { target, text } => format!(
             "📨 → *{}* (`{}`)\n_{}_",
-            target.name,
+            mrkdwn_escape(&target.name),
             short_id(&target.id),
-            text,
+            mrkdwn_escape(text),
         ),
         InjectOutcome::AutoUnfocused { target, error } => format!(
             "⚠️ Focused session *{}* is gone — focus cleared, back to the coordinator. ({})",
-            target.name, error,
+            mrkdwn_escape(&target.name),
+            mrkdwn_escape(error),
         ),
         InjectOutcome::Failed { target, error } => format!(
             "❌ Send to *{}* failed: {}\nStill focused; `/unfocus` to stop.",
-            target.name, error,
+            mrkdwn_escape(&target.name),
+            mrkdwn_escape(error),
         ),
         InjectOutcome::NoFocus => NO_FOCUS_HINT.to_string(),
     }
@@ -221,7 +273,8 @@ fn render_inject(outcome: &InjectOutcome) -> String {
 
 /// Render a [`SummarizeOutcome`] as a Slack `mrkdwn` reply.
 ///
-/// Test: `render_summary_ok_shows_state_and_pending`, `render_summary_no_focus_hints`.
+/// Test: `render_summary_ok_shows_state_and_pending`, `render_summary_no_focus_hints`,
+/// `render_summary_escapes_hostile_fields`.
 fn render_summary(outcome: &SummarizeOutcome) -> String {
     match outcome {
         SummarizeOutcome::Summary {
@@ -232,22 +285,27 @@ fn render_summary(outcome: &SummarizeOutcome) -> String {
         } => {
             let decision = pending_decision
                 .as_deref()
-                .map(|d| format!("\n⚠️ pending: {d}"))
+                .map(|d| format!("\n⚠️ pending: {}", mrkdwn_escape(d)))
                 .unwrap_or_default();
             format!(
                 "*📋 {}* (`{}`) [{}]\n{}{decision}",
-                target.name,
+                mrkdwn_escape(&target.name),
                 short_id(&target.id),
-                state,
-                truncate_summary(summary),
+                mrkdwn_escape(state),
+                mrkdwn_escape(&truncate_summary(summary)),
             )
         }
         SummarizeOutcome::AutoUnfocused { target, error } => format!(
             "⚠️ Focused session *{}* is gone — focus cleared, back to the coordinator. ({})",
-            target.name, error,
+            mrkdwn_escape(&target.name),
+            mrkdwn_escape(error),
         ),
         SummarizeOutcome::Failed { target, error } => {
-            format!("❌ Summary of *{}* failed: {}", target.name, error)
+            format!(
+                "❌ Summary of *{}* failed: {}",
+                mrkdwn_escape(&target.name),
+                mrkdwn_escape(error),
+            )
         }
         SummarizeOutcome::NoFocus => NO_FOCUS_HINT.to_string(),
     }
