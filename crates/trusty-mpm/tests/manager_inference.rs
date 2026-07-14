@@ -10,8 +10,11 @@
 //! in-memory) or an `OpenAiCompatAdapter` pointed at `MockInferenceServer` (real
 //! HTTP client mechanics, loopback mock). It proves: the digest happy path, the
 //! no-provider deterministic-fallback degrade, project scoping, chat multi-turn
-//! continuity, the read-only guarantee (no tools on the request, no state
-//! mutation), and history threading over real HTTP.
+//! continuity, the no-tool-calling-surface + no-mutation-on-a-plain-message
+//! invariant (chat is NO LONGER structurally read-only as of phase 2's
+//! propose→confirm action flow, #2586 — see `tests/manager_routing.rs` for that
+//! suite; THIS file only proves a plain reply with no confirmed proposal still
+//! mutates nothing), and history threading over real HTTP.
 //! What: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test manager_inference`.
 
@@ -368,12 +371,17 @@ async fn chat_degrades_without_provider() {
     assert_eq!(body["error"], "inference_unavailable");
 }
 
-/// Why: the phase-1 chat loop is strictly read-only — the request must carry NO
-/// `tools` (so the model has no mutating surface), and driving a chat turn must
-/// not create or change any session/Deliverable record.
+/// Why: even though phase 2 (#2586) lets chat PROPOSE an action, the request
+/// must still carry NO `tools` (the model's only action surface is the parsed
+/// `manager-action` text sentinel, never real tool-calling), and a PLAIN reply
+/// with no confirmed proposal must not create or change any session/Deliverable
+/// record — the mock here replies with ordinary prose (no proposal block), so
+/// this pins the still-true "a plain message never mutates" half of the
+/// boundary. The propose→confirm execution path itself is covered by the
+/// dedicated suite in `tests/manager_routing.rs`.
 /// Test: itself.
 #[tokio::test]
-async fn chat_is_read_only_no_mutation_and_no_tools() {
+async fn chat_plain_reply_carries_no_tools_and_causes_no_mutation() {
     let server = MockInferenceServer::spawn(200, mock_body("Read-only answer."))
         .await
         .expect("spawn mock");

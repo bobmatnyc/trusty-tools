@@ -206,6 +206,23 @@ impl SessionLauncher for DaemonLauncher {
     }
 }
 
+/// Resolve the `/manager/act` + chat-confirm execution seam.
+///
+/// Why: BOTH `act.rs`'s confirm branch and `chat.rs`'s in-conversation confirm
+/// turn (#2586) need the identical "test override, else fresh production
+/// actuator" resolution — centralising it here is what makes the confirm-turn
+/// wiring `reuse the actuator, not duplicate it` (coordinator review finding 1).
+/// What: returns [`super::ManagerState::actuator_override`] when installed
+/// (hermetic suite), else a fresh [`ProxyActuator::production`].
+/// Test: exercised via `tests/manager_routing.rs` (act) and the chat
+/// propose-confirm suite in the same file.
+pub fn resolve_actuator(state: &Arc<DaemonState>) -> Arc<dyn ManagerActuator> {
+    match state.manager_state().actuator_override() {
+        Some(actuator) => actuator,
+        None => Arc::new(ProxyActuator::production(state)),
+    }
+}
+
 /// The action seam the `/manager/act` handler executes on confirm.
 ///
 /// Why: type-erasing the concrete executor behind a trait is what lets

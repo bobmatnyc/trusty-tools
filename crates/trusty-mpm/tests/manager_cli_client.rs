@@ -31,7 +31,13 @@
 //! `manager_digest_client_surfaces_unknown_project_404_against_real_daemon`,
 //! `manager_chat_client_reads_llm_reply_against_real_daemon`,
 //! `manager_chat_client_surfaces_degrade_message_against_real_daemon`,
-//! `manager_digest_and_chat_degrade_cleanly_on_404_against_older_daemon`.
+//! `manager_digest_and_chat_degrade_cleanly_on_404_against_older_daemon`; plus
+//! (coordinator review finding 2, WI-8 #2585) `manager_route_task_client_reads_live_route_against_real_daemon`,
+//! `manager_route_task_client_surfaces_400_for_empty_text_against_real_daemon`
+//! (the non-404 error path — `DaemonClient::manager_route_task`'s HTTP method,
+//! timeout wiring, and `Err` mapping were previously unexercised beyond the
+//! `from_body` parser unit tests), and
+//! `manager_route_task_client_degrades_cleanly_on_404_against_older_daemon`.
 //! Test: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test manager_cli_client`.
 
@@ -252,15 +258,15 @@ async fn manager_chat_client_surfaces_degrade_message_against_real_daemon() {
     assert_eq!(outcome.conversation_key, "cli:bob");
 }
 
-/// A hand-built stub standing in for a daemon that PREDATES WI-3/WI-4 — the
-/// one scenario the current `origin/main` router (which now ships digest/chat,
-/// PR #2601) cannot produce. `/manager/version` reports both routes
-/// `available: false` and neither route is mounted at all, so a request to
-/// either 404s with an empty body — the genuine "upgrade your daemon" case
+/// A hand-built stub standing in for a daemon that PREDATES WI-3/WI-4/WI-8 — the
+/// one scenario the current `origin/main` router (which now ships
+/// digest/chat/route-task) cannot produce. `/manager/version` reports all three
+/// routes `available: false` and none is mounted at all, so a request to any of
+/// them 404s with an empty body — the genuine "upgrade your daemon" case
 /// [`DaemonClient::manager_endpoint_available`] feature-detects via the
 /// version probe.
 fn older_daemon_stub_router() -> Router {
-    async fn version_without_digest_or_chat() -> impl IntoResponse {
+    async fn version_without_digest_chat_or_route_task() -> impl IntoResponse {
         Json(serde_json::json!({
             "manager_api_version": "0.1.0",
             "crate_version": "0.0.0",
@@ -270,13 +276,14 @@ fn older_daemon_stub_router() -> Router {
                 { "method": "GET", "path": "/api/v1/manager/status", "available": true },
                 { "method": "GET", "path": "/api/v1/manager/digest", "available": false },
                 { "method": "POST", "path": "/api/v1/manager/chat", "available": false },
+                { "method": "POST", "path": "/api/v1/manager/route-task", "available": false },
             ],
             "palace": { "id": "tm-manager-portfolio", "available": false, "reason": null },
         }))
     }
     Router::new().route(
         "/api/v1/manager/version",
-        get(version_without_digest_or_chat),
+        get(version_without_digest_chat_or_route_task),
     )
 }
 
@@ -311,5 +318,66 @@ async fn manager_digest_and_chat_degrade_cleanly_on_404_against_older_daemon() {
     assert!(
         chat.is_none(),
         "expected None (404 degrade) against a daemon reporting chat unavailable"
+    );
+}
+
+/// `DaemonClient::manager_route_task` against the real, shipped
+/// `POST /api/v1/manager/route-task` route (WI-8, #2585) — proves the CLI's
+/// route-task path end to end (the HTTP method, the request body shape, and the
+/// timeout wiring), not merely the wire-shape unit tests in
+/// `client/http_client/manager.rs` (coordinator review finding 2).
+#[tokio::test]
+async fn manager_route_task_client_reads_live_route_against_real_daemon() {
+    let state = fresh_state().await;
+    register_project(&state, "alpha", "https://github.com/acme/alpha").await;
+    let base = serve_real(Arc::clone(&state)).await;
+    let client = DaemonClient::new(base);
+
+    let outcome = client
+        .manager_route_task("alpha")
+        .await
+        .expect("call")
+        .expect("Some(outcome) on 200");
+    assert_eq!(outcome.project.as_deref(), Some("alpha"));
+    assert_eq!(outcome.resolved_by, "resolver");
+}
+
+/// The non-404 error path (coordinator review finding 2: previously
+/// unexercised): an empty `text` is the daemon's own `400`, which
+/// `manager_route_task` must surface as `Err`, never `Ok(None)` — mirroring how
+/// `manager_digest_client_surfaces_unknown_project_404_against_real_daemon`
+/// pins digest's non-mount-detection error path.
+#[tokio::test]
+async fn manager_route_task_client_surfaces_400_for_empty_text_against_real_daemon() {
+    let state = fresh_state().await;
+    let base = serve_real(Arc::clone(&state)).await;
+    let client = DaemonClient::new(base);
+
+    let err = client
+        .manager_route_task("   ")
+        .await
+        .expect_err("an empty task must be Err, not Ok(None)");
+    assert!(
+        err.to_string().contains("text must not be empty"),
+        "error should carry the daemon's own 400 message: {err}"
+    );
+}
+
+/// Against a daemon whose `/manager/version` reports `route-task` unavailable
+/// (and does not mount it at all, so it 404s), the client must degrade to
+/// `Ok(None)` — the genuine "upgrade your daemon" case, mirroring the
+/// digest/chat coverage above.
+#[tokio::test]
+async fn manager_route_task_client_degrades_cleanly_on_404_against_older_daemon() {
+    let base = serve_mock(older_daemon_stub_router()).await;
+    let client = DaemonClient::new(base);
+
+    let route = client
+        .manager_route_task("fix the flaky auth test")
+        .await
+        .expect("manager_route_task call should not error on a genuinely unmounted route");
+    assert!(
+        route.is_none(),
+        "expected None (404 degrade) against a daemon reporting route-task unavailable"
     );
 }

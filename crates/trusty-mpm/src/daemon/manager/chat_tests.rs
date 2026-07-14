@@ -1,8 +1,10 @@
-//! Unit tests for the chat prompt builder (WI-4, #2581).
+//! Unit tests for the chat prompt builder (WI-4 #2581, WI-9 #2586).
 //!
 //! Why: the prompt must ground each reply in the live snapshot AND replay prior
-//! turns in order, and it must carry NO tools (the read-only guarantee is
-//! structural). Prove the message assembly directly.
+//! turns in order, must carry NO tools (the model's ONLY action surface is the
+//! parsed `manager-action` text sentinel, never a real tool-calling API), and
+//! must document that sentinel's exact format so [`super::proposal::extract_proposed_action`]
+//! can round-trip it. Prove the message assembly directly.
 //! What: covers [`super::build_chat_messages`] with a history and an empty
 //! snapshot.
 //! Test: this file IS the test module.
@@ -11,8 +13,10 @@ use super::super::chat_store::{ChatTurn, TurnRole};
 use super::super::status::aggregate_portfolio_status;
 use super::build_chat_messages;
 
-/// Why: the assembled prompt must be system(persona+snapshot) → replayed history
-/// → new user message, in that order, with the read-only persona pinned.
+/// Why: the assembled prompt must be system(persona+proposal-format+snapshot) →
+/// replayed history → new user message, in that order, with the advisory
+/// (propose-not-execute) persona pinned and the `manager-action` sentinel format
+/// documented to the model.
 /// Test: itself.
 #[test]
 fn build_chat_messages_includes_context_and_history() {
@@ -31,7 +35,14 @@ fn build_chat_messages_includes_context_and_history() {
     assert_eq!(messages.len(), 4, "system + 2 history + new user");
     assert_eq!(messages[0].role, "system");
     let system = messages[0].content.as_deref().unwrap_or_default();
-    assert!(system.contains("read-only"), "persona pinned read-only");
+    assert!(
+        system.contains("advisory") && system.contains("PROPOSE"),
+        "persona pinned to propose-not-execute"
+    );
+    assert!(
+        system.contains("```manager-action"),
+        "proposal sentinel format documented to the model"
+    );
     assert!(system.contains("\"project_count\": 0"), "snapshot embedded");
     assert_eq!(messages[1].role, "user");
     assert_eq!(messages[1].content.as_deref(), Some("what's blocked?"));

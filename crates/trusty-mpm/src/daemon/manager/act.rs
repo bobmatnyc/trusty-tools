@@ -28,7 +28,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::actuator::{InjectOutcome, ManagerActuator, ProxyActuator, SummarizeOutcome};
+use super::actuator::{InjectOutcome, ManagerActuator, SummarizeOutcome, resolve_actuator};
 use crate::daemon::state::DaemonState;
 
 /// The action a caller proposes (and, on confirm, the manager executes).
@@ -76,6 +76,20 @@ pub enum ProposedAction {
 #[derive(Debug, Deserialize)]
 pub struct ActRequest {
     /// Conversation key (same keying shape as `SessionProxy`'s focus map).
+    ///
+    /// Why REQUIRED uniformly across every [`ProposedAction`] variant — including
+    /// `Launch`, whose execution path (`execute_action`) does not read it at all:
+    /// this is a DELIBERATE consistency/audit-trail choice (coordinator review
+    /// finding 3), not an oversight. Every manager action — proposed via this
+    /// endpoint or via the chat loop's in-conversation propose/confirm (#2586,
+    /// `chat.rs`) — is attributable to the conversation that proposed it, and a
+    /// single uniform validation rule (`400` on empty, for every action type) is
+    /// simpler to reason about and test than a per-variant carve-out. A future
+    /// caller that wants a conversation-less launch should mint a synthetic key
+    /// (e.g. `"api:<uuid>"`) rather than have the server special-case `Launch`.
+    /// Test: `act_empty_conversation_key_is_400` (Summarize),
+    /// `act_launch_also_requires_conversation_key` (Launch) in
+    /// `tests/manager_routing.rs`.
     pub conversation_key: String,
     /// The proposed action.
     pub action: ProposedAction,
@@ -231,18 +245,60 @@ pub fn propose_message(action: &ProposedAction) -> String {
     format!("Proposed: {body}. Re-send this request with \"confirm\": true to execute it.")
 }
 
+/// Execute a confirmed [`ProposedAction`] through the [`ManagerActuator`] seam.
+///
+/// Why: BOTH `/manager/act`'s confirm branch and the chat loop's in-conversation
+/// confirm turn (#2586, coordinator review finding 1) must execute an action the
+/// IDENTICAL way — through the same actuator instance and the same
+/// [`ProposedAction`]/[`ActResponse`] types — so extracting the dispatch here is
+/// what makes the chat wiring a genuine reuse rather than a parallel copy.
+/// What: dispatches by variant — `Launch` calls [`ManagerActuator::launch`] and
+/// maps `Err` to a `String` (the caller decides how to render a launch failure,
+/// since `/manager/act` renders it as a 502 while chat renders it inline in the
+/// reply); `Inject`/`Summarize` call the matching actuator verb and always
+/// succeed at the HTTP layer (their failure modes are valid [`ActResponse`]
+/// variants, never a hard error).
+/// Test: HTTP coverage in `tests/manager_routing.rs` (both the `/manager/act`
+/// confirm path and the chat propose-confirm suite exercise this).
+pub async fn execute_action(
+    actuator: &Arc<dyn ManagerActuator>,
+    conversation_key: &str,
+    action: ProposedAction,
+) -> Result<ActResponse, String> {
+    match action {
+        ProposedAction::Launch { project, task } => actuator
+            .launch(&project, &task)
+            .await
+            .map(|outcome| ActResponse::Launched {
+                session_id: outcome.session_id,
+                name: outcome.name,
+                state: outcome.state,
+            }),
+        ProposedAction::Inject { session, text } => Ok(ActResponse::from(
+            actuator.inject(conversation_key, &session, &text).await,
+        )),
+        ProposedAction::Summarize { session } => Ok(ActResponse::from(
+            actuator.summarize(conversation_key, &session).await,
+        )),
+    }
+}
+
 /// `POST /api/v1/manager/act` handler (propose → confirm).
 ///
 /// Why: the curl-first (§4) surface for acting on a resolved route WITHOUT silent
 /// mutation. A call with `confirm` unset returns a proposal and touches nothing; a
 /// call with `confirm: true` executes exactly one action through the
 /// [`ManagerActuator`] seam — a launch via #2108's launch verb, an inject/summarize
-/// via L2's `SessionProxy`.
-/// What: validates the conversation key (400 on empty); on `confirm == false`
-/// returns [`ActResponse::Proposed`]; on `confirm == true` resolves the actuator
-/// (a test override on [`ManagerState`], else a fresh production [`ProxyActuator`])
-/// and dispatches by action, rendering the structured outcome. A launch spawn
-/// error is a 502 (the one genuinely failing side effect); inject/summarize
+/// via L2's `SessionProxy`. This is ALSO the seam the chat loop's confirm turn
+/// drives (`chat.rs`, #2586) via the shared [`execute_action`] helper — the API
+/// route and the conversational confirm turn execute identically.
+/// What: validates the conversation key (400 on empty — required uniformly across
+/// every action, including `Launch`, which does not read it operationally; see
+/// [`ActRequest::conversation_key`]'s doc for why); on `confirm == false` returns
+/// [`ActResponse::Proposed`]; on `confirm == true` resolves the actuator (a test
+/// override on [`ManagerState`], else a fresh production `ProxyActuator`, via
+/// [`resolve_actuator`]) and calls [`execute_action`]. A launch spawn error is a
+/// 502 (the one genuinely failing side effect); inject/summarize
 /// resolution/vanish/transient outcomes are valid advisory states returned as 200.
 /// Never logs task/message text (privacy).
 /// Test: HTTP coverage in `tests/manager_routing.rs`.
@@ -269,37 +325,18 @@ pub async fn manager_act_route(
         .into_response();
     }
 
-    // Confirmed: resolve the execution seam (test override, else production).
-    let manager = state.manager_state();
-    let actuator: Arc<dyn ManagerActuator> = match manager.actuator_override() {
-        Some(a) => a,
-        None => Arc::new(ProxyActuator::production(&state)),
-    };
-
-    match body.action {
-        ProposedAction::Launch { project, task } => match actuator.launch(&project, &task).await {
-            Ok(outcome) => Json(ActResponse::Launched {
-                session_id: outcome.session_id,
-                name: outcome.name,
-                state: outcome.state,
-            })
-            .into_response(),
-            Err(error) => {
-                tracing::warn!("manager act: launch failed for project {project}: {error}");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "launch_failed", "message": error })),
-                )
-                    .into_response()
-            }
-        },
-        ProposedAction::Inject { session, text } => {
-            let outcome = actuator.inject(&conversation_key, &session, &text).await;
-            Json(ActResponse::from(outcome)).into_response()
-        }
-        ProposedAction::Summarize { session } => {
-            let outcome = actuator.summarize(&conversation_key, &session).await;
-            Json(ActResponse::from(outcome)).into_response()
+    // Confirmed: resolve the execution seam (test override, else production) and
+    // execute through the SAME dispatch the chat confirm turn uses.
+    let actuator = resolve_actuator(&state);
+    match execute_action(&actuator, &conversation_key, body.action).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::warn!("manager act: action execution failed: {error}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "launch_failed", "message": error })),
+            )
+                .into_response()
         }
     }
 }

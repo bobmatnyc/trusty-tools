@@ -23,6 +23,7 @@ use super::actuator::ManagerActuator;
 use super::chat_store::ChatStore;
 use super::inference::ManagerInference;
 use super::memory::PortfolioPalace;
+use super::proposal::ProposalStore;
 
 /// The daemon-owned state for the `tm manager` (Layer-3) surface.
 ///
@@ -42,6 +43,9 @@ pub struct ManagerState {
     inference: ManagerInference,
     /// Conversation-keyed recent-turn store for the chat loop (WI-4).
     conversations: ChatStore,
+    /// Conversation-keyed pending-proposal store for the chat loop's
+    /// propose→confirm action flow (WI-9, #2586), next-turn-only TTL.
+    proposals: ProposalStore,
     /// Optional TEST override for the `/manager/act` execution seam (WI-9, #2586).
     ///
     /// `None` in production (the handler builds a fresh production
@@ -58,6 +62,7 @@ impl std::fmt::Debug for ManagerState {
             .field("palace", &self.palace)
             .field("inference", &self.inference)
             .field("conversations", &self.conversations)
+            .field("proposals", &self.proposals)
             .field("actuator_override", &has_actuator)
             .finish()
     }
@@ -80,6 +85,7 @@ impl ManagerState {
             palace: PortfolioPalace::provision(framework_root),
             inference: ManagerInference::provision(),
             conversations: ChatStore::default(),
+            proposals: ProposalStore::new(),
             actuator: Mutex::new(None),
         }
     }
@@ -115,6 +121,20 @@ impl ManagerState {
     /// `tests/manager_inference.rs`.
     pub fn conversations(&self) -> &ChatStore {
         &self.conversations
+    }
+
+    /// The conversation-keyed pending-proposal store for chat's propose→confirm
+    /// action flow.
+    ///
+    /// Why: `/manager/chat` reads/consumes the pending proposal for a
+    /// conversation on EVERY turn (the next-turn-only TTL policy,
+    /// [`super::proposal::ProposalStore`]'s doc) before deciding whether to
+    /// execute, discard, or propose a new action.
+    /// What: a shared reference to the [`ProposalStore`].
+    /// Test: `proposal_store_take_is_consume_on_read` (proposal module);
+    /// `tests/manager_routing.rs`.
+    pub fn proposals(&self) -> &ProposalStore {
+        &self.proposals
     }
 
     /// The installed `/manager/act` execution-seam override, if any.

@@ -1,6 +1,6 @@
 //! Hermetic HTTP integration suite for the Layer-3 manager PHASE 2 routing +
-//! proposal-and-confirm surface (`/api/v1/manager/{route-task,act}`, epic #2109,
-//! DOC-36 phase 2: WI-8 #2585, WI-9 #2586).
+//! proposal-and-confirm surface (`/api/v1/manager/{route-task,act,chat}`, epic
+//! #2109, DOC-36 phase 2: WI-8 #2585, WI-9 #2586).
 //!
 //! Why: DOC-36 §4's local-testability bar requires these endpoints to be
 //! exercisable with NO live provider key, NO network, and NO channel/bot token.
@@ -11,7 +11,14 @@
 //! empty-text 400; (2) `act` — the propose→confirm protocol, proving a call
 //! without `confirm` executes NOTHING and a `confirm: true` call routes a launch
 //! through a test-double `SessionLauncher` and an inject through a REAL
-//! `SessionProxy` over a test-double `ManagedBackend` (no live session/channel).
+//! `SessionProxy` over a test-double `ManagedBackend` (no live session/channel);
+//! (3) `chat`'s IN-CONVERSATION propose→confirm action flow (coordinator review
+//! of #2586's primary acceptance criterion) — a proposal turn executes nothing,
+//! the immediately-following confirm turn on the SAME conversation_key executes
+//! exactly once through the SAME actuator seam `act` uses, confirming on a
+//! DIFFERENT conversation_key never executes, an unconfirmed proposal expires
+//! after exactly one intervening turn (next-turn-only TTL), and a plain message
+//! never triggers execution.
 //! What: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test manager_routing`.
 
@@ -463,4 +470,237 @@ async fn act_empty_conversation_key_is_400() {
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// Why: `conversation_key` is required UNIFORMLY across every action type — a
+/// deliberate consistency/audit-trail choice (coordinator review finding 3), not
+/// an oversight limited to Inject/Summarize. `Launch` does not read the key
+/// operationally, but an empty key must still 400, proving the rule applies to
+/// (and is tested for) the one variant that never uses it.
+/// Test: itself.
+#[tokio::test]
+async fn act_launch_also_requires_conversation_key() {
+    let state = fresh_state().await;
+    let launcher = Arc::new(FakeLauncher::new());
+    let backend = Arc::new(FakeBackend::new());
+    install_actuator(&state, Arc::clone(&launcher), Arc::clone(&backend));
+    let base = serve(Arc::clone(&state)).await;
+
+    let (status, _body) = post(
+        &base,
+        "/api/v1/manager/act",
+        json!({
+            "conversation_key": "  ",
+            "confirm": true,
+            "action": { "type": "launch", "project": "alpha", "task": "do the thing" }
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    // The launch verb was never reached.
+    assert!(launcher.launched.lock().unwrap().is_empty());
+}
+
+// ── chat: in-conversation propose→confirm (coordinator review finding 1, #2586) ─
+
+/// Install a scripted adapter with MULTIPLE queued replies (FIFO), so a test can
+/// script exactly how many LLM calls it expects across several chat turns.
+fn install_scripted_queue(state: &Arc<DaemonState>, replies: &[&str]) {
+    let mut adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter));
+    for reply in replies {
+        adapter = adapter.with_response(scripted_reply(reply));
+    }
+    let adapter: Arc<dyn InferenceAdapter> = Arc::new(adapter);
+    state
+        .manager_state()
+        .inference()
+        .set_adapter(adapter, "test/model");
+}
+
+/// A reply text embedding a `manager-action` launch proposal, as the documented
+/// chat system prompt instructs the model to produce.
+fn proposal_reply(project: &str, task: &str) -> String {
+    format!(
+        "Sure, I can help with that.\n\n```manager-action\n\
+         {{\"type\":\"launch\",\"project\":\"{project}\",\"task\":\"{task}\"}}\n\
+         ```"
+    )
+}
+
+/// Why: a turn whose LLM reply embeds a proposal must NOT execute anything — the
+/// primary #2586 acceptance criterion, "propose in-conversation, execute only on
+/// explicit confirmation".
+/// Test: itself.
+#[tokio::test]
+async fn chat_proposal_turn_executes_nothing() {
+    let state = fresh_state().await;
+    let launcher = Arc::new(FakeLauncher::new());
+    let backend = Arc::new(FakeBackend::new());
+    install_actuator(&state, Arc::clone(&launcher), Arc::clone(&backend));
+    let reply = proposal_reply("alpha", "fix the flaky auth test");
+    install_scripted_queue(&state, &[reply.as_str()]);
+    let base = serve(Arc::clone(&state)).await;
+
+    let (status, body) = post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-1", "message": "launch a session for alpha to fix the flaky auth test" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["action_result"]["status"], "proposed", "body: {body}");
+    assert!(
+        body["reply"].as_str().unwrap().contains("confirm"),
+        "body: {body}"
+    );
+    assert!(launcher.launched.lock().unwrap().is_empty());
+}
+
+/// Why: the VERY NEXT turn on the SAME conversation_key, confirming, must execute
+/// the pending proposal EXACTLY ONCE, through the actuator seam — with ZERO
+/// additional LLM calls (only 1 scripted reply is queued, for the propose turn).
+/// Test: itself.
+#[tokio::test]
+async fn chat_confirm_turn_executes_exactly_once() {
+    let state = fresh_state().await;
+    let launcher = Arc::new(FakeLauncher::new());
+    let backend = Arc::new(FakeBackend::new());
+    install_actuator(&state, Arc::clone(&launcher), Arc::clone(&backend));
+    // Only ONE reply queued — the confirm turn must consume ZERO LLM calls.
+    let reply = proposal_reply("alpha", "fix the flaky auth test");
+    install_scripted_queue(&state, &[reply.as_str()]);
+    let base = serve(Arc::clone(&state)).await;
+
+    let (propose_status, _propose_body) = post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-2", "message": "launch a session for alpha to fix the flaky auth test" }),
+    )
+    .await;
+    assert_eq!(propose_status, reqwest::StatusCode::OK);
+
+    let (confirm_status, confirm_body) = post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-2", "message": "confirm" }),
+    )
+    .await;
+    assert_eq!(confirm_status, reqwest::StatusCode::OK);
+    assert_eq!(
+        confirm_body["action_result"]["status"], "launched",
+        "body: {confirm_body}"
+    );
+    let launched = launcher.launched.lock().unwrap();
+    assert_eq!(launched.len(), 1, "must execute exactly once");
+    assert_eq!(
+        launched[0],
+        ("alpha".to_string(), "fix the flaky auth test".to_string())
+    );
+}
+
+/// Why: confirming on a DIFFERENT conversation_key than the one that proposed
+/// must NOT execute anything — proposals are strictly conversation-scoped.
+/// Test: itself.
+#[tokio::test]
+async fn chat_confirm_on_different_conversation_key_does_not_execute() {
+    let state = fresh_state().await;
+    let launcher = Arc::new(FakeLauncher::new());
+    let backend = Arc::new(FakeBackend::new());
+    install_actuator(&state, Arc::clone(&launcher), Arc::clone(&backend));
+    // Propose turn (key A) consumes 1 reply; the "confirm" on key B has no
+    // pending proposal so it falls through to a normal (2nd scripted) LLM call.
+    let reply = proposal_reply("alpha", "fix the flaky auth test");
+    install_scripted_queue(&state, &[reply.as_str(), "I'm not sure what you mean."]);
+    let base = serve(Arc::clone(&state)).await;
+
+    post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-a", "message": "launch a session for alpha to fix the flaky auth test" }),
+    )
+    .await;
+
+    let (status, body) = post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-b", "message": "confirm" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    // No pending proposal on conv-b, so this was treated as an ordinary message
+    // — no action_result, and definitely nothing launched.
+    assert!(body.get("action_result").is_none(), "body: {body}");
+    assert!(launcher.launched.lock().unwrap().is_empty());
+}
+
+/// Why: an UNCONFIRMED proposal must expire after exactly one intervening turn —
+/// a later "confirm" (a THIRD turn) must find nothing pending and therefore not
+/// execute (the next-turn-only TTL policy).
+/// Test: itself.
+#[tokio::test]
+async fn chat_unconfirmed_proposal_expires_next_turn() {
+    let state = fresh_state().await;
+    let launcher = Arc::new(FakeLauncher::new());
+    let backend = Arc::new(FakeBackend::new());
+    install_actuator(&state, Arc::clone(&launcher), Arc::clone(&backend));
+    // Turn 1 (propose) + turn 2 (plain, unrelated — expires the proposal) + turn
+    // 3 ("confirm", but nothing pending — falls through to a normal LLM call).
+    let reply = proposal_reply("alpha", "fix the flaky auth test");
+    install_scripted_queue(
+        &state,
+        &[
+            reply.as_str(),
+            "Sure, happy to chat about something else.",
+            "Not sure what you'd like me to confirm.",
+        ],
+    );
+    let base = serve(Arc::clone(&state)).await;
+
+    post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-3", "message": "launch a session for alpha to fix the flaky auth test" }),
+    )
+    .await;
+    // Turn 2: an unrelated plain message — the pending proposal expires.
+    post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-3", "message": "what else is going on?" }),
+    )
+    .await;
+    // Turn 3: "confirm" arrives too late — nothing is pending anymore.
+    let (status, body) = post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-3", "message": "confirm" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(body.get("action_result").is_none(), "body: {body}");
+    assert!(launcher.launched.lock().unwrap().is_empty());
+}
+
+/// Why: a plain chat message (no proposal in the reply, not a confirmation)
+/// must never trigger execution — the baseline "still safe by default" case.
+/// Test: itself.
+#[tokio::test]
+async fn chat_plain_message_never_triggers_execution() {
+    let state = fresh_state().await;
+    let launcher = Arc::new(FakeLauncher::new());
+    let backend = Arc::new(FakeBackend::new());
+    install_actuator(&state, Arc::clone(&launcher), Arc::clone(&backend));
+    install_scripted_queue(&state, &["Everything looks fine, nothing blocked."]);
+    let base = serve(Arc::clone(&state)).await;
+
+    let (status, body) = post(
+        &base,
+        "/api/v1/manager/chat",
+        json!({ "conversation_key": "conv-4", "message": "what needs my attention?" }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(body.get("action_result").is_none(), "body: {body}");
+    assert_eq!(body["reply"], "Everything looks fine, nothing blocked.");
+    assert!(launcher.launched.lock().unwrap().is_empty());
 }
