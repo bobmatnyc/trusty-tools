@@ -1651,6 +1651,12 @@ mod tests {
     /// Builds a minimal [`SessionRecord`] for [`find_reusable_inproject_session`]
     /// tests — only `source_id`, `state`, and `tmux_name` affect the predicate;
     /// every other field is an arbitrary placeholder.
+    ///
+    /// `#[rustfmt::skip]`: the trailing always-placeholder fields are
+    /// deliberately paired up two-per-line — this file is grandfathered at a
+    /// frozen SLOC budget (`.line-cap-allowlist.tsv`, #2364), so a
+    /// one-line-per-field expansion here would ratchet it up.
+    #[rustfmt::skip]
     fn stub_record(
         source_id: Option<&str>,
         state: ManagedSessionState,
@@ -1664,22 +1670,15 @@ mod tests {
             state,
             created_at: chrono::Utc::now(),
             last_activity_at: None,
-            workspace_path: None,
-            repo_url: None,
-            branch: None,
-            pending_decision: None,
-            proposed_default: None,
-            correlation: Default::default(),
+            workspace_path: None, repo_url: None,
+            branch: None, pending_decision: None,
+            proposed_default: None, correlation: Default::default(),
             runtime: Default::default(),
-            ephemeral: false,
-            workspace_owned: false,
+            ephemeral: false, workspace_owned: false,
             source_id: source_id.map(str::to_owned),
-            claude_session_id: None,
-            scrollback_path: None,
-            last_cwd: None,
-            deliverable_id: None,
-            pane_id: None,
-            injection_status: Default::default(),
+            claude_session_id: None, scrollback_path: None,
+            last_cwd: None, deliverable_id: None,
+            pane_id: None, injection_status: Default::default(),
         }
     }
 
