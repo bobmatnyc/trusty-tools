@@ -293,6 +293,29 @@ impl LaunchdConfig {
         Ok(())
     }
 
+    /// Report whether the agent is currently loaded in the GUI domain.
+    ///
+    /// Why: `tctl start` right after `tctl install` (#2556) would otherwise
+    /// unconditionally call [`bootstrap`](Self::bootstrap) — which itself
+    /// boots the agent OUT first — bouncing a daemon that the install's own
+    /// service-bootstrap step just started seconds earlier. A cheap
+    /// `launchctl print` check lets the caller skip that redundant restart
+    /// when the agent is already loaded and running (#2566 review, item 4).
+    /// What: runs `launchctl print gui/<uid>/<label>` and returns whether it
+    /// exited successfully (launchctl exits non-zero when the label is not
+    /// loaded). Never errors — an inability to query is treated as "not
+    /// loaded" so the caller falls back to the safe (bootstrap) path.
+    /// Test: side-effecting `launchctl` call; exercised manually (mirrors the
+    /// `service status` subcommands' identical `launchctl print` check).
+    pub fn is_loaded(&self) -> bool {
+        let target = format!("gui/{}/{}", current_uid(), self.label);
+        Command::new("launchctl")
+            .args(["print", &target])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     /// Bootout (stop and unload) the agent via `launchctl`.
     ///
     /// Why: uninstalling or re-bootstrapping an agent requires removing the
