@@ -20,3 +20,4 @@ pub mod port;
 pub mod run;
 #[cfg(feature = "http-server")]
 pub mod serve;
+pub mod service;

@@ -170,6 +170,11 @@ pub enum Commands {
     Install {
         /// Specific member(s) to install; omit for all enabled members.
         members: Vec<String>,
+
+        /// Install binaries only — skip the post-install launchd service
+        /// bootstrap (#2556). Also settable via `TCTL_NO_SERVICE_BOOTSTRAP`.
+        #[arg(long)]
+        no_service: bool,
     },
 
     /// Upgrade the stack (or named members) to the BOM-pinned versions, then restart. (DOC-9)

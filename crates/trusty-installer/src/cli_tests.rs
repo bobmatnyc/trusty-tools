@@ -215,8 +215,20 @@ fn parse_install_members() {
         "trusty-memory",
     ])
     .expect("install members parses");
-    if let Commands::Install { members } = &cli.command {
+    if let Commands::Install { members, .. } = &cli.command {
         assert_eq!(members, &["trusty-search", "trusty-memory"]);
+    } else {
+        panic!("expected Install");
+    }
+}
+
+/// Parse `trusty-installer install --no-service` (#2556 opt-out flag).
+#[test]
+fn parse_install_no_service() {
+    let cli = Cli::try_parse_from(["trusty-installer", "install", "--no-service"])
+        .expect("install --no-service parses");
+    if let Commands::Install { no_service, .. } = &cli.command {
+        assert!(*no_service, "--no-service must set the flag");
     } else {
         panic!("expected Install");
     }

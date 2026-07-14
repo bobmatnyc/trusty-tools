@@ -27,7 +27,8 @@ use trusty_progress::{Component, ComponentTracker};
 use super::dependency_graph::describe_added;
 use super::progress_ui::{narrator, prompt_yes_no};
 use super::runtime::block_on;
-use super::stable_set::{select_members_transitive, StableMember};
+use super::service_bootstrap::{bootstrap_enabled, bootstrap_member_service, NO_SERVICE_ENV};
+use super::stable_set::{select_members_transitive, ManageStrategy, StableMember};
 use crate::output::render_json;
 
 /// One member's install outcome for the `--json` report.
@@ -103,9 +104,14 @@ impl InstallReport {
 /// rendering progress rows; emits either the human component table + summary or
 /// the `--json` [`InstallReport`]. Returns the process exit code.
 ///
+/// `no_service` (the `--no-service` flag) — together with the [`NO_SERVICE_ENV`]
+/// environment opt-out — suppresses the Phase-7b launchd service bootstrap
+/// (#2556) so operators who manage launchd themselves, or CI, install binaries
+/// only.
+///
 /// Test: `tests::run_unknown_member_is_error`; the install path itself is
 /// side-effecting (`cargo install`) and validated manually.
-pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
+pub fn run(members: &[String], yes: bool, json: bool, no_service: bool) -> i32 {
     // Phase 4: interactive component picker.
     // Only activates when: no explicit members, stdin is a TTY, and not --json.
     // When members are passed, or in --json / non-TTY mode, behaviour is unchanged.
@@ -204,7 +210,11 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
         }
     }
 
-    let report = block_on(install_all(&selected, json));
+    // #2556: whether to bootstrap each daemon member's launchd plist after it
+    // installs. Disabled by the `--no-service` flag or the env opt-out.
+    let service_enabled = bootstrap_enabled(no_service, std::env::var_os(NO_SERVICE_ENV).is_some());
+
+    let report = block_on(install_all(&selected, json, service_enabled));
     if json {
         // A failed machine-readable write must not exit 0: automation would
         // read success from the exit code while the JSON never arrived.
@@ -225,8 +235,16 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
 /// What: For each member, runs `perform_upgrade` then `verify_installed_binary`,
 /// rendering a `trusty-progress` narration line per member and a final component
 /// table of the installed binaries (with on-disk sizes when resolvable).
-/// Test: Side-effecting; the report shaping is tested via `InstallReport`.
-async fn install_all(selected: &[StableMember], json: bool) -> InstallReport {
+/// When `service_enabled`, each launchd-managed daemon member also has its own
+/// `<binary> service install` run after it lands (#2556, Phase 7b) so the plist
+/// exists before `tctl start`.
+/// Test: Side-effecting; the report shaping is tested via `InstallReport` and the
+/// per-member service policy is tested in `super::service_bootstrap::tests`.
+async fn install_all(
+    selected: &[StableMember],
+    json: bool,
+    service_enabled: bool,
+) -> InstallReport {
     let narr = narrator(json);
     let _ = narr.info(&format!("installing {} component(s)", selected.len()));
 
@@ -261,6 +279,16 @@ async fn install_all(selected: &[StableMember], json: bool) -> InstallReport {
                 // Phase 8: codesign + FDA guidance for trusty-search.
                 if m.crate_name == "trusty-search" {
                     super::macos_signing::post_install_search(&install_dir, json);
+                }
+                // Phase 7b (#2556): bootstrap the launchd plist for each shared
+                // daemon (search/memory/analyze/review/console) via its own
+                // `<binary> service install`, so `tctl start` has a plist to
+                // load. trusty-mpm (OwnVerb, handled above) and tga (non-daemon)
+                // are excluded. Fail-soft + idempotent + non-clobbering; see
+                // `service_bootstrap`.
+                if service_enabled && m.manage == ManageStrategy::Launchd {
+                    let action = bootstrap_member_service(&m.binary);
+                    let _ = narr.info(&action.note(&m.binary));
                 }
             }
             Err(e) => {
@@ -483,7 +511,7 @@ mod tests {
     /// Test: This is the test.
     #[test]
     fn run_unknown_member_is_error() {
-        let code = run(&["not-a-real-tool".to_owned()], true, true);
+        let code = run(&["not-a-real-tool".to_owned()], true, true, false);
         assert_eq!(code, 3);
     }
 }

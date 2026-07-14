@@ -160,6 +160,17 @@ enum Commands {
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
     Config(trusty_common::inference::config::ConfigCommand),
+
+    /// Manage the macOS launchd LaunchAgent for the review daemon (#2557).
+    ///
+    /// `install` writes `~/Library/LaunchAgents/com.trusty.trusty-review.plist`
+    /// (running `trusty-review serve`) and bootstraps it; `uninstall` unloads
+    /// and removes it; `status` / `logs` inspect the running agent. macOS-only.
+    /// `tctl install` / `tctl start` call `install` on the operator's behalf.
+    Service {
+        #[command(subcommand)]
+        action: commands::service::ServiceAction,
+    },
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -190,6 +201,13 @@ fn main() -> Result<()> {
         return handle_port(format);
     }
 
+    // `service` drives macOS launchd (`launchctl`) synchronously — dispatch
+    // before the async runtime so `tctl install`/`tctl start` hooks pay no
+    // tokio start-up cost for a plist write.
+    if let Commands::Service { action } = &cli.command {
+        return commands::service::run_service_action(action);
+    }
+
     let rt = tokio::runtime::Runtime::new().context("build tokio runtime")?;
     rt.block_on(async_main(cli))
 }
@@ -212,5 +230,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         // called; this arm is unreachable at runtime but required for
         // exhaustive match.
         Commands::Port { .. } => unreachable!("port dispatched before async_main"),
+        // `service` is likewise dispatched synchronously in `main`.
+        Commands::Service { .. } => unreachable!("service dispatched before async_main"),
     }
 }

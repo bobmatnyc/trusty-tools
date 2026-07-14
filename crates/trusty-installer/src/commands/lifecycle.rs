@@ -275,15 +275,22 @@ fn apply_to_member(verb: Verb, m: &StableMember) -> anyhow::Result<String> {
 /// [`super::plist_label`].
 /// What (macOS): builds a minimal `LaunchdConfig` carrying only the resolved
 /// `label` (the field `bootout`/`bootstrap` actually use) and calls `bootout`
-/// (stop), `bootstrap` (start), or both (restart). On non-macOS this is
-/// unsupported (launchd is macOS-only) and returns an error.
-/// Test: side-effecting `launchctl`; never exercised in unit tests.
+/// (stop), `bootstrap` (start), or both (restart). For `Start` (#2556) the
+/// "plist must already exist" assumption is relaxed: if no plist is present for
+/// this tctl-managed member, it runs the daemon's own `<binary> service
+/// install` (which writes AND bootstraps the plist) instead of failing. On
+/// non-macOS this is unsupported (launchd is macOS-only) and returns an error.
+/// Test: the `Start` plist-presence decision is pinned by
+/// `super::service_bootstrap::tests::start_plan_maps_presence`; the actual
+/// `launchctl`/subprocess calls are side-effecting and never run in unit tests.
 #[cfg(target_os = "macos")]
 fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
+    use super::service_bootstrap::{start_plan, RealServiceEnv, ServiceEnv, StartPlan};
     use trusty_common::launchd::{KeepAlive, LaunchdConfig};
 
     // Only `label` matters for bootout/bootstrap; the rest are inert because we
-    // never render or install a plist here (the daemon's own `setup` did that).
+    // never render or install a plist here (the daemon's own `service install`
+    // did that — and, for Start on a fresh machine, we now trigger it below).
     let cfg = LaunchdConfig {
         label: super::plist_label::plist_label_for(binary),
         exe_path: std::path::PathBuf::from(binary),
@@ -300,8 +307,26 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
             Ok(format!("booted out {}", cfg.label))
         }
         Verb::Start => {
-            cfg.bootstrap()?;
-            Ok(format!("bootstrapped {}", cfg.label))
+            // #2556: relax the "plist must already exist" assumption. If the
+            // plist is present, bootstrap it (existing behaviour); if absent,
+            // run the daemon's own `service install` to write + bootstrap it.
+            let present = super::plist_label::plist_path_for(binary)
+                .map(|p| p.exists())
+                .unwrap_or(false);
+            match start_plan(present) {
+                StartPlan::Bootstrap => {
+                    cfg.bootstrap()?;
+                    Ok(format!("bootstrapped {}", cfg.label))
+                }
+                StartPlan::ServiceInstall => {
+                    RealServiceEnv.run_service_install(binary).map_err(|e| {
+                        anyhow::anyhow!(
+                            "no launchd plist for {binary} and `service install` failed: {e}"
+                        )
+                    })?;
+                    Ok(format!("installed + bootstrapped {}", cfg.label))
+                }
+            }
         }
         Verb::Restart => {
             // Bootout first (stop); only then bootstrap (start). If bootstrap
