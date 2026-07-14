@@ -9,8 +9,7 @@
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
 crates/trusty-console/src/server.rs	922
 crates/trusty-git-analytics/src/collect/collector.rs	766
-crates/trusty-mpm/src/bin/tm/cli.rs	882
-crates/trusty-mpm/src/daemon/api.rs	1276
+crates/trusty-mpm/src/daemon/api.rs	1271
 crates/trusty-mpm/src/daemon/api/control_routes.rs	543
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	1217
 crates/trusty-mpm/src/daemon/mcp_backend.rs	564
