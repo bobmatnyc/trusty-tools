@@ -35,7 +35,7 @@ impl BackendClient {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
         for (name, bc) in config.backends.into_iter() {
             let result: Result<Arc<dyn Backend>> = match bc {
-                BackendConfig::Github(c) => GitHubBackend::new(c).map(|b| Arc::new(b) as _),
+                BackendConfig::Github(c) => GitHubBackend::new(c).await.map(|b| Arc::new(b) as _),
                 BackendConfig::Jira(c) => JiraBackend::new(c).map(|b| Arc::new(b) as _),
                 BackendConfig::Linear(c) => LinearBackend::new(c).map(|b| Arc::new(b) as _),
             };
