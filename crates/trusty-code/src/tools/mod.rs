@@ -41,7 +41,10 @@ pub use delegate::DelegateToAgentTool;
 pub use finish_task::{
     FINISH_TASK_TOOL_NAME, FinishTaskArgs, FinishTaskTool, render_finish_summary,
 };
-pub use fs::{EditTool, ReadFileTool, WriteFileTool};
+pub use fs::{
+    EditTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, WRITE_FILES_TOOL_NAME, WriteFileTool,
+    WriteFilesTool,
+};
 pub use goals::{CLEAR_GOAL_TOOL_NAME, ClearGoalTool, SET_GOAL_TOOL_NAME, SetGoalTool};
 pub use recall_session::{RECALL_SESSION_TOOL_NAME, RecallSessionTool};
 pub use registry::ToolRegistry;

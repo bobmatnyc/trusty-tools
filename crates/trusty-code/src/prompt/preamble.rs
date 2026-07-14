@@ -46,6 +46,10 @@ before bash).
 seen yet — e.g. you cannot `write_file` content derived from a `read_file` \
 whose result you don't yet have. Sequence those across turns: emit the read, \
 wait for its result, then decide the next step based on what actually happened.
+- When you are scaffolding SEVERAL independent files, do not spend one turn per \
+file. Either emit all their `write_file` calls in a SINGLE turn (batching, as \
+above), or use the `write_files` tool, which takes an array of files and writes \
+them all in one call — an N-file scaffold should cost ONE turn, not N.
 - If one call in a batch fails, you still receive results for every other call \
 plus the failure — use them together to decide the next step.
 - Every tool call's arguments MUST validate against that tool's provided JSON \
@@ -53,6 +57,15 @@ Schema. Supply all required fields and respect declared types.
 - A tool result may report an error. When it does, recover: retry with \
 corrected arguments, choose a different tool, or explain why you cannot \
 proceed. Do not repeat the same failing call unchanged.
+
+## File discovery
+
+- To explore the project, prefer the dedicated discovery tools over shelling \
+out: `glob` finds files by pattern (e.g. `**/*.py`, `src/*.rs`), `grep` \
+searches file contents by regular expression, and `list_dir` lists a \
+directory's entries. They return structured, project-scoped results and are \
+cheaper than a shell command. Reach for the shell tool only for actions these \
+do not cover (running builds, tests, or other commands).
 
 ## Filesystem-safety contract
 

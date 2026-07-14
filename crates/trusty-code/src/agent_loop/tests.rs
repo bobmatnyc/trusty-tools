@@ -1512,6 +1512,10 @@ mod gate_intercept;
 // a focused child module to keep this file under its SLOC cap.
 mod batched_multi_tool;
 
+// Batch file-write regression guards (#2681 — turn-count/file-count decoupling)
+// live in a focused child module to keep this file under its SLOC cap.
+mod write_batch;
+
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final
