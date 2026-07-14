@@ -199,7 +199,7 @@ pub async fn build_deps_async(
     model: &str,
     default_provider: &trusty_review::config::Provider,
 ) -> Result<ReviewDeps> {
-    let llm = build_provider(model, default_provider, &config.openrouter_api_key)
+    let llm = build_provider(model, default_provider, config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 

@@ -290,9 +290,10 @@ fn bedrock_startup_state() -> AppState {
     config.context.require_search = false;
     config.context.require_analyze = false;
     config.role_models.reviewer.provider = Provider::Bedrock;
-    // Non-empty dummy key so build_provider's empty-key guard passes; not a real
-    // credential.
+    // Non-empty dummy keys so build_provider's empty-key guards pass; not real
+    // credentials.
     config.openrouter_api_key = "dummy-openrouter-key-for-tests".to_string(); // pragma: allowlist secret
+    config.fireworks_api_key = "dummy-fireworks-key-for-tests".to_string(); // pragma: allowlist secret
     AppState::new(
         config,
         Arc::new(ApproveLlm), // startup provider stub (name() == "approve-stub")
@@ -313,6 +314,27 @@ async fn deps_from_state_openrouter_override_switches_provider() {
         deps.llm.name(),
         "openrouter",
         "an openrouter/ override must route to the OpenRouter backend (#1233)"
+    );
+    assert!(
+        fallback.is_none(),
+        "a successful override build must NOT report a fallback (#1357)"
+    );
+}
+
+#[tokio::test]
+async fn deps_from_state_fireworks_override_switches_provider() {
+    // A `fireworks/...` reviewer_model override against a Bedrock-startup state
+    // must build a fresh Fireworks provider (same #1233 contract as OpenRouter).
+    let state = bedrock_startup_state();
+    let (deps, fallback) = super::deps_from_state(
+        &state,
+        "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+    )
+    .await;
+    assert_eq!(
+        deps.llm.name(),
+        "fireworks",
+        "a fireworks/ override must route to the Fireworks backend"
     );
     assert!(
         fallback.is_none(),

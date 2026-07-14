@@ -416,7 +416,7 @@ async fn run_synthesis(
 ) -> Synthesis {
     let role = &config.role_models.reviewer;
     let provider =
-        match build_provider(&role.model, &role.provider, &config.openrouter_api_key).await {
+        match build_provider(&role.model, &role.provider, config).await {
             Ok(p) => p,
             Err(e) => return Synthesis::unavailable(format!("provider build failed: {e}")),
         };

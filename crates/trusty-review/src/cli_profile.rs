@@ -88,7 +88,7 @@ pub struct ProfileArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// LLM provider: `bedrock` (default) or `openrouter`.
+    /// LLM provider: `bedrock` (default), `openrouter`, or `fireworks`.
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
 
@@ -223,11 +223,7 @@ pub async fn cmd_profile(config: ReviewConfig, args: ProfileArgs) -> Result<()> 
             .unwrap_or_else(|| config.role_models.reviewer.model.clone());
 
         eprintln!("[trusty-review profile] Building LLM provider (model={reviewer_model})...");
-        let llm = build_provider(
-            &reviewer_model,
-            &default_provider,
-            &config.openrouter_api_key,
-        )
+        let llm = build_provider(&reviewer_model, &default_provider, &config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
