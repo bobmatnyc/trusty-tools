@@ -50,7 +50,12 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     tools.push(tool(
         "format_sheet",
         "Format a range via a discrete action (format_cells, set_number_format, \
-         merge, set_column_width) or 'raw' to pass batchUpdate requests directly.",
+         merge, set_column_width) or 'raw' to pass batchUpdate requests directly. \
+         format_cells, set_number_format, and merge REQUIRE all four of \
+         start_row_index/end_row_index/start_column_index/end_column_index — an \
+         omitted bound is rejected rather than silently applied to the rest of \
+         the sheet (this matters most for merge, which would otherwise merge \
+         the entire tab into one cell and discard the other cells' values).",
         json!({
             "account": account_schema(),
             "spreadsheet_id": { "type": "string" },
@@ -58,6 +63,7 @@ pub(super) fn append(tools: &mut Vec<Value>) {
                 "format_cells", "set_number_format", "merge", "set_column_width", "raw",
             ]),
             // GridRange (0-based, half-open) — used by format_cells / set_number_format / merge.
+            // All four bounds are required for these three actions (see description).
             "sheet_id": { "type": "integer", "description": "Sheet (tab) id the range lives in." },
             "start_row_index": { "type": "integer" },
             "end_row_index": { "type": "integer" },
@@ -66,7 +72,7 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             // format_cells params.
             "bold": { "type": "boolean" },
             "italic": { "type": "boolean" },
-            "font_size": { "type": "number" },
+            "font_size": { "type": "integer" },
             "text_color": {
                 "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
                 "oneOf": [{ "type": "array" }, { "type": "object" }],
@@ -127,7 +133,11 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "has_headers": { "type": "boolean", "description": "First data row is a header (default true)." },
             "legend_position": {
                 "type": "string",
-                "enum": ["BOTTOM_LEGEND", "LEFT_LEGEND", "RIGHT_LEGEND", "TOP_LEGEND", "NO_LEGEND"],
+                "enum": [
+                    "BOTTOM_LEGEND", "LEFT_LEGEND", "RIGHT_LEGEND", "TOP_LEGEND",
+                    "NO_LEGEND", "LABELED_LEGEND",
+                ],
+                "description": "LABELED_LEGEND (labels drawn next to each slice) is only valid for pie charts.",
             },
             "new_sheet": { "type": "boolean", "description": "Place chart on a new sheet (default true)." },
             "position_sheet_id": { "type": "integer", "description": "Overlay target sheet when new_sheet=false." },

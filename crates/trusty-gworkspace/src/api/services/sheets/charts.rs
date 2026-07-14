@@ -61,8 +61,13 @@ fn require_i64(args: &Value, key: &str) -> Result<i64> {
 /// testable without a live client or network.
 /// What: Builds the full `{"requests":[{"addChart":…}]}` batchUpdate body from
 /// the tool arguments; first data column is the domain, the rest are series.
+/// `PieChartSpec` has no `headerCount` field (unlike `BasicChartSpec`), so for
+/// pie charts the header row is excluded by bumping the effective start row
+/// instead of relying on the API to skip it.
 /// Test: `basic_chart_request_shape`, `pie_chart_request_shape`,
-/// `no_headers_sets_zero_header_count`, `overlay_position_when_not_new_sheet`.
+/// `pie_domain_and_series_offset_when_headers_present`,
+/// `pie_domain_not_offset_when_no_headers`, `no_headers_sets_zero_header_count`,
+/// `overlay_position_when_not_new_sheet`, `column_chart_missing_series_errors`.
 fn build_chart_request(args: &Value) -> Result<Value> {
     let (chart_type, is_pie) = normalize_chart_type(require_str(args, "chart_type")?)?;
     let source_sheet = require_i64(args, "source_sheet_id")?;
@@ -75,24 +80,43 @@ fn build_chart_request(args: &Value) -> Result<Value> {
             "end_column_index ({ec}) must be greater than start_column_index ({sc})"
         ));
     }
-
-    // First column is the domain; each remaining column is one series.
-    let domain_source = json!({
-        "sourceRange": { "sources": [grid_range(source_sheet, sr, er, sc, sc + 1)] }
-    });
-    let series: Vec<Value> = (sc + 1..ec)
-        .map(|col| {
-            json!({
-                "series": { "sourceRange": { "sources": [grid_range(source_sheet, sr, er, col, col + 1)] } }
-            })
-        })
-        .collect();
+    // Need at least one domain column plus one series column.
+    if ec - sc < 2 {
+        return Err(anyhow!(
+            "chart source range needs at least 2 columns (1 domain + >=1 series), got {}",
+            ec - sc
+        ));
+    }
 
     let has_headers = args
         .get("has_headers")
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let header_count = if has_headers { 1 } else { 0 };
+
+    // BasicChartSpec has a headerCount field so the API skips the header row
+    // itself; PieChartSpec does not, so pie ranges must exclude it manually or
+    // the header label shows up as a bogus extra slice.
+    let pie_sr = sr + header_count;
+    if is_pie && pie_sr >= er {
+        return Err(anyhow!(
+            "chart source range has no data rows left after excluding the header row"
+        ));
+    }
+    let effective_sr = if is_pie { pie_sr } else { sr };
+
+    // First column is the domain; each remaining column is one series.
+    let domain_source = json!({
+        "sourceRange": { "sources": [grid_range(source_sheet, effective_sr, er, sc, sc + 1)] }
+    });
+    let series: Vec<Value> = (sc + 1..ec)
+        .map(|col| {
+            json!({
+                "series": { "sourceRange": { "sources": [grid_range(source_sheet, effective_sr, er, col, col + 1)] } }
+            })
+        })
+        .collect();
+
     let legend = opt_str(args, "legend_position").unwrap_or("BOTTOM_LEGEND");
 
     let mut spec = json!({});
@@ -101,10 +125,12 @@ fn build_chart_request(args: &Value) -> Result<Value> {
     }
 
     if is_pie {
+        // Guaranteed non-empty by the `ec - sc < 2` check above; the
+        // `ok_or_else` is a defensive invariant, not a reachable error path.
         let first_series = series
             .first()
             .cloned()
-            .ok_or_else(|| anyhow!("pie chart needs at least two columns (labels + values)"))?;
+            .ok_or_else(|| anyhow!("pie chart needs at least one series column"))?;
         spec["pieChart"] = json!({
             "legendPosition": legend,
             "domain": domain_source,
@@ -247,6 +273,39 @@ mod tests {
     }
 
     #[test]
+    fn pie_domain_and_series_offset_when_headers_present() {
+        // has_headers defaults to true; the header row (row 0) must be
+        // excluded from both the pie domain and series ranges, or the header
+        // label shows up as a bogus extra slice.
+        let body = build_chart_request(&base_args("pie")).unwrap();
+        let spec = &body["requests"][0]["addChart"]["chart"]["spec"];
+        let dom = &spec["pieChart"]["domain"]["sourceRange"]["sources"][0];
+        assert_eq!(dom["startRowIndex"], 1);
+        let ser = &spec["pieChart"]["series"]["sourceRange"]["sources"][0];
+        assert_eq!(ser["startRowIndex"], 1);
+    }
+
+    #[test]
+    fn pie_domain_not_offset_when_no_headers() {
+        let mut args = base_args("pie");
+        args["has_headers"] = json!(false);
+        let body = build_chart_request(&args).unwrap();
+        let spec = &body["requests"][0]["addChart"]["chart"]["spec"];
+        let dom = &spec["pieChart"]["domain"]["sourceRange"]["sources"][0];
+        assert_eq!(dom["startRowIndex"], 0);
+        let ser = &spec["pieChart"]["series"]["sourceRange"]["sources"][0];
+        assert_eq!(ser["startRowIndex"], 0);
+    }
+
+    #[test]
+    fn pie_all_rows_consumed_by_header_errors() {
+        let mut args = base_args("pie");
+        args["start_row_index"] = json!(4);
+        args["end_row_index"] = json!(5); // single row, which is the header
+        assert!(build_chart_request(&args).is_err());
+    }
+
+    #[test]
     fn no_headers_sets_zero_header_count() {
         let mut args = base_args("bar");
         args["has_headers"] = json!(false);
@@ -283,6 +342,16 @@ mod tests {
     fn empty_column_span_errors() {
         let mut args = base_args("column");
         args["end_column_index"] = json!(0);
+        assert!(build_chart_request(&args).is_err());
+    }
+
+    #[test]
+    fn column_chart_missing_series_errors() {
+        // Domain-only range (end_col == start_col + 1) leaves zero series
+        // columns for a non-pie chart too — must be rejected locally rather
+        // than sent to the API with an empty `series: []`.
+        let mut args = base_args("column");
+        args["end_column_index"] = json!(1);
         assert!(build_chart_request(&args).is_err());
     }
 }
