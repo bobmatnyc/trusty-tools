@@ -31,6 +31,37 @@ pub const TASKS_API_BASE: &str = "https://tasks.googleapis.com/tasks/v1";
 pub const OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// OAuth 2.0 userinfo endpoint (email, profile id).
 pub const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
+/// OAuth 2.0 authorization endpoint (interactive consent — start of PKCE flow).
+///
+/// Why: The `setup` subcommand must send the user's browser here to grant
+/// consent before Google will issue an authorization code.
+/// What: Google's v2 auth endpoint; query params (client_id, scope, PKCE
+/// challenge, state, redirect_uri) are appended by the consent flow.
+/// Test: Compile-time constant; smoke test asserts it parses as a URL.
+pub const OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+
+/// Full OAuth scope set requested by the interactive consent flow.
+///
+/// Why: This MUST stay identical to the Python CLI's scope set so that the
+/// tokens minted here are wire-compatible with the existing
+/// `~/.gworkspace-mcp/tokens.json` (Google keys refresh tokens by the exact
+/// granted scope set; a mismatch would force re-consent and could invalidate
+/// a token shared with the Python implementation).
+/// What: `openid` plus nine Google API scopes covering userinfo, Calendar,
+/// Gmail (modify), Drive, Docs, Tasks, Sheets, and Slides.
+/// Test: `oauth::flow::assemble_scope_string` unit test asserts order/content.
+pub const OAUTH_SCOPES: &[&str] = &[
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/presentations",
+];
 
 /// Default profile name for token storage — matches Python implementation.
 /// Why: Single canonical profile name shared with the Python CLI.
