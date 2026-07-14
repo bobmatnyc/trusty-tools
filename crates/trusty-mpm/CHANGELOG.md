@@ -9,6 +9,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- tm-manager phase 2 — route-task, proposal-and-confirm, route CLI (#2585 #2586 #2587) ([#2615](https://github.com/bobmatnyc/trusty-tools/pull/2615)) ([`87e4d1d`](https://github.com/bobmatnyc/trusty-tools/commit/87e4d1d4851b218bc651a2bb35ae681923633dfd))
+
+### Fixed
+
+- harden agents against idle parking — never end a turn to wait (closes #2610) ([#2620](https://github.com/bobmatnyc/trusty-tools/pull/2620)) ([`cbcfd17`](https://github.com/bobmatnyc/trusty-tools/commit/cbcfd17e797c6db80074e1254dfefb5f1f8fb3c1))
+## [Unreleased]
+
+### Added
+
 - async managed-spawn provisioning with live progress poll route (closes #2605) ([#2607](https://github.com/bobmatnyc/trusty-tools/pull/2607)) ([`f440192`](https://github.com/bobmatnyc/trusty-tools/commit/f44019266928e96973d16ab83cc618a4ac0894ff))
 - tm manager status|digest|chat CLI (TMMGR phase 1) ([#2600](https://github.com/bobmatnyc/trusty-tools/pull/2600)) ([`ed9390a`](https://github.com/bobmatnyc/trusty-tools/commit/ed9390a8a0f3e491f2aa6416cf68b5603975536a))
 - tm manager phase-1b — digest, read-only chat, hermetic suite ([#2601](https://github.com/bobmatnyc/trusty-tools/pull/2601)) ([`6f80f36`](https://github.com/bobmatnyc/trusty-tools/commit/6f80f36999c66ff679f194fe3e2d3bd9b3214c79))
