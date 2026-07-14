@@ -146,23 +146,43 @@ impl ChatStore {
     ///
     /// Why: a turn is only recorded after a successful reply, so a failed/degraded
     /// request never pollutes history. Trimming from the front keeps the window on
-    /// the most recent turns; using [`LruCache::get_mut`]/[`LruCache::put`] keeps
+    /// the most recent turns; using [`LruCache::get_mut`]/[`LruCache::push`] keeps
     /// `key` promoted to most-recently-used so a live conversation is never the
-    /// eviction candidate while it's still exchanging turns.
+    /// eviction candidate while it's still exchanging turns. Logging every
+    /// eviction at debug level (#2602 review) gives an observable signal that the
+    /// key-set cap is actually being hit in production, without needing a new
+    /// metrics seam for what should be a rare event under normal load.
     /// What: pushes the user then assistant turn under `key` (inserting a fresh
     /// entry — and possibly evicting the least-recently-used OTHER key — if `key`
     /// is new), then truncates the front so at most `max_turns` remain. Returns
     /// the resulting turn count.
+    ///
+    /// Trade-off: `lru` 0.12.5's `get_or_insert_mut` would collapse the
+    /// check-then-insert below into one lookup, but it doesn't surface the
+    /// evicted entry on overflow — and the eviction log needs exactly that entry.
+    /// Eviction observability wins over shaving one lookup, so this stays the
+    /// explicit two-step `get_mut` + `push` form.
     /// Test: `record_and_history_round_trips`, `history_is_bounded`,
     /// `key_set_is_bounded_lru_eviction`.
     pub fn record_exchange(&self, key: &str, user: &str, assistant: &str) -> usize {
         let mut map = self.conversations.lock().unwrap_or_else(|p| p.into_inner());
         if map.get_mut(key).is_none() {
-            map.put(key.to_string(), Vec::new());
+            // `push` returns `Some((old_key, old_value))` both when it evicts the
+            // least-recently-used entry to make room, AND when `key` itself
+            // already existed (a same-key value replace). We only reach this
+            // branch after `get_mut` just confirmed `key` is ABSENT, so any
+            // `Some` here is necessarily a DIFFERENT key that the LRU cap
+            // evicted — the `evicted_key != key` guard documents that invariant
+            // defensively rather than relying on it silently.
+            if let Some((evicted_key, _evicted_turns)) = map.push(key.to_string(), Vec::new())
+                && evicted_key != key
+            {
+                tracing::debug!(
+                    evicted_key = %evicted_key,
+                    "chat_store: LRU-evicted conversation key to stay within the key-set cap"
+                );
+            }
         }
-        // Just inserted-or-present above, so this lookup always succeeds; a
-        // `HashMap`-shaped `entry(..).or_default()` isn't available on
-        // `LruCache`, so `get_mut` (promoting `key` to MRU) is the equivalent.
         let Some(turns) = map.get_mut(key) else {
             return 0;
         };
