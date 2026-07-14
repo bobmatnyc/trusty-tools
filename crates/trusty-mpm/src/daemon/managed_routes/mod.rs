@@ -295,6 +295,19 @@ pub struct SessionSummary {
     /// or process-env-var match alone is provably insufficient).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
+    /// Delivery status of the turnkey `--task` pane injection, if injection
+    /// was ever attempted for this session (additive; #2364).
+    ///
+    /// Why: `SessionManager::inject_task_when_ready` was fire-and-forget
+    /// before this field existed — callers had no way to poll whether an
+    /// injected task was actually delivered. Exposing it lets `tm session
+    /// info`/`tm sessions ls` surface `pending`/`success`/`failed_timeout`/
+    /// `failed_session_died` instead of requiring a blind wait on `tm session
+    /// activity`. `None` when injection was never attempted for this session
+    /// (opted out, empty task, non-Claude-Code runtime, or a spawn that never
+    /// reached `Active`) — see `session_manager::InjectionStatus::NotApplicable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injection_status: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.

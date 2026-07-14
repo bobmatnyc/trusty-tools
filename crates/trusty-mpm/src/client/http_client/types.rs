@@ -450,6 +450,19 @@ pub struct ManagedSessionSummary {
     /// could not resolve one; the gate treats `None` as "unconfirmed."
     #[serde(default)]
     pub pane_id: Option<String>,
+    /// Delivery status of the turnkey `--task` pane injection, if injection
+    /// was ever attempted for this session (additive; #2364). Mirrors
+    /// `daemon::managed_routes::SessionSummary::injection_status`
+    /// field-for-field: `"pending"` | `"success"` | `"failed_timeout"` |
+    /// `"failed_session_died"`, or `None` when injection never applied
+    /// (opted out, empty task, non-Claude-Code runtime, or a spawn that
+    /// never reached `Active`).
+    ///
+    /// Why: lets `tm session info`/`tm sessions ls` poll delivery status
+    /// instead of blind-waiting on `tm session activity`. Old daemon
+    /// responses without the field deserialize as `None`.
+    #[serde(default)]
+    pub injection_status: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

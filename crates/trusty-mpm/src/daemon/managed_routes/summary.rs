@@ -14,7 +14,7 @@
 
 use axum::http::StatusCode;
 
-use crate::session_manager::{ManagedSessionId, SessionRecord};
+use crate::session_manager::{InjectionStatus, ManagedSessionId, SessionRecord};
 
 use super::SessionSummary;
 
@@ -48,7 +48,27 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "source_id": r.source_id,
         "deliverable_id": r.deliverable_id.map(|id| id.to_string()),
         "pane_id": r.pane_id,
+        "injection_status": injection_status_wire(r.injection_status),
     })
+}
+
+/// Map [`InjectionStatus`] to its wire form, `None` for "never attempted"
+/// (#2364).
+///
+/// Why: shared by [`record_to_json`] and [`record_to_summary`] so the MCP and
+/// HTTP wire shapes cannot drift on what "no injection happened" looks like —
+/// both omit the field (JSON `null`/absent) rather than emitting the literal
+/// `"not_applicable"` string, keeping the field silent for the (common)
+/// sessions injection never applies to.
+/// What: `NotApplicable` → `None`; every other variant → `Some(<snake_case>)`
+/// via [`InjectionStatus`]'s `Display`.
+/// Test: `injection_status_wire_omits_not_applicable`,
+/// `injection_status_wire_stringifies_other_variants` in `super::tests`.
+fn injection_status_wire(status: InjectionStatus) -> Option<String> {
+    match status {
+        InjectionStatus::NotApplicable => None,
+        other => Some(other.to_string()),
+    }
 }
 
 /// Convert a [`SessionRecord`] into a wire [`SessionSummary`].
@@ -78,6 +98,7 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         claude_session_id: r.claude_session_id.clone(),
         deliverable_id: r.deliverable_id.map(|id| id.to_string()),
         pane_id: r.pane_id.clone(),
+        injection_status: injection_status_wire(r.injection_status),
     }
 }
 

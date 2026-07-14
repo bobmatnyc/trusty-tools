@@ -154,6 +154,7 @@ impl SessionManager {
                     // the adopted pane already exists, so this is available
                     // immediately, mirroring `adopt.rs`'s explicit adoption path.
                     pane_id: self.tmux.get_pane_id(name),
+                    injection_status: Default::default(),
                 };
                 if let Some(path) = resolved_cwd {
                     newly_resolved.push((id, path));

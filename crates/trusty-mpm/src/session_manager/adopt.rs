@@ -192,6 +192,7 @@ impl SessionManager {
             last_cwd: None,
             deliverable_id: None,
             pane_id,
+            injection_status: Default::default(),
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────
@@ -249,6 +250,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         }
     }
 
@@ -276,6 +278,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         }
     }
 

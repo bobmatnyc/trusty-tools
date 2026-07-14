@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use super::{record_to_json, record_to_summary};
-use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::session_manager::{
+    InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
+};
 
 /// Build a minimal [`SessionRecord`] suitable for serialization tests.
 fn make_record(source_id: Option<&str>) -> SessionRecord {
@@ -38,6 +40,7 @@ fn make_record(source_id: Option<&str>) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     }
 }
 
@@ -168,6 +171,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         claude_session_id: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: None,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -200,6 +204,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         claude_session_id: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: None,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,
@@ -212,4 +217,67 @@ fn decommission_workspace_removed_reflects_ownership() {
         json2.get("workspace_path_was").is_none(),
         "unowned: workspace_path_was must be absent (skip_serializing_if = None)"
     );
+}
+
+/// Why (#2364): a session injection was never attempted for must omit the
+/// `injection_status` key entirely on both wire paths, rather than emitting
+/// the literal string `"not_applicable"` — the field should stay silent for
+/// the (common) case where turnkey injection never applies to a session.
+/// What: asserts `record_to_json` serializes `injection_status` as JSON
+/// `null` and `record_to_summary` carries `None` when the record's
+/// `injection_status` is the `NotApplicable` default.
+/// Test: this test.
+#[test]
+fn injection_status_wire_omits_not_applicable() {
+    let r = make_record(None);
+    assert_eq!(r.injection_status, InjectionStatus::NotApplicable);
+
+    let json = record_to_json(&r);
+    assert!(
+        json["injection_status"].is_null(),
+        "record_to_json must serialize NotApplicable as null, got {:?}",
+        json["injection_status"]
+    );
+
+    let summary = record_to_summary(&r);
+    assert_eq!(
+        summary.injection_status, None,
+        "record_to_summary must carry None for NotApplicable"
+    );
+}
+
+/// Why (#2364): callers polling delivery status need every non-trivial
+/// [`InjectionStatus`] variant to round-trip through BOTH wire paths as its
+/// snake_case string form, so `tm session info`/`tm sessions ls` can surface
+/// exactly `pending`/`success`/`failed_timeout`/`failed_session_died`.
+/// What: for each non-`NotApplicable` variant, asserts `record_to_json`
+/// serializes the matching string and `record_to_summary` carries
+/// `Some(<string>)`.
+/// Test: this test.
+#[test]
+fn injection_status_wire_stringifies_other_variants() {
+    let cases = [
+        (InjectionStatus::Pending, "pending"),
+        (InjectionStatus::Success, "success"),
+        (InjectionStatus::FailedTimeout, "failed_timeout"),
+        (InjectionStatus::FailedSessionDied, "failed_session_died"),
+    ];
+    for (status, expected) in cases {
+        let mut r = make_record(None);
+        r.injection_status = status;
+
+        let json = record_to_json(&r);
+        assert_eq!(
+            json["injection_status"].as_str(),
+            Some(expected),
+            "record_to_json must serialize {status:?} as {expected:?}"
+        );
+
+        let summary = record_to_summary(&r);
+        assert_eq!(
+            summary.injection_status.as_deref(),
+            Some(expected),
+            "record_to_summary must carry {expected:?} for {status:?}"
+        );
+    }
 }

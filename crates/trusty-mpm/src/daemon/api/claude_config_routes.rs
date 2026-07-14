@@ -497,6 +497,7 @@ mod restart_pane_selection_tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: pane_id.map(str::to_owned),
+            injection_status: Default::default(),
         }
     }
 

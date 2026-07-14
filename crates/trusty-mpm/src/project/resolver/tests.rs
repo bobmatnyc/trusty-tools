@@ -68,6 +68,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     }
 }
 
@@ -95,6 +96,7 @@ fn session_no_repo() -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     }
 }
 

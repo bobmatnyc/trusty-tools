@@ -234,6 +234,7 @@ impl SessionManager {
             last_cwd: None,
             deliverable_id: None,
             pane_id,
+            injection_status: Default::default(),
         };
 
         // Persist the record. On failure the freshly-created tmux session has
