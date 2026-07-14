@@ -186,7 +186,8 @@ impl ManagerDigestOutcome {
     /// body carries no `narrative` field at all (not this response shape).
     fn from_body(raw: Value) -> Option<Self> {
         let narrative = raw.get("narrative").and_then(Value::as_str)?.to_string();
-        let fallback = raw.get("generated_by").and_then(Value::as_str) == Some(GENERATED_BY_FALLBACK);
+        let fallback =
+            raw.get("generated_by").and_then(Value::as_str) == Some(GENERATED_BY_FALLBACK);
         Some(Self {
             narrative,
             fallback,
@@ -366,7 +367,10 @@ impl DaemonClient {
         }
 
         if status == StatusCode::NOT_FOUND {
-            if !self.manager_endpoint_available("/api/v1/manager/digest").await {
+            if !self
+                .manager_endpoint_available("/api/v1/manager/digest")
+                .await
+            {
                 return Ok(None);
             }
             anyhow::bail!(daemon_error_text(status, &body_text));
@@ -423,7 +427,10 @@ impl DaemonClient {
         }
 
         if status == StatusCode::NOT_FOUND {
-            if !self.manager_endpoint_available("/api/v1/manager/chat").await {
+            if !self
+                .manager_endpoint_available("/api/v1/manager/chat")
+                .await
+            {
                 return Ok(None);
             }
             anyhow::bail!(daemon_error_text(status, &body_text));
@@ -546,8 +553,7 @@ mod tests {
             "error": "inference_unavailable",
             "message": "no inference provider is configured",
         });
-        let outcome =
-            ManagerChatOutcome::from_body(body, "cli:bob").expect("chat_error shape");
+        let outcome = ManagerChatOutcome::from_body(body, "cli:bob").expect("chat_error shape");
         assert_eq!(outcome.reply, "no inference provider is configured");
         assert_eq!(outcome.conversation_key, "cli:bob");
     }

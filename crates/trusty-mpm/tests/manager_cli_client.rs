@@ -137,7 +137,10 @@ async fn manager_status_client_reads_live_route() {
 async fn manager_digest_client_reads_llm_narrative_against_real_daemon() {
     let state = fresh_state().await;
     register_project(&state, "alpha", "https://github.com/acme/alpha").await;
-    install_scripted(&state, "Alpha has one session provisioning; nothing blocked.");
+    install_scripted(
+        &state,
+        "Alpha has one session provisioning; nothing blocked.",
+    );
     let base = serve_real(Arc::clone(&state)).await;
     let client = DaemonClient::new(base);
 
@@ -198,7 +201,8 @@ async fn manager_digest_client_surfaces_unknown_project_404_against_real_daemon(
         .await
         .expect_err("an unregistered project must be Err, not Ok(None)");
     assert!(
-        err.to_string().contains("project 'ghost' is not registered"),
+        err.to_string()
+            .contains("project 'ghost' is not registered"),
         "error should carry the daemon's own 404 message: {err}"
     );
 }
@@ -270,7 +274,10 @@ fn older_daemon_stub_router() -> Router {
             "palace": { "id": "tm-manager-portfolio", "available": false, "reason": null },
         }))
     }
-    Router::new().route("/api/v1/manager/version", get(version_without_digest_or_chat))
+    Router::new().route(
+        "/api/v1/manager/version",
+        get(version_without_digest_or_chat),
+    )
 }
 
 async fn serve_mock(router: Router) -> String {
