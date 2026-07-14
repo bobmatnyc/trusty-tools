@@ -11276,6 +11276,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-slack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "trusty-common",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
