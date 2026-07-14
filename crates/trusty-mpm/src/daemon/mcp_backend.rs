@@ -270,33 +270,14 @@ impl OrchestratorBackend for StateBackend {
     /// Return recent captured errors across all known daemon stores.
     ///
     /// Why: aggregates errors from trusty-search, trusty-memory, trusty-analyze,
-    ///      and trusty-mpm JSONL stores so the MCP user sees a unified view.
-    /// What: calls [`super::bug_report::aggregate_errors`] with `limit` capped at
-    ///       100, then serializes the [`AggregatedError`] list as JSON.
+    ///      and trusty-mpm JSONL stores so the MCP user sees a unified view. The
+    ///      body lives in `super::mcp_bugreport` (a thin wrapper, matching the
+    ///      `mcp_session`/`mcp_console`/`mcp_project` sibling-module convention)
+    ///      to keep this file under the 500-SLOC cap.
+    /// What: delegates to [`super::mcp_bugreport::list_recent_errors`].
     /// Test: `list_recent_errors_returns_valid_json` in the `tests` module.
     async fn list_recent_errors(&self, limit: u64) -> Result<Value, String> {
-        let limit = (limit as usize).min(100);
-        let errors = super::bug_report::aggregate_errors(limit);
-        let summaries: Vec<serde_json::Value> = errors
-            .iter()
-            .map(|e| {
-                json!({
-                    "fingerprint": e.record.fingerprint,
-                    "crate_target": e.record.crate_target,
-                    "crate_version": e.record.crate_version,
-                    "summary": e.record.summary(),
-                    "occurrences": e.occurrences,
-                    "timestamp_secs": e.record.timestamp_secs,
-                    "os": e.record.os,
-                    "arch": e.record.arch,
-                })
-            })
-            .collect();
-        Ok(json!({
-            "errors": summaries,
-            "total": summaries.len(),
-            "limit": limit,
-        }))
+        super::mcp_bugreport::list_recent_errors(limit).await
     }
 
     /// Build and return the scrubbed issue preview for the given fingerprint.
@@ -304,136 +285,21 @@ impl OrchestratorBackend for StateBackend {
     /// Why: the user must review the exact body that will be filed before
     ///      consenting. The preview IS the filed body — no transformation happens
     ///      between preview and filing.
-    /// What: calls [`super::bug_report::aggregate_errors`] to load errors, finds
-    ///       the one with the matching fingerprint, runs
-    ///       [`super::bug_report::build_preview`], and serializes the result.
-    ///       Returns an error string when the fingerprint is not found.
+    /// What: delegates to [`super::mcp_bugreport::preview_bug_report`].
     /// Test: `preview_bug_report_unknown_fingerprint_errors` in the `tests` module.
     async fn preview_bug_report(&self, fingerprint: &str) -> Result<Value, String> {
-        let errors = super::bug_report::aggregate_errors(500);
-        let found = errors
-            .into_iter()
-            .find(|e| e.record.fingerprint == fingerprint)
-            .ok_or_else(|| {
-                format!(
-                    "fingerprint `{fingerprint}` not found in local error stores; \
-                     run list_recent_errors to see available fingerprints"
-                )
-            })?;
-        let preview = super::bug_report::build_preview(&found);
-        let changes: Vec<serde_json::Value> = preview
-            .scrub_changes
-            .iter()
-            .map(|c| json!({ "pattern": c.pattern, "hint": c.hint }))
-            .collect();
-        Ok(json!({
-            "fingerprint": preview.fingerprint,
-            "title": preview.title,
-            "body": preview.body,
-            "labels": preview.labels,
-            "scrub_changes": changes,
-            "note": "This is the exact content that will be filed. Call report_bug with confirm:true to file.",
-        }))
+        super::mcp_bugreport::preview_bug_report(fingerprint).await
     }
 
     /// File or increment a GitHub issue for the given fingerprint.
     ///
     /// Why: the consent gate — nothing is filed unless `confirm` is `true`.
-    ///      When `confirm` is false, returns the same preview as
-    ///      `preview_bug_report`. When `true`, resolves the token via the full
-    ///      provider chain (Fix 1 / #498) and calls
-    ///      [`super::bug_report::file_issue`].
-    ///
-    /// Fixes implemented here:
-    ///   - Fix 1 (#498, P0): uses `ResolvedProvider` (PAT → file → GitHub App
-    ///     → NoToken) instead of the narrower `EnvFileTokenProvider`, so the
-    ///     GitHub App path is now reachable.
-    ///   - Fix 3 (P2): the `RateLimitGuard` is checked before any GitHub call;
-    ///     a blocked call returns `{ filed:false, rate_limited:true }`.  After a
-    ///     successful filing `record_filed` is called.  State-file failures are
-    ///     non-fatal (logged via `record_filed`'s own warning).
-    ///
-    /// What: a `confirm:false` call is pure-preview (no network call). A
-    ///       `confirm:true` call with no token returns a graceful failure with
-    ///       an actionable message. A rate-limited call returns
-    ///       `{ filed:false, rate_limited:true, note:… }`. A successful filing
-    ///       returns `{ filed, deduped, issue_url, issue_number }`.
+    /// What: delegates to [`super::mcp_bugreport::report_bug`], which resolves
+    ///       the token, checks the rate-limit guard, and files via GitHub.
     /// Test: `report_bug_no_confirm_returns_preview_only`,
     ///       `report_bug_confirm_no_token_graceful_failure` in the `tests` module.
     async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String> {
-        // Step 1: load the error regardless of confirm — preview is always built.
-        let errors = super::bug_report::aggregate_errors(500);
-        let found = errors
-            .into_iter()
-            .find(|e| e.record.fingerprint == fingerprint)
-            .ok_or_else(|| {
-                format!("fingerprint `{fingerprint}` not found; run list_recent_errors")
-            })?;
-        let preview = super::bug_report::build_preview(&found);
-
-        if !confirm {
-            // Preview-only path — nothing filed.
-            let changes: Vec<serde_json::Value> = preview
-                .scrub_changes
-                .iter()
-                .map(|c| json!({ "pattern": c.pattern, "hint": c.hint }))
-                .collect();
-            return Ok(json!({
-                "filed": false,
-                "note": "confirm:false — preview only. Call with confirm:true to file.",
-                "preview": {
-                    "fingerprint": preview.fingerprint,
-                    "title": preview.title,
-                    "body": preview.body,
-                    "labels": preview.labels,
-                    "scrub_changes": changes,
-                }
-            }));
-        }
-
-        // Fix 3 (P2): check the rate-limit guard before any GitHub call.
-        let guard = super::bug_report::RateLimitGuard::production();
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let rl_decision = guard.check(fingerprint, now_secs);
-        if !rl_decision.is_allowed() {
-            return Ok(json!({
-                "filed": false,
-                "rate_limited": true,
-                "note": rl_decision.block_reason(),
-            }));
-        }
-
-        // Step 2: attempt to file via GitHub.
-        // Fix 1 (P0): use the full resolution chain — PAT → file → GitHub App → NoToken.
-        // Use spawn_blocking because the real reqwest client is blocking.
-        let fp_owned = fingerprint.to_string();
-        let provider = super::bug_report::ResolvedProvider;
-        let result =
-            tokio::task::spawn_blocking(move || super::bug_report::file_issue(&preview, &provider))
-                .await
-                .map_err(|e| format!("internal error: spawn_blocking failed: {e}"))?;
-
-        match result {
-            Ok(filing) => {
-                // Fix 3 (P2): record the successful filing; write failures are
-                // non-fatal — record_filed logs warnings internally.
-                guard.record_filed(&fp_owned, now_secs);
-                Ok(json!({
-                    "filed": filing.filed,
-                    "deduped": filing.deduped,
-                    "issue_url": filing.issue_url,
-                    "issue_number": filing.issue_number,
-                }))
-            }
-            Err(super::bug_report::GithubFilingError::NoToken) => Ok(json!({
-                "filed": false,
-                "note": super::bug_report::GithubFilingError::NoToken.to_string(),
-            })),
-            Err(e) => Err(format!("GitHub filing failed: {e}")),
-        }
+        super::mcp_bugreport::report_bug(fingerprint, confirm).await
     }
 
     // ── #1221: session-lifecycle tools ───────────────────────────────────────
@@ -592,6 +458,36 @@ impl OrchestratorBackend for StateBackend {
 
     async fn project_resolve(&self, query: &str) -> Result<Value, String> {
         super::mcp_project::project_resolve(&self.state, query).await
+    }
+
+    // ── #2550: session-manager proxy tools (delegate to mcp_proxy) ───────────
+    //
+    // Each builds a `SessionProxy` over the SAME shared focus store the HTTP
+    // proxy routes use, so a focus set over MCP is visible to those surfaces
+    // under the same `conversation_key` and vice versa.
+
+    async fn session_proxy_focus(
+        &self,
+        conversation_key: &str,
+        session_id: &str,
+    ) -> Result<Value, String> {
+        super::mcp_proxy::session_proxy_focus(&self.state, conversation_key, session_id).await
+    }
+
+    async fn session_proxy_unfocus(&self, conversation_key: &str) -> Result<Value, String> {
+        super::mcp_proxy::session_proxy_unfocus(&self.state, conversation_key).await
+    }
+
+    async fn session_proxy_message(
+        &self,
+        conversation_key: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        super::mcp_proxy::session_proxy_message(&self.state, conversation_key, text).await
+    }
+
+    async fn session_proxy_summary(&self, conversation_key: &str) -> Result<Value, String> {
+        super::mcp_proxy::session_proxy_summary(&self.state, conversation_key).await
     }
 }
 

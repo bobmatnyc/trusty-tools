@@ -232,6 +232,38 @@ impl OrchestratorBackend for MockBackend {
         }
     }
 
+    // ── #2550: session-manager proxy mock impls ──────────────────────────────
+    // Each echoes its parsed args so the dispatch tests can assert the tool name
+    // routed to the right method with correctly-parsed arguments.
+    async fn session_proxy_focus(
+        &self,
+        conversation_key: &str,
+        session_id: &str,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "outcome": "focused",
+            "conversation_key": conversation_key,
+            "session_id": session_id,
+        }))
+    }
+    async fn session_proxy_unfocus(&self, conversation_key: &str) -> Result<Value, String> {
+        Ok(json!({ "cleared": { "conversation_key": conversation_key } }))
+    }
+    async fn session_proxy_message(
+        &self,
+        conversation_key: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "outcome": "sent",
+            "conversation_key": conversation_key,
+            "text": text,
+        }))
+    }
+    async fn session_proxy_summary(&self, conversation_key: &str) -> Result<Value, String> {
+        Ok(json!({ "outcome": "summary", "conversation_key": conversation_key }))
+    }
+
     // ── #1517 WI-5: NL→repo resolver mock impl ───────────────────────────────
     async fn project_resolve(&self, query: &str) -> Result<Value, String> {
         if query == "trusty-tools" {
@@ -291,10 +323,10 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 9 session-lifecycle + 5 console-facing + 4 project = 27
+    // 9 core + 9 session-lifecycle + 5 console + 4 project + 4 proxy = 31
     // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
     // + #2012 session_delete + the three #1519 project-registry tools + #1517
-    // WI-5 project_resolve).
+    // WI-5 project_resolve + the four #2550 session-manager proxy tools).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -303,7 +335,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 27);
+    assert_eq!(tools.as_array().unwrap().len(), 31);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -1090,4 +1122,148 @@ async fn dispatch_project_resolve_requires_query() {
             .unwrap()
             .contains("query")
     );
+}
+
+// ── #2550: session-manager proxy dispatch tests ─────────────────────────────
+//
+// These assert the four proxy tool NAMES route through `proxy_dispatch` to the
+// matching backend method with correctly-parsed arguments (the mock echoes its
+// args). The real SessionProxy round-trip is covered hermetically in
+// `daemon::mcp_proxy::tests`.
+
+/// Why (#2550): `session_proxy_focus` must parse `conversation_key` + the
+/// OPTIONAL `session_id` and route to the backend.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_focus_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_proxy_focus",
+            json!({ "conversation_key": "conv-1", "session_id": "sess-abc" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("conv-1"), "{text}");
+    assert!(text.contains("sess-abc"), "{text}");
+}
+
+/// Why (#2550): `session_id` is optional — an absent value must still dispatch
+/// (the empty-string current-focus query), not error.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_focus_session_id_optional() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_proxy_focus",
+            json!({ "conversation_key": "conv-1" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false, "session_id must be optional");
+}
+
+/// Why (#2550): `conversation_key` is required on every proxy tool; a missing
+/// key must surface as a tool error at the dispatch layer.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_focus_requires_conversation_key() {
+    let resp = dispatch(&MockBackend, call("session_proxy_focus", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("conversation_key")
+    );
+}
+
+/// Why (#2550): `session_proxy_unfocus` routes on `conversation_key` alone.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_unfocus_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_proxy_unfocus",
+            json!({ "conversation_key": "conv-9" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("conv-9")
+    );
+}
+
+/// Why (#2550): `session_proxy_message` must parse both `conversation_key` and
+/// the required `text` and route to the inject method.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_message_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_proxy_message",
+            json!({ "conversation_key": "conv-2", "text": "run the tests" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("conv-2"), "{text}");
+    assert!(text.contains("run the tests"), "{text}");
+}
+
+/// Why (#2550): `session_proxy_message` requires `text`; a missing body must
+/// error at the dispatch layer.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_message_requires_text() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_proxy_message",
+            json!({ "conversation_key": "conv-2" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("text")
+    );
+}
+
+/// Why (#2550): `session_proxy_summary` routes on `conversation_key` alone.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_proxy_summary_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_proxy_summary",
+            json!({ "conversation_key": "conv-3" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("summary"), "{text}");
+    assert!(text.contains("conv-3"), "{text}");
 }

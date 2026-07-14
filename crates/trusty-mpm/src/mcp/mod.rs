@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use trusty_common::mcp::{Request, Response, error_codes};
 
 pub mod project_dispatch;
+pub mod proxy_dispatch;
 pub mod session_dispatch;
 pub mod tools;
 
@@ -373,6 +374,71 @@ pub trait OrchestratorBackend: Send + Sync {
     ///      `needs_disambiguation` flag.
     /// Test: `dispatch_project_resolve_tool` (mock).
     async fn project_resolve(&self, query: &str) -> Result<Value, String>;
+
+    // ── #2550: session-manager PROXY tools (#1440 follow-up) ─────────────────
+    //
+    // These expose the channel-agnostic [`crate::client::proxy::SessionProxy`]
+    // focus/inject/summarize state machine — already reachable over Telegram and
+    // the daemon's local HTTP routes — as a fourth surface: MCP tools. Every
+    // method takes an explicit `conversation_key`: the MCP `dispatch` entry point
+    // is stateless (no per-connection identity is threaded through it, unlike
+    // Telegram's `chat_id` or an HTTP request), so the caller supplies the key,
+    // exactly as the HTTP proxy routes' `conversation_key` body field does. The
+    // daemon impl keys focus into the SAME `DaemonState::proxy_focus_store`, so a
+    // focus set over MCP is visible to the HTTP/Telegram surfaces under the same
+    // key and vice versa.
+
+    /// Back `session_proxy_focus`: focus (or query) a session for a conversation.
+    ///
+    /// Why: the "session click" of the proxy model as an MCP verb — bind a
+    /// conversation to ONE managed session so later `session_proxy_message`s route
+    /// to it without a per-turn id.
+    /// What: with a non-empty `session_id` (id, friendly name, or unambiguous
+    /// prefix) validates + records the focus; with an empty `session_id` performs
+    /// a read-only query of the current focus without touching the backend.
+    /// Returns the tagged proxy focus outcome as JSON.
+    /// Test: `dispatch_session_proxy_focus_tool` (mock) + the daemon-side
+    /// `mcp_proxy` round-trip test against a real `SessionProxy`.
+    async fn session_proxy_focus(
+        &self,
+        conversation_key: &str,
+        session_id: &str,
+    ) -> Result<Value, String>;
+
+    /// Back `session_proxy_unfocus`: clear a conversation's focus.
+    ///
+    /// Why: the "back to fleet chat" action — drop the conversation's binding so
+    /// later free text no longer injects.
+    /// What: clears the focus for `conversation_key`, reporting the session that
+    /// was cleared (or `null`). Never an error — unfocusing an unfocused
+    /// conversation is a harmless no-op.
+    /// Test: `dispatch_session_proxy_unfocus_tool` (mock) + the `mcp_proxy` test.
+    async fn session_proxy_unfocus(&self, conversation_key: &str) -> Result<Value, String>;
+
+    /// Back `session_proxy_message`: INJECT free text into the focused session.
+    ///
+    /// Why: the payoff of focus — a plain message becomes a `send` at the focused
+    /// session. A vanished session auto-unfocuses; a transient failure preserves
+    /// focus; no focus returns a `no_focus` outcome so the caller can fall back to
+    /// its own handling instead of receiving an error.
+    /// What: injects `text` into the conversation's focused session and returns the
+    /// tagged inject outcome (`sent` / `auto_unfocused` / `failed` / `no_focus`).
+    /// Test: `dispatch_session_proxy_message_tool` (mock) + the `mcp_proxy` test.
+    async fn session_proxy_message(
+        &self,
+        conversation_key: &str,
+        text: &str,
+    ) -> Result<Value, String>;
+
+    /// Back `session_proxy_summary`: SUMMARIZE the focused session's activity.
+    ///
+    /// Why: the second proxy direction — "what is my focused session doing?" —
+    /// without attaching to tmux.
+    /// What: returns a lightweight activity digest of the conversation's focused
+    /// session as the tagged summarize outcome (`summary` / `auto_unfocused` /
+    /// `failed` / `no_focus`).
+    /// Test: `dispatch_session_proxy_summary_tool` (mock) + the `mcp_proxy` test.
+    async fn session_proxy_summary(&self, conversation_key: &str) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -545,7 +611,12 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             // module so this match stays focused and `mod.rs` stays under the SLOC cap.
             None => match session_dispatch::try_dispatch(backend, other, &args).await {
                 Some(result) => result,
-                None => Err(format!("unknown tool: {other}")),
+                // #2550: the four session-manager PROXY tools route through their
+                // own sibling module, keeping this match and `mod.rs` small.
+                None => match proxy_dispatch::try_dispatch(backend, other, &args).await {
+                    Some(result) => result,
+                    None => Err(format!("unknown tool: {other}")),
+                },
             },
         },
     };
