@@ -78,14 +78,18 @@ wrapper functions, separate from the core logic they feed.
 ## Persistent-store initialization
 
 - When the service you build is backed by a database or other persistent store, \
-initialize its schema — create the tables, or run the migrations — at \
-application startup, BEFORE the service handles its first request. An app that \
-declares data models but never creates their tables will fail the first read or \
-write with a missing-table error.
-- Perform this initialization so it also runs under an in-process test client \
-(for example a startup hook the client triggers, or an explicit init call the \
-app makes when it is constructed), so the very first request in a test cannot \
-reach an uninitialized store.
+you MUST create its schema — create the tables, or run the migrations — eagerly \
+as part of constructing the application object, so it has already happened \
+BEFORE the service handles its first request. Eager initialization when the \
+application is constructed is the required, primary mechanism, not an optional \
+alternative. An app that declares data models but never creates their tables \
+will fail the first read or write with a missing-table error.
+- A startup or lifecycle event hook alone is NOT sufficient: an in-process test \
+client may construct the application WITHOUT triggering its startup or lifecycle \
+event hooks, so a store initialized only inside such a hook stays uninitialized \
+and the very first request fails with a missing-table error. You may add a hook \
+in addition, but it must never be the sole mechanism — the eager \
+construction-time initialization must always be present.
 
 ## Finish convention
 

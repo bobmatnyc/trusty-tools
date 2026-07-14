@@ -245,19 +245,25 @@ fn base_preamble_nudges_testable_design() {
     );
 }
 
-/// `BASE_PREAMBLE` instructs initializing a persistent store's schema at
-/// startup, before serving, and in a way that also runs under a test client
-/// (#2622 bake-off L3 diagnosis: generated DB-backed services intermittently
-/// omitted `create_all`/migrations, so the first CRUD request hit a missing
-/// table).
+/// `BASE_PREAMBLE` makes eager schema initialization at application
+/// construction the PRIMARY, required mechanism, and explicitly warns that a
+/// startup/lifecycle hook alone is insufficient because an in-process test
+/// client may construct the app without firing those hooks (#2622 bake-off L3
+/// diagnosis, strengthened: the first 1.3.0 fix offered eager init only as an
+/// "OR" alternative, so a generated service picked the hook-only branch and the
+/// first CRUD request still hit a missing table under the bare test client).
 ///
 /// Why: This is a general product-quality nudge for any service backed by a
 /// database or persistent store, not a benchmark- or provider-specific patch —
 /// it must apply to every agent's assembled prompt, so it belongs in the
-/// model-agnostic BASE preamble alongside the neighbouring design nudges.
-/// What: Asserts the preamble names both halves of the principle: initialize
-/// the schema before serving the first request, and do it so it also runs
-/// under a test client.
+/// model-agnostic BASE preamble alongside the neighbouring design nudges. The
+/// eager-at-construction directive must be unambiguously primary so the model
+/// cannot satisfy it with a fragile hook-only initialization.
+/// What: Asserts the preamble (a) requires creating the schema as part of
+/// constructing the application object before the first request, names that the
+/// required/primary mechanism, and (b) warns that a startup/lifecycle hook alone
+/// is not sufficient because an in-process test client may construct the app
+/// without triggering those hooks.
 /// Test: this test.
 #[test]
 fn base_preamble_requires_persistent_store_init() {
@@ -269,9 +275,26 @@ fn base_preamble_requires_persistent_store_init() {
         BASE_PREAMBLE.contains("BEFORE the service handles its first request"),
         "must instruct initializing the schema before the first request"
     );
+    // (a) Eager init at application construction is the PRIMARY, required
+    // mechanism — not merely one alternative among several.
     assert!(
-        BASE_PREAMBLE.contains("in-process test client"),
-        "must ensure initialization also runs under a test client"
+        BASE_PREAMBLE.contains("as part of constructing the application object"),
+        "must require creating the schema as part of constructing the application object"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("required, primary mechanism"),
+        "must name eager construction-time initialization as the required, primary mechanism"
+    );
+    // (b) A startup/lifecycle hook alone is insufficient because an in-process
+    // test client may construct the app without firing those hooks.
+    assert!(
+        BASE_PREAMBLE.contains("lifecycle event hook alone is NOT sufficient"),
+        "must warn that a startup or lifecycle hook alone is not sufficient"
+    );
+    assert!(
+        BASE_PREAMBLE
+            .contains("in-process test client may construct the application WITHOUT triggering"),
+        "must warn that an in-process test client may construct the app without firing its hooks"
     );
 }
 
@@ -312,7 +335,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x83d8_0652_3fc6_0053;
+const EXPECTED_PREAMBLE_HASH: u64 = 0xb631_9159_c613_0d4b;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///
