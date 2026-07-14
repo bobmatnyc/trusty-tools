@@ -34,6 +34,7 @@ pub mod optimizer;
 pub mod orphan_gc;
 pub mod overseer_compose;
 pub mod pairing_store;
+pub mod provisioning;
 pub mod runtime_reap;
 pub mod services;
 pub mod sm_stdio;

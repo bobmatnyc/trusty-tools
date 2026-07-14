@@ -128,8 +128,20 @@ pub struct SpawnParams {
 /// Test: `crate::daemon::mcp_session::tests::session_new_invalid_runtime_errors`
 /// covers the early runtime-rejection path; the HTTP spawn tests cover the
 /// provision/create/spawn path.
+///
+/// #2605: the session id is now a CALLER-SUPPLIED parameter rather than minted
+/// internally, so the asynchronous-spawn path (`background: true`) can learn it
+/// BEFORE provisioning starts — it returns that id to the client immediately
+/// (to poll `provision-status`), keys the
+/// [`crate::daemon::provisioning::ProvisioningRegistry`] on it, and correlates
+/// the `provisioning_stage` SSE frames the background task streams by it. NOTE:
+/// on the reconnect-to-existing-session outcome (#1707) the returned record's
+/// id may DIFFER from `session_id`; callers that keyed anything on `session_id`
+/// must read the final id off the returned record. Synchronous callers simply
+/// pass a fresh [`ManagedSessionId::new()`].
 pub async fn spawn_managed(
     state: &Arc<DaemonState>,
+    session_id: ManagedSessionId,
     params: SpawnParams,
 ) -> Result<SessionRecord, String> {
     // Config is loaded ONCE here and reused below for both the MCP spawn gate
@@ -155,8 +167,6 @@ pub async fn spawn_managed(
         super::mcp_spawn_gate::ensure_mcp_spawn_allowed(&registry, &config, &params.repo_url)
             .await?;
     }
-
-    let session_id = ManagedSessionId::new();
 
     // Wrap the ENTIRE spawn dispatch — in-project, local-path, AND clone-based
     // — in a `provisioning_stage` scope (issue #1904 stretch goal; #1919 fix).
