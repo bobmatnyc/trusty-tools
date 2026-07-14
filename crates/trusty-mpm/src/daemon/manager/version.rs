@@ -36,10 +36,11 @@ const MANAGER_API_VERSION: &str = "0.1.0";
 ///
 /// Why: DOC-36 §6 phases the manager surface (1 read-only chat → 2 routing → 3
 /// proactive → 4 channels); surfacing the phase lets an operator confirm which
-/// slice is live. Phase 1 (this WI cluster) ships `status` + the scaffold.
+/// slice is live. Phase 2 (epic #2109) adds `route-task` + the `act`
+/// proposal-and-confirm flow on top of the phase-1 read-only surface.
 /// What: the integer phase number.
 /// Test: `manager_version_route_reports_capabilities`.
-const MANAGER_PHASE: u8 = 1;
+const MANAGER_PHASE: u8 = 2;
 
 /// One entry in the manager surface's advertised verb set.
 ///
@@ -135,7 +136,12 @@ fn advertised_endpoints() -> Vec<ManagerEndpoint> {
         ManagerEndpoint {
             method: "POST",
             path: "/api/v1/manager/route-task",
-            available: false,
+            available: true,
+        },
+        ManagerEndpoint {
+            method: "POST",
+            path: "/api/v1/manager/act",
+            available: true,
         },
         ManagerEndpoint {
             method: "GET",

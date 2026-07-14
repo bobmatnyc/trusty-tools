@@ -17,10 +17,13 @@
 //! `manager_version_route_reports_capabilities` in `tests/manager_routes.rs`.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use super::actuator::ManagerActuator;
 use super::chat_store::ChatStore;
 use super::inference::ManagerInference;
 use super::memory::PortfolioPalace;
+use super::proposal::ProposalStore;
 
 /// The daemon-owned state for the `tm manager` (Layer-3) surface.
 ///
@@ -33,7 +36,6 @@ use super::memory::PortfolioPalace;
 /// the digest/chat LLM calls (WI-3/WI-4, §3.3), and the conversation-keyed
 /// [`ChatStore`] (WI-4). The proactive poll loop attaches here in phase 3 (§6).
 /// Test: `manager_state_provisions_palace`.
-#[derive(Debug)]
 pub struct ManagerState {
     /// The portfolio-scoped memory palace (WI-5, #2582), provisioned at startup.
     palace: PortfolioPalace,
@@ -41,6 +43,29 @@ pub struct ManagerState {
     inference: ManagerInference,
     /// Conversation-keyed recent-turn store for the chat loop (WI-4).
     conversations: ChatStore,
+    /// Conversation-keyed pending-proposal store for the chat loop's
+    /// propose→confirm action flow (WI-9, #2586), next-turn-only TTL.
+    proposals: ProposalStore,
+    /// Optional TEST override for the `/manager/act` execution seam (WI-9, #2586).
+    ///
+    /// `None` in production (the handler builds a fresh production
+    /// [`super::actuator::ProxyActuator`] per request); `Some` when the hermetic
+    /// suite installs a double via [`ManagerState::set_actuator`], mirroring how
+    /// [`ManagerInference::set_adapter`] swaps the inference seam.
+    actuator: Mutex<Option<Arc<dyn ManagerActuator>>>,
+}
+
+impl std::fmt::Debug for ManagerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_actuator = self.actuator.lock().map(|g| g.is_some()).unwrap_or(false);
+        f.debug_struct("ManagerState")
+            .field("palace", &self.palace)
+            .field("inference", &self.inference)
+            .field("conversations", &self.conversations)
+            .field("proposals", &self.proposals)
+            .field("actuator_override", &has_actuator)
+            .finish()
+    }
 }
 
 impl ManagerState {
@@ -60,6 +85,8 @@ impl ManagerState {
             palace: PortfolioPalace::provision(framework_root),
             inference: ManagerInference::provision(),
             conversations: ChatStore::default(),
+            proposals: ProposalStore::new(),
+            actuator: Mutex::new(None),
         }
     }
 
@@ -94,6 +121,46 @@ impl ManagerState {
     /// `tests/manager_inference.rs`.
     pub fn conversations(&self) -> &ChatStore {
         &self.conversations
+    }
+
+    /// The conversation-keyed pending-proposal store for chat's propose→confirm
+    /// action flow.
+    ///
+    /// Why: `/manager/chat` reads/consumes the pending proposal for a
+    /// conversation on EVERY turn (the next-turn-only TTL policy,
+    /// [`super::proposal::ProposalStore`]'s doc) before deciding whether to
+    /// execute, discard, or propose a new action.
+    /// What: a shared reference to the [`ProposalStore`].
+    /// Test: `proposal_store_take_is_consume_on_read` (proposal module);
+    /// `tests/manager_routing.rs`.
+    pub fn proposals(&self) -> &ProposalStore {
+        &self.proposals
+    }
+
+    /// The installed `/manager/act` execution-seam override, if any.
+    ///
+    /// Why: the act handler consults this before building a production actuator so
+    /// the hermetic suite can run the propose→confirm flow over a test-double
+    /// launcher + `SessionProxy` (WI-9, #2586). `None` in production.
+    /// What: clones the `Arc<dyn ManagerActuator>` under the lock, or `None`.
+    /// Test: exercised via `tests/manager_routing.rs`.
+    pub fn actuator_override(&self) -> Option<Arc<dyn ManagerActuator>> {
+        self.actuator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Install a test override for the `/manager/act` execution seam.
+    ///
+    /// Why: mirrors [`ManagerInference::set_adapter`] — the hermetic suite builds a
+    /// real `DaemonState` and installs a [`super::actuator::ProxyActuator`] over
+    /// doubles through the shared `Arc<ManagerState>`, no bespoke constructor.
+    /// This reconfigures ACTION execution for a test; it is never set in production.
+    /// What: stores `actuator` as the override.
+    /// Test: `tests/manager_routing.rs`.
+    pub fn set_actuator(&self, actuator: Arc<dyn ManagerActuator>) {
+        *self.actuator.lock().unwrap_or_else(|p| p.into_inner()) = Some(actuator);
     }
 }
 

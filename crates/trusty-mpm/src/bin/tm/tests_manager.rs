@@ -114,6 +114,28 @@ fn cli_parses_manager_chat_conversation_override() {
     }
 }
 
+#[test]
+fn cli_parses_manager_route() {
+    match manager_action(&["tm", "manager", "route", "fix the flaky auth test"]) {
+        ManagerAction::Route { text, json } => {
+            assert_eq!(text, "fix the flaky auth test");
+            assert!(!json);
+        }
+        other => panic!("expected Route, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_manager_route_json() {
+    match manager_action(&["tm", "manager", "route", "some task", "--json"]) {
+        ManagerAction::Route { text, json } => {
+            assert_eq!(text, "some task");
+            assert!(json);
+        }
+        other => panic!("expected Route, got {other:?}"),
+    }
+}
+
 /// A bare `tm manager` (no verb) must fail with a clap usage error — the
 /// action subcommand is mandatory, matching `ProjectsAction`'s convention.
 #[test]

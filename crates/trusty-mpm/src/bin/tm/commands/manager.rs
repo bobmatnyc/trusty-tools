@@ -26,7 +26,7 @@
 //! `crates/trusty-mpm/tests/manager_cli_client.rs`.
 
 use trusty_mpm::client::DaemonClient;
-use trusty_mpm::client::http_client::manager::PortfolioStatusWire;
+use trusty_mpm::client::http_client::manager::{PortfolioStatusWire, RouteTaskOutcome};
 
 use crate::cli::ManagerAction;
 
@@ -55,6 +55,7 @@ pub(crate) async fn manager(
             conversation,
             json,
         } => chat(client, url, message, conversation, json).await,
+        ManagerAction::Route { text, json } => route(client, url, text, json).await,
     }
 }
 
@@ -196,6 +197,55 @@ pub(crate) async fn chat(
     }
     println!("{}", outcome.reply);
     Ok(())
+}
+
+/// `tm manager route <text> [--json]` — advisory task→project routing.
+///
+/// Why: the thin CLI half of `/api/v1/manager/route-task` (#2587) — no
+/// resolution logic client-side (the AC forbids it); it is one
+/// `DaemonClient::manager_route_task` call plus a render. Advisory only: it
+/// prints the resolved route and never launches or mutates a session.
+pub(crate) async fn route(
+    client: &reqwest::Client,
+    url: &str,
+    text: String,
+    json: bool,
+) -> anyhow::Result<()> {
+    if text.trim().is_empty() {
+        anyhow::bail!("tm manager route: text must not be empty");
+    }
+    // `None` here means the client feature-detected (via `GET /manager/version`)
+    // that this daemon predates the route-task endpoint (phase 2).
+    let outcome = daemon(client, url).manager_route_task(&text).await?;
+    let Some(outcome) = outcome else {
+        anyhow::bail!(
+            "this daemon does not support `manager route` yet — upgrade the daemon \
+             (`tm restart` after `cargo install trusty-mpm --locked`) and try again"
+        );
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome.raw)?);
+        return Ok(());
+    }
+    println!("{}", render_route(&outcome));
+    Ok(())
+}
+
+/// Render the human view of a routed task.
+///
+/// Why: pure function of the parsed [`RouteTaskOutcome`] — testable without HTTP,
+/// matching the crate's plain-text status render style.
+/// What: one line naming the resolved project (or "no match"), the confidence,
+/// the decision path, and the rationale.
+/// Test: `render_route_resolved`, `render_route_no_match`.
+pub(crate) fn render_route(outcome: &RouteTaskOutcome) -> String {
+    match &outcome.project {
+        Some(project) => format!(
+            "route: {project} (confidence {:.2}, via {})\n  {}",
+            outcome.confidence, outcome.resolved_by, outcome.rationale,
+        ),
+        None => format!("route: no match\n  {}", outcome.rationale),
+    }
 }
 
 /// Read a one-shot chat message from stdin (piped or terminal, Ctrl-D-terminated).
@@ -427,5 +477,35 @@ mod tests {
         let mut reader = std::io::Cursor::new(b"  hello there  \n".to_vec());
         let msg = read_message_from_reader(&mut reader).unwrap();
         assert_eq!(msg, "hello there");
+    }
+
+    #[test]
+    fn render_route_resolved() {
+        let outcome = RouteTaskOutcome {
+            project: Some("alpha".to_string()),
+            confidence: 0.95,
+            rationale: "resolved to 'alpha' by exact name match".to_string(),
+            resolved_by: "resolver".to_string(),
+            raw: serde_json::json!({}),
+        };
+        let line = render_route(&outcome);
+        assert!(line.contains("alpha"), "{line}");
+        assert!(line.contains("0.95"), "{line}");
+        assert!(line.contains("resolver"), "{line}");
+        assert!(line.contains("exact name match"), "{line}");
+    }
+
+    #[test]
+    fn render_route_no_match() {
+        let outcome = RouteTaskOutcome {
+            project: None,
+            confidence: 0.0,
+            rationale: "no registered project matched the task".to_string(),
+            resolved_by: "no_match".to_string(),
+            raw: serde_json::json!({}),
+        };
+        let line = render_route(&outcome);
+        assert!(line.contains("no match"), "{line}");
+        assert!(line.contains("no registered project"), "{line}");
     }
 }
