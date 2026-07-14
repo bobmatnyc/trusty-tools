@@ -712,3 +712,18 @@ async fn reap_dead_managed_sessions_marks_stopped() {
         "reap_managed_against must mark Active session Stopped when tmux_name absent (#1744)"
     );
 }
+
+/// The Layer-3 manager state is provisioned at daemon construction and reachable
+/// via the shared accessor (#2578) — the palace handle it threads through always
+/// carries the stable portfolio id, regardless of whether the memory engine is
+/// compiled/available (that availability is the palace tests' concern).
+#[test]
+fn manager_state_is_provisioned() {
+    let (state, _dir) = hermetic_state();
+    let manager = state.manager_state();
+    assert_eq!(
+        manager.palace().id(),
+        crate::daemon::manager::PORTFOLIO_PALACE_ID,
+        "daemon startup must auto-provision the portfolio manager palace"
+    );
+}

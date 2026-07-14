@@ -90,6 +90,19 @@ bedrock = ["trusty-common/bedrock-client"]
 # `cargo build --features sm-memory` does not.
 sm-memory = ["trusty-common/memory-core"]
 
+# `manager-memory` gates the Layer-3 `tm manager` PORTFOLIO memory palace (WI-5,
+# #2582, DOC-36 §3.4) — a single portfolio-scoped `trusty-memory` palace holding
+# digest history, escalation dispositions, and portfolio chat turns, distinct
+# from the SM palace and every per-project palace. Like `sm-memory` it is NOT in
+# `default`: it turns on `trusty-common/memory-core` (the heavy HNSW/ONNX Memory
+# Palace engine), so a default daemon build pays no ONNX/usearch cost. Without
+# this feature the portfolio palace reports "unavailable" and the manager surface
+# still works (DOC-36 §4 degrade bar). The `daemon::manager::memory` live binding
+# is compiled only under this flag. Build/test with `--features manager-memory`;
+# the `embedder-test-support` dev-dependency below supplies the mock embedder so
+# `cargo test --features manager-memory` runs without the ONNX model.
+manager-memory = ["trusty-common/memory-core"]
+
 # `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
 # is ALWAYS available; this flag exists only so the subcommand can optionally
 # advertise itself. The Tauri GUI lives in the separate, publish=false
