@@ -137,12 +137,15 @@ pub async fn handle_tool_call(state: &AppState, name: &str, args: Value) -> Valu
         "modify_sheet_values" => {
             services::sheets::core::modify_sheet_values(&state.client, args).await
         }
-        "format_sheet" => services::sheets::core::format_sheet(&state.client, args).await,
+        "format_sheet" => services::sheets::formatting::format_sheet(&state.client, args).await,
+        "create_chart" => services::sheets::charts::create_chart(&state.client, args).await,
 
         // Slides
         "get_slides" => services::slides::core::get_slides(&state.client, args).await,
         "manage_slides" => services::slides::core::manage_slides(&state.client, args).await,
-        "add_slide_content" => services::slides::core::add_slide_content(&state.client, args).await,
+        "add_slide_content" => {
+            services::slides::content::add_slide_content(&state.client, args).await
+        }
 
         // Tasks
         "manage_task_lists" => services::tasks::manage_task_lists(&state.client, args).await,

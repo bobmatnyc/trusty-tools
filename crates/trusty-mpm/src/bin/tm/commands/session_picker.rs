@@ -32,16 +32,21 @@ use super::managed::filter_live_sessions;
 /// Why: extracting the parse-and-decide logic from the I/O driver makes it
 /// unit-testable without stdin/tmux. The driver calls parse, checks the variant,
 /// and shells out only for Resume and LaunchNew.
-/// What: five variants cover every valid and invalid input the picker can
+/// What: six variants cover every valid and invalid input the picker can
 /// receive. [`Self::ConfirmRestart`] is the #2148 safety default: a bare Enter
 /// that WOULD have silently restarted (destructively recreated the tmux pane
 /// of) a stopped/errored session instead asks for an explicit numeric choice.
+/// [`Self::Unresumable`] (#2595) is the analogous safety gate for a DEAD
+/// session — no confirmation would ever help, since the resume/restart is
+/// guaranteed to fail, so the driver never round-trips to the daemon for it.
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_live_session_resumes_first`,
 /// `guided_picker_bare_enter_stopped_session_requires_confirm`,
 /// `guided_picker_q_returns_quit`, `guided_picker_numeric_valid_resumes`,
 /// `guided_picker_numeric_launch_new`, `guided_picker_out_of_range_unrecognised`,
-/// `guided_picker_non_numeric_unrecognised`.
+/// `guided_picker_non_numeric_unrecognised`,
+/// `guided_picker_bare_enter_unresumable_session_blocked`,
+/// `guided_picker_numeric_unresumable_session_blocked`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PickerDecision {
     /// Resume the session at 0-based index into the sessions slice.
@@ -63,6 +68,13 @@ pub(crate) enum PickerDecision {
     /// running session, a force-confirm — before touching the store, so this
     /// variant only signals intent, never an unconditional destructive action.
     Delete(usize),
+    /// Selection (bare Enter OR an explicit numeric choice) targeted the
+    /// 0-based-indexed session whose workspace is gone for good — the
+    /// server-computed `unresumable` flag was `true` (#2595). Resuming it
+    /// would only ever fail (see #2577/#2594): the driver never attempts the
+    /// daemon round-trip; it prints the dead-session notice and points the
+    /// operator at `d<N>` (delete) instead.
+    Unresumable(usize),
 }
 
 /// Scope describing which sessions the picker operates over and how to launch new.
@@ -171,22 +183,34 @@ pub(crate) async fn fetch_live_sessions(
 /// logic unit-testable without needing a real stdin, tmux, or daemon. Folding
 /// `first_needs_restart` in here (rather than deciding safety in the I/O
 /// driver) keeps the destructive-default guard (#2148) exhaustively
-/// unit-testable alongside every other picker-input case.
+/// unit-testable alongside every other picker-input case. `unresumable` (#2595)
+/// is folded in the same way: a session flagged dead by the daemon must never
+/// reach `Resume`/`ConfirmRestart` from EITHER a bare Enter or an explicit
+/// numeric choice — checking it here, ahead of both branches, is the single
+/// place that guarantee can never regress.
 /// What: `session_count` is the number of existing sessions in the menu (the
 /// menu slot `session_count + 1` is always "launch new"); `first_needs_restart`
 /// is true when the session at index 0 is `stopped`/`errored` — i.e. resuming
 /// it goes through the daemon's restart path, which can recreate its tmux pane
-/// (see [`super::guided_resume::needs_restart`]).
+/// (see [`super::guided_resume::needs_restart`]); `unresumable[i]` is the
+/// server-computed dead-workspace flag for the session at 0-based index `i`
+/// (`ManagedSessionSummary::unresumable`, #2595) — a slice, not a single bool,
+/// because an EXPLICIT numeric choice can target ANY index, not just 0.
 ///   • `"q"` / `"Q"` → `Quit`
 ///   • empty / whitespace, `session_count == 0` → `LaunchNew`
+///   • empty / whitespace, `session_count > 0`, session 0 is dead →
+///     `Unresumable(0)` (#2595 — checked BEFORE the restart-confirm gate)
 ///   • empty / whitespace, `session_count > 0`, session 0 is live → `Resume(0)`
 ///   • empty / whitespace, `session_count > 0`, session 0 needs a restart →
 ///     `ConfirmRestart(0)` (#2148: no longer an implicit destructive default)
+///   • `N` (1..=session_count), session `N-1` is dead → `Unresumable(N-1)`
+///     (#2595 — an explicit numeric choice no longer bypasses this gate)
 ///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index) — an EXPLICIT
 ///     numeric choice always restarts/resumes directly, confirm or not
 ///   • `session_count + 1` → `LaunchNew`
 ///   • `d<N>` / `d <N>` (1..=session_count) → `Delete(N-1)` (#2304); the driver
-///     still runs a confirm/force-confirm prompt before deleting
+///     still runs a confirm/force-confirm prompt before deleting — this is the
+///     REMEDY the driver points a dead-session pick at
 ///   • anything else → `Unrecognised`
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_live_session_resumes_first`,
@@ -194,18 +218,23 @@ pub(crate) async fn fetch_live_sessions(
 /// `guided_picker_q_returns_quit`, `guided_picker_q_uppercase_returns_quit`,
 /// `guided_picker_numeric_valid_resumes`, `guided_picker_numeric_launch_new`,
 /// `guided_picker_out_of_range_unrecognised`,
-/// `guided_picker_non_numeric_unrecognised`.
+/// `guided_picker_non_numeric_unrecognised`,
+/// `guided_picker_bare_enter_unresumable_session_blocked`,
+/// `guided_picker_numeric_unresumable_session_blocked`.
 pub(crate) fn parse_picker_choice(
     line: &str,
     session_count: usize,
     first_needs_restart: bool,
+    unresumable: &[bool],
 ) -> PickerDecision {
     let choice = line.trim();
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
     }
     // #2304: `d<N>` / `d <N>` deletes the session at menu slot N. Parsed before
-    // the numeric-resume branch so the `d` prefix is unambiguous.
+    // the numeric-resume branch so the `d` prefix is unambiguous. Deleting a
+    // dead session is exactly the intended remedy, so this branch is NOT
+    // gated by `unresumable`.
     if let Some(rest) = choice.strip_prefix(['d', 'D']) {
         if let Ok(n) = rest.trim().parse::<usize>()
             && n >= 1
@@ -219,6 +248,9 @@ pub(crate) fn parse_picker_choice(
         if session_count == 0 {
             return PickerDecision::LaunchNew;
         }
+        if unresumable.first().copied().unwrap_or(false) {
+            return PickerDecision::Unresumable(0);
+        }
         return if first_needs_restart {
             PickerDecision::ConfirmRestart(0)
         } else {
@@ -227,7 +259,11 @@ pub(crate) fn parse_picker_choice(
     }
     if let Ok(n) = choice.parse::<usize>() {
         if n >= 1 && n <= session_count {
-            return PickerDecision::Resume(n - 1);
+            let idx = n - 1;
+            if unresumable.get(idx).copied().unwrap_or(false) {
+                return PickerDecision::Unresumable(idx);
+            }
+            return PickerDecision::Resume(idx);
         }
         if n == session_count + 1 {
             return PickerDecision::LaunchNew;
@@ -253,6 +289,9 @@ pub(crate) fn parse_picker_choice(
 ///     redisplays the menu (fleet-wide `tm ls` has no single launch target);
 ///   • `ConfirmRestart(i)` (#2148) → print a one-line "type the number to
 ///     confirm" notice and redisplay the SAME menu — no daemon round-trip;
+///   • `Unresumable(i)` (#2595) → print the dead-session notice pointing at
+///     `d<N>` and redisplay the SAME menu — no daemon round-trip (a resume
+///     would only ever fail: #2577/#2594);
 ///   • `Delete(i)` (#2304) → [`super::picker_delete::confirm_and_delete`] runs a
 ///     confirm (force-confirm for a running session) then the managed→local
 ///     routed delete; redisplay the re-fetched menu afterwards;
@@ -289,11 +328,27 @@ pub(crate) async fn run_tty_picker(
             .first()
             .map(|s| super::guided_resume::needs_restart(&s.state))
             .unwrap_or(false);
+        // #2595: server-computed dead-workspace flag, one per session, in menu
+        // order — the single source `parse_picker_choice` and the menu render
+        // both read so they can never disagree about which slot is dead.
+        let unresumable: Vec<bool> = sessions.iter().map(|s| s.unresumable).collect();
         if sessions.is_empty() {
             eprintln!("tm:   [Enter] launch new session");
             eprintln!("tm:   [q]     quit");
         } else {
             for (i, s) in sessions.iter().enumerate() {
+                if s.unresumable {
+                    // #2595: workspace is gone for good — never offer resume/restart;
+                    // point straight at the delete remedy instead.
+                    eprintln!(
+                        "tm:   [{}] {} ({}) — DEAD: workspace removed; use [d{}] to remove the record",
+                        i + 1,
+                        s.name,
+                        s.state,
+                        i + 1
+                    );
+                    continue;
+                }
                 // Show "restart" for sessions that are stopped/errored — they have no
                 // live tmux session and will be restarted via the daemon (#1742).
                 let stopped = matches!(s.state.as_str(), "stopped" | "errored");
@@ -303,7 +358,11 @@ pub(crate) async fn run_tty_picker(
             eprintln!("tm:   [{new_idx}] launch new session");
             eprintln!("tm:   [d<N>] delete session N (e.g. d1)");
             eprintln!("tm:   [q] quit");
-            if first_needs_restart {
+            if unresumable.first().copied().unwrap_or(false) {
+                eprintln!(
+                    "tm: [Enter] is DEAD (workspace removed) — type [d1] to remove it, or choose another"
+                );
+            } else if first_needs_restart {
                 // #2148: no implicit destructive default — an explicit [1] is required.
                 eprintln!("tm: [Enter] does NOT restart — type [1] to confirm the restart");
             } else {
@@ -320,7 +379,7 @@ pub(crate) async fn run_tty_picker(
             break;
         } // EOF (Ctrl-D): exit cleanly.
 
-        match parse_picker_choice(&line, sessions.len(), first_needs_restart) {
+        match parse_picker_choice(&line, sessions.len(), first_needs_restart, &unresumable) {
             PickerDecision::Quit => {
                 eprintln!("tm: quit.");
                 break;
@@ -367,6 +426,22 @@ pub(crate) async fn run_tty_picker(
                 );
                 eprintln!(
                     "tm: type [{}] to confirm the restart, or [q] to quit.",
+                    i + 1
+                );
+                continue;
+            }
+            // #2595: selection targeted a dead session — its workspace no longer
+            // exists anywhere on disk, so a resume/restart is guaranteed to fail
+            // (#2577/#2594). No daemon round-trip; point at the delete remedy and
+            // redisplay the SAME menu.
+            PickerDecision::Unresumable(i) => {
+                eprintln!(
+                    "tm: '{}' is dead — its workspace no longer exists anywhere on disk; \
+                     resuming it would only fail.",
+                    sessions[i].name
+                );
+                eprintln!(
+                    "tm: run [d{}] to remove the record, or choose another session.",
                     i + 1
                 );
                 continue;

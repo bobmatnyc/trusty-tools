@@ -37,6 +37,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         deliverable_id: None,
         pane_id: None,
         injection_status: None,
+        unresumable: false,
     }
 }
 

@@ -1,8 +1,8 @@
 //! Sheets v4 core operations.
 //!
-//! Why: Get spreadsheet metadata; create spreadsheets; read/write cell
-//! values; apply formatting via batchUpdate.
-//! What: Four tool functions matching the Python service surface.
+//! Why: Get spreadsheet metadata; create spreadsheets; read/write cell values.
+//! What: Three tool functions matching the Python service surface (formatting
+//! and charts live in sibling `formatting`/`charts` modules).
 //! Test: Live only.
 
 use anyhow::{Result, anyhow};
@@ -115,19 +115,4 @@ pub async fn modify_sheet_values(client: &BaseClient, args: Value) -> Result<Val
         }
         other => Err(anyhow!("unknown action for modify_sheet_values: {other}")),
     }
-}
-
-/// Why: Cell formatting (bold, colours, number format) is a batchUpdate surface.
-/// What: Builds a `repeatCell` request from the supplied style fields and POSTs batchUpdate.
-/// Test: Live API.
-pub async fn format_sheet(client: &BaseClient, args: Value) -> Result<Value> {
-    let account = account_of(&args);
-    let id = require_str(&args, "spreadsheet_id")?;
-    let requests = args
-        .get("requests")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing 'requests' array (sheets batchUpdate requests)"))?;
-    let body = json!({ "requests": requests });
-    let url = format!("{SHEETS_API_BASE}/spreadsheets/{id}:batchUpdate");
-    client.post(&url, body, account).await
 }

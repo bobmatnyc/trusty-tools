@@ -27,3 +27,5 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
+clap = { workspace = true }
+open = { workspace = true }

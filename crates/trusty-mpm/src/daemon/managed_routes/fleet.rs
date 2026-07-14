@@ -16,7 +16,7 @@ use tracing::warn;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::SessionRecord;
 
-use super::{SessionSummary, record_to_summary};
+use super::{SessionSummary, checked_summaries};
 
 /// Per-project group entry for GET /api/v1/sessions/managed/fleet.
 ///
@@ -56,8 +56,12 @@ pub struct FleetByProjectResponse {
 /// projects from the `ProjectRegistry`, runs `fleet_by_project` to group them,
 /// and returns a `FleetByProjectResponse` with one `FleetProjectGroup` per
 /// project (empty `sessions` list included — the operator sees the full project
-/// landscape, not just active ones).
-/// Test: `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`.
+/// landscape, not just active ones). Each session's `unresumable` flag (#2595)
+/// is computed via [`checked_summaries`] — the SAME checked, concurrently-probed
+/// path `list_managed_sessions` uses — so the TUI (the primary consumer of
+/// this route) never offers a dead session for resume either.
+/// Test: `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`;
+/// `fleet_route_marks_dead_session_unresumable` in the same file (#2595).
 pub async fn fleet_by_project_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     let mgr = state.session_manager().await;
     let registry = state.project_registry().await;
@@ -81,14 +85,14 @@ pub async fn fleet_by_project_route(State(state): State<Arc<DaemonState>>) -> im
 
     let fleet = crate::project::fleet_by_project(&raw_sessions, &projects);
 
-    let project_groups: Vec<FleetProjectGroup> = fleet
-        .into_iter()
-        .map(|pf| FleetProjectGroup {
+    let mut project_groups: Vec<FleetProjectGroup> = Vec::with_capacity(fleet.len());
+    for pf in fleet {
+        project_groups.push(FleetProjectGroup {
             project_name: pf.project.name.clone(),
             repo_url: pf.project.repo_url.clone(),
-            sessions: pf.sessions.iter().map(record_to_summary).collect(),
-        })
-        .collect();
+            sessions: checked_summaries(&pf.sessions).await,
+        });
+    }
 
     Json(FleetByProjectResponse {
         projects: project_groups,
