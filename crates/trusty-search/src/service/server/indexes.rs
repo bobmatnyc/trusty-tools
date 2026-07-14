@@ -78,9 +78,8 @@ pub(super) struct ListIndexesParams {
 /// failure) and returns `(id, PersistedIndex::repo_identity)` for every
 /// registered handle; ids with no matching persisted entry map to `None`.
 /// Test: `list_indexes_repo_identity_details_and_filter`,
-/// `list_indexes_repo_identity_tree_filter` (server tests, both in
-/// `tests_list.rs`, seed `indexes.toml` directly rather than relying on a live
-/// derive).
+/// `list_indexes_repo_identity_tree_filter` (`list_repo_identity_tests.rs`),
+/// which seed `indexes.toml` directly rather than relying on a live derive.
 fn resolve_identities(
     handles: &[Arc<IndexHandle>],
 ) -> std::collections::HashMap<String, Option<String>> {

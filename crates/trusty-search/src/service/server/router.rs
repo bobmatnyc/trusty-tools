@@ -56,7 +56,8 @@ pub(super) struct IndexDetailEntry {
     /// What: the persisted `PersistedIndex::repo_identity` (no per-request live
     /// derive — see `resolve_identities` in `indexes.rs` for why). Serialised
     /// only when present.
-    /// Test: `list_indexes_repo_identity_details_and_filter` (`tests_list.rs`).
+    /// Test: `list_indexes_repo_identity_details_and_filter`
+    /// (`list_repo_identity_tests.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_identity: Option<String>,
 }
