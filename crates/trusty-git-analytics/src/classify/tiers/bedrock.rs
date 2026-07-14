@@ -7,7 +7,16 @@
 //! Why: organizations on AWS often prefer Bedrock (private VPC, IAM-based
 //! auth, no per-request data egress to a third-party SaaS) over OpenRouter
 //! or OpenAI for LLM access. Making it an optional feature keeps the
-//! default binary lean for users who don't need it.
+//! default binary lean for users who don't need it. As of #2411 the Bedrock
+//! wire integration (region resolution, the AWS credential chain, and the
+//! Converse request/response conversion) is NO LONGER a private aws-sdk
+//! `InvokeModel` port here — it bridges onto the shared
+//! `trusty_common::inference::bedrock` Converse adapter (#2407), the same one
+//! trusty-code and the trusty-mpm SM provider consume, so the wire mechanics
+//! live in exactly one place. This module keeps the tga-specific policy:
+//! sequential best-effort batch classification (never crashes on a bad
+//! payload) and the shared `SYSTEM_PROMPT`/[`LlmVerdict`] parsing contract
+//! from `llm.rs`.
 
 use crate::classify::tiers::ClassificationResult;
 // Shared prompt and verdict types live in `llm.rs` so both the HTTP and
@@ -21,14 +30,15 @@ use crate::classify::tiers::llm::{LlmVerdict, SYSTEM_PROMPT};
 /// AWS Bedrock-backed LLM classifier targeting Anthropic Claude on Bedrock.
 ///
 /// Uses the AWS default credential provider chain (env vars, profile,
-/// SSO, IMDS, etc.). Requests are formatted as the Anthropic Messages API
-/// with `anthropic_version: "bedrock-2023-05-31"` per Bedrock's contract.
+/// SSO, IMDS, etc.), resolved lazily by the shared
+/// `trusty_common::inference::bedrock::BedrockAdapter` on the first call.
 pub struct BedrockClassifier {
     /// Bedrock model id (e.g. `anthropic.claude-3-haiku-20240307-v1:0`).
     #[allow(dead_code)] // only read under the `bedrock` feature.
     pub(crate) model: String,
+    /// Shared Converse adapter (owns region + lazily-built AWS client).
     #[cfg(feature = "bedrock")]
-    client: aws_sdk_bedrockruntime::Client,
+    inner: trusty_common::inference::BedrockAdapter,
 }
 
 /// Default Bedrock model id when the caller doesn't override it.
@@ -40,26 +50,22 @@ impl BedrockClassifier {
     /// # Errors
     ///
     /// Returns `Err` with a clear message when the binary was built without
-    /// `--features bedrock`. With the feature enabled, this returns `Ok`
-    /// after the AWS credential chain initializes.
+    /// `--features bedrock`. With the feature enabled, this always returns
+    /// `Ok` — the shared adapter defers AWS credential/client construction to
+    /// the first `classify_one` call (#2245 lazy-construction guarantee).
     ///
     /// Why: surfacing the missing-feature condition as an error (rather
     /// than silently no-oping) helps operators diagnose deployments.
-    /// What: loads default AWS config and constructs the SDK client.
+    /// What: builds a [`trusty_common::inference::BedrockAdapter`] pinned to
+    /// the default region resolution (`TRUSTY_AWS_REGION` > `AWS_REGION` >
+    /// `us-east-1`).
     /// Test: building with and without `--features bedrock` verifies both
     /// arms compile and behave correctly at startup.
     #[cfg(feature = "bedrock")]
     pub async fn new(model: &str) -> Result<Self, String> {
-        // Use the explicit BehaviorVersion (latest()) form to avoid the
-        // deprecation on `load_from_env` without taking the cross-version
-        // feature flag.
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-        let client = aws_sdk_bedrockruntime::Client::new(&config);
         Ok(Self {
             model: model.to_string(),
-            client,
+            inner: trusty_common::inference::BedrockAdapter::new(None),
         })
     }
 
@@ -68,22 +74,16 @@ impl BedrockClassifier {
     /// Why: operators who specify a `region:` in the `llm:` config section
     /// need a way to override the SDK's default region selection without
     /// mutating environment variables.
-    /// What: loads AWS config with the supplied region pinned, then
-    /// constructs the SDK client. Falls back to `new(model)` semantics when
-    /// `region` is `None`.
+    /// What: builds a [`trusty_common::inference::BedrockAdapter`] pinned to
+    /// `region` (falling back to the shared adapter's own resolution when
+    /// `None`, matching `new`'s semantics).
     /// Test: indirectly tested via config-driven construction when `region:`
     /// is set in the `llm:` YAML block.
     #[cfg(feature = "bedrock")]
     pub async fn with_region(model: &str, region: Option<&str>) -> Result<Self, String> {
-        let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
-        if let Some(r) = region {
-            builder = builder.region(aws_config::Region::new(r.to_string()));
-        }
-        let config = builder.load().await;
-        let client = aws_sdk_bedrockruntime::Client::new(&config);
         Ok(Self {
             model: model.to_string(),
-            client,
+            inner: trusty_common::inference::BedrockAdapter::new(region),
         })
     }
 
@@ -116,7 +116,8 @@ impl BedrockClassifier {
     ///
     /// Why: the LLM tier is best-effort; a single bad payload must not
     /// poison an entire batch.
-    /// What: sequentially invokes `InvokeModel` for each message.
+    /// What: sequentially invokes the shared Converse adapter for each
+    /// message via [`Self::classify_one`].
     /// Test: integration-tested when AWS credentials are present; stubbed
     /// path tested in `bedrock_stub_returns_error_without_feature`.
     #[cfg(feature = "bedrock")]
@@ -141,80 +142,46 @@ impl BedrockClassifier {
         vec![None; messages.len()]
     }
 
-    /// Classify a single commit message via Bedrock InvokeModel.
+    /// Classify a single commit message via the shared Bedrock Converse
+    /// adapter.
     ///
-    /// Why: encapsulates the AWS SDK call and JSON parsing so
+    /// Why: encapsulates the shared-adapter call and JSON parsing so
     /// `classify_batch_bedrock` stays readable.
-    /// What: builds an Anthropic Messages API payload (Bedrock wire format),
-    /// invokes the model, parses the response into a shared [`LlmVerdict`],
-    /// and maps it to a [`ClassificationResult`].
+    /// What: builds a shared [`trusty_common::inference::ChatRequest`] with
+    /// the same `SYSTEM_PROMPT`/user-message/temperature(0.0)/max_tokens(256)
+    /// the pre-#2411 `InvokeModel` port sent, delegates to
+    /// [`trusty_common::inference::BedrockAdapter::chat`] (Converse API —
+    /// AWS documents the same on-demand model ids as `InvokeModel` for
+    /// Converse, so [`DEFAULT_BEDROCK_MODEL`] and any bare foundation-model id
+    /// resolve identically), and parses the response text into the shared
+    /// [`LlmVerdict`].
     /// Test: integration path requires live AWS credentials; the stub path
     /// falls through to the `#[cfg(not(feature = "bedrock"))]` branch above.
     #[cfg(feature = "bedrock")]
     async fn classify_one(&self, message: &str) -> Option<ClassificationResult> {
         use crate::core::models::ClassificationMethod;
-        use aws_sdk_bedrockruntime::primitives::Blob;
         use tracing::warn;
+        use trusty_common::inference::{ChatMessage, ChatRequest, InferenceAdapter};
 
-        // Use SYSTEM_PROMPT from llm.rs so both paths send identical
-        // instructions and return the same JSON shape (including complexity).
-        let body = serde_json::json!({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 256,
-            "temperature": 0.0,
-            "system": SYSTEM_PROMPT,
-            "messages": [
-                {"role": "user", "content": format!("Classify this commit message:\n\n{message}")}
-            ]
-        });
-        let body_bytes = match serde_json::to_vec(&body) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = %e, "bedrock body serialize failed");
-                return None;
-            }
-        };
+        let mut req = ChatRequest::new(
+            self.model.clone(),
+            vec![
+                ChatMessage::system(SYSTEM_PROMPT),
+                ChatMessage::user(format!("Classify this commit message:\n\n{message}")),
+            ],
+        );
+        req.temperature = Some(0.0);
+        req.max_tokens = Some(256);
 
-        let resp = match self
-            .client
-            .invoke_model()
-            .model_id(&self.model)
-            .content_type("application/json")
-            .accept("application/json")
-            .body(Blob::new(body_bytes))
-            .send()
-            .await
-        {
+        let resp = match self.inner.chat(&req).await {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "bedrock invoke_model failed");
+                warn!(error = %e, "bedrock converse call failed");
                 return None;
             }
         };
 
-        let raw = resp.body.into_inner();
-
-        #[derive(serde::Deserialize)]
-        struct BedrockResponse {
-            content: Vec<ContentBlock>,
-        }
-        #[derive(serde::Deserialize)]
-        struct ContentBlock {
-            #[serde(default)]
-            text: Option<String>,
-        }
-        let parsed: BedrockResponse = match serde_json::from_slice(&raw) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(error = %e, "bedrock response decode failed");
-                return None;
-            }
-        };
-        let text = parsed
-            .content
-            .into_iter()
-            .find_map(|b| b.text)
-            .unwrap_or_default();
+        let text = resp.first_text().unwrap_or_default();
 
         // Parse using the shared LlmVerdict from llm.rs so the Bedrock
         // path produces the same category/subcategory/confidence/complexity
