@@ -15,6 +15,7 @@ pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+pub mod injection_status;
 pub mod manager;
 pub mod naming;
 pub mod prune;
@@ -81,11 +82,15 @@ mod pane_scoped_tests;
 #[cfg(test)]
 mod adopt_existing_tests;
 
+#[cfg(test)]
+mod injection_status_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]
 pub mod real_tmux;
 
+pub use injection_status::InjectionStatus;
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};

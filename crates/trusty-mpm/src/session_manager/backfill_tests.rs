@@ -83,6 +83,7 @@ async fn reconcile_backfills_source_id_from_workspace_git_remote() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
@@ -170,6 +171,7 @@ async fn reconcile_backfills_source_id_for_stopped_record() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 

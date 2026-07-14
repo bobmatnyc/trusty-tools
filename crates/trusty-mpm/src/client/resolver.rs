@@ -186,6 +186,7 @@ mod tests {
             claude_session_id: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: None,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

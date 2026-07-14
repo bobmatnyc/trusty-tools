@@ -863,6 +863,7 @@ mod orphan_tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         mgr.store
             .write()

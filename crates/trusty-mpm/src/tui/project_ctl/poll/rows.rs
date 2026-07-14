@@ -198,6 +198,7 @@ mod tests {
             claude_session_id: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: None,
         }
     }
 
