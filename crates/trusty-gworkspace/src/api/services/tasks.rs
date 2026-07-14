@@ -76,7 +76,7 @@ pub async fn complete_task(client: &BaseClient, args: Value) -> Result<Value> {
 }
 
 /// Why: Task list CRUD is small enough to share one tool action enum.
-/// What: Routes `list|create|delete|update` to `users/@me/lists` on the Tasks API.
+/// What: Routes `list|get|create|update|delete` to `users/@me/lists`.
 /// Test: Live API.
 pub async fn manage_task_lists(client: &BaseClient, args: Value) -> Result<Value> {
     let action = require_str(&args, "action")?;
@@ -84,6 +84,11 @@ pub async fn manage_task_lists(client: &BaseClient, args: Value) -> Result<Value
     match action {
         "list" => {
             let url = format!("{TASKS_API_BASE}/users/@me/lists");
+            client.get(&url, account).await
+        }
+        "get" => {
+            let id = require_str(&args, "tasklist_id")?;
+            let url = format!("{TASKS_API_BASE}/users/@me/lists/{id}");
             client.get(&url, account).await
         }
         "create" => {
@@ -106,9 +111,11 @@ pub async fn manage_task_lists(client: &BaseClient, args: Value) -> Result<Value
     }
 }
 
-/// Why: Task CRUD inside a list is the bulk of the Tasks API surface.
-/// What: Routes `list|get|create|update|delete|complete` to `lists/{id}/tasks`.
-/// Test: Live API.
+/// Why: Task CRUD inside a list is the bulk of the Tasks API surface, plus a
+/// cross-list search agents frequently need ("find the task about X").
+/// What: Routes `list|get|create|update|delete|complete|move|search` to
+/// `lists/{id}/tasks`; `search` fans out across every tasklist.
+/// Test: `search` filter is unit-tested via `task_matches`; live 200 deferred.
 pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
     let action = require_str(&args, "action")?;
     let account = account_of(&args);
@@ -118,6 +125,12 @@ pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
             let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks");
             client.get(&url, account).await
         }
+        "get" => {
+            let id = require_str(&args, "task_id")?;
+            let url = format!("{TASKS_API_BASE}/lists/{tasklist}/tasks/{id}");
+            client.get(&url, account).await
+        }
+        "search" => search_tasks(client, account, &args).await,
         "create" => {
             let body = args
                 .get("task")
@@ -159,5 +172,93 @@ pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
             client.post(&url, json!({}), account).await
         }
         other => Err(anyhow!("unknown action for manage_tasks: {other}")),
+    }
+}
+
+/// Why: The Tasks API has no cross-list search; agents need one call to find a
+/// task by keyword regardless of which list holds it.
+/// What: Lists every tasklist, then lists each list's tasks and keeps those
+/// whose title or notes contain `query` (case-insensitive). Each hit is
+/// annotated with its owning `tasklist_id`/`tasklist_title`.
+/// Test: The per-task predicate is unit-tested via `task_matches`.
+async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) -> Result<Value> {
+    let query = require_str(args, "query")?;
+    let needle = query.to_ascii_lowercase();
+    let show_completed = args
+        .get("show_completed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let lists = client
+        .get(&format!("{TASKS_API_BASE}/users/@me/lists"), account)
+        .await?;
+    let list_items = lists
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Sequential fan-out: a user has few tasklists (typically < 10), so this
+    // keeps the `&client` borrow trivial and avoids a `futures` dependency
+    // while remaining well within any practical latency budget.
+    let mut results = Vec::<Value>::new();
+    for list in &list_items {
+        let Some(list_id) = list.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let list_title = list.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let tasks_url = format!(
+            "{TASKS_API_BASE}/lists/{list_id}/tasks?showCompleted={show_completed}&showHidden=true&maxResults=100"
+        );
+        let tasks = client.get(&tasks_url, account).await?;
+        let items = tasks
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for task in items {
+            if task_matches(&task, &needle) {
+                results.push(json!({
+                    "tasklist_id": list_id,
+                    "tasklist_title": list_title,
+                    "id": task.get("id"),
+                    "title": task.get("title"),
+                    "notes": task.get("notes"),
+                    "due": task.get("due"),
+                    "status": task.get("status"),
+                }));
+            }
+        }
+    }
+    Ok(json!({ "query": query, "count": results.len(), "results": results }))
+}
+
+/// Why: The cross-list search filter must be pure to be unit-testable offline.
+/// What: Returns true when the (already-lowercased) `needle` is a substring of
+/// the task's title or notes.
+/// Test: `task_matches_title_and_notes` below.
+fn task_matches(task: &Value, needle_lower: &str) -> bool {
+    let title = task.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let notes = task.get("notes").and_then(|v| v.as_str()).unwrap_or("");
+    title.to_ascii_lowercase().contains(needle_lower)
+        || notes.to_ascii_lowercase().contains(needle_lower)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_matches_title_and_notes() {
+        let t = json!({ "title": "Ship the Release", "notes": "coordinate with QA" });
+        // Case-insensitive substring on the title.
+        assert!(task_matches(&t, "release"));
+        // Match in the notes field.
+        assert!(task_matches(&t, "qa"));
+        // No match.
+        assert!(!task_matches(&t, "invoice"));
+        // Missing fields must not panic and must not match.
+        let empty = json!({});
+        assert!(!task_matches(&empty, "anything"));
     }
 }

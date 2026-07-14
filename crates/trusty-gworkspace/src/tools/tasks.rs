@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 pub(super) fn append(tools: &mut Vec<Value>) {
     tools.push(tool(
         "manage_task_lists",
-        "CRUD Google Tasks lists.",
+        "CRUD Google Tasks lists (list, get one by id, create, update, delete).",
         json!({
             "account": account_schema(),
-            "action": action_enum(&["list", "create", "update", "delete"]),
-            "tasklist_id": { "type": "string" },
+            "action": action_enum(&["list", "get", "create", "update", "delete"]),
+            "tasklist_id": { "type": "string", "description": "Required for get/update/delete." },
             "title": { "type": "string" },
             "updates": { "type": "object" },
         }),
@@ -27,16 +27,18 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     tools.push(tool(
         "manage_tasks",
-        "CRUD or complete/move tasks within a Google Tasks list.",
+        "CRUD, complete/move, get one, or search tasks within Google Tasks lists.",
         json!({
             "account": account_schema(),
-            "action": action_enum(&["list", "create", "update", "delete", "complete", "move"]),
+            "action": action_enum(&["list", "get", "create", "update", "delete", "complete", "move", "search"]),
             "tasklist_id": { "type": "string" },
-            "task_id": { "type": "string" },
+            "task_id": { "type": "string", "description": "Required for get/update/delete/complete/move." },
             "task": { "type": "object" },
             "updates": { "type": "object" },
             "parent": { "type": "string" },
             "previous": { "type": "string" },
+            "query": { "type": "string", "description": "search: case-insensitive substring matched against task title/notes across all lists." },
+            "show_completed": { "type": "boolean", "description": "search: include completed tasks (default true)." },
         }),
         &["action"],
     ));
