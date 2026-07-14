@@ -125,13 +125,18 @@ impl PortfolioPalace {
                     memory: Some(memory),
                 },
                 Err(e) => {
+                    // #2598 review LOW: the underlying error can embed an absolute
+                    // on-disk path (unwritable/corrupt store root). Log the full
+                    // detail to stderr for the operator, but surface only a generic
+                    // reason so the curl-observable capabilities stub never leaks a
+                    // filesystem path.
                     tracing::warn!(
                         "portfolio manager palace unavailable: {e}; palace features disabled"
                     );
                     Self {
                         id,
                         available: false,
-                        reason: Some(e.to_string()),
+                        reason: Some("palace open failed (see daemon logs)".to_string()),
                         memory: None,
                     }
                 }
@@ -184,6 +189,42 @@ impl PortfolioPalace {
     /// Test: `portfolio_palace_reports_unavailable_without_feature`.
     pub fn unavailable_reason(&self) -> Option<&str> {
         self.reason.as_deref()
+    }
+
+    /// Best-effort dual-write of a completed chat turn into the palace (WI-4).
+    ///
+    /// Why: DOC-36 §3.4 gives the portfolio palace the portfolio chat turns; the
+    /// chat loop persists each completed exchange so later-phase framing can recall
+    /// prior conversation. This MUST degrade silently — a build without
+    /// `manager-memory`, or an unavailable palace, simply skips persistence and
+    /// never surfaces an error to the read-only chat path (§4 degrade bar).
+    /// What: under `manager-memory` with a live binding, remembers the turn tagged
+    /// by conversation key; a remember failure logs at warn (the error only — never
+    /// the turn text) and is otherwise ignored. Without the feature it is a no-op.
+    /// Test: `chat_multi_turn_conversation_continuity` in `tests/manager_inference.rs`
+    /// exercises the (palace-unavailable) no-op path.
+    pub async fn record_chat_turn(&self, conversation_key: &str, user: &str, assistant: &str) {
+        #[cfg(feature = "manager-memory")]
+        {
+            if let Some(mem) = self.memory() {
+                let text = format!(
+                    "portfolio chat turn (conversation {conversation_key})\n\
+                     user: {user}\nmanager: {assistant}"
+                );
+                let tags = vec![
+                    "portfolio-chat".to_string(),
+                    format!("conversation:{conversation_key}"),
+                ];
+                if let Err(e) = mem.remember(text, tags).await {
+                    // Log the error only — never the turn content (privacy).
+                    tracing::warn!("portfolio chat-turn persistence failed: {e}");
+                }
+            }
+        }
+        #[cfg(not(feature = "manager-memory"))]
+        {
+            let _ = (conversation_key, user, assistant);
+        }
     }
 
     /// The live `memory-core` binding, when compiled and available.

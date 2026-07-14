@@ -122,9 +122,15 @@ async fn manager_version_route_reports_capabilities() {
     assert_eq!(body["manager_api_version"], "0.1.0");
     assert_eq!(body["phase"], 1);
     assert_eq!(body["palace"]["id"], "tm-manager-portfolio");
-    // Default build: no `manager-memory` feature → palace reports unavailable,
-    // but the surface still answered 200 (degrade bar).
+    // Palace availability is feature-dependent: a default build (no
+    // `manager-memory`) reports the palace as unavailable but still answers 200
+    // (§4 degrade bar); a `--features manager-memory` build provisions the live
+    // palace, so it reports available. Either way the surface answered 200 with a
+    // palace status block.
+    #[cfg(not(feature = "manager-memory"))]
     assert_eq!(body["palace"]["available"], false, "body: {body}");
+    #[cfg(feature = "manager-memory")]
+    assert_eq!(body["palace"]["available"], true, "body: {body}");
 
     let endpoints = body["endpoints"].as_array().expect("endpoints array");
     let status_ep = endpoints
@@ -137,8 +143,24 @@ async fn manager_version_route_reports_capabilities() {
         .find(|e| e["path"] == "/api/v1/manager/digest")
         .expect("digest endpoint advertised");
     assert_eq!(
-        digest_ep["available"], false,
-        "digest is a later-phase WI, advertised as planned"
+        digest_ep["available"], true,
+        "digest ships in phase 1 (WI-3, #2580)"
+    );
+    let chat_ep = endpoints
+        .iter()
+        .find(|e| e["path"] == "/api/v1/manager/chat")
+        .expect("chat endpoint advertised");
+    assert_eq!(
+        chat_ep["available"], true,
+        "chat ships in phase 1 (WI-4, #2581)"
+    );
+    let route_task_ep = endpoints
+        .iter()
+        .find(|e| e["path"] == "/api/v1/manager/route-task")
+        .expect("route-task endpoint advertised");
+    assert_eq!(
+        route_task_ep["available"], false,
+        "route-task is a phase-2 WI, advertised as planned"
     );
 }
 
