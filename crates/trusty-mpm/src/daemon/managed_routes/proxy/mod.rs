@@ -367,5 +367,32 @@ pub async fn proxy_summary(
     Json(ProxySummaryResponse::from(outcome)).into_response()
 }
 
+/// Build the sub-router for the local session-manager PROXY surface.
+///
+/// Why: co-locating the five `/api/v1/sessions/proxy/*` route registrations with
+/// their handlers (rather than inlining them in the daemon's monolithic
+/// `api::router`) keeps this cohesive TELUI-6 cluster self-contained and lets
+/// `api::router` compose it with a single `.merge`. Every route here binds the
+/// same [`DaemonState`] the parent router carries, so merging is state-preserving.
+/// What: returns a [`Router`] with the focus/unfocus/message/summary handlers
+/// wired, ready to `.merge` into the daemon router before `.with_state`.
+/// Test: exercised end-to-end by `tests/proxy_routes.rs` (the routes reach the
+/// daemon exactly as before this extraction).
+pub fn proxy_router() -> axum::Router<Arc<DaemonState>> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/api/v1/sessions/proxy/focus", post(proxy_focus))
+        .route(
+            "/api/v1/sessions/proxy/focus/{conversation_key}",
+            get(proxy_get_focus),
+        )
+        .route("/api/v1/sessions/proxy/unfocus", post(proxy_unfocus))
+        .route("/api/v1/sessions/proxy/message", post(proxy_message))
+        .route(
+            "/api/v1/sessions/proxy/summary/{conversation_key}",
+            get(proxy_summary),
+        )
+}
+
 #[cfg(test)]
 mod tests;

@@ -22,6 +22,7 @@ pub mod idle_reaper;
 pub mod llm_overseer;
 pub mod lock;
 pub mod managed_routes;
+pub mod manager;
 pub mod mcp_backend;
 pub mod mcp_bugreport;
 pub mod mcp_console;
