@@ -29,6 +29,13 @@ pub(crate) fn build_create_segment_request(is_header: bool) -> Value {
 
 /// Why: Updating a header/footer inserts text scoped to that segment id.
 /// What: Builds an `insertText` request with a `segmentId` in its location.
+/// NOTE (non-blocking): the insert location is always index 0 within the
+/// segment, matching upstream. This means repeated `update_header`/
+/// `update_footer` calls on the same segment PREPEND rather than append —
+/// each call's text lands before whatever was inserted by the previous call.
+/// Callers that want to append should read the segment first (`action:
+/// "get"`) and compute an explicit trailing index instead of relying on this
+/// tool to accumulate text.
 /// Test: `update_segment_request` below.
 pub(crate) fn build_update_segment_request(segment_id: &str, text: &str) -> Value {
     json!({

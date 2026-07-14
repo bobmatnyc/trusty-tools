@@ -65,6 +65,19 @@ pub(crate) fn compute_content_aware_widths(
     let mut clamped = vec![false; num_cols];
     let mut remaining = usable_width;
 
+    // NOTE (non-blocking, matches the Python upstream algorithm verbatim):
+    // `free_weight` is recomputed once per outer pass, then reused as the
+    // denominator for every column checked within that SAME inner loop —
+    // including columns that get clamped partway through the pass. On a
+    // wide table with many columns this can under-allocate a column that
+    // is checked late in a pass (its provisional share is computed against
+    // a `free_weight` that hasn't yet shed the weight of columns clamped
+    // earlier in the same pass), pushing it slightly below `min_col_pt`
+    // before the final renormalisation pass runs. This never panics and
+    // the post-loop renormalisation still makes the total sum to
+    // `usable_width` exactly; only the very last column(s) processed in a
+    // pass could end up marginally under the nominal minimum on pathological
+    // (very-wide, many-column) inputs.
     for _ in 0..=num_cols {
         let free_weight: f64 = (0..num_cols)
             .filter(|&i| !clamped[i])

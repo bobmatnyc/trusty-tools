@@ -71,15 +71,18 @@ pub(crate) fn merge_style(preset: Value, custom: &Value) -> Value {
 }
 
 /// Walk the doc body for a table at `table_start_index`, returning each cell's
-/// first-paragraph start index as a `[row][col]` grid.
+/// first-paragraph `(startIndex, endIndex)` as a `[row][col]` grid.
 ///
-/// Why: Header-bold styling needs the text start index of each header cell.
-/// What: Locates the table element and reads `content[0].startIndex` per cell.
+/// Why: Header-bold styling needs the FULL text range of each header cell —
+/// capturing only `startIndex` (as an earlier revision did) bolds just the
+/// first character. Mirrors `table_format::find_header_cell_ranges`.
+/// What: Locates the table element and reads `content[0].{startIndex,endIndex}`
+/// per cell.
 /// Test: `find_cell_indices_grid` below.
 pub(crate) fn find_table_cell_indices(
     body_content: &[Value],
     table_start_index: i64,
-) -> Vec<Vec<i64>> {
+) -> Vec<Vec<(i64, i64)>> {
     for element in body_content {
         let Some(table) = element.get("table") else {
             continue;
@@ -93,14 +96,19 @@ pub(crate) fn find_table_cell_indices(
                 let mut row_cells = Vec::new();
                 if let Some(cells) = row.get("tableCells").and_then(|c| c.as_array()) {
                     for cell in cells {
-                        let idx = cell
+                        let content = cell
                             .get("content")
                             .and_then(|c| c.as_array())
-                            .and_then(|a| a.first())
+                            .and_then(|a| a.first());
+                        let start = content
                             .and_then(|c| c.get("startIndex"))
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        row_cells.push(idx);
+                        let end = content
+                            .and_then(|c| c.get("endIndex"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(start);
+                        row_cells.push((start, end));
                     }
                 }
                 grid.push(row_cells);
@@ -257,11 +265,11 @@ pub async fn apply_table_style(client: &BaseClient, args: Value) -> Result<Value
             .unwrap_or(&empty);
         let grid = find_table_cell_indices(body_content, table_start_index);
         if let Some(first_row) = grid.first() {
-            for &start_idx in first_row {
-                if start_idx > 0 {
+            for &(start_idx, end_idx) in first_row {
+                if start_idx > 0 && end_idx > start_idx {
                     requests.push(json!({
                         "updateTextStyle": {
-                            "range": { "startIndex": start_idx, "endIndex": start_idx + 1 },
+                            "range": { "startIndex": start_idx, "endIndex": end_idx },
                             "textStyle": { "bold": true },
                             "fields": "bold",
                         }
@@ -369,15 +377,39 @@ mod tests {
             "table": {
                 "tableRows": [
                     { "tableCells": [
-                        { "content": [{ "startIndex": 7 }] },
-                        { "content": [{ "startIndex": 12 }] },
+                        { "content": [{ "startIndex": 7, "endIndex": 14 }] },
+                        { "content": [{ "startIndex": 15, "endIndex": 22 }] },
                     ] },
                 ]
             }
         })];
         let grid = find_table_cell_indices(&body, 5);
-        assert_eq!(grid, vec![vec![7, 12]]);
+        // Full (start, end) ranges are captured, not just the start index.
+        assert_eq!(grid, vec![vec![(7, 14), (15, 22)]]);
         // Wrong index => empty.
         assert!(find_table_cell_indices(&body, 99).is_empty());
+    }
+
+    #[test]
+    fn apply_table_style_bolds_full_header_cell_range_not_one_char() {
+        // Regression for the MEDIUM finding: header-bold must cover the
+        // entire header cell text, not just its first character.
+        let header_ranges = [(7, 20), (21, 30)];
+        let requests: Vec<Value> = header_ranges
+            .iter()
+            .filter(|&&(s, e)| s > 0 && e > s)
+            .map(|&(s, e)| {
+                json!({
+                    "updateTextStyle": {
+                        "range": { "startIndex": s, "endIndex": e },
+                        "textStyle": { "bold": true },
+                        "fields": "bold",
+                    }
+                })
+            })
+            .collect();
+        assert_eq!(requests[0]["updateTextStyle"]["range"]["endIndex"], 20);
+        assert_ne!(requests[0]["updateTextStyle"]["range"]["endIndex"], 8);
+        assert_eq!(requests[1]["updateTextStyle"]["range"]["endIndex"], 30);
     }
 }

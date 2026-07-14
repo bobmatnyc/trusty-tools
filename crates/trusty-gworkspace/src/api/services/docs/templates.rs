@@ -39,8 +39,12 @@ pub(crate) fn build_replacement_requests(replacements: &Value) -> Vec<Value> {
 }
 
 /// Why: A named-style update must translate ergonomic snake_case fields into the
-/// Docs `updateNamedStyle` shape and emit separate text/paragraph field masks.
-/// What: Builds one `updateNamedStyle` request from a spec, returning `None`
+/// Docs `updateNamedStyle` shape. The real `UpdateNamedStyleRequest` has a
+/// single `fields` FieldMask on the request (not separate `textStyleFields`/
+/// `paragraphStyleFields` keys, which don't exist in the API) — each changed
+/// leaf must be addressed as `textStyle.<field>` or `paragraphStyle.<field>`.
+/// What: Builds one `updateNamedStyle` request from a spec, joining every
+/// changed text/paragraph field into one dotted `fields` mask. Returns `None`
 /// when neither a text nor paragraph field is supplied.
 /// Test: `named_style_request_*` below.
 pub(crate) fn build_named_style_request(spec: &Value) -> Option<Value> {
@@ -108,13 +112,21 @@ pub(crate) fn build_named_style_request(spec: &Value) -> Option<Value> {
         named_style["paragraphStyle"] = paragraph_style;
     }
 
-    let mut request = json!({ "updateNamedStyle": { "namedStyle": named_style } });
-    if !text_fields.is_empty() {
-        request["updateNamedStyle"]["textStyleFields"] = json!(text_fields.join(","));
-    }
-    if !para_fields.is_empty() {
-        request["updateNamedStyle"]["paragraphStyleFields"] = json!(para_fields.join(","));
-    }
+    // The Docs API's UpdateNamedStyleRequest has exactly one `fields`
+    // FieldMask on the request itself; nested textStyle/paragraphStyle
+    // fields are addressed with a dotted prefix.
+    let mut mask_parts: Vec<String> = text_fields
+        .iter()
+        .map(|f| format!("textStyle.{f}"))
+        .collect();
+    mask_parts.extend(para_fields.iter().map(|f| format!("paragraphStyle.{f}")));
+
+    let request = json!({
+        "updateNamedStyle": {
+            "namedStyle": named_style,
+            "fields": mask_parts.join(","),
+        }
+    });
     Some(request)
 }
 
@@ -297,16 +309,27 @@ mod tests {
         let r = build_named_style_request(&spec).unwrap();
         let inner = &r["updateNamedStyle"];
         assert_eq!(inner["namedStyle"]["namedStyleType"], "HEADING_1");
-        let tf = inner["textStyleFields"].as_str().unwrap();
-        assert!(tf.contains("bold"));
-        assert!(tf.contains("fontSize"));
-        let pf = inner["paragraphStyleFields"].as_str().unwrap();
-        assert!(pf.contains("alignment"));
-        assert!(pf.contains("spaceAbove"));
+        // A single dotted `fields` FieldMask on the request — not the
+        // nonexistent textStyleFields/paragraphStyleFields keys.
+        assert!(inner.get("textStyleFields").is_none());
+        assert!(inner.get("paragraphStyleFields").is_none());
+        let fields = inner["fields"].as_str().unwrap();
+        assert!(fields.contains("textStyle.bold"));
+        assert!(fields.contains("textStyle.fontSize"));
+        assert!(fields.contains("paragraphStyle.alignment"));
+        assert!(fields.contains("paragraphStyle.spaceAbove"));
         assert_eq!(
             inner["namedStyle"]["textStyle"]["fontSize"]["magnitude"],
             20.0
         );
+    }
+
+    #[test]
+    fn named_style_request_text_only_omits_paragraph_prefix() {
+        let spec = json!({ "named_style_type": "NORMAL_TEXT", "text_style": { "italic": true } });
+        let r = build_named_style_request(&spec).unwrap();
+        let fields = r["updateNamedStyle"]["fields"].as_str().unwrap();
+        assert_eq!(fields, "textStyle.italic");
     }
 
     #[test]

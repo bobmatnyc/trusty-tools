@@ -181,7 +181,7 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     // ---- Header / footer ----
     tools.push(tool(
         "manage_document_header_footer",
-        "Manage headers/footers: get, create_header, create_footer, update_header, update_footer, delete_header, delete_footer.",
+        "Manage headers/footers: get, create_header, create_footer, update_header, update_footer, delete_header, delete_footer. NOTE: update_header/update_footer always insert at the start of the segment, so repeated calls PREPEND rather than append.",
         json!({
             "account": account_schema(),
             "action": action_enum(&[
@@ -191,7 +191,7 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "document_id": { "type": "string" },
             "header_id": { "type": "string", "description": "Required for update_header/delete_header." },
             "footer_id": { "type": "string", "description": "Required for update_footer/delete_footer." },
-            "text": { "type": "string", "description": "Required for update_header/update_footer." },
+            "text": { "type": "string", "description": "Required for update_header/update_footer. Inserted at segment index 0 — repeated calls prepend, they do not append." },
         }),
         &["action", "document_id"],
     ));

@@ -138,6 +138,24 @@ pub(crate) fn format_tabs(tabs: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Why: Nested tabs live in each tab's `childTabs` array (per Google's "Work
+/// with tabs" guide), not in a single flat top-level list. `list` and
+/// `get_content` must see the whole tree or child tabs are invisible and
+/// `get_content`/lookups on a nested `tab_id` wrongly report "not found".
+/// What: Depth-first flattens `tabs` together with each tab's `childTabs`,
+/// recursively, into one vec (parent before its children).
+/// Test: `flatten_tabs_includes_nested_children` below.
+pub(crate) fn flatten_tabs(tabs: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for tab in tabs {
+        out.push(tab.clone());
+        if let Some(children) = tab.get("childTabs").and_then(|c| c.as_array()) {
+            out.extend(flatten_tabs(children));
+        }
+    }
+    out
+}
+
 /// Extract concatenated plain text from a Docs body-like structure.
 ///
 /// Why: `get_content` returns a tab's text; tab bodies use the same
@@ -182,11 +200,12 @@ pub async fn manage_document_tabs(client: &BaseClient, args: Value) -> Result<Va
     match action {
         "list" => {
             let resp = client.get(&tabs_url, account).await?;
-            let tabs = resp
+            let top_level = resp
                 .get("tabs")
                 .and_then(|t| t.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let tabs = flatten_tabs(&top_level);
             if tabs.is_empty() {
                 return Ok(json!({
                     "document_id": id,
@@ -201,11 +220,12 @@ pub async fn manage_document_tabs(client: &BaseClient, args: Value) -> Result<Va
         "get_content" => {
             let tab_id = require_str(&args, "tab_id")?;
             let resp = client.get(&tabs_url, account).await?;
-            let empty = Vec::new();
-            let tabs = resp
+            let top_level = resp
                 .get("tabs")
                 .and_then(|t| t.as_array())
-                .unwrap_or(&empty);
+                .cloned()
+                .unwrap_or_default();
+            let tabs = flatten_tabs(&top_level);
             let target = tabs.iter().find(|t| {
                 t.get("tabProperties")
                     .and_then(|p| p.get("tabId"))
@@ -422,6 +442,69 @@ mod tests {
         assert!(out[0].get("icon_emoji").is_none());
         assert!(out[0].get("parent_tab_id").is_none());
         assert_eq!(out[0]["index"], 0);
+    }
+
+    #[test]
+    fn flatten_tabs_includes_nested_children() {
+        let tabs = vec![json!({
+            "tabProperties": { "tabId": "root1", "title": "Root" },
+            "childTabs": [
+                {
+                    "tabProperties": { "tabId": "child1", "title": "Child" },
+                    "childTabs": [
+                        { "tabProperties": { "tabId": "grandchild1", "title": "Grandchild" } }
+                    ]
+                },
+                { "tabProperties": { "tabId": "child2", "title": "Child2" } },
+            ]
+        })];
+        let flat = flatten_tabs(&tabs);
+        let ids: Vec<&str> = flat
+            .iter()
+            .map(|t| t["tabProperties"]["tabId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["root1", "child1", "grandchild1", "child2"]);
+    }
+
+    #[test]
+    fn flatten_tabs_no_children_is_identity() {
+        let tabs = vec![json!({ "tabProperties": { "tabId": "t1" } })];
+        assert_eq!(flatten_tabs(&tabs).len(), 1);
+    }
+
+    #[test]
+    fn get_content_finds_nested_tab_by_id() {
+        // Regression for the HIGH finding: get_content must find a tab_id
+        // that lives inside childTabs, not just the top-level array.
+        let top_level = vec![json!({
+            "tabProperties": { "tabId": "root1", "title": "Root" },
+            "documentTab": { "body": { "content": [] } },
+            "childTabs": [
+                {
+                    "tabProperties": { "tabId": "nested1", "title": "Nested" },
+                    "documentTab": { "body": { "content": [
+                        { "paragraph": { "elements": [ { "textRun": { "content": "hi" } } ] } }
+                    ] } },
+                }
+            ]
+        })];
+        let flat = flatten_tabs(&top_level);
+        let found = flat.iter().find(|t| {
+            t.get("tabProperties")
+                .and_then(|p| p.get("tabId"))
+                .and_then(|v| v.as_str())
+                == Some("nested1")
+        });
+        assert!(
+            found.is_some(),
+            "nested tab must be discoverable after flattening"
+        );
+        let body = found
+            .unwrap()
+            .get("documentTab")
+            .and_then(|d| d.get("body"))
+            .unwrap();
+        assert_eq!(extract_body_text(body), "hi");
     }
 
     #[test]

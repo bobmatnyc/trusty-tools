@@ -159,7 +159,11 @@ pub(crate) fn build_create_list_requests(
         list_text.push_str(item);
         list_text.push('\n');
     }
-    let end_index = insert_index + list_text.chars().count() as i64;
+    // Docs indices are UTF-16 code units, not Unicode scalar values — a
+    // `chars().count()` here would under-count for any text outside the BMP
+    // (e.g. emoji) and desync the createParagraphBullets range from the
+    // actually-inserted text.
+    let end_index = insert_index + list_text.encode_utf16().count() as i64;
     let preset = if list_type == "NUMBERED" {
         "NUMBERED_DECIMAL_ALPHA_ROMAN"
     } else {
@@ -387,6 +391,21 @@ mod tests {
         assert_eq!(
             r["requests"][1]["createParagraphBullets"]["bulletPreset"],
             "NUMBERED_DECIMAL_ALPHA_ROMAN"
+        );
+    }
+
+    #[test]
+    fn create_list_requests_end_index_counts_utf16_units() {
+        // "🎉" is outside the BMP: 1 Unicode scalar value but 2 UTF-16 code
+        // units. Docs indices are UTF-16 code units, so the end index must
+        // reflect that — chars().count() would under-count by 1 per emoji
+        // and desync the createParagraphBullets range from the inserted text.
+        let items = vec!["🎉".to_string()];
+        let r = build_create_list_requests(10, "BULLETED", &items);
+        // text = "🎉\n" -> 2 (surrogate pair) + 1 (newline) = 3 UTF-16 units.
+        assert_eq!(
+            r["requests"][1]["createParagraphBullets"]["range"]["endIndex"],
+            13
         );
     }
 }
