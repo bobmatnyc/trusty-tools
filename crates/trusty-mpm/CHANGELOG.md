@@ -9,6 +9,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- tm manager phase-1a — scaffold, status rollup, portfolio palace ([#2598](https://github.com/bobmatnyc/trusty-tools/pull/2598)) ([`3084a3c`](https://github.com/bobmatnyc/trusty-tools/commit/3084a3c406c2aa935c4c736950b81954c47fea39))
+
+### Fixed
+
+- session restart returns 500 for stopped session whose workspace is gone (closes #2577) ([#2594](https://github.com/bobmatnyc/trusty-tools/pull/2594)) ([`f2270f1`](https://github.com/bobmatnyc/trusty-tools/commit/f2270f1f2effb417aaf460f21b56c311d3403b34))
+## [Unreleased]
+
+### Added
+
 - task-injection delivery observability + readiness-probe hardening (closes #2364) ([#2568](https://github.com/bobmatnyc/trusty-tools/pull/2568)) ([`d0fe72b`](https://github.com/bobmatnyc/trusty-tools/commit/d0fe72b943434a4adab735e1973c1446f067f1a0))
 - wire Slack onto the channel-agnostic SessionProxy (closes #2549) ([#2565](https://github.com/bobmatnyc/trusty-tools/pull/2565)) ([`26aa1ae`](https://github.com/bobmatnyc/trusty-tools/commit/26aa1ae5e6a4d890221874d181037180bb9cfde2))
 - expose SessionProxy focus/inject/summarize as MCP tools ([#2562](https://github.com/bobmatnyc/trusty-tools/pull/2562)) ([`4edcc3b`](https://github.com/bobmatnyc/trusty-tools/commit/4edcc3bba3a848e9dba4d97401ee370423edf92f))
