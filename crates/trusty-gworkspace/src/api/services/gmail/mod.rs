@@ -6,6 +6,7 @@
 //! `gmail::manage_gmail_labels`, etc.
 //! Test: Each sub-module has its own tests where applicable.
 
+pub mod compose;
 pub mod labels;
 pub mod messages;
 pub mod organize;
