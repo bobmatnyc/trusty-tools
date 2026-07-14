@@ -513,7 +513,7 @@ fn format_fleet_by_project_slack(fleet: &[ProjectFleetView]) -> String {
 /// unchanged when already short. Char-based (not byte-slice) truncation so a
 /// multi-byte UTF-8 id can never panic on a non-char boundary.
 /// Test: `short_id_truncates_long_ids`, `short_id_handles_multibyte`.
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     let mut chars = id.chars();
     let head: String = chars.by_ref().take(SHORT_ID_LEN).collect();
     if chars.next().is_some() {

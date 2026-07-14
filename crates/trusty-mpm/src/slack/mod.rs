@@ -21,7 +21,9 @@
 //! installed app; see the PR body).
 
 pub mod commands;
+pub mod focus;
 pub mod formatter;
+pub mod lifecycle;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,9 +32,19 @@ use std::sync::{Arc, Mutex};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::client::{ChatMessage, CommandExecutor, CommandResult, TrustyCommand};
+use crate::client::{
+    ChatMessage, CommandExecutor, CommandResult, FreeTextRoute, ManagedBackend, SessionProxy,
+    TrustyCommand, route_free_text,
+};
 use commands::{SlackCommand, parse_slash};
+use focus::ProxyVerb;
 use formatter::SlackFormatter;
+// Process-lifecycle (PID file + precise stop) lives in its own module to keep
+// this file under the 500-SLOC production cap (#2549); re-exported so the
+// external `slack::pid_file_path` / `slack::stop_via_pid_file` / `slack::StopOutcome`
+// paths the `tm slack` CLI depends on stay stable.
+use lifecycle::{PidFileGuard, write_pid_file};
+pub use lifecycle::{StopOutcome, pid_file_path, stop_via_pid_file};
 
 /// Ceiling on establishing the TCP connection to `slack.com`.
 ///
@@ -153,7 +165,9 @@ pub enum SlackEvent {
         /// The channel id the reply should be posted to.
         channel: String,
     },
-    /// A plain user message (free text) routed to the action-capable coordinator.
+    /// A plain user message (free text): routed to the focused session (proxy
+    /// INJECT direction) when the conversation is focused, else to the
+    /// action-capable coordinator.
     Message {
         /// Socket-Mode envelope id to ACK.
         envelope_id: String,
@@ -161,6 +175,14 @@ pub enum SlackEvent {
         text: String,
         /// The channel id the reply should be posted to.
         channel: String,
+        /// The thread timestamp when the message is in a thread, else `None`.
+        ///
+        /// Why (#2549): the session-manager proxy keys focus per Slack
+        /// conversation, and a thread is a distinct conversation from its parent
+        /// channel — so a focus set in a thread must scope to that thread. The
+        /// `thread_ts` (present only for threaded messages) refines the
+        /// conversation key via [`focus::conv`].
+        thread: Option<String>,
     },
     /// A `disconnect` control envelope: Slack is tearing down this socket.
     ///
@@ -229,165 +251,6 @@ pub fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
         DisconnectKind::Permanent
     } else {
         DisconnectKind::Transient
-    }
-}
-
-/// The PID-file name (under `~/.trusty-mpm`) for the foreground Slack bot.
-///
-/// Why: `tm slack stop` must terminate exactly the bot `tm slack start` launched —
-/// not any process whose argv happens to contain "slack start" (the old
-/// `pkill -f "slack start"` could kill an editor, a grep, or an unrelated tool).
-/// A PID file records the one true process so `stop` signals precisely it.
-const SLACK_PID_FILE: &str = "slack.pid";
-
-/// Absolute path to the Slack bot PID file (`~/.trusty-mpm/slack.pid`).
-///
-/// Why: `start` (writer) and `stop` (reader) must agree on one location; deriving
-/// it from the shared [`FRAMEWORK_DIR_NAME`](crate::core::paths::FRAMEWORK_DIR_NAME)
-/// home root keeps it consistent with the rest of the framework's state files.
-/// What: `~/.trusty-mpm/slack.pid`, falling back to `./.trusty-mpm/slack.pid` when
-/// the home directory cannot be resolved (mirrors `FrameworkPaths::default`).
-/// Test: `pid_file_path_is_under_framework_root`.
-pub fn pid_file_path() -> std::path::PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(crate::core::paths::FRAMEWORK_DIR_NAME)
-        .join(SLACK_PID_FILE)
-}
-
-/// Record the current process id in the Slack PID file.
-///
-/// Why: so `tm slack stop` can signal exactly this foreground bot instead of
-/// pattern-matching process argv. Written once at startup, removed on stop.
-/// What: creates `~/.trusty-mpm` if needed and writes the current PID as text.
-/// A write failure is logged (stderr) and swallowed — an unwritable PID file must
-/// not prevent the bot from running; `stop` simply falls back to a manual kill.
-/// Test: `write_then_read_pid_file_round_trips` (against a temp path).
-fn write_pid_file() {
-    let path = pid_file_path();
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!("could not create Slack PID dir {}: {e}", parent.display());
-        return;
-    }
-    if let Err(e) = std::fs::write(&path, std::process::id().to_string()) {
-        tracing::warn!("could not write Slack PID file {}: {e}", path.display());
-    }
-}
-
-/// RAII guard that best-effort removes the Slack PID file when dropped.
-///
-/// Why: [`run`] writes the PID file at startup so `tm slack stop` can signal
-/// exactly this process, but a clean exit (e.g. a permanent `disconnect`), an
-/// early `?` return, or a panic would otherwise leave a STALE PID file behind —
-/// a later `tm slack stop` could then SIGTERM a recycled, unrelated PID. Holding
-/// the path in a `Drop` guard removes the file on EVERY exit path of `run`.
-/// What: on drop, removes the file at `path`. Best-effort: a `NotFound` is
-/// expected (e.g. `tm slack stop` already removed it) and silent; any other
-/// removal error is logged to stderr and swallowed — cleanup must never panic.
-/// Test: `pid_file_guard_removes_on_drop`, `pid_file_guard_drop_missing_is_silent`.
-struct PidFileGuard {
-    /// The PID-file path to remove on drop.
-    path: std::path::PathBuf,
-}
-
-impl Drop for PidFileGuard {
-    fn drop(&mut self) {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                tracing::warn!(
-                    "could not remove Slack PID file {} on exit: {e}",
-                    self.path.display()
-                );
-            }
-        }
-    }
-}
-
-/// The result of a `tm slack stop` attempt, for a precise operator message.
-///
-/// Why: `stop` must report honestly — it should NOT print "no process found" when
-/// it actually hit an error (an unreadable PID file or a failed signal). The old
-/// `pkill` path conflated "no match" with "pkill itself errored"; a typed outcome
-/// keeps the three cases distinct.
-/// What: `Stopped(pid)` signalled a live bot; `NotRunning` found no PID file or a
-/// stale one (process already gone); `Failed(msg)` is a real error.
-/// Test: `stop_via_pid_file_*` cover the missing-file and stale-pid paths.
-#[derive(Debug, PartialEq, Eq)]
-pub enum StopOutcome {
-    /// A running bot (this PID) was signalled to stop.
-    Stopped(u32),
-    /// No bot was running (no PID file, or the recorded PID is already gone).
-    NotRunning,
-    /// Stopping failed for a real reason (e.g. an unreadable PID file).
-    Failed(String),
-}
-
-/// Stop the foreground Slack bot recorded in the PID file at `path`.
-///
-/// Why: this is the precise replacement for `pkill -f "slack start"` — it signals
-/// exactly the process `tm slack start` recorded, so it can never kill an
-/// unrelated process, and it distinguishes "not running" from a genuine failure.
-/// Taking `path` as a parameter keeps it unit-testable against a temp file.
-/// What: reads the PID, sends `SIGTERM` to it (Unix), removes the PID file, and
-/// returns a [`StopOutcome`]. A missing PID file → `NotRunning`; a recorded PID
-/// that no longer exists → `NotRunning` (stale file, still cleaned up); an
-/// unreadable/garbage PID file or a signal error other than "no such process" →
-/// `Failed`.
-/// Test: `stop_via_pid_file_missing_is_not_running`,
-/// `stop_via_pid_file_stale_pid_is_not_running`.
-pub fn stop_via_pid_file(path: &Path) -> StopOutcome {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StopOutcome::NotRunning,
-        Err(e) => return StopOutcome::Failed(format!("could not read PID file: {e}")),
-    };
-    let pid: u32 = match raw.trim().parse() {
-        Ok(pid) => pid,
-        Err(e) => {
-            // A corrupt PID file is unusable; remove it so the next start is clean.
-            let _ = std::fs::remove_file(path);
-            return StopOutcome::Failed(format!("PID file is not a valid pid: {e}"));
-        }
-    };
-    let outcome = signal_terminate(pid);
-    // Always clear the PID file once we have acted on it (stopped or stale).
-    let _ = std::fs::remove_file(path);
-    outcome
-}
-
-/// Send `SIGTERM` to `pid`, classifying the result.
-///
-/// Why: `stop_via_pid_file` must distinguish a successful signal from "the process
-/// is already gone" (a stale PID file, not an error) and from a real failure.
-/// Isolating the raw `kill(2)` call keeps that classification in one place.
-/// What: on Unix, calls `libc::kill(pid, SIGTERM)`; `ESRCH` (no such process) maps
-/// to [`StopOutcome::NotRunning`], any other errno to [`StopOutcome::Failed`], and
-/// success to [`StopOutcome::Stopped`]. On non-Unix it reports unsupported.
-/// Test: covered indirectly via `stop_via_pid_file_stale_pid_is_not_running`.
-fn signal_terminate(pid: u32) -> StopOutcome {
-    #[cfg(unix)]
-    {
-        // SAFETY: `kill` is async-signal-safe and merely posts a signal; passing a
-        // pid and a constant signal number has no memory-safety implications.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        if rc == 0 {
-            return StopOutcome::Stopped(pid);
-        }
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ESRCH) {
-            // The process is already gone — a stale PID file, not a failure.
-            StopOutcome::NotRunning
-        } else {
-            StopOutcome::Failed(format!("failed to signal pid {pid}: {err}"))
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        StopOutcome::Failed("stopping the Slack bot is only supported on Unix".to_string())
     }
 }
 
@@ -506,6 +369,14 @@ fn parse_events_api(v: &serde_json::Value, envelope_id: Option<String>) -> Slack
         || event.get("subtype").and_then(|s| s.as_str()) == Some("bot_message");
     let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
     let channel = event.get("channel").and_then(|c| c.as_str()).unwrap_or("");
+    // A threaded message carries `thread_ts` (the parent's ts); a top-level
+    // message omits it. It refines the proxy conversation key (#2549) so focus
+    // set inside a thread scopes to that thread.
+    let thread = event
+        .get("thread_ts")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
 
     match envelope_id {
         Some(envelope_id)
@@ -515,6 +386,7 @@ fn parse_events_api(v: &serde_json::Value, envelope_id: Option<String>) -> Slack
                 envelope_id,
                 text: text.to_string(),
                 channel: channel.to_string(),
+                thread,
             }
         }
         other => SlackEvent::Ignored { envelope_id: other },
@@ -638,18 +510,25 @@ async fn action_chat_reply(
 
 /// Compute the reply body for any actionable [`SlackEvent`].
 ///
-/// Why: this is the adapter's routing core — slash commands go through the
-/// executor, free text goes through the action-capable coordinator (mirroring the
-/// Telegram adapter's `on_message` split). Keeping it one async function keeps the
-/// WebSocket loop a thin driver.
-/// What: a slash command parses to a [`SlackCommand`] and dispatches; an unknown
-/// slash verb and any plain message route to the coordinator. Returns `None` for
-/// [`SlackEvent::Ignored`] (nothing to reply).
-/// Test: routing is covered indirectly via `dispatch_slash` / `action_chat_reply`
-/// and the `commands` tests; the parse split by `parse_envelope_*`.
+/// Why: this is the adapter's routing core — the three session-manager PROXY
+/// verbs (`/focus`, `/unfocus`, `/summary`) drive the per-conversation
+/// [`SessionProxy`] (TELUI-6, #2549), every other slash command goes through the
+/// executor, and free text either INJECTs to the focused session or drives the
+/// action-capable coordinator (mirroring the Telegram adapter's `on_message`
+/// split). Keeping it one async function keeps the WebSocket loop a thin driver.
+/// What: a `/focus`/`/unfocus`/`/summary` slash verb ([`focus::proxy_verb`])
+/// routes to the proxy; any other slash command parses to a [`SlackCommand`] and
+/// dispatches (unknown verb → free-text drive). A plain message routes via
+/// [`route_free_text`] — INJECT to the focused session when the conversation is
+/// focused, else the coordinator. Returns `None` for [`SlackEvent::Ignored`].
+/// Test: proxy-verb and inject routing by `slash_focus_reaches_proxy_resolve`,
+/// `message_when_focused_reaches_proxy_send`, `slash_summary_reaches_proxy_activity`,
+/// `slash_unfocus_reaches_proxy`; command dispatch by the `commands` tests; the
+/// parse split by `parse_envelope_*`.
 async fn reply_for_event(
     executor: &CommandExecutor,
     histories: &ChatHistories,
+    proxy: &SessionProxy,
     event: &SlackEvent,
 ) -> Option<(String, String)> {
     match event {
@@ -659,18 +538,43 @@ async fn reply_for_event(
             channel,
             ..
         } => {
-            let body = match parse_slash(command, text) {
-                Some(cmd) => dispatch_slash(executor, cmd).await,
-                // Unknown slash verb → treat the whole thing as free text drive.
-                None => {
-                    let combined = format!("{command} {text}");
-                    action_chat_reply(executor, histories, channel, combined.trim()).await
-                }
+            // A slash command has no thread context; key by channel alone so a
+            // `/focus` here and later plain messages in the same channel share
+            // one conversation key.
+            let conv = focus::conv(channel, None);
+            let body = match focus::proxy_verb(command) {
+                // The three PROXY verbs drive the per-conversation focus state
+                // machine, never the daemon command surface.
+                Some(ProxyVerb::Focus) => focus::handle_focus(proxy, &conv, text).await,
+                Some(ProxyVerb::Unfocus) => focus::handle_unfocus(proxy, &conv),
+                Some(ProxyVerb::Summary) => focus::handle_summary(proxy, &conv).await,
+                None => match parse_slash(command, text) {
+                    Some(cmd) => dispatch_slash(executor, cmd).await,
+                    // Unknown slash verb → treat the whole thing as free text drive.
+                    None => {
+                        let combined = format!("{command} {text}");
+                        action_chat_reply(executor, histories, channel, combined.trim()).await
+                    }
+                },
             };
             Some((channel.clone(), body))
         }
-        SlackEvent::Message { text, channel, .. } => {
-            let body = action_chat_reply(executor, histories, channel, text).await;
+        SlackEvent::Message {
+            text,
+            channel,
+            thread,
+            ..
+        } => {
+            let conv = focus::conv(channel, thread.as_deref());
+            let has_focus = proxy.current_focus(&conv).is_some();
+            let body = match route_free_text(text, has_focus) {
+                // A focused conversation injects the line straight to that session.
+                FreeTextRoute::Inject => focus::inject_reply(proxy, &conv, text).await,
+                // Otherwise natural language drives the fleet via the coordinator.
+                FreeTextRoute::Coordinator => {
+                    action_chat_reply(executor, histories, channel, text).await
+                }
+            };
             Some((channel.clone(), body))
         }
         SlackEvent::Disconnect { .. } | SlackEvent::Ignored { .. } => None,
@@ -822,6 +726,13 @@ pub async fn run(
     let executor = Arc::new(CommandExecutor::new(url));
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
 
+    // The channel-agnostic session-manager proxy (TELUI-6, #2549): holds
+    // per-conversation focus state and drives the INJECT/SUMMARIZE directions
+    // over the SAME shared executor. Slack is one thin binding; Telegram and the
+    // daemon's local proxy routes reuse the identical `SessionProxy`.
+    let proxy_backend = Arc::clone(&executor) as Arc<dyn ManagedBackend>;
+    let proxy = Arc::new(SessionProxy::new(proxy_backend));
+
     // Record our PID so `tm slack stop` can signal exactly this process, and
     // hold a RAII guard so the file is removed on EVERY exit path (clean return,
     // early `?`, or panic) — a stale PID file could otherwise misdirect a later
@@ -850,7 +761,7 @@ pub async fn run(
         };
 
         let connected_at = std::time::Instant::now();
-        match socket_loop(&http, &bot_token, &ws_url, &executor, &histories).await {
+        match socket_loop(&http, &bot_token, &ws_url, &executor, &histories, &proxy).await {
             SocketOutcome::PermanentDisconnect(reason) => {
                 anyhow::bail!("Slack sent a permanent disconnect ({reason}); stopping");
             }
@@ -889,6 +800,7 @@ async fn socket_loop(
     ws_url: &str,
     executor: &Arc<CommandExecutor>,
     histories: &ChatHistories,
+    proxy: &Arc<SessionProxy>,
 ) -> SocketOutcome {
     let (ws, _) = match tokio_tungstenite::connect_async(ws_url).await {
         Ok(ws) => ws,
@@ -916,7 +828,7 @@ async fn socket_loop(
         {
             return SocketOutcome::Dropped(e.into());
         }
-        if let Some((channel, body)) = reply_for_event(executor, histories, &event).await {
+        if let Some((channel, body)) = reply_for_event(executor, histories, proxy, &event).await {
             post_message(http, bot_token, &channel, &body).await;
         }
     }
