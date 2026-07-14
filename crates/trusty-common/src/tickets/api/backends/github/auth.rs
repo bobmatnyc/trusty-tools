@@ -40,7 +40,8 @@ pub(super) enum AuthSource {
 /// `gh` CLI so users authenticated via `gh auth login` need no PAT.
 /// What: Returns `Token` when `cfg.token` is `Some` and non-whitespace, else
 /// `GhCli`.
-/// Test: `tests::select_auth_prefers_token`, `select_auth_falls_back_to_gh`.
+/// Test: `select_auth_prefers_token`, `select_auth_falls_back_to_gh_when_absent`,
+/// `select_auth_falls_back_to_gh_when_blank`.
 pub(super) fn select_auth(cfg: &GithubConfig) -> AuthSource {
     match cfg.token.as_deref() {
         Some(t) if !t.trim().is_empty() => AuthSource::Token,
