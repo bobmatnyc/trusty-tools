@@ -193,9 +193,9 @@ fn set_timezone_only(map: &mut Map<String, Value>, key: &str, timezone: &str) {
 /// Why: The typed schema accepts a plain list of email strings (the common
 /// case), while the raw API wants attendee objects; passing through objects
 /// verbatim preserves advanced fields (`responseStatus`, `optional`, …).
-/// What: Returns `Some(array)` when `attendees` is an array — string entries
-/// become `{email}`, non-string entries are cloned through unchanged; returns
-/// `None` (skip) when the field is absent or not an array.
+/// What: Returns `Some(array)` when `attendees` is a non-empty array — string
+/// entries become `{email}`, non-string entries are cloned through unchanged;
+/// returns `None` (skip) when the field is absent, not an array, or empty.
 /// Test: `build_event_body_attendees_*` below.
 fn build_attendees(args: &Value) -> Option<Value> {
     let arr = args.get("attendees")?.as_array()?;
@@ -206,6 +206,12 @@ fn build_attendees(args: &Value) -> Option<Value> {
             None => entry.clone(),
         })
         .collect();
+    // An empty `attendees: []` must not count as "content provided" — otherwise
+    // it would bypass the create-path content-free-request guard and send a
+    // bodyless event to the API (mirrors `build_recurrence`'s empty check).
+    if list.is_empty() {
+        return None;
+    }
     Some(Value::Array(list))
 }
 
@@ -236,17 +242,20 @@ fn build_recurrence(args: &Value) -> Option<Value> {
 
 /// Prefix `RRULE:` onto a recurrence rule that lacks a rule-type keyword.
 ///
-/// Why: See `build_recurrence`. Keeps already-qualified lines untouched.
-/// What: Case-insensitively checks for a known prefix; prefixes `RRULE:` when
-/// none is found.
+/// Why: See `build_recurrence`. Keeps already-qualified lines untouched, but
+/// Google requires the keyword itself to be uppercase — a lowercase/mixed-case
+/// `rrule:` prefix is malformed and would otherwise pass through unnormalized.
+/// What: Case-insensitively detects a known prefix and canonicalizes its
+/// casing to the uppercase form while leaving the rest of the line untouched;
+/// prefixes `RRULE:` when no keyword prefix is found.
 /// Test: `build_event_body_recurrence_*` below.
 fn normalize_rrule(rule: &str) -> String {
     const PREFIXES: [&str; 4] = ["RRULE:", "RDATE:", "EXDATE:", "EXRULE:"];
-    let upper = rule.trim_start().to_ascii_uppercase();
-    if PREFIXES.iter().any(|p| upper.starts_with(p)) {
-        rule.to_string()
-    } else {
-        format!("RRULE:{rule}")
+    let trimmed = rule.trim_start();
+    let upper = trimmed.to_ascii_uppercase();
+    match PREFIXES.iter().find(|p| upper.starts_with(*p)) {
+        Some(p) => format!("{p}{}", &trimmed[p.len()..]),
+        None => format!("RRULE:{rule}"),
     }
 }
 
@@ -391,6 +400,31 @@ mod tests {
             body["recurrence"],
             json!(["RRULE:FREQ=DAILY", "EXDATE:20260901T090000Z"])
         );
+    }
+
+    #[test]
+    fn build_event_body_recurrence_lowercase_prefix_is_canonicalized() {
+        // A lowercase/mixed-case rule keyword is malformed for Google; the
+        // prefix itself must be canonicalized to uppercase while the rest of
+        // the line is left untouched.
+        let args = json!({
+            "recurrence": ["rrule:FREQ=DAILY", "ExDate:20260901T090000Z"],
+        });
+        let body = build_event_body(json!({}), &args);
+        assert_eq!(
+            body["recurrence"],
+            json!(["RRULE:FREQ=DAILY", "EXDATE:20260901T090000Z"])
+        );
+    }
+
+    #[test]
+    fn build_event_body_empty_attendees_does_not_count_as_content() {
+        // An `attendees: []`-only request must not bypass the create-path
+        // content-free-request guard — it must be treated the same as
+        // "no attendees field at all".
+        let body = build_event_body(json!({}), &json!({ "attendees": [] }));
+        assert_eq!(body, json!({}));
+        assert!(body.get("attendees").is_none());
     }
 
     #[test]

@@ -43,13 +43,20 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "location": { "type": "string", "description": "Event location (create/update)." },
             "attendees": {
                 "type": "array",
-                "items": { "type": "string" },
-                "description": "Attendee email addresses (create/update). Each maps to an attendee {email} object."
+                "items": {
+                    "oneOf": [
+                        { "type": "string", "description": "Attendee email address; maps to {email}." },
+                        { "type": "object", "description": "Raw attendee object (e.g. {email, optional, responseStatus}), passed through unchanged." },
+                    ]
+                },
+                "description": "Attendees (create/update): email strings or raw attendee objects."
             },
             "recurrence": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Recurrence rules, e.g. 'FREQ=WEEKLY;COUNT=10' or a full 'RRULE:FREQ=...' line (create/update)."
+                "oneOf": [
+                    { "type": "string", "description": "A single recurrence rule, e.g. 'FREQ=WEEKLY;COUNT=10' or 'RRULE:FREQ=...'." },
+                    { "type": "array", "items": { "type": "string" }, "description": "Multiple recurrence/exclusion lines, e.g. RRULE/RDATE/EXDATE/EXRULE." },
+                ],
+                "description": "Recurrence rule(s) (create/update). Bare FREQ=... strings are normalised to an RRULE: line."
             },
             "time_min": { "type": "string", "description": "RFC3339 lower bound (list)." },
             "time_max": { "type": "string", "description": "RFC3339 upper bound (list)." },
