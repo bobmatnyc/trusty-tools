@@ -1339,10 +1339,24 @@ async fn front_gate_or_escalate(
 /// is intentionally NOT re-run here: those steps are not all confirmed safe to
 /// repeat against an already-running workspace, so re-running them on every
 /// resume risks a different class of bug for a narrower payoff.
+///
+/// #2647 worktree/upstream sync: before the statusline self-heal, every
+/// resume also calls
+/// [`crate::core::session_launch::sync_worktree_with_upstream`] (fetch +
+/// fast-forward-only merge — never resets the branch, never touches
+/// uncommitted changes) and
+/// [`crate::core::session_launch::self_heal_claude_md`] (strips legacy #2170
+/// delegation-directive pollution from `CLAUDE.md`, including when it is an
+/// uncommitted diff the fast-forward alone cannot touch). Both are
+/// best-effort and never block the resume — a long-lived session worktree
+/// that was previously frozen at its creation commit now catches up to
+/// `origin/main` on every resume instead of silently drifting forever.
 /// Test: covered by the HTTP `resume_managed_session` tests and the MCP
 /// `session_resume_unknown_id_errors` test;
 /// `resume_managed_backfills_missing_status_line` in
-/// `tests/session_manager_mvp.rs` covers the self-heal call added here.
+/// `tests/session_manager_mvp.rs` covers the self-heal call added here;
+/// `core::session_launch::worktree_sync`'s own unit tests cover the sync/
+/// self-heal primitives.
 pub async fn resume_managed(
     state: &Arc<DaemonState>,
     id: &ManagedSessionId,
@@ -1354,6 +1368,15 @@ pub async fn resume_managed(
         .workspace_path
         .clone()
         .unwrap_or_else(|| record.cwd.clone());
+
+    // Worktree/upstream sync + legacy CLAUDE.md self-heal (#2647): fast-forward
+    // -only, best-effort, never blocks the resume — see
+    // `core::session_launch::resume_self_heal` for the full safety contract
+    // (never resets the branch, never touches uncommitted changes). This is
+    // the resume-time counterpart to `WorkspaceProvisioner::fetch_and_reset`
+    // for the shared `.base` checkout, closing the gap that let a session
+    // worktree silently drift from `origin/main` forever.
+    crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string());
 
     // Defensive self-heal (#1913): best-effort, never blocks the resume.
     if let Err(e) = crate::core::session_launch::ensure_status_line(&workspace) {
