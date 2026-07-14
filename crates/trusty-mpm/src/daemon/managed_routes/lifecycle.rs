@@ -1376,7 +1376,7 @@ pub async fn resume_managed(
     // the resume-time counterpart to `WorkspaceProvisioner::fetch_and_reset`
     // for the shared `.base` checkout, closing the gap that let a session
     // worktree silently drift from `origin/main` forever.
-    crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string());
+    crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string()).await;
 
     // Defensive self-heal (#1913): best-effort, never blocks the resume.
     if let Err(e) = crate::core::session_launch::ensure_status_line(&workspace) {

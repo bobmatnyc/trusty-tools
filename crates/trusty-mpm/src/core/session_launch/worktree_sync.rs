@@ -29,12 +29,27 @@
 //! `sync_is_noop_when_already_up_to_date`,
 //! `sync_skips_when_no_upstream_configured`,
 //! `sync_fails_open_on_conflicting_uncommitted_change`,
+//! `sync_fails_open_when_branches_have_diverged_with_local_commit`,
 //! `self_heal_claude_md_strips_legacy_block`,
 //! `self_heal_claude_md_noop_when_clean`,
 //! `self_heal_claude_md_noop_when_absent`.
 
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+/// Upper bound on how long [`resume_self_heal`] will wait for the git
+/// fetch/merge to complete before giving up and letting resume proceed.
+///
+/// Why (code-critic review, #2647): the git subprocess work runs on a
+/// blocking thread via `tokio::task::spawn_blocking`, but a stalled network
+/// fetch (e.g. a dead remote, a hung proxy) can otherwise keep that thread —
+/// and the resume flow awaiting it — blocked indefinitely. Resume must never
+/// hang on network I/O.
+/// What: 10 seconds, generous for a same-org `origin` fetch of a handful of
+/// commits, short enough that a hung fetch cannot meaningfully delay a
+/// session resume.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Outcome of one [`sync_worktree_with_upstream`] attempt.
 ///
@@ -85,7 +100,8 @@ pub enum SyncOutcome {
 /// Test: `sync_fast_forwards_tracked_file_leaves_uncommitted_user_file_untouched`,
 /// `sync_is_noop_when_already_up_to_date`,
 /// `sync_skips_when_no_upstream_configured`,
-/// `sync_fails_open_on_conflicting_uncommitted_change`.
+/// `sync_fails_open_on_conflicting_uncommitted_change`,
+/// `sync_fails_open_when_branches_have_diverged_with_local_commit`.
 pub fn sync_worktree_with_upstream(workspace: &Path) -> SyncOutcome {
     if !workspace.join(".git").exists() {
         return SyncOutcome::NotAGitWorktree;
@@ -109,7 +125,21 @@ pub fn sync_worktree_with_upstream(workspace: &Path) -> SyncOutcome {
 
     let before = git_stdout(workspace, &["rev-parse", "HEAD"]).unwrap_or_default();
 
-    if let Err(stderr) = git_run(workspace, &["fetch", remote]) {
+    // Defense in depth (code-critic review, #2647) alongside the outer
+    // `SYNC_TIMEOUT`: abort the fetch itself if the transfer stalls below
+    // 1000 bytes/sec for more than 5 seconds, so a slow-but-not-dead remote
+    // cannot eat most of the outer timeout budget on the network layer alone.
+    if let Err(stderr) = git_run(
+        workspace,
+        &[
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=5",
+            "fetch",
+            remote,
+        ],
+    ) {
         return SyncOutcome::Failed(format!("git fetch failed: {stderr}"));
     }
 
@@ -172,18 +202,28 @@ pub fn self_heal_claude_md(workspace: &Path) -> bool {
 /// `lifecycle.rs` over its frozen SLOC budget during #2647 review.
 /// Centralising the log-and-continue wiring here keeps the call site small
 /// and keeps this module the single place that knows how to interpret a
-/// [`SyncOutcome`].
-/// What: calls [`sync_worktree_with_upstream`] then [`self_heal_claude_md`],
-/// logging a `FastForwarded` or `Failed` sync outcome (and a successful
-/// self-heal) at `info`/`warn` via `tracing`; steady states
+/// [`SyncOutcome`]. This function is `async` (code-critic review, #2647):
+/// `resume_managed` runs on a tokio worker thread, and the git fetch/merge
+/// in [`sync_worktree_with_upstream`] are blocking subprocess calls that can
+/// stall on network I/O — running them directly on the async task would
+/// block that worker thread (and, transitively, resume) for as long as the
+/// network hangs.
+/// What: runs [`sync_worktree_with_upstream`] on a `spawn_blocking` thread,
+/// bounded by [`SYNC_TIMEOUT`] — a timeout or a panicked blocking task both
+/// degrade to `SyncOutcome::Failed` and are logged exactly like any other
+/// sync failure (fail-open; resume always proceeds). Then calls
+/// [`self_heal_claude_md`] directly (a single small `CLAUDE.md` read/write,
+/// no git subprocess, no network — not a resume-hang risk). Logs a
+/// `FastForwarded` or `Failed` sync outcome (and a successful self-heal) at
+/// `info`/`warn` via `tracing`; steady states
 /// (`UpToDate`/`NotAGitWorktree`/`NoUpstream`) are not logged. `session_id`
 /// is included in every log line for correlation; callers pass
 /// `record.id.to_string()`.
 /// Test: covered indirectly via [`sync_worktree_with_upstream`]'s and
 /// [`self_heal_claude_md`]'s own unit tests above — this wrapper adds only
-/// logging, no independent branching logic.
-pub fn resume_self_heal(workspace: &Path, session_id: &str) {
-    match sync_worktree_with_upstream(workspace) {
+/// async/timeout plumbing and logging, no independent branching logic.
+pub async fn resume_self_heal(workspace: &Path, session_id: &str) {
+    match sync_worktree_with_upstream_bounded(workspace).await {
         SyncOutcome::FastForwarded { from, to } => {
             tracing::info!(id = %session_id, %from, %to, "resume: worktree fast-forwarded to upstream");
         }
@@ -194,6 +234,37 @@ pub fn resume_self_heal(workspace: &Path, session_id: &str) {
     }
     if self_heal_claude_md(workspace) {
         tracing::info!(id = %session_id, "resume: stripped legacy delegation-directive pollution from CLAUDE.md");
+    }
+}
+
+/// Run [`sync_worktree_with_upstream`] on a blocking thread-pool thread,
+/// bounded by [`SYNC_TIMEOUT`] so a stalled fetch can never hang the caller.
+///
+/// Why: see [`resume_self_heal`]'s doc comment — this is the seam that keeps
+/// the blocking git subprocess work off the async task and off the resume
+/// critical path past a fixed budget.
+/// What: `tokio::task::spawn_blocking` runs the sync on a dedicated thread;
+/// `tokio::time::timeout(SYNC_TIMEOUT, ...)` races it against the deadline.
+/// A timeout or a `JoinError` (blocking-task panic) both degrade to
+/// `SyncOutcome::Failed` with a descriptive message — never propagated as an
+/// error to the caller, matching the fail-open contract of every other
+/// variant. Note: on timeout the abandoned blocking task keeps running to
+/// completion in the background (it cannot be forcibly killed mid-syscall);
+/// this only bounds how long `resume_self_heal` itself waits.
+/// Test: exercised transitively by every `sync_*` test above (the bounded
+/// wrapper adds no branching beyond the timeout race, which is impractical
+/// to trigger deterministically in a fast unit test without a fake slow git
+/// binary).
+async fn sync_worktree_with_upstream_bounded(workspace: &Path) -> SyncOutcome {
+    let workspace = workspace.to_path_buf();
+    let task = tokio::task::spawn_blocking(move || sync_worktree_with_upstream(&workspace));
+    match tokio::time::timeout(SYNC_TIMEOUT, task).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(join_err)) => SyncOutcome::Failed(format!("sync task panicked: {join_err}")),
+        Err(_elapsed) => SyncOutcome::Failed(format!(
+            "worktree sync timed out after {}s",
+            SYNC_TIMEOUT.as_secs()
+        )),
     }
 }
 
@@ -473,6 +544,56 @@ mod tests {
             std::fs::read_to_string(worktree.join("CLAUDE.md")).unwrap(),
             "local uncommitted edit\n",
             "a refused merge must leave the uncommitted local edit untouched"
+        );
+    }
+
+    #[test]
+    fn sync_fails_open_when_branches_have_diverged_with_local_commit() {
+        // Why (code-critic review, #2647 item 5): the earlier conflict test
+        // covers an UNCOMMITTED collision; this covers genuine branch
+        // divergence — a real local COMMIT on the worktree branch that
+        // origin/main does not have, while origin/main independently gains
+        // an unrelated commit. Neither branch is an ancestor of the other,
+        // so `git merge --ff-only` must refuse outright (a true merge or
+        // rebase would be required, which this fail-open sync never
+        // attempts), leaving the worktree's branch tip and working tree
+        // completely untouched.
+        let Some(fx) = build_fixture() else {
+            return;
+        };
+        let worktree = fx.worktree_dir.path();
+
+        // A genuine local commit on the worktree's own branch — e.g. the
+        // operator committed work-in-progress before this resume.
+        std::fs::write(worktree.join("OTHER.md"), "other v1 + local work\n").unwrap();
+        assert!(git_ok(worktree, &["add", "-A"]));
+        assert!(git_ok(worktree, &["commit", "-m", "local wip commit"]));
+        let head_before = git_stdout(worktree, &["rev-parse", "HEAD"]).unwrap();
+
+        // origin/main independently advances with an unrelated commit.
+        push_claude_md_update(&fx, "new content\n");
+
+        let outcome = sync_worktree_with_upstream(worktree);
+        assert!(
+            matches!(outcome, SyncOutcome::Failed(_)),
+            "expected a fail-open Failed outcome on diverged histories, got {outcome:?}"
+        );
+
+        let head_after = git_stdout(worktree, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(
+            head_before, head_after,
+            "a refused non-fast-forward merge must never move the branch tip"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("OTHER.md")).unwrap(),
+            "other v1 + local work\n",
+            "the local commit's content must survive an untouched worktree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("CLAUDE.md")).unwrap(),
+            "old content\n",
+            "CLAUDE.md must stay at the worktree's own committed content, not \
+             silently pick up origin's unrelated commit"
         );
     }
 
