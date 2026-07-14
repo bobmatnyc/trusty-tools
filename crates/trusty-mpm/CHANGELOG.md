@@ -9,6 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- async managed-spawn provisioning with live progress poll route (closes #2605) ([#2607](https://github.com/bobmatnyc/trusty-tools/pull/2607)) ([`f440192`](https://github.com/bobmatnyc/trusty-tools/commit/f44019266928e96973d16ab83cc618a4ac0894ff))
+- tm manager status|digest|chat CLI (TMMGR phase 1) ([#2600](https://github.com/bobmatnyc/trusty-tools/pull/2600)) ([`ed9390a`](https://github.com/bobmatnyc/trusty-tools/commit/ed9390a8a0f3e491f2aa6416cf68b5603975536a))
+- tm manager phase-1b — digest, read-only chat, hermetic suite ([#2601](https://github.com/bobmatnyc/trusty-tools/pull/2601)) ([`6f80f36`](https://github.com/bobmatnyc/trusty-tools/commit/6f80f36999c66ff679f194fe3e2d3bd9b3214c79))
+
+### Fixed
+
+- pm_guard permits PM single-file writes to non-source paths ([#2606](https://github.com/bobmatnyc/trusty-tools/pull/2606)) ([`3c6f9f7`](https://github.com/bobmatnyc/trusty-tools/commit/3c6f9f705760f1e94a37f6b9d966b45bf483c2ed))
+## [Unreleased]
+
+### Added
+
 - tm manager phase-1a — scaffold, status rollup, portfolio palace ([#2598](https://github.com/bobmatnyc/trusty-tools/pull/2598)) ([`3084a3c`](https://github.com/bobmatnyc/trusty-tools/commit/3084a3c406c2aa935c4c736950b81954c47fea39))
 
 ### Fixed
