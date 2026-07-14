@@ -109,6 +109,38 @@ fn pm_guard_denies_write_tool() {
 }
 
 #[test]
+fn pm_guard_allows_pm_session_snapshot_write() {
+    // Regression for issue #2604: the PM's own `/tm-session-pause` snapshot write
+    // to `.trusty-mpm/sessions/session-*.md` must be ALLOWED (no output). This is
+    // the exact path from Bob's live-dogfooding bug report. Orchestration state
+    // under `.trusty-mpm/` is PM-owned and must never be blocked.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":".trusty-mpm/sessions/session-20260714-064556.md","content":"session snapshot"}}"#,
+        &[],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "PM session-pause snapshot write under .trusty-mpm/ must be allowed"
+    );
+}
+
+#[test]
+fn pm_guard_allows_non_source_single_file_write() {
+    // Bob's directive (issue #2604): the PM can write single non-source files
+    // (docs / notes / config), not just delegate every write.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"NOTES.md","content":"x"}}"#,
+        &[],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a single non-source file write must be allowed"
+    );
+}
+
+#[test]
 fn pm_guard_denies_forbidden_bash_verb() {
     // `sed -i` edits a file in place — a P1 circumvention via Bash.
     let stdout = run_pm_guard(

@@ -24,8 +24,11 @@
 //! (no daemon round-trip — a PreToolUse hook must be fast and must never
 //! hard-block when the daemon is down), and either stays silent (ALLOW) or
 //! prints a `permissionDecision: "deny"` response (DENY). The classification is
-//! a static default-ALLOW + explicit deny-list: [`evaluate_tool`] denies the
-//! file-edit tools and forbidden Bash verbs and allows everything else. Every
+//! a static default-ALLOW + explicit deny-list: [`evaluate_tool`] denies a PM
+//! direct edit tool ONLY when it targets a *source-code* file (path-based —
+//! issue #2604), denies the forbidden Bash verbs, and allows everything else —
+//! including single-file writes to PM-owned orchestration state
+//! (`.trusty-mpm/**`, the memory palace, `TASK.md`), docs, and config. Every
 //! error path (malformed stdin, missing fields) fails **open** — ALLOW — so a
 //! broken hook never wedges the PM. **Opt-in deny-by-default (issue #2231):**
 //! the sub-agent exemption is narrowed, ONLY when
@@ -67,17 +70,42 @@ use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 /// What: the literal env var name. See [`pm_unrestricted`].
 pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
 
-/// File-editing tools the PM must delegate to rust-engineer (prohibition P1).
+/// Single-file mutation tools the PM invokes directly. Whether a given call is
+/// denied is decided by its *target path*, not the tool name — see
+/// [`evaluate_edit_tool`].
 ///
-/// Why: these are the direct filesystem-mutation tools; the PM's job is to
-/// dispatch them to an engineering sub-agent via the Task/Agent tool, never to
-/// wield them itself.
-/// What: matched by exact tool name in [`evaluate_tool`].
-const DENIED_EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+/// Why: these are the direct filesystem-mutation tools. Prohibition P1's real
+/// target is *source-code implementation* — the PM must hand `.rs`/`.py`/… work
+/// to rust-engineer. But a single-file write to PM-owned orchestration state (a
+/// session snapshot under `.trusty-mpm/`, the memory palace, a `TASK.md`), a
+/// doc, or a config file is legitimate PM work and must NOT be blocked
+/// (issue #2604 — Bob's directive: "the PM can write single files").
+/// What: matched by exact tool name in [`evaluate_tool`], then classified by
+/// target path in [`evaluate_edit_tool`].
+const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
-/// Deny reason for a direct file-edit tool call.
-const EDIT_TOOL_REASON: &str = "PM must not edit files directly (prohibition P1). \
-     Delegate the change to rust-engineer via the Task/Agent tool.";
+/// Deny reason for a PM direct write to a *source-code* file (prohibition P1).
+const SOURCE_EDIT_REASON: &str = "PM must not implement source code directly (prohibition P1). \
+     Delegate the change to rust-engineer via the Task/Agent tool. Single-file writes to \
+     non-source files (docs, config, and `.trusty-mpm/` orchestration state) are permitted.";
+
+/// Source-code file extensions a PM direct edit-tool call must not target.
+///
+/// Why: prohibition P1 blocks the PM from *implementing code* directly; the file
+/// extension is the cheap, reliable signal for "this is source the PM should
+/// hand to rust-engineer" (issue #2604). Non-code single-file writes (docs,
+/// config, data, orchestration state) are legitimate and are NOT listed here.
+/// What: lowercase extensions (no dot) matched in [`is_source_code_path`]. The
+/// list covers the mainstream compiled/scripting languages; anything not listed
+/// is treated as a non-source file and allowed.
+/// Test: `is_source_code_path_classifies_by_extension`.
+const SOURCE_CODE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "pyi", "pyx", "ipynb", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "java", "kt",
+    "kts", "rb", "php", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "swift", "scala", "sc",
+    "ex", "exs", "erl", "dart", "sql", "sh", "bash", "zsh", "fish", "lua", "pl", "pm", "r", "mm",
+    "vue", "svelte", "proto", "hs", "clj", "cljs", "cljc", "jl", "fs", "fsx", "groovy", "vb",
+    "asm", "nim", "zig", "ml", "mli",
+];
 
 /// `tm hook --pm-guard` entry point — classify a `PreToolUse` call and emit an
 /// ALLOW (silent) or DENY (`permissionDecision`) response.
@@ -223,17 +251,20 @@ fn payload_is_subagent_dispatch(payload: &serde_json::Value) -> bool {
 /// break the PM (it legitimately calls Read/Grep/Task/git-status/mcp tools all
 /// the time); only the small, high-confidence set of prohibited actions is
 /// blocked.
-/// What: denies the [`DENIED_EDIT_TOOLS`] by exact name, delegates a `Bash`
-/// call to [`evaluate_bash_command`] against its `command` argument, and allows
-/// every other tool (Read, Grep, Glob, Task, TodoWrite, WebFetch, `mcp__*`, …).
-/// Test: `evaluate_tool_denies_edit_tools`, `evaluate_tool_allows_read_and_task`,
-/// `evaluate_tool_delegates_bash`.
+/// What: routes an [`EDIT_TOOLS`] call through the path-based
+/// [`evaluate_edit_tool`] (deny only a source-code write — issue #2604),
+/// delegates a `Bash` call to [`evaluate_bash_command`] against its `command`
+/// argument, and allows every other tool (Read, Grep, Glob, Task, TodoWrite,
+/// WebFetch, `mcp__*`, …).
+/// Test: `evaluate_tool_denies_source_code_edits`,
+/// `evaluate_tool_allows_pm_orchestration_state`,
+/// `evaluate_tool_allows_read_and_task`, `evaluate_tool_delegates_bash`.
 pub(crate) fn evaluate_tool(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
 ) -> Option<&'static str> {
-    if DENIED_EDIT_TOOLS.contains(&tool_name) {
-        return Some(EDIT_TOOL_REASON);
+    if EDIT_TOOLS.contains(&tool_name) {
+        return evaluate_edit_tool(tool_input);
     }
     if tool_name == "Bash" {
         let command = tool_input
@@ -243,6 +274,98 @@ pub(crate) fn evaluate_tool(
         return evaluate_bash_command(command);
     }
     None
+}
+
+/// Classify a PM direct edit-tool call by its target path (issue #2604).
+///
+/// Why: prohibition P1 must stop the PM implementing *source code* directly
+/// while still letting it write single non-code files — its own orchestration
+/// state (`.trusty-mpm/` snapshots, the memory palace), docs, and config. Bob's
+/// directive (live dogfooding): "the PM can write single files." The pre-#2604
+/// guard blocked *all* Edit/Write, which denied the PM its own session-pause
+/// snapshot write to `.trusty-mpm/sessions/session-*.md`.
+/// What: reads the target path; ALLOW (`None`) when it is PM-owned orchestration
+/// state ([`is_pm_orchestration_path`], the HARD always-allow set — this wins
+/// over the source-code rule); DENY ([`SOURCE_EDIT_REASON`]) when it is a
+/// source-code file ([`is_source_code_path`]); otherwise ALLOW (a single-file
+/// write to a non-source file). A call with no resolvable target path fails
+/// open to ALLOW, consistent with the module's fail-open posture.
+/// Test: `evaluate_tool_denies_source_code_edits`,
+/// `evaluate_tool_allows_pm_orchestration_state`,
+/// `evaluate_tool_allows_non_source_single_file_writes`,
+/// `evaluate_edit_tool_fails_open_without_path`.
+fn evaluate_edit_tool(tool_input: Option<&serde_json::Value>) -> Option<&'static str> {
+    let path = edit_tool_target_path(tool_input)?;
+    if is_pm_orchestration_path(path) {
+        return None;
+    }
+    if is_source_code_path(path) {
+        return Some(SOURCE_EDIT_REASON);
+    }
+    None
+}
+
+/// The filesystem path an edit-tool call targets, if any.
+///
+/// Why: the edit-tool deny decision (issue #2604) is path-based, so it must read
+/// the file the call would write. `Write`/`Edit`/`MultiEdit` name it in
+/// `file_path`; `NotebookEdit` uses `notebook_path`.
+/// What: returns the first present string of `tool_input.file_path` /
+/// `tool_input.notebook_path`, or `None` when neither is present (a malformed
+/// call — the caller then fails open).
+/// Test: covered via `evaluate_edit_tool_fails_open_without_path` and the
+/// `evaluate_tool_*` edit cases.
+fn edit_tool_target_path(tool_input: Option<&serde_json::Value>) -> Option<&str> {
+    let input = tool_input?;
+    input
+        .get("file_path")
+        .or_else(|| input.get("notebook_path"))
+        .and_then(|v| v.as_str())
+}
+
+/// Whether `path` is PM-owned orchestration state that must NEVER be blocked.
+///
+/// Why (issue #2604, HARD requirement): the PM has to persist its own
+/// orchestration artifacts — session snapshots and config/override files under
+/// `.trusty-mpm/`, its memory palace under the tm-owned `.trusty-tools/` config
+/// home, and `TASK.md`-style session files. A session-pause writing
+/// `.trusty-mpm/sessions/session-*.md` must always pass, independent of the
+/// source-code rule.
+/// What: `true` when the basename is `TASK.md` or `MEMORY.md`, or when any path
+/// *component* is exactly `.trusty-mpm` or `.trusty-tools`. Component matching
+/// (not substring) is deliberate so the crate source dir `crates/trusty-mpm/`
+/// — note no leading dot — is NOT matched.
+/// Test: `is_pm_orchestration_path_matches_owned_state`.
+fn is_pm_orchestration_path(path: &str) -> bool {
+    use std::path::{Component, Path};
+    let p = Path::new(path);
+    if matches!(
+        p.file_name().and_then(|s| s.to_str()),
+        Some("TASK.md" | "MEMORY.md")
+    ) {
+        return true;
+    }
+    p.components().any(|c| {
+        matches!(c, Component::Normal(os)
+            if matches!(os.to_str(), Some(".trusty-mpm" | ".trusty-tools")))
+    })
+}
+
+/// Whether `path` names a source-code file (by extension).
+///
+/// Why: prohibition P1 blocks the PM from *implementing code* directly; the
+/// extension is the reliable, cheap signal for "this is source the PM should
+/// hand to rust-engineer" (issue #2604).
+/// What: `true` when the lowercased file extension is in
+/// [`SOURCE_CODE_EXTENSIONS`]. Extension-less files (e.g. `Makefile`, `README`)
+/// and non-code extensions (`.md`, `.toml`, `.json`, `.txt`) return `false`.
+/// Test: `is_source_code_path_classifies_by_extension`.
+fn is_source_code_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| SOURCE_CODE_EXTENSIONS.contains(&e.as_str()))
 }
 
 /// Build the `hookSpecificOutput.permissionDecision = "deny"` JSON body.
@@ -317,13 +440,114 @@ mod tests {
     use crate::commands::pm_guard_bash::SHELL_EDIT_REASON;
 
     #[test]
-    fn evaluate_tool_denies_edit_tools() {
-        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+    fn evaluate_tool_denies_source_code_edits() {
+        // A PM direct edit of a source-code file is still blocked (P1).
+        for tool in ["Edit", "Write", "MultiEdit"] {
             assert_eq!(
-                evaluate_tool(tool, Some(&serde_json::json!({"file_path": "/x"}))),
-                Some(EDIT_TOOL_REASON),
-                "expected {tool} to be denied"
+                evaluate_tool(
+                    tool,
+                    Some(&serde_json::json!({"file_path": "crates/foo/src/lib.rs"}))
+                ),
+                Some(SOURCE_EDIT_REASON),
+                "expected {tool} on a .rs file to be denied"
             );
+        }
+        // NotebookEdit names its target in `notebook_path`.
+        assert_eq!(
+            evaluate_tool(
+                "NotebookEdit",
+                Some(&serde_json::json!({"notebook_path": "/x/nb.ipynb"}))
+            ),
+            Some(SOURCE_EDIT_REASON)
+        );
+    }
+
+    #[test]
+    fn evaluate_tool_allows_pm_orchestration_state() {
+        // Regression for issue #2604: the exact session-pause snapshot path must
+        // be allowed, plus TASK.md and the memory index.
+        for path in [
+            ".trusty-mpm/sessions/session-20260714-064556.md",
+            "TASK.md",
+            "/Users/x/.trusty-tools/trusty-mpm/claude-config/projects/p/memory/MEMORY.md",
+        ] {
+            assert_eq!(
+                evaluate_tool("Write", Some(&serde_json::json!({"file_path": path}))),
+                None,
+                "expected PM-owned state {path} to be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_tool_allows_non_source_single_file_writes() {
+        // Bob's directive: single-file writes to non-source files are permitted.
+        for path in [
+            "notes.md",
+            "config.json",
+            "data.csv",
+            "settings.toml",
+            "README",
+            "out.txt",
+        ] {
+            assert_eq!(
+                evaluate_tool("Write", Some(&serde_json::json!({"file_path": path}))),
+                None,
+                "expected non-source single-file write {path} to be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_edit_tool_fails_open_without_path() {
+        // A malformed edit call with no resolvable target path fails open.
+        assert_eq!(
+            evaluate_tool("Write", Some(&serde_json::json!({"content": "x"}))),
+            None
+        );
+        assert_eq!(evaluate_tool("Edit", None), None);
+    }
+
+    #[test]
+    fn is_pm_orchestration_path_matches_owned_state() {
+        for p in [
+            ".trusty-mpm/sessions/session-20260714-064556.md",
+            "/abs/path/.trusty-mpm/config.json",
+            "/Users/x/.trusty-tools/trusty-mpm/x/memory/MEMORY.md",
+            "TASK.md",
+            "sub/dir/TASK.md",
+        ] {
+            assert!(is_pm_orchestration_path(p), "{p} should be PM-owned");
+        }
+        // The crate source dir `trusty-mpm` (no leading dot) must NOT match.
+        for p in ["crates/trusty-mpm/src/lib.rs", "src/main.rs", "notes.md"] {
+            assert!(!is_pm_orchestration_path(p), "{p} should NOT be PM-owned");
+        }
+    }
+
+    #[test]
+    fn is_source_code_path_classifies_by_extension() {
+        for p in [
+            "a.rs",
+            "b.py",
+            "c.ts",
+            "d.tsx",
+            "e.go",
+            "nb.ipynb",
+            "x/y/z.cpp",
+        ] {
+            assert!(is_source_code_path(p), "{p} should be source");
+        }
+        for p in [
+            "notes.md",
+            "Cargo.toml",
+            "data.json",
+            "TASK.md",
+            "README",
+            "log.txt",
+            ".trusty-mpm/s.md",
+        ] {
+            assert!(!is_source_code_path(p), "{p} should NOT be source");
         }
     }
 
