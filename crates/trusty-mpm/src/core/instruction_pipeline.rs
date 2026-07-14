@@ -659,6 +659,41 @@ mod tests {
     }
 
     #[test]
+    fn primary_directive_mandate_not_duplicated_across_channels() {
+        // Issue #2647 (R2): the PRIMARY DIRECTIVE / delegation mandate must
+        // live in exactly ONE channel. Before this fix, both the appended
+        // system prompt (`assemble_system_prompt`, always injected via
+        // `--append-system-prompt-file`) AND every bundled output-style file
+        // (loaded independently via the Claude Code `outputStyle` settings
+        // key) carried a full, near-identical "PRIMARY DIRECTIVE - MANDATORY
+        // DELEGATION" banner — ~2-3k duplicated tokens every session. The
+        // appended prompt is now the canonical source (Identity +
+        // Prohibitions content, no literal "PRIMARY DIRECTIVE" banner); each
+        // output style keeps only a short pointer heading naming the phrase
+        // once, never a full restatement.
+        const SENTINEL: &str = "PRIMARY DIRECTIVE";
+        let assembled = assemble_system_prompt();
+        assert_eq!(
+            assembled.matches(SENTINEL).count(),
+            0,
+            "the appended system prompt must not carry a literal PRIMARY \
+             DIRECTIVE banner — the mandate lives there as Identity + \
+             Prohibitions content"
+        );
+        for style in crate::core::bundle::OUTPUT_STYLES {
+            let combined =
+                assembled.matches(SENTINEL).count() + style.content.matches(SENTINEL).count();
+            assert_eq!(
+                combined, 1,
+                "{}: PRIMARY DIRECTIVE sentinel must appear exactly once across \
+                 the appended prompt + this output style (one pointer heading, \
+                 never a full restatement) — got {combined}",
+                style.id
+            );
+        }
+    }
+
+    #[test]
     fn pipeline_no_agents_still_succeeds() {
         // An empty agents dir yields a zero agent_count and the "no agents"
         // delegation section, but the pipeline still produces merged output.
