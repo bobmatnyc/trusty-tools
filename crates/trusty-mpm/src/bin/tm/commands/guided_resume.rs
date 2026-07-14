@@ -10,13 +10,23 @@
 //! both files under the 500-SLOC production cap.
 //!
 //! What: [`plan_resume`] is the pure branch selector over [`is_zombie`] /
-//! [`needs_restart`]; [`resume_guided_session`] is the I/O driver that dispatches
-//! on it, delegating the two daemon round-trips to [`reconcile_zombie_stop`]
+//! [`needs_restart`]; [`resume_session`] is the I/O driver that dispatches on
+//! it, delegating the two daemon round-trips to [`reconcile_zombie_stop`]
 //! (POST `/runtime-stop`) and [`restart_via_daemon`] (POST `/resume`).
+//! [`resume_guided_session`] is a thin always-attach wrapper over
+//! [`resume_session`] for the picker's own call sites, which are already
+//! TTY-gated upstream (`guided::tty_gate`). `tm session(s) resume <id>`
+//! (`commands::managed::session_resume`, #2649) calls [`resume_session`]
+//! directly with `no_attach` derived from `std::io::stdin().is_terminal()`,
+//! so a headless/scripted invocation still gets the daemon-side restart but
+//! never attempts a real tmux attach with no controlling terminal to move
+//! (code-critic HIGH, #2649 review).
 //!
 //! Test: the pure seams (`needs_restart`, `is_zombie`, `plan_resume`) are
 //! exhaustively unit-tested in `tests_behavior_c_tests.rs`; the HTTP paths are
-//! exercised by the e2e suite and manual smoke tests.
+//! exercised by the e2e suite and manual smoke tests; the `no_attach` gate is
+//! covered by `managed_tests.rs`'s
+//! `session_resume_headless_active_live_tmux_skips_restart_and_attach`.
 
 use anyhow::Context as _;
 
@@ -131,6 +141,56 @@ pub(crate) async fn resume_guided_session(
     url: &str,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<()> {
+    // The picker is only ever reached after its own upstream TTY gate
+    // (`guided::tty_gate`, checked before the picker renders at all) — always
+    // attach here. `no_attach` gating lives in `resume_session`, used by the
+    // explicit `tm session(s) resume <id>` verb, which has no such upstream
+    // gate (#2649 review).
+    resume_session(client, url, session, false).await
+}
+
+/// Same state machine as [`resume_guided_session`], but TTY-gated: skips the
+/// final terminal hand-off (and prints a status line instead) when the caller
+/// has no controlling terminal to move.
+///
+/// Why (code-critic HIGH, #2649 review): every branch of the resume flow
+/// unconditionally ended in [`tmux_attach`], which shells out to a REAL
+/// `tmux attach-session`/`switch-client`. That is correct for the interactive
+/// picker (always run at a real terminal — gated upstream, see
+/// [`resume_guided_session`]'s doc) but wrong for the explicit `tm
+/// session(s) resume <id>` verb: that verb is also a legitimate
+/// scripted/headless entry point (CI, a supervisor process, a piped
+/// invocation) with no controlling terminal at all. Attaching there is at
+/// best a silent no-op and at worst an actively confusing tmux error —
+/// even though the daemon-side resume already succeeded. Mirrors the
+/// `tty_gate` idiom (`guided.rs`, `std::io::stdin().is_terminal()`), but
+/// since the gated action here is an OUTPUT step (attach) rather than an
+/// input read, the caller passes the already-resolved `no_attach` bool
+/// instead of this function reading `stdin` itself — keeping the gate at the
+/// actual I/O boundary and this function fully testable without a TTY.
+/// What: identical branch selection to `resume_guided_session`
+/// (`plan_resume` / zombie-reconcile / restart via `restart_via_daemon`).
+/// When `no_attach` is `true`, skips [`tmux_attach`] and instead prints the
+/// same `resumed <name> (<id>) [<state>]` status line the pre-#2649
+/// direct-POST implementation printed — using the daemon's authoritative
+/// post-restart record when a restart happened, or the caller's own summary
+/// otherwise (the plain `Attach` branch never touches the daemon, so nothing
+/// changed). Returns `Ok(())` in both cases once the daemon-side state is
+/// confirmed good — a headless caller only sees a non-zero exit when the
+/// daemon-side resume/reconcile itself failed.
+/// Test: `needs_restart`/`is_zombie`/`plan_resume` are the testable pure
+/// seams (`guided_resume_plan_active_live_tmux_attaches` proves the Attach
+/// branch selection this depends on); `managed_tests.rs`'s
+/// `session_resume_headless_active_live_tmux_skips_restart_and_attach`
+/// (#2649) drives this function's Attach branch end-to-end in a non-TTY test
+/// process and asserts no daemon-side mutation occurred; the restart I/O
+/// path is exercised by the e2e suite and manual smoke tests.
+pub(crate) async fn resume_session(
+    client: &reqwest::Client,
+    url: &str,
+    session: &trusty_mpm::client::ManagedSessionSummary,
+    no_attach: bool,
+) -> anyhow::Result<()> {
     let tmux_live = tmux_has_session(&session.name);
     let action = plan_resume(&session.state, tmux_live);
 
@@ -147,6 +207,11 @@ pub(crate) async fn resume_guided_session(
         );
         reconcile_zombie_stop(client, url, session).await?;
     }
+
+    // `resumed` reflects the daemon's authoritative post-restart record when a
+    // restart happened below; otherwise (the plain Attach branch) it is just
+    // the caller's own summary — nothing on the daemon side changed.
+    let mut resumed = session.clone();
 
     // Restart path — shared by the plain Restart branch and the reconciled zombie.
     if matches!(
@@ -170,9 +235,17 @@ pub(crate) async fn resume_guided_session(
                 );
             }
         }
-        restart_via_daemon(client, url, session).await?;
+        resumed = restart_via_daemon(client, url, session).await?;
     }
-    tmux_attach(&session.name)
+
+    if no_attach {
+        println!(
+            "resumed {} ({}) [{}]",
+            resumed.name, resumed.id, resumed.state
+        );
+        return Ok(());
+    }
+    tmux_attach(&resumed.name)
 }
 
 /// Auto-stop a zombie session so the daemon record resets to `Stopped` (#2001).
@@ -250,14 +323,17 @@ async fn reconcile_zombie_stop(
 /// concrete reason (e.g. "workspace directory … no longer exists") instead of a
 /// bare status code. On HTTP 200 the body is parsed
 /// and, if `state=errored`, the async runtime spawn failed → bail directing the
-/// operator to `tm session info`. Success prints "restarted — attaching…" and
-/// returns `Ok(())`; the caller then attaches.
+/// operator to `tm session info`. Success prints "session restarted." and
+/// returns the daemon's authoritative post-restart [`ManagedSessionSummary`]
+/// (#2649 review: the caller needs this to print an accurate final state in
+/// headless/`no_attach` mode, rather than assuming `state == "active"`); the
+/// interactive caller uses it to attach.
 /// Test: I/O path exercised by the e2e suite; branch selection is [`plan_resume`].
 async fn restart_via_daemon(
     client: &reqwest::Client,
     url: &str,
     session: &trusty_mpm::client::ManagedSessionSummary,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<trusty_mpm::client::ManagedSessionSummary> {
     // POST with a 30-second timeout — a hung daemon must not freeze the CLI.
     let resp = match client
         .post(format!(
@@ -392,8 +468,8 @@ async fn restart_via_daemon(
                     session.name
                 );
             }
-            eprintln!("tm: session restarted — attaching…");
-            Ok(())
+            eprintln!("tm: session restarted.");
+            Ok(body)
         }
     }
 }
