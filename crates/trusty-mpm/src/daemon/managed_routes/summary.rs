@@ -14,7 +14,9 @@
 
 use axum::http::StatusCode;
 
-use crate::session_manager::{InjectionStatus, ManagedSessionId, SessionRecord};
+use crate::session_manager::{
+    InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
+};
 
 use super::SessionSummary;
 
@@ -75,7 +77,14 @@ fn injection_status_wire(status: InjectionStatus) -> Option<String> {
 ///
 /// Why: the API exposes a flat, string-typed summary so clients don't depend on
 /// the internal record shape.
-/// What: maps every record field to its serialized form.
+/// What: maps every record field to its serialized form. `unresumable` always
+/// starts `false` here — it requires an async filesystem probe
+/// (`session_manager::resume_workdir::is_unresumable`), which this function
+/// cannot perform since it is a pure/sync conversion shared by handlers that
+/// have no reason to pay that cost (spawn/reactivate/decommission are never
+/// mid-flight through the dead-workspace predicate). The list/get handlers
+/// (#2595) overwrite the field on the returned value when they can await the
+/// probe.
 /// Test: covered by the list/get handler tests.
 pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
     SessionSummary {
@@ -99,7 +108,73 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         deliverable_id: r.deliverable_id.map(|id| id.to_string()),
         pane_id: r.pane_id.clone(),
         injection_status: injection_status_wire(r.injection_status),
+        unresumable: false,
     }
+}
+
+/// [`record_to_summary`] plus the async `unresumable` probe (#2595).
+///
+/// Why: `list_managed_sessions`/`get_managed_session` are the two handlers
+/// that can afford the filesystem probe (both already `.await` the session
+/// manager). Folding "convert, then overwrite the flag" into one call here —
+/// rather than repeating it inline at each handler — keeps `mod.rs`'s handler
+/// bodies a single line each (`mod.rs` sits at its 500-SLOC production cap).
+/// What: [`record_to_summary`], then overwrites `unresumable` via
+/// `session_manager::resume_workdir::is_unresumable`.
+/// Test: `list_marks_dead_stopped_session_unresumable`,
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in `super::tests`.
+pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSummary {
+    let mut summary = record_to_summary(r);
+    summary.unresumable = crate::session_manager::resume_workdir::is_unresumable(r).await;
+    summary
+}
+
+/// [`record_to_summary`] for MANY records, running each `unresumable` probe
+/// concurrently rather than one-at-a-time (#2595 review, MEDIUM finding 4).
+///
+/// Why: `list_managed_sessions` originally awaited [`record_to_summary_checked`]
+/// sequentially in a `for` loop — for a fleet of N sessions that serializes N
+/// `tokio::fs::try_exists`-backed round trips even though they are entirely
+/// independent. `is_unresumable` already short-circuits with NO I/O for any
+/// state other than `Stopped`/`Errored` (the state gate), so only that subset
+/// ever pays the probe cost — fan out exactly those via `tokio::task::JoinSet`
+/// (unconditional `tokio` dependency; the workspace's optional `futures` crate
+/// is feature-gated and not assumed available to every daemon route) rather
+/// than every record.
+/// What: builds every summary synchronously first via [`record_to_summary`]
+/// (cheap, no I/O — preserves `records`' order), then spawns one
+/// `is_unresumable` task per `Stopped`/`Errored` record (each tagged with its
+/// original index so `JoinSet`'s out-of-completion-order yield can never
+/// reorder the response), and patches each result back into its slot as
+/// tasks complete. A panicking probe task is dropped silently — that summary
+/// simply keeps its `record_to_summary` default (`unresumable: false`)
+/// rather than failing the whole list response.
+/// Test: `checked_summaries_preserves_input_order_and_flags_only_dead_sessions`
+/// in `super::tests`; end-to-end coverage via `list_marks_dead_stopped_session_unresumable`,
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in
+/// `tests/session_manager_mvp.rs`.
+pub(super) async fn checked_summaries(records: &[SessionRecord]) -> Vec<SessionSummary> {
+    let mut summaries: Vec<SessionSummary> = records.iter().map(record_to_summary).collect();
+
+    let mut probes = tokio::task::JoinSet::new();
+    for (idx, r) in records.iter().enumerate() {
+        if matches!(
+            r.state,
+            ManagedSessionState::Stopped | ManagedSessionState::Errored
+        ) {
+            let r = r.clone();
+            probes.spawn(async move {
+                let unresumable = crate::session_manager::resume_workdir::is_unresumable(&r).await;
+                (idx, unresumable)
+            });
+        }
+    }
+    while let Some(res) = probes.join_next().await {
+        if let Ok((idx, unresumable)) = res {
+            summaries[idx].unresumable = unresumable;
+        }
+    }
+    summaries
 }
 
 /// Build the tmux attach command string for a session.

@@ -81,6 +81,7 @@ fn seeded_state() -> ProjectCtlState {
             pending_decision: None,
             proposed_default: None,
             deliverable_id: None,
+            unresumable: false,
         }],
     );
     state.projects_nav.sync_len(state.projects.len());
@@ -170,6 +171,48 @@ fn resume_and_attach_target_selected_session_immediately() {
         Some(PendingAction::Attach("sess-1".to_string()))
     );
     assert!(state.pending_confirm.is_none());
+}
+
+/// #2595: `r` on a session flagged `unresumable` must NOT fire
+/// `PendingAction::Resume` — its workspace is gone for good, so the daemon
+/// round trip can only 422 (#2594). Mirrors the CLI picker's
+/// `PickerDecision::Unresumable` guard, adapted to the TUI's notice idiom: no
+/// confirm gate, just a refusal pointing at `d` (decommission) instead.
+#[test]
+fn resume_on_unresumable_session_is_blocked() {
+    let mut state = seeded_state();
+    state.focus = Pane::Sessions;
+    state.sessions_by_project.get_mut("alpha").unwrap()[0].unresumable = true;
+
+    let action = handle_key(&mut state, key(KeyCode::Char('r')));
+    assert!(
+        action.is_none(),
+        "a dead session must never produce PendingAction::Resume"
+    );
+    assert!(state.pending_confirm.is_none());
+    let notice = state.notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("dead") || notice.to_lowercase().contains("workspace"),
+        "notice should explain the session is dead / workspace missing, got {notice:?}"
+    );
+    assert!(
+        notice.contains('d'),
+        "notice should point at the [d] decommission remedy, got {notice:?}"
+    );
+}
+
+/// #2595 counterpart: a HEALTHY session (`unresumable: false`, the default)
+/// must still fire `PendingAction::Resume` immediately — the guard must not
+/// over-fire and block ordinary resumes.
+#[test]
+fn resume_on_healthy_session_fires_immediately() {
+    let mut state = seeded_state();
+    state.focus = Pane::Sessions;
+    assert_eq!(
+        handle_key(&mut state, key(KeyCode::Char('r'))),
+        Some(PendingAction::Resume("sess-1".to_string()))
+    );
+    assert!(state.notice.is_none());
 }
 
 // ---- DOC-35 §6 config form (#2120) --------------------------------------

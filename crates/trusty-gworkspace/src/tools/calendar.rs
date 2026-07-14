@@ -35,8 +35,29 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "action": action_enum(&["list", "create", "update", "delete"]),
             "calendar_id": { "type": "string", "description": "Calendar ID. Defaults to 'primary'." },
             "event_id": { "type": "string" },
-            "event": { "type": "object", "description": "Event resource (create)." },
-            "updates": { "type": "object" },
+            "event": { "type": "object", "description": "Raw event resource (create). Escape hatch; typed fields below take precedence." },
+            "updates": { "type": "object", "description": "Raw patch body (update). Escape hatch; typed fields below take precedence." },
+            "start_time": { "type": "string", "description": "Event start, RFC3339 (create/update). Maps to start.dateTime." },
+            "end_time": { "type": "string", "description": "Event end, RFC3339 (create/update). Maps to end.dateTime." },
+            "timezone": { "type": "string", "description": "IANA timezone (e.g. 'America/Los_Angeles') applied to start/end (create/update)." },
+            "location": { "type": "string", "description": "Event location (create/update)." },
+            "attendees": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        { "type": "string", "description": "Attendee email address; maps to {email}." },
+                        { "type": "object", "description": "Raw attendee object (e.g. {email, optional, responseStatus}), passed through unchanged." },
+                    ]
+                },
+                "description": "Attendees (create/update): email strings or raw attendee objects."
+            },
+            "recurrence": {
+                "oneOf": [
+                    { "type": "string", "description": "A single recurrence rule, e.g. 'FREQ=WEEKLY;COUNT=10' or 'RRULE:FREQ=...'." },
+                    { "type": "array", "items": { "type": "string" }, "description": "Multiple recurrence/exclusion lines, e.g. RRULE/RDATE/EXDATE/EXRULE." },
+                ],
+                "description": "Recurrence rule(s) (create/update). Bare FREQ=... strings are normalised to an RRULE: line."
+            },
             "time_min": { "type": "string", "description": "RFC3339 lower bound (list)." },
             "time_max": { "type": "string", "description": "RFC3339 upper bound (list)." },
             "query": { "type": "string", "description": "Free-text search (list)." },
