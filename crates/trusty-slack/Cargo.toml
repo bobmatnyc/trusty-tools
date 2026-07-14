@@ -1,0 +1,24 @@
+[package]
+name = "trusty-slack"
+version = "0.1.0"
+publish = false
+edition = "2021"
+description = "Native Slack MCP server (chat-as-tools) for the Trusty suite — scaffold"
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "slack-mcp"
+path = "src/bin/slack-mcp.rs"
+
+[dependencies]
+trusty-common = { workspace = true, features = ["mcp"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
