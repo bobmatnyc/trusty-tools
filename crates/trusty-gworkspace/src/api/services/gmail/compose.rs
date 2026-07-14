@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::api::client::BaseClient;
 use crate::api::constants::DRIVE_API_BASE;
-use crate::api::services::guess_mime_from_path;
+use crate::api::services::{guess_mime_from_path, sanitize_header_value};
 
 /// A resolved attachment ready for MIME encoding.
 ///
@@ -87,18 +87,26 @@ pub(super) fn build_mime(parts: &MessageParts, attachments: &[Attachment]) -> St
         multipart("mixed", &boundary, &sub)
     };
 
+    // Every value below is attacker-influenceable (direct MCP args, or —
+    // for `reply` — a fetched message's Subject/From) and is formatted
+    // straight into a raw header line, so each MUST be CRLF-sanitized here
+    // to prevent header injection (e.g. a smuggled `Bcc:`).
     let mut headers = vec![
-        format!("To: {}", parts.to),
-        format!("Subject: {}", parts.subject),
+        format!("To: {}", sanitize_header_value(parts.to)),
+        format!("Subject: {}", sanitize_header_value(parts.subject)),
     ];
     if let Some(c) = parts.cc {
-        headers.push(format!("Cc: {c}"));
+        headers.push(format!("Cc: {}", sanitize_header_value(c)));
     }
     if let Some(b) = parts.bcc {
-        headers.push(format!("Bcc: {b}"));
+        headers.push(format!("Bcc: {}", sanitize_header_value(b)));
     }
     for (k, v) in &parts.extra_headers {
-        headers.push(format!("{k}: {v}"));
+        headers.push(format!(
+            "{}: {}",
+            sanitize_header_value(k),
+            sanitize_header_value(v)
+        ));
     }
     headers.push("MIME-Version: 1.0".to_string());
 
@@ -270,12 +278,20 @@ fn text_part(subtype: &str, body: &str) -> String {
 }
 
 /// Render an attachment leaf part (headers + base64 body).
+///
+/// Why: `mime`/`filename` can originate from caller-supplied `mime_type` /
+/// `filename` arguments (or a Drive file's own `mimeType`/`name`), so they
+/// must be CRLF-sanitized before landing in a raw header line — the same
+/// injection class as the top-level `To`/`Subject` headers.
+/// What: Sanitizes both values, then formats the `Content-Type` and
+/// `Content-Disposition` header lines.
+/// Test: `build_mime_rejects_crlf_injection_in_attachment_filename` below.
 fn attachment_part(a: &Attachment) -> String {
     let b64 = wrap_base64(&STANDARD.encode(&a.bytes));
+    let mime = sanitize_header_value(&a.mime);
+    let name = sanitize_header_value(&a.filename);
     format!(
-        "Content-Type: {mime}; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{b64}",
-        mime = a.mime,
-        name = a.filename,
+        "Content-Type: {mime}; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{b64}"
     )
 }
 
@@ -389,6 +405,122 @@ mod tests {
         assert!(mime.contains("In-Reply-To: <abc@mail>\r\n"));
         assert!(mime.contains("References: <abc@mail>\r\n"));
         assert!(mime.contains("Subject: Re: Question\r\n"));
+    }
+
+    #[test]
+    fn build_mime_alternative_with_attachment_nests_correctly() {
+        // The most error-prone nesting: multipart/mixed(multipart/alternative(
+        // plain, html), attachment) — html+plain body plus one attachment.
+        let p = MessageParts {
+            to: "to@x.com",
+            cc: None,
+            bcc: None,
+            subject: "S",
+            plain: Some("plain text"),
+            html: Some("<b>rich</b>"),
+            extra_headers: Vec::new(),
+        };
+        let att = Attachment {
+            filename: "note.txt".to_string(),
+            mime: "text/plain".to_string(),
+            bytes: b"attached bytes".to_vec(),
+        };
+        let mime = build_mime(&p, std::slice::from_ref(&att));
+
+        assert!(mime.contains("Content-Type: multipart/mixed"));
+        assert!(mime.contains("Content-Type: multipart/alternative"));
+        assert!(mime.contains(&STANDARD.encode("plain text")));
+        assert!(mime.contains(&STANDARD.encode("<b>rich</b>")));
+        assert!(mime.contains("Content-Disposition: attachment; filename=\"note.txt\""));
+
+        // Nesting order: mixed's own header precedes the nested alternative's
+        // header, which precedes the attachment part.
+        let mixed_at = mime.find("Content-Type: multipart/mixed").unwrap();
+        let alt_at = mime.find("Content-Type: multipart/alternative").unwrap();
+        let att_at = mime.find("Content-Disposition: attachment").unwrap();
+        assert!(mixed_at < alt_at, "mixed header must precede alternative");
+        assert!(alt_at < att_at, "alternative body must precede attachment");
+    }
+
+    /// A sanitized value still contains its original characters (minus CR/LF)
+    /// merged into the header line it belongs to — that's expected and
+    /// harmless. The actual security property is that CR/LF can never
+    /// terminate the current header and start a new one, so every injection
+    /// test below asserts the ABSENCE of a new header line (`"\r\n<Name>:"`),
+    /// not the absence of the raw attacker substring.
+    fn asserts_no_injected_header_line(mime: &str, injected_header_name: &str) {
+        let needle = format!("\r\n{injected_header_name}:");
+        assert!(
+            !mime.contains(&needle),
+            "expected no injected '{injected_header_name}:' header line, got:\n{mime}"
+        );
+    }
+
+    #[test]
+    fn build_mime_rejects_crlf_injection_in_subject() {
+        let malicious_subject = "Hi\r\nBcc: attacker@evil.example";
+        let p = parts_plain("to@x.com", malicious_subject, "body");
+        let mime = build_mime(&p, &[]);
+        asserts_no_injected_header_line(&mime, "Bcc");
+        // The value survives, merged harmlessly onto the Subject line.
+        assert!(mime.contains("Subject: HiBcc: attacker@evil.example\r\n"));
+    }
+
+    #[test]
+    fn build_mime_rejects_crlf_injection_in_to_cc_bcc() {
+        let p = MessageParts {
+            to: "to@x.com\r\nBcc: attacker1@evil.example",
+            cc: Some("cc@x.com\r\nBcc: attacker2@evil.example"),
+            bcc: None,
+            subject: "S",
+            plain: Some("body"),
+            html: None,
+            extra_headers: Vec::new(),
+        };
+        let mime = build_mime(&p, &[]);
+        asserts_no_injected_header_line(&mime, "Bcc");
+    }
+
+    #[test]
+    fn build_mime_rejects_crlf_injection_in_reply_headers() {
+        let p = MessageParts {
+            to: "to@x.com",
+            cc: None,
+            bcc: None,
+            subject: "S",
+            plain: Some("body"),
+            html: None,
+            extra_headers: vec![(
+                "In-Reply-To".to_string(),
+                "<abc@mail>\r\nBcc: attacker@evil.example".to_string(),
+            )],
+        };
+        let mime = build_mime(&p, &[]);
+        asserts_no_injected_header_line(&mime, "Bcc");
+    }
+
+    #[test]
+    fn build_mime_rejects_crlf_injection_in_attachment_filename() {
+        let p = parts_plain("to@x.com", "S", "body");
+        let att = Attachment {
+            filename: "evil.txt\r\nBcc: attacker@evil.example".to_string(),
+            mime: "text/plain".to_string(),
+            bytes: b"x".to_vec(),
+        };
+        let mime = build_mime(&p, std::slice::from_ref(&att));
+        asserts_no_injected_header_line(&mime, "Bcc");
+    }
+
+    #[test]
+    fn build_mime_rejects_crlf_injection_in_attachment_mime() {
+        let p = parts_plain("to@x.com", "S", "body");
+        let att = Attachment {
+            filename: "note.txt".to_string(),
+            mime: "text/plain\r\nX-Injected: evil".to_string(),
+            bytes: b"x".to_vec(),
+        };
+        let mime = build_mime(&p, std::slice::from_ref(&att));
+        asserts_no_injected_header_line(&mime, "X-Injected");
     }
 
     #[test]

@@ -46,6 +46,25 @@ pub(crate) fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Strip CR/LF from a value about to be interpolated into a raw RFC 2822
+/// header line.
+///
+/// Why: Header values (Gmail `To`/`Cc`/`Bcc`/`Subject`/`In-Reply-To`, Drive
+/// upload `Content-Type`) are formatted directly into hand-built header
+/// lines. Several sources are attacker-influenceable: MCP tool arguments
+/// directly, and — via the `reply` action — a fetched message's `Subject`/
+/// `From` headers. An embedded `\r` or `\n` lets the value terminate the
+/// current header and inject an arbitrary new one (e.g. a covert `Bcc:`),
+/// a classic CRLF/header-injection vector. Every value placed into a header
+/// line MUST be passed through this first.
+/// What: Removes every `\r` and `\n` character; the result can never
+/// terminate the header line it is placed into.
+/// Test: `sanitize_header_value_strips_crlf` below; injection regression
+/// tests live alongside each header-building call site.
+pub(crate) fn sanitize_header_value(value: &str) -> String {
+    value.chars().filter(|c| *c != '\r' && *c != '\n').collect()
+}
+
 /// Guess a MIME type from a filename extension (best-effort).
 ///
 /// Why: Drive uploads and Gmail attachments both need a `Content-Type` when
@@ -89,6 +108,16 @@ pub(crate) fn guess_mime_from_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_header_value_strips_crlf() {
+        assert_eq!(sanitize_header_value("plain value"), "plain value");
+        assert_eq!(
+            sanitize_header_value("a\r\nBcc: evil@x.com"),
+            "aBcc: evil@x.com"
+        );
+        assert_eq!(sanitize_header_value("a\nb\rc"), "abc");
+    }
 
     #[test]
     fn guess_mime_covers_common_extensions() {

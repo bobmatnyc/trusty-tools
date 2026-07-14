@@ -177,10 +177,12 @@ pub async fn manage_tasks(client: &BaseClient, args: Value) -> Result<Value> {
 
 /// Why: The Tasks API has no cross-list search; agents need one call to find a
 /// task by keyword regardless of which list holds it.
-/// What: Lists every tasklist, then lists each list's tasks and keeps those
-/// whose title or notes contain `query` (case-insensitive). Each hit is
-/// annotated with its owning `tasklist_id`/`tasklist_title`.
-/// Test: The per-task predicate is unit-tested via `task_matches`.
+/// What: Lists every tasklist (fully paginated), then lists each list's tasks
+/// (also fully paginated) and keeps those whose title or notes contain
+/// `query` (case-insensitive). Each hit is annotated with its owning
+/// `tasklist_id`/`tasklist_title`.
+/// Test: The per-task predicate is unit-tested via `task_matches`; the
+/// pagination termination condition via `next_page_token_present_and_absent`.
 async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) -> Result<Value> {
     let query = require_str(args, "query")?;
     let needle = query.to_ascii_lowercase();
@@ -189,14 +191,12 @@ async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) 
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let lists = client
-        .get(&format!("{TASKS_API_BASE}/users/@me/lists"), account)
-        .await?;
-    let list_items = lists
-        .get("items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let list_items = fetch_all_items(
+        client,
+        account,
+        &format!("{TASKS_API_BASE}/users/@me/lists?maxResults=100"),
+    )
+    .await?;
 
     // Sequential fan-out: a user has few tasklists (typically < 10), so this
     // keeps the `&client` borrow trivial and avoids a `futures` dependency
@@ -210,12 +210,7 @@ async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) 
         let tasks_url = format!(
             "{TASKS_API_BASE}/lists/{list_id}/tasks?showCompleted={show_completed}&showHidden=true&maxResults=100"
         );
-        let tasks = client.get(&tasks_url, account).await?;
-        let items = tasks
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let items = fetch_all_items(client, account, &tasks_url).await?;
         for task in items {
             if task_matches(&task, &needle) {
                 results.push(json!({
@@ -231,6 +226,57 @@ async fn search_tasks(client: &BaseClient, account: Option<&str>, args: &Value) 
         }
     }
     Ok(json!({ "query": query, "count": results.len(), "results": results }))
+}
+
+/// Fetch every page of a paginated Tasks API list endpoint, concatenating
+/// each page's `items` array.
+///
+/// Why: Both `/users/@me/lists` and `lists/{id}/tasks` paginate via
+/// `nextPageToken`; a single unpaged GET silently truncates results once an
+/// account has many tasklists, or a list has many tasks — a false negative
+/// that defeats the point of a cross-list `search`.
+/// What: GETs `base_url` (which already carries its own query string),
+/// collects `items`, and follows `nextPageToken` by appending
+/// `&pageToken=...` until the API stops returning one.
+/// Test: The termination predicate is unit-tested via `next_page_token`;
+/// the loop itself is live-only (network).
+async fn fetch_all_items(
+    client: &BaseClient,
+    account: Option<&str>,
+    base_url: &str,
+) -> Result<Vec<Value>> {
+    let mut items = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let url = match &page_token {
+            Some(tok) => format!("{base_url}&pageToken={tok}"),
+            None => base_url.to_string(),
+        };
+        let page = client.get(&url, account).await?;
+        if let Some(arr) = page.get("items").and_then(|v| v.as_array()) {
+            items.extend(arr.iter().cloned());
+        }
+        page_token = next_page_token(&page);
+        if page_token.is_none() {
+            break;
+        }
+    }
+    Ok(items)
+}
+
+/// Extract the next-page continuation token from a Tasks API list response.
+///
+/// Why: Isolating the termination condition as a pure function lets the
+/// pagination loop's stopping behavior be unit-tested without a live HTTP
+/// round-trip.
+/// What: Returns `Some(token)` when `nextPageToken` is present and non-empty,
+/// else `None`.
+/// Test: `next_page_token_present_and_absent` below.
+fn next_page_token(page: &Value) -> Option<String> {
+    page.get("nextPageToken")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 /// Why: The cross-list search filter must be pure to be unit-testable offline.
@@ -260,5 +306,19 @@ mod tests {
         // Missing fields must not panic and must not match.
         let empty = json!({});
         assert!(!task_matches(&empty, "anything"));
+    }
+
+    #[test]
+    fn next_page_token_present_and_absent() {
+        let with_token = json!({ "items": [], "nextPageToken": "abc123" });
+        assert_eq!(next_page_token(&with_token).as_deref(), Some("abc123"));
+
+        let without_token = json!({ "items": [] });
+        assert_eq!(next_page_token(&without_token), None);
+
+        // An empty-string token must be treated as "no more pages", not as
+        // a token to loop forever on.
+        let empty_token = json!({ "items": [], "nextPageToken": "" });
+        assert_eq!(next_page_token(&empty_token), None);
     }
 }

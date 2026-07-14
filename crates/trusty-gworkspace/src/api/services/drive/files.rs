@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 
 use crate::api::client::BaseClient;
 use crate::api::constants::{DRIVE_API_BASE, DRIVE_UPLOAD_BASE};
-use crate::api::services::{account_of, guess_mime_from_path, opt_str, require_str};
+use crate::api::services::{
+    account_of, guess_mime_from_path, opt_str, require_str, sanitize_header_value,
+};
 
 /// Why: Folder listing is the entry point for any Drive navigation tool.
 /// What: Queries `/files` filtered by parent id, returning name/mimeType/id for each child.
@@ -279,16 +281,21 @@ pub async fn manage_drive_file(client: &BaseClient, args: Value) -> Result<Value
 
 /// Why: Drive's multipart upload endpoint expects a `multipart/related` body
 /// pairing a JSON metadata part with the raw media part; getting the CRLF
-/// framing wrong yields a 400.
-/// What: Serialises `metadata` as the first part and `content` (under `mime`)
-/// as the second, delimited by `boundary` per RFC 2387.
-/// Test: `multipart_body_has_metadata_and_media_parts` below.
+/// framing wrong yields a 400. `mime` comes from a caller-supplied
+/// `mime_type` argument (or our own extension guess), so it must be
+/// CRLF-sanitized before landing in the raw `Content-Type:` header line —
+/// the same header-injection class as the Gmail compose headers.
+/// What: Serialises `metadata` as the first part and `content` (under the
+/// sanitized `mime`) as the second, delimited by `boundary` per RFC 2387.
+/// Test: `multipart_body_has_metadata_and_media_parts`,
+/// `multipart_related_sanitizes_crlf_in_mime` below.
 fn build_multipart_related(
     metadata: &Value,
     mime: &str,
     content: &[u8],
     boundary: &str,
 ) -> Result<Vec<u8>> {
+    let mime = sanitize_header_value(mime);
     let meta_json = serde_json::to_vec(metadata).context("serialize upload metadata")?;
     let mut body = Vec::with_capacity(meta_json.len() + content.len() + 256);
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
@@ -376,5 +383,19 @@ mod tests {
         let meta_at = text.find("\"name\":\"hi.txt\"").unwrap();
         let media_at = text.find("hello world").unwrap();
         assert!(meta_at < media_at);
+    }
+
+    #[test]
+    fn multipart_related_sanitizes_crlf_in_mime() {
+        // A malicious mime_type must not be able to smuggle a NEW header line
+        // into the multipart/related part it is formatted into — the value
+        // survives (merged harmlessly onto the Content-Type line) but the
+        // CRLF that would have started a fresh "X-Injected:" header is gone.
+        let metadata = json!({ "name": "hi.txt" });
+        let malicious_mime = "text/plain\r\nX-Injected: evil";
+        let body = build_multipart_related(&metadata, malicious_mime, b"data", "BOUND").unwrap();
+        let text = String::from_utf8(body).expect("ascii-framed multipart");
+        assert!(!text.contains("\r\nX-Injected:"));
+        assert!(text.contains("Content-Type: text/plainX-Injected: evil\r\n\r\ndata"));
     }
 }
