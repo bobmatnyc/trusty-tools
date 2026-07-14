@@ -1310,13 +1310,17 @@ async fn front_gate_or_escalate(
 /// lets the HTTP handler match on variants (→ 404/409/500) with no stringly-typed
 /// coupling, and lets the MCP path render a stable `Display` string whose
 /// "not found" substring the existing MCP tests rely on.
-/// What: three variants — `NotFound` (the id is absent), `InvalidState` (the
-/// session is not `Stopped`/`Errored`, carrying the descriptive reason), and
-/// `Other` (any remaining failure: tmux/store/I-O). The `Display` strings are
-/// chosen so the not-found variant still contains the literal "not found".
+/// What: four variants — `NotFound` (the id is absent), `InvalidState` (the
+/// session is not `Stopped`/`Errored`, carrying the descriptive reason),
+/// `Unresumable` (the session's on-disk state makes a resume impossible even
+/// though the request itself is well-formed: the workspace directory is gone,
+/// or the recorded pane vanished while a sibling window keeps the tmux session
+/// alive), and `Other` (any remaining genuinely-internal failure: store/I-O).
+/// The `Display` strings are chosen so the not-found variant still contains the
+/// literal "not found".
 /// Test: `resume_managed_typed_*` in tests/session_manager_mvp.rs drive the
-/// 404/409 paths through the typed value (no `Display` matching), and the MCP
-/// `session_resume_unknown_id_errors` test asserts the rendered string.
+/// 404/409/422 paths through the typed value (no `Display` matching), and the
+/// MCP `session_resume_unknown_id_errors` test asserts the rendered string.
 #[derive(Debug, thiserror::Error)]
 pub enum ResumeManagedError {
     /// The requested session id was not present in the store → HTTP 404.
@@ -1328,7 +1332,23 @@ pub enum ResumeManagedError {
     #[error("invalid state transition: {0}")]
     InvalidState(String),
 
-    /// Any other failure (tmux/store/I-O) → HTTP 500.
+    /// The session cannot be resumed because of its on-disk state — the
+    /// workspace directory was removed ([`ManagedError::WorkspaceMissing`]) or
+    /// the recorded pane is gone while a sibling window keeps the tmux session
+    /// alive ([`ManagedError::PaneGone`]) → HTTP 422. Carries the manager's full
+    /// actionable message (which names the vanished path / pane and the
+    /// remedy).
+    ///
+    /// Why (#2577): these are OPERATOR-actionable preconditions, not
+    /// daemon-internal faults. Routing them through `Other` → 500 gave the CLI a
+    /// bare "daemon returned an internal error (500)" with no clue that the
+    /// worktree had simply been removed. A distinct 4xx lets the caller print
+    /// the concrete remedy and stops paging the operator toward a phantom
+    /// daemon bug.
+    #[error("{0}")]
+    Unresumable(String),
+
+    /// Any other genuinely-internal failure (store/I-O) → HTTP 500.
     #[error("{0}")]
     Other(String),
 }
@@ -1339,12 +1359,21 @@ impl From<ManagedError> for ResumeManagedError {
     /// HTTP distinction in one place and prevents a wording change from regressing
     /// a 404/409 to a 500.
     /// What: maps `SessionNotFound` → `NotFound`, `InvalidState` → `InvalidState`
-    /// (preserving the descriptive reason), and every other variant → `Other`.
-    /// Test: covered transitively by the resume handler 404/409 tests.
+    /// (preserving the descriptive reason), `WorkspaceMissing`/`PaneGone` →
+    /// `Unresumable` (preserving the manager's full actionable Display message),
+    /// and every remaining variant → `Other`.
+    /// Test: covered transitively by the resume handler 404/409/422 tests
+    /// (`resume_managed_typed_*` in tests/session_manager_mvp.rs).
     fn from(e: ManagedError) -> Self {
         match e {
             ManagedError::SessionNotFound(id) => ResumeManagedError::NotFound(id),
             ManagedError::InvalidState(_, reason) => ResumeManagedError::InvalidState(reason),
+            // The Display impls of these two variants already carry the vanished
+            // path/pane and the concrete remedy — preserve them verbatim so the
+            // 422 body is fully actionable at the CLI.
+            e @ (ManagedError::WorkspaceMissing(..) | ManagedError::PaneGone(..)) => {
+                ResumeManagedError::Unresumable(e.to_string())
+            }
             other => ResumeManagedError::Other(other.to_string()),
         }
     }

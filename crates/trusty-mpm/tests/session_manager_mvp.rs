@@ -778,7 +778,58 @@ async fn tcode_session_spawns_and_accepts_commands() {
 use trusty_mpm::daemon::managed_routes::{ResumeManagedError, resume_managed};
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::runtime::RuntimeKind as ResumeRuntimeKind;
+use trusty_mpm::session_manager::ManagedError as ResumeManagedManagerError;
 use trusty_mpm::session_manager::ManagedSessionId as ResumeSessionId;
+
+/// #2577: `WorkspaceMissing` and `PaneGone` — both operator-actionable on-disk
+/// preconditions — map to the typed `Unresumable` variant (→ HTTP 422), NOT
+/// `Other` (→ 500), preserving each error's full actionable Display message.
+///
+/// Why: the HTTP status is derived structurally from the variant, so pinning
+/// the `From` mapping stops a future refactor from silently regressing either
+/// condition back to a bare 500. `Other` is the catch-all for genuinely-internal
+/// faults and must NOT swallow these two.
+/// What: converts each variant and asserts both the resulting variant and that
+/// the rendered string still names the vanished path / pane id.
+/// Test: this function IS the test.
+#[test]
+fn resume_error_workspace_missing_and_pane_gone_map_to_unresumable() {
+    let ws_err = ResumeManagedError::from(ResumeManagedManagerError::WorkspaceMissing(
+        "sess-1".into(),
+        "/gone/worktree".into(),
+    ));
+    match ws_err {
+        ResumeManagedError::Unresumable(msg) => assert!(
+            msg.contains("/gone/worktree"),
+            "422 body must name the vanished workspace path, got {msg:?}"
+        ),
+        other => panic!("WorkspaceMissing must map to Unresumable (→ 422), got {other:?}"),
+    }
+
+    let pane_err = ResumeManagedError::from(ResumeManagedManagerError::PaneGone(
+        "sess-2".into(),
+        "%42".into(),
+    ));
+    match pane_err {
+        ResumeManagedError::Unresumable(msg) => assert!(
+            msg.contains("%42"),
+            "422 body must name the vanished pane id, got {msg:?}"
+        ),
+        other => panic!("PaneGone must map to Unresumable (→ 422), got {other:?}"),
+    }
+}
+
+/// A genuinely-internal manager fault (store I/O) must still map to `Other`
+/// (→ HTTP 500) — the #2577 change narrowed the 422 path to exactly the two
+/// on-disk-precondition variants and must not have widened it.
+#[test]
+fn resume_error_internal_fault_still_maps_to_other() {
+    let io = ResumeManagedManagerError::Io(std::io::Error::other("disk gone"));
+    assert!(
+        matches!(ResumeManagedError::from(io), ResumeManagedError::Other(_)),
+        "internal I/O faults must remain Other (→ 500)"
+    );
+}
 
 // ── RAII PATH guard (#2229 CI determinism) ─────────────────────────────────
 //
@@ -929,6 +980,79 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
     assert!(
         matches!(err, ResumeManagedError::InvalidState(_)),
         "non-resumable state must map to the typed InvalidState variant (→ 409), got {err:?}"
+    );
+}
+
+/// #2577 regression: resuming a Stopped/Errored session whose workspace
+/// directory no longer exists on disk yields the typed `Unresumable` variant
+/// (→ HTTP 422), NOT `Other` (→ HTTP 500).
+///
+/// Why: an adopted/external session whose worktree was pruned (or any session
+/// whose `last_cwd`/`workspace_path`/`cwd` all vanished) reaches
+/// `resolve_existing_workdir`, which returns `ManagedError::WorkspaceMissing`
+/// rather than handing a removed path to tmux. Before #2577 that mapped through
+/// `Other` → 500, so the CLI printed a bare "daemon returned an internal error
+/// (500)" with no hint that the worktree had simply been removed. The handler
+/// now derives 422 from the typed `Unresumable` variant; this test proves the
+/// variant is produced (structurally, never via the Display string) so the
+/// operator-actionable 422 contract cannot silently regress to 500.
+/// What: seeds a session whose `cwd`/`workspace_path` point at a path that is
+/// NEVER created on disk, drives it into `Errored` (a resumable state) via
+/// `mark_errored`, calls `resume_managed`, and asserts the error matches
+/// `ResumeManagedError::Unresumable`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_typed_missing_workspace_is_unprocessable() {
+    // Hermetic framework root with FakeNoopTmuxDriver — no real tmux sessions
+    // are created, so nothing escapes into the production store (#1790).
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    // A workspace path UNDER the temp root that is never actually created on
+    // disk — every resume workdir candidate (`last_cwd` is None on a fresh
+    // record, `workspace_path` and `cwd` are this vanished path) fails its
+    // existence check, so `resolve_existing_workdir` returns `WorkspaceMissing`.
+    // UUID-first keeps the derived tmux name unique after truncation (see the
+    // invalid-state test above for the rationale).
+    let id = ResumeSessionId::new();
+    let gone = root.path().join(format!("{id}-removed-worktree"));
+    let _seeded = mgr
+        .create_with_id(
+            id,
+            "regression: missing-workspace resume".to_string(),
+            Some(gone.clone()),
+            None,
+            Some(gone.clone()),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    // Drive it into `Errored` (a resumable state) so `resume` passes the state
+    // gate and reaches the workdir-resolution step where the missing directory
+    // is detected. `mark_errored` sets `Errored` unconditionally.
+    mgr.mark_errored(&id, "regression: simulate prior spawn failure")
+        .await
+        .expect("mark errored");
+
+    // Guard against a stray real directory at the vanished path.
+    assert!(
+        !gone.exists(),
+        "test precondition: the workspace path must NOT exist on disk"
+    );
+
+    let err = resume_managed(&state, &id)
+        .await
+        .expect_err("resuming a session whose workspace is gone must error");
+
+    assert!(
+        matches!(err, ResumeManagedError::Unresumable(_)),
+        "a removed workspace must map to the typed Unresumable variant (→ 422), got {err:?}"
     );
 }
 

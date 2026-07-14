@@ -817,6 +817,13 @@ pub async fn resume_managed_session(
         Err(ResumeManagedError::InvalidState(reason)) => {
             (StatusCode::CONFLICT, reason).into_response()
         }
+        // #2577: the session cannot be resumed because its workspace directory
+        // was removed, or its recorded pane vanished. These are operator-
+        // actionable preconditions, not internal faults — 422 (not 500) with the
+        // manager's descriptive message so the CLI can print the concrete remedy.
+        Err(ResumeManagedError::Unresumable(msg)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response()
+        }
         Err(ResumeManagedError::Other(msg)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }

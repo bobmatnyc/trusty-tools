@@ -117,8 +117,10 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool) -> ResumeAction {
 /// nothing (#2001); (3) for stopped/errored (or a just-reconciled zombie) it warns
 /// about pane kill if the tmux pane is still live, then POSTs
 /// `/api/v1/sessions/managed/{id}/resume` via [`restart_via_daemon`] with a
-/// 30-second timeout; (4) 404/409/5xx/network errors each print a distinct
-/// actionable message; (5) on HTTP 200, the response body is checked — if
+/// 30-second timeout; (4) 404/409/422/5xx/network errors each print a distinct
+/// actionable message (the 422/5xx branches surface the daemon body verbatim so
+/// a removed-workspace reason reaches the operator, #2577); (5) on HTTP 200, the
+/// response body is checked — if
 /// `state=errored` the runtime spawn failed and the operator is directed to
 /// `tm session info`; (6) falls through to `tmux_attach` only when everything is
 /// confirmed ready.
@@ -242,8 +244,11 @@ async fn reconcile_zombie_stop(
 /// the zombie auto-reconcile path (#2001); a single helper keeps their error
 /// handling identical. Extracting it also keeps [`resume_guided_session`] small.
 /// What: POSTs `/api/v1/sessions/managed/{id}/resume` with a 30-second timeout so
-/// a hung daemon cannot freeze the CLI. 404/409/5xx/other/network errors each
-/// print a distinct actionable message and bail. On HTTP 200 the body is parsed
+/// a hung daemon cannot freeze the CLI. 404/409/422/5xx/other/network errors each
+/// print a distinct actionable message and bail; the 422/5xx/other branches now
+/// surface the daemon's response body verbatim (#2577) so an operator sees the
+/// concrete reason (e.g. "workspace directory … no longer exists") instead of a
+/// bare status code. On HTTP 200 the body is parsed
 /// and, if `state=errored`, the async runtime spawn failed → bail directing the
 /// operator to `tm session info`. Success prints "restarted — attaching…" and
 /// returns `Ok(())`; the caller then attaches.
@@ -292,25 +297,68 @@ async fn restart_via_daemon(
             eprintln!("tm: run `tm session ls` to see the current state.");
             anyhow::bail!("cannot restart session '{}': {msg}", session.name);
         }
-        // 5xx means the daemon IS running but had an internal error —
-        // "start the daemon" is wrong advice; direct the operator to inspect state.
-        s if s.is_server_error() => {
+        // 422 (#2577): the session cannot be resumed because of its on-disk state
+        // — its workspace directory was removed, or its recorded pane vanished.
+        // The daemon body carries the concrete, actionable reason (the vanished
+        // path/pane and the remedy); surface it verbatim rather than a bare
+        // status. Previously these mapped to 500 and the operator saw only
+        // "daemon returned an internal error (500)" with no clue it was a removed
+        // worktree.
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
+            let msg = resp.text().await.unwrap_or_default();
+            let detail = msg.trim();
+            eprintln!("tm: cannot restart session '{}': {detail}", session.name);
             eprintln!(
-                "tm: daemon returned an internal error ({s}) restarting '{}' — \
-                 try `tm session ls`.",
-                session.name
+                "tm: this session is not resumable as-is — run `tm session ls` to review, \
+                 or `tm session rm {}` if its workspace is gone for good.",
+                session.id
             );
+            anyhow::bail!("cannot restart session '{}': {detail}", session.name);
+        }
+        // 5xx means the daemon IS running but had a genuine internal error —
+        // "start the daemon" is wrong advice; surface the body (if any) so the
+        // operator has something concrete to act on, and direct them to inspect
+        // state. Threading the body through (#2577) mirrors the #2485 precedent:
+        // the daemon already puts a message in the 500 body — don't discard it.
+        s if s.is_server_error() => {
+            let msg = resp.text().await.unwrap_or_default();
+            let detail = msg.trim();
+            if detail.is_empty() {
+                eprintln!(
+                    "tm: daemon returned an internal error ({s}) restarting '{}' — \
+                     try `tm session ls`.",
+                    session.name
+                );
+            } else {
+                eprintln!(
+                    "tm: daemon returned an internal error ({s}) restarting '{}': {detail} — \
+                     try `tm session ls`.",
+                    session.name
+                );
+            }
             anyhow::bail!(
-                "daemon internal error {s} restarting session '{}'",
+                "daemon internal error {s} restarting session '{}': {detail}",
                 session.name
             );
         }
         s if !s.is_success() => {
-            eprintln!(
-                "tm: daemon returned {s} restarting '{}' — try `tm session ls`.",
+            let msg = resp.text().await.unwrap_or_default();
+            let detail = msg.trim();
+            if detail.is_empty() {
+                eprintln!(
+                    "tm: daemon returned {s} restarting '{}' — try `tm session ls`.",
+                    session.name
+                );
+            } else {
+                eprintln!(
+                    "tm: daemon returned {s} restarting '{}': {detail} — try `tm session ls`.",
+                    session.name
+                );
+            }
+            anyhow::bail!(
+                "daemon error {s} restarting session '{}': {detail}",
                 session.name
             );
-            anyhow::bail!("daemon error {s} restarting session '{}'", session.name);
         }
         _ => {
             // The daemon returned 200 but the runtime spawn may still have failed:
