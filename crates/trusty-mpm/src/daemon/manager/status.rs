@@ -108,8 +108,22 @@ pub fn aggregate_portfolio_status(
         .map(|p| aggregate_project_status(p, all_sessions, all_deliverables, all_milestones))
         .collect();
 
-    let totals = fold_totals(&per_project);
+    rollup_of(per_project)
+}
 
+/// Fold an already-computed set of per-project rollups into a portfolio response.
+///
+/// Why: the digest endpoint needs to build a scope-narrowed snapshot (e.g. one
+/// project) from the SAME per-project rollups `/status` produces, without
+/// re-deriving them — reusing this keeps the "never re-derive #2108's status"
+/// guarantee (§5) intact and the totals self-consistent with `projects`.
+/// What: folds `per_project` into [`PortfolioTotals`] and wraps both into a
+/// [`PortfolioStatusResponse`], preserving the caller's ordering.
+/// Test: `aggregate_portfolio_status_sums_across_projects` (via
+/// `aggregate_portfolio_status`); the project-scope digest test in
+/// `tests/manager_inference.rs`.
+pub(crate) fn rollup_of(per_project: Vec<ProjectStatusResponse>) -> PortfolioStatusResponse {
+    let totals = fold_totals(&per_project);
     PortfolioStatusResponse {
         project_count: per_project.len(),
         totals,
@@ -193,6 +207,60 @@ fn fold_totals(per_project: &[ProjectStatusResponse]) -> PortfolioTotals {
     }
 }
 
+/// Load the deterministic portfolio rollup from the daemon's live stores.
+///
+/// Why: `GET /manager/status`, `/manager/digest`, and `/manager/chat` all need the
+/// SAME deterministic snapshot — the digest prompt and the chat context are built
+/// from exactly what `/status` returns, never a re-derivation (DOC-36 §3.2/§5
+/// "never reimplements #2108's status computation"). Extracting the store reads
+/// into one helper is the single reuse point that guarantees that, and keeps the
+/// error-to-HTTP mapping consistent across all three handlers.
+/// What: lists every registered project plus all session/Deliverable/Milestone
+/// records ONCE, folds them via [`aggregate_portfolio_status`], and returns the
+/// [`PortfolioStatusResponse`]. Any store read error becomes a
+/// `(500, message)` pair the caller renders — the library never `unwrap`s a store
+/// result. Read-only: it never mutates a record (§2.1 boundary).
+/// Test: `manager_status_route_rolls_up_all_projects`,
+/// `manager_status_route_empty_portfolio` in `tests/manager_routes.rs`; the digest
+/// and chat coverage in `tests/manager_inference.rs` exercise it via those routes.
+pub(crate) async fn load_portfolio_status(
+    state: &DaemonState,
+) -> Result<PortfolioStatusResponse, (StatusCode, String)> {
+    let registry = state.project_registry().await;
+    let projects = registry.list().await.map_err(|e| {
+        warn!(error = %e, "manager status: project registry read failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "project registry read failed".to_string(),
+        )
+    })?;
+
+    let sessions = state.session_manager().await.list().await;
+
+    let deliverable_mgr = state.deliverable_manager().await;
+    let deliverables = deliverable_mgr.all_deliverables().await.map_err(|e| {
+        warn!(error = %e, "manager status: deliverable store read failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "deliverable store read failed".to_string(),
+        )
+    })?;
+    let milestones = deliverable_mgr.all_milestones().await.map_err(|e| {
+        warn!(error = %e, "manager status: milestone store read failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "milestone store read failed".to_string(),
+        )
+    })?;
+
+    Ok(aggregate_portfolio_status(
+        &projects,
+        &sessions,
+        &deliverables,
+        &milestones,
+    ))
+}
+
 /// `GET /api/v1/manager/status` — deterministic cross-project portfolio rollup.
 ///
 /// Why: exposes [`aggregate_portfolio_status`] over HTTP so the manager CLI/TUI
@@ -201,59 +269,15 @@ fn fold_totals(per_project: &[ProjectStatusResponse]) -> PortfolioTotals {
 /// The handler is a thin, read-only composition over the same registry / session
 /// / Deliverable stores the per-project endpoint reads — it adds no persistence,
 /// no reasoning, and never mutates a record (§2.1 boundary).
-/// What: lists every registered project plus all session/Deliverable/Milestone
-/// records ONCE, then returns `Json(aggregate_portfolio_status(..))`. A store
-/// read error degrades to 500 with a logged warning rather than a panic — the
-/// library never `unwrap`s a store result.
+/// What: delegates to [`load_portfolio_status`] and renders the rollup as JSON, or
+/// the store-read error as its `(500, message)` pair.
 /// Test: `manager_status_route_rolls_up_all_projects`,
 /// `manager_status_route_empty_portfolio` in `tests/manager_routes.rs`.
 pub async fn manager_status_route(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
-    let registry = state.project_registry().await;
-    let projects = match registry.list().await {
-        Ok(projects) => projects,
-        Err(e) => {
-            warn!(error = %e, "manager_status_route: project registry read failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "project registry read failed".to_string(),
-            )
-                .into_response();
-        }
-    };
-
-    let sessions = state.session_manager().await.list().await;
-
-    let deliverable_mgr = state.deliverable_manager().await;
-    let deliverables = match deliverable_mgr.all_deliverables().await {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(error = %e, "manager_status_route: deliverable store read failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "deliverable store read failed".to_string(),
-            )
-                .into_response();
-        }
-    };
-    let milestones = match deliverable_mgr.all_milestones().await {
-        Ok(m) => m,
-        Err(e) => {
-            warn!(error = %e, "manager_status_route: milestone store read failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "milestone store read failed".to_string(),
-            )
-                .into_response();
-        }
-    };
-
-    Json(aggregate_portfolio_status(
-        &projects,
-        &sessions,
-        &deliverables,
-        &milestones,
-    ))
-    .into_response()
+    match load_portfolio_status(&state).await {
+        Ok(rollup) => Json(rollup).into_response(),
+        Err((code, msg)) => (code, msg).into_response(),
+    }
 }
 
 #[cfg(test)]

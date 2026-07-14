@@ -177,6 +177,12 @@ trusty-common = { workspace = true, features = [
     "update-check",
     # #2405: the universal `tm config keys …` inference-provider credential CLI.
     "config-cli",
+    # #2580/#2581 (DOC-36 §3.3): the Layer-3 `tm manager` digest/chat handlers
+    # resolve providers and issue chat calls through the unified
+    # `trusty_common::inference` adapter/Configurator. `config-cli` already implies
+    # `inference-client`; listing it explicitly documents the direct dependency so
+    # a future config-cli change can't silently drop the manager's inference core.
+    "inference-client",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
@@ -283,7 +289,18 @@ nix = { version = "0.29", features = ["signal"] }
 # `cargo test --features sm-memory` WITHOUT leaking it into a production
 # `cargo build --features sm-memory`. `memory-core` is repeated so the unified
 # feature set still includes the palace storage engine the SM-4 tests exercise.
-trusty-common = { workspace = true, features = ["memory-core", "embedder-test-support"] }
+trusty-common = { workspace = true, features = [
+    "memory-core",
+    "embedder-test-support",
+    # #2584 (DOC-36 §4): the hermetic manager CI suite drives the digest/chat
+    # routes with `ScriptedAdapter` and, for real HTTP-client mechanics,
+    # `test_support::MockInferenceServer` — the latter is gated behind
+    # `axum-server`. `inference-client` is listed for clarity (the runtime dep
+    # already enables it via `config-cli`); `axum-server` is the dev-only
+    # addition that exposes the loopback mock server.
+    "inference-client",
+    "axum-server",
+] }
 # DEV-ONLY (DOC-15 C5 / #1362): the cross-gate AC-18 golden test
 # (`tests/conformance_cross_gate.rs`) drives BOTH conformance gates from one
 # shared `trusty_common::intent_source::ResolvedIntent` — the trusty-mpm FRONT

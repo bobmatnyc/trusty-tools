@@ -18,6 +18,12 @@
 //!   startup and degrade-graceful (WI-5, #2582);
 //! - [`status`] — the deterministic `GET /manager/status` cross-project rollup,
 //!   NO LLM (WI-2, #2579);
+//! - [`inference`] — the `trusty_common::inference` resolution seam shared by the
+//!   digest/chat LLM calls (WI-3/WI-4, §3.3);
+//! - [`digest`] — `GET /manager/digest`, the LLM-authored portfolio narrative with
+//!   a deterministic fallback (WI-3, #2580);
+//! - [`chat`] + [`chat_store`] — `POST /manager/chat`, the read-only
+//!   conversation-keyed portfolio chat loop (WI-4, #2581);
 //! - [`version`] — the `GET /manager/version` capabilities stub that makes the
 //!   scaffold self-describing and curl-observable (WI-1, #2578).
 //!
@@ -29,11 +35,19 @@
 //! Test: `tests/manager_routes.rs` (real-HTTP contract, mirrors
 //! `tests/proxy_routes.rs`) plus the in-module unit tests in each submodule.
 
+pub mod chat;
+pub mod chat_store;
+pub mod digest;
+pub mod inference;
 pub mod memory;
 pub mod state;
 pub mod status;
 pub mod version;
 
+pub use chat::{ChatReplyBody, ChatRequestBody, manager_chat_route};
+pub use chat_store::{ChatStore, ChatTurn, TurnRole};
+pub use digest::{DigestResponse, DigestScope, manager_digest_route};
+pub use inference::{InferenceUnavailable, ManagerInference};
 pub use memory::{PORTFOLIO_PALACE_ID, PortfolioPalace};
 pub use state::ManagerState;
 pub use status::{

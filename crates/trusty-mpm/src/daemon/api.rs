@@ -142,7 +142,9 @@ use super::managed_routes::{
     stop_managed_session, stop_managed_session_runtime,
 };
 // Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
-use super::manager::{manager_status_route, manager_version_route};
+use super::manager::{
+    manager_chat_route, manager_digest_route, manager_status_route, manager_version_route,
+};
 
 /// Typed HTTP response bodies for every endpoint.
 ///
@@ -337,12 +339,16 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // any channel connects. Registrations live with their handlers in
         // `managed_routes::proxy::proxy_router` and are merged here.
         .merge(proxy_router())
-        // Layer-3 portfolio manager surface (epic #2109, DOC-36 §3.2). Phase 1a:
-        // a self-describing capabilities stub + the deterministic (no-LLM)
-        // cross-project rollup. Both are read-only and curl-testable with no
-        // channel/bot token (§4). Later WIs add digest/chat/route-task/escalations.
+        // Layer-3 portfolio manager surface (epic #2109, DOC-36 §3.2). Phase 1:
+        // a self-describing capabilities stub, the deterministic (no-LLM)
+        // cross-project rollup, the LLM-authored digest (deterministic fallback),
+        // and the read-only conversation-keyed chat loop. All are read-only and
+        // curl-testable with no channel/bot token (§4). Later WIs add
+        // route-task/escalations.
         .route("/api/v1/manager/version", get(manager_version_route))
         .route("/api/v1/manager/status", get(manager_status_route))
+        .route("/api/v1/manager/digest", get(manager_digest_route))
+        .route("/api/v1/manager/chat", post(manager_chat_route))
         // DOC-35 §10.2/§10.5 (#2378 + #2380): Deliverable/Milestone CRUD, nested
         // under the projects namespace. The literal `/deliverables` and
         // `/milestones` segments come before their `/{id}` param routes so a

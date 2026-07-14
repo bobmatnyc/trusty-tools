@@ -103,9 +103,10 @@ pub struct ManagerVersionResponse {
 /// The advertised DOC-36 §3.2 verb set for the manager surface.
 ///
 /// Why: centralises the roadmap so `version` stays the single source of truth for
-/// "what does `/api/v1/manager/*` offer". Phase-1a ships `version` + `status`;
-/// the rest are advertised as planned so the surface documents its own trajectory
-/// without pretending to serve endpoints later WIs own.
+/// "what does `/api/v1/manager/*` offer". Phase-1 ships `version` + `status` +
+/// `digest` + `chat`; `route-task` and `escalations` are advertised as planned so
+/// the surface documents its own trajectory without pretending to serve endpoints
+/// later WIs own.
 /// What: the five §3.2 endpoints plus this `version` stub, each tagged with its
 /// current availability in this build.
 /// Test: `manager_version_route_reports_capabilities`.
@@ -124,12 +125,12 @@ fn advertised_endpoints() -> Vec<ManagerEndpoint> {
         ManagerEndpoint {
             method: "GET",
             path: "/api/v1/manager/digest",
-            available: false,
+            available: true,
         },
         ManagerEndpoint {
             method: "POST",
             path: "/api/v1/manager/chat",
-            available: false,
+            available: true,
         },
         ManagerEndpoint {
             method: "POST",

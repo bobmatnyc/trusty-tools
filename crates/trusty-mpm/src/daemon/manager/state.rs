@@ -18,6 +18,8 @@
 
 use std::path::Path;
 
+use super::chat_store::ChatStore;
+use super::inference::ManagerInference;
 use super::memory::PortfolioPalace;
 
 /// The daemon-owned state for the `tm manager` (Layer-3) surface.
@@ -27,13 +29,18 @@ use super::memory::PortfolioPalace;
 /// every other daemon subsystem. Keeping it distinct from `DaemonState` (rather
 /// than scattering manager fields across it) means the L3 surface has one
 /// cohesive home the later phases grow into.
-/// What: phase 1a holds only the [`PortfolioPalace`]; the inference adapter and
-/// poll-loop handle attach in later phases (§3.3, §6).
+/// What: holds the [`PortfolioPalace`] (WI-5), the [`ManagerInference`] seam for
+/// the digest/chat LLM calls (WI-3/WI-4, §3.3), and the conversation-keyed
+/// [`ChatStore`] (WI-4). The proactive poll loop attaches here in phase 3 (§6).
 /// Test: `manager_state_provisions_palace`.
 #[derive(Debug)]
 pub struct ManagerState {
     /// The portfolio-scoped memory palace (WI-5, #2582), provisioned at startup.
     palace: PortfolioPalace,
+    /// The inference resolution seam for digest/chat (WI-3/WI-4, §3.3).
+    inference: ManagerInference,
+    /// Conversation-keyed recent-turn store for the chat loop (WI-4).
+    conversations: ChatStore,
 }
 
 impl ManagerState {
@@ -42,14 +49,17 @@ impl ManagerState {
     /// Why: DOC-36 §7 Q3 fixes provisioning as "auto-created at daemon startup",
     /// so the daemon constructs this eagerly in its own constructor. It must be
     /// infallible from the daemon's perspective — a palace that cannot be opened
-    /// degrades inside [`PortfolioPalace::provision`], never bubbling an error
-    /// that could fail startup (§4 degrade bar).
-    /// What: provisions the portfolio palace rooted at `framework_root` and wraps
-    /// it into the manager state.
+    /// degrades inside [`PortfolioPalace::provision`], and the inference seam
+    /// degrades at call time when no provider is configured (§4 degrade bar), so
+    /// neither can fail startup.
+    /// What: provisions the portfolio palace rooted at `framework_root`, the
+    /// credential-backed inference seam, and an empty conversation store.
     /// Test: `manager_state_provisions_palace`.
     pub fn provision(framework_root: &Path) -> Self {
         Self {
             palace: PortfolioPalace::provision(framework_root),
+            inference: ManagerInference::provision(),
+            conversations: ChatStore::default(),
         }
     }
 
@@ -61,6 +71,29 @@ impl ManagerState {
     /// Test: `manager_state_provisions_palace`.
     pub fn palace(&self) -> &PortfolioPalace {
         &self.palace
+    }
+
+    /// The inference resolution seam for digest/chat.
+    ///
+    /// Why: the `/manager/digest` and `/manager/chat` handlers resolve a live
+    /// adapter (or a typed degrade) through this; the hermetic suite swaps its
+    /// source through the shared `Arc` via [`ManagerInference::set_adapter`].
+    /// What: a shared reference to the provisioned [`ManagerInference`].
+    /// Test: `resolve_reports_no_provider_when_unconfigured` (inference module);
+    /// `tests/manager_inference.rs`.
+    pub fn inference(&self) -> &ManagerInference {
+        &self.inference
+    }
+
+    /// The conversation-keyed chat turn store.
+    ///
+    /// Why: `/manager/chat` reads recent turns for context and records each
+    /// completed exchange through this shared, bounded store.
+    /// What: a shared reference to the [`ChatStore`].
+    /// Test: `record_and_history_round_trips` (chat_store module);
+    /// `tests/manager_inference.rs`.
+    pub fn conversations(&self) -> &ChatStore {
+        &self.conversations
     }
 }
 
