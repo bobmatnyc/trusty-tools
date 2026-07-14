@@ -18,7 +18,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::api::auth::TokenStorage;
-use crate::api::auth::oauth::{flow, run_consent};
+use crate::api::auth::oauth::{DefaultMode, flow, run_consent};
 
 /// `gworkspace-mcp` — Google Workspace MCP server + onboarding CLI.
 ///
@@ -48,13 +48,24 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run interactive OAuth consent and mint a token into tokens.json.
+    ///
+    /// Default-profile behavior: if no default profile exists yet, the newly
+    /// authorized profile automatically becomes it. If a default already
+    /// exists, it is left alone (silently swapping it on a routine re-run
+    /// would change which Google account MCP write-tools act against). Use
+    /// `--make-default` to explicitly switch the default, or `--no-default`
+    /// to guarantee it is never touched.
     Setup {
         /// Profile name to store the token under (default: `gworkspace-mcp`).
         #[arg(long)]
         profile: Option<String>,
-        /// Do NOT mark this profile as the default.
-        #[arg(long)]
+        /// Do NOT mark this profile as the default, even if none exists yet.
+        #[arg(long, conflicts_with = "make_default")]
         no_default: bool,
+        /// Explicitly make this profile the default, displacing any existing
+        /// one (a warning is printed naming the displaced profile).
+        #[arg(long, conflicts_with = "no_default")]
+        make_default: bool,
     },
     /// Check OAuth client credentials and token state.
     Doctor,
@@ -99,17 +110,31 @@ pub async fn dispatch(command: Command) -> Result<()> {
         Command::Setup {
             profile,
             no_default,
+            make_default,
         } => {
             let profile = flow::effective_profile(profile.as_deref());
-            let outcome = run_consent(&storage, &profile, !no_default).await?;
+            let mode = if no_default {
+                DefaultMode::Never
+            } else if make_default {
+                DefaultMode::Force
+            } else {
+                DefaultMode::Auto
+            };
+            let outcome = run_consent(&storage, &profile, mode).await?;
+            let suffix = if outcome.default_applied {
+                " (default)"
+            } else {
+                ""
+            };
             match &outcome.email {
-                Some(email) => println!(
-                    "Authorized {email} as profile '{}'{}.",
-                    outcome.profile,
-                    if no_default { "" } else { " (default)" }
-                ),
+                Some(email) => {
+                    println!(
+                        "Authorized {email} as profile '{}'{suffix}.",
+                        outcome.profile
+                    )
+                }
                 None => println!(
-                    "Authorized profile '{}' (email could not be resolved).",
+                    "Authorized profile '{}' (email could not be resolved){suffix}.",
                     outcome.profile
                 ),
             }
@@ -143,7 +168,7 @@ mod tests {
             Cli::try_parse_from(["gworkspace-mcp", "setup", "--profile", "work"]).expect("setup");
         assert!(matches!(
             setup.command,
-            Some(Command::Setup { profile: Some(p), no_default: false }) if p == "work"
+            Some(Command::Setup { profile: Some(p), no_default: false, make_default: false }) if p == "work"
         ));
 
         let doctor = Cli::try_parse_from(["gworkspace-mcp", "doctor"]).expect("doctor");
@@ -179,8 +204,33 @@ mod tests {
             cli.command,
             Some(Command::Setup {
                 profile: None,
-                no_default: true
+                no_default: true,
+                make_default: false,
             })
         ));
+    }
+
+    #[test]
+    fn setup_make_default_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["gworkspace-mcp", "setup", "--make-default"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Setup {
+                profile: None,
+                no_default: false,
+                make_default: true,
+            })
+        ));
+    }
+
+    #[test]
+    fn setup_no_default_and_make_default_are_mutually_exclusive() {
+        let result =
+            Cli::try_parse_from(["gworkspace-mcp", "setup", "--no-default", "--make-default"]);
+        assert!(
+            result.is_err(),
+            "--no-default and --make-default must conflict"
+        );
     }
 }

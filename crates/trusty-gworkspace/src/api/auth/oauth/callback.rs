@@ -8,14 +8,17 @@
 //! Why (security): the listener binds only to `127.0.0.1` (loopback), never a
 //! routable interface, so no other host can reach the redirect endpoint.
 //! What: `bind_loopback` grabs a free ephemeral port; `wait_for_code` blocks
-//! for one request, parses the redirect query, validates `state`, and writes
-//! a human-readable HTML response back to the browser.
-//! Test: `mod tests` covers free-port binding and request-line parsing (the
-//! pure part); the blocking accept loop is exercised by an end-to-end test
-//! that connects a client socket to the bound listener.
+//! for one request; `wait_for_code_with_timeout` (used by the real flow)
+//! bounds that wait so an abandoned browser tab can't hang the process
+//! forever. Both parse the redirect query, validate `state`, and write a
+//! human-readable HTML response back to the browser.
+//! Test: `mod tests` covers free-port binding, request-line parsing, and the
+//! timeout path; the accept loop is exercised by an end-to-end test that
+//! connects a client socket to the bound listener.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -76,6 +79,52 @@ pub fn query_from_request_line(line: &str) -> String {
 pub fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String> {
     let (stream, _peer) = listener.accept().context("accept callback connection")?;
     handle_connection(stream, expected_state)
+}
+
+/// Poll for the browser's redirect connection until it arrives or `timeout`
+/// elapses.
+///
+/// Why: A plain blocking `accept()` (see [`wait_for_code`]) hangs forever if
+/// the user abandons the browser tab, so the interactive flow needs a bound.
+/// Since `TcpListener::accept` has no built-in deadline, this puts the
+/// listener in non-blocking mode and retries on a short interval, which also
+/// means the wait can be interrupted without leaking an unbounded blocking
+/// thread.
+/// What: Retries `accept()` every 200ms; returns an actionable timeout error
+/// once `Instant::now() >= deadline`. Restores blocking mode on the accepted
+/// stream before parsing the request (accepted sockets can inherit a
+/// listener's non-blocking flag on some platforms).
+/// Test: `times_out_when_no_connection_arrives`.
+pub fn wait_for_code_with_timeout(
+    listener: &TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String> {
+    listener
+        .set_nonblocking(true)
+        .context("set callback listener nonblocking")?;
+    let deadline = Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(200);
+    loop {
+        match listener.accept() {
+            Ok((stream, _peer)) => {
+                stream
+                    .set_nonblocking(false)
+                    .context("restore blocking mode on accepted callback stream")?;
+                return handle_connection(stream, expected_state);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "timed out waiting for browser authorization after {}s — run `setup` again",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(e) => return Err(e).context("accept callback connection"),
+        }
+    }
 }
 
 /// Handle a single accepted connection (split out for testability).
@@ -206,6 +255,20 @@ mod tests {
         let response = client.join().expect("join");
         assert!(response.contains("200 OK"));
         assert!(response.contains("Authorization complete"));
+    }
+
+    #[test]
+    fn times_out_when_no_connection_arrives() {
+        let listener = bind_loopback().expect("bind");
+        let start = Instant::now();
+        let result = wait_for_code_with_timeout(&listener, "STATE", Duration::from_millis(300));
+        assert!(result.is_err(), "must time out with no connection");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "must not block far past the requested timeout"
+        );
     }
 
     #[test]

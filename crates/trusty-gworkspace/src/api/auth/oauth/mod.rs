@@ -14,4 +14,4 @@ pub mod callback;
 pub mod flow;
 pub mod pkce;
 
-pub use flow::{ConsentOutcome, resolve_client_creds, run_consent};
+pub use flow::{ConsentOutcome, DefaultMode, resolve_client_creds, run_consent};
