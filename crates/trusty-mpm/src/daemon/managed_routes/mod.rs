@@ -70,7 +70,9 @@ pub use prune::{
 pub use reactivate::reactivate_managed_session;
 pub use resume_error::ResumeManagedError;
 pub use summary::record_to_json;
-use summary::{attach_cmd_for, parse_id, record_to_summary};
+use summary::{
+    attach_cmd_for, checked_summaries, parse_id, record_to_summary, record_to_summary_checked,
+};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -323,6 +325,30 @@ pub struct SessionSummary {
     /// reached `Active`) — see `session_manager::InjectionStatus::NotApplicable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injection_status: Option<String>,
+    /// True when this session is a dead pick: it is `stopped`/`errored` AND no
+    /// workdir candidate (`last_cwd`, `workspace_path`, `cwd`) exists on disk
+    /// any more, so a resume is guaranteed to fail (#2595).
+    ///
+    /// Why: #2577/#2594 fixed the ERROR an operator sees after picking a
+    /// GC-pruned session to restart (bare 500 → actionable 422); the deeper UX
+    /// defect was that such a session was OFFERED as a restart option at all.
+    /// Computing this once here — server-side, where the full record (`last_cwd`
+    /// included) and filesystem access both live — lets every listing surface
+    /// (the bare-`tm` guided default, the `tm ls` picker, and `tm sessions ls`,
+    /// all of which read this same list endpoint) mark/exclude the session
+    /// BEFORE the operator selects it, instead of only failing loudly after the
+    /// fact. Always `false` for live/provisioning/decommissioned sessions —
+    /// see `session_manager::resume_workdir::is_unresumable`.
+    /// What: computed by [`list_managed_sessions`]/[`get_managed_session`] via
+    /// `session_manager::resume_workdir::is_unresumable`; every other handler
+    /// that builds a `SessionSummary` via `record_to_summary` leaves it at its
+    /// `false` default (freshly spawned/reactivated/decommissioned sessions are
+    /// never mid-flight through this predicate).
+    /// Test: `list_marks_dead_stopped_session_unresumable`,
+    /// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in
+    /// `super::tests`.
+    #[serde(default)]
+    pub unresumable: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.
@@ -623,21 +649,31 @@ pub async fn adopt_existing_session(
 /// their state, and pending decisions.
 /// What: returns all session records as a JSON list of summaries. When the
 /// optional `?source_id=<id>` query parameter is present, only sessions whose
-/// `source_id` matches exactly are returned.
-/// Test: list handler test; list-with-source-id-filter test.
+/// `source_id` matches exactly are returned. Each summary's `unresumable` flag
+/// (#2595) is computed here — via
+/// `session_manager::resume_workdir::is_unresumable`, which short-circuits to
+/// `false` without any I/O for every state other than `Stopped`/`Errored` — so
+/// every picker/list surface reading this endpoint sees dead sessions flagged
+/// up front rather than discovering them via a failed resume. The per-session
+/// probes run CONCURRENTLY via [`summary::checked_summaries`] (#2595 review,
+/// MEDIUM finding 4) rather than one-at-a-time, so a large fleet's response
+/// latency does not scale with its count of stopped/errored sessions.
+/// Test: list handler test; list-with-source-id-filter test;
+/// `list_marks_dead_stopped_session_unresumable`,
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked`.
 pub async fn list_managed_sessions(
     State(state): State<Arc<DaemonState>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let mgr = state.session_manager().await;
     let sid_filter = q.get("source_id").map(String::as_str);
-    let sessions: Vec<SessionSummary> = mgr
+    let records: Vec<_> = mgr
         .list()
         .await
-        .iter()
+        .into_iter()
         .filter(|r| sid_filter.is_none_or(|sid| r.source_id.as_deref() == Some(sid)))
-        .map(record_to_summary)
         .collect();
+    let sessions = checked_summaries(&records).await;
     Json(ListSessionsResponse { sessions })
 }
 
@@ -645,7 +681,10 @@ pub async fn list_managed_sessions(
 ///
 /// Why: the calling agentic process needs the full record for a specific session
 /// including workspace_path, repo_url, branch, and pending decision fields.
-/// What: looks up the session by id and returns its summary.
+/// What: looks up the session by id and returns its summary, with `unresumable`
+/// (#2595) computed the same way [`list_managed_sessions`] does — kept
+/// consistent so `tm session info <id>` never disagrees with the list/picker
+/// about whether a session is a dead pick.
 /// Test: get handler test.
 pub async fn get_managed_session(
     State(state): State<Arc<DaemonState>>,
@@ -657,7 +696,7 @@ pub async fn get_managed_session(
     };
     let mgr = state.session_manager().await;
     match mgr.get(&id).await {
-        Ok(record) => Json(record_to_summary(&record)).into_response(),
+        Ok(record) => Json(record_to_summary_checked(&record).await).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
     }
 }

@@ -32,8 +32,22 @@ describing one.
 - You invoke a tool by emitting a tool call. The harness executes it and \
 returns the result to you before the conversation continues; never assume a \
 tool's effect without seeing its result.
-- Take one logical step at a time: emit a tool call, wait for its result, then \
-decide the next step based on what actually happened.
+- You may emit MULTIPLE tool calls in a single turn when they form a connected \
+unit of work. The harness executes the calls you emit in order and returns all \
+their results together before your next turn, so batching connected work cuts \
+round-trips. Batch calls that are INDEPENDENT — whose arguments do not depend \
+on another same-turn call's result (e.g. reading several files at once, or \
+several independent lookups) — and batch an ORDERED sequence when a later call \
+does not need to SEE an earlier call's output first (e.g. `write_file` then a \
+`bash` that runs or verifies it: bash only needs the write to have happened, \
+not its return value, and calls run in emission order so the write completes \
+before bash).
+- Do NOT batch a call whose arguments must be built from a result you have not \
+seen yet — e.g. you cannot `write_file` content derived from a `read_file` \
+whose result you don't yet have. Sequence those across turns: emit the read, \
+wait for its result, then decide the next step based on what actually happened.
+- If one call in a batch fails, you still receive results for every other call \
+plus the failure — use them together to decide the next step.
 - Every tool call's arguments MUST validate against that tool's provided JSON \
 Schema. Supply all required fields and respect declared types.
 - A tool result may report an error. When it does, recover: retry with \

@@ -122,8 +122,14 @@ pub(crate) async fn session_ls(
 /// What: prints a "no managed sessions[ for <slug>]" line when the list is empty;
 /// otherwise prints the header + one row per session (id, state, truncated name,
 /// task/`(interactive)` placeholder, short created-at, and any pending decision).
+/// The STATE column appends `[dead]` (#2595) when the server-computed
+/// `unresumable` flag is set — the session's workspace no longer exists
+/// anywhere on disk, so `tm session resume`/the picker's restart would only
+/// ever fail; the operator's actionable remedy is `tm session rm`.
 /// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
-/// table bytes are exercised by `tests/session_manager_mvp.rs`.
+/// table bytes are exercised by `tests/session_manager_mvp.rs`;
+/// `format_state_column_appends_dead_marker` covers the `[dead]` marker via the
+/// extracted pure helper, [`format_state_column`].
 pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
     if sessions.is_empty() {
         if let Some(sid) = source_id {
@@ -155,16 +161,37 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             .as_deref()
             .map(|d| format!(" [pending: {d}]"))
             .unwrap_or_default();
+        // #2595: flag a dead pick (stopped/errored with no workdir candidate
+        // left on disk) right in the STATE column — the operator sees it
+        // without having to select the session and hit a 422 first.
+        let state = format_state_column(&s.state, s.unresumable);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
             "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
             s.id,
-            s.state,
+            state,
             truncate(&s.name, 24),
             task,
             created,
             pending
         );
+    }
+}
+
+/// Format the STATE column value for one `tm session ls` row (#2595).
+///
+/// Why: extracted as a pure function so the `[dead]` marker is unit-testable
+/// without capturing `render_session_table`'s stdout.
+/// What: returns `state` unchanged when `unresumable` is `false`; appends
+/// `" [dead]"` when `true` — the session is `stopped`/`errored` with no
+/// workdir candidate left on disk, so a resume is guaranteed to fail.
+/// Test: `format_state_column_appends_dead_marker`,
+/// `format_state_column_leaves_healthy_state_unchanged`.
+fn format_state_column(state: &str, unresumable: bool) -> String {
+    if unresumable {
+        format!("{state} [dead]")
+    } else {
+        state.to_string()
     }
 }
 

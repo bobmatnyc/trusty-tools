@@ -11,8 +11,10 @@
 
 pub mod manager;
 pub mod models;
+pub mod oauth;
 pub mod storage;
 
 pub use manager::OAuthManager;
 pub use models::{OAuthToken, StoredToken, TokenMetadata};
+pub use oauth::{ConsentOutcome, run_consent};
 pub use storage::TokenStorage;
