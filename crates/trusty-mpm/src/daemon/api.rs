@@ -296,6 +296,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             get(get_managed_session).delete(stop_managed_session),
         )
         .route("/api/v1/sessions/managed/{id}/send", post(send_to_session))
+        // #2605: async-spawn progress poll route, merged as a sub-router.
+        .merge(super::managed_routes::provision_status::router())
         .route(
             "/api/v1/sessions/managed/{id}/answer",
             post(answer_session_decision),

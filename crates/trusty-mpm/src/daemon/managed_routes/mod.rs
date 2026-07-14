@@ -24,6 +24,7 @@ use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
+use crate::session_manager::ManagedSessionId;
 
 pub mod activity;
 mod deliverable_link;
@@ -35,6 +36,7 @@ mod lifecycle;
 mod mcp_spawn_gate;
 mod project_registry_routes;
 mod project_status;
+pub mod provision_status;
 pub mod proxy;
 pub mod prune;
 mod reactivate;
@@ -129,6 +131,18 @@ pub struct SpawnRequest {
     /// fails the whole request with a 400, it is not tolerated as `false`.
     #[serde(default)]
     pub force_new: bool,
+    /// Optional asynchronous-spawn control (#2605): `true` provisions on a
+    /// detached background task and returns `202 Accepted` with
+    /// `{ id, state: "provisioning" }` IMMEDIATELY, instead of holding the
+    /// connection open for the whole clone/deploy. The caller then polls
+    /// `GET /api/v1/sessions/managed/{id}/provision-status` for live progress
+    /// and the terminal outcome. Absent/`false` → the legacy synchronous `201`
+    /// behaviour (unchanged for every existing programmatic/MCP caller), so
+    /// this is a purely additive, opt-in flag. Like `force_new`, it is a plain
+    /// `#[serde(default)]` bool: an explicit `"background": null` is a type
+    /// mismatch (400), not tolerated as `false`.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -505,7 +519,16 @@ pub async fn spawn_session(
         force_new: req.force_new,
     };
 
-    match spawn_managed(&state, params).await {
+    // Async path (#2605): provision on a detached task and return the job id
+    // immediately, so a large-repo clone never outlasts the client's HTTP
+    // timeout and the blocking provision runs OFF the request path. The runtime
+    // and deliverable validations above already ran synchronously, so an
+    // invalid request is still a fast 400/404 (never a deferred failure).
+    if req.background {
+        return provision_status::accept_async_spawn(state.clone(), params);
+    }
+
+    match spawn_managed(&state, ManagedSessionId::new(), params).await {
         Ok(final_record) => {
             let resp = SpawnResponse {
                 id: final_record.id.to_string(),

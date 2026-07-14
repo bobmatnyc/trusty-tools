@@ -199,8 +199,27 @@ pub async fn scoped<F: Future>(emitter: StageEmitter, fut: F) -> F::Output {
 /// Test: `emit_inside_scope_broadcasts_envelope`, `emit_outside_scope_is_noop`,
 /// `envelope_contains_repo_url_for_client_filtering`.
 pub fn emit(stage: ProvisioningStage) {
+    emit_with_detail(stage, None);
+}
+
+/// Publish a stage transition carrying an optional fine-grained `detail` string.
+///
+/// Why: the coarse [`ProvisioningStage`] enum answers "which step" but not "how
+/// far into it" — and the one step that dominates a large-repo spawn (the git
+/// clone) can run for minutes with nothing else changing. Threading an optional
+/// `detail` (e.g. `"Receiving objects: 63%"`, parsed from `git clone
+/// --progress`) through the SAME envelope lets the client render measurable
+/// movement WITHIN a stage without a second event channel or a new stage
+/// variant per percentage. `emit(stage)` is exactly `emit_with_detail(stage,
+/// None)`, so every existing coarse call site is unchanged.
+/// What: builds the same envelope as [`emit`] plus a `"detail"` field (absent
+/// when `detail` is `None`) and best-effort sends it on the scoped emitter's
+/// broadcast sender. A missing scope, or zero active subscribers, are both
+/// silently ignored — identical infallible semantics to [`emit`].
+/// Test: `emit_with_detail_includes_detail_field`.
+pub fn emit_with_detail(stage: ProvisioningStage, detail: Option<&str>) {
     let _ = CURRENT.try_with(|emitter| {
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "kind": "provisioning_stage",
             "session": emitter.session_id,
             "repo_url": emitter.repo_url,
@@ -208,6 +227,14 @@ pub fn emit(stage: ProvisioningStage) {
             "label": stage.label(),
             "at": chrono::Utc::now().to_rfc3339(),
         });
+        if let Some(detail) = detail
+            && let Some(obj) = value.as_object_mut()
+        {
+            obj.insert(
+                "detail".to_string(),
+                serde_json::Value::String(detail.to_string()),
+            );
+        }
         let _ = emitter.sender.send(value);
     });
 }
@@ -282,6 +309,39 @@ mod tests {
     /// What: asserts the envelope's `repo_url` round-trips exactly and every
     /// stage has a distinct label.
     /// Test: this is the test.
+    /// Why: the clone step's byte/object progress rides in the envelope's
+    /// optional `detail` field; a subscriber must receive it verbatim, and a
+    /// `None` detail must NOT add the key (so the wire shape is unchanged for
+    /// coarse `emit` callers).
+    /// What: emits one detailed and one plain stage inside `scoped` and asserts
+    /// the `detail` field is present/absent respectively.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn emit_with_detail_includes_detail_field() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let emitter = StageEmitter::new("s-detail", "owner/repo", tx);
+
+        scoped(emitter, async {
+            emit_with_detail(
+                ProvisioningStage::CloningRepo,
+                Some("Receiving objects: 63%"),
+            );
+            emit(ProvisioningStage::DeployingAgents);
+        })
+        .await;
+
+        let first = rx.try_recv().expect("detailed stage event");
+        assert_eq!(first["stage"], "CloningRepo");
+        assert_eq!(first["detail"], "Receiving objects: 63%");
+
+        let second = rx.try_recv().expect("plain stage event");
+        assert_eq!(second["stage"], "DeployingAgents");
+        assert!(
+            second.get("detail").is_none(),
+            "a None detail must not add the detail key"
+        );
+    }
+
     #[tokio::test]
     async fn envelope_contains_repo_url_for_client_filtering() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);

@@ -304,6 +304,22 @@ pub struct DaemonState {
     /// Test: `manager_state_is_provisioned` in `state/tests.rs`;
     /// `manager_version_route_reports_capabilities` in `tests/manager_routes.rs`.
     pub(super) manager: Arc<crate::daemon::manager::ManagerState>,
+    /// Progress registry for asynchronous managed-session provisioning (#2605).
+    ///
+    /// Why: `POST /api/v1/sessions/managed` with `background: true` returns a
+    /// job id immediately and runs the (potentially minutes-long, on a large
+    /// repo) workspace provision on a detached task. That task records live
+    /// phase/detail progress and its terminal outcome HERE so the poll route
+    /// (`GET .../{id}/provision-status`) and the CLI can follow along without
+    /// holding one long HTTP request open. Owned as a plain field (not a
+    /// `OnceCell`) because it is a cheap, interior-mutable `DashMap` with a
+    /// trivial `Default` — the same ownership shape as `session_registry`.
+    /// What: a [`crate::daemon::provisioning::ProvisioningRegistry`] keyed by
+    /// job id; shared across the handler, its stage-updater task, and the poll
+    /// route via the daemon `Arc`.
+    /// Test: `crate::daemon::managed_routes::provision_status` tests exercise
+    /// the async state machine through the router.
+    pub provisioning: crate::daemon::provisioning::ProvisioningRegistry,
 }
 
 impl Default for DaemonState {
@@ -395,6 +411,7 @@ impl DaemonState {
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
             manager,
+            provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
         }
     }
 
@@ -461,6 +478,7 @@ impl DaemonState {
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
             manager,
+            provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
         }
     }
 
