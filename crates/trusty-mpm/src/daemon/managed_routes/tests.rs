@@ -172,6 +172,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         deliverable_id: None,
         pane_id: None,
         injection_status: None,
+        unresumable: false,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -205,6 +206,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         deliverable_id: None,
         pane_id: None,
         injection_status: None,
+        unresumable: false,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

@@ -23,7 +23,7 @@ pub mod reactivate;
 mod reconcile;
 pub mod record;
 pub mod restart_ops;
-mod resume_workdir;
+pub(crate) mod resume_workdir;
 pub mod search_gc;
 pub mod session_guard;
 pub mod snapshot;

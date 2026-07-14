@@ -1815,6 +1815,169 @@ async fn list_managed_sessions_source_id_filter() {
     );
 }
 
+/// #2595: a stopped/errored session whose workspace has been GC-pruned must be
+/// flagged `unresumable: true` on the LIST endpoint — the same endpoint the
+/// bare-`tm` guided default, the `tm ls` picker, and `tm sessions ls` all read.
+///
+/// Why: #2577/#2594 fixed the ERROR an operator saw after picking such a
+/// session to restart (bare 500 → actionable 422); this predicate lets the
+/// listing surfaces exclude/mark the session BEFORE it is ever offered as a
+/// restart option, closing the deeper UX defect the issue reports.
+/// What: seeds a session whose `workspace_path`/`cwd` point at a directory
+/// that is never created on disk (mirrors
+/// `resume_managed_typed_missing_workspace_is_unprocessable` in
+/// `resume_unresumable_mapping.rs`), drives it to `Errored` via
+/// `mark_errored` (a resumable state, satisfying the predicate's state gate),
+/// then asserts the LIST endpoint's summary for that id carries
+/// `unresumable: true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn list_marks_dead_stopped_session_unresumable() {
+    use std::collections::HashMap;
+    use trusty_mpm::daemon::managed_routes::list_managed_sessions;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let gone = root.path().join(format!("{id}-pruned-worktree"));
+    mgr.create_with_id(
+        id,
+        "regression: #2595 dead session must be flagged unresumable".to_string(),
+        Some(gone.clone()),
+        None,
+        Some(gone.clone()),
+        Some("https://example.com/r.git".to_string()),
+        Some("main".to_string()),
+        ResumeRuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session");
+    mgr.mark_errored(&id, "regression: simulate prior spawn failure")
+        .await
+        .expect("mark errored");
+    assert!(
+        !gone.exists(),
+        "test precondition: the workspace path must NOT exist on disk"
+    );
+
+    let q: HashMap<String, String> = HashMap::new();
+    let (status, body) = decode_response(
+        list_managed_sessions(axum::extract::State(state.clone()), axum::extract::Query(q)).await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+    let row = sessions
+        .iter()
+        .find(|s| s["id"].as_str() == Some(id.to_string().as_str()))
+        .unwrap_or_else(|| panic!("seeded session must appear in the list, got {body}"));
+    assert_eq!(
+        row["unresumable"].as_bool(),
+        Some(true),
+        "a stopped/errored session with no workdir candidate on disk must be \
+         flagged unresumable, got {row}"
+    );
+}
+
+/// #2595 counterpart: a HEALTHY stopped session (workspace still on disk) and
+/// a LIVE/provisioning session (workspace missing, but the state gate means
+/// the predicate never even probes the filesystem) must both come back
+/// `unresumable: false` — the predicate must never over-fire.
+///
+/// Why: without this counterpart, `list_marks_dead_stopped_session_unresumable`
+/// alone could pass even if the predicate always returned `true` — this test
+/// pins the negative cases the picker/table depend on (issue #2595's own
+/// acceptance criterion: "healthy stopped sessions unaffected").
+/// What: seeds session A `Errored` with a REAL `TempDir` workspace (an existing
+/// candidate) and session B left in its default `Provisioning` state with a
+/// workspace path that is never created (so the state gate — not a filesystem
+/// check — is what saves it); asserts BOTH come back `unresumable: false`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn list_leaves_live_and_healthy_stopped_sessions_unmarked() {
+    use std::collections::HashMap;
+    use trusty_mpm::daemon::managed_routes::list_managed_sessions;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    // Session A: Errored, but its workspace genuinely still exists on disk.
+    let id_a = ResumeSessionId::new();
+    let ws_a = root.path().join(format!("{id_a}-healthy-ws"));
+    std::fs::create_dir_all(&ws_a).expect("create real workspace dir for session A");
+    mgr.create_with_id(
+        id_a,
+        "regression: #2595 healthy errored session stays resumable".to_string(),
+        Some(ws_a.clone()),
+        None,
+        Some(ws_a),
+        Some("https://example.com/r.git".to_string()),
+        Some("main".to_string()),
+        ResumeRuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session A");
+    mgr.mark_errored(&id_a, "regression: simulate prior spawn failure")
+        .await
+        .expect("mark errored A");
+
+    // Session B: left Provisioning (create_with_id's default) with a workspace
+    // path that is never created — the state gate alone must save it.
+    let id_b = ResumeSessionId::new();
+    let gone_b = root.path().join(format!("{id_b}-never-created"));
+    mgr.create_with_id(
+        id_b,
+        "regression: #2595 provisioning session with missing workdir stays unflagged".to_string(),
+        Some(gone_b.clone()),
+        None,
+        Some(gone_b),
+        Some("https://example.com/r.git".to_string()),
+        Some("main".to_string()),
+        ResumeRuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session B");
+
+    let q: HashMap<String, String> = HashMap::new();
+    let (status, body) = decode_response(
+        list_managed_sessions(axum::extract::State(state.clone()), axum::extract::Query(q)).await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+
+    let row_a = sessions
+        .iter()
+        .find(|s| s["id"].as_str() == Some(id_a.to_string().as_str()))
+        .unwrap_or_else(|| panic!("session A must appear in the list, got {body}"));
+    assert_eq!(
+        row_a["unresumable"].as_bool(),
+        Some(false),
+        "an errored session with an EXISTING workspace must not be flagged unresumable, \
+         got {row_a}"
+    );
+
+    let row_b = sessions
+        .iter()
+        .find(|s| s["id"].as_str() == Some(id_b.to_string().as_str()))
+        .unwrap_or_else(|| panic!("session B must appear in the list, got {body}"));
+    assert_eq!(
+        row_b["unresumable"].as_bool(),
+        Some(false),
+        "a provisioning/live session must never be flagged unresumable regardless \
+         of workdir, got {row_b}"
+    );
+}
+
 /// A GitHub `repo_url` must produce a project-identifiable session name (#1789).
 ///
 /// Why: pins the `parse_github_path → gh.repo → build_managed_session_name`

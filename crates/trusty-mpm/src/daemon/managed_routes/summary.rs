@@ -75,7 +75,14 @@ fn injection_status_wire(status: InjectionStatus) -> Option<String> {
 ///
 /// Why: the API exposes a flat, string-typed summary so clients don't depend on
 /// the internal record shape.
-/// What: maps every record field to its serialized form.
+/// What: maps every record field to its serialized form. `unresumable` always
+/// starts `false` here — it requires an async filesystem probe
+/// (`session_manager::resume_workdir::is_unresumable`), which this function
+/// cannot perform since it is a pure/sync conversion shared by handlers that
+/// have no reason to pay that cost (spawn/reactivate/decommission are never
+/// mid-flight through the dead-workspace predicate). The list/get handlers
+/// (#2595) overwrite the field on the returned value when they can await the
+/// probe.
 /// Test: covered by the list/get handler tests.
 pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
     SessionSummary {
@@ -99,7 +106,25 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         deliverable_id: r.deliverable_id.map(|id| id.to_string()),
         pane_id: r.pane_id.clone(),
         injection_status: injection_status_wire(r.injection_status),
+        unresumable: false,
     }
+}
+
+/// [`record_to_summary`] plus the async `unresumable` probe (#2595).
+///
+/// Why: `list_managed_sessions`/`get_managed_session` are the two handlers
+/// that can afford the filesystem probe (both already `.await` the session
+/// manager). Folding "convert, then overwrite the flag" into one call here —
+/// rather than repeating it inline at each handler — keeps `mod.rs`'s handler
+/// bodies a single line each (`mod.rs` sits at its 500-SLOC production cap).
+/// What: [`record_to_summary`], then overwrites `unresumable` via
+/// `session_manager::resume_workdir::is_unresumable`.
+/// Test: `list_marks_dead_stopped_session_unresumable`,
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in `super::tests`.
+pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSummary {
+    let mut summary = record_to_summary(r);
+    summary.unresumable = crate::session_manager::resume_workdir::is_unresumable(r).await;
+    summary
 }
 
 /// Build the tmux attach command string for a session.

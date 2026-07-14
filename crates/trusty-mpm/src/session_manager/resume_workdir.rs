@@ -24,15 +24,34 @@
 //! `resolve_existing_workdir_falls_back_through_candidates`,
 //! `resolve_existing_workdir_errors_when_all_missing`,
 //! `verify_pane_cwd_ok_on_match`, `verify_pane_cwd_ok_when_unknown`,
-//! `verify_pane_cwd_errors_on_mismatch` (this file's `#[cfg(test)]` module);
-//! end-to-end coverage of the recreate branch lives in
+//! `verify_pane_cwd_errors_on_mismatch`, `is_unresumable_*` (this file's
+//! `#[cfg(test)]` module); end-to-end coverage of the recreate branch lives in
 //! `resume_reattach_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
 use super::ManagedTmuxDriver;
 use super::manager::ManagedError;
-use super::record::{ManagedSessionId, SessionRecord};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+/// The three resume-workdir candidates for `record`, in priority order.
+///
+/// Why: [`resolve_existing_workdir`] and [`is_unresumable`] (#2595) must probe
+/// the EXACT same candidates in the EXACT same order — a divergence here would
+/// mean a session `resolve_existing_workdir` can still resume gets flagged
+/// dead (or vice versa). Factoring the candidate list out of both callers
+/// makes that impossible.
+/// What: `[last_cwd, workspace_path, cwd]`, `None`-filtered by the caller via
+/// `.into_iter().flatten()`.
+/// Test: exercised transitively by every `resolve_existing_workdir_*` and
+/// `is_unresumable_*` test.
+fn workdir_candidates(record: &SessionRecord) -> [Option<&Path>; 3] {
+    [
+        record.last_cwd.as_deref(),
+        record.workspace_path.as_deref(),
+        Some(record.cwd.as_path()),
+    ]
+}
 
 /// Pick the first candidate workdir that exists on disk, in priority order.
 ///
@@ -43,11 +62,11 @@ use super::record::{ManagedSessionId, SessionRecord};
 /// parameters) purely to keep the call site in `manager.rs` — already at its
 /// 500-SLOC cap — a single short line.
 /// What: checks `record.last_cwd`, then `record.workspace_path`, then
-/// `record.cwd` in order via `tokio::fs::try_exists` (non-blocking); returns
-/// the first that exists. When none do, returns
-/// [`ManagedError::WorkspaceMissing`] carrying `id` and the most-informative
-/// candidate (`workspace_path` if set, else `cwd`) so the operator knows
-/// exactly which directory vanished.
+/// `record.cwd` in order (via [`workdir_candidates`]) using
+/// `tokio::fs::try_exists` (non-blocking); returns the first that exists.
+/// When none do, returns [`ManagedError::WorkspaceMissing`] carrying `id` and
+/// the most-informative candidate (`workspace_path` if set, else `cwd`) so the
+/// operator knows exactly which directory vanished.
 /// Test: `resolve_existing_workdir_prefers_first_existing`,
 /// `resolve_existing_workdir_falls_back_through_candidates`,
 /// `resolve_existing_workdir_errors_when_all_missing`.
@@ -55,21 +74,55 @@ pub(super) async fn resolve_existing_workdir(
     id: &ManagedSessionId,
     record: &SessionRecord,
 ) -> Result<PathBuf, ManagedError> {
-    let (last_cwd, workspace_path, cwd) = (
-        record.last_cwd.as_deref(),
-        record.workspace_path.as_deref(),
-        record.cwd.as_path(),
-    );
-    for candidate in [last_cwd, workspace_path, Some(cwd)].into_iter().flatten() {
+    for candidate in workdir_candidates(record).into_iter().flatten() {
         if tokio::fs::try_exists(candidate).await.unwrap_or(false) {
             return Ok(candidate.to_path_buf());
         }
     }
-    let missing = workspace_path.unwrap_or(cwd);
+    let missing = record.workspace_path.as_deref().unwrap_or(&record.cwd);
     Err(ManagedError::WorkspaceMissing(
         id.to_string(),
         missing.display().to_string(),
     ))
+}
+
+/// The shared "unresumable" predicate (#2595): true when a stopped/errored
+/// session has NO workdir candidate left on disk, meaning any resume attempt
+/// is guaranteed to fail with [`ManagedError::WorkspaceMissing`].
+///
+/// Why (#2595, builds on #2594's `ResumeManagedError::Unresumable` semantics):
+/// before this, an operator-facing session picker offered "restart" for a
+/// session whose workspace had been GC-pruned — the restart could only ever
+/// 422. #2594 fixed the ERROR response; this predicate lets every LISTING
+/// surface (the bare-`tm` guided default, `tm ls`, `tm sessions ls` — all of
+/// which read `GET /api/v1/sessions/managed`) exclude/flag the session
+/// BEFORE the operator ever selects it, instead of only failing loudly after
+/// the fact. Gated to `Stopped`/`Errored` (mirrors the CLI's own
+/// `guided_resume::needs_restart`) because a live/provisioning session has (or
+/// is about to have) a real tmux pane — whether its ORIGINAL workdir still
+/// exists is irrelevant to whether it can be resumed (reattached).
+/// What: returns `false` immediately for any state other than
+/// `Stopped`/`Errored` (no I/O). For `Stopped`/`Errored`, probes the SAME
+/// three candidates [`resolve_existing_workdir`] does (via
+/// [`workdir_candidates`]) with `tokio::fs::try_exists`; returns `true` only
+/// when NONE exist — i.e. exactly the condition under which
+/// `resolve_existing_workdir` would return `WorkspaceMissing`.
+/// Test: `is_unresumable_true_when_all_candidates_missing_and_stopped`,
+/// `is_unresumable_false_when_any_candidate_exists`,
+/// `is_unresumable_false_for_non_stopped_states_even_when_all_missing`.
+pub(crate) async fn is_unresumable(record: &SessionRecord) -> bool {
+    if !matches!(
+        record.state,
+        ManagedSessionState::Stopped | ManagedSessionState::Errored
+    ) {
+        return false;
+    }
+    for candidate in workdir_candidates(record).into_iter().flatten() {
+        if tokio::fs::try_exists(candidate).await.unwrap_or(false) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Verify a freshly created tmux pane actually landed at `expected`.
@@ -250,6 +303,71 @@ mod tests {
                 assert_eq!(path, missing_workspace.display().to_string());
             }
             other => panic!("expected WorkspaceMissing, got {other:?}"),
+        }
+    }
+
+    // ── is_unresumable (#2595) ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn is_unresumable_true_when_all_candidates_missing_and_stopped() {
+        let mut record = make_record(
+            PathBuf::from("/nonexistent/cwd-2595"),
+            Some(PathBuf::from("/nonexistent/workspace-2595")),
+            Some(PathBuf::from("/nonexistent/last-cwd-2595")),
+        );
+        record.state = ManagedSessionState::Stopped;
+        assert!(
+            is_unresumable(&record).await,
+            "stopped session with no existing candidate must be unresumable"
+        );
+
+        // Errored is the sibling resumable-from state and must behave identically.
+        record.state = ManagedSessionState::Errored;
+        assert!(
+            is_unresumable(&record).await,
+            "errored session with no existing candidate must be unresumable"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_unresumable_false_when_any_candidate_exists() {
+        let cwd = TempDir::new().unwrap();
+        // Only `cwd` (the last-resort candidate) exists on disk; last_cwd and
+        // workspace_path are both gone — this must still be resumable, exactly
+        // mirroring `resolve_existing_workdir`'s fallback-to-cwd behavior.
+        let mut record = make_record(
+            cwd.path().to_owned(),
+            Some(PathBuf::from("/nonexistent/workspace-2595")),
+            Some(PathBuf::from("/nonexistent/last-cwd-2595")),
+        );
+        record.state = ManagedSessionState::Stopped;
+        assert!(
+            !is_unresumable(&record).await,
+            "a session with ANY existing candidate must not be flagged unresumable"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_unresumable_false_for_non_stopped_states_even_when_all_missing() {
+        // Why: a live/provisioning session already has (or is about to have) a
+        // real tmux pane; whether its original workdir still exists on disk is
+        // irrelevant to whether it can be resumed (reattached). The predicate
+        // must short-circuit to `false` WITHOUT probing the filesystem.
+        let mut record = make_record(
+            PathBuf::from("/nonexistent/cwd-2595"),
+            Some(PathBuf::from("/nonexistent/workspace-2595")),
+            Some(PathBuf::from("/nonexistent/last-cwd-2595")),
+        );
+        for state in [
+            ManagedSessionState::Active,
+            ManagedSessionState::Provisioning,
+        ] {
+            record.state = state;
+            assert!(
+                !is_unresumable(&record).await,
+                "state {:?} must never be flagged unresumable regardless of workdir",
+                record.state
+            );
         }
     }
 
