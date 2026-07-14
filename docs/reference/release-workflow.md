@@ -137,6 +137,49 @@ it still runs `cargo install` from local source (the one thing `tctl install`
 cannot do), then shells out to `tctl sign trusty-search` for the actual
 codesign step.
 
+🔴 **Identifier migration notice (PR #2657 review):** #2558 canonicalized
+`trusty-search`'s / `trusty-embedderd`'s `--identifier` from the short-form
+`com.trusty.search` / `com.trusty.embedderd` (used by the pre-PR `tctl
+install` hook) to the full-form `com.trusty.trusty-search` /
+`com.trusty.trusty-embedderd` (matching the script and the launchd label
+convention). Changing the identifier changes the designated requirement (DR),
+which **invalidates any existing FDA/App-Data grant keyed to the old value** —
+the same `indexes:2` symptom #873 originally described. To avoid a *silent*
+re-break, every signing path (`tctl install`'s hook and `tctl sign`) now reads
+the binary's CURRENT on-disk identifier before re-signing
+(`macos_signing::current_identifier`, via `codesign -d`) and prints a loud,
+distinct notice when it is about to change:
+
+```
+trusty-installer: ⚠ IDENTIFIER CHANGE for trusty-search: com.trusty.search -> com.trusty.trusty-search.
+Existing macOS Full Disk Access / App Data grants keyed to the old identifier will STOP MATCHING
+after this signing — re-grant/re-approve once after this install.
+```
+
+If you see this notice, re-grant FDA (search) or re-approve the next App-Data
+prompt (mpm) exactly once — subsequent reinstalls will not re-trigger it,
+since the identifier is now stable at the canonical value.
+
+🟡 **Hardened Runtime split (PR #2657 review, PM decision):** `--options
+runtime --timestamp` (Hardened Runtime) is gated per binary set and signing
+context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
+
+| Set | `tctl install` auto-hook | `tctl sign` / wrapper script (explicit) |
+|---|---|---|
+| `trusty-search` / `trusty-embedderd` | **off** (pre-PR hook behavior) | **on** (pre-PR script behavior) |
+| `trusty-mpm` | **on** | **on** |
+
+trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
+library-validation restriction has not yet been empirically verified safe for
+that load path — flipping the automatic hook to hardened-by-default risked
+silently breaking `tctl install trusty-search` on every machine with a
+Developer ID cert already installed. trusty-mpm loads no dylibs, so it is
+hardened unconditionally. **This split does not affect TCC grant stability** —
+that depends on `--identifier` + Team ID, not `--options runtime` — only on
+notarization eligibility and dylib-validation strictness. See the tracking
+issue linked from PR #2657 for lifting this split once ONNX-under-Hardened-
+Runtime is verified.
+
 ### One-Time Certificate Setup
 
 1. **Enroll in the Apple Developer Program** (if not already enrolled):

@@ -19,8 +19,10 @@
 //! a no-op notice and returns 0 (codesign/TCC are Apple-specific).
 //!
 //! Test: `tests::run_unknown_target_is_error` covers the shared error path
-//! cross-platform (unknown target name); the macOS signing path is
-//! side-effecting (real `codesign`) and validated manually.
+//! cross-platform (unknown target name); `tests::run_known_target_is_noop_on_non_macos`
+//! (compiled and run only on non-macOS hosts — this workspace's CI runs on
+//! `ubuntu-latest`) covers the no-op path end to end; the macOS signing path
+//! itself is side-effecting (real `codesign`) and validated manually.
 
 use std::path::PathBuf;
 
@@ -86,14 +88,18 @@ fn run_macos(target: &str, dir: Option<PathBuf>, json: bool) -> i32 {
             }
             0
         }
-        Err(e) => {
-            let is_no_cert = e.to_string().contains("no Developer ID Application");
+        // PR #2657 review (MEDIUM): match on the typed `SignSetError` variant
+        // instead of substring-matching `e.to_string()` — brittle against any
+        // future wording change to the error message.
+        Err(macos_signing::SignSetError::NoCertificate) => {
             if !json {
-                if is_no_cert {
-                    eprintln!("{}", macos_signing::cert_setup_guidance(target));
-                } else {
-                    eprintln!("tctl sign: {e}");
-                }
+                eprintln!("{}", macos_signing::cert_setup_guidance(target));
+            }
+            1
+        }
+        Err(e) => {
+            if !json {
+                eprintln!("tctl sign: {e}");
             }
             1
         }
@@ -131,5 +137,22 @@ mod tests {
     fn run_unknown_target_is_error() {
         let code = run("not-a-real-target", None, true);
         assert_eq!(code, 2);
+    }
+
+    /// Why: PR #2657 review (LOW) — the non-macOS no-op path (codesign/TCC are
+    /// Apple-specific) must be exercised end to end, not just asserted by
+    /// inspection. This workspace's CI runs on `ubuntu-latest`, so this test
+    /// actually executes there; on a macOS dev machine it is compiled out
+    /// (`run` takes the `run_macos` branch instead, which is validated
+    /// manually — see the module doc comment).
+    /// What: A known target (`trusty-search`) on a non-macOS host returns exit
+    /// 0 without ever reaching the macOS-only `codesign` invocation (that code
+    /// path is not even compiled into this binary on non-macOS).
+    /// Test: This is the test.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn run_known_target_is_noop_on_non_macos() {
+        let code = run("trusty-search", None, false);
+        assert_eq!(code, 0);
     }
 }

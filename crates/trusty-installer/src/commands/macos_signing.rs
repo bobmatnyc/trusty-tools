@@ -17,13 +17,35 @@
 //! because `tm` reads other apps' `$HOME` containers (Claude config dirs, tmux
 //! state).
 //!
-//! What: [`binaries_for_set`] maps a named signable set (`"trusty-search"` →
-//! search + embedderd, `"trusty-mpm"` → mpm alone) to its binaries;
-//! [`codesign_identifier`] maps each binary to its fixed `--identifier`. Probes
-//! for a Developer ID Application certificate (env var `TRUSTY_SIGN_IDENTITY` >
-//! `security find-identity`), signs with `--options runtime --timestamp`
-//! (Hardened Runtime + secure timestamp, matching the script and required for
-//! notarization), and verifies with `codesign --verify --deep --strict`.
+//! PR #2657 code-critic review fixes (same day):
+//! - The canonicalization above is a SILENT IDENTIFIER MIGRATION for any host
+//!   previously signed by the pre-PR Rust hook's `com.trusty.search` — changing
+//!   the designated requirement invalidates that host's existing FDA grant with
+//!   no warning (reproducing #873's `indexes:2` symptom). [`current_identifier`]
+//!   reads the binary's on-disk identifier before signing and
+//!   [`identifier_migration_notice`] prints a loud, distinct callout when it is
+//!   about to change.
+//! - `--options runtime --timestamp` (Hardened Runtime) is now gated by
+//!   [`use_hardened_runtime`] rather than always-on: trusty-search/embedderd
+//!   load an ONNX runtime dylib at runtime, and Hardened Runtime's library
+//!   validation has NOT been empirically verified safe for that yet, so the
+//!   pre-PR automatic `tctl install` hook's behavior (no hardened runtime) is
+//!   preserved for the SEARCH set there, while the pre-PR script's behavior
+//!   (hardened runtime) is preserved for explicit signing
+//!   (`tctl sign trusty-search` / the wrapper script). trusty-mpm loads no
+//!   dylibs, so it gets hardened runtime unconditionally — see the follow-up
+//!   issue tracked in the PR for lifting this split once ONNX-under-Hardened-
+//!   Runtime is verified. TCC grant stability depends on `--identifier` + Team
+//!   ID, not on `--options runtime`, so this split does not reintroduce the
+//!   identifier drift above.
+//!
+//! What: [`binaries_for_set`] and [`codesign_identifier`] are both derived from
+//! the single [`SIGNABLE_BINARIES`] table (binary, set, identifier) so set
+//! membership and identifier mapping can never drift apart again.
+//! [`has_developer_id_cert`] probes for a cert (env var `TRUSTY_SIGN_IDENTITY` >
+//! `security find-identity`). [`sign_binary`] signs with `--options runtime
+//! --timestamp` only when `hardened` is `true` (see [`use_hardened_runtime`]),
+//! and [`verify_signature`] checks with `codesign --verify --deep --strict`.
 //! [`post_install_search`] / [`post_install_mpm`] are the fail-soft hooks
 //! `commands::install` calls after each member lands; [`sign_set_strict`] is the
 //! hard-failing primitive the standalone `tctl sign <target>` command
@@ -31,6 +53,7 @@
 //! shells out to instead of duplicating codesign flags in bash.
 //!
 //! Test: `tests` covers `binaries_for_set`, `codesign_identifier`,
+//! `use_hardened_runtime`, `identifier_migration_notice`,
 //! `has_developer_id_cert` identity-probe logic, and all guidance-text
 //! generation as pure functions; `codesign` / `security` are not invoked in
 //! tests (side-effecting, macOS-only).
@@ -41,6 +64,29 @@ pub const SEARCH_SET: &str = "trusty-search";
 /// The `trusty-mpm` signable set: `trusty-mpm` alone.
 pub const MPM_SET: &str = "trusty-mpm";
 
+/// The master table: every signable binary → (its set, its codesign identifier).
+///
+/// Why: PR #2657 review (MEDIUM) — `binaries_for_set` and `codesign_identifier`
+/// were two independently-maintained tables that could drift apart exactly the
+/// way the script and the pre-#2558 hook already had. Collapsing set
+/// membership and identifier mapping into one table makes that class of drift
+/// structurally impossible: every signable binary is declared exactly once.
+///
+/// What: `(binary, set, identifier)` triples. [`binaries_for_set`] filters on
+/// the middle field; [`codesign_identifier`] looks up the third field by the
+/// first.
+///
+/// Test: `tests::every_set_member_has_a_real_identifier`.
+const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
+    ("trusty-search", SEARCH_SET, "com.trusty.trusty-search"),
+    (
+        "trusty-embedderd",
+        SEARCH_SET,
+        "com.trusty.trusty-embedderd",
+    ),
+    ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
+];
+
 /// Resolve the binaries that make up a named Developer-ID-signable set.
 ///
 /// Why: `trusty-search` ships two binaries that must be signed together
@@ -49,20 +95,21 @@ pub const MPM_SET: &str = "trusty-mpm";
 /// install hooks and the strict `tctl sign` command) agrees on exactly which
 /// binaries a target name covers.
 ///
-/// What: Returns the binary names for `"trusty-search"` or `"trusty-mpm"`; an
-/// empty slice for any other input (the caller treats that as "unknown set").
+/// What: Returns the binary names whose [`SIGNABLE_BINARIES`] entry matches
+/// `set`, in table order. An empty `Vec` for any other input (the caller
+/// treats that as "unknown set").
 ///
 /// Test: `tests::binaries_for_set_covers_search_and_mpm`,
 /// `tests::binaries_for_set_unknown_is_empty`.
-pub fn binaries_for_set(set: &str) -> &'static [&'static str] {
-    match set {
-        SEARCH_SET => &["trusty-search", "trusty-embedderd"],
-        MPM_SET => &["trusty-mpm"],
-        _ => &[],
-    }
+pub fn binaries_for_set(set: &str) -> Vec<&'static str> {
+    SIGNABLE_BINARIES
+        .iter()
+        .filter(|(_, s, _)| *s == set)
+        .map(|(binary, _, _)| *binary)
+        .collect()
 }
 
-/// The codesign identifiers for every signable binary.
+/// The codesign identifier for a signable binary.
 ///
 /// Why: A fixed `--identifier` anchors the designated requirement (DR) to a
 /// stable value rather than the binary hash, so the FDA / App-Data TCC grant
@@ -71,18 +118,50 @@ pub fn binaries_for_set(set: &str) -> &'static [&'static str] {
 /// `com.trusty.trusty-search`) matches the launchd label convention in
 /// `plist_label.rs` and `docs/reference/release-workflow.md` — this is the
 /// canonical scheme; the pre-#2558 `com.trusty.search` (short form) used here
-/// was the drift this issue fixes.
+/// was the drift this issue fixes. Migrating an already-signed host from the
+/// old identifier is handled separately by [`identifier_migration_notice`].
 ///
-/// What: Maps binary name → codesign identifier.
+/// What: Looks up `binary` in [`SIGNABLE_BINARIES`]; falls back to
+/// `"com.trusty.unknown"` for anything not in the table.
 ///
-/// Test: `tests::identifier_map_covers_all_signable_binaries`.
+/// Test: `tests::identifier_map_covers_all_signable_binaries`,
+/// `tests::every_set_member_has_a_real_identifier`.
 pub fn codesign_identifier(binary: &str) -> &'static str {
-    match binary {
-        "trusty-search" => "com.trusty.trusty-search",
-        "trusty-embedderd" => "com.trusty.trusty-embedderd",
-        "trusty-mpm" => "com.trusty.trusty-mpm",
-        _ => "com.trusty.unknown",
-    }
+    SIGNABLE_BINARIES
+        .iter()
+        .find(|(b, _, _)| *b == binary)
+        .map(|(_, _, identifier)| *identifier)
+        .unwrap_or("com.trusty.unknown")
+}
+
+/// Whether to enable Hardened Runtime (`--options runtime --timestamp`) for a
+/// given signing context.
+///
+/// Why: PM decision, PR #2657 review (HIGH) — preserve BOTH pre-PR behaviors
+/// exactly rather than flipping a default. The pre-PR script (an explicit
+/// operator action) always signed with `--options runtime`; the pre-PR
+/// `tctl install` post-install hook (automatic, fail-soft, runs on every
+/// install with a cert present) never did. trusty-search/trusty-embedderd load
+/// an ONNX runtime dylib, and Hardened Runtime's library-validation
+/// restriction has not been empirically verified safe for that load path —
+/// flipping the automatic hook to hardened-by-default risks silently breaking
+/// `tctl install trusty-search` on every machine with a Developer ID cert
+/// already installed. trusty-mpm loads no dylibs, so Hardened Runtime is
+/// low-risk there in both contexts. Note: TCC grant stability (the actual
+/// bug #873/#2558 fix) depends on `--identifier` + Team ID, NOT on
+/// `--options runtime`, so this split does not reintroduce the identifier-drift
+/// problem — it only affects notarization eligibility and dylib-validation
+/// strictness.
+///
+/// What: `explicit` (the operator directly ran `tctl sign <target>`, or the
+/// wrapper script which shells out to it) → always `true`. Automatic
+/// (`tctl install`'s fail-soft hook, `explicit = false`) → `true` only for
+/// [`MPM_SET`]; `false` for [`SEARCH_SET`] until ONNX-under-Hardened-Runtime
+/// is verified (see the tracking issue referenced in PR #2657).
+///
+/// Test: `tests::hardened_runtime_policy`.
+pub fn use_hardened_runtime(set: &str, explicit: bool) -> bool {
+    explicit || set == MPM_SET
 }
 
 /// Check whether a Developer ID Application certificate is available.
@@ -121,40 +200,121 @@ pub fn has_developer_id_cert() -> Option<String> {
     None
 }
 
+/// Read a binary's CURRENT on-disk codesign identifier, if any.
+///
+/// Why: PR #2657 review (HIGH) — before (re-)signing with the canonical
+/// identifier, we must know whether the binary was already signed with a
+/// DIFFERENT identifier (e.g. the pre-#2558 `com.trusty.search` short form).
+/// Silently changing the DR invalidates any TCC grant keyed to the old value
+/// with no warning — exactly #873's `indexes:2` symptom, reintroduced by this
+/// PR's own canonicalization if left unchecked.
+///
+/// What: Runs `codesign -d <path>` (display mode) and parses the
+/// `Identifier=<value>` line from its stderr output (that is where `codesign
+/// -d` writes its human-readable summary). Returns `None` when the path does
+/// not exist, the binary is unsigned (no `Identifier=` line, non-zero exit),
+/// or `codesign` cannot be spawned.
+///
+/// Test: Not invoked in tests (side-effecting, requires a real signed
+/// binary); the comparison logic that consumes its output is tested via
+/// `identifier_migration_notice`.
+#[cfg(target_os = "macos")]
+pub fn current_identifier(path: &std::path::Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    let out = std::process::Command::new("codesign")
+        .args(["-d"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    stderr.lines().find_map(|line| {
+        line.strip_prefix("Identifier=")
+            .map(|s| s.trim().to_owned())
+    })
+}
+
+/// Build the identifier-migration warning, if `old_identifier` differs from
+/// the canonical identifier for `binary`.
+///
+/// Why: Extracted as a pure function (no system calls) so the exact wording
+/// and the "only warn on an actual change" decision are unit-tested directly.
+///
+/// What: Returns `None` when `old_identifier` is empty (never signed before)
+/// or already matches [`codesign_identifier`]; otherwise returns a loud,
+/// distinct notice explaining that existing FDA / App-Data grants keyed to
+/// the old identifier will stop matching.
+///
+/// Test: `tests::identifier_migration_notice_warns_on_change`,
+/// `tests::identifier_migration_notice_silent_when_unchanged_or_absent`.
+pub fn identifier_migration_notice(binary: &str, old_identifier: &str) -> Option<String> {
+    let canonical = codesign_identifier(binary);
+    if old_identifier.is_empty() || old_identifier == canonical {
+        return None;
+    }
+    Some(format!(
+        "\u{26A0} IDENTIFIER CHANGE for {binary}: {old_identifier} -> {canonical}. Existing \
+         macOS Full Disk Access / App Data grants keyed to the old identifier will STOP \
+         MATCHING after this signing — re-grant/re-approve once after this install."
+    ))
+}
+
+/// Print [`identifier_migration_notice`] to stderr when `path`'s current
+/// on-disk identifier differs from the canonical one for `binary`.
+///
+/// Why: Shared by both signing call sites ([`sign_set_strict`] and the
+/// fail-soft [`post_install_signed_set`]) so the warning fires regardless of
+/// which path re-signs an already-signed binary. Always printed (not gated by
+/// `json`) — this is safety-critical information about an existing TCC grant
+/// breaking, not routine narration.
+///
+/// What: Reads `path`'s current identifier via [`current_identifier`]; if a
+/// migration notice applies, prints it to stderr.
+///
+/// Test: Not invoked in tests (side-effecting); composes two independently
+/// tested pure/probe functions.
+#[cfg(target_os = "macos")]
+fn warn_on_identifier_change(path: &std::path::Path, binary: &str) {
+    if let Some(old) = current_identifier(path) {
+        if let Some(notice) = identifier_migration_notice(binary, &old) {
+            eprintln!("trusty-installer: {notice}");
+        }
+    }
+}
+
 /// Sign a binary with a Developer ID Application certificate.
 ///
 /// Why: Signing with `--identifier` anchors the DR so the TCC FDA / App-Data
 /// grant persists across reinstalls (no re-grant needed after `cargo install`).
-/// `--options runtime` enables the Hardened Runtime (required for
-/// notarization); `--timestamp` requests a secure timestamp from Apple's
-/// servers — both match the pre-#2558 script's flags, folded in here so the
-/// script no longer needs its own `codesign` invocation.
+/// `hardened` gates `--options runtime` (Hardened Runtime, required for
+/// notarization) + `--timestamp` (secure timestamp from Apple's servers) — see
+/// [`use_hardened_runtime`] for why this is no longer unconditional.
 ///
-/// What: Runs `codesign --force --options runtime --timestamp --identifier <id>
-/// --sign <identity> <path>`. Returns `Ok(())` on success, `Err` with the
+/// What: Runs `codesign --force [--options runtime --timestamp] --identifier
+/// <id> --sign <identity> <path>`. Returns `Ok(())` on success, `Err` with the
 /// `codesign` stderr on failure.
 ///
 /// Test: Not invoked in tests (side-effecting); the identifier mapping is
-/// tested via `codesign_identifier`.
+/// tested via `codesign_identifier`, the hardened-runtime gating via
+/// `use_hardened_runtime`.
 #[cfg(target_os = "macos")]
-pub fn sign_binary(path: &std::path::Path, identity: &str) -> anyhow::Result<()> {
+pub fn sign_binary(path: &std::path::Path, identity: &str, hardened: bool) -> anyhow::Result<()> {
     use anyhow::Context;
     let binary_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     let identifier = codesign_identifier(binary_name);
+
+    let mut args: Vec<&str> = vec!["--force"];
+    if hardened {
+        args.extend(["--options", "runtime", "--timestamp"]);
+    }
+    args.extend(["--identifier", identifier, "--sign", identity]);
+
     let out = std::process::Command::new("codesign")
-        .args([
-            "--force",
-            "--options",
-            "runtime",
-            "--timestamp",
-            "--identifier",
-            identifier,
-            "--sign",
-            identity,
-        ])
+        .args(&args)
         .arg(path)
         .output()
         .with_context(|| format!("running codesign on {}", path.display()))?;
@@ -194,6 +354,65 @@ pub fn verify_signature(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Typed error for [`sign_set_strict`].
+///
+/// Why: PR #2657 review (MEDIUM) — `commands::sign::run_macos` previously
+/// distinguished "no cert" from "signing failed" by substring-matching the
+/// error message, which is brittle (any future wording change silently breaks
+/// the branch that shows cert-setup guidance). A typed variant lets the caller
+/// match on the actual failure kind.
+///
+/// What: `UnknownSet` — `set` did not resolve to any binaries.
+/// `NoCertificate` — no Developer ID Application cert is available.
+/// `NoBinariesFound` — the set resolved, but none of its binaries exist under
+/// the install directory. `Sign` — signing or post-sign verification failed
+/// for a specific binary (wraps the underlying `anyhow::Error`).
+///
+/// Test: `tests::sign_set_error_display_is_distinct_per_variant`.
+#[derive(Debug)]
+pub enum SignSetError {
+    /// `set` did not resolve to any binaries via [`binaries_for_set`].
+    UnknownSet(String),
+    /// No Developer ID Application certificate is available (env override or keychain).
+    NoCertificate,
+    /// No binary from the resolved set exists under the install directory.
+    NoBinariesFound {
+        /// The signable-set name that was requested.
+        set: String,
+        /// The install directory searched.
+        dir: String,
+    },
+    /// Signing or post-sign verification failed for a specific binary.
+    Sign(anyhow::Error),
+}
+
+impl std::fmt::Display for SignSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignSetError::UnknownSet(set) => write!(
+                f,
+                "unknown signable set '{set}' (expected 'trusty-search' or 'trusty-mpm')"
+            ),
+            SignSetError::NoCertificate => {
+                write!(f, "no Developer ID Application certificate found")
+            }
+            SignSetError::NoBinariesFound { set, dir } => {
+                write!(f, "no binaries from set '{set}' found in {dir}")
+            }
+            SignSetError::Sign(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SignSetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SignSetError::Sign(e) => e.source(),
+            _ => None,
+        }
+    }
+}
+
 /// Sign and verify every binary in a named set, hard-failing on any problem.
 ///
 /// Why: The fail-soft `post_install_*` hooks below must never abort a `tctl
@@ -203,26 +422,29 @@ pub fn verify_signature(path: &std::path::Path) -> anyhow::Result<()> {
 /// for signing to happen — a silent partial failure there would be worse than a
 /// loud one, exactly like the pre-#2558 script's `set -euo pipefail` behaviour.
 ///
-/// What: Resolves the Developer ID identity (erroring if none is found), then
-/// for every binary in `binaries_for_set(set)` that exists under `install_dir`,
-/// signs it and verifies the signature — bailing out on the first failure.
-/// Returns the paths that were signed. Errors when the set name is unknown or
-/// no binary in the set was found on disk.
+/// What: Resolves the Developer ID identity (erroring with
+/// [`SignSetError::NoCertificate`] if none is found), warns on any
+/// identifier migration via [`warn_on_identifier_change`], then for every
+/// binary in `binaries_for_set(set)` that exists under `install_dir`, signs it
+/// (always with Hardened Runtime — `explicit = true` per
+/// [`use_hardened_runtime`]) and verifies the signature — bailing out on the
+/// first failure. Returns the paths that were signed. Errors on an unknown
+/// set name or when no binary in the set was found on disk.
 ///
 /// Test: Not invoked in tests (side-effecting); the set/identifier resolution
 /// it composes is tested independently via `binaries_for_set` /
-/// `codesign_identifier`.
+/// `codesign_identifier` / `use_hardened_runtime`.
 #[cfg(target_os = "macos")]
 pub fn sign_set_strict(
     install_dir: &std::path::Path,
     set: &str,
-) -> anyhow::Result<Vec<std::path::PathBuf>> {
+) -> Result<Vec<std::path::PathBuf>, SignSetError> {
     let binaries = binaries_for_set(set);
     if binaries.is_empty() {
-        anyhow::bail!("unknown signable set '{set}' (expected 'trusty-search' or 'trusty-mpm')");
+        return Err(SignSetError::UnknownSet(set.to_owned()));
     }
-    let identity = has_developer_id_cert()
-        .ok_or_else(|| anyhow::anyhow!("no Developer ID Application certificate found"))?;
+    let identity = has_developer_id_cert().ok_or(SignSetError::NoCertificate)?;
+    let hardened = use_hardened_runtime(set, true);
 
     let mut signed = Vec::new();
     for name in binaries {
@@ -230,15 +452,16 @@ pub fn sign_set_strict(
         if !path.exists() {
             continue;
         }
-        sign_binary(&path, &identity)?;
-        verify_signature(&path)?;
+        warn_on_identifier_change(&path, name);
+        sign_binary(&path, &identity, hardened).map_err(SignSetError::Sign)?;
+        verify_signature(&path).map_err(SignSetError::Sign)?;
         signed.push(path);
     }
     if signed.is_empty() {
-        anyhow::bail!(
-            "no binaries from set '{set}' found in {}",
-            install_dir.display()
-        );
+        return Err(SignSetError::NoBinariesFound {
+            set: set.to_owned(),
+            dir: install_dir.display().to_string(),
+        });
     }
     Ok(signed)
 }
@@ -330,10 +553,13 @@ pub fn app_data_guidance(binary_path: &str) -> String {
 /// Why: Shared by [`post_install_search`] and [`post_install_mpm`] so the
 /// probe/sign/guidance sequence is written once.
 ///
-/// What: On macOS: probes for a Developer ID cert; if found, signs + verifies
-/// every present binary in `set` and prints a success note; on cert-probe
-/// failure, prints the set-appropriate guidance (FDA for search, App Data TCC
-/// for mpm) using the set's first binary's path. Never aborts the caller.
+/// What: On macOS: probes for a Developer ID cert; if found, warns on any
+/// identifier migration ([`warn_on_identifier_change`]), then signs + verifies
+/// every present binary in `set` — with Hardened Runtime gated per
+/// [`use_hardened_runtime`] (`explicit = false`: on for [`MPM_SET`], off for
+/// [`SEARCH_SET`]) — and prints a success note; on cert-probe failure, prints
+/// the set-appropriate guidance (FDA for search, App Data TCC for mpm) using
+/// the set's first binary's path. Never aborts the caller.
 #[cfg(target_os = "macos")]
 fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool) {
     let binaries = binaries_for_set(set);
@@ -341,17 +567,19 @@ fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool)
         return;
     };
     let primary_path = install_dir.join(primary);
+    let hardened = use_hardened_runtime(set, false);
 
     match has_developer_id_cert() {
         Some(identity) => {
             let mut signed_ok = true;
-            for name in binaries {
+            for &name in &binaries {
                 let path = install_dir.join(name);
                 if !path.exists() {
                     // A bundled binary (e.g. embedderd) may not be present; skip gracefully.
                     continue;
                 }
-                if let Err(e) = sign_binary(&path, &identity) {
+                warn_on_identifier_change(&path, name);
+                if let Err(e) = sign_binary(&path, &identity, hardened) {
                     if !json {
                         eprintln!(
                             "trusty-installer: warning: codesign failed for {}: {e}",
@@ -433,14 +661,14 @@ mod tests {
     fn binaries_for_set_covers_search_and_mpm() {
         assert_eq!(
             binaries_for_set(SEARCH_SET),
-            &["trusty-search", "trusty-embedderd"]
+            vec!["trusty-search", "trusty-embedderd"]
         );
-        assert_eq!(binaries_for_set(MPM_SET), &["trusty-mpm"]);
+        assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm"]);
     }
 
     /// Why: An unrecognised set name must not silently sign nothing without
-    /// signal — callers detect "unknown set" via an empty slice.
-    /// What: Asserts a bogus name returns an empty slice.
+    /// signal — callers detect "unknown set" via an empty result.
+    /// What: Asserts a bogus name returns an empty `Vec`.
     /// Test: This is the test.
     #[test]
     fn binaries_for_set_unknown_is_empty() {
@@ -465,6 +693,67 @@ mod tests {
             "com.trusty.trusty-embedderd"
         );
         assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
+    }
+
+    /// Why: PR #2657 review MEDIUM — with set membership and identifier now
+    /// derived from one table, this regression-guards that every binary
+    /// produced by `binaries_for_set` for EVERY known set has a real
+    /// (non-fallback) identifier, i.e. the two views of the table can never
+    /// silently disagree.
+    /// What: For each of `SEARCH_SET`/`MPM_SET`, asserts every member binary's
+    /// identifier is not the `"com.trusty.unknown"` fallback.
+    /// Test: This is the test.
+    #[test]
+    fn every_set_member_has_a_real_identifier() {
+        for set in [SEARCH_SET, MPM_SET] {
+            for binary in binaries_for_set(set) {
+                assert_ne!(
+                    codesign_identifier(binary),
+                    "com.trusty.unknown",
+                    "{binary} in set {set} has no real identifier"
+                );
+            }
+        }
+    }
+
+    /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
+    /// per-context split — pin the truth table so a future edit cannot
+    /// silently flip either preserved pre-PR behavior.
+    /// What: explicit=true is always hardened (both sets); explicit=false is
+    /// hardened only for MPM_SET.
+    /// Test: This is the test.
+    #[test]
+    fn hardened_runtime_policy() {
+        assert!(use_hardened_runtime(SEARCH_SET, true));
+        assert!(use_hardened_runtime(MPM_SET, true));
+        assert!(!use_hardened_runtime(SEARCH_SET, false));
+        assert!(use_hardened_runtime(MPM_SET, false));
+    }
+
+    /// Why: The migration notice must actually fire when the on-disk
+    /// identifier differs from the canonical one — this is the #2657 review
+    /// HIGH fix; a silent no-op here would reproduce #873.
+    /// What: Asserts the pre-#2558 short-form identifier triggers a notice
+    /// naming both the old and new values.
+    /// Test: This is the test.
+    #[test]
+    fn identifier_migration_notice_warns_on_change() {
+        let notice = identifier_migration_notice("trusty-search", "com.trusty.search")
+            .expect("must warn on a real change");
+        assert!(notice.contains("com.trusty.search"));
+        assert!(notice.contains("com.trusty.trusty-search"));
+        assert!(notice.contains("Full Disk Access"));
+    }
+
+    /// Why: The notice must NOT fire for a fresh install (no prior identifier)
+    /// or when re-signing with the identifier unchanged — false-positive
+    /// alarms would train operators to ignore the real warning.
+    /// What: Asserts `None` for an empty old identifier and for a match.
+    /// Test: This is the test.
+    #[test]
+    fn identifier_migration_notice_silent_when_unchanged_or_absent() {
+        assert!(identifier_migration_notice("trusty-search", "").is_none());
+        assert!(identifier_migration_notice("trusty-search", "com.trusty.trusty-search").is_none());
     }
 
     /// Why: The FDA guidance must contain all 4 numbered steps and reference the
@@ -562,5 +851,30 @@ mod tests {
             assert!(g.contains(step), "{step} missing");
         }
         assert!(g.contains("tctl sign trusty-mpm"));
+    }
+
+    /// Why: `commands::sign::run_macos` matches on `SignSetError` variants
+    /// (PR #2657 review MEDIUM fix, replacing string-matching); the variants'
+    /// `Display` text must stay distinguishable from each other for any
+    /// fallback logging path that does print the message.
+    /// What: Asserts each variant's rendered message is non-empty and unique.
+    /// Test: This is the test.
+    #[test]
+    fn sign_set_error_display_is_distinct_per_variant() {
+        let variants: Vec<String> = vec![
+            SignSetError::UnknownSet("bogus".to_owned()).to_string(),
+            SignSetError::NoCertificate.to_string(),
+            SignSetError::NoBinariesFound {
+                set: "trusty-search".to_owned(),
+                dir: "/tmp".to_owned(),
+            }
+            .to_string(),
+            SignSetError::Sign(anyhow::anyhow!("boom")).to_string(),
+        ];
+        for v in &variants {
+            assert!(!v.is_empty());
+        }
+        let unique: std::collections::HashSet<&String> = variants.iter().collect();
+        assert_eq!(unique.len(), variants.len(), "variant messages collided");
     }
 }
