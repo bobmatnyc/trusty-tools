@@ -22,6 +22,11 @@
         "serve",
         "--stdio"
       ]
+    },
+    "tickets-mcp": {
+      "type": "stdio",
+      "command": "tickets-mcp",
+      "args": []
     }
   }
 }
