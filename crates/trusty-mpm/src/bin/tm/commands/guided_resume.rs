@@ -32,6 +32,8 @@ use anyhow::Context as _;
 
 use crate::formatters::banner::tmux_has_session;
 
+use super::tmux_attach::AttachOutcome;
+
 /// Decide whether a guided resume must restart the session through the daemon.
 ///
 /// Why: a stopped/errored managed session has no live tmux session; calling
@@ -136,11 +138,13 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool) -> ResumeAction {
 /// confirmed ready.
 /// Test: `needs_restart`, `is_zombie`, and `plan_resume` are the testable pure
 /// seams; the I/O path is exercised by the e2e suite and manual smoke tests.
+/// Returns the [`AttachOutcome`] from the terminal hand-off (#2678) so
+/// `run_tty_picker` knows whether it must stop reading stdin.
 pub(crate) async fn resume_guided_session(
     client: &reqwest::Client,
     url: &str,
     session: &trusty_mpm::client::ManagedSessionSummary,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AttachOutcome> {
     // The picker is only ever reached after its own upstream TTY gate
     // (`guided::tty_gate`, checked before the picker renders at all) — always
     // attach here. `no_attach` gating lives in `resume_session`, used by the
@@ -177,7 +181,11 @@ pub(crate) async fn resume_guided_session(
 /// otherwise (the plain `Attach` branch never touches the daemon, so nothing
 /// changed). Returns `Ok(())` in both cases once the daemon-side state is
 /// confirmed good — a headless caller only sees a non-zero exit when the
-/// daemon-side resume/reconcile itself failed.
+/// daemon-side resume/reconcile itself failed. When `no_attach` is `true`
+/// the return is always [`AttachOutcome::Skipped`] (#2678) — no attach was
+/// attempted, so a looping caller has nothing to guard against; when
+/// `no_attach` is `false` the return is whatever [`tmux_attach`] resolved
+/// (`Attached`, `Switched`, or `TargetUnresolved`).
 /// Test: `needs_restart`/`is_zombie`/`plan_resume` are the testable pure
 /// seams (`guided_resume_plan_active_live_tmux_attaches` proves the Attach
 /// branch selection this depends on); `managed_tests.rs`'s
@@ -190,7 +198,7 @@ pub(crate) async fn resume_session(
     url: &str,
     session: &trusty_mpm::client::ManagedSessionSummary,
     no_attach: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AttachOutcome> {
     let tmux_live = tmux_has_session(&session.name);
     let action = plan_resume(&session.state, tmux_live);
 
@@ -243,7 +251,7 @@ pub(crate) async fn resume_session(
             "resumed {} ({}) [{}]",
             resumed.name, resumed.id, resumed.state
         );
-        return Ok(());
+        return Ok(AttachOutcome::Skipped);
     }
     tmux_attach(&resumed.name)
 }
@@ -542,13 +550,14 @@ pub(crate) fn unresumable_remedy_line(id: &str, reason: Option<&str>) -> String 
 ///
 /// Why: resuming a session means handing the terminal over to tmux; when the
 /// operator is already inside a tmux client, a plain `attach-session` is
-/// refused by tmux (nesting guard), so the actual argv choice is delegated to
-/// the shared [`crate::commands::tmux_attach::tmux_attach`] helper (#1873).
+/// refused by tmux (nesting guard), so the actual argv choice — and the
+/// safe, explicit `-c <client>` targeting (#2678) — is delegated to the
+/// shared [`crate::commands::tmux_attach::tmux_attach`] helper (#1873).
 /// What: thin re-export so existing call sites don't need to change their import
 /// path.
-/// Test: `attach_argv_inside_tmux_uses_switch_client`,
-/// `attach_argv_outside_tmux_uses_attach_session` in `tmux_attach.rs` cover
+/// Test: `attach_argv_uses_attach_session`,
+/// `switch_client_argv_targets_explicit_client` in `tmux_attach.rs` cover
 /// the argv decision; exercised indirectly here by the picker flow.
-fn tmux_attach(name: &str) -> anyhow::Result<()> {
+fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     crate::commands::tmux_attach::tmux_attach(name)
 }

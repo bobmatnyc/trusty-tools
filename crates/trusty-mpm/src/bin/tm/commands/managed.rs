@@ -381,7 +381,8 @@ pub(crate) async fn session_resume(
     // having a terminal — a headless/scripted caller (no stdin TTY) still gets
     // the daemon-side restart/reconcile, just never a doomed real tmux attach.
     let no_attach = !std::io::stdin().is_terminal();
-    crate::commands::guided_resume::resume_session(client, url, &session, no_attach).await
+    crate::commands::guided_resume::resume_session(client, url, &session, no_attach).await?;
+    Ok(())
 }
 
 /// `tm session decommission <id>` — full teardown (may or may not remove workspace).
