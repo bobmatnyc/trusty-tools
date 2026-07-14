@@ -21,10 +21,16 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::inproject::try_inproject_spawn;
+use super::resume_error::ResumeManagedError;
 use crate::daemon::state::DaemonState;
 use crate::provisioner::WorkspaceProvisioner;
 use crate::runtime::{RuntimeKind, build_adapter};
-use crate::session_manager::{ManagedError, ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+// `ManagedError` moved out of this file's non-test code with the #2577 review
+// enum split (see `resume_error.rs`); it is still used by this module's own
+// `#[cfg(test)]` `StubTmux` double below.
+#[cfg(test)]
+use crate::session_manager::ManagedError;
 
 /// Transport-agnostic inputs for spawning a managed session.
 ///
@@ -1299,101 +1305,6 @@ async fn front_gate_or_escalate(
     Ok(Some(
         mgr.get(&record.id).await.unwrap_or_else(|_| record.clone()),
     ))
-}
-
-/// Typed failure modes for [`resume_managed`], shared across transports.
-///
-/// Why: the prior design mapped resume failures to HTTP status codes by
-/// substring-matching the `Display` string (`msg.contains("invalid state
-/// transition")` → 409, `msg.contains("session not found")` → 404), which
-/// silently regressed to 500 the moment any error wording changed. A typed enum
-/// lets the HTTP handler match on variants (→ 404/409/500) with no stringly-typed
-/// coupling, and lets the MCP path render a stable `Display` string whose
-/// "not found" substring the existing MCP tests rely on.
-/// What: five variants — `NotFound` (the id is absent), `InvalidState` (the
-/// session is not `Stopped`/`Errored`, carrying the descriptive reason),
-/// `WorkspaceGone` and `PaneGone` (both operator-actionable on-disk
-/// preconditions that make a resume impossible even though the request is
-/// well-formed — split into DISTINCT variants, not one shared `Unresumable`,
-/// because their safe remedies differ: see each variant's doc), and `Other`
-/// (any remaining genuinely-internal failure: store/I-O). The `Display`
-/// strings are chosen so the not-found variant still contains the literal
-/// "not found".
-/// Test: `resume_managed_typed_*` in tests/session_manager_mvp.rs drive the
-/// 404/409/422 paths through the typed value (no `Display` matching), and the
-/// MCP `session_resume_unknown_id_errors` test asserts the rendered string.
-#[derive(Debug, thiserror::Error)]
-pub enum ResumeManagedError {
-    /// The requested session id was not present in the store → HTTP 404.
-    #[error("session not found: {0}")]
-    NotFound(String),
-
-    /// The session is not in a resumable state (only `Stopped`/`Errored` are) →
-    /// HTTP 409. Carries the manager's descriptive reason.
-    #[error("invalid state transition: {0}")]
-    InvalidState(String),
-
-    /// The session's workspace directory was removed
-    /// ([`ManagedError::WorkspaceMissing`]) → HTTP 422. Carries the manager's
-    /// full actionable message (names the vanished path).
-    ///
-    /// Why (#2577): a removed workspace is an OPERATOR-actionable precondition,
-    /// not a daemon-internal fault — routing it through `Other` → 500 gave the
-    /// CLI a bare "daemon returned an internal error (500)" with no clue the
-    /// worktree had simply been removed. Kept as its own variant (not merged
-    /// with `PaneGone` under one `Unresumable`) because its safe remedy is
-    /// different: with no workspace left to protect, `tm session delete
-    /// --force` (store-only, never touches tmux) is safe here — the SAME verb
-    /// would be actively dangerous for `PaneGone` (see that variant's doc).
-    #[error("{0}")]
-    WorkspaceGone(String),
-
-    /// The session's recorded tmux pane vanished while a SIBLING window keeps
-    /// the tmux session alive ([`ManagedError::PaneGone`]) → HTTP 422. Carries
-    /// the manager's full actionable message (names the vanished pane id).
-    ///
-    /// Why (#2577 review): this is the #2467/#2468 sibling-window-hijack
-    /// protection firing — the tmux SESSION is still alive and may hold other
-    /// live work; `tm session decommission` kills the WHOLE session (the live
-    /// sibling included). A prior draft merged this with `WorkspaceGone` under
-    /// one `Unresumable` variant and pointed BOTH at the same "just delete it"
-    /// remedy — factually wrong here, since there is nothing missing to
-    /// justify teardown, only a stale pane reference. Kept distinct so the CLI
-    /// can render a remedy that tells the operator to INSPECT
-    /// (`tmux list-panes`) before doing anything destructive.
-    #[error("{0}")]
-    PaneGone(String),
-
-    /// Any other genuinely-internal failure (store/I-O) → HTTP 500.
-    #[error("{0}")]
-    Other(String),
-}
-
-impl From<ManagedError> for ResumeManagedError {
-    /// Why: `SessionManager::resume` returns a typed [`ManagedError`]; mapping its
-    /// variants here (rather than at each call site) keeps the not-found/invalid-state
-    /// HTTP distinction in one place and prevents a wording change from regressing
-    /// a 404/409 to a 500.
-    /// What: maps `SessionNotFound` → `NotFound`, `InvalidState` → `InvalidState`
-    /// (preserving the descriptive reason), `WorkspaceMissing` → `WorkspaceGone`,
-    /// `PaneGone` → `PaneGone` (each preserving the manager's full actionable
-    /// Display message verbatim), and every remaining variant → `Other`.
-    /// Test: covered transitively by the resume handler 404/409/422 tests
-    /// (`resume_managed_typed_*` in tests/session_manager_mvp.rs).
-    fn from(e: ManagedError) -> Self {
-        match e {
-            ManagedError::SessionNotFound(id) => ResumeManagedError::NotFound(id),
-            ManagedError::InvalidState(_, reason) => ResumeManagedError::InvalidState(reason),
-            // The Display impls of these two variants already carry the vanished
-            // path/pane and the concrete remedy — preserve them verbatim so the
-            // 422 body is fully actionable at the CLI.
-            e @ ManagedError::WorkspaceMissing(..) => {
-                ResumeManagedError::WorkspaceGone(e.to_string())
-            }
-            e @ ManagedError::PaneGone(..) => ResumeManagedError::PaneGone(e.to_string()),
-            other => ResumeManagedError::Other(other.to_string()),
-        }
-    }
 }
 
 /// Resume a stopped session and re-spawn its runtime, shared across transports.

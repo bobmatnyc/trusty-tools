@@ -38,6 +38,7 @@ mod project_status;
 pub mod proxy;
 pub mod prune;
 mod reactivate;
+mod resume_error;
 mod summary;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
@@ -45,8 +46,7 @@ pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
 pub use lifecycle::{
-    ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
-    spawn_runtime_for, write_task_md,
+    SpawnParams, is_local_workdir, resume_managed, spawn_managed, spawn_runtime_for, write_task_md,
 };
 pub use project_registry_routes::{
     PatchProjectBody, ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
@@ -66,6 +66,7 @@ pub use prune::{
     PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
 };
 pub use reactivate::reactivate_managed_session;
+pub use resume_error::ResumeManagedError;
 pub use summary::record_to_json;
 use summary::{attach_cmd_for, parse_id, record_to_summary};
 
@@ -804,62 +805,16 @@ pub async fn resume_managed_session(
 
     // Single round-trip: the shared `resume_managed` helper performs the
     // existence + state check inside `SessionManager::resume` and re-spawns the
-    // runtime. We match on its TYPED error to choose the HTTP status — no
-    // pre-flight `get` (which introduced a TOCTOU race where the session could be
-    // decommissioned between the probe and the resume, yielding 500 instead of
-    // 404) and no `Display`-substring matching (which silently fell through to 500
-    // whenever the error wording changed).
+    // runtime. The TYPED error picks its own HTTP status/headers via its
+    // `IntoResponse` impl (`resume_error.rs`) — no pre-flight `get` (which
+    // introduced a TOCTOU race where the session could be decommissioned
+    // between the probe and the resume, yielding 500 instead of 404) and no
+    // `Display`-substring matching (which silently fell through to 500 whenever
+    // the error wording changed).
     match resume_managed(&state, &id).await {
         Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
-        Err(ResumeManagedError::NotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
-        }
-        Err(ResumeManagedError::InvalidState(reason)) => {
-            (StatusCode::CONFLICT, reason).into_response()
-        }
-        // #2577: the session cannot be resumed because of its on-disk state —
-        // these are operator-actionable preconditions, not internal faults, so
-        // 422 (not 500) with the manager's descriptive message. Both cases carry
-        // the SAME status but DIFFERENT safe remedies (WorkspaceGone: delete the
-        // stale record; PaneGone: inspect before touching anything, since the
-        // tmux session is still alive with a sibling window) — tagged via the
-        // `x-trusty-resume-reason` response header rather than making the CLI
-        // parse the human-readable body, mirroring why `ResumeManagedError`
-        // itself exists (no `Display`-substring matching).
-        Err(ResumeManagedError::WorkspaceGone(msg)) => {
-            unresumable_response(msg, "workspace_missing")
-        }
-        Err(ResumeManagedError::PaneGone(msg)) => unresumable_response(msg, "pane_gone"),
-        Err(ResumeManagedError::Other(msg)) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-        }
+        Err(e) => e.into_response(),
     }
-}
-
-/// Build the HTTP 422 response for an on-disk-precondition resume failure
-/// (`ResumeManagedError::WorkspaceGone`/`PaneGone`), tagging it with a
-/// machine-readable `x-trusty-resume-reason` header.
-///
-/// Why (#2577 review): the two failure classes need DIFFERENT operator remedies
-/// (see [`ResumeManagedError::WorkspaceGone`]/[`ResumeManagedError::PaneGone`]
-/// docs) but share the same status code and a human-readable body. Without a
-/// machine-readable discriminant, the CLI's only option would be to
-/// substring-match the body text to pick a remedy — precisely the
-/// stringly-typed anti-pattern `ResumeManagedError` was introduced to
-/// eliminate for the 404/409 cases. A response header keeps the body free for
-/// the operator-facing message while giving the caller a stable, typed signal.
-/// What: sets status 422, body = `msg` (the manager's full Display message),
-/// header `x-trusty-resume-reason: <reason>` (`"workspace_missing"` or
-/// `"pane_gone"`).
-/// Test: `resume_route_workspace_gone_tags_reason_header`,
-/// `resume_route_pane_gone_tags_reason_header` in `tests/session_manager_mvp.rs`.
-fn unresumable_response(msg: String, reason: &'static str) -> axum::response::Response {
-    let mut resp = (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response();
-    resp.headers_mut().insert(
-        axum::http::HeaderName::from_static("x-trusty-resume-reason"),
-        axum::http::HeaderValue::from_static(reason),
-    );
-    resp
 }
 
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.
