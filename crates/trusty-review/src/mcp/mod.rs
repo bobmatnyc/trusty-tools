@@ -234,8 +234,8 @@ pub async fn build_review_state() -> Result<AppState> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = build_provider(&reviewer_model, &default_provider, &config)
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to build reviewer LLM provider: {e}"))?;
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to build reviewer LLM provider: {e}"))?;
 
     // Verifier is optional in the embedded path: degrade to no-verification
     // rather than abort the host daemon if the verifier model cannot be built.

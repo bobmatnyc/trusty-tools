@@ -146,8 +146,8 @@ async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = build_provider(&reviewer_model, &default_provider, &config)
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
     let verifier = cli_verify::build_verifier_for_serve(&config).await?;
     enforce_verifier_liveness(&config, verifier.as_ref())

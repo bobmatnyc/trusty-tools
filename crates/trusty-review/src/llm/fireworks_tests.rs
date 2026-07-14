@@ -35,11 +35,7 @@ fn new_succeeds_with_valid_key_and_name_is_fireworks() {
 
 #[test]
 fn cost_estimate_kimi() {
-    let cost = estimate_cost_usd(
-        "accounts/fireworks/models/kimi-k2p5",
-        1_000_000,
-        1_000_000,
-    );
+    let cost = estimate_cost_usd("accounts/fireworks/models/kimi-k2p5", 1_000_000, 1_000_000);
     assert!((cost - 3.10_f64).abs() < 1e-9, "expected $3.10, got {cost}");
 }
 
@@ -79,7 +75,11 @@ fn cost_estimate_deepseek_r1_before_v3() {
 
 #[test]
 fn cost_estimate_unknown_model_is_zero() {
-    let cost = estimate_cost_usd("accounts/fireworks/models/some-future-model", 100_000, 50_000);
+    let cost = estimate_cost_usd(
+        "accounts/fireworks/models/some-future-model",
+        100_000,
+        50_000,
+    );
     assert_eq!(cost, 0.0);
 }
 
@@ -208,9 +208,11 @@ async fn complete_round_trips_through_mock_server() {
             raw.extend_from_slice(&buf[..n]);
             let text = String::from_utf8_lossy(&raw);
             if let Some(header_end) = text.find("\r\n\r\n") {
-                let content_length = text
-                    .lines()
-                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()));
+                let content_length = text.lines().find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                });
                 let body_len = raw.len() - (header_end + 4);
                 if content_length.is_none_or(|cl| body_len >= cl) {
                     break;
@@ -285,12 +287,17 @@ async fn complete_round_trips_through_mock_server() {
     assert_eq!(sent["messages"][0]["role"], "system");
     assert_eq!(sent["response_format"]["type"], "json_schema");
     assert!(
-        sent["response_format"]["json_schema"].get("strict").is_none(),
+        sent["response_format"]["json_schema"]
+            .get("strict")
+            .is_none(),
         "no strict field on the wire"
     );
 
     // ── Response assertions ─────────────────────────────────────────────
-    assert_eq!(resp.text, "{\"judgment\":\"CONFIRMED\",\"reason\":\"repro\"}");
+    assert_eq!(
+        resp.text,
+        "{\"judgment\":\"CONFIRMED\",\"reason\":\"repro\"}"
+    );
     assert_eq!(resp.input_tokens, 100);
     assert_eq!(resp.output_tokens, 10);
     assert_eq!(
@@ -359,7 +366,9 @@ async fn live_fireworks_structured_output_enforces_enum() {
     // The text must be a clean JSON object (no fences) with an enforced enum.
     let parsed: serde_json::Value =
         serde_json::from_str(resp.text.trim()).expect("response must be clean JSON");
-    let judgment = parsed["judgment"].as_str().expect("judgment must be a string");
+    let judgment = parsed["judgment"]
+        .as_str()
+        .expect("judgment must be a string");
     assert!(
         judgment == "CONFIRMED" || judgment == "REFUTED",
         "judgment must be one of the enum values, got {judgment:?}"

@@ -224,8 +224,8 @@ pub async fn cmd_profile(config: ReviewConfig, args: ProfileArgs) -> Result<()> 
 
         eprintln!("[trusty-review profile] Building LLM provider (model={reviewer_model})...");
         let llm = build_provider(&reviewer_model, &default_provider, &config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
         // Per-period batch review.
         let batch_reviewer = BatchReviewer::new(Arc::clone(&llm), &reviewer_model);

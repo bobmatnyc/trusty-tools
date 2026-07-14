@@ -415,11 +415,10 @@ async fn run_synthesis(
     budget: Budget,
 ) -> Synthesis {
     let role = &config.role_models.reviewer;
-    let provider =
-        match build_provider(&role.model, &role.provider, config).await {
-            Ok(p) => p,
-            Err(e) => return Synthesis::unavailable(format!("provider build failed: {e}")),
-        };
+    let provider = match build_provider(&role.model, &role.provider, config).await {
+        Ok(p) => p,
+        Err(e) => return Synthesis::unavailable(format!("provider build failed: {e}")),
+    };
 
     // Wave-3 investigation (local checkouts only): select → LLM → verify, then
     // inject verified findings so synthesis and the reporter render them.
