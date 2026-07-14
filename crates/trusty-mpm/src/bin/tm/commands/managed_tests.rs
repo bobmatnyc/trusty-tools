@@ -210,11 +210,11 @@ async fn spawn_test_daemon_with_unrestartable_stopped_session() -> (String, Stri
 
 /// #2649: a daemon-rejected restart (422 — the seeded workspace directory was
 /// never created on disk) must still propagate as `Err` at the CLI layer now
-/// that `session_resume` delegates to `resume_guided_session` — the same
+/// that `session_resume` delegates to `resume_session` — the same
 /// non-swallowing guarantee #2457/#2521 established for the old direct-POST
 /// implementation. Deterministic and tmux/TTY-independent: the failure fires
-/// inside `restart_via_daemon`, BEFORE `resume_guided_session` would ever
-/// reach the terminal hand-off (`tmux_attach`).
+/// inside `restart_via_daemon`, BEFORE `resume_session` would ever reach the
+/// terminal hand-off (`tmux_attach`).
 #[tokio::test]
 async fn session_resume_restart_failure_errors() {
     let (url, id) = spawn_test_daemon_with_unrestartable_stopped_session().await;
@@ -225,6 +225,121 @@ async fn session_resume_restart_failure_errors() {
     assert!(
         err.to_string().contains("cannot restart"),
         "error should surface the daemon's rejection: {err}"
+    );
+}
+
+/// #2649 code-critic review, HIGH #1 + HIGH #2: a session that is NOT
+/// stopped/errored (e.g. `active`/`provisioning`) WITH a live tmux pane must
+/// resolve to `ResumeAction::Attach` — no `/resume` POST, no daemon-side
+/// mutation at all — the PM-accepted idempotent "resume = get me into this
+/// session" UX (see `session_resume`'s doc for the full rationale; this
+/// SUPERSEDES the pre-#2649 behavior of bailing with the daemon's raw 409
+/// "cannot resume a session in state 'active'"). It also proves the HIGH #1
+/// `no_attach` gate: under `cargo test`, stdin is never a TTY, so
+/// `session_resume` must still return `Ok(())` (headless success) rather
+/// than attempting (and presumably failing/hanging on) a real tmux attach
+/// with no controlling terminal to move.
+///
+/// Why `provisioning` and not the literal `active` string: branch selection
+/// here is state-string-independent — both `active` and `provisioning` fail
+/// `needs_restart` identically, so the `Provisioning` state `create_with_id`
+/// naturally leaves a freshly-seeded record in is an equally valid stand-in.
+/// Getting a record into `Active` through public API surface alone would
+/// require the separate `/reactivate` machinery (#2453), adding seeding
+/// complexity with no additional coverage — the literal `"active"` string is
+/// already exhaustively covered at the pure-function layer by
+/// `guided_resume_plan_active_live_tmux_attaches` in `tests_behavior_c_tests.rs`.
+///
+/// What: seeds a session via `create_with_id` (left in its default
+/// `Provisioning` state), then spins up a REAL (not the daemon's fake) tmux
+/// session with the record's EXACT `tmux_name` — the CLI's own client-side
+/// `tmux_has_session` liveness probe always shells to the real system tmux
+/// regardless of what driver the (isolated, fake-driven) daemon uses
+/// server-side, so this is the one deterministic way to make that probe
+/// report "live" without depending on this test process's own tmux/TTY
+/// environment for the OUTCOME (only tmux's presence on `PATH`, already a
+/// hard dependency of this workspace's test suite — see
+/// `session_manager/tests.rs`). Calls the real `session_resume` CLI function
+/// and asserts: (1) `Ok(())` — headless success; (2) the daemon's own record
+/// of the session state is UNCHANGED afterward (still `provisioning`) — the
+/// only way to prove NO `/resume` POST landed, since a successful restart
+/// always flips state to `active`. The real tmux session is killed
+/// unconditionally (even on assertion failure) before returning.
+#[tokio::test]
+async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
+    use trusty_mpm::daemon::{api, state::DaemonState};
+    use trusty_mpm::runtime::RuntimeKind;
+    use trusty_mpm::session_manager::ManagedSessionId;
+
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.clone()).await);
+    let id = ManagedSessionId::new();
+    let ws = root.join(format!("{id}-headless-attach-ws"));
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create_with_id(
+            id,
+            "regression: #2649 headless active-live-tmux CLI test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+    assert_eq!(
+        record.state.to_string(),
+        "provisioning",
+        "sanity: create_with_id must leave a fresh record un-stopped/un-errored"
+    );
+
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let create_status = std::process::Command::new(&tmux_bin)
+        .args(["new-session", "-d", "-s", &record.tmux_name])
+        .status()
+        .expect("spawn real tmux session for the liveness probe");
+    assert!(
+        create_status.success(),
+        "failed to create the real scratch tmux session"
+    );
+
+    let router = api::router(std::sync::Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    let url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let result = session_resume(&client, &url, id.to_string()).await;
+
+    // Unconditional cleanup of the real tmux session, even if an assertion
+    // below panics.
+    let _ = std::process::Command::new(&tmux_bin)
+        .args(["kill-session", "-t", &record.tmux_name])
+        .output();
+
+    result.expect(
+        "headless resume of an already-live, non-stopped/errored session must succeed (Ok), \
+         not error",
+    );
+
+    let after: serde_json::Value = client
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.get("state").and_then(|v| v.as_str()),
+        Some("provisioning"),
+        "state must be UNCHANGED — a /resume POST would have flipped it to 'active'; this \
+         proves the Attach branch never issued a daemon-side restart"
     );
 }
 

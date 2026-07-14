@@ -15,6 +15,8 @@
 //! Test: `cli_parses_catalog_sync` exercises the parse path; the HTTP round-trip
 //! is covered by `tests/session_manager_mvp.rs`.
 
+use std::io::IsTerminal as _;
+
 use trusty_mpm::client::ManagedSessionSummary;
 
 use crate::cli::CatalogAction;
@@ -329,20 +331,39 @@ pub(crate) async fn session_stop(
 /// returning `Ok(())`.
 /// What: GETs `/api/v1/sessions/managed/{id}` (a 404 bails with an error); on
 /// success, hands the resulting [`ManagedSessionSummary`] to
-/// `resume_guided_session`, which picks the right action (attach directly /
-/// restart via the daemon `/resume` endpoint / auto-reconcile a zombie then
-/// restart) purely from the record's state and live tmux liveness, then
-/// attaches (or `switch-client`s, when already inside tmux) the caller's
-/// terminal into the session's tmux window.
+/// [`crate::commands::guided_resume::resume_session`], which picks the right
+/// action (attach directly / restart via the daemon `/resume` endpoint /
+/// auto-reconcile a zombie then restart) purely from the record's state and
+/// live tmux liveness. When stdin is a real terminal, it then attaches (or
+/// `switch-client`s, when already inside tmux) the caller's terminal into the
+/// session's tmux window; otherwise (code-critic HIGH, #2649 review — a
+/// headless/scripted invocation has no controlling terminal to move) it
+/// still performs the daemon-side restart/reconcile but skips the attach and
+/// prints the resulting `resumed <name> (<id>) [<state>]` status line
+/// instead, returning `Ok(())` on daemon-side success either way.
+///
+/// #2649 review, PM-accepted UX change: an `Active` session with a live tmux
+/// pane now resolves to `ResumeAction::Attach` — no `/resume` POST at all,
+/// just an idempotent (re)attach — rather than the pre-#2649 behavior of
+/// bailing with the daemon's raw 409 ("cannot resume a session in state
+/// 'active'"). This makes `tm session resume <id>` idempotent for an
+/// already-running session: "resume" now means "get me into this session",
+/// matching the guided picker's long-standing behavior, instead of treating
+/// an already-active session as a usage error.
 /// Test: HTTP path covered by the integration test; parse by
 /// `cli_parses_session_managed_resume_verb`; `session_resume_not_found_errors`
 /// covers the #2457 exit-code fix for the 404 branch;
 /// `session_resume_restart_failure_errors` (in `managed_tests.rs`, #2649)
 /// covers the same non-swallowing guarantee for a daemon-rejected restart now
 /// that this handler routes through the shared restart/attach helper instead
-/// of POSTing `/resume` directly; `plan_resume`/`needs_restart`/`is_zombie`
-/// in `guided_resume.rs`'s own tests exhaustively cover the branch selection
-/// this handler now shares.
+/// of POSTing `/resume` directly; `session_resume_headless_active_live_tmux_skips_restart_and_attach`
+/// (`managed_tests.rs`, #2649) proves the new Active+live-tmux idempotent-attach
+/// UX never issues a `/resume` POST (asserted via the record's state staying
+/// unchanged) and that headless mode exits `Ok(())` without attempting a real
+/// tmux attach; `plan_resume`/`needs_restart`/`is_zombie` in
+/// `guided_resume.rs`'s own tests (including
+/// `guided_resume_plan_active_live_tmux_attaches`) exhaustively cover the
+/// branch selection this handler now shares.
 pub(crate) async fn session_resume(
     client: &reqwest::Client,
     url: &str,
@@ -356,7 +377,11 @@ pub(crate) async fn session_resume(
         anyhow::bail!("managed session '{id}' not found");
     }
     let session: ManagedSessionSummary = resp.error_for_status()?.json().await?;
-    crate::commands::guided_resume::resume_guided_session(client, url, &session).await
+    // #2649 review (code-critic HIGH): gate the terminal hand-off on actually
+    // having a terminal — a headless/scripted caller (no stdin TTY) still gets
+    // the daemon-side restart/reconcile, just never a doomed real tmux attach.
+    let no_attach = !std::io::stdin().is_terminal();
+    crate::commands::guided_resume::resume_session(client, url, &session, no_attach).await
 }
 
 /// `tm session decommission <id>` — full teardown (may or may not remove workspace).
