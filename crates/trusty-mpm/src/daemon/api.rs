@@ -142,9 +142,7 @@ use super::managed_routes::{
     stop_managed_session, stop_managed_session_runtime,
 };
 // Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
-use super::manager::{
-    manager_chat_route, manager_digest_route, manager_status_route, manager_version_route,
-};
+use super::manager::manager_router;
 
 /// Typed HTTP response bodies for every endpoint.
 ///
@@ -341,16 +339,14 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // any channel connects. Registrations live with their handlers in
         // `managed_routes::proxy::proxy_router` and are merged here.
         .merge(proxy_router())
-        // Layer-3 portfolio manager surface (epic #2109, DOC-36 §3.2). Phase 1:
-        // a self-describing capabilities stub, the deterministic (no-LLM)
-        // cross-project rollup, the LLM-authored digest (deterministic fallback),
-        // and the read-only conversation-keyed chat loop. All are read-only and
-        // curl-testable with no channel/bot token (§4). Later WIs add
-        // route-task/escalations.
-        .route("/api/v1/manager/version", get(manager_version_route))
-        .route("/api/v1/manager/status", get(manager_status_route))
-        .route("/api/v1/manager/digest", get(manager_digest_route))
-        .route("/api/v1/manager/chat", post(manager_chat_route))
+        // Layer-3 portfolio manager surface (epic #2109, DOC-36 §3.2), merged as a
+        // self-contained sub-router (like the L2 `proxy_router`). Phase 1: the
+        // read-only capabilities stub, deterministic rollup, LLM digest, and chat
+        // loop. Phase 2: `route-task` (advisory task routing + disambiguation,
+        // #2585) and `act` (session launch/inject/summarize propose→confirm, which
+        // mutates ONLY on an explicit `confirm: true`, #2586). All curl-testable
+        // with no channel/bot token (§4).
+        .merge(manager_router())
         // DOC-35 §10.2/§10.5 (#2378 + #2380): Deliverable/Milestone CRUD, nested
         // under the projects namespace. The literal `/deliverables` and
         // `/milestones` segments come before their `/{id}` param routes so a

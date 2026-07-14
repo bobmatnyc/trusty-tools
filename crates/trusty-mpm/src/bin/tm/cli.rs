@@ -1680,55 +1680,10 @@ pub(crate) enum ProjectsAction {
     },
 }
 
-/// Actions for `tm manager <action>` (DOC-36 §3.2/§6 phase 1, #2583).
-///
-/// Why: mirrors `ProjectsAction`'s shape — one variant per daemon verb this
-/// WI wraps. `route-task`/`escalations` (phase 2/3) are deliberately absent;
-/// this ticket wraps only the phase-1 read-only triad the issue scopes.
-/// What: `Status`/`Digest`/`Chat`, each a thin client over the matching
-/// `DaemonClient::manager_*` method (`client/http_client/manager.rs`).
-/// Test: `cli_parses_manager_*` in `tests_manager.rs`.
-#[derive(Debug, Subcommand)]
-pub(crate) enum ManagerAction {
-    /// Deterministic cross-project portfolio rollup — no LLM call.
-    Status {
-        /// Emit the raw status JSON instead of the human view.
-        #[arg(long)]
-        json: bool,
-    },
-    /// LLM-authored portfolio (or single-project) narrative, with a
-    /// deterministic fallback when no inference provider is configured.
-    Digest {
-        /// `portfolio` (default) or `project:<name>` to scope to one project.
-        #[arg(long, default_value = "portfolio")]
-        scope: String,
-        /// Emit the raw digest JSON instead of the human view.
-        #[arg(long)]
-        json: bool,
-    },
-    /// One-shot chat turn against the portfolio manager persona.
-    ///
-    /// Why (conversation-key convention, #2583): defaults to a stable
-    /// per-user key (`cli:$USER`, see `commands::manager::default_conversation_key`)
-    /// so repeated one-shot invocations on the same machine accumulate as one
-    /// ongoing conversation server-side (matching `SessionProxy`'s focus-map
-    /// keying, DOC-36 §3.2) — `--conversation` overrides it for scripts/tests
-    /// that need an isolated key. Interactive REPL mode (multi-turn within a
-    /// single process) is deferred to a follow-up; this ships the one-shot
-    /// form the issue's acceptance criteria require.
-    Chat {
-        /// The message to send. When omitted, reads the full message from
-        /// stdin (supports both piping and a terminal Ctrl-D-terminated
-        /// single message).
-        message: Option<String>,
-        /// Override the conversation key (defaults to a stable per-user key).
-        #[arg(long)]
-        conversation: Option<String>,
-        /// Emit the raw chat-response JSON instead of the human view.
-        #[arg(long)]
-        json: bool,
-    },
-}
+// The `tm manager <action>` subcommand tree lives in `cli_manager.rs` (extracted
+// to keep this file under the SLOC cap); re-exported so `crate::cli::ManagerAction`
+// stays the stable reference every dispatcher and parse test uses.
+pub(crate) use crate::cli_manager::ManagerAction;
 
 /// Actions for `tm projects config <name>` (DOC-35 §3.1/§6, #2120).
 ///

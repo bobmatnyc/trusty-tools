@@ -35,20 +35,28 @@
 //! Test: `tests/manager_routes.rs` (real-HTTP contract, mirrors
 //! `tests/proxy_routes.rs`) plus the in-module unit tests in each submodule.
 
+pub mod act;
+pub mod actuator;
 pub mod chat;
 pub mod chat_store;
 pub mod digest;
 pub mod inference;
 pub mod memory;
+pub mod route_task;
 pub mod state;
 pub mod status;
 pub mod version;
 
+pub use act::{ActRequest, ActResponse, ProposedAction, manager_act_route};
+pub use actuator::{
+    DaemonLauncher, LaunchOutcome, ManagerActuator, ProxyActuator, SessionLauncher,
+};
 pub use chat::{ChatReplyBody, ChatRequestBody, manager_chat_route};
 pub use chat_store::{ChatStore, ChatTurn, TurnRole};
 pub use digest::{DigestResponse, DigestScope, manager_digest_route};
 pub use inference::{InferenceUnavailable, ManagerInference};
 pub use memory::{PORTFOLIO_PALACE_ID, PortfolioPalace};
+pub use route_task::{ResolvedBy, RouteTaskRequest, RouteTaskResponse, manager_route_task_route};
 pub use state::ManagerState;
 pub use status::{
     PortfolioStatusResponse, PortfolioTotals, aggregate_portfolio_status, manager_status_route,
@@ -56,3 +64,28 @@ pub use status::{
 pub use version::{
     ManagerEndpoint, ManagerPalaceStatus, ManagerVersionResponse, manager_version_route,
 };
+
+/// Build the sub-router for the Layer-3 portfolio manager surface
+/// (`/api/v1/manager/*`, epic #2109, DOC-36 §3.2).
+///
+/// Why: co-locating every manager route registration with the module that owns
+/// the handlers (rather than inlining them in the daemon's monolithic
+/// `api::router`) keeps this cohesive cluster self-contained and lets
+/// `api::router` compose it with a single `.merge` — mirroring how the L2
+/// [`crate::daemon::managed_routes::proxy::proxy_router`] is composed. Every route
+/// binds the same [`DaemonState`](crate::daemon::state::DaemonState) the parent
+/// router carries, so merging is state-preserving.
+/// What: registers the phase-1 read-only triad (`version`/`status`/`digest`/`chat`)
+/// plus the phase-2 `route-task` (advisory) and `act` (propose→confirm) verbs.
+/// Test: the real-HTTP `tests/manager_routes.rs` and `tests/manager_routing.rs`
+/// exercise these routes exactly as before this extraction.
+pub fn manager_router() -> axum::Router<std::sync::Arc<crate::daemon::state::DaemonState>> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/api/v1/manager/version", get(manager_version_route))
+        .route("/api/v1/manager/status", get(manager_status_route))
+        .route("/api/v1/manager/digest", get(manager_digest_route))
+        .route("/api/v1/manager/chat", post(manager_chat_route))
+        .route("/api/v1/manager/route-task", post(manager_route_task_route))
+        .route("/api/v1/manager/act", post(manager_act_route))
+}

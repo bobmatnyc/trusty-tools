@@ -8,6 +8,7 @@
 //! Test: `cargo test -p trusty-mpm` runs the full suite in `tests.rs`.
 
 mod cli;
+mod cli_manager;
 mod commands;
 mod formatters;
 mod gh_identity;

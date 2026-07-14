@@ -120,7 +120,7 @@ async fn manager_version_route_reports_capabilities() {
     let body: serde_json::Value = resp.json().await.unwrap();
 
     assert_eq!(body["manager_api_version"], "0.1.0");
-    assert_eq!(body["phase"], 1);
+    assert_eq!(body["phase"], 2);
     assert_eq!(body["palace"]["id"], "tm-manager-portfolio");
     // Palace availability is feature-dependent: a default build (no
     // `manager-memory`) reports the palace as unavailable but still answers 200
@@ -159,8 +159,16 @@ async fn manager_version_route_reports_capabilities() {
         .find(|e| e["path"] == "/api/v1/manager/route-task")
         .expect("route-task endpoint advertised");
     assert_eq!(
-        route_task_ep["available"], false,
-        "route-task is a phase-2 WI, advertised as planned"
+        route_task_ep["available"], true,
+        "route-task ships in phase 2 (WI-8, #2585)"
+    );
+    let act_ep = endpoints
+        .iter()
+        .find(|e| e["path"] == "/api/v1/manager/act")
+        .expect("act endpoint advertised");
+    assert_eq!(
+        act_ep["available"], true,
+        "act proposal-and-confirm ships in phase 2 (WI-9, #2586)"
     );
 }
 

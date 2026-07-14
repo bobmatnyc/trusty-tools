@@ -246,6 +246,57 @@ impl ManagerChatOutcome {
     }
 }
 
+/// Parsed result of `POST /api/v1/manager/route-task` (WI-8, #2585).
+///
+/// Why: backs `tm manager route` (#2587) — the thin CLI wrapper over the
+/// advisory routing endpoint. The daemon always returns a `{ project,
+/// confidence, rationale, resolved_by }` body on success (200) including the
+/// no-match case (`project: null`), so one parse function handles every routed
+/// result the CLI renders.
+/// What: the resolved project (`None` on no-match), the confidence, the
+/// rationale, and the decision path (`resolver` | `disambiguation` |
+/// `no_match`).
+/// Test: `route_task_outcome_reads_real_daemon_shape`,
+/// `route_task_outcome_reads_no_match` in this module's `tests` submodule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteTaskOutcome {
+    /// The resolved project name, or `None` when nothing matched.
+    pub project: Option<String>,
+    /// Confidence in the resolved route, `[0.0, 1.0]`.
+    pub confidence: f32,
+    /// Human-readable rationale for the route.
+    pub rationale: String,
+    /// How the route was decided (`resolver` | `disambiguation` | `no_match`).
+    pub resolved_by: String,
+    /// The raw response body, kept for `--json` passthrough.
+    pub raw: Value,
+}
+
+impl RouteTaskOutcome {
+    /// Build from a `RouteTaskResponse`-shaped body. Returns `None` when the body
+    /// carries no `resolved_by` field at all (not this response shape).
+    fn from_body(raw: Value) -> Option<Self> {
+        let resolved_by = raw.get("resolved_by").and_then(Value::as_str)?.to_string();
+        let project = raw
+            .get("project")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let confidence = raw.get("confidence").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let rationale = raw
+            .get("rationale")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Some(Self {
+            project,
+            confidence,
+            rationale,
+            resolved_by,
+            raw,
+        })
+    }
+}
+
 /// Format a non-JSON (or unrecognized-shape) error body for `anyhow::bail!`.
 ///
 /// Why: `digest.rs`'s 400 (`invalid scope`) and 404 (`project '{name}' is not
@@ -438,6 +489,55 @@ impl DaemonClient {
 
         anyhow::bail!(daemon_error_text(status, &body_text))
     }
+
+    /// Route a free-text task to a project via `POST /api/v1/manager/route-task`.
+    ///
+    /// Why: backs `tm manager route` (#2587), against the shipped
+    /// `daemon/manager/route_task.rs` contract (WI-8, #2585). Advisory only —
+    /// resolving a route never launches or mutates a session. Same
+    /// feature-detected-404 handling as [`Self::manager_digest`]/
+    /// [`Self::manager_chat`]: a `404` maps to `Ok(None)` ONLY when
+    /// [`Self::manager_endpoint_available`] reports the route unmounted (an older
+    /// daemon predating phase 2), so the CLI can print a friendly upgrade hint
+    /// rather than a raw 404. Uses the longer chat-scoped timeout since a genuine
+    /// tie escalates to the daemon's own upstream LLM round trip (DOC-36 §3.3).
+    /// What: POSTs `{ text }`; parses the body as `RouteTaskResponse`-shaped on
+    /// ANY status code (the daemon returns 200 even for the advisory no-match);
+    /// `Ok(None)` on a genuine mount-detection 404; `Err` otherwise (carrying the
+    /// daemon's body message, e.g. a 400 for empty text).
+    /// Test: `route_task_outcome_reads_real_daemon_shape`,
+    /// `route_task_outcome_reads_no_match`; live HTTP in
+    /// `crates/trusty-mpm/tests/manager_routing.rs`.
+    pub async fn manager_route_task(&self, text: &str) -> anyhow::Result<Option<RouteTaskOutcome>> {
+        let url = format!("{}/api/v1/manager/route-task", self.base);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "text": text }))
+            .timeout(super::config::CHAT_REQUEST_TIMEOUT)
+            .send()
+            .await?;
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        if let Ok(body) = serde_json::from_str::<Value>(&body_text)
+            && let Some(outcome) = RouteTaskOutcome::from_body(body)
+        {
+            return Ok(Some(outcome));
+        }
+
+        if status == StatusCode::NOT_FOUND {
+            if !self
+                .manager_endpoint_available("/api/v1/manager/route-task")
+                .await
+            {
+                return Ok(None);
+            }
+            anyhow::bail!(daemon_error_text(status, &body_text));
+        }
+
+        anyhow::bail!(daemon_error_text(status, &body_text))
+    }
 }
 
 #[cfg(test)]
@@ -562,5 +662,41 @@ mod tests {
     #[test]
     fn manager_chat_outcome_none_for_non_chat_shape() {
         assert!(ManagerChatOutcome::from_body(serde_json::json!({ "ok": true }), "k").is_none());
+    }
+
+    /// A resolved `RouteTaskResponse` — the real success shape from
+    /// `daemon/manager/route_task.rs`.
+    #[test]
+    fn route_task_outcome_reads_real_daemon_shape() {
+        let body = serde_json::json!({
+            "project": "alpha",
+            "confidence": 0.95,
+            "rationale": "resolved to 'alpha' by exact name match (confidence 0.95)",
+            "resolved_by": "resolver",
+        });
+        let outcome = RouteTaskOutcome::from_body(body).expect("RouteTaskResponse shape");
+        assert_eq!(outcome.project.as_deref(), Some("alpha"));
+        assert!((outcome.confidence - 0.95).abs() < 1e-6);
+        assert_eq!(outcome.resolved_by, "resolver");
+    }
+
+    /// The advisory no-match shape (`project: null`, confidence 0).
+    #[test]
+    fn route_task_outcome_reads_no_match() {
+        let body = serde_json::json!({
+            "project": null,
+            "confidence": 0.0,
+            "rationale": "no registered project matched the task",
+            "resolved_by": "no_match",
+        });
+        let outcome = RouteTaskOutcome::from_body(body).expect("no-match shape");
+        assert!(outcome.project.is_none());
+        assert_eq!(outcome.resolved_by, "no_match");
+    }
+
+    /// A body with no `resolved_by` field is not a route-task shape.
+    #[test]
+    fn route_task_outcome_none_for_non_route_shape() {
+        assert!(RouteTaskOutcome::from_body(serde_json::json!({ "error": "nope" })).is_none());
     }
 }
