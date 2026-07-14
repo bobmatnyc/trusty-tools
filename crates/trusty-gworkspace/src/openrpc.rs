@@ -101,7 +101,21 @@ pub fn scopes_for_tool(name: &str) -> &'static [&'static str] {
         | "set_document_style"
         | "insert_table_in_document"
         | "find_tables_in_document"
-        | "manage_table_structure" => &[DOCUMENTS, DRIVE],
+        | "manage_table_structure"
+        | "manage_document_tabs"
+        | "create_document_tab"
+        | "move_paragraph_in_document"
+        | "format_paragraph_in_document"
+        | "create_list_in_document"
+        | "insert_image_in_document"
+        | "format_table_cells"
+        | "set_table_column_widths"
+        | "apply_table_style"
+        | "format_document_tables"
+        | "manage_document_header_footer"
+        | "create_document_from_template"
+        | "get_document_named_styles"
+        | "update_document_named_styles" => &[DOCUMENTS, DRIVE],
 
         // Sheets
         "get_spreadsheet"

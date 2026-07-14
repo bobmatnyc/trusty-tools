@@ -128,6 +128,48 @@ pub async fn handle_tool_call(state: &AppState, name: &str, args: Value) -> Valu
         "manage_table_structure" => {
             services::docs::table_ops::manage_table_structure(&state.client, args).await
         }
+        "manage_document_tabs" => {
+            services::docs::tabs::manage_document_tabs(&state.client, args).await
+        }
+        "create_document_tab" => {
+            services::docs::tabs::create_document_tab(&state.client, args).await
+        }
+        "move_paragraph_in_document" => {
+            services::docs::paragraphs::move_paragraph_in_document(&state.client, args).await
+        }
+        "format_paragraph_in_document" => {
+            services::docs::paragraphs::format_paragraph_in_document(&state.client, args).await
+        }
+        "create_list_in_document" => {
+            services::docs::paragraphs::create_list_in_document(&state.client, args).await
+        }
+        "insert_image_in_document" => {
+            services::docs::images::insert_image_in_document(&state.client, args).await
+        }
+        "format_table_cells" => {
+            services::docs::table_style::format_table_cells(&state.client, args).await
+        }
+        "set_table_column_widths" => {
+            services::docs::table_style::set_table_column_widths(&state.client, args).await
+        }
+        "apply_table_style" => {
+            services::docs::table_preset::apply_table_style(&state.client, args).await
+        }
+        "format_document_tables" => {
+            services::docs::table_format::format_document_tables(&state.client, args).await
+        }
+        "manage_document_header_footer" => {
+            services::docs::header_footer::manage_document_header_footer(&state.client, args).await
+        }
+        "create_document_from_template" => {
+            services::docs::templates::create_document_from_template(&state.client, args).await
+        }
+        "get_document_named_styles" => {
+            services::docs::templates::get_document_named_styles(&state.client, args).await
+        }
+        "update_document_named_styles" => {
+            services::docs::templates::update_document_named_styles(&state.client, args).await
+        }
 
         // Sheets
         "get_spreadsheet" => services::sheets::core::get_spreadsheet(&state.client, args).await,
