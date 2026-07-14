@@ -245,6 +245,36 @@ fn base_preamble_nudges_testable_design() {
     );
 }
 
+/// `BASE_PREAMBLE` instructs initializing a persistent store's schema at
+/// startup, before serving, and in a way that also runs under a test client
+/// (#2622 bake-off L3 diagnosis: generated DB-backed services intermittently
+/// omitted `create_all`/migrations, so the first CRUD request hit a missing
+/// table).
+///
+/// Why: This is a general product-quality nudge for any service backed by a
+/// database or persistent store, not a benchmark- or provider-specific patch —
+/// it must apply to every agent's assembled prompt, so it belongs in the
+/// model-agnostic BASE preamble alongside the neighbouring design nudges.
+/// What: Asserts the preamble names both halves of the principle: initialize
+/// the schema before serving the first request, and do it so it also runs
+/// under a test client.
+/// Test: this test.
+#[test]
+fn base_preamble_requires_persistent_store_init() {
+    assert!(
+        BASE_PREAMBLE.contains("persistent store"),
+        "must address services backed by a database or other persistent store"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("BEFORE the service handles its first request"),
+        "must instruct initializing the schema before the first request"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("in-process test client"),
+        "must ensure initialization also runs under a test client"
+    );
+}
+
 /// `BASE_PREAMBLE` carries no host- or model-specific tokens (spec §2a/§3).
 ///
 /// Why: Any model name, provider name, or host path in the BASE preamble would
@@ -282,7 +312,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0xcdfb_41b6_3f06_2396;
+const EXPECTED_PREAMBLE_HASH: u64 = 0x83d8_0652_3fc6_0053;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///

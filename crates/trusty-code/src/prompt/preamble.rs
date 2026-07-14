@@ -75,6 +75,18 @@ accept plain data as input and return plain data as output.
 - Keep I/O (subprocess invocation, network calls, filesystem access) in thin \
 wrapper functions, separate from the core logic they feed.
 
+## Persistent-store initialization
+
+- When the service you build is backed by a database or other persistent store, \
+initialize its schema — create the tables, or run the migrations — at \
+application startup, BEFORE the service handles its first request. An app that \
+declares data models but never creates their tables will fail the first read or \
+write with a missing-table error.
+- Perform this initialization so it also runs under an in-process test client \
+(for example a startup hook the client triggers, or an explicit init call the \
+app makes when it is constructed), so the very first request in a test cannot \
+reach an uninitialized store.
+
 ## Finish convention
 
 - You signal that the task is complete by producing an assistant turn that \
