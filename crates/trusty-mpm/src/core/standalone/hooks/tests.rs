@@ -68,14 +68,20 @@ fn test_hook_command_rejects_ephemeral_exe_override() {
 }
 
 #[test]
-fn test_mpm_hook_additions_has_five_events() {
+fn test_mpm_hook_additions_has_six_events() {
     // #1744: SessionStart/SessionEnd must be present so the daemon receives
     // them for claude_session_id capture and immediate-Stopped marking.
+    // #2610: SubagentStop must be present so the hook handler sees a delegated
+    // subagent's turn-end and can flag an idle-parking final message.
     let v = mpm_hook_additions();
     let hooks = v.get("hooks").expect("missing 'hooks' key");
     assert!(hooks.get("PreToolUse").is_some(), "missing PreToolUse");
     assert!(hooks.get("PostToolUse").is_some(), "missing PostToolUse");
     assert!(hooks.get("Stop").is_some(), "missing Stop");
+    assert!(
+        hooks.get("SubagentStop").is_some(),
+        "missing SubagentStop (#2610)"
+    );
     assert!(
         hooks.get("SessionStart").is_some(),
         "missing SessionStart (#1744)"
@@ -97,6 +103,7 @@ fn test_mpm_hook_additions_with_exe_embeds_absolute_path() {
         "PreToolUse",
         "PostToolUse",
         "Stop",
+        "SubagentStop",
         "SessionStart",
         "SessionEnd",
     ] {
@@ -513,6 +520,7 @@ fn test_write_project_hooks_collapses_stale_hash_and_mvp_entries() {
         "PreToolUse",
         "PostToolUse",
         "Stop",
+        "SubagentStop",
         "SessionStart",
         "SessionEnd",
     ] {
@@ -611,7 +619,13 @@ fn test_write_project_hooks_replaces_stale_exe_path_group() {
     );
 
     // Every other event started empty, so exactly one (MPM) group must survive.
-    for event in &["PostToolUse", "Stop", "SessionStart", "SessionEnd"] {
+    for event in &[
+        "PostToolUse",
+        "Stop",
+        "SubagentStop",
+        "SessionStart",
+        "SessionEnd",
+    ] {
         let arr = hooks[*event]
             .as_array()
             .unwrap_or_else(|| panic!("event {event} must be present after two writes"));
