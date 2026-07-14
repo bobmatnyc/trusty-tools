@@ -248,4 +248,55 @@ mod tests {
     fn serve_args_are_serve() {
         assert_eq!(serve_args(), vec!["serve".to_string()]);
     }
+
+    /// Cross-crate port-uniqueness contract (#2566 review finding).
+    ///
+    /// Why: trusty-review's original `DEFAULT_PORT` (7880) silently collided
+    /// with trusty-mpm's live `DEFAULT_DAEMON_ADDR`, crash-looping a launchd
+    /// agent on install. This mirrors that fix's guard for the console's own
+    /// default (`crate::DEFAULT_PORT`), pointer-commented to each sibling's
+    /// real source constant, so a future edit here that reintroduces a
+    /// collision fails this test instead of shipping a crash-loop.
+    /// What: asserts `crate::DEFAULT_PORT` is absent from the known-sibling
+    /// ports list.
+    /// Test: this is the test.
+    #[test]
+    fn default_port_does_not_collide_with_known_siblings() {
+        // (binary, port, source-of-truth pointer)
+        let known_siblings: &[(&str, u16, &str)] = &[
+            (
+                "trusty-memory",
+                7070,
+                "trusty-memory/src/http_server.rs::DEFAULT_HTTP_PORT",
+            ),
+            (
+                "trusty-search",
+                7878,
+                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-analyze",
+                7879,
+                "trusty-analyze/src/service/events.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-review",
+                7890,
+                "trusty-review/src/service/mod.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-mpm",
+                7880,
+                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+            ),
+        ];
+        for (binary, port, source) in known_siblings {
+            assert_ne!(
+                crate::DEFAULT_PORT,
+                *port,
+                "trusty-console DEFAULT_PORT {} collides with {binary}'s {port} ({source})",
+                crate::DEFAULT_PORT
+            );
+        }
+    }
 }

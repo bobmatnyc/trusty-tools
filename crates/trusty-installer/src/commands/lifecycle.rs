@@ -315,6 +315,15 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
                 .unwrap_or(false);
             match start_plan(present) {
                 StartPlan::Bootstrap => {
+                    // #2566 review (item 4): `bootstrap()` boots the agent OUT
+                    // before reloading it — a redundant restart when `tctl
+                    // start` runs right after `tctl install` already bootstrapped
+                    // this same daemon seconds earlier. Skip the bounce when the
+                    // agent is already loaded; this is a cheap `launchctl print`
+                    // check (mirrors the daemons' own `service status`).
+                    if cfg.is_loaded() {
+                        return Ok(format!("{} already running (skipped restart)", cfg.label));
+                    }
                     cfg.bootstrap()?;
                     Ok(format!("bootstrapped {}", cfg.label))
                 }

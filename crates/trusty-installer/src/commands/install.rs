@@ -27,16 +27,29 @@ use trusty_progress::{Component, ComponentTracker};
 use super::dependency_graph::describe_added;
 use super::progress_ui::{narrator, prompt_yes_no};
 use super::runtime::block_on;
-use super::service_bootstrap::{bootstrap_enabled, bootstrap_member_service, NO_SERVICE_ENV};
+use super::service_bootstrap::{
+    bootstrap_enabled, bootstrap_member_service, BootstrapAction, NO_SERVICE_ENV,
+};
 use super::stable_set::{select_members_transitive, ManageStrategy, StableMember};
 use crate::output::render_json;
 
 /// One member's install outcome for the `--json` report.
 ///
 /// Why: A typed per-member result keeps the machine output stable and testable.
-/// What: `member` is the crate name; `ok` whether it installed + health-gated;
-/// `detail` a human note (e.g. the error on failure).
-/// Test: `tests::report_serialises`.
+/// `service_ok` / `service_detail` were added after a review of #2566 found
+/// that a genuine `service install` failure was reported ONLY via an info-level
+/// narration line — `--json` output claimed `all_ok: true` / exit 0 even when
+/// every daemon's launchd bootstrap had failed, which is precisely the failure
+/// class #2557 existed because of (a broken daemon that LOOKS installed).
+/// What: `member` is the crate name; `ok` whether the binary install +
+/// health-gate succeeded; `detail` a human note (e.g. the error on binary
+/// failure). `service_ok` is `true` when the post-install launchd service
+/// bootstrap was not attempted (bootstrap disabled, non-service member, or a
+/// plist already present — none of those are failures) OR when it ran and
+/// succeeded; it is `false` ONLY when `service install` was attempted and
+/// genuinely errored. `service_detail` carries the human note for whichever
+/// case applied.
+/// Test: `tests::report_serialises`, `tests::report_all_ok_reflects_service_failure`.
 #[derive(Clone, Debug, Serialize)]
 pub struct InstallOutcome {
     /// Crate name installed.
@@ -45,6 +58,28 @@ pub struct InstallOutcome {
     pub ok: bool,
     /// Human detail / error message.
     pub detail: String,
+    /// Whether the post-install service bootstrap succeeded or was not
+    /// attempted (see field doc above for the false-only-on-genuine-failure
+    /// contract).
+    pub service_ok: bool,
+    /// Human note for the service bootstrap outcome.
+    pub service_detail: String,
+}
+
+impl InstallOutcome {
+    /// Build the `service_ok = true`, empty-detail outcome for a member whose
+    /// binary install failed (never reached the service-bootstrap step).
+    ///
+    /// Why: a binary-install failure and a service-bootstrap failure are
+    /// distinct failure classes; a binary that never installed cannot have a
+    /// "failed" service bootstrap — centralising this avoids a copy-pasted
+    /// `service_ok: true, service_detail: String::new()` at every call site.
+    /// What: returns `(true, "")`&nbsp;— not-applicable, not a failure.
+    /// Test: exercised via `tests::report_all_ok` (binary failure alone still
+    /// yields `all_ok == false` from `ok`, independent of this default).
+    fn service_not_attempted() -> (bool, String) {
+        (true, String::new())
+    }
 }
 
 /// The aggregate install report.
@@ -52,25 +87,31 @@ pub struct InstallOutcome {
 /// Why: `--json` consumers want the whole rollup in one object with an overall
 /// verdict; the human path renders the same data as a component table.
 /// What: Holds per-member outcomes and the computed `all_ok`.
-/// Test: `tests::report_serialises`, `tests::report_all_ok`.
+/// Test: `tests::report_serialises`, `tests::report_all_ok`,
+/// `tests::report_all_ok_reflects_service_failure`.
 #[derive(Clone, Debug, Serialize)]
 pub struct InstallReport {
     /// Fixed command tag for JSON consumers.
     pub command: &'static str,
     /// Per-member install outcomes in install order.
     pub members: Vec<InstallOutcome>,
-    /// Whether every member installed successfully.
+    /// Whether every member installed AND every attempted service bootstrap
+    /// succeeded (see [`InstallOutcome`]'s field docs for what counts as a
+    /// service failure).
     pub all_ok: bool,
 }
 
 impl InstallReport {
     /// Build a report from per-member outcomes.
     ///
-    /// Why: Centralises the `all_ok` derivation so the exit code and JSON agree.
-    /// What: Sets `command = "install"` and `all_ok = every outcome ok`.
-    /// Test: `tests::report_all_ok`.
+    /// Why: Centralises the `all_ok` derivation so the exit code and JSON agree,
+    /// and so the report cannot claim success while a genuine service-bootstrap
+    /// failure occurred (#2566 review finding).
+    /// What: Sets `command = "install"` and
+    /// `all_ok = every outcome has ok == true AND service_ok == true`.
+    /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`.
     fn build(members: Vec<InstallOutcome>) -> Self {
-        let all_ok = members.iter().all(|m| m.ok);
+        let all_ok = members.iter().all(|m| m.ok && m.service_ok);
         Self {
             command: "install",
             members,
@@ -262,11 +303,6 @@ async fn install_all(
         let _ = narr.info(&format!("installing {}", m.crate_name));
         match install_one(m).await {
             Ok(()) => {
-                outcomes.push(InstallOutcome {
-                    member: m.crate_name.clone(),
-                    ok: true,
-                    detail: "installed".to_owned(),
-                });
                 tracker.add(Component::new(m.binary.clone(), binary_size(&m.binary)));
                 // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
                 if m.crate_name == "trusty-mpm" {
@@ -284,19 +320,46 @@ async fn install_all(
                 // daemon (search/memory/analyze/review/console) via its own
                 // `<binary> service install`, so `tctl start` has a plist to
                 // load. trusty-mpm (OwnVerb, handled above) and tga (non-daemon)
-                // are excluded. Fail-soft + idempotent + non-clobbering; see
-                // `service_bootstrap`.
-                if service_enabled && m.manage == ManageStrategy::Launchd {
-                    let action = bootstrap_member_service(&m.binary);
-                    let _ = narr.info(&action.note(&m.binary));
-                }
+                // are excluded. Fail-soft for the BINARY install phase (the
+                // member is still reported `ok: true` — the binary is on PATH
+                // and healthy) but the REPORT must not lie: a genuine bootstrap
+                // failure is routed through `narr.error()` (not `info()`) and
+                // folds into `service_ok` / `all_ok` / the exit code (#2566
+                // review — `--json` previously reported `all_ok: true` even
+                // when every daemon's service bootstrap had failed).
+                let (service_ok, service_detail) =
+                    if service_enabled && m.manage == ManageStrategy::Launchd {
+                        let action = bootstrap_member_service(&m.binary);
+                        let note = action.note(&m.binary);
+                        match &action {
+                            BootstrapAction::Failed(_) => {
+                                let _ = narr.error(&note);
+                            }
+                            BootstrapAction::Skipped(_) | BootstrapAction::Installed => {
+                                let _ = narr.info(&note);
+                            }
+                        }
+                        (!matches!(action, BootstrapAction::Failed(_)), note)
+                    } else {
+                        InstallOutcome::service_not_attempted()
+                    };
+                outcomes.push(InstallOutcome {
+                    member: m.crate_name.clone(),
+                    ok: true,
+                    detail: "installed".to_owned(),
+                    service_ok,
+                    service_detail,
+                });
             }
             Err(e) => {
                 let _ = narr.error(&format!("{}: {e}", m.crate_name));
+                let (service_ok, service_detail) = InstallOutcome::service_not_attempted();
                 outcomes.push(InstallOutcome {
                     member: m.crate_name.clone(),
                     ok: false,
                     detail: e.to_string(),
+                    service_ok,
+                    service_detail,
                 });
             }
         }
@@ -419,46 +482,92 @@ fn print_human_summary(report: &InstallReport) {
     for m in report.members.iter().filter(|m| !m.ok) {
         let _ = narr.error(&format!("{}: {}", m.member, m.detail));
     }
+    // #2566 review: a binary can install cleanly (`ok: true`) while its
+    // service bootstrap genuinely failed — surface that on the human path too,
+    // not just fold it silently into the exit code.
+    for m in report.members.iter().filter(|m| m.ok && !m.service_ok) {
+        let _ = narr.error(&format!("{}: {}", m.member, m.service_detail));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build an `InstallOutcome` with the pre-#2566 default service state
+    /// (not attempted — `service_ok: true`, empty detail), so tests that only
+    /// care about the binary-install dimension don't have to repeat the two
+    /// new fields at every call site.
+    fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
+        InstallOutcome {
+            member: member.to_owned(),
+            ok,
+            detail: detail.to_owned(),
+            service_ok: true,
+            service_detail: String::new(),
+        }
+    }
+
     /// Why: The JSON envelope is a public contract; pin its shape.
     /// What: Builds a report and asserts the serialised keys/values.
     /// Test: This is the test.
     #[test]
     fn report_serialises() {
-        let report = InstallReport::build(vec![InstallOutcome {
-            member: "trusty-search".to_owned(),
-            ok: true,
-            detail: "installed".to_owned(),
-        }]);
+        let report = InstallReport::build(vec![outcome("trusty-search", true, "installed")]);
         let v = serde_json::to_value(&report).expect("serialises");
         assert_eq!(v["command"], "install");
         assert_eq!(v["all_ok"], true);
         assert_eq!(v["members"][0]["member"], "trusty-search");
+        assert_eq!(v["members"][0]["service_ok"], true);
     }
 
-    /// Why: `all_ok` must be false if any member failed.
+    /// Why: `all_ok` must be false if any member's BINARY install failed.
     /// What: Mixes an ok and a failed outcome; asserts `all_ok = false`.
     /// Test: This is the test.
     #[test]
     fn report_all_ok() {
-        let report = InstallReport::build(vec![
-            InstallOutcome {
-                member: "a".to_owned(),
-                ok: true,
-                detail: String::new(),
-            },
-            InstallOutcome {
-                member: "b".to_owned(),
-                ok: false,
-                detail: "boom".to_owned(),
-            },
-        ]);
+        let report =
+            InstallReport::build(vec![outcome("a", true, ""), outcome("b", false, "boom")]);
         assert!(!report.all_ok);
+    }
+
+    /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
+    /// SERVICE bootstrap genuinely fails; the report must not claim
+    /// `all_ok: true` in that case (the exact failure class #2557 existed
+    /// because of: a "successfully installed" daemon that never actually
+    /// works). A `Skipped` service outcome (opt-out, non-service member, or
+    /// plist already present) must NOT be treated as a failure.
+    /// What: one member with `ok: true, service_ok: false` → `all_ok == false`;
+    /// a second report with `ok: true, service_ok: true` (skip case) →
+    /// `all_ok == true`.
+    /// Test: this is the test.
+    #[test]
+    fn report_all_ok_reflects_service_failure() {
+        let failed = InstallReport::build(vec![InstallOutcome {
+            member: "trusty-search".to_owned(),
+            ok: true,
+            detail: "installed".to_owned(),
+            service_ok: false,
+            service_detail: "service bootstrap failed (non-fatal): boom".to_owned(),
+        }]);
+        assert!(
+            !failed.all_ok,
+            "a genuine service bootstrap failure must flip all_ok to false"
+        );
+        assert_eq!(failed.exit_code(), 2);
+
+        let skipped = InstallReport::build(vec![InstallOutcome {
+            member: "trusty-search".to_owned(),
+            ok: true,
+            detail: "installed".to_owned(),
+            service_ok: true,
+            service_detail: "launchd plist already present — left untouched".to_owned(),
+        }]);
+        assert!(
+            skipped.all_ok,
+            "a skipped (not failed) service bootstrap must not flip all_ok"
+        );
+        assert_eq!(skipped.exit_code(), 0);
     }
 
     /// Why: The exit code must track the verdict for automation.
@@ -466,17 +575,9 @@ mod tests {
     /// Test: This is the test.
     #[test]
     fn exit_code_reflects_all_ok() {
-        let ok = InstallReport::build(vec![InstallOutcome {
-            member: "a".to_owned(),
-            ok: true,
-            detail: String::new(),
-        }]);
+        let ok = InstallReport::build(vec![outcome("a", true, "")]);
         assert_eq!(ok.exit_code(), 0);
-        let bad = InstallReport::build(vec![InstallOutcome {
-            member: "a".to_owned(),
-            ok: false,
-            detail: "x".to_owned(),
-        }]);
+        let bad = InstallReport::build(vec![outcome("a", false, "x")]);
         assert_eq!(bad.exit_code(), 2);
     }
 

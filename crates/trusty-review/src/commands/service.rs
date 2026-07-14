@@ -13,10 +13,11 @@
 //! shared `trusty_common::launchd` module; the agent runs `trusty-review serve`
 //! (the long-lived HTTP webhook daemon). On non-macOS the entry point returns a
 //! clear error rather than emitting confusing plist output.
-//! Test: `service_label_matches_tctl_convention` and `serve_args_are_serve`
-//! (macOS-only, pure) pin the load-bearing label + args; the install/uninstall
-//! paths are side-effecting `launchctl` calls exercised manually (never in the
-//! test suite, per the hermetic-test rule).
+//! Test: `service_label_matches_tctl_convention` and
+//! `serve_args_pass_explicit_default_port` (macOS-only, pure) pin the
+//! load-bearing label + args; the install/uninstall paths are side-effecting
+//! `launchctl` calls exercised manually (never in the test suite, per the
+//! hermetic-test rule).
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -85,13 +86,22 @@ pub fn run_service_action(action: &ServiceAction) -> Result<()> {
 /// The daemon serve args embedded in the launchd plist.
 ///
 /// Why: the launchd agent must start the long-lived HTTP webhook server, which
-/// is `trusty-review serve`; centralising the args keeps install and the label
-/// contract in one testable place.
-/// What: returns `["serve"]`.
-/// Test: `serve_args_are_serve`.
+/// is `trusty-review serve`. The port is passed EXPLICITLY (rather than
+/// relying solely on `serve`'s `default_value_t = DEFAULT_PORT`) as defense in
+/// depth (#2566 review): a `KeepAlive::Always` / 10s-throttle launchd agent
+/// that silently inherited a colliding default would crash-loop indefinitely
+/// with no obvious cause, whereas an explicit `--port` here makes the bound
+/// port a visible, testable part of the plist contract, independent of
+/// whatever `serve`'s CLI default happens to be at any given moment.
+/// What: returns `["serve", "--port", "<DEFAULT_PORT>"]`.
+/// Test: `serve_args_pass_explicit_default_port`.
 #[cfg(target_os = "macos")]
 fn serve_args() -> Vec<String> {
-    vec!["serve".to_string()]
+    vec![
+        "serve".to_string(),
+        "--port".to_string(),
+        trusty_review::service::DEFAULT_PORT.to_string(),
+    ]
 }
 
 /// Resolve the log directory for the review launchd agent.
@@ -239,13 +249,24 @@ mod tests {
         assert_eq!(LAUNCHD_LABEL, "com.trusty.trusty-review");
     }
 
-    /// Why: the launchd agent must start the HTTP webhook daemon, i.e.
-    /// `trusty-review serve`; a wrong arg would load a plist that runs the
-    /// wrong (or no) subcommand.
-    /// What: asserts the embedded args are exactly `["serve"]`.
+    /// Why: the launchd agent must start the HTTP webhook daemon with an
+    /// EXPLICIT `--port` (#2566 review — defense in depth against a future
+    /// `DEFAULT_PORT` drift silently reintroducing the trusty-mpm :7880
+    /// collision); a wrong or missing port arg would load a plist that either
+    /// runs the wrong subcommand or falls back to whatever `serve`'s CLI
+    /// default happens to be.
+    /// What: asserts the embedded args are exactly
+    /// `["serve", "--port", "<DEFAULT_PORT>"]`.
     /// Test: this is the test.
     #[test]
-    fn serve_args_are_serve() {
-        assert_eq!(serve_args(), vec!["serve".to_string()]);
+    fn serve_args_pass_explicit_default_port() {
+        assert_eq!(
+            serve_args(),
+            vec![
+                "serve".to_string(),
+                "--port".to_string(),
+                trusty_review::service::DEFAULT_PORT.to_string(),
+            ]
+        );
     }
 }

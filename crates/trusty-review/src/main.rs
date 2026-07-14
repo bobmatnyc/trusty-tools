@@ -82,9 +82,9 @@ enum Commands {
     /// Reads the `http_addr` discovery file written at daemon bind time and
     /// prints the address in one of three machine-readable formats:
     ///
-    ///   trusty-review port          → bare port:  7880
-    ///   trusty-review port --addr   → host:port:  127.0.0.1:7880
-    ///   trusty-review port --json   → JSON:       {"addr":"127.0.0.1","port":7880}
+    ///   trusty-review port          → bare port:  7890
+    ///   trusty-review port --addr   → host:port:  127.0.0.1:7890
+    ///   trusty-review port --json   → JSON:       {"addr":"127.0.0.1","port":7890}
     ///
     /// Exits non-zero when no daemon discovery file is found so shell
     /// substitution (`$(trusty-review port)`) fails safely.
@@ -98,7 +98,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Start the long-lived HTTP webhook server (port 7880 by default).
+    /// Start the long-lived HTTP webhook server (port 7890 by default).
     ///
     /// Exposes:
     ///   GET  /health                  — liveness + dep status
@@ -167,6 +167,9 @@ enum Commands {
     /// (running `trusty-review serve`) and bootstraps it; `uninstall` unloads
     /// and removes it; `status` / `logs` inspect the running agent. macOS-only.
     /// `tctl install` / `tctl start` call `install` on the operator's behalf.
+    /// Requires the `http-server` feature (enabled by default) since it
+    /// daemonizes `trusty-review serve`.
+    #[cfg(feature = "http-server")]
     Service {
         #[command(subcommand)]
         action: commands::service::ServiceAction,
@@ -204,6 +207,7 @@ fn main() -> Result<()> {
     // `service` drives macOS launchd (`launchctl`) synchronously — dispatch
     // before the async runtime so `tctl install`/`tctl start` hooks pay no
     // tokio start-up cost for a plist write.
+    #[cfg(feature = "http-server")]
     if let Commands::Service { action } = &cli.command {
         return commands::service::run_service_action(action);
     }
@@ -231,6 +235,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         // exhaustive match.
         Commands::Port { .. } => unreachable!("port dispatched before async_main"),
         // `service` is likewise dispatched synchronously in `main`.
+        #[cfg(feature = "http-server")]
         Commands::Service { .. } => unreachable!("service dispatched before async_main"),
     }
 }
