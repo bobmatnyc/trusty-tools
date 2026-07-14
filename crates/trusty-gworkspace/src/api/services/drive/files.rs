@@ -5,7 +5,9 @@
 //! What: Each tool is a thin wrapper over the v3 REST endpoints.
 //! Test: Live only.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
 use crate::api::client::BaseClient;
@@ -47,47 +49,128 @@ pub async fn search_drive_files(client: &BaseClient, args: Value) -> Result<Valu
     client.get(&url, account).await
 }
 
-/// Why: Fetching file body (export for native Google types) needs MIME-aware handling.
-/// What: For Google MIME types calls `/export`; for others calls `/files/{id}?alt=media`.
-/// Test: Live API.
+/// Why: Fetching a file body must be MIME-aware — Google-native docs need
+/// `/export`, and binary files (images, PDFs, zips) must never be forced
+/// through UTF-8 decoding, which silently corrupts them (parity fix #2627).
+/// What: Resolves the file's MIME, downloads the body as raw bytes, then:
+/// text-like content is returned inline as `content`; binary content is
+/// base64-encoded (`encoding: "base64"`) unless `save_path` is set, in which
+/// case the raw bytes are written to disk. `output_format: "raw"` forces the
+/// binary path even for text MIME types (mirrors Python's `auto|raw`).
+/// Test: `is_textual_mime` branching is unit-tested below; end-to-end 200 is
+/// live-only.
 pub async fn get_drive_file_content(client: &BaseClient, args: Value) -> Result<Value> {
     let account = account_of(&args);
     let id = require_str(&args, "file_id")?;
     let export_mime = opt_str(&args, "export_mime_type");
+    let save_path = opt_str(&args, "save_path");
+    let output_format = opt_str(&args, "output_format").unwrap_or("auto");
 
-    // Get metadata first to know mime type
-    let meta_url = format!("{DRIVE_API_BASE}/files/{id}?fields=id,name,mimeType");
+    // Get metadata first to know mime type.
+    let meta_url =
+        format!("{DRIVE_API_BASE}/files/{id}?fields=id,name,mimeType&supportsAllDrives=true");
     let meta = client.get(&meta_url, account).await?;
     let mime = meta.get("mimeType").and_then(|v| v.as_str()).unwrap_or("");
+    let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let is_google_native = mime.starts_with("application/vnd.google-apps");
 
-    let content_url = if mime.starts_with("application/vnd.google-apps") {
-        // Google native doc — must use export
+    let content_url = if is_google_native {
+        // Google native doc — must use export.
         let target = export_mime.unwrap_or("text/plain");
         format!(
             "{DRIVE_API_BASE}/files/{id}/export?mimeType={}",
             encode(target)
         )
     } else {
-        format!("{DRIVE_API_BASE}/files/{id}?alt=media")
+        format!("{DRIVE_API_BASE}/files/{id}?alt=media&supportsAllDrives=true")
     };
 
-    let token = client.get_access_token(account).await?;
-    let raw = reqwest::Client::new()
-        .get(&content_url)
-        .bearer_auth(token)
-        .send()
-        .await?;
-    let status = raw.status();
-    let text = raw.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Ok(json!({ "error": text, "status": status.as_u16() }));
+    let raw = client.get_bytes(&content_url, account).await?;
+    if !raw.status.is_success() {
+        let text = String::from_utf8_lossy(&raw.bytes).into_owned();
+        return Ok(json!({ "error": text, "status": raw.status.as_u16() }));
     }
-    Ok(json!({
+
+    // Effective MIME: an export target, else the response header, else metadata.
+    let effective_mime: String = if is_google_native {
+        export_mime.unwrap_or("text/plain").to_string()
+    } else {
+        raw.content_type
+            .as_deref()
+            .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| mime.to_string())
+    };
+
+    // Persisting to disk always writes the exact bytes, text or binary.
+    if let Some(path) = save_path {
+        std::fs::write(path, &raw.bytes).with_context(|| format!("write drive file to {path}"))?;
+        return Ok(json!({
+            "id": id,
+            "name": name,
+            "mimeType": effective_mime,
+            "savedTo": path,
+            "bytesWritten": raw.bytes.len(),
+        }));
+    }
+
+    let treat_as_text = output_format != "raw" && is_textual_mime(&effective_mime);
+    if treat_as_text {
+        // Only return inline text when the bytes are valid UTF-8; otherwise
+        // fall through to base64 so we never emit lossy content.
+        match String::from_utf8(raw.bytes) {
+            Ok(text) => {
+                return Ok(json!({
+                    "id": id,
+                    "name": name,
+                    "mimeType": effective_mime,
+                    "content": text,
+                }));
+            }
+            Err(e) => {
+                return Ok(binary_content_json(id, name, &effective_mime, e.as_bytes()));
+            }
+        }
+    }
+    Ok(binary_content_json(id, name, &effective_mime, &raw.bytes))
+}
+
+/// Why: Binary payloads must round-trip losslessly through JSON.
+/// What: Base64-encodes `bytes` and tags the payload `encoding: "base64"`.
+/// Test: Covered indirectly by the `get_drive_file_content` binary branch.
+fn binary_content_json(id: &str, name: &str, mime: &str, bytes: &[u8]) -> Value {
+    json!({
         "id": id,
-        "name": meta.get("name"),
+        "name": name,
         "mimeType": mime,
-        "content": text,
-    }))
+        "encoding": "base64",
+        "size": bytes.len(),
+        "content": STANDARD.encode(bytes),
+    })
+}
+
+/// Why: Deciding text-vs-binary handling requires a MIME classifier that
+/// covers the common textual families Drive serves.
+/// What: Returns true for `text/*`, JSON/XML (incl. `+json`/`+xml` suffixes),
+/// CSV, JavaScript, and SVG; false otherwise. Case- and parameter-insensitive.
+/// Test: `textual_mime_classification` below.
+pub(crate) fn is_textual_mime(mime: &str) -> bool {
+    let m = mime
+        .split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase();
+    m.starts_with("text/")
+        || m == "application/json"
+        || m == "application/xml"
+        || m == "application/xhtml+xml"
+        || m == "application/javascript"
+        || m == "application/x-ndjson"
+        || m == "application/csv"
+        || m == "image/svg+xml"
+        || m.ends_with("+json")
+        || m.ends_with("+xml")
 }
 
 /// Why: Shared drives are a separate Drive endpoint from regular `/files`.
@@ -168,4 +251,49 @@ pub(crate) fn encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn textual_mime_classification() {
+        // Text families are inline-able.
+        for m in [
+            "text/plain",
+            "text/html; charset=UTF-8",
+            "application/json",
+            "application/vnd.api+json",
+            "application/xml",
+            "image/svg+xml",
+            "application/csv",
+            "TEXT/CSV",
+        ] {
+            assert!(is_textual_mime(m), "{m} should be textual");
+        }
+        // Binary families must not be decoded as UTF-8.
+        for m in [
+            "image/png",
+            "application/pdf",
+            "application/zip",
+            "application/octet-stream",
+            "video/mp4",
+        ] {
+            assert!(!is_textual_mime(m), "{m} should be binary");
+        }
+    }
+
+    #[test]
+    fn binary_content_json_is_base64_encoded() {
+        // Non-UTF-8 bytes must survive JSON round-tripping via base64.
+        let bytes = [0x89u8, 0x50, 0x4E, 0x47, 0x00, 0xFF];
+        let v = binary_content_json("id1", "logo.png", "image/png", &bytes);
+        assert_eq!(v["encoding"], "base64");
+        assert_eq!(v["size"], 6);
+        let decoded = STANDARD
+            .decode(v["content"].as_str().unwrap())
+            .expect("valid base64");
+        assert_eq!(decoded, bytes);
+    }
 }

@@ -35,11 +35,17 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     tools.push(tool(
         "get_drive_file_content",
-        "Fetch the textual content of a Drive file (auto-exports Google native docs).",
+        "Fetch a Drive file's content (auto-exports Google native docs). Text is returned inline; binary files are base64-encoded, or written to disk when save_path is set.",
         json!({
             "account": account_schema(),
             "file_id": { "type": "string" },
             "export_mime_type": { "type": "string", "description": "Override export MIME for Google native files." },
+            "save_path": { "type": "string", "description": "If set, the raw bytes are written to this local path (required for large binaries)." },
+            "output_format": {
+                "type": "string",
+                "enum": ["auto", "raw"],
+                "description": "auto: text inline / binary base64 (default). raw: always treat as bytes (base64 or save_path).",
+            },
         }),
         &["file_id"],
     ));
