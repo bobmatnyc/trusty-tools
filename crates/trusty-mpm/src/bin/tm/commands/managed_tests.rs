@@ -9,14 +9,19 @@
 //! against a real hermetic daemon (mirroring `client::executor::tests`'s
 //! `spawn_test_daemon` pattern) and assert `Err` is returned instead.
 //! What: the `session_*_not_found_errors` tests cover the 404 exit-code fix.
-//! `session_resume`'s 409/conflict branch got the identical mechanical fix —
-//! print+`Ok(())` to `bail!` — and is now ALSO covered at this CLI layer by
-//! `session_resume_conflict_state_errors`, which seeds a session in a
-//! non-resumable (`Provisioning`) state via
-//! `spawn_test_daemon_with_unresumable_session` (#2521 review; previously left
-//! only to the daemon-layer `resume_managed_typed_invalid_state_is_conflict`
-//! test in `tests/session_manager_mvp.rs`, which exercises the typed
-//! `resume_managed` helper directly rather than the CLI's `session_resume`).
+//! `session_resume` no longer POSTs `/resume` directly (#2649) — it now
+//! fetches the record and delegates to the shared
+//! `guided_resume::resume_guided_session` helper (also used by the bare-`tm`
+//! picker), so its restart/attach decision and error propagation are
+//! primarily covered by that module's own `plan_resume`/`needs_restart`/
+//! `is_zombie` unit tests plus the e2e suite. `session_resume_restart_failure_errors`
+//! covers the ONE thing specific to this CLI-layer wrapper: a daemon-rejected
+//! restart still surfaces as `Err`, not a swallowed `Ok(())` — the same
+//! guarantee #2457/#2521's `session_resume_conflict_state_errors` (now
+//! superseded — see `spawn_test_daemon_with_unrestartable_stopped_session`'s
+//! doc for why the old `Provisioning`-seed/409 scenario no longer applies
+//! cleanly at this layer) established for the prior direct-POST
+//! implementation.
 //! The pre-existing `truncate_*`/`short_timestamp_*`/
 //! `decommission_message_reflects_workspace_removed` unit tests are carried
 //! over unchanged from the inline module this file replaced.
@@ -126,27 +131,47 @@ async fn session_resume_not_found_errors() {
     );
 }
 
-/// Spawn the daemon's real HTTP API with ONE managed session already seeded in
-/// `Provisioning` — a non-resumable state — so a `resume` call against it is a
-/// genuine 409 from the daemon, not a hand-rolled stub response.
+/// Spawn the daemon's real HTTP API with ONE managed session seeded `Stopped`
+/// whose workspace/cwd directory was never created on disk, so a `resume`
+/// call against it is a genuine, deterministic daemon-side restart failure
+/// (`ManagedError::WorkspaceMissing` -> HTTP 422) — not a hand-rolled stub
+/// response, and not dependent on this test process's own tmux/TTY
+/// environment.
 ///
-/// Why: #2521 review — `session_resume`'s 409/conflict branch (managed.rs
-/// L337-339) had no CLI-layer test proving it returns `Err`; the module doc
-/// above explained this was left uncovered because seeding a non-resumable
-/// session needs `SessionManager::create_with_id` scaffolding. That
-/// scaffolding is exactly what `tests/session_manager_mvp.rs`'s
-/// `resume_managed_typed_invalid_state_is_conflict` already uses (a freshly
-/// created record starts in `Provisioning`, which is not `Stopped`/`Errored`,
-/// so resuming it is an invalid state transition). This slots the SAME seeding
-/// approach into `managed_tests.rs`'s hermetic HTTP-round-trip harness
-/// (mirroring `spawn_test_daemon`) so the CLI-layer `session_resume` function
-/// itself — not just the daemon's typed `resume_managed` — is proven to
-/// surface the 409 as an `Err`.
-/// What: builds the isolated daemon state directly (so the seeded session can
-/// be created against it before the router starts serving), creates ONE
-/// session via `create_with_id` (left in its initial `Provisioning` state,
-/// never started/stopped), serves the router, and returns `(base_url, id)`.
-async fn spawn_test_daemon_with_unresumable_session() -> (String, String) {
+/// Why (#2649 — supersedes the old #2521 `spawn_test_daemon_with_unresumable_session`
+/// helper): `session_resume` no longer POSTs `/resume` directly — it now
+/// fetches the record and delegates to
+/// `guided_resume::resume_guided_session`, the SAME helper the bare-`tm`
+/// picker uses, so both entry points share one "restart, then hand the
+/// terminal to the tmux window" implementation instead of maintaining two
+/// (the exact duplication that let this bug survive five rounds of fixes to
+/// the picker's sibling path). That helper picks its action purely from
+/// state + live tmux liveness (`plan_resume`): seeding a record in a
+/// non-`Stopped`/`Errored` state (the old `Provisioning` seed) no longer
+/// reaches a raw 409 here — it is classified a "zombie" (record not
+/// stopped/errored, tmux pane gone) and AUTO-RECONCILED via `/runtime-stop`
+/// then `/resume`, exactly the #2001 behavior this fix ports to the
+/// explicit-id verb. Driving a test through that path would, on success,
+/// reach a REAL tmux `switch-client`/`attach-session` call whose outcome
+/// depends on whether this test process has a real attached tmux client —
+/// which it never does under `cargo test` — making the assertion flaky by
+/// construction. Seeding directly into `Stopped` sidesteps the zombie branch
+/// entirely (`needs_restart` is `true` regardless of tmux liveness), so the
+/// only variable left is the daemon's `/resume` response.
+/// What: `with_root_isolated_managed` seeds the `SessionManager` with
+/// [`trusty_mpm::session_manager::real_tmux::FakeNoopTmuxDriver`] — no real
+/// tmux process is ever spawned server-side, so nothing here depends on this
+/// test process's own tmux/TTY environment. `create_with_id` does NOT touch
+/// the filesystem itself (`ws` genuinely does not exist afterward), but
+/// `SessionManager::stop`'s non-fatal pre-kill snapshot capture DOES:
+/// `capture_into` unconditionally `mkdir -p`'s `<workspace_path>/.trusty-mpm/`
+/// to write a (here, empty — the fake driver's `capture` returns `""`)
+/// scrollback file, which recreates `ws` as a side effect (confirmed
+/// empirically). So the directory is removed a SECOND time, after `stop`,
+/// immediately before the router starts serving, to end up with a record
+/// that is genuinely `Stopped` AND genuinely workspace-less at `/resume`
+/// time. Returns `(base_url, id)`.
+async fn spawn_test_daemon_with_unrestartable_stopped_session() -> (String, String) {
     use trusty_mpm::daemon::{api, state::DaemonState};
     use trusty_mpm::runtime::RuntimeKind;
     use trusty_mpm::session_manager::ManagedSessionId;
@@ -155,24 +180,26 @@ async fn spawn_test_daemon_with_unresumable_session() -> (String, String) {
     let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.clone()).await);
 
     let id = ManagedSessionId::new();
-    let ws = root.join(format!("{id}-resume-conflict-ws"));
-    state
-        .session_manager()
+    let ws = root.join(format!("{id}-resume-missing-ws"));
+    let mgr = state.session_manager().await;
+    mgr.create_with_id(
+        id,
+        "regression: #2649 resume-restart-failure CLI test".to_string(),
+        Some(ws.clone()),
+        None,
+        Some(ws.clone()),
+        Some("https://example.com/r.git".to_string()),
+        Some("main".to_string()),
+        RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session");
+    mgr.stop(&id).await.expect("mark seeded session Stopped");
+    tokio::fs::remove_dir_all(&ws)
         .await
-        .create_with_id(
-            id,
-            "regression: #2521 409 resume CLI test".to_string(),
-            Some(ws.clone()),
-            None,
-            Some(ws),
-            Some("https://example.com/r.git".to_string()),
-            Some("main".to_string()),
-            RuntimeKind::default(),
-            false,
-            false,
-        )
-        .await
-        .expect("seed non-resumable session");
+        .expect("remove the dir stop()'s snapshot capture recreated, so it is genuinely absent");
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -181,19 +208,23 @@ async fn spawn_test_daemon_with_unresumable_session() -> (String, String) {
     (format!("http://{addr}"), id.to_string())
 }
 
-/// #2521 review: a 409 from `resume` (session exists but is in a non-resumable
-/// state) must propagate as `Err` at the CLI layer — the same layer #2457
-/// changed from "print + `Ok(())`" to "bail".
+/// #2649: a daemon-rejected restart (422 — the seeded workspace directory was
+/// never created on disk) must still propagate as `Err` at the CLI layer now
+/// that `session_resume` delegates to `resume_guided_session` — the same
+/// non-swallowing guarantee #2457/#2521 established for the old direct-POST
+/// implementation. Deterministic and tmux/TTY-independent: the failure fires
+/// inside `restart_via_daemon`, BEFORE `resume_guided_session` would ever
+/// reach the terminal hand-off (`tmux_attach`).
 #[tokio::test]
-async fn session_resume_conflict_state_errors() {
-    let (url, id) = spawn_test_daemon_with_unresumable_session().await;
+async fn session_resume_restart_failure_errors() {
+    let (url, id) = spawn_test_daemon_with_unrestartable_stopped_session().await;
     let client = reqwest::Client::new();
     let err = session_resume(&client, &url, id)
         .await
-        .expect_err("resuming a non-resumable session must be a hard failure, not Ok(())");
+        .expect_err("a daemon-rejected restart must be a hard failure, not Ok(())");
     assert!(
-        err.to_string().contains("cannot resume"),
-        "error should surface the daemon's 409 conflict message: {err}"
+        err.to_string().contains("cannot restart"),
+        "error should surface the daemon's rejection: {err}"
     );
 }
 

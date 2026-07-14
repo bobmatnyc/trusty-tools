@@ -306,43 +306,57 @@ pub(crate) async fn session_stop(
     Ok(())
 }
 
-/// `tm session resume <id>` — resume a stopped managed session in its existing workspace.
+/// `tm session resume <id>` — resume a stopped managed session in its existing
+/// workspace AND hand the terminal over to it.
 ///
-/// Why: after `stop`, the workspace is still on disk; `resume` re-spawns the
-/// runtime there without re-cloning. Renamed from the verbose `managed-resume`
-/// in #1205 (which remains a deprecated alias). A missing id or a rejected
-/// resume (daemon `InvalidState`, e.g. the session isn't stopped) are both
-/// genuine failures to perform the requested resume (#2457) — printing a
-/// message and returning `Ok(())` let a script/CI check treat either as
-/// success, so both now return `Err` (non-zero exit) instead, mirroring the
-/// symmetric project-session resume path's own 404 handling just above this
-/// call site in `session.rs`.
-/// What: POSTs `/api/v1/sessions/managed/{id}/resume`; a 404 or 409 bails with
-/// an error instead of printing a status line.
+/// Why (#2649): after `stop`, the workspace is still on disk; `resume`
+/// re-spawns the runtime there without re-cloning. Renamed from the verbose
+/// `managed-resume` in #1205 (which remains a deprecated alias). Before #2649
+/// this handler only printed a status line after the daemon-side resume — the
+/// operator's terminal never moved into the resumed session's tmux window,
+/// unlike the bare-`tm` guided picker's resume path (fixed across #1742/#2001/
+/// #2148/#2453/#2456/#2467). Rather than re-implement that whole state
+/// machine, this now fetches the session record and delegates to the SAME
+/// [`crate::commands::guided_resume::resume_guided_session`] helper the picker
+/// uses, so the two entry points ("resume a session I just picked" and
+/// "resume a session I already know the id of") can never drift apart again —
+/// the exact gap that let this bug survive five rounds of fixes to the
+/// sibling path. That helper also ports the #2001 zombie/stale-Active
+/// auto-reconcile: a session the daemon still marks active/provisioning but
+/// whose tmux pane is gone is auto-stopped then restarted, rather than
+/// dead-ending on a 409. A missing id is still a genuine failure to perform
+/// the requested resume (#2457) — bailing instead of printing a message and
+/// returning `Ok(())`.
+/// What: GETs `/api/v1/sessions/managed/{id}` (a 404 bails with an error); on
+/// success, hands the resulting [`ManagedSessionSummary`] to
+/// `resume_guided_session`, which picks the right action (attach directly /
+/// restart via the daemon `/resume` endpoint / auto-reconcile a zombie then
+/// restart) purely from the record's state and live tmux liveness, then
+/// attaches (or `switch-client`s, when already inside tmux) the caller's
+/// terminal into the session's tmux window.
 /// Test: HTTP path covered by the integration test; parse by
 /// `cli_parses_session_managed_resume_verb`; `session_resume_not_found_errors`
-/// covers the #2457 exit-code fix for the 404 branch; `session_resume_conflict_state_errors`
-/// (in `managed_tests.rs`, #2521) covers the identical 409/conflict fix by
-/// seeding a session into a non-resumable state.
+/// covers the #2457 exit-code fix for the 404 branch;
+/// `session_resume_restart_failure_errors` (in `managed_tests.rs`, #2649)
+/// covers the same non-swallowing guarantee for a daemon-rejected restart now
+/// that this handler routes through the shared restart/attach helper instead
+/// of POSTing `/resume` directly; `plan_resume`/`needs_restart`/`is_zombie`
+/// in `guided_resume.rs`'s own tests exhaustively cover the branch selection
+/// this handler now shares.
 pub(crate) async fn session_resume(
     client: &reqwest::Client,
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
     let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/resume"))
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("managed session '{id}' not found");
     }
-    if resp.status() == reqwest::StatusCode::CONFLICT {
-        let msg = resp.text().await.unwrap_or_default();
-        anyhow::bail!("cannot resume: {msg}");
-    }
-    let body: ManagedSessionSummary = resp.error_for_status()?.json().await?;
-    println!("resumed {} ({}) [{}]", body.name, body.id, body.state);
-    Ok(())
+    let session: ManagedSessionSummary = resp.error_for_status()?.json().await?;
+    crate::commands::guided_resume::resume_guided_session(client, url, &session).await
 }
 
 /// `tm session decommission <id>` — full teardown (may or may not remove workspace).
