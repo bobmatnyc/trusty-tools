@@ -273,8 +273,9 @@ pub fn accept_async_spawn(state: Arc<DaemonState>, params: SpawnParams) -> Respo
 /// `ready`), and 404s only when neither knows the id. An unparseable id is a
 /// 400 (via [`parse_id`]).
 /// Test: `poll_route_reports_provisioning_then_ready`,
-/// `poll_route_falls_back_to_ready_for_known_session`,
-/// `poll_route_unknown_id_is_404`, `poll_route_invalid_id_is_400`.
+/// `poll_route_unknown_id_is_404`, `poll_route_invalid_id_is_400`; the
+/// session-store fallback branch is covered by the live `handler_spawn_*`
+/// integration tests.
 pub async fn get_provision_status(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
