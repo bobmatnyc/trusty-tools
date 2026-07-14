@@ -207,6 +207,28 @@ pub struct PersistedIndex {
     /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_indexed_unix: Option<u64>,
+
+    /// Canonical repository identity (DOC-37, issue #2611) — the path-independent
+    /// join key relating this index to the other facets (live checkout, `.base`
+    /// clone, session worktrees) of the SAME repo.
+    ///
+    /// Why: `id` is a bare path basename, so a repo's live checkout, its
+    /// tm-managed `.base` clone, and each session worktree register as unrelated
+    /// indexes. Storing the canonical
+    /// [`trusty_common::repo_identity::RepoIdentity`] string (`owner/repo`, or
+    /// `content:<sha>` for remoteless repos) alongside `id` lets an operator
+    /// group and filter every index of one repo — including orphaned worktree
+    /// entries whose `root_path` no longer exists, where re-deriving from disk is
+    /// impossible.
+    /// What: `Option<String>` holding `RepoIdentity::canonical()`. `None` for
+    /// pre-DOC-37 indexes and for roots with no derivable identity; computed at
+    /// registration and backfilled at warm-boot where derivable, so existing
+    /// `indexes.toml` files load unchanged. `skip_serializing_if` keeps the TOML
+    /// compact — only a resolved identity is written.
+    /// Test: `repo_identity_round_trips` in `persistence_tests.rs`; grouping is
+    /// covered by `prune_orphans::tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_identity: Option<String>,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -302,6 +324,7 @@ impl Default for PersistedIndex {
             colocated: false,
             last_queried_unix: None,
             last_indexed_unix: None,
+            repo_identity: None,
         }
     }
 }

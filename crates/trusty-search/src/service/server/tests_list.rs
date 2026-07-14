@@ -28,6 +28,7 @@ async fn list_indexes_flat_default_unchanged() {
         Query(ListIndexesParams {
             format: None,
             details: false,
+            repo_identity: None,
         }),
     )
     .await;
@@ -93,6 +94,7 @@ async fn list_indexes_tree_format_shape() {
         Query(ListIndexesParams {
             format: Some("tree".to_string()),
             details: false,
+            repo_identity: None,
         }),
     )
     .await;
@@ -171,6 +173,7 @@ async fn list_indexes_details_includes_size_bytes() {
         Query(ListIndexesParams {
             format: None,
             details: true,
+            repo_identity: None,
         }),
     )
     .await;
@@ -230,6 +233,7 @@ async fn list_indexes_details_includes_root_path() {
         Query(ListIndexesParams {
             format: None,
             details: true,
+            repo_identity: None,
         }),
     )
     .await;
@@ -407,4 +411,111 @@ async fn global_search_sub_index_boost_applied() {
         has_child_result,
         "sub-index (boost-child) must contribute results to the fan-out"
     );
+}
+
+/// Create a throwaway git repo at `dir` with an origin remote, returning `false`
+/// (so the caller skips) if git is unavailable on the runner. DOC-37 tests.
+fn init_git_repo_with_origin(dir: &std::path::Path, origin: &str) -> bool {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init"]) {
+        return false;
+    }
+    let _ = git(&["remote", "add", "origin", origin]);
+    true
+}
+
+/// `GET /indexes?details=true` carries `repo_identity` derived from the index's
+/// git origin, and `?repo_identity=` filters the flat list to that repo only
+/// (DOC-37, issue #2611).
+///
+/// Why: the visibility layer — an operator must be able to see, and select, all
+/// indexes belonging to one repo. Uses real temp git repos so the derive
+/// fallback yields deterministic canonical identities.
+/// What: registers two indexes rooted at temp git repos with different origins,
+/// asserts the details response surfaces each `repo_identity`, and that the
+/// `?repo_identity=` flat filter returns only the matching index.
+/// Test: this function (skips cleanly when git is unavailable).
+#[tokio::test]
+async fn list_indexes_repo_identity_details_and_filter() {
+    use super::indexes::ListIndexesParams;
+    use crate::core::{
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId, IndexRegistry},
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let repo_a = tempfile::TempDir::new().unwrap();
+    let repo_b = tempfile::TempDir::new().unwrap();
+    if !init_git_repo_with_origin(repo_a.path(), "git@github.com:acme/alpha.git")
+        || !init_git_repo_with_origin(repo_b.path(), "git@github.com:acme/beta.git")
+    {
+        return; // no usable git — nothing to assert
+    }
+
+    let registry = IndexRegistry::new();
+    for (name, dir) in [("idx-a", repo_a.path()), ("idx-b", repo_b.path())] {
+        let indexer = CodeIndexer::new(name, dir.to_string_lossy().to_string());
+        registry.register(IndexHandle::bare(
+            IndexId::new(name),
+            Arc::new(RwLock::new(indexer)),
+            dir.to_path_buf(),
+        ));
+    }
+    let state = Arc::new(SearchAppState::new(registry));
+
+    // details=true → each entry carries its derived repo_identity.
+    let resp = list_indexes_handler(
+        State(state.clone()),
+        Query(ListIndexesParams {
+            format: None,
+            details: true,
+            repo_identity: None,
+        }),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let entries = value["indexes"].as_array().unwrap();
+    let identity_for = |id: &str| -> Option<String> {
+        entries
+            .iter()
+            .find(|e| e["id"].as_str() == Some(id))
+            .and_then(|e| e["repo_identity"].as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(identity_for("idx-a").as_deref(), Some("acme/alpha"));
+    assert_eq!(identity_for("idx-b").as_deref(), Some("acme/beta"));
+
+    // ?repo_identity=acme/alpha → flat list contains only idx-a.
+    let resp = list_indexes_handler(
+        State(state),
+        Query(ListIndexesParams {
+            format: None,
+            details: false,
+            repo_identity: Some("acme/alpha".to_string()),
+        }),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let ids: Vec<&str> = value["indexes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(ids, vec!["idx-a"], "filter must return only the matching repo");
 }
