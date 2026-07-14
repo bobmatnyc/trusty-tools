@@ -1,6 +1,16 @@
 # DOC-27 — `trusty-mcp-service`: Unified Native Sidecar Services via MCP-A
 
-**Status:** Draft
+> **⚠️ SUPERSEDED BY ADR-0014 (native Rust MCP, PR #2624).** The unified
+> `trusty-mcp-service` / MCP-A gateway approach described below was **not**
+> adopted. Its intent — retiring the out-of-band Python sidecars (`gworkspace-mcp`,
+> `slack-mpm`) in favor of native Rust MCP servers — is instead delivered directly:
+> each service ships as its own native stdio MCP binary in-workspace (e.g. the
+> `gworkspace-mcp` binary in crate `trusty-gworkspace`), wired into
+> `trusty-agents`' default MCP config rather than through a single MCP-A gateway.
+> This document is retained for historical/design context only; do not implement
+> against it. See the closed tracking work under #1606.
+
+**Status:** Superseded (was: Draft)
 **Subsystem:** trusty-mcp-service (new) — unified native sidecar services / MCP-A gateway
 **Owner:** Engineering (Bob Matsuoka)
 **Last-updated:** 2026-06-23
