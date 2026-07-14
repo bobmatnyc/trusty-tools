@@ -185,6 +185,23 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ProjectsAction,
     },
+    /// Layer-3 portfolio manager — cross-project status, digest, and chat
+    /// (DOC-36, epic #2109, WI-6 #2583).
+    ///
+    /// Why: `tm manager` is the thin CLI client over the daemon's
+    /// `/api/v1/manager/*` surface (DOC-36 §3.2) — the "reason across the
+    /// WHOLE portfolio" layer `tm projects`/`tm sessions` structurally cannot
+    /// provide (DOC-35 §11 scopes cross-project synthesis to #2109). Every
+    /// verb here is read-only in phase 1: `status` is a pure aggregation (no
+    /// LLM), `digest` and `chat` may call an LLM but never mutate a
+    /// Deliverable/Milestone or a session (§2.1 boundary).
+    /// What: the `tm manager <action>` command group.
+    /// Test: `cli_parses_manager_*` in `tests_manager.rs`.
+    Manager {
+        /// Manager action to perform.
+        #[command(subcommand)]
+        action: ManagerAction,
+    },
     /// Show the recent hook-event feed.
     Events,
     /// Run a full system diagnostic of the trusty-mpm stack.
@@ -1660,6 +1677,56 @@ pub(crate) enum ProjectsAction {
         /// Milestone action to perform.
         #[command(subcommand)]
         action: MilestonesAction,
+    },
+}
+
+/// Actions for `tm manager <action>` (DOC-36 §3.2/§6 phase 1, #2583).
+///
+/// Why: mirrors `ProjectsAction`'s shape — one variant per daemon verb this
+/// WI wraps. `route-task`/`escalations` (phase 2/3) are deliberately absent;
+/// this ticket wraps only the phase-1 read-only triad the issue scopes.
+/// What: `Status`/`Digest`/`Chat`, each a thin client over the matching
+/// `DaemonClient::manager_*` method (`client/http_client/manager.rs`).
+/// Test: `cli_parses_manager_*` in `tests_manager.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum ManagerAction {
+    /// Deterministic cross-project portfolio rollup — no LLM call.
+    Status {
+        /// Emit the raw status JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// LLM-authored portfolio (or single-project) narrative, with a
+    /// deterministic fallback when no inference provider is configured.
+    Digest {
+        /// `portfolio` (default) or `project:<name>` to scope to one project.
+        #[arg(long, default_value = "portfolio")]
+        scope: String,
+        /// Emit the raw digest JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// One-shot chat turn against the portfolio manager persona.
+    ///
+    /// Why (conversation-key convention, #2583): defaults to a stable
+    /// per-user key (`cli:$USER`, see `commands::manager::default_conversation_key`)
+    /// so repeated one-shot invocations on the same machine accumulate as one
+    /// ongoing conversation server-side (matching `SessionProxy`'s focus-map
+    /// keying, DOC-36 §3.2) — `--conversation` overrides it for scripts/tests
+    /// that need an isolated key. Interactive REPL mode (multi-turn within a
+    /// single process) is deferred to a follow-up; this ships the one-shot
+    /// form the issue's acceptance criteria require.
+    Chat {
+        /// The message to send. When omitted, reads the full message from
+        /// stdin (supports both piping and a terminal Ctrl-D-terminated
+        /// single message).
+        message: Option<String>,
+        /// Override the conversation key (defaults to a stable per-user key).
+        #[arg(long)]
+        conversation: Option<String>,
+        /// Emit the raw chat-response JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
     },
 }
 
