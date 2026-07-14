@@ -42,16 +42,25 @@
 //! `$TMUX_PANE` claims, BEFORE that pane is trusted for anything — closing
 //! the headless/backgrounded gap where a leaked/stale `$TMUX_PANE` (e.g. a
 //! `nohup`ed or re-parented process) would otherwise resolve a session it no
-//! longer has any live relationship to. [`switch_client_to`] fails closed
-//! (`AttachOutcome::TargetUnresolved`, no tmux mutation at all) the moment
-//! any one of these checks does not hold.
+//! longer has any live relationship to. [`switch_decision`] is the pure,
+//! I/O-free composition of all five resolved inputs into one fail-closed
+//! gate — [`switch_client_to`] resolves each input via a real tmux/
+//! `ttyname_r` call, then defers to it, so the composed sequence (not just
+//! each sub-check in isolation) is directly unit-tested. Every read-only
+//! tmux query added in round 2 ([`session_for_pane`], [`pane_tty_for`],
+//! [`resolve_switch_target`]) resolves the tmux binary via
+//! `resolve_tmux_binary_or_bare`, exactly like the actual attach/switch
+//! spawn — a bare `"tmux"` lookup in any of them could fail against a
+//! version-pinned/wrapped install and silently force the fail-closed path,
+//! partially reintroducing the hang this PR fixes.
 //! Test: `attach_argv_uses_attach_session`, `switch_client_argv_targets_explicit_client`,
 //! `inside_tmux_detection_env_matrix` (via `inside_tmux_from_env`),
 //! `parse_single_client_tty_*`, `attach_outcome_ends_interactive_loop_matrix`,
-//! `invoking_pane_identity_confirmed_*` cover the pure logic directly;
-//! `tmux_attach`/`resolve_switch_target`/`session_for_pane`/`pane_tty_for`
-//! themselves are exercised indirectly by the picker/launch/connect flows
-//! (they spawn a real `tmux` process).
+//! `invoking_pane_identity_confirmed_*`, `switch_decision_*` cover the pure
+//! logic directly (including the full composed guard sequence); `tmux_attach`/
+//! `resolve_switch_target`/`session_for_pane`/`pane_tty_for` themselves are
+//! exercised indirectly by the picker/launch/connect flows (they spawn a
+//! real `tmux` process).
 
 use anyhow::Context as _;
 
@@ -300,13 +309,18 @@ pub(crate) fn parse_single_client_tty(list_clients_output: &str) -> Option<Strin
 /// pane-id targeted) — this function only closes the client-arity half of
 /// the ambiguity; a caller that hands it an untargeted/guessed session name
 /// reopens the exact hijack this exists to prevent, one layer up.
-/// What: runs `tmux list-clients -t <session>` and delegates parsing to
-/// [`parse_single_client_tty`]. Returns `None` on any I/O failure, non-zero
-/// exit, or when the arity check fails.
+/// What: resolves the tmux binary via `resolve_tmux_binary_or_bare` (round
+/// 2 review, MEDIUM — every tmux invocation in this crate routes through the
+/// common resolved entry point, #2399; a bare `"tmux"` lookup here could fail
+/// against a version-pinned/wrapped install, silently forcing the
+/// fail-closed path this fix depends on), runs `list-clients -t <session>`,
+/// and delegates parsing to [`parse_single_client_tty`]. Returns `None` on
+/// any I/O failure, non-zero exit, or when the arity check fails.
 /// Test: I/O path, not unit-tested (requires a live tmux server); the parse/
 /// arity logic is covered by `parse_single_client_tty_*`.
 pub(crate) fn resolve_switch_target(session: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let output = std::process::Command::new(&tmux_bin)
         .args(["list-clients", "-t", session])
         .output()
         .ok()?;
@@ -328,13 +342,17 @@ pub(crate) fn resolve_switch_target(session: &str) -> Option<String> {
 /// such fallback: tmux resolves a pane id to exactly the one pane with that
 /// id, or errors — there is nothing left to guess. [`switch_client_to`] uses
 /// this, not [`current_tmux_session_name`], for exactly that reason.
-/// What: runs `tmux display-message -p -t <pane_id> '#S'` and returns the
-/// trimmed, non-empty stdout, or `None` on any I/O failure, non-zero exit
-/// (e.g. the pane no longer exists), or empty output.
+/// What: resolves the tmux binary via `resolve_tmux_binary_or_bare` (round
+/// 2 review, MEDIUM — see [`resolve_switch_target`]'s doc for why a bare
+/// `"tmux"` lookup here is unsafe), runs
+/// `display-message -p -t <pane_id> '#S'`, and returns the trimmed,
+/// non-empty stdout, or `None` on any I/O failure, non-zero exit (e.g. the
+/// pane no longer exists), or empty output.
 /// Test: I/O path, not unit-tested (requires a live tmux server) — mirrors
 /// [`current_tmux_session_name`]'s exact shape, targeted instead of bare.
 fn session_for_pane(pane_id: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let output = std::process::Command::new(&tmux_bin)
         .args(["display-message", "-p", "-t", pane_id, "#S"])
         .output()
         .ok()?;
@@ -354,14 +372,18 @@ fn session_for_pane(pane_id: &str) -> Option<String> {
 /// session at all — closing the headless/backgrounded, leaked/stale-env gap
 /// (a `nohup`ed or re-parented process can retain a `$TMUX_PANE` value from
 /// a pane it is no longer live in).
-/// What: runs `tmux display-message -p -t <pane_id> '#{pane_tty}'` and
-/// returns the trimmed, non-empty stdout, or `None` on any I/O failure,
-/// non-zero exit, or empty output.
+/// What: resolves the tmux binary via `resolve_tmux_binary_or_bare` (round
+/// 2 review, MEDIUM — see [`resolve_switch_target`]'s doc for why a bare
+/// `"tmux"` lookup here is unsafe), runs
+/// `display-message -p -t <pane_id> '#{pane_tty}'`, and returns the trimmed,
+/// non-empty stdout, or `None` on any I/O failure, non-zero exit, or empty
+/// output.
 /// Test: I/O path, not unit-tested (requires a live tmux server); the pure
 /// comparison that CONSUMES this value is unit-tested via
 /// `invoking_pane_identity_confirmed_*`.
 fn pane_tty_for(pane_id: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let output = std::process::Command::new(&tmux_bin)
         .args(["display-message", "-p", "-t", pane_id, "#{pane_tty}"])
         .output()
         .ok()?;
@@ -458,50 +480,88 @@ fn print_fail_closed_hint(name: &str) {
     );
 }
 
+/// Pure composed-guard decision behind [`switch_client_to`] (round 2 review,
+/// MEDIUM — the individual sub-checks were each unit-tested, but nothing
+/// exercised the ORDER/composition of the full chain end-to-end).
+///
+/// Why: `switch_client_to` threads five independently-resolved, fallible
+/// values through a sequence of checks before ever calling `switch-client`.
+/// Each sub-predicate ([`tmux_pane_id_from_env`],
+/// [`invoking_pane_identity_confirmed`], the arity check inside
+/// [`resolve_switch_target`]) already has its own unit tests, but none of
+/// them proved the WHOLE sequence composes correctly — e.g. that a resolved
+/// session and client do NOT override an earlier identity mismatch. Factoring
+/// the composition into this pure function (no I/O — it takes
+/// already-resolved `Option`s) makes that whole-chain behavior directly
+/// testable without a live tmux server, and gives [`switch_client_to`] a
+/// single source of truth for the gate instead of duplicating the sequence
+/// inline.
+/// What: mirrors [`switch_client_to`]'s exact step order: `tmux_pane`
+/// present → `pane_tty` resolved → BOTH `own_stdin_tty`/`own_stdout_tty`
+/// equal `pane_tty` (via [`invoking_pane_identity_confirmed`]) → `session`
+/// resolved → `client_tty` resolved. Returns `Some(client_tty)` only when
+/// EVERY step holds (the caller may safely run `switch-client -c
+/// <client_tty>`); returns `None` the instant any step fails — fail closed,
+/// regardless of what later inputs would have resolved to.
+/// Test: `switch_decision_all_steps_confirmed_allows_switch`,
+/// `switch_decision_missing_pane_env_fails_closed`,
+/// `switch_decision_pane_tty_unresolved_fails_closed`,
+/// `switch_decision_identity_mismatch_fails_closed`,
+/// `switch_decision_session_unresolved_fails_closed`,
+/// `switch_decision_client_unresolved_fails_closed`.
+fn switch_decision(
+    tmux_pane: Option<&str>,
+    pane_tty: Option<&str>,
+    own_stdin_tty: Option<&str>,
+    own_stdout_tty: Option<&str>,
+    session: Option<&str>,
+    client_tty: Option<&str>,
+) -> Option<String> {
+    tmux_pane?;
+    let pane_tty = pane_tty?;
+    if !invoking_pane_identity_confirmed(own_stdin_tty, own_stdout_tty, pane_tty) {
+        return None;
+    }
+    session?;
+    client_tty.map(str::to_owned)
+}
+
 /// Move the resolved single client of the pane's OWN session into `name` via
 /// an explicit `switch-client -c <tty>` (#2678, hardened round 2).
 ///
-/// Why: the inside-tmux half of [`tmux_attach`], split out so every
-/// fail-closed branch — no `$TMUX_PANE`, no resolvable pane tty, this
-/// process's own controlling terminal does not match that pane, no
-/// resolvable session, no unambiguous client — short-circuits before any
-/// tmux mutation is attempted.
-/// What: (1) reads `$TMUX_PANE` (fail closed if unset/empty); (2) resolves
-/// that pane's tty via [`pane_tty_for`] and proves THIS process's own stdin
-/// AND stdout controlling terminal equal it via
-/// [`invoking_pane_identity_confirmed`] (fail closed on any mismatch or
-/// missing controlling tty — the headless/leaked-env case); (3) resolves the
-/// SESSION that exact pane belongs to via [`session_for_pane`] (pane-id
-/// targeted, never the ambiguous untargeted `#S`); (4) resolves the single
-/// attached client of that session via [`resolve_switch_target`]; on success
+/// Why: the inside-tmux half of [`tmux_attach`] — the sole I/O driver that
+/// resolves each of [`switch_decision`]'s inputs via a real tmux/`ttyname_r`
+/// call, then defers the actual pass/fail-closed gate to that pure function
+/// so the composition itself stays testable and free of drift from what
+/// actually runs.
+/// What: (1) reads `$TMUX_PANE`; (2) resolves that pane's tty via
+/// [`pane_tty_for`]; (3) resolves this process's own stdin/stdout
+/// controlling terminal via [`own_controlling_tty`]; (4) resolves the
+/// SESSION that pane belongs to via [`session_for_pane`] (pane-id targeted,
+/// never the ambiguous untargeted `#S`); (5) resolves the single attached
+/// client of that session via [`resolve_switch_target`]. All five inputs are
+/// then threaded through [`switch_decision`] in one call — on `Some(tty)`,
 /// runs `switch-client -c <tty> -t <name>` and returns
-/// [`AttachOutcome::Switched`]. Any fail-closed branch prints
-/// [`print_fail_closed_hint`] and returns [`AttachOutcome::TargetUnresolved`]
-/// WITHOUT invoking tmux at all — never a bare, unguarded `switch-client`.
+/// [`AttachOutcome::Switched`]; on `None` (ANY step failed, in ANY
+/// combination), prints [`print_fail_closed_hint`] and returns
+/// [`AttachOutcome::TargetUnresolved`] WITHOUT invoking tmux at all — never a
+/// bare, unguarded `switch-client`.
 fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
-    let Some(tmux_pane) = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok()) else {
-        print_fail_closed_hint(name);
-        return Ok(AttachOutcome::TargetUnresolved);
-    };
-    let Some(pane_tty) = pane_tty_for(&tmux_pane) else {
-        print_fail_closed_hint(name);
-        return Ok(AttachOutcome::TargetUnresolved);
-    };
+    let tmux_pane = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok());
+    let pane_tty = tmux_pane.as_deref().and_then(pane_tty_for);
     let own_stdin_tty = own_controlling_tty(libc::STDIN_FILENO);
     let own_stdout_tty = own_controlling_tty(libc::STDOUT_FILENO);
-    if !invoking_pane_identity_confirmed(
+    let session = tmux_pane.as_deref().and_then(session_for_pane);
+    let client_tty = session.as_deref().and_then(resolve_switch_target);
+
+    let Some(client_tty) = switch_decision(
+        tmux_pane.as_deref(),
+        pane_tty.as_deref(),
         own_stdin_tty.as_deref(),
         own_stdout_tty.as_deref(),
-        &pane_tty,
-    ) {
-        print_fail_closed_hint(name);
-        return Ok(AttachOutcome::TargetUnresolved);
-    }
-    let Some(current_session) = session_for_pane(&tmux_pane) else {
-        print_fail_closed_hint(name);
-        return Ok(AttachOutcome::TargetUnresolved);
-    };
-    let Some(client_tty) = resolve_switch_target(&current_session) else {
+        session.as_deref(),
+        client_tty.as_deref(),
+    ) else {
         print_fail_closed_hint(name);
         return Ok(AttachOutcome::TargetUnresolved);
     };
@@ -730,5 +790,114 @@ mod tests {
         );
         assert_eq!(tmux_pane_id_from_env(Some(String::new())), None);
         assert_eq!(tmux_pane_id_from_env(None), None);
+    }
+
+    /// The composed guard sequence, end to end: every step resolves and
+    /// agrees — this is the only case that may proceed to `switch-client`
+    /// (round 2 review, MEDIUM — the composition itself, not just each
+    /// sub-check, needed direct coverage).
+    #[test]
+    fn switch_decision_all_steps_confirmed_allows_switch() {
+        assert_eq!(
+            switch_decision(
+                Some("%260"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("tm-dogfood-relaunch-01"),
+                Some("/dev/ttys000"),
+            ),
+            Some("/dev/ttys000".to_string())
+        );
+    }
+
+    /// No `$TMUX_PANE` at all — fails closed even though every later input
+    /// (deliberately crafted here) would otherwise agree, proving the env
+    /// gate is checked first and is not bypassable by downstream agreement.
+    #[test]
+    fn switch_decision_missing_pane_env_fails_closed() {
+        assert_eq!(
+            switch_decision(
+                None,
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("tm-dogfood-relaunch-01"),
+                Some("/dev/ttys000"),
+            ),
+            None
+        );
+    }
+
+    /// `$TMUX_PANE` present but its pane tty could not be resolved (e.g. the
+    /// pane no longer exists) — fails closed before identity is even
+    /// evaluated.
+    #[test]
+    fn switch_decision_pane_tty_unresolved_fails_closed() {
+        assert_eq!(
+            switch_decision(
+                Some("%260"),
+                None,
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("tm-dogfood-relaunch-01"),
+                Some("/dev/ttys000"),
+            ),
+            None
+        );
+    }
+
+    /// Session AND client both resolve cleanly, but this process's own
+    /// controlling terminal does not match the claimed pane — the exact
+    /// residual-hijack shape the round-2 review flagged. A confirmed session/
+    /// client must NOT override a failed identity check.
+    #[test]
+    fn switch_decision_identity_mismatch_fails_closed() {
+        assert_eq!(
+            switch_decision(
+                Some("%260"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys999"),
+                Some("/dev/ttys001"),
+                Some("tm-dogfood-relaunch-01"),
+                Some("/dev/ttys000"),
+            ),
+            None
+        );
+    }
+
+    /// Identity confirmed, but the pane's own session could not be resolved
+    /// — fails closed before a client is ever looked up.
+    #[test]
+    fn switch_decision_session_unresolved_fails_closed() {
+        assert_eq!(
+            switch_decision(
+                Some("%260"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                None,
+                Some("/dev/ttys000"),
+            ),
+            None
+        );
+    }
+
+    /// Everything up to the session resolves and matches, but the session's
+    /// client arity check failed (zero or 2+ attached clients) — fails
+    /// closed, matching `resolve_switch_target`'s own fail-closed contract.
+    #[test]
+    fn switch_decision_client_unresolved_fails_closed() {
+        assert_eq!(
+            switch_decision(
+                Some("%260"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("/dev/ttys001"),
+                Some("tm-dogfood-relaunch-01"),
+                None,
+            ),
+            None
+        );
     }
 }
