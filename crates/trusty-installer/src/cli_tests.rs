@@ -13,7 +13,9 @@
 
 use clap::Parser;
 
-use crate::cli::{AnalyzeCoreArg, Cli, Commands, ConfigSubcommand, ScopeArg, StackCmd};
+use crate::cli::{
+    AnalyzeCoreArg, Cli, Commands, ConfigSubcommand, ScopeArg, SignTargetArg, StackCmd,
+};
 
 /// Parse `trusty-installer up` — selects `Commands::Up` with all flags defaulted off.
 #[test]
@@ -484,4 +486,58 @@ fn parse_self_update() {
 fn tctl_alias_self_update() {
     let cli = Cli::try_parse_from(["tctl", "self-update"]).expect("tctl self-update parses");
     assert!(matches!(cli.command, Commands::SelfUpdate));
+}
+
+/// `trusty-installer sign trusty-search` / `sign trusty-mpm` both parse and
+/// round-trip to the right `SignTargetArg` (#2558).
+#[test]
+fn parse_sign() {
+    let search = Cli::try_parse_from(["trusty-installer", "sign", "trusty-search"])
+        .expect("sign trusty-search parses");
+    match search.command {
+        Commands::Sign { target, dir } => {
+            assert_eq!(target, SignTargetArg::Search);
+            assert_eq!(target.as_set_name(), "trusty-search");
+            assert!(dir.is_none());
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
+
+    let mpm = Cli::try_parse_from(["trusty-installer", "sign", "trusty-mpm"])
+        .expect("sign trusty-mpm parses");
+    match mpm.command {
+        Commands::Sign { target, .. } => {
+            assert_eq!(target, SignTargetArg::Mpm);
+            assert_eq!(target.as_set_name(), "trusty-mpm");
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
+}
+
+/// `trusty-installer sign trusty-search --dir <path>` parses the override.
+#[test]
+fn parse_sign_dir_override() {
+    let cli = Cli::try_parse_from([
+        "trusty-installer",
+        "sign",
+        "trusty-search",
+        "--dir",
+        "/tmp/custom-bin",
+    ])
+    .expect("sign --dir parses");
+    if let Commands::Sign { dir, .. } = &cli.command {
+        assert_eq!(
+            dir.as_deref(),
+            Some(std::path::Path::new("/tmp/custom-bin"))
+        );
+    } else {
+        panic!("expected Sign");
+    }
+}
+
+/// An invalid `sign` target is rejected by clap (unknown `ValueEnum` variant).
+#[test]
+fn parse_sign_invalid_target_rejected() {
+    let result = Cli::try_parse_from(["trusty-installer", "sign", "not-a-target"]);
+    assert!(result.is_err(), "unknown sign target must be rejected");
 }
