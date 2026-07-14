@@ -149,9 +149,22 @@ const CLAUDE_MD_STUB: &str = "# Project Instructions
 // `-research` / `-teacher` variants), which Claude Code loads as the
 // session's system prompt through the `outputStyle` settings key — making the
 // CLAUDE.md copy redundant. No code path writes this block anymore; the
-// markers below are retained only so [`strip_delegation_block`] can find and
+// markers below are retained so [`strip_delegation_block`] can find and
 // remove pre-existing pollution from workspaces provisioned before this fix
 // (e.g. `apex`).
+//
+// Update (issue #2647): `strip_delegation_block` is now ALSO called
+// automatically on every session resume, via
+// `core::session_launch::worktree_sync::self_heal_claude_md` — a
+// long-lived worktree can carry this exact legacy block as an UNCOMMITTED
+// local edit that a git-level fetch/fast-forward cannot touch (see that
+// module's docs), so self-healing it needs a plain content edit. This is
+// still NOT general CLAUDE.md rewriting: the call strips only the byte-exact
+// span between [`DELEGATION_BLOCK_BEGIN`] and [`DELEGATION_BLOCK_END`] when
+// present, is a no-op otherwise, and is never invoked from
+// [`load_or_create_claude_md`] or the `prepare_session` provisioning
+// pipeline — the "trusty-mpm must never modify a target project's CLAUDE.md"
+// invariant still holds for every OTHER byte of the file.
 // ---------------------------------------------------------------------------
 
 /// Begin marker fencing the legacy framework-owned delegation-directive block
@@ -173,11 +186,15 @@ const DELEGATION_BLOCK_END: &str = "<!-- trusty-mpm:delegation-directive:end -->
 ///
 /// Why: workspaces provisioned before issue #2170 landed may still carry the
 /// block trusty-mpm used to inject, fenced by [`DELEGATION_BLOCK_BEGIN`] /
-/// [`DELEGATION_BLOCK_END`]. This function is deliberately NOT called from
-/// [`load_or_create_claude_md`] or anywhere in the session-launch pipeline —
-/// trusty-mpm must never touch a project's `CLAUDE.md` on its own. It exists
-/// so an operator (or a future explicit, opt-in cleanup command) can strip
-/// already-polluted files on demand.
+/// [`DELEGATION_BLOCK_END`]. This function is still NOT called from
+/// [`load_or_create_claude_md`] or the `prepare_session` provisioning
+/// pipeline — trusty-mpm must never rewrite a project's `CLAUDE.md` as part
+/// of normal provisioning. As of issue #2647 it IS called from one other
+/// site: `core::session_launch::worktree_sync::self_heal_claude_md`, on
+/// every session resume — a targeted, anchored self-heal (this exact fenced
+/// span only) rather than the general rewriting the invariant above still
+/// forbids. It is also available for an operator (or a future explicit,
+/// opt-in cleanup command) to call on demand.
 /// What: if both fence markers are present (in order), removes the span
 /// between them (inclusive) plus the blank line that follows it, leaving
 /// every other byte of `content` untouched. Returns `content` unchanged when
@@ -656,6 +673,84 @@ mod tests {
             on_disk.contains("# BASE_PM Framework Floor"),
             "BASE_PM floor must be present"
         );
+    }
+
+    #[test]
+    fn primary_directive_mandate_not_duplicated_across_channels() {
+        // Issue #2647 (R2): the FULL mandate table (Prohibitions, Circuit
+        // Breakers, Delegation Map, PM Allowlist) must live in exactly ONE
+        // channel — the appended system prompt (`assemble_system_prompt`,
+        // always injected via `--append-system-prompt-file` on tm-driven
+        // spawns). Before this fix, every bundled output-style file (loaded
+        // independently via the Claude Code `outputStyle` settings key) ALSO
+        // carried a full, near-identical restatement of that table —
+        // duplicated tokens every session.
+        //
+        // Code-critic follow-up: `outputStyle` is deployed to
+        // `<project>/.claude/output-styles/*.md` + `settings.json`
+        // (`settings.rs`) and therefore applies to ANY `claude` launched in
+        // that directory — including a manual `claude` invocation that never
+        // receives `--append-system-prompt-file` at all
+        // (`runtime/claude_code.rs`). A style with NOTHING but a pointer to
+        // the appended prompt would leave such a launch with zero
+        // enforcement. So each style keeps a short, SELF-CONTAINED minimal
+        // mandate (PRIMARY DIRECTIVE statement, override-phrase list, a
+        // prohibition summary) alongside the pointer to the full table —
+        // this test asserts that block survived the dedup, not just that the
+        // heading sentinel is de-duplicated.
+        const SENTINEL: &str = "PRIMARY DIRECTIVE";
+        let assembled = assemble_system_prompt();
+        assert_eq!(
+            assembled.matches(SENTINEL).count(),
+            0,
+            "the appended system prompt must not carry a literal PRIMARY \
+             DIRECTIVE banner — the mandate lives there as Identity + \
+             Prohibitions content"
+        );
+
+        // The appended prompt must still carry the substantive, canonical
+        // mandate content — so the mandate can never silently vanish from
+        // BOTH channels at once just because the banner text moved.
+        assert!(
+            assembled.contains("## Prohibitions"),
+            "the appended prompt must carry the canonical Prohibitions table"
+        );
+        assert!(
+            assembled.contains("## Circuit Breakers"),
+            "the appended prompt must carry the canonical Circuit Breakers table"
+        );
+        assert!(
+            assembled.contains("don't delegate"),
+            "the appended prompt must carry at least one override phrase"
+        );
+
+        for style in crate::core::bundle::OUTPUT_STYLES {
+            let combined =
+                assembled.matches(SENTINEL).count() + style.content.matches(SENTINEL).count();
+            assert_eq!(
+                combined, 1,
+                "{}: PRIMARY DIRECTIVE sentinel must appear exactly once across \
+                 the appended prompt + this output style (one heading, never a \
+                 full restatement of the mandate TABLE) — got {combined}",
+                style.id
+            );
+
+            // Each style must still carry its OWN self-contained minimal
+            // mandate — the override-phrase list and a prohibition summary —
+            // so a manual `claude` launch (no --append-system-prompt-file)
+            // in a tm-provisioned workspace is never left with zero
+            // enforcement.
+            assert!(
+                style.content.contains("do this yourself"),
+                "{}: must carry its own self-contained override-phrase list",
+                style.id
+            );
+            assert!(
+                style.content.contains("Minimum prohibitions"),
+                "{}: must carry its own self-contained prohibition summary",
+                style.id
+            );
+        }
     }
 
     #[test]
