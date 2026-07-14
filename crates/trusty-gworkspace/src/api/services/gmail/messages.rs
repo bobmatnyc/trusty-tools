@@ -12,6 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 
+use super::compose;
 use crate::api::client::BaseClient;
 use crate::api::constants::GMAIL_API_BASE;
 use crate::api::services::{account_of, opt_str, require_str};
@@ -111,75 +112,187 @@ fn collect_attachments(part: &Value, out: &mut Vec<Value>) {
     }
 }
 
-/// Compose an email: send, draft, or send an existing draft.
+/// Compose an email: send, draft, send an existing draft, or reply.
 ///
-/// Why: Single tool covers the three common write paths in Gmail; we build
-/// the RFC 2822 MIME envelope here so callers pass logical fields.
-/// What: Builds a `From/To/Subject/Body` message, base64url-encodes it, and
-/// POSTs to either `/messages/send` or `/drafts`.
-/// Test: Live only (real Gmail send).
+/// Why: One tool covers every Gmail write path, now including replies and
+/// attachments at parity with the Python upstream (#2630).
+/// What: Resolves plain/HTML bodies and attachments, builds the MIME envelope
+/// via `compose::build_mime`, base64url-encodes it, and POSTs to the right
+/// endpoint. `reply` fetches the original message to set
+/// `In-Reply-To`/`References` headers and the send `threadId`, defaulting the
+/// recipient/subject from the original when omitted.
+/// Test: MIME construction is unit-tested in `compose`; live send is deferred.
 pub async fn compose_email(client: &BaseClient, args: Value) -> Result<Value> {
     let account = account_of(&args);
     let action = opt_str(&args, "action").unwrap_or("send");
 
     if action == "send_draft" {
         let draft_id = require_str(&args, "draft_id")?;
-        let body = json!({ "id": draft_id });
         let url = format!("{GMAIL_API_BASE}/users/me/drafts/send");
-        return client.post(&url, body, account).await;
+        return client.post(&url, json!({ "id": draft_id }), account).await;
     }
 
-    let to = require_str(&args, "to")?;
-    let subject = opt_str(&args, "subject").unwrap_or("");
-    let body_text = opt_str(&args, "body").unwrap_or("");
-    let cc = opt_str(&args, "cc");
-    let bcc = opt_str(&args, "bcc");
-    let html = args.get("html").and_then(|v| v.as_bool()).unwrap_or(false);
+    let plain_body = opt_str(&args, "body");
+    let html_body = opt_str(&args, "html_body");
+    let html_flag = args.get("html").and_then(|v| v.as_bool()).unwrap_or(false);
+    // html_body wins; else the legacy `html: true` flag re-labels `body` as HTML.
+    let (plain, html): (Option<&str>, Option<&str>) = if html_body.is_some() {
+        (plain_body, html_body)
+    } else if html_flag {
+        (None, plain_body)
+    } else {
+        (plain_body, None)
+    };
 
-    let mime = build_mime_message(to, cc, bcc, subject, body_text, html);
-    let encoded = URL_SAFE_NO_PAD.encode(mime.as_bytes());
+    let attachments = compose::resolve_attachments(client, account, &args).await?;
 
-    let payload = json!({ "raw": encoded });
+    // Reply context supplies headers, a default recipient/subject, and threadId.
+    let mut extra_headers: Vec<(String, String)> = Vec::new();
+    let mut thread_id: Option<String> = None;
+    let mut to_default: Option<String> = None;
+    let mut subject_default: Option<String> = None;
+    if action == "reply" {
+        let ctx = fetch_reply_context(client, account, require_str(&args, "message_id")?).await?;
+        thread_id = ctx.thread_id.clone();
+        if let Some(mid) = &ctx.message_id_header {
+            extra_headers.push(("In-Reply-To".to_string(), mid.clone()));
+            extra_headers.push(("References".to_string(), ctx.references_chain(mid)));
+        }
+        if opt_str(&args, "to").is_none() {
+            to_default = ctx.from.clone();
+        }
+        if opt_str(&args, "subject").is_none() {
+            subject_default = ctx.subject.as_deref().map(reply_subject);
+        }
+    }
+
+    let to = match (opt_str(&args, "to"), to_default.as_deref()) {
+        (Some(t), _) | (None, Some(t)) => t,
+        (None, None) => {
+            return Err(anyhow!(
+                "'to' is required (or reply to a message that has a sender)"
+            ));
+        }
+    };
+    let subject = opt_str(&args, "subject")
+        .or(subject_default.as_deref())
+        .unwrap_or("");
+
+    let parts = compose::MessageParts {
+        to,
+        cc: opt_str(&args, "cc"),
+        bcc: opt_str(&args, "bcc"),
+        subject,
+        plain,
+        html,
+        extra_headers,
+    };
+    let raw = compose::encode_raw(&compose::build_mime(&parts, &attachments));
+
     match action {
         "send" => {
+            let url = format!("{GMAIL_API_BASE}/users/me/messages/send");
+            client.post(&url, json!({ "raw": raw }), account).await
+        }
+        "reply" => {
+            let mut payload = json!({ "raw": raw });
+            if let Some(tid) = thread_id {
+                payload["threadId"] = json!(tid);
+            }
             let url = format!("{GMAIL_API_BASE}/users/me/messages/send");
             client.post(&url, payload, account).await
         }
         "draft" => {
-            let body = json!({ "message": { "raw": encoded } });
             let url = format!("{GMAIL_API_BASE}/users/me/drafts");
-            client.post(&url, body, account).await
+            client
+                .post(&url, json!({ "message": { "raw": raw } }), account)
+                .await
         }
         other => Err(anyhow!("unknown action for compose_email: {other}")),
     }
 }
 
-fn build_mime_message(
-    to: &str,
-    cc: Option<&str>,
-    bcc: Option<&str>,
-    subject: &str,
-    body: &str,
-    html: bool,
-) -> String {
-    let content_type = if html {
-        "text/html; charset=UTF-8"
-    } else {
-        "text/plain; charset=UTF-8"
+/// The subset of an original message needed to build a threaded reply.
+///
+/// Why: A well-formed reply must chain `In-Reply-To`/`References` to the
+/// original `Message-ID`, ride the same `threadId`, and default To/Subject.
+/// What: Carries the original thread id, `Message-ID`, `References`, subject,
+/// and sender.
+/// Test: `references_chain`/`reply_subject` are unit-tested below.
+struct ReplyContext {
+    thread_id: Option<String>,
+    message_id_header: Option<String>,
+    references: Option<String>,
+    subject: Option<String>,
+    from: Option<String>,
+}
+
+impl ReplyContext {
+    /// Append this message id to any existing References chain.
+    fn references_chain(&self, msg_id: &str) -> String {
+        match self.references.as_deref().filter(|r| !r.is_empty()) {
+            Some(prev) => format!("{prev} {msg_id}"),
+            None => msg_id.to_string(),
+        }
+    }
+}
+
+/// Fetch the reply context (threadId + relevant headers) for a message.
+///
+/// Why: Replies need the original's headers to thread correctly.
+/// What: GETs the message with `format=metadata` limited to the four headers
+/// we consume, then extracts them case-insensitively.
+/// Test: Live (network); pure header parsing is exercised via the message JSON.
+async fn fetch_reply_context(
+    client: &BaseClient,
+    account: Option<&str>,
+    message_id: &str,
+) -> Result<ReplyContext> {
+    let url = format!(
+        "{GMAIL_API_BASE}/users/me/messages/{message_id}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=Subject&metadataHeaders=From"
+    );
+    let msg = client.get(&url, account).await?;
+    let thread_id = msg
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let headers = msg
+        .get("payload")
+        .and_then(|p| p.get("headers"))
+        .and_then(|h| h.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let header = |name: &str| -> Option<String> {
+        headers
+            .iter()
+            .find(|h| {
+                h.get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+            .and_then(|h| h.get("value").and_then(|v| v.as_str()))
+            .map(String::from)
     };
-    let mut headers = vec![
-        format!("To: {to}"),
-        format!("Subject: {subject}"),
-        format!("Content-Type: {content_type}"),
-        "MIME-Version: 1.0".to_string(),
-    ];
-    if let Some(c) = cc {
-        headers.push(format!("Cc: {c}"));
+    Ok(ReplyContext {
+        thread_id,
+        message_id_header: header("Message-ID"),
+        references: header("References"),
+        subject: header("Subject"),
+        from: header("From"),
+    })
+}
+
+/// Prefix a subject with `Re: ` unless it already has one.
+fn reply_subject(original: &str) -> String {
+    if original
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("re:")
+    {
+        original.to_string()
+    } else {
+        format!("Re: {original}")
     }
-    if let Some(b) = bcc {
-        headers.push(format!("Bcc: {b}"));
-    }
-    format!("{}\r\n\r\n{}", headers.join("\r\n"), body)
 }
 
 /// Why: Bulk label add/remove (incl. archive/trash) is one Gmail batchModify call.
@@ -239,4 +352,38 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_subject_prefixes_once() {
+        assert_eq!(reply_subject("Question"), "Re: Question");
+        // Already a reply -> unchanged, case-insensitive.
+        assert_eq!(reply_subject("Re: Question"), "Re: Question");
+        assert_eq!(reply_subject("RE: Loud"), "RE: Loud");
+    }
+
+    #[test]
+    fn references_chain_appends_to_existing() {
+        let with_prev = ReplyContext {
+            thread_id: None,
+            message_id_header: Some("<b@m>".to_string()),
+            references: Some("<a@m>".to_string()),
+            subject: None,
+            from: None,
+        };
+        assert_eq!(with_prev.references_chain("<b@m>"), "<a@m> <b@m>");
+
+        let no_prev = ReplyContext {
+            thread_id: None,
+            message_id_header: Some("<b@m>".to_string()),
+            references: None,
+            subject: None,
+            from: None,
+        };
+        assert_eq!(no_prev.references_chain("<b@m>"), "<b@m>");
+    }
 }

@@ -17,6 +17,8 @@ pub const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
 pub const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 /// Google Drive REST API v3 root.
 pub const DRIVE_API_BASE: &str = "https://www.googleapis.com/drive/v3";
+/// Google Drive **upload** endpoint root (multipart/simple/resumable uploads).
+pub const DRIVE_UPLOAD_BASE: &str = "https://www.googleapis.com/upload/drive/v3/files";
 /// Google Docs REST API v1 root.
 pub const DOCS_API_BASE: &str = "https://docs.googleapis.com/v1";
 /// Google Sheets REST API v4 root.

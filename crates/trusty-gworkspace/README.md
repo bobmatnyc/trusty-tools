@@ -132,6 +132,14 @@ adding a new tool means: write the function, add a `match` arm in
 - **Errors as data.** Tool failures return `{"error": "..."}` inside the
   MCP `content` envelope rather than JSON-RPC framing errors, so the
   model gets actionable feedback.
+- **Local filesystem access is intentionally broad.** `compose_email`
+  attachments (`path`/`local_path`), `manage_drive_file`'s `upload` action
+  (`local_path`), and `get_drive_file_content`'s `save_path` all read or
+  write arbitrary local paths the calling agent supplies. There is no path
+  confinement — an LLM-driven agent processing untrusted content (e.g. a
+  malicious email body instructing it to attach `~/.ssh/id_rsa`) can read or
+  exfiltrate any file the process's user can access. Treat this server the
+  same as any other tool granting a model direct filesystem read/write.
 
 ## Testing
 
