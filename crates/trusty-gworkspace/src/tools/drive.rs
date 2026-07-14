@@ -57,13 +57,16 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     tools.push(tool(
         "manage_drive_file",
-        "Create folders, rename/move/copy/trash/delete files in Drive.",
+        "Create folders, rename/move/copy/trash/delete, or upload files in Drive.",
         json!({
             "account": account_schema(),
-            "action": action_enum(&["create_folder", "rename", "trash", "delete", "copy", "move"]),
+            "action": action_enum(&["create_folder", "rename", "trash", "delete", "copy", "move", "upload"]),
             "file_id": { "type": "string" },
-            "name": { "type": "string" },
-            "parent_id": { "type": "string" },
+            "name": { "type": "string", "description": "New/target file or folder name (required for create_folder, rename, upload)." },
+            "parent_id": { "type": "string", "description": "Parent folder id (target for move/upload, optional for create_folder)." },
+            "local_path": { "type": "string", "description": "upload: read bytes from this local file." },
+            "content": { "type": "string", "description": "upload: inline text content (alternative to local_path)." },
+            "mime_type": { "type": "string", "description": "upload: MIME type of the content (guessed from local_path extension, else text/plain)." },
         }),
         &["action"],
     ));

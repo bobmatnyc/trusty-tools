@@ -11,8 +11,8 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
 use crate::api::client::BaseClient;
-use crate::api::constants::DRIVE_API_BASE;
-use crate::api::services::{account_of, opt_str, require_str};
+use crate::api::constants::{DRIVE_API_BASE, DRIVE_UPLOAD_BASE};
+use crate::api::services::{account_of, guess_mime_from_path, opt_str, require_str};
 
 /// Why: Folder listing is the entry point for any Drive navigation tool.
 /// What: Queries `/files` filtered by parent id, returning name/mimeType/id for each child.
@@ -182,9 +182,12 @@ pub async fn list_shared_drives(client: &BaseClient, args: Value) -> Result<Valu
     client.get(&url, account).await
 }
 
-/// Why: File-level mutations (create folder, rename, trash) share one Drive API surface.
-/// What: Dispatches `create_folder|rename|trash|untrash|delete` to the Drive `/files` API.
-/// Test: Live API.
+/// Why: File-level mutations (create folder, rename, trash, upload) share one
+/// Drive API surface.
+/// What: Dispatches `create_folder|rename|trash|delete|copy|move|upload` to the
+/// Drive `/files` (and `/upload/.../files`) endpoints.
+/// Test: `upload` multipart-body shape is unit-tested via
+/// `build_multipart_related`; live 200 validation is deferred.
 pub async fn manage_drive_file(client: &BaseClient, args: Value) -> Result<Value> {
     let action = require_str(&args, "action")?;
     let account = account_of(&args);
@@ -235,8 +238,67 @@ pub async fn manage_drive_file(client: &BaseClient, args: Value) -> Result<Value
                 format!("{DRIVE_API_BASE}/files/{id}?addParents={parent}&supportsAllDrives=true");
             client.patch(&url, json!({}), account).await
         }
+        "upload" => {
+            let name = require_str(&args, "name")?;
+            let parent = opt_str(&args, "parent_id");
+            let mime_arg = opt_str(&args, "mime_type");
+
+            // Source bytes come from either a local file or inline content.
+            let (bytes, resolved_mime) = if let Some(path) = opt_str(&args, "local_path") {
+                let data =
+                    std::fs::read(path).with_context(|| format!("read upload source {path}"))?;
+                let mime = mime_arg
+                    .map(str::to_string)
+                    .unwrap_or_else(|| guess_mime_from_path(path));
+                (data, mime)
+            } else if let Some(content) = opt_str(&args, "content") {
+                let mime = mime_arg.unwrap_or("text/plain").to_string();
+                (content.as_bytes().to_vec(), mime)
+            } else {
+                return Err(anyhow!(
+                    "upload requires either 'local_path' or inline 'content'"
+                ));
+            };
+
+            let mut metadata = json!({ "name": name, "mimeType": resolved_mime });
+            if let Some(p) = parent {
+                metadata["parents"] = json!([p]);
+            }
+
+            let boundary = format!("gworkspace-{}", uuid::Uuid::new_v4().simple());
+            let body = build_multipart_related(&metadata, &resolved_mime, &bytes, &boundary)?;
+            let content_type = format!("multipart/related; boundary={boundary}");
+            let url = format!(
+                "{DRIVE_UPLOAD_BASE}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,parents"
+            );
+            client.post_raw(&url, &content_type, body, account).await
+        }
         other => Err(anyhow!("unknown action for manage_drive_file: {other}")),
     }
+}
+
+/// Why: Drive's multipart upload endpoint expects a `multipart/related` body
+/// pairing a JSON metadata part with the raw media part; getting the CRLF
+/// framing wrong yields a 400.
+/// What: Serialises `metadata` as the first part and `content` (under `mime`)
+/// as the second, delimited by `boundary` per RFC 2387.
+/// Test: `multipart_body_has_metadata_and_media_parts` below.
+fn build_multipart_related(
+    metadata: &Value,
+    mime: &str,
+    content: &[u8],
+    boundary: &str,
+) -> Result<Vec<u8>> {
+    let meta_json = serde_json::to_vec(metadata).context("serialize upload metadata")?;
+    let mut body = Vec::with_capacity(meta_json.len() + content.len() + 256);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+    body.extend_from_slice(&meta_json);
+    body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(format!("Content-Type: {mime}\r\n\r\n").as_bytes());
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Ok(body)
 }
 
 pub(crate) fn encode(s: &str) -> String {
@@ -295,5 +357,24 @@ mod tests {
             .decode(v["content"].as_str().unwrap())
             .expect("valid base64");
         assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn multipart_body_has_metadata_and_media_parts() {
+        let metadata = json!({ "name": "hi.txt", "mimeType": "text/plain" });
+        let body =
+            build_multipart_related(&metadata, "text/plain", b"hello world", "BOUND").unwrap();
+        let text = String::from_utf8(body).expect("ascii-framed multipart");
+        // Two boundaries + closing delimiter.
+        assert_eq!(text.matches("--BOUND\r\n").count(), 2);
+        assert!(text.ends_with("--BOUND--\r\n"));
+        // JSON metadata part precedes the media part.
+        assert!(text.contains("Content-Type: application/json; charset=UTF-8\r\n\r\n"));
+        assert!(text.contains("\"name\":\"hi.txt\""));
+        assert!(text.contains("Content-Type: text/plain\r\n\r\nhello world\r\n"));
+        // Metadata part must come before the media body.
+        let meta_at = text.find("\"name\":\"hi.txt\"").unwrap();
+        let media_at = text.find("hello world").unwrap();
+        assert!(meta_at < media_at);
     }
 }
