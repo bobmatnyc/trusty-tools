@@ -262,24 +262,10 @@ eager_discovery = true
 [tool_registry.endpoints.transport]
 timeout_ms = 5000
 
-# tickets-mcp — unified ticketing MCP server (GitHub Issues, JIRA, Linear)
-# via JSON-RPC 2.0 stdio. Disabled by default; flip `enabled = true` once
-# the `tickets-mcp` binary is on $PATH.
-[[tool_registry.endpoints]]
-name = "tickets-mcp"
-driver = "direct"
-description = "Unified ticketing MCP server — GitHub Issues, JIRA, Linear"
-command = "tickets-mcp"
-args = []
-enabled = false
-scopes = ["ticketing.*"]
-discovery_ttl_secs = 0
-eager_discovery = true
-
-[tool_registry.endpoints.transport]
-timeout_ms = 5000
-
-# commons-ticketing retired per ADR-0014 (native Rust MCP, PR #2624): a disabled
-# external OpenRPC stub with no consumers, superseded by the native tickets-mcp
-# endpoint above.
+# tickets-mcp is intentionally NOT a `driver = "direct"` (OpenRPC) endpoint:
+# the `tickets-mcp` binary (trusty-common, `tickets` feature) speaks MCP
+# framing, not OpenRPC `rpc.discover`, so a direct endpoint would silently
+# fail discovery. It is wired out-of-process via the repo-root `.mcp.json`
+# stdio server instead. The former dead `tickets-mcp` (and `commons-ticketing`)
+# OpenRPC stubs were retired per ADR-0014 (native Rust MCP, PR #2624).
 "#;
