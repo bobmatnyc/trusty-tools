@@ -4,13 +4,16 @@
 //! Why: the thin CLI half of the Layer-3 `/api/v1/manager/*` surface — no
 //! logic is duplicated client-side (#2583's acceptance criteria); each verb
 //! is a `DaemonClient::manager_*` call plus a pure render function, mirroring
-//! `commands/projects/registry.rs`'s `status` verb shape. `digest`/`chat`
-//! (WI-3 #2580, WI-4 #2581) are shipping concurrently on a sibling branch and
-//! may not be mounted on the daemon this CLI talks to yet;
-//! [`DaemonClient::manager_digest`]/[`DaemonClient::manager_chat`] already
-//! encode the 404-degrade contract (`Ok(None)`), so this module's job is just
-//! to turn that into the documented upgrade message (`digest_unavailable_message`
-//! and the inline chat equivalent).
+//! `commands/projects/registry.rs`'s `status` verb shape. All the
+//! version-skew/degrade handling lives in the client
+//! (`client/http_client/manager.rs::manager_digest`/`manager_chat`): a `404`
+//! against a daemon that genuinely predates WI-3/WI-4 (#2580/#2581) comes
+//! back as `Ok(None)`, which this module turns into the upgrade message
+//! below; a daemon-reported error (including a real 404 like an unregistered
+//! `scope=project:<name>`, or the inference-unavailable/failed 502/503
+//! degrade) comes back as `Ok(Some(outcome))` or `Err` respectively and is
+//! rendered/propagated as-is — this module never re-derives that
+//! distinction.
 //! What: [`status`], [`digest`], [`chat`] — the three dispatch targets
 //! `main.rs` routes `Command::Manager` actions to — plus the pure render
 //! helpers [`render_status_headline`] and [`render_project_rows`], and
@@ -128,6 +131,10 @@ pub(crate) async fn digest(
     scope: &str,
     json: bool,
 ) -> anyhow::Result<()> {
+    // `?` propagates a daemon-reported error (incl. a real 404 for an
+    // unregistered `scope=project:<name>`) as-is; `None` here means the
+    // client feature-detected via `GET /manager/version` that this daemon
+    // genuinely predates the digest route.
     let outcome = daemon(client, url).manager_digest(scope).await?;
     let Some(outcome) = outcome else {
         anyhow::bail!(
@@ -168,6 +175,8 @@ pub(crate) async fn chat(
     }
     let conversation_key = conversation.unwrap_or_else(default_conversation_key);
 
+    // Same feature-detected 404 story as `digest` above: `None` only when
+    // `GET /manager/version` reports the chat route genuinely unmounted.
     let outcome = daemon(client, url)
         .manager_chat(&conversation_key, &message)
         .await?;

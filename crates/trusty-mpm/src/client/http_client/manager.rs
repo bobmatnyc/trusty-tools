@@ -3,39 +3,66 @@
 //!
 //! Why: `tm manager status|digest|chat` (#2583) is the thin CLI half of the
 //! `/api/v1/manager/*` surface — same "wire an endpoint exactly once" rule
-//! DOC-35 §1.3 established for `projects.rs`. `status` is a pinned, live
-//! contract (WI-2 #2579, shipped in PR #2598): [`PortfolioStatusWire`] mirrors
-//! [`super::projects::ProjectStatusWire`] the same way the daemon's
-//! `PortfolioStatusResponse` composes `ProjectStatusResponse` per-project, so
-//! this module never re-derives the per-project shape. `digest` (WI-3 #2580)
-//! and `chat` (WI-4 #2581) are being built concurrently by a sibling engineer
-//! and are NOT mounted on `origin/main` as of this WI landing — calling them
-//! against an older daemon must degrade cleanly rather than error confusingly,
-//! so both methods special-case `404 Not Found` into `Ok(None)` ("this daemon
-//! predates the endpoint") distinct from a genuine daemon-reported failure
-//! (`Err`, e.g. "no inference provider configured", surfaced via
-//! [`response_or_body_error`] per #2485). Because the exact response body
-//! shape for `digest`/`chat` is not yet pinned by a shipped daemon contract,
-//! both parse the body as a loosely-typed [`serde_json::Value`] and read a
-//! small set of candidate field names — forward-tolerant of the sibling PR's
-//! final shape rather than a brittle `#[derive(Deserialize)]` that could
-//! reject a same-intent-different-key-name response outright.
+//! DOC-35 §1.3 established for `projects.rs`. All three routes are now pinned,
+//! shipped contracts: `status` (WI-2 #2579, PR #2598) and `digest`/`chat`
+//! (WI-3/WI-4 #2580/#2581, PR #2601) — see `daemon/manager/{status,digest,
+//! chat}.rs`. [`PortfolioStatusWire`] mirrors [`super::projects::ProjectStatusWire`]
+//! the same way the daemon's `PortfolioStatusResponse` composes
+//! `ProjectStatusResponse` per-project. [`ManagerDigestOutcome`]/
+//! [`ManagerChatOutcome`] read the daemon's REAL response fields
+//! (`digest.rs`'s `DigestResponse` — `narrative`/`generated_by`/`status`;
+//! `chat.rs`'s `ChatReplyBody`/`chat_error` — `reply`/`conversation_key` on
+//! success, `error`/`message` on degrade) rather than a speculative candidate
+//! list, now that the shape is a shipped contract, not a concurrent guess.
+//!
+//! Two behaviors this module gets deliberately right, both found in review
+//! (PR #2600 paired review against PR #2601's shapes):
+//!
+//! 1. **The daemon's degrade body is not an HTTP error to discard.**
+//!    `digest.rs`'s 502/503 branches (`digest_call_failed`, the no-provider
+//!    503) return a FULL `DigestResponse` — narrative + status snapshot +
+//!    `generated_by: "deterministic_fallback"` — by design, so a consumer can
+//!    degrade gracefully without a second call. `chat.rs`'s 400/502/503
+//!    branches return `{ error, message }` with an actionable `message`
+//!    (never a `reply`, since there is no assistant text to synthesize).
+//!    [`Self::manager_digest`]/[`Self::manager_chat`] therefore parse the
+//!    response body FIRST, regardless of status code, and only fall back to
+//!    treating the response as a hard error when the body carries neither
+//!    shape — never blindly call `response_or_body_error` (which would
+//!    discard exactly the body the daemon went out of its way to send).
+//! 2. **A `404` is not always "this daemon is too old."** `digest.rs` ALSO
+//!    answers `404` for a legitimate, mounted request — `scope=project:<name>`
+//!    naming an unregistered project (`"project '{name}' is not registered"`).
+//!    Treating every `404` as "upgrade your daemon" would misreport a typo'd
+//!    project name as a version problem. [`Self::manager_endpoint_available`]
+//!    feature-detects via the already-live `GET /api/v1/manager/version`
+//!    (`version.rs`'s `advertised_endpoints`, flips `available: true` once
+//!    WI-3/WI-4 land) and only degrades to `Ok(None)` when the endpoint is
+//!    genuinely unavailable; otherwise the daemon's own 404 body surfaces as
+//!    `Err`.
+//!
 //! What: [`PortfolioStatusWire`]/[`PortfolioTotalsWire`]/
 //! [`DeliverableStatusCountsWire`]/[`MilestoneStatusCountsWire`] (the
 //! `GET /manager/status` response DTOs), [`ManagerDigestOutcome`] /
-//! [`ManagerChatOutcome`] (loosely-parsed digest/chat results), and three
-//! [`DaemonClient`] methods: [`DaemonClient::manager_status`],
+//! [`ManagerChatOutcome`] (parsed digest/chat results, success OR degrade),
+//! and three [`DaemonClient`] methods: [`DaemonClient::manager_status`],
 //! [`DaemonClient::manager_digest`], [`DaemonClient::manager_chat`].
 //! Test: `portfolio_status_wire_parses_totals_and_projects`,
 //! `portfolio_status_wire_tolerates_missing_fields` (wire-shape unit tests);
-//! `manager_digest_outcome_reads_narrative_field_candidates`,
-//! `manager_chat_outcome_reads_reply_field_candidates` (loose-parse unit
-//! tests) in this module's `tests` submodule; live HTTP (incl. the 404
-//! degrade path) in `crates/trusty-mpm/tests/manager_cli_client.rs`.
+//! `manager_digest_outcome_reads_real_daemon_shape`,
+//! `manager_digest_outcome_marks_deterministic_fallback`,
+//! `manager_chat_outcome_reads_real_daemon_shape`,
+//! `manager_chat_outcome_surfaces_error_message_on_degrade` (parse unit
+//! tests, bodies built from the real `DigestResponse`/`ChatReplyBody`
+//! structs) in this module's `tests` submodule; live HTTP (incl. the 404
+//! degrade AND the real-error-body paths) in
+//! `crates/trusty-mpm/tests/manager_cli_client.rs`.
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
+use reqwest::StatusCode;
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::DaemonClient;
 use super::error::response_or_body_error;
@@ -128,84 +155,110 @@ pub struct PortfolioStatusWire {
     pub projects: Vec<ProjectStatusWire>,
 }
 
-/// Loosely-parsed result of `GET /api/v1/manager/digest`.
+/// `generated_by` value the daemon sends for the deterministic templated
+/// fallback (`daemon/manager/digest.rs::GENERATED_BY_FALLBACK`).
+const GENERATED_BY_FALLBACK: &str = "deterministic_fallback";
+
+/// Parsed result of `GET /api/v1/manager/digest`, covering BOTH the success
+/// (200, `generated_by: "llm"`) and degrade (502/503, `generated_by:
+/// "deterministic_fallback"`) shapes — both are the same `DigestResponse`
+/// JSON body on the wire (`daemon/manager/digest.rs`).
 ///
-/// Why: see module doc — the response shape is not yet pinned by a shipped
-/// daemon contract (WI-3 #2580 is concurrent), so this is read from raw JSON
-/// rather than a strict DTO.
-/// What: the narrative text (empty string if the body carried none of the
-/// candidate field names) and whether the daemon marked it as the
-/// deterministic no-LLM-provider fallback (DOC-36 §3.2/DOC-16 D1).
-/// Test: `manager_digest_outcome_reads_narrative_field_candidates`.
+/// Why: the daemon's `DigestResponse` always carries `narrative` regardless
+/// of status code (see module doc point 1), so one parse function handles
+/// every case the CLI needs to render.
+/// What: the narrative text and whether it is the deterministic fallback.
+/// Test: `manager_digest_outcome_reads_real_daemon_shape`,
+/// `manager_digest_outcome_marks_deterministic_fallback`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerDigestOutcome {
-    /// The narrative text, or empty when the daemon returned no recognized
-    /// text field.
+    /// The narrative text (LLM-authored or the deterministic fallback prose).
     pub narrative: String,
-    /// True when the daemon marked this as the deterministic fallback
-    /// (no inference adapter configured).
+    /// True when `generated_by == "deterministic_fallback"` (no inference
+    /// provider configured, or the LLM call failed) — DOC-16 D1.
     pub fallback: bool,
     /// The raw response body, kept for `--json` passthrough.
-    pub raw: serde_json::Value,
+    pub raw: Value,
 }
 
 impl ManagerDigestOutcome {
-    fn from_body(raw: serde_json::Value) -> Self {
-        let narrative =
-            first_str_field(&raw, &["narrative", "digest", "text", "summary"]).unwrap_or_default();
-        let fallback = raw
-            .get("fallback")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        Self {
+    /// Build from a `DigestResponse`-shaped body. Returns `None` when the
+    /// body carries no `narrative` field at all (not this response shape).
+    fn from_body(raw: Value) -> Option<Self> {
+        let narrative = raw.get("narrative").and_then(Value::as_str)?.to_string();
+        let fallback = raw.get("generated_by").and_then(Value::as_str) == Some(GENERATED_BY_FALLBACK);
+        Some(Self {
             narrative,
             fallback,
             raw,
-        }
+        })
     }
 }
 
-/// Loosely-parsed result of `POST /api/v1/manager/chat`.
+/// Parsed result of `POST /api/v1/manager/chat`, covering BOTH the success
+/// shape (`ChatReplyBody` — `reply`/`conversation_key`/`model`/`turn_count`)
+/// and the degrade shape (`chat_error`'s `{ error, message }`, sent on
+/// 400/502/503 — `daemon/manager/chat.rs`). There is no deterministic
+/// fallback reply to synthesize for chat (unlike digest), so on degrade the
+/// daemon's actionable `message` text is surfaced as [`Self::reply`] rather
+/// than discarded — the CLI still has something useful to print.
 ///
-/// Why: see module doc — same forward-tolerant loose parse as
-/// [`ManagerDigestOutcome`], for the same reason (WI-4 #2581 is concurrent).
-/// What: the assistant's reply text and the conversation key the daemon
-/// echoed back (falls back to the key the request sent, if the daemon
-/// omitted it).
-/// Test: `manager_chat_outcome_reads_reply_field_candidates`.
+/// Why: one parse function for both shapes keeps `manager_chat` from ever
+/// needing to special-case status codes beyond the 404 mount-detection (see
+/// module doc point 2).
+/// What: the reply/message text and the conversation key (echoed by the
+/// daemon on success, falls back to the requested key on degrade — the
+/// error body never carries one).
+/// Test: `manager_chat_outcome_reads_real_daemon_shape`,
+/// `manager_chat_outcome_surfaces_error_message_on_degrade`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerChatOutcome {
-    /// The assistant's reply text, or empty when unrecognized.
+    /// The assistant's reply (success) or the daemon's actionable degrade
+    /// message (`chat_error`'s `message` field).
     pub reply: String,
     /// The conversation key this turn was recorded under.
     pub conversation_key: String,
     /// The raw response body, kept for `--json` passthrough.
-    pub raw: serde_json::Value,
+    pub raw: Value,
 }
 
 impl ManagerChatOutcome {
-    fn from_body(raw: serde_json::Value, requested_key: &str) -> Self {
-        let reply =
-            first_str_field(&raw, &["reply", "message", "text", "response"]).unwrap_or_default();
+    /// Build from a `ChatReplyBody`- or `chat_error`-shaped body. Returns
+    /// `None` when the body carries neither a `reply` nor a `message` field
+    /// (not one of chat's two response shapes).
+    fn from_body(raw: Value, requested_key: &str) -> Option<Self> {
+        let reply = raw
+            .get("reply")
+            .and_then(Value::as_str)
+            .or_else(|| raw.get("message").and_then(Value::as_str))?
+            .to_string();
         let conversation_key = raw
             .get("conversation_key")
-            .and_then(|v| v.as_str())
+            .and_then(Value::as_str)
             .unwrap_or(requested_key)
             .to_string();
-        Self {
+        Some(Self {
             reply,
             conversation_key,
             raw,
-        }
+        })
     }
 }
 
-/// Read the first present string field among `candidates`.
-fn first_str_field(body: &serde_json::Value, candidates: &[&str]) -> Option<String> {
-    candidates
-        .iter()
-        .find_map(|key| body.get(*key).and_then(|v| v.as_str()))
-        .map(str::to_string)
+/// Format a non-JSON (or unrecognized-shape) error body for `anyhow::bail!`.
+///
+/// Why: `digest.rs`'s 400 (`invalid scope`) and 404 (`project '{name}' is not
+/// registered`) responses are plain text, not JSON — `(StatusCode,
+/// String)::into_response()` — so there is no `error`/`message` field to
+/// prefer; the raw trimmed body IS the daemon's message.
+/// What: `"{status}: {trimmed body}"`, or bare `"{status}"` on an empty body.
+fn daemon_error_text(status: StatusCode, body_text: &str) -> String {
+    let trimmed = body_text.trim();
+    if trimmed.is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}: {trimmed}")
+    }
 }
 
 impl DaemonClient {
@@ -215,8 +268,8 @@ impl DaemonClient {
     /// token — DOC-36 §4's local-testability bar. This endpoint has been live
     /// since WI-2 (#2579, PR #2598), so a 404 here is a genuine "unreachable
     /// or ancient daemon" condition and surfaces as an ordinary `Err` via
-    /// [`response_or_body_error`], unlike the deliberate 404-degrade on
-    /// [`Self::manager_digest`]/[`Self::manager_chat`].
+    /// [`response_or_body_error`], unlike the feature-detected 404 handling
+    /// on [`Self::manager_digest`]/[`Self::manager_chat`].
     /// What: GETs the rollup, returns the parsed [`PortfolioStatusWire`].
     /// Test: `portfolio_status_wire_parses_totals_and_projects`; live HTTP via
     /// `crates/trusty-mpm/tests/manager_cli_client.rs`.
@@ -231,27 +284,63 @@ impl DaemonClient {
         Ok(status)
     }
 
+    /// Whether `GET /api/v1/manager/version` reports `path` as `available`.
+    ///
+    /// Why: distinguishes "this daemon predates the route" from "the route
+    /// exists but rejected this particular request" (module doc point 2) —
+    /// called ONLY when a `manager_digest`/`manager_chat` call actually hits a
+    /// `404`, so the common case (route mounted, request succeeds or degrades
+    /// via a real body) never pays for the extra round trip. Conservative on
+    /// any probe failure (network error, non-2xx, unparseable body, missing
+    /// entry): treats the endpoint as unavailable, which routes the caller to
+    /// the friendlier "upgrade your daemon" message rather than a confusing
+    /// probe-failure error.
+    /// What: `GET`s `/api/v1/manager/version`, reads the `endpoints` array,
+    /// returns `true` iff an entry has `path == path` and `available == true`.
+    /// Test: exercised indirectly by
+    /// `manager_digest_and_chat_degrade_cleanly_on_404_against_older_daemon`
+    /// (unavailable path) and
+    /// `manager_digest_client_surfaces_unknown_project_404_against_real_daemon`
+    /// (available path) in `crates/trusty-mpm/tests/manager_cli_client.rs`.
+    async fn manager_endpoint_available(&self, path: &str) -> bool {
+        let url = format!("{}/api/v1/manager/version", self.base);
+        let Ok(resp) = self.http.get(&url).send().await else {
+            return false;
+        };
+        if !resp.status().is_success() {
+            return false;
+        }
+        let Ok(body) = resp.json::<Value>().await else {
+            return false;
+        };
+        body.get("endpoints")
+            .and_then(Value::as_array)
+            .is_some_and(|endpoints| {
+                endpoints.iter().any(|ep| {
+                    ep.get("path").and_then(Value::as_str) == Some(path)
+                        && ep.get("available").and_then(Value::as_bool) == Some(true)
+                })
+            })
+    }
+
     /// Fetch the portfolio (or single-project) digest via
     /// `GET /api/v1/manager/digest?scope=<scope>`.
     ///
-    /// Why: backs `tm manager digest` (#2583). WI-3 (#2580) ships this route
-    /// concurrently with this CLI; against a daemon that predates it, the
-    /// route answers `404` (see `version.rs`'s `advertised_endpoints`, which
-    /// lists `digest` as `available: false` until WI-3 lands) — that is NOT
-    /// the same condition as "the daemon has no inference provider
-    /// configured" (DOC-16 D1's fallback path, which per DOC-36 §3.2 still
-    /// answers `200` with `fallback: true`, or — depending on the sibling
-    /// PR's final error-vs-fallback choice — a non-2xx the daemon annotates
-    /// with an actionable body message). Splitting the two here means the CLI
-    /// handler can print "upgrade your daemon" for the former and the
-    /// daemon's own message for the latter, rather than one generic HTTP
-    /// error for both.
-    /// What: `Ok(None)` on `404` (older daemon); `Err` on any other non-2xx,
-    /// carrying the daemon's body message via [`response_or_body_error`]
-    /// (#2485); `Ok(Some(outcome))` on success with the response loosely
-    /// parsed per [`ManagerDigestOutcome::from_body`].
-    /// Test: `manager_digest_outcome_reads_narrative_field_candidates`; live
-    /// HTTP (incl. the 404 degrade) via
+    /// Why: backs `tm manager digest` (#2583), against the shipped
+    /// `daemon/manager/digest.rs` contract (WI-3, #2580, PR #2601). See the
+    /// module doc's two review-found behaviors: the response body is parsed
+    /// BEFORE any status-code branching (the daemon's 502/503 degrade bodies
+    /// are full `DigestResponse`s, not bare errors), and a `404` is
+    /// feature-detected against `GET /manager/version` rather than assumed to
+    /// mean "old daemon" outright (digest.rs also 404s a genuine
+    /// `scope=project:<name>` naming an unregistered project).
+    /// What: parses the body as `DigestResponse`-shaped on ANY status code;
+    /// `Ok(Some(outcome))` when it is; otherwise, on `404`, `Ok(None)` when
+    /// [`Self::manager_endpoint_available`] reports the route unmounted, else
+    /// `Err` carrying the daemon's own 404 message; on any other
+    /// unrecognized-shape non-2xx, `Err` carrying the body text.
+    /// Test: `manager_digest_outcome_reads_real_daemon_shape`,
+    /// `manager_digest_outcome_marks_deterministic_fallback`; live HTTP in
     /// `crates/trusty-mpm/tests/manager_cli_client.rs`.
     pub async fn manager_digest(
         &self,
@@ -264,31 +353,47 @@ impl DaemonClient {
             .query(&[("scope", scope)])
             .send()
             .await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        // The daemon sends a full DigestResponse body (narrative + status +
+        // generated_by) on 200 AND on the 502/503 degrade paths — never
+        // discard it just because the status isn't 2xx.
+        if let Ok(body) = serde_json::from_str::<Value>(&body_text)
+            && let Some(outcome) = ManagerDigestOutcome::from_body(body)
+        {
+            return Ok(Some(outcome));
         }
-        let body: serde_json::Value = response_or_body_error(resp)
-            .await?
-            .json()
-            .await
-            .context("deserialize manager digest")?;
-        Ok(Some(ManagerDigestOutcome::from_body(body)))
+
+        if status == StatusCode::NOT_FOUND {
+            if !self.manager_endpoint_available("/api/v1/manager/digest").await {
+                return Ok(None);
+            }
+            anyhow::bail!(daemon_error_text(status, &body_text));
+        }
+
+        anyhow::bail!(daemon_error_text(status, &body_text))
     }
 
     /// Send one chat turn via `POST /api/v1/manager/chat`.
     ///
-    /// Why: backs `tm manager chat` (#2583). Same concurrent-sibling-route
-    /// story as [`Self::manager_digest`] — WI-4 (#2581) ships this route
-    /// concurrently; a 404 here means "this daemon does not support manager
-    /// chat yet". Uses the same longer chat-scoped timeout
-    /// [`super::config::CHAT_REQUEST_TIMEOUT`] the existing `llm_chat`/
-    /// `coordinator_chat` methods use, since this also waits on the daemon's
-    /// own upstream LLM round trip (DOC-36 §3.3).
-    /// What: POSTs `{ conversation_key, message }`; `Ok(None)` on `404`
-    /// (older daemon); `Err` on any other non-2xx (#2485 body message);
-    /// `Ok(Some(outcome))` on success with the response loosely parsed.
-    /// Test: `manager_chat_outcome_reads_reply_field_candidates`; live HTTP
-    /// (incl. the 404 degrade) via
+    /// Why: backs `tm manager chat` (#2583), against the shipped
+    /// `daemon/manager/chat.rs` contract (WI-4, #2581, PR #2601). Same
+    /// body-first / feature-detected-404 handling as [`Self::manager_digest`]
+    /// (module doc), adapted for chat's two shapes: `ChatReplyBody` on
+    /// success, `chat_error`'s `{ error, message }` on 400/502/503 (whose
+    /// `message` is surfaced as the outcome's `reply` — there's no assistant
+    /// text to synthesize on a degrade, but the daemon's actionable message
+    /// is still worth printing rather than discarding). Uses the same longer
+    /// chat-scoped timeout [`super::config::CHAT_REQUEST_TIMEOUT`] the
+    /// existing `llm_chat`/`coordinator_chat` methods use, since this also
+    /// waits on the daemon's own upstream LLM round trip (DOC-36 §3.3).
+    /// What: POSTs `{ conversation_key, message }`; parses the body as
+    /// chat-shaped on ANY status code; `Ok(None)` on `404` ONLY when
+    /// [`Self::manager_endpoint_available`] reports the route unmounted;
+    /// `Err` otherwise (carrying the daemon's body message).
+    /// Test: `manager_chat_outcome_reads_real_daemon_shape`,
+    /// `manager_chat_outcome_surfaces_error_message_on_degrade`; live HTTP in
     /// `crates/trusty-mpm/tests/manager_cli_client.rs`.
     pub async fn manager_chat(
         &self,
@@ -306,15 +411,25 @@ impl DaemonClient {
             .timeout(super::config::CHAT_REQUEST_TIMEOUT)
             .send()
             .await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+
+        // chat.rs's `chat_error` sends `{ error, message }` JSON on
+        // 400/502/503 — a real, actionable body, never discard it.
+        if let Ok(body) = serde_json::from_str::<Value>(&body_text)
+            && let Some(outcome) = ManagerChatOutcome::from_body(body, conversation_key)
+        {
+            return Ok(Some(outcome));
         }
-        let body: serde_json::Value = response_or_body_error(resp)
-            .await?
-            .json()
-            .await
-            .context("deserialize manager chat reply")?;
-        Ok(Some(ManagerChatOutcome::from_body(body, conversation_key)))
+
+        if status == StatusCode::NOT_FOUND {
+            if !self.manager_endpoint_available("/api/v1/manager/chat").await {
+                return Ok(None);
+            }
+            anyhow::bail!(daemon_error_text(status, &body_text));
+        }
+
+        anyhow::bail!(daemon_error_text(status, &body_text))
     }
 }
 
@@ -359,37 +474,87 @@ mod tests {
         assert!(status.projects.is_empty());
     }
 
+    /// A 200 `DigestResponse` (`generated_by: "llm"`) — the real success
+    /// shape from `daemon/manager/digest.rs`.
     #[test]
-    fn manager_digest_outcome_reads_narrative_field_candidates() {
-        let a = ManagerDigestOutcome::from_body(serde_json::json!({
-            "narrative": "all quiet", "fallback": true
-        }));
-        assert_eq!(a.narrative, "all quiet");
-        assert!(a.fallback);
-
-        // A differently-named field (e.g. the sibling PR ships `digest`
-        // instead of `narrative`) still parses.
-        let b = ManagerDigestOutcome::from_body(serde_json::json!({ "digest": "busy day" }));
-        assert_eq!(b.narrative, "busy day");
-        assert!(!b.fallback);
-
-        let c = ManagerDigestOutcome::from_body(serde_json::json!({}));
-        assert_eq!(c.narrative, "");
-        assert!(!c.fallback);
+    fn manager_digest_outcome_reads_real_daemon_shape() {
+        let body = serde_json::json!({
+            "scope": "portfolio",
+            "generated_by": "llm",
+            "model": "anthropic/claude-3-5-haiku",
+            "narrative": "Three projects have active sessions; widget is blocked on review.",
+            "status": { "project_count": 3, "totals": {}, "projects": [] },
+        });
+        let outcome = ManagerDigestOutcome::from_body(body).expect("DigestResponse shape");
+        assert_eq!(
+            outcome.narrative,
+            "Three projects have active sessions; widget is blocked on review."
+        );
+        assert!(!outcome.fallback);
     }
 
+    /// A 502/503 `DigestResponse` degrade body (`generated_by:
+    /// "deterministic_fallback"`, plus `error`/`message`) — the real
+    /// no-provider / inference-failed shape. This is the case #2600's
+    /// original `fallback: bool` read could never detect (dead code, since
+    /// the daemon has no such field) — the fix reads `generated_by` instead.
     #[test]
-    fn manager_chat_outcome_reads_reply_field_candidates() {
-        let a = ManagerChatOutcome::from_body(
-            serde_json::json!({ "reply": "hi there", "conversation_key": "k1" }),
-            "requested-key",
-        );
-        assert_eq!(a.reply, "hi there");
-        assert_eq!(a.conversation_key, "k1");
+    fn manager_digest_outcome_marks_deterministic_fallback() {
+        let body = serde_json::json!({
+            "scope": "portfolio",
+            "generated_by": "deterministic_fallback",
+            "narrative": "[deterministic fallback — no inference provider configured] portfolio rollup:\n- Projects: 1",
+            "status": { "project_count": 1, "totals": {}, "projects": [] },
+            "error": "inference_unavailable",
+            "message": "no inference provider is configured",
+        });
+        let outcome = ManagerDigestOutcome::from_body(body).expect("DigestResponse shape");
+        assert!(outcome.fallback);
+        assert!(outcome.narrative.starts_with("[deterministic fallback"));
+    }
 
-        // Missing conversation_key echo falls back to the requested key.
-        let b = ManagerChatOutcome::from_body(serde_json::json!({ "message": "yo" }), "req-key");
-        assert_eq!(b.reply, "yo");
-        assert_eq!(b.conversation_key, "req-key");
+    /// A body with no `narrative` field at all (e.g. digest's plain-text
+    /// 400/404 bodies) is not this shape.
+    #[test]
+    fn manager_digest_outcome_none_for_non_digest_shape() {
+        assert!(ManagerDigestOutcome::from_body(serde_json::json!({ "error": "nope" })).is_none());
+    }
+
+    /// A 200 `ChatReplyBody` — the real success shape from
+    /// `daemon/manager/chat.rs`.
+    #[test]
+    fn manager_chat_outcome_reads_real_daemon_shape() {
+        let body = serde_json::json!({
+            "conversation_key": "cli:alice",
+            "reply": "Everything looks healthy right now.",
+            "model": "anthropic/claude-3-5-haiku",
+            "turn_count": 2,
+        });
+        let outcome =
+            ManagerChatOutcome::from_body(body, "cli:alice").expect("ChatReplyBody shape");
+        assert_eq!(outcome.reply, "Everything looks healthy right now.");
+        assert_eq!(outcome.conversation_key, "cli:alice");
+    }
+
+    /// `chat_error`'s degrade shape (`{ error, message }`, no `reply`, no
+    /// `conversation_key`) — the daemon's actionable `message` surfaces as
+    /// the outcome's `reply`, and the conversation key falls back to the one
+    /// the request sent (the error body never echoes one).
+    #[test]
+    fn manager_chat_outcome_surfaces_error_message_on_degrade() {
+        let body = serde_json::json!({
+            "error": "inference_unavailable",
+            "message": "no inference provider is configured",
+        });
+        let outcome =
+            ManagerChatOutcome::from_body(body, "cli:bob").expect("chat_error shape");
+        assert_eq!(outcome.reply, "no inference provider is configured");
+        assert_eq!(outcome.conversation_key, "cli:bob");
+    }
+
+    /// A body with neither `reply` nor `message` is not one of chat's shapes.
+    #[test]
+    fn manager_chat_outcome_none_for_non_chat_shape() {
+        assert!(ManagerChatOutcome::from_body(serde_json::json!({ "ok": true }), "k").is_none());
     }
 }
