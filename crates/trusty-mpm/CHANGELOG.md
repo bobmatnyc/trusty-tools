@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- task-injection delivery observability + readiness-probe hardening (closes #2364) ([#2568](https://github.com/bobmatnyc/trusty-tools/pull/2568)) ([`d0fe72b`](https://github.com/bobmatnyc/trusty-tools/commit/d0fe72b943434a4adab735e1973c1446f067f1a0))
+- wire Slack onto the channel-agnostic SessionProxy (closes #2549) ([#2565](https://github.com/bobmatnyc/trusty-tools/pull/2565)) ([`26aa1ae`](https://github.com/bobmatnyc/trusty-tools/commit/26aa1ae5e6a4d890221874d181037180bb9cfde2))
+- expose SessionProxy focus/inject/summarize as MCP tools ([#2562](https://github.com/bobmatnyc/trusty-tools/pull/2562)) ([`4edcc3b`](https://github.com/bobmatnyc/trusty-tools/commit/4edcc3bba3a848e9dba4d97401ee370423edf92f))
+
+### Changed
+
+- retire duplicate Bedrock ports onto trusty-common::inference ([#2567](https://github.com/bobmatnyc/trusty-tools/pull/2567)) ([`31c9fc0`](https://github.com/bobmatnyc/trusty-tools/commit/31c9fc0467adfda65b702c7433ceded01e0cf884))
+## [Unreleased]
+
 ### Fixed
 
 - reconcile agent roster drift across deploy destinations ([#2547](https://github.com/bobmatnyc/trusty-tools/pull/2547)) ([`8d8b042`](https://github.com/bobmatnyc/trusty-tools/commit/8d8b04230a646f8c7941754c7cd4684f57d32089))
