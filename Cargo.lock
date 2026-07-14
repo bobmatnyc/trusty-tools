@@ -11090,6 +11090,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "libc",
+ "lru",
  "nix 0.29.0",
  "notify 6.1.1",
  "parking_lot",

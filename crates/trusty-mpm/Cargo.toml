@@ -211,6 +211,9 @@ jsonwebtoken.workspace = true
 utoipa.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 tokio.workspace = true
+# #2602: bounds the manager ChatStore's distinct conversation-key set with a
+# capacity-evicting LRU cache — see daemon/manager/chat_store.rs.
+lru.workspace = true
 # async-trait is needed by the SM providers' `LlmProvider` trait (SM-2), which is
 # compiled unconditionally in the `core` library. (The `mcp` feature also lists it
 # below for the OrchestratorBackend trait; declaring it here makes it always-on.)
