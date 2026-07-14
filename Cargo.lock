@@ -9808,8 +9808,6 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-trait",
- "aws-config",
- "aws-sdk-bedrockruntime",
  "blake3",
  "chrono",
  "clap",
@@ -11075,13 +11073,10 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.19.6"
+version = "0.19.7"
 dependencies = [
  "anyhow",
  "async-trait",
- "aws-config",
- "aws-sdk-bedrockruntime",
- "aws-types",
  "axum",
  "chrono",
  "clap",

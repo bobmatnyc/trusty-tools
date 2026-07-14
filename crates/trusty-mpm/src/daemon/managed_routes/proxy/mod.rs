@@ -51,10 +51,13 @@ pub use backend::DirectManagedBackend;
 /// sharing `state`'s persistent focus store.
 ///
 /// Why: every handler below needs the identical construction; centralising it
-/// keeps each handler a one-line call.
+/// keeps each handler a one-line call. Since #2550 the MCP proxy tools
+/// ([`crate::daemon::mcp_proxy`]) build their [`SessionProxy`] through this SAME
+/// helper, so the HTTP and MCP surfaces share one construction site over the one
+/// shared focus store — a focus set on either surface is visible on the other.
 /// What: wraps a fresh [`DirectManagedBackend`] and the daemon's shared focus
 /// map into a [`SessionProxy`].
-fn local_proxy(state: &Arc<DaemonState>) -> SessionProxy {
+pub(crate) fn local_proxy(state: &Arc<DaemonState>) -> SessionProxy {
     let backend: Arc<dyn ManagedBackend> = Arc::new(DirectManagedBackend::new(Arc::clone(state)));
     SessionProxy::with_focus_store(backend, state.proxy_focus_store())
 }

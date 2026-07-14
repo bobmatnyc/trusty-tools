@@ -2,72 +2,58 @@
 //!
 //! Why: AWS-resident operators can use Bedrock-hosted models (IAM auth, private
 //! VPC, no third-party SaaS egress) without an OpenRouter or Anthropic key.
-//! This is the SM's third provider, ported from trusty-review's
-//! `llm/bedrock/mod.rs` (text path only — the SM does not need the tool-use
-//! plumbing). It lives behind the `bedrock` cargo feature so the heavy
-//! `aws-sdk-bedrockruntime` dependency is opt-in (§5.1).
-//! What: [`BedrockProvider`] calls `Converse` (non-streaming), maps
-//! [`LlmRequest`] → Bedrock request, extracts text + usage, measures latency,
-//! computes cost, and retries bounded times on transient errors. Config errors
-//! (ModelNotFound/AccessDenied/Validation) never retry and always alarm. The
-//! `us.`/`eu.`/… cross-region inference-profile prefix is required and validated
-//! up front so a bare foundation-model id fails early as [`SmLlmError::Validation`].
+//! This is the SM's third provider. As of #2411 the Bedrock *wire* integration
+//! (region resolution, the AWS credential chain, and the Converse
+//! message/usage/response conversion) is NO LONGER a private aws-sdk port here:
+//! it lives once in the shared `trusty_common::inference::bedrock` Converse
+//! adapter (#2407). This module is the thin bridge that remains — it wraps that
+//! shared [`BedrockAdapter`] and re-applies the SM-specific POLICY the commons
+//! adapter deliberately does not carry: the required cross-region
+//! inference-profile prefix validation (§5.1), the typed [`SmLlmError`]
+//! classification the resolver's retry/alarm loop depends on (§5.3), bounded
+//! retry with backoff, and per-call cost/latency telemetry (§5.5).
+//! What: [`BedrockProvider`] holds a lazily-constructed [`BedrockAdapter`] and
+//! maps [`LlmRequest`] → shared [`ChatRequest`], delegates the Converse call,
+//! maps a shared [`InferenceError`] back to [`SmLlmError`] via [`map_sdk_error`]
+//! (unchanged substring classifier — the commons `DisplayErrorContext` string
+//! carries the same AWS error-class markers the old raw SDK string did), extracts
+//! text + usage, measures latency, computes cost, and retries bounded times on
+//! transient errors. Config errors (ModelNotFound/AccessDenied/Validation) never
+//! retry and always alarm. The `us.`/`eu.`/… inference-profile prefix is required
+//! and validated up front so a bare foundation-model id fails early as
+//! [`SmLlmError::Validation`].
 //! Test: `bedrock_region_resolution`, `bedrock_prefix_validation`,
-//! `bedrock_provider_stores_model_and_region`,
-//! `bedrock_no_credentials_returns_error`,
-//! `bedrock_empty_messages_is_validation_error` in tests; cost estimation is
-//! covered centrally in `pricing_tests.rs`.
+//! `bedrock_provider_stores_model_and_region`, `bedrock_empty_messages_is_validation_error`,
+//! and `map_sdk_error_*` in `bedrock_tests.rs`; the live Converse wire path is
+//! covered by the shared adapter's `#[ignore]`-gated coverage in
+//! `trusty_common::inference::bedrock`. Cost estimation is covered centrally in
+//! `pricing_tests.rs`.
+//!
+//! [`InferenceError`]: trusty_common::inference::InferenceError
 
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
-use aws_sdk_bedrockruntime::Client as BedrockClient;
-use aws_sdk_bedrockruntime::types::{
-    ContentBlock, ConversationRole, InferenceConfiguration, Message, SystemContentBlock,
-};
 use tracing::{debug, warn};
+use trusty_common::inference::{
+    BedrockAdapter, ChatMessage as InferenceChatMessage, ChatRequest, InferenceAdapter,
+};
 
 use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError, pricing};
 
-/// Region env var: trusty-specific override (highest precedence).
-const ENV_REGION_TRUSTY: &str = "TRUSTY_AWS_REGION";
-/// Region env var: standard AWS fallback.
-const ENV_REGION_AWS: &str = "AWS_REGION";
-/// Default AWS region when neither env var is set.
-const DEFAULT_REGION: &str = "us-east-1";
 /// Required cross-region inference-profile prefixes (§5.1).
 const INFERENCE_PROFILE_PREFIXES: &[&str] = &["us.", "eu.", "ap.", "jp.", "global."];
 /// Retry attempts for transient errors.
 const MAX_RETRIES: u32 = 3;
 
-// ─── Region & validation ───────────────────────────────────────────────────────
-
-/// Resolve the AWS region: `explicit` > `TRUSTY_AWS_REGION` > `AWS_REGION` >
-/// `us-east-1`.
-///
-/// Why: operators may set either env var; the trusty-specific one wins (§5.1).
-/// What: returns the first non-empty value in precedence order.
-/// Test: `bedrock_region_resolution`.
-pub fn resolve_bedrock_region(explicit: Option<&str>) -> String {
-    if let Some(r) = explicit.filter(|s| !s.is_empty()) {
-        return r.to_string();
-    }
-    for var in [ENV_REGION_TRUSTY, ENV_REGION_AWS] {
-        if let Ok(val) = std::env::var(var) {
-            let val = val.trim().to_string();
-            if !val.is_empty() {
-                return val;
-            }
-        }
-    }
-    DEFAULT_REGION.to_string()
-}
+// ─── Validation ────────────────────────────────────────────────────────────────
 
 /// Validate that `model_id` carries a cross-region inference-profile prefix.
 ///
 /// Why: Bedrock rejects bare foundation-model ids at runtime; we surface that
-/// at construction so operators see it immediately (§5.1).
+/// at construction so operators see it immediately (§5.1). The shared commons
+/// adapter deliberately does NOT enforce this (it serves every consumer), so the
+/// SM keeps its own up-front check here.
 /// What: `Ok(())` if any [`INFERENCE_PROFILE_PREFIXES`] matches; else
 /// [`SmLlmError::Validation`].
 /// Test: `bedrock_prefix_validation`.
@@ -89,132 +75,102 @@ fn validate_model_id(model_id: &str) -> Result<(), SmLlmError> {
 /// AWS Bedrock Converse provider for the SM.
 ///
 /// Why: satisfies [`LlmProvider`] over Bedrock so the SM works with IAM-based
-/// auth and no SaaS API key (§5.1).
-/// What: holds a `BedrockClient`, the bare model id, and the resolved region.
-/// `complete` calls `Converse`, extracts text + usage, retries transient
+/// auth and no SaaS API key (§5.1), while the Converse wire mechanics live in
+/// the shared `trusty_common::inference::bedrock` adapter (#2411 dedup).
+/// What: holds the shared [`BedrockAdapter`] (which owns the resolved region and
+/// a lazily-built AWS client — construction touches no AWS credentials, #2245)
+/// and the bare, validated model id. `complete` maps to the shared request,
+/// delegates the Converse call, extracts text + usage, and retries transient
 /// errors up to [`MAX_RETRIES`].
-/// Test: `bedrock_provider_stores_model_and_region`,
-/// `bedrock_no_credentials_returns_error`.
+/// Test: `bedrock_provider_stores_model_and_region`.
+#[derive(Debug)]
 pub struct BedrockProvider {
-    client: BedrockClient,
+    /// Shared Converse adapter (owns region + lazy AWS client).
+    inner: BedrockAdapter,
     /// The bare (validated) model id, e.g. `us.anthropic.claude-sonnet-4-6`.
     pub model: String,
-    region: String,
 }
 
 impl BedrockProvider {
     /// Construct using the standard AWS credential chain.
     ///
-    /// Why: the SDK default chain covers env vars, `~/.aws/credentials`, IMDS,
-    /// and SSO without code changes.
-    /// What: validates the model id, resolves the region, loads AWS config, and
-    /// builds the client. Returns [`SmLlmError::Validation`] on a bad model id.
-    /// Async because credential loading may touch the filesystem / IMDS.
-    /// Test: `bedrock_prefix_validation` (validation path; no network).
+    /// Why: the SDK default chain (resolved lazily by the shared adapter on the
+    /// first call) covers env vars, `~/.aws/credentials`, IMDS, and SSO without
+    /// code changes. Region resolution (`region` > `TRUSTY_AWS_REGION` >
+    /// `AWS_REGION` > `us-east-1`) is the shared adapter's, unchanged from the
+    /// SM's prior local copy.
+    /// What: validates the model id, then builds a [`BedrockAdapter`] pinned to
+    /// the resolved region. Returns [`SmLlmError::Validation`] on a bad model id.
+    /// Stays `async` for call-site compatibility (the resolver `.await`s it);
+    /// the AWS client build is deferred to the first `complete`.
+    /// Test: `bedrock_prefix_validation` (validation path; no network),
+    /// `bedrock_provider_stores_model_and_region`.
     pub async fn new(model: impl Into<String>, region: Option<&str>) -> Result<Self, SmLlmError> {
         let model = model.into();
         validate_model_id(&model)?;
-        let region_str = resolve_bedrock_region(region);
-        let config = aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_config::meta::region::RegionProviderChain::first_try(
-                aws_types::region::Region::new(region_str.clone()),
-            ))
-            .load()
-            .await;
-        let client = BedrockClient::new(&config);
         Ok(Self {
-            client,
+            inner: BedrockAdapter::new(region),
             model,
-            region: region_str,
         })
     }
 
-    /// Construct from a pre-built client (testing only; skips validation).
-    ///
-    /// Why: tests inject a `no_credentials()` client to drive provider logic
-    /// without AWS.
-    /// What: stores the client verbatim.
-    /// Test: `bedrock_provider_stores_model_and_region`,
-    /// `bedrock_no_credentials_returns_error`.
-    #[cfg(test)]
-    pub fn from_client(
-        client: BedrockClient,
-        model: impl Into<String>,
-        region: impl Into<String>,
-    ) -> Self {
-        Self {
-            client,
-            model: model.into(),
-            region: region.into(),
-        }
-    }
-
     /// The AWS region the client is configured for.
+    ///
+    /// Why: exposed for diagnostics / telemetry.
+    /// What: delegates to the shared adapter's resolved region.
+    /// Test: `bedrock_provider_stores_model_and_region`, `bedrock_region_resolution`.
     pub fn region(&self) -> &str {
-        &self.region
+        self.inner.region()
     }
 
-    /// Execute a single Converse call.
+    /// Execute a single Converse call via the shared adapter.
     ///
     /// Why: extracted so retry logic in `complete` is visible/testable.
-    /// What: builds a `Converse` request from `req`, sends it, and maps SDK
-    /// errors to [`SmLlmError`] by inspecting the message text.
-    /// Test: error-mapping exercised via `bedrock_no_credentials_returns_error`.
+    /// What: rejects an empty message list up front (deterministic client-side
+    /// [`SmLlmError::Validation`]), converts `req` into the shared [`ChatRequest`]
+    /// (system prompt prepended as a `system`-role message the commons converter
+    /// diverts into Converse's system array; `assistant` role → assistant, all
+    /// other roles → user, matching the SM's prior mapping), delegates to the
+    /// shared adapter, and maps a shared [`InferenceError`] back to a typed
+    /// [`SmLlmError`] via [`map_sdk_error`].
+    /// Test: `bedrock_empty_messages_is_validation_error`; error-mapping via
+    /// `map_sdk_error_*`.
     async fn call_once(&self, req: &LlmRequest) -> Result<LlmResponse, SmLlmError> {
         let start = Instant::now();
 
-        let mut system_blocks: Vec<SystemContentBlock> = Vec::new();
-        if !req.system.is_empty() {
-            system_blocks.push(SystemContentBlock::Text(req.system.clone()));
-        }
-
-        let mut messages: Vec<Message> = Vec::new();
-        for m in &req.messages {
-            let role = if m.role == "assistant" {
-                ConversationRole::Assistant
-            } else {
-                ConversationRole::User
-            };
-            let msg = Message::builder()
-                .role(role)
-                .content(ContentBlock::Text(m.content.clone()))
-                .build()
-                .map_err(|e| SmLlmError::Validation(format!("build Bedrock Message: {e}")))?;
-            messages.push(msg);
-        }
-        if messages.is_empty() {
+        if req.messages.is_empty() {
             return Err(SmLlmError::Validation(
                 "LlmRequest contains no user/assistant messages".to_string(),
             ));
         }
 
-        let inference = InferenceConfiguration::builder()
-            // Saturating, sound conversion: `req.max_tokens` is a `u32`, but the
-            // Bedrock SDK wants an `i32`. A naive `as i32` would wrap any value
-            // above `i32::MAX` into a negative token budget; clamp to `i32::MAX`
-            // instead (`unwrap_or` here cannot panic).
-            .max_tokens(i32::try_from(req.max_tokens).unwrap_or(i32::MAX))
-            .temperature(req.temperature)
-            .build();
-
-        let mut sdk_req = self
-            .client
-            .converse()
-            .model_id(&req.model)
-            .inference_config(inference)
-            .set_messages(Some(messages));
-        if !system_blocks.is_empty() {
-            sdk_req = sdk_req.set_system(Some(system_blocks));
+        let mut messages: Vec<InferenceChatMessage> = Vec::with_capacity(req.messages.len() + 1);
+        if !req.system.is_empty() {
+            messages.push(InferenceChatMessage::system(req.system.clone()));
+        }
+        for m in &req.messages {
+            let msg = if m.role == "assistant" {
+                InferenceChatMessage::assistant(m.content.clone())
+            } else {
+                InferenceChatMessage::user(m.content.clone())
+            };
+            messages.push(msg);
         }
 
-        let resp = sdk_req
-            .send()
+        let mut chat_req = ChatRequest::new(req.model.clone(), messages);
+        chat_req.temperature = Some(req.temperature);
+        chat_req.max_tokens = Some(req.max_tokens);
+
+        let resp = self
+            .inner
+            .chat(&chat_req)
             .await
-            .map_err(|e| map_sdk_error(e.to_string(), &req.model, &self.region))?;
+            .map_err(|e| map_sdk_error(e.to_string(), &req.model, self.region()))?;
 
         let latency_ms = start.elapsed().as_millis() as u64;
-        let text = extract_converse_text(&resp).unwrap_or_default();
-        let (input_tokens, output_tokens) = extract_token_usage(&resp);
+        let text = resp.first_text().unwrap_or_default();
+        let usage = resp.usage();
+        let (input_tokens, output_tokens) = (usage.prompt_tokens, usage.completion_tokens);
         let cost_usd = pricing::estimate_cost_usd(&req.model, input_tokens, output_tokens);
 
         Ok(LlmResponse {
@@ -228,13 +184,18 @@ impl BedrockProvider {
     }
 }
 
-/// Map a Bedrock SDK error string to the right [`SmLlmError`] variant.
+/// Map a Bedrock error string to the right [`SmLlmError`] variant.
 ///
-/// Why: the AWS SDK surfaces typed errors as strings here; classifying them
-/// keeps retry/alarm policy correct (§5.3).
+/// Why: the resolver's retry/alarm loop (§5.3) must distinguish config errors
+/// (never retry, always alarm) from transient ones (retry with backoff). The
+/// shared adapter collapses every Converse failure into `InferenceError::Provider`,
+/// but its message wraps the full AWS source chain via `DisplayErrorContext`, so
+/// the same AWS error-class markers the SM matched on the raw SDK string are
+/// still present — this substring classifier is unchanged from the pre-#2411
+/// local port.
 /// What: substring-matches the lowercased message to the matching variant,
 /// defaulting unknown errors to retryable `Transport`.
-/// Test: exercised by `bedrock_no_credentials_returns_error`.
+/// Test: `map_sdk_error_classifies_*`.
 fn map_sdk_error(msg: String, model: &str, region: &str) -> SmLlmError {
     let lower = msg.to_lowercase();
     if lower.contains("resourcenotfound") || lower.contains("no such model") {
@@ -280,13 +241,13 @@ impl LlmProvider for BedrockProvider {
     /// What: calls `call_once`; retries up to [`MAX_RETRIES`] while
     /// `is_retryable()`; returns other errors immediately. Logs cost/usage to
     /// stderr.
-    /// Test: `bedrock_no_credentials_returns_error` (error path),
-    /// `bedrock_empty_messages_is_validation_error` (validation path).
+    /// Test: `bedrock_empty_messages_is_validation_error` (validation path);
+    /// retry/error classification via `map_sdk_error_*`.
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
         debug!(
             provider = "bedrock",
             model = %req.model,
-            region = %self.region,
+            region = %self.region(),
             "sm bedrock complete request"
         );
         let mut attempt = 0u32;
@@ -314,47 +275,6 @@ impl LlmProvider for BedrockProvider {
             }
         }
     }
-}
-
-// ─── Response helpers ───────────────────────────────────────────────────────────
-
-/// Join the `Text` content blocks of a Converse response.
-///
-/// Why: Converse wraps content in typed blocks; the SM only needs the text.
-/// What: joins `Text` blocks with newlines; `None` when empty.
-/// Test: covered by `bedrock_no_credentials_returns_error`.
-fn extract_converse_text(
-    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
-) -> Option<String> {
-    let msg = resp.output()?.as_message().ok()?;
-    let mut out = String::new();
-    for block in msg.content() {
-        if let ContentBlock::Text(t) = block {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(t);
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-/// Extract `(input_tokens, output_tokens)` from the Converse usage.
-///
-/// Why: needed for cost estimation and telemetry (§5.5).
-/// What: reads `usage.inputTokens`/`outputTokens`; `(0, 0)` when absent.
-/// Test: covered by `bedrock_no_credentials_returns_error`.
-fn extract_token_usage(
-    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
-) -> (u32, u32) {
-    resp.usage()
-        .map(|u| {
-            (
-                u.input_tokens().max(0) as u32,
-                u.output_tokens().max(0) as u32,
-            )
-        })
-        .unwrap_or((0, 0))
 }
 
 #[cfg(test)]

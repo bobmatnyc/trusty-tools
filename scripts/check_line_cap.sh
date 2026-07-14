@@ -104,71 +104,12 @@ done
 
 # ---------------------------------------------------------------------------
 # SLOC counter: shared awk program that counts code lines (SLOC) in one file.
-#
-# Algorithm:
-#   - track `in_block` state for /* ... */ spans
-#   - when in_block, look for */ to close it; don't count any part of the block
-#   - on a non-block line, strip a /* ... */ that opens and closes on the same
-#     line (repeat to handle multiple same-line blocks), then check for a
-#     remaining // that kills the rest of the line; if what's left has
-#     non-whitespace, count it.
-#
-# Intentional leniency: // or /* inside a string literal will suppress the
-# remainder of that line (undercounts code). Raw strings (r#"..."#) containing
-# /* will open an apparent block comment (undercounts). Both errors lean toward
-# leniency (lower SLOC count), so the gate never falsely fails a real file.
+# Defines $SLOC_AWK. See scripts/lib/sloc_awk.sh for the full algorithm note
+# and the issue #2489/#2509 fix (a `/*` inside `//`/`///`/`//!` line-comment
+# prose must never be mistaken for a block-comment opener).
 # ---------------------------------------------------------------------------
-SLOC_AWK='
-BEGIN { in_block = 0; sloc = 0 }
-{
-  line = $0
-  if (in_block) {
-    # Inside a block comment: look for the closing */
-    pos = index(line, "*/")
-    if (pos > 0) {
-      # Remainder after */ may have code — fall through to the while loop
-      # below which will re-scan it for further /* ... */ pairs.
-      in_block = 0
-      line = substr(line, pos + 2)
-    } else {
-      # Entire line is inside block comment
-      next
-    }
-  }
-  # Strip complete /* ... */ pairs on the same line (may be multiple).
-  # Guard: a stray */ that appears BEFORE the first /* (e.g. `foo */ bar /* baz`)
-  # must not be mistaken for the closer of the opener.  We find the closing */
-  # by searching only in the substring that starts AFTER the opener (two chars),
-  # so a pre-existing stray */ is invisible to that search.
-  while (1) {
-    blk_open = index(line, "/*")
-    if (blk_open == 0) break
-    # Search for */ only in the portion after the opener to avoid matching a
-    # stray */ that appears earlier in the line.
-    after_open = substr(line, blk_open + 2)
-    rel_close = index(after_open, "*/")
-    if (rel_close > 0) {
-      # rel_close is 1-based within after_open; absolute position in line:
-      blk_close = blk_open + 1 + rel_close   # +1 for the two chars of /*
-      line = substr(line, 1, blk_open - 1) substr(line, blk_close + 2)
-    } else {
-      # /* opened but no */ on this line — remainder is a block comment
-      line = substr(line, 1, blk_open - 1)
-      in_block = 1
-      break
-    }
-  }
-  # Strip trailing line comment (// ... to end of line)
-  pos = index(line, "//")
-  if (pos > 0) {
-    line = substr(line, 1, pos - 1)
-  }
-  # Count the line if anything non-whitespace remains
-  gsub(/[[:space:]]/, "", line)
-  if (length(line) > 0) sloc++
-}
-END { print sloc }
-'
+# shellcheck source=lib/sloc_awk.sh
+. "$SCRIPT_DIR/lib/sloc_awk.sh"
 
 # ---------------------------------------------------------------------------
 # cap_for_path: print the applicable SLOC cap for a given repo-relative path.
