@@ -29,8 +29,8 @@
 
 use std::future::IntoFuture as _;
 
+use super::{format_state_column, short_timestamp, truncate};
 use super::{session_activity, session_decommission, session_resume, session_stop};
-use super::{short_timestamp, truncate};
 
 #[test]
 fn truncate_clips_and_appends_ellipsis() {
@@ -38,6 +38,23 @@ fn truncate_clips_and_appends_ellipsis() {
     assert_eq!(truncate("hello world", 5), "hell\u{2026}");
     assert_eq!(truncate("", 5), "");
     assert_eq!(truncate("abcde", 5), "abcde");
+}
+
+/// #2595: `tm sessions ls` must mark a dead pick right in the STATE column so
+/// the operator sees it without selecting the session and hitting a 422 first.
+#[test]
+fn format_state_column_appends_dead_marker() {
+    assert_eq!(format_state_column("stopped", true), "stopped [dead]");
+    assert_eq!(format_state_column("errored", true), "errored [dead]");
+}
+
+/// #2595: a healthy (resumable) session's STATE column must render byte-for-byte
+/// unchanged — no regression for the common case.
+#[test]
+fn format_state_column_leaves_healthy_state_unchanged() {
+    assert_eq!(format_state_column("active", false), "active");
+    assert_eq!(format_state_column("stopped", false), "stopped");
+    assert_eq!(format_state_column("provisioning", false), "provisioning");
 }
 
 #[test]

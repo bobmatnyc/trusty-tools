@@ -463,6 +463,24 @@ pub struct ManagedSessionSummary {
     /// responses without the field deserialize as `None`.
     #[serde(default)]
     pub injection_status: Option<String>,
+    /// True when this session is a dead pick: `stopped`/`errored` AND no
+    /// workdir candidate exists on disk any more, so a resume/restart is
+    /// guaranteed to fail (additive; #2595). Mirrors
+    /// `daemon::managed_routes::SessionSummary::unresumable` field-for-field.
+    ///
+    /// Why: the guided-default picker, the `tm ls` picker, and `tm sessions
+    /// ls` all read this list endpoint and must not offer — or must clearly
+    /// mark — a session whose workspace was GC-pruned; computing the
+    /// filesystem probe server-side (once) and shipping the verdict on the
+    /// wire keeps the CLI's picker/table logic pure and I/O-free.
+    /// `#[serde(default)]` keeps the client tolerant of an OLDER daemon that
+    /// omits the field — it deserializes to `false` (never spuriously flags a
+    /// session dead against a daemon that hasn't shipped this yet).
+    /// What: a plain bool, `false` for every session except a dead
+    /// `stopped`/`errored` pick.
+    /// Test: `managed_session_summary_deserializes_unresumable_flag`.
+    #[serde(default)]
+    pub unresumable: bool,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).
