@@ -245,42 +245,40 @@ pub async fn manager_chat_route(
     // Phase 2 (#2586): consult the pending-proposal store BEFORE any LLM call.
     // `take` unconditionally consumes (next-turn-only TTL) — a confirming
     // message executes it via the SAME actuator seam `/manager/act` uses; any
-    // other message just lets it expire and falls through to the normal flow.
-    if let Some(pending) = manager.proposals().take(&conversation_key) {
-        if is_confirmation(&body.message) {
-            let actuator = resolve_actuator(&state);
-            let action_result = match execute_action(&actuator, &conversation_key, pending).await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    tracing::warn!("manager chat: confirmed action failed: {error}");
-                    ActResponse::ActionFailed {
-                        session: "(launch)".to_string(),
-                        error,
-                    }
+    // other message just lets it expire and falls through to the normal flow
+    // (the `take` above already consumed it either way).
+    if let Some(pending) = manager.proposals().take(&conversation_key)
+        && is_confirmation(&body.message)
+    {
+        let actuator = resolve_actuator(&state);
+        let action_result = match execute_action(&actuator, &conversation_key, pending).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("manager chat: confirmed action failed: {error}");
+                ActResponse::ActionFailed {
+                    session: "(launch)".to_string(),
+                    error,
                 }
-            };
-            let reply = describe_action_result(&action_result);
-            let model = manager.inference().model();
-            let turn_count =
-                manager
-                    .conversations()
-                    .record_exchange(&conversation_key, &body.message, &reply);
+            }
+        };
+        let reply = describe_action_result(&action_result);
+        let model = manager.inference().model();
+        let turn_count =
             manager
-                .palace()
-                .record_chat_turn(&conversation_key, &body.message, &reply)
-                .await;
-            return Json(ChatReplyBody {
-                conversation_key,
-                reply,
-                model,
-                turn_count,
-                action_result: Some(action_result),
-            })
-            .into_response();
-        }
-        // Not a confirmation — the pending proposal has already expired (taken
-        // above); proceed to the normal flow with the current message.
+                .conversations()
+                .record_exchange(&conversation_key, &body.message, &reply);
+        manager
+            .palace()
+            .record_chat_turn(&conversation_key, &body.message, &reply)
+            .await;
+        return Json(ChatReplyBody {
+            conversation_key,
+            reply,
+            model,
+            turn_count,
+            action_result: Some(action_result),
+        })
+        .into_response();
     }
 
     let status = match load_portfolio_status(&state).await {

@@ -266,14 +266,16 @@ pub async fn execute_action(
     action: ProposedAction,
 ) -> Result<ActResponse, String> {
     match action {
-        ProposedAction::Launch { project, task } => actuator
-            .launch(&project, &task)
-            .await
-            .map(|outcome| ActResponse::Launched {
-                session_id: outcome.session_id,
-                name: outcome.name,
-                state: outcome.state,
-            }),
+        ProposedAction::Launch { project, task } => {
+            actuator
+                .launch(&project, &task)
+                .await
+                .map(|outcome| ActResponse::Launched {
+                    session_id: outcome.session_id,
+                    name: outcome.name,
+                    state: outcome.state,
+                })
+        }
         ProposedAction::Inject { session, text } => Ok(ActResponse::from(
             actuator.inject(conversation_key, &session, &text).await,
         )),

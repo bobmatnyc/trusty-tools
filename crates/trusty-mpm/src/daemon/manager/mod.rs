@@ -32,7 +32,9 @@
 //!   in-conversation propose→confirm action flow (#2586);
 //! - [`version`] — the `GET /manager/version` capabilities stub that makes the
 //!   surface self-describing and curl-observable (WI-1, #2578);
+//!
 //! and phase-2 submodules —
+//!
 //! - [`route_task`] — `POST /manager/route-task`, advisory task→project routing
 //!   with disambiguation judgment (WI-8, #2585);
 //! - [`act`] + [`actuator`] — `POST /manager/act`, the API-first

@@ -60,7 +60,18 @@ fn extract_proposed_action_keeps_leading_and_trailing_prose() {
 
 #[test]
 fn is_confirmation_accepts_documented_phrases() {
-    for phrase in ["confirm", "Confirm", "CONFIRM", "confirm.", "confirm!", "  confirm  ", "yes", "Yes.", "y", "confirmed"] {
+    for phrase in [
+        "confirm",
+        "Confirm",
+        "CONFIRM",
+        "confirm.",
+        "confirm!",
+        "  confirm  ",
+        "yes",
+        "Yes.",
+        "y",
+        "confirmed",
+    ] {
         assert!(is_confirmation(phrase), "expected confirmation: {phrase:?}");
     }
 }
@@ -76,7 +87,10 @@ fn is_confirmation_rejects_partial_or_unrelated_text() {
         "yesish",
         "y not",
     ] {
-        assert!(!is_confirmation(phrase), "expected NOT a confirmation: {phrase:?}");
+        assert!(
+            !is_confirmation(phrase),
+            "expected NOT a confirmation: {phrase:?}"
+        );
     }
 }
 
