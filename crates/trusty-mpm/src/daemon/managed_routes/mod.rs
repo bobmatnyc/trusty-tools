@@ -817,17 +817,49 @@ pub async fn resume_managed_session(
         Err(ResumeManagedError::InvalidState(reason)) => {
             (StatusCode::CONFLICT, reason).into_response()
         }
-        // #2577: the session cannot be resumed because its workspace directory
-        // was removed, or its recorded pane vanished. These are operator-
-        // actionable preconditions, not internal faults — 422 (not 500) with the
-        // manager's descriptive message so the CLI can print the concrete remedy.
-        Err(ResumeManagedError::Unresumable(msg)) => {
-            (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response()
+        // #2577: the session cannot be resumed because of its on-disk state —
+        // these are operator-actionable preconditions, not internal faults, so
+        // 422 (not 500) with the manager's descriptive message. Both cases carry
+        // the SAME status but DIFFERENT safe remedies (WorkspaceGone: delete the
+        // stale record; PaneGone: inspect before touching anything, since the
+        // tmux session is still alive with a sibling window) — tagged via the
+        // `x-trusty-resume-reason` response header rather than making the CLI
+        // parse the human-readable body, mirroring why `ResumeManagedError`
+        // itself exists (no `Display`-substring matching).
+        Err(ResumeManagedError::WorkspaceGone(msg)) => {
+            unresumable_response(msg, "workspace_missing")
         }
+        Err(ResumeManagedError::PaneGone(msg)) => unresumable_response(msg, "pane_gone"),
         Err(ResumeManagedError::Other(msg)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
     }
+}
+
+/// Build the HTTP 422 response for an on-disk-precondition resume failure
+/// (`ResumeManagedError::WorkspaceGone`/`PaneGone`), tagging it with a
+/// machine-readable `x-trusty-resume-reason` header.
+///
+/// Why (#2577 review): the two failure classes need DIFFERENT operator remedies
+/// (see [`ResumeManagedError::WorkspaceGone`]/[`ResumeManagedError::PaneGone`]
+/// docs) but share the same status code and a human-readable body. Without a
+/// machine-readable discriminant, the CLI's only option would be to
+/// substring-match the body text to pick a remedy — precisely the
+/// stringly-typed anti-pattern `ResumeManagedError` was introduced to
+/// eliminate for the 404/409 cases. A response header keeps the body free for
+/// the operator-facing message while giving the caller a stable, typed signal.
+/// What: sets status 422, body = `msg` (the manager's full Display message),
+/// header `x-trusty-resume-reason: <reason>` (`"workspace_missing"` or
+/// `"pane_gone"`).
+/// Test: `resume_route_workspace_gone_tags_reason_header`,
+/// `resume_route_pane_gone_tags_reason_header` in `tests/session_manager_mvp.rs`.
+fn unresumable_response(msg: String, reason: &'static str) -> axum::response::Response {
+    let mut resp = (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response();
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-trusty-resume-reason"),
+        axum::http::HeaderValue::from_static(reason),
+    );
+    resp
 }
 
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.

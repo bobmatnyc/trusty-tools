@@ -281,3 +281,48 @@ fn injection_status_wire_stringifies_other_variants() {
         );
     }
 }
+
+/// #2577 review: `unresumable_response` must tag the 422 with the CORRECT
+/// machine-readable `x-trusty-resume-reason` header per failure class, so the
+/// CLI can select a remedy WITHOUT parsing the human-readable body text.
+///
+/// Why: this is the exact plumbing that lets `WorkspaceGone` (safe to
+/// `tm session delete --force`) and `PaneGone` (unsafe to delete/decommission
+/// without first inspecting — a sibling tmux window may still be live) render
+/// DIFFERENT operator guidance from the SAME HTTP status. A test at the
+/// `resume_managed_session` handler match-arm level (rather than only the
+/// `From<ManagedError>` conversion, already covered in
+/// `tests/session_manager_mvp.rs`) proves the header actually reaches the
+/// wire, not just the typed Rust value.
+/// What: calls `unresumable_response` directly for each reason string and
+/// asserts status 422 plus the exact header value.
+/// Test: this function IS the test.
+#[test]
+fn unresumable_response_tags_reason_header_per_failure_class() {
+    use axum::http::StatusCode;
+
+    for (reason, msg) in [
+        (
+            "workspace_missing",
+            "workspace directory /gone no longer exists",
+        ),
+        ("pane_gone", "recorded pane %42 no longer exists"),
+    ] {
+        let resp = super::unresumable_response(msg.to_string(), reason);
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unresumable_response must always answer 422, got {:?} for reason {reason:?}",
+            resp.status()
+        );
+        let header = resp
+            .headers()
+            .get("x-trusty-resume-reason")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(
+            header,
+            Some(reason),
+            "x-trusty-resume-reason header must carry the exact reason passed in"
+        );
+    }
+}

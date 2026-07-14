@@ -781,29 +781,35 @@ use trusty_mpm::runtime::RuntimeKind as ResumeRuntimeKind;
 use trusty_mpm::session_manager::ManagedError as ResumeManagedManagerError;
 use trusty_mpm::session_manager::ManagedSessionId as ResumeSessionId;
 
-/// #2577: `WorkspaceMissing` and `PaneGone` — both operator-actionable on-disk
-/// preconditions — map to the typed `Unresumable` variant (→ HTTP 422), NOT
-/// `Other` (→ 500), preserving each error's full actionable Display message.
+/// #2577 (review-revised): `WorkspaceMissing` and `PaneGone` — both
+/// operator-actionable on-disk preconditions — map to DISTINCT typed variants
+/// (`WorkspaceGone`/`PaneGone`, both → HTTP 422), NOT the same shared variant
+/// and NOT `Other` (→ 500). Each preserves the error's full actionable Display
+/// message.
 ///
 /// Why: the HTTP status is derived structurally from the variant, so pinning
 /// the `From` mapping stops a future refactor from silently regressing either
-/// condition back to a bare 500. `Other` is the catch-all for genuinely-internal
-/// faults and must NOT swallow these two.
-/// What: converts each variant and asserts both the resulting variant and that
-/// the rendered string still names the vanished path / pane id.
+/// condition back to a bare 500 — or, per the #2577 review, from silently
+/// merging them back into one variant that cannot distinguish "safe to
+/// delete" (`WorkspaceGone`) from "a live sibling window is at risk"
+/// (`PaneGone`). `Other` is the catch-all for genuinely-internal faults and
+/// must NOT swallow either.
+/// What: converts each `ManagedError` variant and asserts both the resulting
+/// `ResumeManagedError` variant and that the rendered string still names the
+/// vanished path / pane id.
 /// Test: this function IS the test.
 #[test]
-fn resume_error_workspace_missing_and_pane_gone_map_to_unresumable() {
+fn resume_error_workspace_missing_and_pane_gone_map_to_distinct_variants() {
     let ws_err = ResumeManagedError::from(ResumeManagedManagerError::WorkspaceMissing(
         "sess-1".into(),
         "/gone/worktree".into(),
     ));
     match ws_err {
-        ResumeManagedError::Unresumable(msg) => assert!(
+        ResumeManagedError::WorkspaceGone(msg) => assert!(
             msg.contains("/gone/worktree"),
             "422 body must name the vanished workspace path, got {msg:?}"
         ),
-        other => panic!("WorkspaceMissing must map to Unresumable (→ 422), got {other:?}"),
+        other => panic!("WorkspaceMissing must map to WorkspaceGone (→ 422), got {other:?}"),
     }
 
     let pane_err = ResumeManagedError::from(ResumeManagedManagerError::PaneGone(
@@ -811,11 +817,11 @@ fn resume_error_workspace_missing_and_pane_gone_map_to_unresumable() {
         "%42".into(),
     ));
     match pane_err {
-        ResumeManagedError::Unresumable(msg) => assert!(
+        ResumeManagedError::PaneGone(msg) => assert!(
             msg.contains("%42"),
             "422 body must name the vanished pane id, got {msg:?}"
         ),
-        other => panic!("PaneGone must map to Unresumable (→ 422), got {other:?}"),
+        other => panic!("PaneGone must map to PaneGone (→ 422), got {other:?}"),
     }
 }
 
@@ -984,8 +990,9 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
 }
 
 /// #2577 regression: resuming a Stopped/Errored session whose workspace
-/// directory no longer exists on disk yields the typed `Unresumable` variant
-/// (→ HTTP 422), NOT `Other` (→ HTTP 500).
+/// directory no longer exists on disk yields the typed `WorkspaceGone` variant
+/// (→ HTTP 422), NOT `Other` (→ HTTP 500) and NOT `PaneGone` (a different
+/// remedy — see the #2577 review split documented on `ResumeManagedError`).
 ///
 /// Why: an adopted/external session whose worktree was pruned (or any session
 /// whose `last_cwd`/`workspace_path`/`cwd` all vanished) reaches
@@ -993,13 +1000,14 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
 /// rather than handing a removed path to tmux. Before #2577 that mapped through
 /// `Other` → 500, so the CLI printed a bare "daemon returned an internal error
 /// (500)" with no hint that the worktree had simply been removed. The handler
-/// now derives 422 from the typed `Unresumable` variant; this test proves the
+/// now derives 422 from the typed `WorkspaceGone` variant; this test proves the
 /// variant is produced (structurally, never via the Display string) so the
-/// operator-actionable 422 contract cannot silently regress to 500.
+/// operator-actionable 422 contract cannot silently regress to 500 — or
+/// silently collapse into the differently-remedied `PaneGone` variant.
 /// What: seeds a session whose `cwd`/`workspace_path` point at a path that is
 /// NEVER created on disk, drives it into `Errored` (a resumable state) via
 /// `mark_errored`, calls `resume_managed`, and asserts the error matches
-/// `ResumeManagedError::Unresumable`.
+/// `ResumeManagedError::WorkspaceGone`.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn resume_managed_typed_missing_workspace_is_unprocessable() {
@@ -1051,9 +1059,132 @@ async fn resume_managed_typed_missing_workspace_is_unprocessable() {
         .expect_err("resuming a session whose workspace is gone must error");
 
     assert!(
-        matches!(err, ResumeManagedError::Unresumable(_)),
-        "a removed workspace must map to the typed Unresumable variant (→ 422), got {err:?}"
+        matches!(err, ResumeManagedError::WorkspaceGone(_)),
+        "a removed workspace must map to the typed WorkspaceGone variant (→ 422), got {err:?}"
     );
+}
+
+/// #2577 review (MEDIUM finding 3a): drives `ManagedError::PaneGone` through
+/// the REAL `resume_managed` daemon-layer function — not just the `From`
+/// conversion in isolation (`resume_error_workspace_missing_and_pane_gone_map_to_distinct_variants`
+/// above) — proving the full round trip (state gate → workdir resolution →
+/// `session_exists` → `ensure_pane_alive` → error mapping) actually reaches
+/// `ResumeManagedError::PaneGone`.
+///
+/// Why: `resume_managed` is what BOTH the HTTP handler and the MCP
+/// `session_resume` tool call; a unit test on the `From` impl alone cannot
+/// prove the manager-level `PaneGone` (the #2467/#2468 sibling-window-hijack
+/// guard — fires when the tmux SESSION is still alive via a sibling window but
+/// the record's specific recorded pane is confirmed gone) actually reaches the
+/// daemon's typed error at all.
+/// What: seeds a session in a REAL (existing) temp workspace via a custom
+/// driver (`PaneGoneTmux`) whose `create_session` records the tmux session as
+/// "live" (so `session_exists` reports true) and whose `get_pane_id` returns a
+/// fixed id (reproducing what a real spawn captures) while `pane_exists`
+/// always reports `false` (the recorded pane is gone). Drives the record to
+/// `Errored` (a resumable state) without touching tmux, then calls
+/// `resume_managed` and asserts the typed `ResumeManagedError::PaneGone`
+/// variant.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_typed_pane_gone_is_unprocessable() {
+    let root = TempDir::new().unwrap();
+    let workspace_dir = TempDir::new().unwrap();
+    let driver = PaneGoneTmux::new("%42");
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(root.path().to_path_buf(), driver).await,
+    );
+    let mgr = state.session_manager().await;
+
+    let ws = workspace_dir.path().to_owned();
+    let record = mgr
+        .create(
+            "regression: pane-gone resume".to_string(),
+            Some(ws.clone()),
+            Some("pane-gone-session".into()),
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+        )
+        .await
+        .expect("create session");
+
+    assert_eq!(
+        record.pane_id.as_deref(),
+        Some("%42"),
+        "sanity: create() must have captured the driver's seeded pane_id"
+    );
+
+    // Drive to Errored (a resumable state) WITHOUT touching tmux, so the
+    // driver's "live" bookkeeping from create_session is left untouched.
+    mgr.mark_errored(&record.id, "regression: simulate prior spawn failure")
+        .await
+        .expect("mark errored");
+
+    let err = resume_managed(&state, &record.id)
+        .await
+        .expect_err("resuming with a confirmed-gone recorded pane must error");
+
+    assert!(
+        matches!(err, ResumeManagedError::PaneGone(_)),
+        "a confirmed-gone recorded pane (sibling window alive) must map to the \
+         typed PaneGone variant (→ 422), got {err:?}"
+    );
+}
+
+/// A tmux driver that tracks live sessions (like `LiveTrackingTmux` above) AND
+/// lets a test configure `get_pane_id`/`pane_exists` independently — needed to
+/// drive the sibling-window-hijack path (`ManagedError::PaneGone`) through the
+/// REAL `resume_managed` daemon-layer function (#2577 review).
+///
+/// Why: the tmux SESSION must report alive (`session_exists` true, driving
+/// `resume`'s reuse branch) while the recorded PANE reports gone
+/// (`pane_exists` false) — a combination neither `FakeNoopTmuxDriver` (never
+/// reports anything alive) nor `LiveTrackingTmux` (uses the trait's `true`
+/// default for `pane_exists`) can express.
+/// What: a `Mutex<HashSet<String>>` of live session names (mirroring
+/// `LiveTrackingTmux`) plus a fixed `pane_id` returned by `get_pane_id`;
+/// `pane_exists` unconditionally reports `false`, simulating the original pane
+/// having closed while a sibling window keeps the session alive.
+/// Test: `resume_managed_typed_pane_gone_is_unprocessable`.
+struct PaneGoneTmux {
+    live: std::sync::Mutex<std::collections::HashSet<String>>,
+    pane_id: &'static str,
+}
+
+impl PaneGoneTmux {
+    fn new(pane_id: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            live: std::sync::Mutex::new(std::collections::HashSet::new()),
+            pane_id,
+        })
+    }
+}
+
+impl ManagedTmuxDriver for PaneGoneTmux {
+    fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        self.live.lock().unwrap().insert(name.to_owned());
+        Ok(())
+    }
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        self.live.lock().unwrap().remove(name);
+        Ok(())
+    }
+    fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(self.live.lock().unwrap().iter().cloned().collect())
+    }
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        Some(self.pane_id.to_string())
+    }
+    fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+        false
+    }
 }
 
 /// #1913 self-heal: `resume_managed` must backfill a missing `statusLine` key
