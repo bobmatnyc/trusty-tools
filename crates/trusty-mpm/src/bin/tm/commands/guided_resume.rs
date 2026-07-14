@@ -117,8 +117,10 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool) -> ResumeAction {
 /// nothing (#2001); (3) for stopped/errored (or a just-reconciled zombie) it warns
 /// about pane kill if the tmux pane is still live, then POSTs
 /// `/api/v1/sessions/managed/{id}/resume` via [`restart_via_daemon`] with a
-/// 30-second timeout; (4) 404/409/5xx/network errors each print a distinct
-/// actionable message; (5) on HTTP 200, the response body is checked — if
+/// 30-second timeout; (4) 404/409/422/5xx/network errors each print a distinct
+/// actionable message (the 422/5xx branches surface the daemon body verbatim so
+/// a removed-workspace reason reaches the operator, #2577); (5) on HTTP 200, the
+/// response body is checked — if
 /// `state=errored` the runtime spawn failed and the operator is directed to
 /// `tm session info`; (6) falls through to `tmux_attach` only when everything is
 /// confirmed ready.
@@ -242,8 +244,11 @@ async fn reconcile_zombie_stop(
 /// the zombie auto-reconcile path (#2001); a single helper keeps their error
 /// handling identical. Extracting it also keeps [`resume_guided_session`] small.
 /// What: POSTs `/api/v1/sessions/managed/{id}/resume` with a 30-second timeout so
-/// a hung daemon cannot freeze the CLI. 404/409/5xx/other/network errors each
-/// print a distinct actionable message and bail. On HTTP 200 the body is parsed
+/// a hung daemon cannot freeze the CLI. 404/409/422/5xx/other/network errors each
+/// print a distinct actionable message and bail; the 422/5xx/other branches now
+/// surface the daemon's response body verbatim (#2577) so an operator sees the
+/// concrete reason (e.g. "workspace directory … no longer exists") instead of a
+/// bare status code. On HTTP 200 the body is parsed
 /// and, if `state=errored`, the async runtime spawn failed → bail directing the
 /// operator to `tm session info`. Success prints "restarted — attaching…" and
 /// returns `Ok(())`; the caller then attaches.
@@ -288,29 +293,84 @@ async fn restart_via_daemon(
         }
         reqwest::StatusCode::CONFLICT => {
             let msg = resp.text().await.unwrap_or_default();
-            eprintln!("tm: cannot restart session '{}': {}", session.name, msg);
+            let detail = truncate_for_display(msg.trim());
+            eprintln!("tm: cannot restart session '{}': {}", session.name, detail);
             eprintln!("tm: run `tm session ls` to see the current state.");
-            anyhow::bail!("cannot restart session '{}': {msg}", session.name);
+            anyhow::bail!("cannot restart session '{}': {detail}", session.name);
         }
-        // 5xx means the daemon IS running but had an internal error —
-        // "start the daemon" is wrong advice; direct the operator to inspect state.
-        s if s.is_server_error() => {
+        // 422 (#2577): the session cannot be resumed because of its on-disk state
+        // — its workspace directory was removed, or its recorded pane vanished.
+        // The daemon body carries the concrete, actionable reason (the vanished
+        // path/pane); surface it verbatim rather than a bare status. Previously
+        // these mapped to 500 and the operator saw only "daemon returned an
+        // internal error (500)" with no clue it was a removed worktree.
+        //
+        // The `x-trusty-resume-reason` header (#2577 review) disambiguates WHICH
+        // on-disk precondition fired so the printed remedy names a REAL, SAFE
+        // `tm session` verb: reading the body text alone cannot reliably tell
+        // "workspace gone" (safe to delete the record) from "sibling window
+        // still alive" (decommission would kill that live window too) without
+        // fragile substring matching — the exact anti-pattern the daemon-side
+        // typed `ResumeManagedError` was introduced to eliminate for 404/409.
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
+            let reason = resp
+                .headers()
+                .get("x-trusty-resume-reason")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let msg = resp.text().await.unwrap_or_default();
+            let detail = truncate_for_display(msg.trim());
+            eprintln!("tm: cannot restart session '{}': {}", session.name, detail);
             eprintln!(
-                "tm: daemon returned an internal error ({s}) restarting '{}' — \
-                 try `tm session ls`.",
-                session.name
+                "{}",
+                unresumable_remedy_line(&session.id, reason.as_deref())
             );
+            anyhow::bail!("cannot restart session '{}': {detail}", session.name);
+        }
+        // 5xx means the daemon IS running but had a genuine internal error —
+        // "start the daemon" is wrong advice; surface the body (if any) so the
+        // operator has something concrete to act on, and direct them to inspect
+        // state. Threading the body through (#2577) mirrors the #2485 precedent:
+        // the daemon already puts a message in the 500 body — don't discard it.
+        s if s.is_server_error() => {
+            let msg = resp.text().await.unwrap_or_default();
+            let detail = truncate_for_display(msg.trim());
+            if detail.is_empty() {
+                eprintln!(
+                    "tm: daemon returned an internal error ({s}) restarting '{}' — \
+                     try `tm session ls`.",
+                    session.name
+                );
+            } else {
+                eprintln!(
+                    "tm: daemon returned an internal error ({s}) restarting '{}': {detail} — \
+                     try `tm session ls`.",
+                    session.name
+                );
+            }
             anyhow::bail!(
-                "daemon internal error {s} restarting session '{}'",
+                "daemon internal error {s} restarting session '{}': {detail}",
                 session.name
             );
         }
         s if !s.is_success() => {
-            eprintln!(
-                "tm: daemon returned {s} restarting '{}' — try `tm session ls`.",
+            let msg = resp.text().await.unwrap_or_default();
+            let detail = truncate_for_display(msg.trim());
+            if detail.is_empty() {
+                eprintln!(
+                    "tm: daemon returned {s} restarting '{}' — try `tm session ls`.",
+                    session.name
+                );
+            } else {
+                eprintln!(
+                    "tm: daemon returned {s} restarting '{}': {detail} — try `tm session ls`.",
+                    session.name
+                );
+            }
+            anyhow::bail!(
+                "daemon error {s} restarting session '{}': {detail}",
                 session.name
             );
-            anyhow::bail!("daemon error {s} restarting session '{}'", session.name);
         }
         _ => {
             // The daemon returned 200 but the runtime spawn may still have failed:
@@ -335,6 +395,70 @@ async fn restart_via_daemon(
             eprintln!("tm: session restarted — attaching…");
             Ok(())
         }
+    }
+}
+
+/// Cap an echoed daemon error body at a sane display length.
+///
+/// Why: a daemon error body is normally a short, hand-written message, but
+/// nothing on the wire enforces that — a future error path (or a proxy
+/// mangling the response) could hand the CLI an unbounded string. Printing it
+/// straight to the terminal without a cap risks flooding the operator's
+/// scrollback for what should be a one-line diagnostic.
+/// What: returns `s` unchanged when it fits within 2000 chars; otherwise
+/// truncates to the first 2000 chars (on a `char` boundary) and appends a
+/// `… (truncated)` marker.
+/// Test: `truncate_for_display_leaves_short_bodies_unchanged`,
+/// `truncate_for_display_caps_long_bodies` in `tests_behavior_e_tests.rs`.
+pub(crate) fn truncate_for_display(s: &str) -> String {
+    const MAX_CHARS: usize = 2000;
+    if s.chars().count() <= MAX_CHARS {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(MAX_CHARS).collect();
+    format!("{truncated}… (truncated)")
+}
+
+/// Build the operator-facing remedy line for a 422 "session not resumable"
+/// response, selected by the daemon's `x-trusty-resume-reason` header.
+///
+/// Why (#2577 review): a prior draft pointed EVERY 422 at the same generic
+/// "delete it" hint, including `tm session rm <id>` — a subcommand that DOES
+/// NOT EXIST (`tm session` only defines `delete`/`decommission`; running it
+/// fails with "unrecognized subcommand 'rm'"). Worse, that draft conflated
+/// `WorkspaceMissing` (the workspace is genuinely gone; `delete --force` is
+/// safe — store-only, never touches tmux) with `PaneGone` (the tmux SESSION is
+/// still alive via a sibling window; `decommission` KILLS THE WHOLE SESSION,
+/// destroying that live sibling too) under one framing. Steering an operator
+/// through the pane-gone case toward teardown risked destroying work in the
+/// surviving window. This function is a pure, table-driven seam so its LITERAL
+/// text can be pinned against `Cli::try_parse_from` in a unit test — the exact
+/// bug class that shipped the nonexistent `rm` verb.
+/// What: `Some("pane_gone")` → an inspect-before-acting remedy naming
+/// `tmux list-panes` / `tm session info` and warning that `decommission` kills
+/// the whole session; `Some("workspace_missing")` → `tm session delete <id>
+/// --force` (safe: store-only, and there is no workspace left to protect);
+/// anything else (an unrecognized or absent header — e.g. an older daemon that
+/// predates #2577) → a conservative pointer naming no destructive verb at all.
+/// Test: `unresumable_remedy_line_cites_real_subcommands` in
+/// `tests_behavior_e_tests.rs`.
+pub(crate) fn unresumable_remedy_line(id: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some("pane_gone") => format!(
+            "tm: this session's tmux window is still alive (a sibling window is keeping it up) \
+             but its recorded pane is gone — inspect with `tmux list-panes` or `tm session info {id}` \
+             before acting; `tm session decommission {id}` kills the WHOLE tmux session, including \
+             that sibling window, so verify first."
+        ),
+        Some("workspace_missing") => format!(
+            "tm: its workspace is gone for good — `tm session delete {id} --force` removes the \
+             stale record (store-only, never touches tmux), or run `tm session info {id}` to \
+             review first."
+        ),
+        _ => format!(
+            "tm: this session is not resumable as-is — run `tm session ls` or `tm session info {id}` \
+             to review."
+        ),
     }
 }
 

@@ -38,6 +38,7 @@ mod project_status;
 pub mod proxy;
 pub mod prune;
 mod reactivate;
+mod resume_error;
 mod summary;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
@@ -45,8 +46,7 @@ pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
 pub use lifecycle::{
-    ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
-    spawn_runtime_for, write_task_md,
+    SpawnParams, is_local_workdir, resume_managed, spawn_managed, spawn_runtime_for, write_task_md,
 };
 pub use project_registry_routes::{
     PatchProjectBody, ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
@@ -66,6 +66,7 @@ pub use prune::{
     PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
 };
 pub use reactivate::reactivate_managed_session;
+pub use resume_error::ResumeManagedError;
 pub use summary::record_to_json;
 use summary::{attach_cmd_for, parse_id, record_to_summary};
 
@@ -804,22 +805,15 @@ pub async fn resume_managed_session(
 
     // Single round-trip: the shared `resume_managed` helper performs the
     // existence + state check inside `SessionManager::resume` and re-spawns the
-    // runtime. We match on its TYPED error to choose the HTTP status — no
-    // pre-flight `get` (which introduced a TOCTOU race where the session could be
-    // decommissioned between the probe and the resume, yielding 500 instead of
-    // 404) and no `Display`-substring matching (which silently fell through to 500
-    // whenever the error wording changed).
+    // runtime. The TYPED error picks its own HTTP status/headers via its
+    // `IntoResponse` impl (`resume_error.rs`) — no pre-flight `get` (which
+    // introduced a TOCTOU race where the session could be decommissioned
+    // between the probe and the resume, yielding 500 instead of 404) and no
+    // `Display`-substring matching (which silently fell through to 500 whenever
+    // the error wording changed).
     match resume_managed(&state, &id).await {
         Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
-        Err(ResumeManagedError::NotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
-        }
-        Err(ResumeManagedError::InvalidState(reason)) => {
-            (StatusCode::CONFLICT, reason).into_response()
-        }
-        Err(ResumeManagedError::Other(msg)) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-        }
+        Err(e) => e.into_response(),
     }
 }
 

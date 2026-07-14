@@ -21,10 +21,16 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::inproject::try_inproject_spawn;
+use super::resume_error::ResumeManagedError;
 use crate::daemon::state::DaemonState;
 use crate::provisioner::WorkspaceProvisioner;
 use crate::runtime::{RuntimeKind, build_adapter};
-use crate::session_manager::{ManagedError, ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+// `ManagedError` moved out of this file's non-test code with the #2577 review
+// enum split (see `resume_error.rs`); it is still used by this module's own
+// `#[cfg(test)]` `StubTmux` double below.
+#[cfg(test)]
+use crate::session_manager::ManagedError;
 
 /// Transport-agnostic inputs for spawning a managed session.
 ///
@@ -1299,55 +1305,6 @@ async fn front_gate_or_escalate(
     Ok(Some(
         mgr.get(&record.id).await.unwrap_or_else(|_| record.clone()),
     ))
-}
-
-/// Typed failure modes for [`resume_managed`], shared across transports.
-///
-/// Why: the prior design mapped resume failures to HTTP status codes by
-/// substring-matching the `Display` string (`msg.contains("invalid state
-/// transition")` → 409, `msg.contains("session not found")` → 404), which
-/// silently regressed to 500 the moment any error wording changed. A typed enum
-/// lets the HTTP handler match on variants (→ 404/409/500) with no stringly-typed
-/// coupling, and lets the MCP path render a stable `Display` string whose
-/// "not found" substring the existing MCP tests rely on.
-/// What: three variants — `NotFound` (the id is absent), `InvalidState` (the
-/// session is not `Stopped`/`Errored`, carrying the descriptive reason), and
-/// `Other` (any remaining failure: tmux/store/I-O). The `Display` strings are
-/// chosen so the not-found variant still contains the literal "not found".
-/// Test: `resume_managed_typed_*` in tests/session_manager_mvp.rs drive the
-/// 404/409 paths through the typed value (no `Display` matching), and the MCP
-/// `session_resume_unknown_id_errors` test asserts the rendered string.
-#[derive(Debug, thiserror::Error)]
-pub enum ResumeManagedError {
-    /// The requested session id was not present in the store → HTTP 404.
-    #[error("session not found: {0}")]
-    NotFound(String),
-
-    /// The session is not in a resumable state (only `Stopped`/`Errored` are) →
-    /// HTTP 409. Carries the manager's descriptive reason.
-    #[error("invalid state transition: {0}")]
-    InvalidState(String),
-
-    /// Any other failure (tmux/store/I-O) → HTTP 500.
-    #[error("{0}")]
-    Other(String),
-}
-
-impl From<ManagedError> for ResumeManagedError {
-    /// Why: `SessionManager::resume` returns a typed [`ManagedError`]; mapping its
-    /// variants here (rather than at each call site) keeps the not-found/invalid-state
-    /// HTTP distinction in one place and prevents a wording change from regressing
-    /// a 404/409 to a 500.
-    /// What: maps `SessionNotFound` → `NotFound`, `InvalidState` → `InvalidState`
-    /// (preserving the descriptive reason), and every other variant → `Other`.
-    /// Test: covered transitively by the resume handler 404/409 tests.
-    fn from(e: ManagedError) -> Self {
-        match e {
-            ManagedError::SessionNotFound(id) => ResumeManagedError::NotFound(id),
-            ManagedError::InvalidState(_, reason) => ResumeManagedError::InvalidState(reason),
-            other => ResumeManagedError::Other(other.to_string()),
-        }
-    }
 }
 
 /// Resume a stopped session and re-spawn its runtime, shared across transports.

@@ -281,3 +281,7 @@ fn injection_status_wire_stringifies_other_variants() {
         );
     }
 }
+
+// `unresumable_response`'s header-tagging behavior is unit-tested beside its
+// definition in `resume_error.rs` (#2577 review) — see
+// `resume_error::tests::unresumable_response_tags_reason_header_per_failure_class`.
