@@ -104,9 +104,11 @@ pub fn scopes_for_tool(name: &str) -> &'static [&'static str] {
         | "manage_table_structure" => &[DOCUMENTS, DRIVE],
 
         // Sheets
-        "get_spreadsheet" | "manage_spreadsheet" | "modify_sheet_values" | "format_sheet" => {
-            &[SPREADSHEETS, DRIVE]
-        }
+        "get_spreadsheet"
+        | "manage_spreadsheet"
+        | "modify_sheet_values"
+        | "format_sheet"
+        | "create_chart" => &[SPREADSHEETS, DRIVE],
 
         // Slides
         "get_slides" | "manage_slides" | "add_slide_content" => &[PRESENTATIONS, DRIVE],
