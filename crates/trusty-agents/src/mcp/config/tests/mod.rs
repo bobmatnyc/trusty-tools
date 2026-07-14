@@ -44,9 +44,10 @@ async fn load_or_create_writes_default_when_absent() {
         "config file should exist after load_or_create"
     );
 
-    // Defaults (#256): gworkspace-mcp (enabled), slack-user-proxy (disabled),
-    // granola-notes (enabled), duetto-memory (disabled).
-    assert_eq!(cfg.mcp.services.len(), 4);
+    // Defaults after ADR-0014 (#256, native-MCP retire): gworkspace-mcp
+    // (enabled, native), granola-notes (enabled), duetto-memory (disabled).
+    // slack-user-proxy was retired as a dead external stub.
+    assert_eq!(cfg.mcp.services.len(), 3);
     let gw = cfg
         .mcp
         .services
@@ -54,13 +55,13 @@ async fn load_or_create_writes_default_when_absent() {
         .find(|s| s.name == "gworkspace-mcp")
         .expect("gworkspace-mcp present in defaults");
     assert!(gw.enabled);
-    let slack = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "slack-user-proxy")
-        .expect("slack-user-proxy present in defaults");
-    assert!(!slack.enabled);
+    assert!(
+        !cfg.mcp
+            .services
+            .iter()
+            .any(|s| s.name == "slack-user-proxy"),
+        "slack-user-proxy retired per ADR-0014"
+    );
     let granola = cfg
         .mcp
         .services
@@ -136,9 +137,9 @@ enabled = true
 #[tokio::test]
 async fn load_returns_documented_defaults_when_absent() {
     // (#244, #245) load() must not create the file (unlike load_or_create),
-    // but must return the documented defaults (gworkspace-mcp +
-    // slack-user-proxy) so prompt-build paths see the same registry that
-    // `load_or_create` would write.
+    // but must return the documented defaults (native gworkspace-mcp,
+    // granola-notes, duetto-memory) so prompt-build paths see the same registry
+    // that `load_or_create` would write.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir();
     unsafe {
@@ -147,12 +148,12 @@ async fn load_returns_documented_defaults_when_absent() {
     let cfg = GlobalConfig::load().await;
     let path = home.join(".trusty-agents").join("config.toml");
     assert!(!path.exists(), "load() must not create the config file");
-    // #245/#256: defaults now mirror DEFAULT_CONFIG_TOML — 4 services
-    // (gworkspace-mcp, slack-user-proxy, granola-notes, duetto-memory).
-    assert_eq!(cfg.mcp.services.len(), 4);
+    // #245/#256 + ADR-0014: defaults mirror DEFAULT_CONFIG_TOML — 3 services
+    // (gworkspace-mcp, granola-notes, duetto-memory) after slack-user-proxy retire.
+    assert_eq!(cfg.mcp.services.len(), 3);
     assert!(cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"));
     assert!(
-        cfg.mcp
+        !cfg.mcp
             .services
             .iter()
             .any(|s| s.name == "slack-user-proxy")

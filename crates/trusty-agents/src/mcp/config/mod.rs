@@ -8,8 +8,8 @@
 //! What: `GlobalConfig` is the on-disk schema (formerly `McpConfig`; renamed
 //! in #245 to reflect that it composes multiple subsystems — MCP registry +
 //! GitHub identities — rather than only MCP). `load_or_create()` creates the
-//! file with default content (gworkspace-mcp enabled + slack-user-proxy
-//! disabled) when missing. The registry only lists *remote/service-tier*
+//! file with default content (native gworkspace-mcp enabled) when missing.
+//! The registry only lists *remote/service-tier*
 //! MCPs that agents should know about — local native integrations
 //! (kuzu-memory, mcp-vector-search) are wired into the harness directly and
 //! deliberately do not appear here.
@@ -176,7 +176,7 @@ impl GlobalConfig {
     /// changes made via the `mcp_*` tools. When the file is missing the
     /// prompt-build path must not fail — and previously it returned an empty
     /// registry (`Self::default()`), which silently dropped the documented
-    /// gworkspace-mcp + slack-user-proxy defaults from in-memory state. We
+    /// native gworkspace-mcp defaults from in-memory state. We
     /// now parse `DEFAULT_CONFIG_TOML` so the in-memory defaults match what
     /// `load_or_create` would write to disk. Parse failure (a programmer
     /// error in the literal) falls back to `Self::default()` rather than
@@ -202,7 +202,7 @@ impl GlobalConfig {
     /// dispatch (called from async contexts).
     /// What: Reads `$HOME/.trusty-agents/config.toml` via `tokio::fs`. If the
     /// file is missing returns `default_config()` (the documented defaults
-    /// — gworkspace-mcp + slack-user-proxy). Parse failures log a warning
+    /// — native gworkspace-mcp). Parse failures log a warning
     /// and fall back to the same defaults rather than failing loudly.
     /// Test: `tests::load_returns_documented_defaults_when_absent`,
     /// `tests::save_and_reload_roundtrip`.

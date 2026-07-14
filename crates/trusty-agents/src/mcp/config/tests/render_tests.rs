@@ -234,7 +234,8 @@ fn default_config_includes_local_inference_section() {
 #[test]
 fn default_config_is_valid_toml() {
     let cfg = GlobalConfig::from_toml_str(DEFAULT_CONFIG_TOML).expect("default parses");
-    assert_eq!(cfg.mcp.services.len(), 4);
+    // ADR-0014: 3 services after slack-user-proxy retire.
+    assert_eq!(cfg.mcp.services.len(), 3);
     let gw = cfg
         .mcp
         .services
@@ -242,15 +243,17 @@ fn default_config_is_valid_toml() {
         .find(|s| s.name == "gworkspace-mcp")
         .expect("gworkspace-mcp present");
     assert!(gw.enabled);
+    // Native gworkspace-mcp takes no subcommand (external upstream used ["mcp"]).
+    assert!(gw.args.is_empty(), "native gworkspace-mcp takes no args");
     assert!(gw.tools.iter().any(|t| t.name == "gmail_search"));
     assert!(gw.tools.iter().any(|t| t.name == "calendar_list"));
-    let slack = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "slack-user-proxy")
-        .expect("slack-user-proxy present");
-    assert!(!slack.enabled);
+    assert!(
+        !cfg.mcp
+            .services
+            .iter()
+            .any(|s| s.name == "slack-user-proxy"),
+        "slack-user-proxy retired per ADR-0014"
+    );
     // Native local integrations stay out of the registry.
     assert!(!cfg.mcp.services.iter().any(|s| s.name == "kuzu-memory"));
     assert!(

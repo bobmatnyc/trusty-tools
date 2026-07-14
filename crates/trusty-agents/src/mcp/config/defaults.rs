@@ -18,15 +18,25 @@ pub(super) const DEFAULT_CONFIG_TOML: &str = r#"# trusty-agents global configura
 # Agent roles that receive MCP tool descriptions in their system prompt
 inject_for_roles = ["ctrl", "pm", "research", "observe"]
 
-# Remote and service-tier MCPs — these are external platforms agents can reference.
-# Local native integrations (kuzu-memory, mcp-vector-search) are handled by the
-# harness directly and do not appear here.
+# Service-tier MCPs agents can reference. Local native integrations
+# (kuzu-memory, mcp-vector-search) are handled by the harness directly and
+# do not appear here.
 
+# gworkspace-mcp — the NATIVE in-workspace stdio MCP server built from crate
+# `trusty-gworkspace` (bin `gworkspace-mcp`, src/bin/gworkspace-mcp.rs). Per
+# ADR-0014 (native Rust MCP, PR #2624) this repoints off the retired external
+# Python upstream: the native binary is a pure stdio server that takes NO
+# subcommand, so `args = []` (the old external upstream required `["mcp"]`).
+#
+# ⚠️ NAME COLLISION: the native cargo-installed `gworkspace-mcp` and the legacy
+# pipx Python package share the same binary name on $PATH, so which one launches
+# depends on PATH order. `args = []` targets the native contract, but full
+# disambiguation needs a binary rename (follow-up) or removing the pipx package.
 [[mcp.services]]
 name = "gworkspace-mcp"
-description = "Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Tasks"
+description = "Google Workspace (native trusty-gworkspace) — Gmail, Calendar, Drive, Docs, Sheets, Tasks"
 command = "gworkspace-mcp"
-args = ["mcp"]
+args = []
 transport = "stdio"
 enabled = true
 
@@ -102,25 +112,9 @@ description = "Create a Google Task"
 name = "tasks_complete"
 description = "Mark a Google Task as complete"
 
-[[mcp.services]]
-name = "slack-user-proxy"
-description = "Slack messaging — send messages, read channels, search"
-command = "slack-user-proxy"
-args = []
-transport = "stdio"
-enabled = false
-
-[[mcp.services.tools]]
-name = "slack_post"
-description = "Post a message to a Slack channel"
-
-[[mcp.services.tools]]
-name = "slack_search"
-description = "Search Slack messages"
-
-[[mcp.services.tools]]
-name = "slack_read"
-description = "Read messages from a Slack channel"
+# slack-user-proxy retired per ADR-0014 (native Rust MCP, PR #2624): it was a
+# disabled external (Python) stdio stub with no native in-workspace successor,
+# so it is dropped rather than repointed.
 
 # Granola — meeting notes, transcripts, and action items (#256).
 # Enabled by default; harmless when the binary is absent (the harness
@@ -285,17 +279,7 @@ eager_discovery = true
 [tool_registry.endpoints.transport]
 timeout_ms = 5000
 
-[[tool_registry.endpoints]]
-name = "commons-ticketing"
-driver = "direct"
-description = "Commons ticketing — create/update/close GitHub issues and PRs via OpenRPC stdio"
-command = "commons-ticketing"
-args = ["--rpc"]
-enabled = false
-scopes = ["ticketing.read", "ticketing.write", "ticketing.admin"]
-discovery_ttl_secs = 300
-eager_discovery = true
-
-[tool_registry.endpoints.transport]
-timeout_ms = 5000
+# commons-ticketing retired per ADR-0014 (native Rust MCP, PR #2624): a disabled
+# external OpenRPC stub with no consumers, superseded by the native tickets-mcp
+# endpoint above.
 "#;
