@@ -193,14 +193,24 @@ pub fn parse_github_path(url: &str) -> Option<GithubPath> {
 /// it were a host. Round-tripping a stored canonical identity (e.g. the
 /// `?repo_identity=owner/repo` daemon filter, or a value read back from
 /// `indexes.toml`) needs a parser that treats the input as a path, not a URL.
-/// What: splits on `/`, keeps the last two non-empty segments as `(owner, repo)`
-/// (so nested group paths collapse to their final two, matching
-/// [`parse_github_path`]), and slugifies each. A single trailing segment maps to
-/// `(UNKNOWN_OWNER, repo)`. Returns `None` when no non-empty `repo` slug survives.
+/// What: rejects input containing `@` or `://` up front — those are unambiguous
+/// markers of a URL/SSH remote (`git@host:owner/repo`, `https://host/owner/repo`),
+/// which this function must NOT silently mis-slugify into a nonsense identity
+/// (e.g. `git@host:owner/repo` would otherwise parse as owner=`host:owner`,
+/// repo=`repo`). Callers that genuinely have a remote URL must use
+/// [`parse_github_path`] instead. Otherwise splits on `/`, keeps the last two
+/// non-empty segments as `(owner, repo)` (so nested group paths collapse to
+/// their final two, matching [`parse_github_path`]), and slugifies each. A
+/// single trailing segment maps to `(UNKNOWN_OWNER, repo)`. Returns `None` when
+/// no non-empty `repo` slug survives, or the URL/SSH-shape guard rejects it.
 /// Test: `parse_owner_repo_roundtrips_rel_path`, `parse_owner_repo_single_segment`,
-/// `parse_owner_repo_empty_returns_none`.
+/// `parse_owner_repo_empty_returns_none`, `parse_owner_repo_rejects_url_shaped_input`.
 pub fn parse_owner_repo(s: &str) -> Option<GithubPath> {
-    let segments: Vec<&str> = s.trim().split('/').filter(|p| !p.is_empty()).collect();
+    let trimmed = s.trim();
+    if trimmed.contains('@') || trimmed.contains("://") {
+        return None;
+    }
+    let segments: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
     let (owner_raw, repo_raw) = match segments.as_slice() {
         [.., owner, repo] => (Some(*owner), *repo),
         [repo] => (None, *repo),
@@ -410,5 +420,23 @@ mod tests {
         assert_eq!(parse_owner_repo(""), None);
         assert_eq!(parse_owner_repo("   "), None);
         assert_eq!(parse_owner_repo("///"), None);
+    }
+
+    /// Why: `parse_owner_repo` treats its input as a canonical `owner/repo`
+    /// PATH, not a URL — feeding it an SSH (`git@host:owner/repo`) or HTTPS
+    /// (`https://host/owner/repo`) remote must be rejected rather than silently
+    /// mis-slugified into a nonsense identity (e.g. owner=`host:owner`).
+    /// Test: itself.
+    #[test]
+    fn parse_owner_repo_rejects_url_shaped_input() {
+        assert_eq!(
+            parse_owner_repo("git@github.com:bobmatnyc/trusty-tools.git"),
+            None
+        );
+        assert_eq!(
+            parse_owner_repo("https://github.com/bobmatnyc/trusty-tools"),
+            None
+        );
+        assert_eq!(parse_owner_repo("ssh://git@host/owner/repo"), None);
     }
 }

@@ -63,15 +63,24 @@ pub(super) struct ListIndexesParams {
 ///
 /// Why: `GET /indexes` needs a per-index identity for the `?repo_identity=`
 /// filter and the `?details=true` output. The durable source is
-/// `PersistedIndex::repo_identity` (populated at registration / warm-boot
-/// backfill); a live derive from `root_path` is the fallback for indexes not yet
-/// persisted with one. Building the id→identity map once per request avoids an
-/// O(N) `indexes.toml` scan per handle.
-/// What: loads the persisted registry (best-effort — empty on failure), then for
-/// each handle returns `(id, Option<canonical_identity>)`, preferring the stored
-/// value and falling back to `RepoIdentity::derive(&root_path)`.
-/// Test: `list_indexes_details_includes_repo_identity`,
-/// `list_indexes_filters_by_repo_identity` (server tests).
+/// `PersistedIndex::repo_identity` (populated at registration / relocate /
+/// warm-boot backfill in `start_restore.rs`) — this function reads ONLY that
+/// stored value, one `indexes.toml` load for the whole request. It deliberately
+/// does NOT fall back to a live `RepoIdentity::derive` per handle: that would
+/// shell out to `git` (a blocking subprocess) once per handle lacking a
+/// persisted identity, and on a daemon with ~75 legacy indexes that is 100+
+/// synchronous subprocess spawns inside this async handler on every
+/// `GET /indexes` call until the next warm-boot backfill runs. A handle with no
+/// stored identity yet simply reports `None` here (until warm-boot backfills it,
+/// or a `PATCH`/relocate/reindex re-derives it) — bounded, not unbounded, work
+/// per request.
+/// What: loads the persisted registry (best-effort — empty `HashMap` on load
+/// failure) and returns `(id, PersistedIndex::repo_identity)` for every
+/// registered handle; ids with no matching persisted entry map to `None`.
+/// Test: `list_indexes_repo_identity_details_and_filter`,
+/// `list_indexes_repo_identity_tree_filter` (server tests, both in
+/// `tests_list.rs`, seed `indexes.toml` directly rather than relying on a live
+/// derive).
 fn resolve_identities(
     handles: &[Arc<IndexHandle>],
 ) -> std::collections::HashMap<String, Option<String>> {
@@ -85,10 +94,7 @@ fn resolve_identities(
         .iter()
         .map(|h| {
             let id = h.id.0.clone();
-            let identity = persisted.get(&id).cloned().flatten().or_else(|| {
-                trusty_common::repo_identity::RepoIdentity::derive(&h.root_path)
-                    .map(|r| r.canonical())
-            });
+            let identity = persisted.get(&id).cloned().flatten();
             (id, identity)
         })
         .collect()

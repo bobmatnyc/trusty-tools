@@ -47,7 +47,9 @@ const NO_IDENTITY_LABEL: &str = "(no repo identity)";
 /// entries (missing root) can only use the stored value.
 /// What: returns the stored identity, else a live derive from `root_path` when
 /// the path still exists, else `None`.
-/// Test: `prune_orphans_groups_by_repo_identity`, `report_repo_identity_*`.
+/// Test: `prune_orphans_groups_by_repo_identity`,
+/// `report_repo_identity_lists_matching_facets_without_mutating`,
+/// `report_repo_identity_no_match_is_ok`.
 fn resolve_identity(entry: &PersistedIndex) -> Option<String> {
     entry.repo_identity.clone().or_else(|| {
         entry
@@ -217,7 +219,7 @@ fn print_grouped(records: &[OrphanEntry]) {
 /// What: normalises `filter` to canonical form, selects every registered entry
 /// whose resolved identity matches, and prints each with a `live`/`orphan`
 /// status marker. Prints a friendly note and returns `Ok` when nothing matches.
-/// Test: `report_repo_identity_lists_matching_facets`,
+/// Test: `report_repo_identity_lists_matching_facets_without_mutating`,
 /// `report_repo_identity_no_match_is_ok`.
 fn report_repo_identity(entries: &[PersistedIndex], filter: &str) -> Result<()> {
     let target = RepoIdentity::parse(filter)
