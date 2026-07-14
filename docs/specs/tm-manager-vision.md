@@ -1,10 +1,12 @@
 # DOC-36 — `tm manager`: Layer-3 Chat-Based Portfolio Project Manager
 
-**Status:** Draft (owner review requested — no child issues filed yet)
+**Status:** Approved (owner review complete 2026-07-14 — see §7 for per-item resolutions; implementation green-lit)
 **Subsystem:** trusty-mpm — daemon / inference layer / external channels
 **Owner:** Engineering (trusty-mpm)
-**Last-updated:** 2026-07-13
-**Spec ID:** `SPEC-TMMGR-01~draft` … `SPEC-TMMGR-06~draft` (DOC-36)
+**Last-updated:** 2026-07-14
+**Approved:** 2026-07-14 by owner. Implementation green-lit; child issues to be filed and
+tracked on GitHub milestone 10 (Chat-Based Project Manager) under epic #2109.
+**Spec ID:** `SPEC-TMMGR-01~approved` … `SPEC-TMMGR-06~approved` (DOC-36)
 **Builds on:** DOC-35 — `tm project`: Deterministic Project/Session Control Plane
 (`docs/specs/tm-project-control-plane.md`, epic #2108, CLOSED/shipped-substrate) — especially
 §1.1 (three-layer model), §10 (Deliverable/Milestone data model), §11 (the L2/L3 boundary
@@ -319,34 +321,52 @@ that most benefits from phases 1–3 already being dogfooded internally via curl
    never auto-mutates), with actual intervention gated behind either explicit user follow-up or an
    **opt-in** per-category intervention tier the operator turns on later (phase-3 follow-up, not
    initial scope). Confirm, or specify a different default.
+   - **RESOLVED 2026-07-14:** notify-only default confirmed; opt-in per-category intervention tier
+     deferred to the phase-3 follow-up (WI-13), gated on notify-only being dogfooded first.
 2. **Verb set for `/api/v1/manager/*` (§3.2).** Confirm the proposed five endpoints (`status`,
    `digest`, `chat`, `route-task`, `escalations`), or amend — in particular, confirm `status`
    (deterministic cross-project rollup) belongs on the manager surface rather than as a new #2108
    fleet-wide endpoint, given DOC-35 §11 scopes "reason across MULTIPLE projects" to #2109
    regardless of whether the reasoning is inferential.
+   - **RESOLVED 2026-07-14:** five-endpoint surface (`status`, `digest`, `chat`, `route-task`,
+     `escalations`) confirmed as proposed; `status` stays on the manager surface per DOC-35 §11's
+     scoping, not moved to #2108.
 3. **Portfolio `trusty-memory` palace (§3.4).** Confirm a single new portfolio-scoped palace
    (holding digest history, escalation dispositions, and portfolio chat turns) is the right shape,
    and confirm a naming/provisioning convention (e.g. auto-created at daemon startup vs. explicit
    `tm manager init`) — distinct from every per-project palace, which remains untouched.
+   - **RESOLVED 2026-07-14:** single portfolio-scoped palace confirmed; provisioning convention is
+     auto-created at daemon startup (consistent with §3.1's "daemon as source of truth"
+     principle), not a separate explicit `tm manager init` step.
 4. **Phasing (§6).** Confirm phase boundaries and ordering (1 read-only chat/digest → 2 task
    routing → 3 proactive monitoring → 4 external channel), or flag any phase that should move
    earlier — e.g., whether a Telegram binding for phase-1 read-only digests (lower risk than a
    full portfolio persona) should be pulled into phase 1 rather than held for phase 4.
+   - **RESOLVED 2026-07-14:** phase boundaries and ordering confirmed as proposed (1 → 2 → 3 → 4);
+     no phase pulled earlier — Telegram binding stays in phase 4.
 5. **Disambiguation UX surface.** DOC-35 §13 Q1 resolved that acting on ambiguous NL routing is
    #2109's; confirm that lives entirely inside the chat surface (`POST /manager/chat`,
    `POST /manager/route-task`) with no separate CLI-only disambiguation prompt required for v1, or
    specify that a scriptable `tm manager route` CLI (§6 phase 2) needs its own non-chat
    confirmation UX (e.g. `--yes` flag vs. an interactive picker) for headless/CI use.
+   - **RESOLVED 2026-07-14:** disambiguation lives entirely within the chat surface
+     (`POST /manager/chat`, `POST /manager/route-task`) for v1; no separate CLI-only confirmation
+     UX required initially.
 6. **Autonomy-tier consumption, read-only confirmation.** Confirm `tm manager` only ever *reads*
    DOC-23's adjudication confidence/disposition as an escalation-prioritization signal (§5) and
    never requests, suggests, or triggers a tier change on the user's behalf — or specify whether a
    future phase should let the manager *propose* (never apply) a tier adjustment based on observed
    patterns, distinct from DOC-23's own learned-autonomy loop.
+   - **RESOLVED 2026-07-14:** read-only confirmed — `tm manager` only reads DOC-23's adjudication
+     confidence/disposition signals for escalation prioritization; it never requests, suggests, or
+     triggers an autonomy-tier change.
 7. **Portfolio channel identity vs. L2 session identity (§3.5, §6 phase 4).** Confirm the phase-4
    Telegram/Slack binding should present as a **distinct bot persona/chat surface** from #1440's
    per-session L2 bot, so users are never ambiguous about whether they're talking to one session
    or the whole portfolio — or specify that a single bot identity should serve both L2 and L3
    roles, disambiguated some other way (e.g. a `/portfolio` command prefix within the same chat).
+   - **RESOLVED 2026-07-14:** distinct bot persona/chat surface confirmed for the phase-4
+     portfolio binding, separate from #1440's per-session L2 bot.
 
 ---
 
@@ -418,3 +438,7 @@ both followed, filing happens after §7's decisions are resolved. Grouped by pha
   proposal (`/api/v1/manager/*`), local-testability bar, layering table against #2108/DOC-22/L2/
   DOC-23, a four-phase delivery proposal, a seven-item owner-decision checklist, and an unfiled
   15-item work-item table. Opened for owner review; no child issues filed.
+- **2026-07-14 (v2)** — Approved by owner (DOC-36, `SPEC-TMMGR-01~approved` … `-06~approved`). All
+  7 items in §7's owner-decision checklist resolved as proposed (see per-item RESOLVED annotations
+  in §7). Implementation green-lit; child issues to be filed and tracked on GitHub milestone 10
+  (Chat-Based Project Manager) under epic #2109.
