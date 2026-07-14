@@ -122,7 +122,7 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
 /// the daemon to ingest tool results; the other five use short synchronous timeouts.
 /// `exe_override` pins the binary path for the hook command; pass `None` to resolve
 /// via `mpm_hook_command(None)`.
-/// Test: `test_mpm_hook_additions_has_five_events`,
+/// Test: `test_mpm_hook_additions_has_six_events`,
 /// covered by `test_ensure_managed_hooks_writes_triad`.
 pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::Value {
     let cmd = mpm_hook_command(exe_override);
@@ -186,7 +186,7 @@ pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::V
 /// Why: convenience wrapper that calls `mpm_hook_additions_with_exe(None)` so
 /// existing call sites that do not need to pin the exe path stay concise.
 /// What: delegates to [`mpm_hook_additions_with_exe`] with `None`.
-/// Test: covered by `test_mpm_hook_additions_has_five_events`.
+/// Test: covered by `test_mpm_hook_additions_has_six_events`.
 pub fn mpm_hook_additions() -> serde_json::Value {
     mpm_hook_additions_with_exe(None)
 }
