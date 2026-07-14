@@ -136,11 +136,10 @@ use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
     get_managed_session, get_project_registry_route, get_session_activity, list_managed_sessions,
-    list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_focus,
-    proxy_get_focus, proxy_message, proxy_summary, proxy_unfocus, prune_managed_route,
-    prune_worktrees_route, reactivate_managed_session, register_project_registry_route,
-    resume_managed_session, send_to_session, spawn_session, stop_managed_session,
-    stop_managed_session_runtime,
+    list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_router,
+    prune_managed_route, prune_worktrees_route, reactivate_managed_session,
+    register_project_registry_route, resume_managed_session, send_to_session, spawn_session,
+    stop_managed_session, stop_managed_session_runtime,
 };
 // Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
 use super::manager::{manager_status_route, manager_version_route};
@@ -335,21 +334,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // TELUI-6 (#1440): the local session-manager PROXY surface — the SAME
         // focus/inject/summarize state machine every channel (Telegram, Slack)
         // binds to, exposed here as plain HTTP so it is `curl`-testable before
-        // any channel connects. Literal segments (`/focus`, `/unfocus`,
-        // `/message`) are registered as their own routes; the two GET routes
-        // take `conversation_key` as a path param, mirroring the `/{id}`
-        // convention used throughout this managed-session block.
-        .route("/api/v1/sessions/proxy/focus", post(proxy_focus))
-        .route(
-            "/api/v1/sessions/proxy/focus/{conversation_key}",
-            get(proxy_get_focus),
-        )
-        .route("/api/v1/sessions/proxy/unfocus", post(proxy_unfocus))
-        .route("/api/v1/sessions/proxy/message", post(proxy_message))
-        .route(
-            "/api/v1/sessions/proxy/summary/{conversation_key}",
-            get(proxy_summary),
-        )
+        // any channel connects. Registrations live with their handlers in
+        // `managed_routes::proxy::proxy_router` and are merged here.
+        .merge(proxy_router())
         // Layer-3 portfolio manager surface (epic #2109, DOC-36 §3.2). Phase 1a:
         // a self-describing capabilities stub + the deterministic (no-LLM)
         // cross-project rollup. Both are read-only and curl-testable with no

@@ -59,7 +59,7 @@ pub use project_status::{
 pub use proxy::{
     DirectManagedBackend, ProxyFocusRequest, ProxyFocusResponse, ProxyMessageRequest,
     ProxyMessageResponse, ProxySummaryResponse, ProxyTargetWire, ProxyUnfocusRequest,
-    ProxyUnfocusResponse, proxy_focus, proxy_get_focus, proxy_message, proxy_summary,
+    ProxyUnfocusResponse, proxy_focus, proxy_get_focus, proxy_message, proxy_router, proxy_summary,
     proxy_unfocus,
 };
 pub use prune::{
