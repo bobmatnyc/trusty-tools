@@ -513,7 +513,7 @@ fn format_fleet_by_project_slack(fleet: &[ProjectFleetView]) -> String {
 /// unchanged when already short. Char-based (not byte-slice) truncation so a
 /// multi-byte UTF-8 id can never panic on a non-char boundary.
 /// Test: `short_id_truncates_long_ids`, `short_id_handles_multibyte`.
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     let mut chars = id.chars();
     let head: String = chars.by_ref().take(SHORT_ID_LEN).collect();
     if chars.next().is_some() {
@@ -521,4 +521,27 @@ fn short_id(id: &str) -> String {
     } else {
         head
     }
+}
+
+/// Escape the three `mrkdwn`-significant characters for a Slack message body.
+///
+/// Why (#2565 review): the proxy binding (`slack::focus`) interpolates
+/// backend-controlled and operator-supplied text — session names, `/focus`
+/// arguments, error strings, activity summaries — directly into `mrkdwn`
+/// replies. Slack's markup treats `<...>` as a special link/mention/broadcast
+/// span (e.g. `<!channel>` broadcast-pings the whole channel, `<@U123>`
+/// mentions a user); an unescaped session named `<!channel> pwned` would
+/// broadcast-ping the channel from every proxy reply. Mirrors the Telegram
+/// binding's `html_escape` (`telegram::formatter::html_escape`), which the
+/// Telegram proxy binding applies to the identical set of fields.
+/// What: replaces `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, in that order (so
+/// the `&` produced by the `<`/`>` substitutions is never re-escaped). Slack
+/// unescapes exactly these three entities in `mrkdwn` bodies, matching
+/// Slack's own documented escaping contract for `chat.postMessage`.
+/// Test: `mrkdwn_escape_escapes_ampersand_lt_gt`,
+/// `mrkdwn_escape_neutralizes_channel_broadcast_span`.
+pub(crate) fn mrkdwn_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

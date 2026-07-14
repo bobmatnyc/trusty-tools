@@ -66,6 +66,30 @@ fn parse_envelope_message() {
             envelope_id: "env-3".into(),
             text: "spin up a session".into(),
             channel: "C7".into(),
+            thread: None,
+        }
+    );
+}
+
+#[test]
+fn parse_envelope_threaded_message_carries_thread_ts() {
+    // A message posted inside a thread carries `thread_ts` (#2549) so the proxy
+    // conversation key can scope focus to that thread, distinct from the parent
+    // channel.
+    let raw = r#"{
+        "type": "events_api",
+        "envelope_id": "env-3t",
+        "payload": {
+            "event": { "type": "message", "text": "run the tests", "channel": "C7", "user": "U1", "thread_ts": "169.42" }
+        }
+    }"#;
+    assert_eq!(
+        parse_envelope(raw),
+        SlackEvent::Message {
+            envelope_id: "env-3t".into(),
+            text: "run the tests".into(),
+            channel: "C7".into(),
+            thread: Some("169.42".into()),
         }
     );
 }
@@ -242,6 +266,7 @@ fn envelope_id_of_extracts_each_variant() {
             envelope_id: "b".into(),
             text: "hi".into(),
             channel: "C".into(),
+            thread: None,
         }),
         Some("b".to_string())
     );
@@ -459,4 +484,292 @@ fn slack_client_timeout_constants_are_finite() {
     // failure — the exact regression this module exists to prevent.
     assert_eq!(SLACK_CONNECT_TIMEOUT_SECS, 10);
     assert_eq!(SLACK_REQUEST_TIMEOUT_SECS, 30);
+}
+
+// ---------------------------------------------------------------------------
+// Session-manager proxy routing (TELUI-6, #2549).
+//
+// These are the hermetic "inbound Slack event shape reaches the same
+// SessionProxy method" tests: a recording `ManagedBackend` double stands in for
+// the daemon (no live Slack workspace, no network, no tmux), so driving
+// `reply_for_event` with a simulated `SlackEvent` asserts the `/focus`,
+// `/summary`, `/unfocus`, and focused-message paths reach `resolve`/`activity`/
+// `send` on the SHARED proxy — the same state machine the daemon's own routes
+// and the Telegram binding exercise. The pure state machine itself is covered by
+// `client::proxy::tests`; the render mapping by `slack::focus::tests`.
+// ---------------------------------------------------------------------------
+
+use crate::client::{ActivityDigest, FocusTarget};
+
+/// A `ManagedBackend` double that records every method call.
+///
+/// Why: proves an inbound Slack event reaches the proxy's `resolve`/`send`/
+/// `activity` primitives without a daemon, network, or live Slack socket.
+/// What: appends a `"verb:args"` line per call; `resolve` succeeds (returning a
+/// synthetic id/name) or fails with a `"not found"`-shaped error per `resolve_ok`.
+/// Test: used by the `slash_*`/`message_*` proxy-routing tests below.
+struct RecordingBackend {
+    calls: Mutex<Vec<String>>,
+    resolve_ok: bool,
+}
+
+impl RecordingBackend {
+    fn new(resolve_ok: bool) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            resolve_ok,
+        }
+    }
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ManagedBackend for RecordingBackend {
+    async fn resolve(&self, target: &str) -> Result<(String, String), String> {
+        self.calls.lock().unwrap().push(format!("resolve:{target}"));
+        if self.resolve_ok {
+            Ok((format!("id-{target}"), target.to_string()))
+        } else {
+            Err(format!("managed session {target} not found"))
+        }
+    }
+    async fn send(&self, id: &str, text: &str) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("send:{id}:{text}"));
+        Ok(())
+    }
+    async fn activity(&self, id: &str) -> Result<ActivityDigest, String> {
+        self.calls.lock().unwrap().push(format!("activity:{id}"));
+        Ok(ActivityDigest {
+            state: "active".into(),
+            summary: "running cargo test".into(),
+            pending_decision: None,
+        })
+    }
+}
+
+/// An offline executor for `reply_for_event`'s coordinator path — never reached
+/// by the proxy-verb / focused-message tests below, so its unreachable URL is
+/// only a placeholder for the parameter.
+fn offline_executor() -> CommandExecutor {
+    CommandExecutor::new("http://127.0.0.1:0")
+}
+
+fn empty_histories() -> ChatHistories {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn slash(command: &str, text: &str, channel: &str) -> SlackEvent {
+    SlackEvent::SlashCommand {
+        envelope_id: "e".into(),
+        command: command.into(),
+        text: text.into(),
+        channel: channel.into(),
+    }
+}
+
+fn message(text: &str, channel: &str, thread: Option<&str>) -> SlackEvent {
+    SlackEvent::Message {
+        envelope_id: "e".into(),
+        text: text.into(),
+        channel: channel.into(),
+        thread: thread.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn slash_focus_reaches_proxy_resolve() {
+    // `/focus api` on channel C1 must reach `SessionProxy::focus` → the backend's
+    // `resolve`, and leave the conversation focused so later plain messages inject.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+    let executor = offline_executor();
+    let histories = empty_histories();
+
+    let (channel, body) =
+        reply_for_event(&executor, &histories, &proxy, &slash("/focus", "api", "C1"))
+            .await
+            .expect("slash command yields a reply");
+
+    assert_eq!(channel, "C1");
+    assert!(body.contains("Focused on *api*"), "{body}");
+    assert_eq!(backend.calls(), vec!["resolve:api".to_string()]);
+    assert_eq!(
+        proxy.current_focus(&focus::conv("C1", None)),
+        Some(FocusTarget {
+            id: "id-api".into(),
+            name: "api".into(),
+        }),
+    );
+}
+
+#[tokio::test]
+async fn message_when_focused_reaches_proxy_send() {
+    // With C1 focused, a plain message routes INJECT → the backend's `send` at the
+    // focused id, echoing the text back — NOT the coordinator.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+    let executor = offline_executor();
+    let histories = empty_histories();
+
+    // Focus first (records resolve:api).
+    reply_for_event(&executor, &histories, &proxy, &slash("/focus", "api", "C1"))
+        .await
+        .expect("focus reply");
+
+    let (_channel, body) = reply_for_event(
+        &executor,
+        &histories,
+        &proxy,
+        &message("run tests", "C1", None),
+    )
+    .await
+    .expect("message yields a reply");
+
+    assert!(body.contains("run tests"), "{body}");
+    assert!(
+        backend
+            .calls()
+            .contains(&"send:id-api:run tests".to_string()),
+        "expected a send call, got {:?}",
+        backend.calls()
+    );
+}
+
+#[tokio::test]
+async fn slash_summary_reaches_proxy_activity() {
+    // `/summary` on a focused conversation reaches `SessionProxy::summarize` → the
+    // backend's `activity`, rendering the digest.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+    let executor = offline_executor();
+    let histories = empty_histories();
+
+    reply_for_event(&executor, &histories, &proxy, &slash("/focus", "api", "C1"))
+        .await
+        .expect("focus reply");
+
+    let (_channel, body) =
+        reply_for_event(&executor, &histories, &proxy, &slash("/summary", "", "C1"))
+            .await
+            .expect("summary reply");
+
+    assert!(body.contains("active"), "{body}");
+    assert!(body.contains("running cargo test"), "{body}");
+    assert!(
+        backend.calls().contains(&"activity:id-api".to_string()),
+        "expected an activity call, got {:?}",
+        backend.calls()
+    );
+}
+
+#[tokio::test]
+async fn slash_unfocus_reaches_proxy() {
+    // `/unfocus` clears the conversation's focus; the reply names the cleared
+    // session and `current_focus` returns to `None`.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+    let executor = offline_executor();
+    let histories = empty_histories();
+
+    reply_for_event(&executor, &histories, &proxy, &slash("/focus", "api", "C1"))
+        .await
+        .expect("focus reply");
+
+    let (_channel, body) =
+        reply_for_event(&executor, &histories, &proxy, &slash("/unfocus", "", "C1"))
+            .await
+            .expect("unfocus reply");
+
+    assert!(body.contains("Unfocused"), "{body}");
+    assert!(proxy.current_focus(&focus::conv("C1", None)).is_none());
+}
+
+#[tokio::test]
+async fn focus_is_scoped_per_thread() {
+    // Focus set in a thread scopes to that thread: a plain message in the SAME
+    // thread injects, while the parent channel stays unfocused (its message would
+    // route to the coordinator, not inject). Asserting the thread's focus map is
+    // set and the channel's is not proves the per-conversation keying.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+
+    // Focus directly on the thread conversation key (slash commands are keyed by
+    // channel; here we focus the thread key to prove the scoping seam).
+    let thread_conv = focus::conv("C1", Some("169.42"));
+    proxy.focus(&thread_conv, "api").await;
+
+    assert!(proxy.current_focus(&thread_conv).is_some());
+    assert!(proxy.current_focus(&focus::conv("C1", None)).is_none());
+}
+
+#[tokio::test]
+async fn threaded_reply_falls_back_to_channel_focus() {
+    // #2565 review, MEDIUM-HIGH: `/focus` via a slash command keys by the bare
+    // channel (no thread context). A reply posted INSIDE a thread must still
+    // reach that channel-focused session — end-to-end through reply_for_event,
+    // not just the effective_conv unit — proving the fallback is actually wired
+    // into the message-routing path, not merely unit-tested in isolation.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+    let executor = offline_executor();
+    let histories = empty_histories();
+
+    // Channel-level focus (no thread).
+    reply_for_event(&executor, &histories, &proxy, &slash("/focus", "api", "C1"))
+        .await
+        .expect("focus reply");
+
+    // A message INSIDE a thread of that same channel.
+    let (_channel, body) = reply_for_event(
+        &executor,
+        &histories,
+        &proxy,
+        &message("run tests", "C1", Some("169.42")),
+    )
+    .await
+    .expect("threaded message yields a reply");
+
+    // It must INJECT (reach the backend's send), not silently fall through to
+    // the coordinator.
+    assert!(body.contains("run tests"), "{body}");
+    assert!(
+        backend
+            .calls()
+            .contains(&"send:id-api:run tests".to_string()),
+        "expected the threaded reply to inject via the channel's focus, got {:?}",
+        backend.calls()
+    );
+}
+
+#[tokio::test]
+async fn thread_focus_does_not_leak_to_parent_channel_message() {
+    // #2565 review: the OTHER direction — a thread-specific focus must stay
+    // thread-scoped and never satisfy a plain, non-threaded channel message
+    // (the channel itself was never focused). Proven end-to-end: a message with
+    // no thread context must NOT reach the backend's `send` at all.
+    let backend = Arc::new(RecordingBackend::new(true));
+    let proxy = SessionProxy::new(backend.clone() as Arc<dyn ManagedBackend>);
+
+    // Focus only the thread (never the channel).
+    let thread_conv = focus::conv("C1", Some("169.42"));
+    proxy.focus(&thread_conv, "api").await;
+
+    let executor = offline_executor();
+    let histories = empty_histories();
+    // A plain, non-threaded message in the same channel.
+    let _ = reply_for_event(
+        &executor,
+        &histories,
+        &proxy,
+        &message("run tests", "C1", None),
+    )
+    .await;
+
+    assert!(
+        !backend.calls().iter().any(|c| c.starts_with("send:")),
+        "a thread-scoped focus must never satisfy a non-threaded channel message, got {:?}",
+        backend.calls()
+    );
 }
