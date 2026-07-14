@@ -434,13 +434,33 @@ pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
 /// the Stop/SubagentStop hook can never block the user's prompt. A tail read may
 /// slice mid-line; the detector tolerates a truncated leading line, so we accept
 /// the boundary rather than paying to align it.
-/// What: opens `path`, seeks to `len - max_bytes` (clamped at 0), reads up to
-/// `max_bytes`, and returns the bytes as a lossy UTF-8 string. Any I/O error
-/// yields `None` (fail-open — detection is advisory, never load-bearing).
-/// Test: exercised end-to-end via [`detect_idle_parking_from_payload`]'s callers
-/// and the `core::idle_parking` unit tests that cover truncated tails.
+///
+/// Code-critic finding (PR #2620): the caller wraps this whole function in
+/// `tokio::time::timeout`, but that only bounds the `.await` — the underlying
+/// `open()` syscall still runs to completion on a `spawn_blocking` worker
+/// thread. If `transcript_path` ever pointed at a FIFO with no writer, `open()`
+/// blocks the kernel thread indefinitely; the `timeout` future resolves (the
+/// hook process still exits promptly), but the leaked blocking task pins a
+/// worker thread forever. `stat()` (unlike `open()`) never blocks on a FIFO, so
+/// checking the file type first — and refusing anything that is not a regular
+/// file — closes that leak before the `open()` call can ever be reached.
+/// What: `tokio::fs::metadata` (stat)-checks `path` first and returns `None`
+/// immediately unless it names a regular file (rejects FIFOs, sockets, device
+/// nodes, directories, and anything `stat` can't resolve). Only then opens
+/// `path`, seeks to `len - max_bytes` (clamped at 0), reads up to `max_bytes`,
+/// and returns the bytes as a lossy UTF-8 string. Any I/O error yields `None`
+/// (fail-open — detection is advisory, never load-bearing).
+/// Test: `rejects_fifo_without_blocking` (unix-only, `#[cfg(unix)]`) proves the
+/// FIFO case returns promptly instead of hanging; also exercised end-to-end via
+/// [`detect_idle_parking_from_payload`]'s callers and the `core::idle_parking`
+/// unit tests that cover truncated tails.
 async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
 
     let mut file = tokio::fs::File::open(path).await.ok()?;
     let len = file.metadata().await.ok()?.len();

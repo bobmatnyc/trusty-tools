@@ -124,3 +124,79 @@ fn hook_does_not_scan_non_turn_end_events() {
         "non-turn-end event must not scan for parking, got: {stderr:?}"
     );
 }
+
+/// Code-critic finding (PR #2620): `read_transcript_tail`'s caller wraps the
+/// whole read in `tokio::time::timeout`, but that only bounds the `.await` —
+/// the underlying blocking `open()` syscall (run on a `spawn_blocking` worker)
+/// still runs to completion. `open()` on a FIFO with no writer blocks
+/// indefinitely at the kernel level, which would leak a stuck blocking-pool
+/// thread even though the hook process itself still exits promptly. The fix
+/// `stat()`s the path first (which never blocks on a FIFO) and refuses
+/// anything that is not a regular file before ever calling `open()`.
+///
+/// This proves the FIFO case end to end: `tm hook` must return promptly (well
+/// under the test's generous bound) with a clean `exit 0` and no idle-parking
+/// warning — not hang waiting on the FIFO to be opened for writing (which
+/// never happens, since nothing else opens it).
+///
+/// `mkfifo` is a POSIX-only primitive, hence `#[cfg(unix)]`; the equivalent
+/// Windows named-pipe API has different open semantics and is out of scope —
+/// this test skips cleanly (does not compile / run at all) on non-unix.
+#[cfg(unix)]
+#[test]
+fn rejects_fifo_without_blocking() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let fifo_path = dir.path().join("transcript.fifo");
+
+    let mkfifo_status = Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .expect("failed to spawn mkfifo");
+    assert!(mkfifo_status.success(), "mkfifo must succeed");
+
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let mut child = Command::new(bin)
+        .args(["--url", "http://127.0.0.1:1", "hook"])
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm hook`");
+
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(payload("SubagentStop", &fifo_path).as_bytes())
+        .expect("write stdin");
+
+    // Bounded poll instead of `wait_with_output()`: if the `stat`-first guard
+    // regresses and `open()` is reached, this must fail LOUDLY (assertion) —
+    // it must never hang the test suite waiting on a FIFO nothing will write to.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tm hook did not exit within the bound — the stat-before-open FIFO \
+             guard has regressed and open() is blocking on the FIFO"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+
+    let output = child.wait_with_output().expect("collect output after exit");
+    assert!(
+        status.success(),
+        "tm hook must exit 0 even for an unreadable transcript path (fail-open), \
+         status={status:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("IDLE-PARKING WARNING"),
+        "a FIFO transcript path must never be scanned, got: {stderr:?}"
+    );
+}

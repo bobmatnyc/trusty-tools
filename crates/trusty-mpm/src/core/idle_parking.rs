@@ -106,7 +106,14 @@ pub fn detect_idle_parking(final_message: &str) -> Option<&'static str> {
 /// `content` for forward-compat — and returns the first non-empty result found
 /// scanning backward. Returns `None` when no assistant text is present. Tolerant
 /// of a truncated leading line (e.g. when only the file tail was read): a line
-/// that fails to parse is simply skipped.
+/// that fails to parse is simply skipped. Known tradeoff (code-critic, PR #2620):
+/// the caller only hands this the last `MAX_TRANSCRIPT_TAIL` (256 KiB) bytes of
+/// the transcript, so a single final JSONL line LARGER than that window (e.g. an
+/// unusually long assistant turn) is itself truncated, fails to parse, and is
+/// skipped like any other broken leading line — an advisory false negative by
+/// design, not a bug: this detector is a best-effort warning back-stop, never a
+/// hard gate, so silently missing an oversized final line is an acceptable
+/// tradeoff for bounding the read cost on multi-MB session transcripts.
 /// Test: `extracts_last_assistant_text`, `extracts_across_tool_use_blocks`,
 /// `tolerates_truncated_and_blank_lines`, `returns_none_without_assistant`.
 pub fn last_assistant_text_from_transcript(jsonl: &str) -> Option<String> {
