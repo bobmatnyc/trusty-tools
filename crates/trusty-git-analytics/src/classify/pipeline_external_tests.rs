@@ -1,10 +1,10 @@
 //! Unit tests for the bounded-concurrency external-source resolution seam
 //! (issue #2719). HTTP-free: they exercise dedupe, once-per-message invocation,
-//! and the concurrency speedup with a counting/sleeping fake resolver.
+//! and the concurrency bound with a counting/gauging fake resolver.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{resolve_unique, unique_unresolved_messages};
 use crate::classify::pipeline_db::CommitRow;
@@ -70,36 +70,56 @@ async fn resolve_unique_invokes_once_per_message() {
 }
 
 /// Why: the whole point of #2719 is to replace the serial network loop with a
-/// bounded fan-out; this proves the fan-out actually overlaps I/O.
-/// What: resolve 16 messages that each "sleep" 25ms with a concurrency of 8 and
-/// assert the wall-clock beats half of the serial estimate (16 × 25ms = 400ms).
-/// Test: HTTP-free; uses `tokio::time::sleep` to simulate network latency.
+/// bounded fan-out. A wall-clock assertion (`elapsed < serial / 2`) is the
+/// exact load-sensitive flake class removed in #2714 — under CI scheduler
+/// contention, sleeps can jitter enough to falsely fail. Replace it with a
+/// deterministic gauge: an `AtomicUsize` incremented on entry and decremented
+/// on exit of each fake-resolve call, tracking the maximum concurrently
+/// in-flight count. This proves the *bound* holds without depending on
+/// wall-clock timing at all.
+/// What: resolve 16 messages through `resolve_unique` at `concurrency = 8`;
+/// each fake resolve increments the gauge, yields once (so `buffer_unordered`
+/// has a chance to launch further futures up to the bound before any
+/// completes), then decrements. Asserts `1 < max_seen <= concurrency` —
+/// strictly more than one in flight (proving concurrency actually happened,
+/// not accidental seriality) and never more than the configured bound.
+/// Test: HTTP-free, deterministic; no timing assumptions.
 #[tokio::test]
 async fn resolve_unique_bounds_concurrency() {
     let n = 16usize;
-    let latency = Duration::from_millis(25);
     let concurrency = 8usize;
     let messages: Vec<String> = (0..n).map(|i| format!("PROJ-{i} msg")).collect();
 
-    let start = Instant::now();
+    let in_flight = AtomicUsize::new(0);
+    let max_seen = AtomicUsize::new(0);
+    let in_flight_ref = &in_flight;
+    let max_seen_ref = &max_seen;
+
     let map = resolve_unique(messages, concurrency, |m| async move {
-        tokio::time::sleep(latency).await;
+        let now = in_flight_ref.fetch_add(1, Ordering::SeqCst) + 1;
+        max_seen_ref.fetch_max(now, Ordering::SeqCst);
+        // Yield control (without depending on real elapsed time) so
+        // `buffer_unordered` gets a chance to poll further futures up to the
+        // concurrency bound before this one completes.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        in_flight_ref.fetch_sub(1, Ordering::SeqCst);
         Some(signal(m))
     })
     .await;
-    let elapsed = start.elapsed();
 
-    let serial = latency * n as u32;
-    eprintln!(
-        "resolve_unique: n={n} concurrency={concurrency} elapsed={elapsed:?} \
-         serial_estimate={serial:?}"
-    );
+    let observed_max = max_seen.load(Ordering::SeqCst);
+    eprintln!("resolve_unique: n={n} concurrency={concurrency} max_in_flight={observed_max}");
 
     assert_eq!(map.len(), n, "all messages resolved");
     assert!(
-        elapsed < serial / 2,
-        "bounded-concurrency resolution ({elapsed:?}) must beat half the serial \
-         estimate ({serial:?})"
+        observed_max > 1,
+        "expected genuine concurrency (max_in_flight={observed_max}), \
+         got effectively serial execution"
+    );
+    assert!(
+        observed_max <= concurrency,
+        "max_in_flight={observed_max} must never exceed the configured bound \
+         ({concurrency})"
     );
 }
 

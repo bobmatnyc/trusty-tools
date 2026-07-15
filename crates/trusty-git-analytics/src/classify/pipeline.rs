@@ -541,12 +541,16 @@ impl ClassificationPipeline {
         // (Tier 0). The previous implementation resolved tickets strictly
         // serially — one network round-trip per commit, each up to the 30s
         // JIRA timeout — which produced multi-minute "zero progress" stalls on
-        // large corpora. We now resolve each *unique* commit message exactly
-        // once, fanned out with a bounded `buffer_unordered` (mirroring the LLM
-        // fallback tier), then apply the resulting signal to every commit
-        // sharing that message. Dedupe-before-spawn preserves the serial loop's
-        // fetch-once-per-ticket guarantee; commits with a Tier-0 override are
-        // excluded (manual overrides win).
+        // large corpora. We now warm the resolver's cache from the full
+        // ticket-KEY set extracted across every unique commit message (NOT a
+        // message-level dedupe — two differently-worded commits referencing
+        // the same ticket must still resolve to one fetch; see
+        // `pipeline_external`'s module doc for the code-critic HIGH finding
+        // this closes), fetching each unique ticket with a bounded
+        // `buffer_unordered` (mirroring the LLM fallback tier), then apply the
+        // resulting signal to every commit sharing a message that referenced
+        // it. Commits with a Tier-0 override are excluded (manual overrides
+        // win).
         if let Some(res) = &resolver {
             let signals =
                 super::pipeline_external::resolve_external_signals(&commits, &overrides, res).await;

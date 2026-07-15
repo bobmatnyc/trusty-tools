@@ -569,6 +569,99 @@ async fn pipeline_external_sources_dedupe_and_apply() {
     drop(server);
 }
 
+/// Why: code-critic HIGH finding on #2719/PR#2720 — deduping by raw commit
+/// *message* does NOT protect the resolver's per-TICKET cache. Two
+/// differently-worded commits referencing the same ticket key produce two
+/// distinct messages; under concurrency both can race the resolver's
+/// non-atomic check→fetch→populate (the cache lock is dropped across the
+/// network `.await`), so both miss the cache and both fire a fetch for the
+/// SAME hot ticket. This is the sibling of
+/// `pipeline_external_sources_dedupe_and_apply` (which only proves
+/// fetch-once-per-IDENTICAL-message) with three DISTINCT messages that all
+/// reference `PROJ-100`.
+/// What: three commits with different wording, all referencing `PROJ-100`,
+/// against a wiremock JIRA mock permitting exactly one issue fetch
+/// (`.expect(1)`). Must fail against message-level dedupe (proving the HIGH)
+/// and pass once resolution dedupes on the extracted ticket-KEY set instead.
+/// Test: in-memory DB + wiremock; no LLM tier.
+#[tokio::test]
+async fn pipeline_external_sources_dedupe_distinct_messages_same_ticket() {
+    use crate::classify::sources::{
+        ExternalSourceResolver, JiraFieldMappings, JiraSourceConfig, SourceConfig,
+    };
+    use std::collections::HashMap;
+
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "key": "PROJ-100",
+        "fields": { "issuetype": {"name": "Bug"}, "labels": [], "components": [] }
+    });
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        // Exactly one fetch is allowed: three DISTINCT messages all reference
+        // PROJ-100, so ticket-key-level dedupe (not message-level dedupe)
+        // must collapse them to a single request.
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    unsafe { std::env::set_var("JIRA_TOKEN_2719_DISTINCT", "test-token") };
+
+    let mut issue_type_map = HashMap::new();
+    issue_type_map.insert("Bug".to_string(), "bug_fix".to_string());
+    let jira = JiraSourceConfig {
+        base_url: server.uri(),
+        token_env: "JIRA_TOKEN_2719_DISTINCT".to_string(),
+        username: None,
+        email_env: None,
+        project_keys: vec![],
+        field_mappings: JiraFieldMappings {
+            issue_type: issue_type_map,
+            labels: HashMap::new(),
+            components: HashMap::new(),
+        },
+    };
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
+        .with_jira_base_url(0, server.uri());
+
+    let mut db = Database::open_in_memory().expect("db");
+    // Three DIFFERENT messages, same ticket key.
+    insert_commit(&db, "sha-a", "PROJ-100 fix the null pointer crash");
+    insert_commit(&db, "sha-b", "see PROJ-100 for background on this");
+    insert_commit(&db, "sha-c", "related to PROJ-100, tidy up call sites");
+
+    let pipeline = ClassificationPipeline::new(Config::default());
+    let engine = ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+        .expect("engine");
+    pipeline
+        .run_with_engine_and_resolver(&mut db, engine, Some(resolver))
+        .await
+        .expect("run with resolver");
+
+    for sha in ["sha-a", "sha-b", "sha-c"] {
+        let (category, method): (String, String) = db
+            .connection()
+            .query_row(
+                "SELECT cl.category, cl.method FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = ?1",
+                params![sha],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_else(|e| panic!("query {sha}: {e}"));
+        assert_eq!(category, "bug_fix", "{sha} must adopt the JIRA Bug mapping");
+        assert_eq!(
+            method, "external_source",
+            "{sha} must be tagged as an external-source verdict"
+        );
+    }
+
+    unsafe { std::env::remove_var("JIRA_TOKEN_2719_DISTINCT") };
+    // Dropping the server asserts `.expect(1)` — exactly one JIRA fetch,
+    // regardless of how many distinct messages referenced PROJ-100.
+    drop(server);
+}
+
 /// Why: regression guard for the source-aware LLM model default (bug fix
 /// 2.3.1). When `llm.model` is absent, `build_engine` must pick the
 /// default model for the configured source rather than always falling back

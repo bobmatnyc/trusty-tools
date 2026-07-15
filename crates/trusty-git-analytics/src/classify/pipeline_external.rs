@@ -5,17 +5,35 @@
 //! serially — one network round-trip per commit, each capable of taking up to
 //! the 30s JIRA timeout — producing multi-minute "zero progress" stalls on
 //! large corpora (~181k commits). This module fans the network work out with a
-//! bounded `buffer_unordered` (mirroring the LLM fallback tier) while preserving
-//! the serial loop's "resolve each ticket exactly once" throughput guarantee.
+//! bounded `buffer_unordered` (mirroring the LLM fallback tier).
 //!
-//! What: [`resolve_external_signals`] collects the *unique* commit messages that
-//! still need external resolution, resolves them concurrently (bounded), emits
-//! progress, and returns a `message -> ExternalSignal` map the caller applies to
-//! every commit sharing that message. [`resolve_unique`] is the generic,
-//! HTTP-free core seam, unit-tested with a counting fake resolver.
+//! Fetch-once-per-TICKET (not per-message) is achieved in two phases, per the
+//! code-critic HIGH finding on PR #2720: deduping on raw commit *message* text
+//! is not sufficient, because the resolver's cache is keyed by the extracted
+//! ticket KEY — two differently-worded commits referencing the same ticket
+//! produce two distinct messages, and resolving both concurrently races the
+//! cache's non-atomic check→fetch→populate sequence. The fix:
+//! 1. **Warm** ([`ExternalSourceResolver::warm_cache`]) — extract and dedupe
+//!    ticket keys/refs across the *entire* batch of unique messages, per
+//!    source, BEFORE any fetch is dispatched; fetch only the still-uncached
+//!    keys, bounded-concurrent. This guarantees each unique ticket is fetched
+//!    at most once, regardless of how many distinct messages reference it.
+//! 2. **Apply** ([`resolve_unique`] over [`ExternalSourceResolver::resolve`]) —
+//!    now that every referenced ticket is cached, resolving each unique
+//!    message is cache-only (no further network I/O, no further race).
+//!
+//! What: [`resolve_external_signals`] collects the *unique* commit messages
+//! that still need external resolution, warms the resolver's cache from that
+//! full message set, then resolves each message (now cache-hit-only, so still
+//! fanned out via [`resolve_unique`] for progress-reporting granularity), and
+//! returns a `message -> ExternalSignal` map the caller applies to every
+//! commit sharing that message.
 //!
 //! Test: `pipeline_external_tests` (dedupe + concurrency) and the wiremock
-//! `pipeline_tests::pipeline_external_sources_*` integration tests.
+//! `pipeline_tests::pipeline_external_sources_*` integration tests — including
+//! `pipeline_external_sources_dedupe_distinct_messages_same_ticket`, which
+//! proves fetch-once-per-ticket across DISTINCT messages (not just identical
+//! ones).
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -52,12 +70,17 @@ const PROGRESS_LOG_EVERY: usize = 50;
 /// Why: this is the pipeline's Tier-0.5 entry point; concentrating the
 /// dedupe-then-concurrent-resolve logic here keeps `pipeline.rs` thin and under
 /// its SLOC budget.
-/// What: collects the unique messages of override-free commits, resolves each
-/// exactly once with bounded concurrency via [`resolve_unique`], emits progress
-/// to stderr, and returns a `message -> ExternalSignal` map. Commits with a
-/// Tier-0 manual override are excluded (overrides win). Returns an empty map
-/// when nothing needs resolution.
-/// Test: `pipeline_tests::pipeline_external_sources_dedupe_and_apply`.
+/// What: collects the unique messages of override-free commits, **warms the
+/// resolver's cache from the full ticket-key set extracted across all of
+/// them** (see the module doc — this is what makes fetch-once-per-ticket hold
+/// even when the same ticket is referenced by differently-worded commits),
+/// then resolves each unique message (now cache-hit-only) with bounded
+/// concurrency via [`resolve_unique`], emitting progress to stderr, and
+/// returns a `message -> ExternalSignal` map. Commits with a Tier-0 manual
+/// override are excluded (overrides win). Returns an empty map when nothing
+/// needs resolution.
+/// Test: `pipeline_tests::pipeline_external_sources_dedupe_and_apply` and
+/// `pipeline_external_sources_dedupe_distinct_messages_same_ticket`.
 pub(super) async fn resolve_external_signals(
     commits: &[CommitRow],
     overrides: &HashMap<i64, ClassificationResult>,
@@ -65,11 +88,20 @@ pub(super) async fn resolve_external_signals(
 ) -> HashMap<String, ExternalSignal> {
     // Dedupe BEFORE spawning: firing one future per commit would launch
     // duplicate in-flight requests for the same ticket; collapsing to unique
-    // messages first preserves the serial loop's fetch-once guarantee.
+    // messages first is necessary but NOT sufficient on its own (two distinct
+    // messages can still reference the same ticket key — see module doc).
     let unique = unique_unresolved_messages(commits, overrides);
     if unique.is_empty() {
         return HashMap::new();
     }
+
+    // Phase 1 (warm): dedupe on the extracted ticket-KEY set across the whole
+    // message batch, per source, and fetch each unique key at most once,
+    // bounded-concurrent. This is what actually prevents the duplicate-fetch
+    // race — message-level dedupe alone does not (code-critic HIGH, PR #2720).
+    resolver
+        .warm_cache(&unique, EXTERNAL_SOURCE_CONCURRENCY)
+        .await;
 
     let total = unique.len();
     let pb = super::pipeline_db::make_progress(total as u64, "External sources");
@@ -77,6 +109,9 @@ pub(super) async fn resolve_external_signals(
     let pb_ref = &pb;
     let done_ref = &done;
 
+    // Phase 2 (apply): every ticket referenced by `unique` is now cached, so
+    // each `resolve` call below performs no network I/O — safe to fan out
+    // concurrently purely for progress-reporting granularity.
     let map = resolve_unique(unique, EXTERNAL_SOURCE_CONCURRENCY, |message| async move {
         let signal = resolver.resolve(&message).await;
         pb_ref.inc(1);

@@ -10,6 +10,11 @@
 //! cache. [`ExternalSourceResolver::resolve`] accepts a commit message, extracts
 //! ticket keys, checks the cache, fetches only misses, and returns the
 //! highest-priority [`super::ExternalSignal`] found across all configured sources.
+//! [`warm::warm_cache`] (see the `warm` submodule) pre-populates every source's
+//! cache from a batch of messages with bounded concurrency, deduped on the
+//! extracted ticket KEY (not the raw message) — this is what the pipeline's
+//! concurrent Tier-0.5 pass (issue #2719) calls before doing any per-message
+//! `resolve`, so that concurrent `resolve` calls never race a cold cache.
 //!
 //! Test: covered by `tests::resolver_uses_cached_result_on_second_call` and the
 //! mock-HTTP integration tests.
@@ -24,6 +29,8 @@ use super::{
     github_issues::{self, GitHubRef},
     jira, linear, shortcut, ExternalSignal, SourceConfig,
 };
+
+mod warm;
 
 /// In-memory cache type alias (key → Option<ExternalSignal>).
 type Cache = HashMap<String, Option<ExternalSignal>>;
