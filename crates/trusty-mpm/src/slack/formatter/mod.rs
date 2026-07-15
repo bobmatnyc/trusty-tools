@@ -16,6 +16,14 @@ use crate::client::{
     fleet_state_glyph,
 };
 
+// The pure `mrkdwn` primitives were extracted to `trusty_common::slack_format`
+// (epic #2636) so the native Slack MCP server in `trusty-channels` can reuse the
+// byte-identical escaping without depending on this crate. Re-exported here so
+// every existing call site (`code_block(...)` below, `focus.rs`'s
+// `super::formatter::mrkdwn_escape`, and the module tests) is unchanged — this
+// move is behaviour-neutral for trusty-mpm.
+pub(crate) use trusty_common::slack_format::{code_block, mrkdwn_escape};
+
 #[cfg(test)]
 mod tests;
 
@@ -458,16 +466,6 @@ fn tail_lines(output: &str) -> String {
     lines[lines.len().saturating_sub(MAX_OUTPUT_LINES)..].join("\n")
 }
 
-/// Wrap text in a Slack triple-backtick code fence.
-///
-/// Why: pane output and captured command output should render monospaced in
-/// Slack; `mrkdwn` uses triple backticks for that.
-/// What: returns ```` ```\n<text>\n``` ````.
-/// Test: covered by `format_command_sent_uses_code_block`.
-fn code_block(text: &str) -> String {
-    format!("```\n{text}\n```")
-}
-
 /// Render managed sessions grouped by project as a Slack `mrkdwn` body.
 ///
 /// Why: `/fleet` (WI-B, #1586) shows a per-project breakdown of live sessions
@@ -521,27 +519,4 @@ pub(crate) fn short_id(id: &str) -> String {
     } else {
         head
     }
-}
-
-/// Escape the three `mrkdwn`-significant characters for a Slack message body.
-///
-/// Why (#2565 review): the proxy binding (`slack::focus`) interpolates
-/// backend-controlled and operator-supplied text — session names, `/focus`
-/// arguments, error strings, activity summaries — directly into `mrkdwn`
-/// replies. Slack's markup treats `<...>` as a special link/mention/broadcast
-/// span (e.g. `<!channel>` broadcast-pings the whole channel, `<@U123>`
-/// mentions a user); an unescaped session named `<!channel> pwned` would
-/// broadcast-ping the channel from every proxy reply. Mirrors the Telegram
-/// binding's `html_escape` (`telegram::formatter::html_escape`), which the
-/// Telegram proxy binding applies to the identical set of fields.
-/// What: replaces `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, in that order (so
-/// the `&` produced by the `<`/`>` substitutions is never re-escaped). Slack
-/// unescapes exactly these three entities in `mrkdwn` bodies, matching
-/// Slack's own documented escaping contract for `chat.postMessage`.
-/// Test: `mrkdwn_escape_escapes_ampersand_lt_gt`,
-/// `mrkdwn_escape_neutralizes_channel_broadcast_span`.
-pub(crate) fn mrkdwn_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
