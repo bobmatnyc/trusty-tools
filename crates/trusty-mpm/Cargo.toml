@@ -183,6 +183,10 @@ trusty-common = { workspace = true, features = [
     # `inference-client`; listing it explicitly documents the direct dependency so
     # a future config-cli change can't silently drop the manager's inference core.
     "inference-client",
+    # Shared best-effort trusty-search index register+reindex helper
+    # (`search_index::register_project_index` → `trusty_common::search_index`).
+    # Promoted out of trusty-mpm so trusty-code can reuse the ONE implementation.
+    "search-index",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by

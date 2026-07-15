@@ -58,6 +58,41 @@ const ENGINEER_BASH_TIMEOUT_SECS: u64 = 120;
 /// warrant).
 const ENGINEER_AGENT_NAME: &str = "python-engineer";
 
+/// Fire-and-forget best-effort trusty-search indexing of a task's working
+/// project, at task/session START (trusty-search-first discovery, PR B).
+///
+/// Why: a tcode run's answers are far better when the working project is
+/// discoverable via trusty-search's `search`/`grep`/`get_call_chain` tools, but
+/// nothing previously ensured the project's index existed and was populated —
+/// that register-and-reindex logic lived only in trusty-mpm's session launch.
+/// This shares the ONE promoted implementation
+/// ([`trusty_common::search_index::ensure_project_indexed`]) so the two crates
+/// can never diverge. It runs at task start, detached, so the index is built
+/// WHILE the agent loop proceeds rather than blocking it. Fail-open by design:
+/// the shared helper logs-and-swallows every daemon/HTTP error, so a missing or
+/// slow trusty-search daemon never affects the run.
+/// What: cheaply short-circuits when `project` is not inside a git repository
+/// (via [`trusty_common::find_git_root`]) — the bake-off L1 scratch-project case
+/// has nothing worth indexing and would only register a soon-deleted directory.
+/// Otherwise it spawns a detached OS thread that calls the shared helper (which
+/// itself runs the blocking HTTP on its own short-timeout threads) and returns
+/// immediately, so the caller never waits on the network.
+/// Test: the promoted helper's fail-open + no-daemon behaviour is unit-tested in
+/// `trusty_common::search_index::tests`; the git short-circuit in
+/// `trusty_common::index_id::tests::find_git_root_none_when_no_repo`. This thin
+/// spawn wrapper is side-effect-only (detached thread) and has no return to
+/// assert.
+pub(crate) fn ensure_project_indexed_in_background(project: PathBuf) {
+    // Scratch/bake-off projects have no `.git` anywhere up the tree — nothing to
+    // index, so skip cheaply before spending a thread or touching the daemon.
+    if trusty_common::find_git_root(&project).is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _ = trusty_common::search_index::ensure_project_indexed(&project);
+    });
+}
+
 /// Inputs to a single `run-task` invocation, parsed from the CLI.
 ///
 /// Why: Bundling the inputs keeps `execute_run_task`'s signature stable as flags
@@ -109,6 +144,11 @@ pub struct RunTaskParams {
 /// `exit_code_reflects_run_failure`,
 /// `pm_stops_redelegating_once_cap_latched_ends_partial_promptly`.
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
+    // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
+    // ensure the working project is indexed so `search`/`grep` are useful while
+    // the loop below proceeds. Fail-open, git-gated — see the helper's docs.
+    ensure_project_indexed_in_background(params.project.clone());
+
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
     // #2264: resolve the (optional) full wire-level debug-capture sink once

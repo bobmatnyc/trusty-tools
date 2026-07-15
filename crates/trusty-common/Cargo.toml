@@ -270,6 +270,15 @@ axum-server = ["dep:axum", "dep:tower-http"]
 # `trusty-mcp-core` crate). Pulls in no extra deps beyond `serde` / `tokio`
 # which are already required.
 mcp = []
+# Enables the `search_index` module: the shared best-effort "ensure this project
+# is indexed by trusty-search" entry point (issues #1373 / #1908), used by
+# trusty-mpm at session launch and trusty-code at task start. Adds no new
+# dependency — it only turns on `reqwest`'s `blocking` client feature (reqwest is
+# already an unconditional dep). `chrono` / `serde_json` / `tracing` and the
+# `index_id` / `daemon_addr` helpers it uses are already unconditional, so the
+# feature flag gates module compilation + the blocking client only. Off by
+# default so consumers that don't register indexes pay nothing.
+search-index = ["reqwest/blocking"]
 # Enables the `session_naming` module: the ONE canonical tmux-session naming
 # rule (managed prefix, adjective+noun / dir-slug / serial derivation, and the
 # `is_managed_session_name` classifier) shared by trusty-mpm's SessionManager

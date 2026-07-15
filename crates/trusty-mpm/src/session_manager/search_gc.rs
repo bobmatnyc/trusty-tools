@@ -17,8 +17,9 @@
 //! SessionManager` block is additive, exactly like `adopt.rs`/`prune.rs`.
 //! Test: `disposable_index_id_*`, `is_orphan_index_*` in `tests` below (pure,
 //! no live daemon required); the live-HTTP paths are best-effort/fail-soft by
-//! design and are exercised the same way `search_index::best_effort_create_index`'s
-//! daemon-down path is (integration-only).
+//! design and are exercised the same way the shared
+//! `trusty_common::search_index` register path's daemon-down path is
+//! (integration-only).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -92,8 +93,8 @@ pub(super) fn disposable_workspace_index_id(
 /// error) at info/warn. A `None` base (daemon never started) is a debug-logged
 /// no-op.
 /// Test: exercised via the live-daemon decommission integration path; the
-/// daemon-unreachable branch mirrors `search_index::best_effort_create_index`'s
-/// (both skip cleanly on a missing address file).
+/// daemon-unreachable branch mirrors the shared `trusty_common::search_index`
+/// register path's (both skip cleanly on a missing address file).
 pub(super) async fn delete_search_index_best_effort(index_id: &str) {
     let Some(base) = trusty_common::resolve_daemon_base_url("trusty-search") else {
         debug!(
