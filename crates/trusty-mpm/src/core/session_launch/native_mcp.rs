@@ -59,7 +59,10 @@
 //! What: [`inject_native_trusty_mcps`] reads the managed `.claude.json`
 //! `mcpServers` map (via the SAME [`crate::core::mcp_config`] reader `tm mcp`
 //! uses), filters it to the [`NATIVE_TRUSTY_MCP_SERVERS`] allowlist, and for
-//! each match splits the entry via [`split_public_and_secret_env`]: the
+//! each match splits the entry via [`split_public_and_secret_env`], which also
+//! validates it as a stdio + env-auth server (a positive field allowlist —
+//! `type`/`command`/`args`/`env` only — rejects any registration carrying a
+//! secret-bearing field like `url`/`headers`): the
 //! `env`-free command/args/type shape merges idempotently into
 //! `<workspace>/.mcp.json` via [`super::settings::inject_mcp_server`]; any `env`
 //! entries are collected and merged into `<workspace>/.env.local` via
@@ -169,10 +172,13 @@ pub(super) fn inject_native_trusty_mcps(
 /// What: reads the managed `mcpServers` map via [`mcp_config::list_servers`]
 /// (which quarantines a malformed `.claude.json` and yields an empty map when the
 /// file is absent). For each entry whose NAME is in
-/// [`NATIVE_TRUSTY_MCP_SERVERS`], [`split_public_and_secret_env`] separates the
-/// entry into an `env`-free public shape (merged into `.mcp.json` via
-/// [`inject_mcp_server`]) and its `env` map (collected across all matched
-/// servers). When any secrets were collected, [`route_native_mcp_secrets`]
+/// [`NATIVE_TRUSTY_MCP_SERVERS`], [`split_public_and_secret_env`] validates it as
+/// a stdio + env-auth server and separates the entry into an `env`-free public
+/// shape (merged into `.mcp.json` via [`inject_mcp_server`]) and its `env` map
+/// (collected across all matched servers); a registration that fails that
+/// validation (non-stdio `type`, missing `command`, or a non-allowlisted field
+/// like `url`/`headers`) is REJECTED wholesale — nothing is written for it.
+/// When any secrets were collected, [`route_native_mcp_secrets`]
 /// merges them into the workspace `.env.local`. Non-allowlisted
 /// (third-party/HTTP) servers are skipped, and `trusty-memory` / `trusty-search`
 /// are never touched here (their dedicated injectors own them). Injection order
@@ -198,9 +204,13 @@ pub(super) fn inject_native_trusty_mcps_from(
     let mut secret_env: BTreeMap<String, String> = BTreeMap::new();
     for &name in NATIVE_TRUSTY_MCP_SERVERS {
         if let Some(entry) = servers.get(name) {
-            let (public_entry, env) = split_public_and_secret_env(entry, name);
-            inject_mcp_server(project_path, name, public_entry)?;
-            secret_env.extend(env);
+            // `None` = the registration failed the stdio+env-auth validation
+            // (non-stdio type, missing command, or a non-allowlisted field like
+            // url/headers) and was rejected wholesale — nothing is written for it.
+            if let Some((public_entry, env)) = split_public_and_secret_env(entry, name) {
+                inject_mcp_server(project_path, name, public_entry)?;
+                secret_env.extend(env);
+            }
         }
     }
 
@@ -210,41 +220,139 @@ pub(super) fn inject_native_trusty_mcps_from(
     Ok(())
 }
 
-/// Split a managed registry entry into an `env`-free public shape and its
-/// secret `env` map.
+/// The ONLY top-level fields an injected native registration may carry.
 ///
-/// Why (code-critic BLOCK on #2739): the managed registry's `env` block is
-/// where live secrets (`SLACK_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, …) live. Every
-/// value there is treated as a secret categorically — never split by a
-/// key-name heuristic (`*_TOKEN`, `*_SECRET`, …) — because a heuristic has
-/// false negatives and a single missed key is a real credential leak into a
-/// tracked file; a category-wide rule can't have that failure mode. Today none
-/// of the four allowlisted servers need a non-secret env var in `.mcp.json`
-/// (`gworkspace-mcp`/`trusty-analyze` carry no `env` at all in practice), so
-/// this costs nothing real yet — a future native server that legitimately needs
-/// a non-secret, committable env var would need an explicit carve-out here, not
-/// silent inclusion.
-/// What: clones `entry`, removes its top-level `env` key (if any and if it is a
-/// JSON object) from the clone, and returns `(entry_without_env,
-/// string_valued_env_map)`. A non-string env value is skipped with a `warn!`
-/// (never propagated into `.mcp.json` either) — the `env` schema for an MCP
-/// server is always `Record<string, string>`, so a non-string value indicates a
-/// malformed registry entry, not a legitimate secret to route.
+/// Why (code-critic residual HIGH on #2739): stripping just the `env` key is
+/// not enough — a token can also ride in `url`, `headers`, or any other field
+/// of a registration, and those would pass verbatim into the git-tracked
+/// `.mcp.json`. Enumerating the permitted fields POSITIVELY (rather than
+/// blocklisting `url`/`headers`) means a NEW secret-bearing field invented
+/// upstream fails closed by default: it is not on this list, so the whole
+/// registration is rejected rather than leaked. Injection is thereby narrowed
+/// to exactly the stdio + env-auth shape — the only shape the four native
+/// servers actually use.
+/// What: `type`, `command`, `args`, `env`. `env` is extracted to `.env.local`
+/// (never written to `.mcp.json`); the rest form the committable public shape.
+/// Test: `split_public_and_secret_env_rejects_url_bearing_entry`,
+/// `split_public_and_secret_env_rejects_header_bearing_entry`,
+/// `split_public_and_secret_env_rejects_unknown_field`.
+const INJECTABLE_STDIO_FIELDS: &[&str] = &["type", "command", "args", "env"];
+
+/// Validate an allowlisted registration as a stdio + env-auth server and split
+/// it into an `env`-free public shape plus its secret `env` map — or reject it.
+///
+/// Why (code-critic BLOCK + residual HIGH on #2739): two distinct leak classes
+/// are closed here.
+///   (1) The managed registry's `env` block is where live secrets
+///   (`SLACK_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, …) live. Every value there is
+///   treated as a secret CATEGORICALLY — never split by a key-name heuristic
+///   (`*_TOKEN`, `*_SECRET`, …) — because a heuristic has false negatives and a
+///   single missed key is a real credential leak into a tracked file; a
+///   category-wide rule can't have that failure mode.
+///   (2) A token can also ride OUTSIDE `env` — in a `url`, `headers`, or any
+///   other field of the registration. Rather than stripping only `env` (which
+///   would pass such a field verbatim into `.mcp.json`), this constrains
+///   injection to the stdio + env-auth shape via a POSITIVE field allowlist
+///   ([`INJECTABLE_STDIO_FIELDS`]): a registration is REJECTED outright (skipped,
+///   with a `warn!` to stderr — never partially injected) when it declares a
+///   non-`stdio` `type`, omits a string `command`, or carries ANY field outside
+///   the allowlist (e.g. `url`/`headers`, the http-server shape). This is the
+///   actual guarantee: the ONLY bytes that ever reach `.mcp.json` are a
+///   `type`/`command`/`args` stdio triple; every secret channel (`env`, and now
+///   any out-of-band field) is either routed to `.env.local` or rejected
+///   wholesale. `args` is the one field passed through verbatim: it defines the
+///   stdio invocation itself, and argv is not a credential channel for these
+///   native servers (they all take secrets via `env`/`resolve_key`, and argv is
+///   world-readable via `ps` so no sane server accepts a token there) — a value
+///   the operator placed in `args` via their own `tm mcp add` is their explicit
+///   command shape, not a secret to strip.
+/// What: returns `Some((public_shape, secret_env))` for a valid stdio server, or
+/// `None` (logged) to reject. `public_shape` is built POSITIVELY from only the
+/// non-secret allowlisted fields present (`type`/`command`/`args`), so no
+/// unexpected field can survive even if the allowlist check is later loosened.
+/// A non-string `env` value is skipped with a `warn!` (never propagated to
+/// `.mcp.json` OR `.env.local`) — the `env` schema is always
+/// `Record<string, string>`, so a non-string value is a malformed entry, not a
+/// secret to route.
 /// Test: `inject_native_strips_secret_env_from_mcp_json`,
 /// `inject_native_no_env_key_when_source_has_none`,
 /// `split_public_and_secret_env_separates_env_from_shape`,
-/// `split_public_and_secret_env_skips_non_string_values`.
+/// `split_public_and_secret_env_skips_non_string_values`,
+/// `split_public_and_secret_env_rejects_url_bearing_entry`,
+/// `split_public_and_secret_env_rejects_header_bearing_entry`,
+/// `split_public_and_secret_env_rejects_unknown_field`,
+/// `split_public_and_secret_env_rejects_non_stdio_type`,
+/// `split_public_and_secret_env_rejects_missing_command`,
+/// `inject_native_rejects_url_bearing_allowlisted_server`.
 pub(super) fn split_public_and_secret_env(
     entry: &Value,
     server_name: &str,
-) -> (Value, BTreeMap<String, String>) {
-    let mut public_entry = entry.clone();
-    let mut secret_env = BTreeMap::new();
+) -> Option<(Value, BTreeMap<String, String>)> {
+    let Some(obj) = entry.as_object() else {
+        tracing::warn!(
+            server = server_name,
+            "refusing to inject native trusty MCP server: registration is not a JSON object \
+             (never routed to .mcp.json)"
+        );
+        return None;
+    };
 
-    if let Some(obj) = public_entry.as_object_mut()
-        && let Some(env_value) = obj.remove("env")
-        && let Some(env_obj) = env_value.as_object()
+    // Positive field allowlist: any field outside the stdio + env-auth shape
+    // (e.g. `url`/`headers` of an http server) means the registration could
+    // carry a secret we do NOT strip — reject the whole entry rather than leak.
+    if let Some(bad_field) = obj
+        .keys()
+        .find(|k| !INJECTABLE_STDIO_FIELDS.contains(&k.as_str()))
     {
+        tracing::warn!(
+            server = server_name,
+            field = %bad_field,
+            "refusing to inject native trusty MCP server: registration carries a field outside \
+             the stdio+env-auth allowlist (e.g. url/headers) that could hold a secret; only \
+             stdio command servers are injected (never routed to .mcp.json)"
+        );
+        return None;
+    }
+
+    // `type`, if present, must be exactly `stdio` (a token-bearing http/sse
+    // server declares `type: "http"` and carries its secret in url/headers).
+    if let Some(ty) = obj.get("type")
+        && ty.as_str() != Some("stdio")
+    {
+        tracing::warn!(
+            server = server_name,
+            "refusing to inject native trusty MCP server: `type` is not `stdio` \
+             (never routed to .mcp.json)"
+        );
+        return None;
+    }
+
+    // A stdio server MUST name a string command; without one there is nothing
+    // safe to inject.
+    let Some(command) = obj.get("command").filter(|c| c.is_string()) else {
+        tracing::warn!(
+            server = server_name,
+            "refusing to inject native trusty MCP server: no string `command` \
+             (never routed to .mcp.json)"
+        );
+        return None;
+    };
+
+    // Build the public shape POSITIVELY — only the non-secret allowlisted
+    // fields, so nothing unexpected can ride along even if the guard above is
+    // later relaxed.
+    let mut public = serde_json::Map::new();
+    if let Some(ty) = obj.get("type") {
+        public.insert("type".to_string(), ty.clone());
+    }
+    public.insert("command".to_string(), command.clone());
+    if let Some(args) = obj.get("args") {
+        public.insert("args".to_string(), args.clone());
+    }
+
+    // Extract the secret env map (routed to `.env.local`, never `.mcp.json`).
+    let mut secret_env = BTreeMap::new();
+    if let Some(env_obj) = obj.get("env").and_then(Value::as_object) {
         for (key, value) in env_obj {
             match value.as_str() {
                 Some(s) => {
@@ -260,7 +368,7 @@ pub(super) fn split_public_and_secret_env(
         }
     }
 
-    (public_entry, secret_env)
+    Some((Value::Object(public), secret_env))
 }
 
 /// Merge collected native-server secrets into the workspace `.env.local`,
@@ -344,11 +452,16 @@ fn route_native_mcp_secrets(
 /// authority on whether a path would be excluded from `git add`, so this is
 /// the same check a human would run to verify the guarantee, not a
 /// reimplementation of git's ignore-resolution rules.
-/// What: runs `git -C <project_path> check-ignore -q -- .env.local` and
-/// returns whether it exited `0` (ignored). Any non-zero exit — including
-/// "not ignored" (which is what a tracked file, or a file with no matching
-/// ignore rule, both report) and a hard error (not a repo, no `git` binary) —
-/// is treated as `false`. Never panics.
+/// What: runs `git -C <project_path> check-ignore -q -- .env.local` via
+/// `.output()` (NOT `.status()`) — capturing the child's stdout/stderr into
+/// buffers instead of letting them inherit this process's file descriptors —
+/// and returns whether it exited `0` (ignored). Capturing matters because this
+/// runs inside the daemon/MCP process whose stdout must stay clean for JSON-RPC
+/// framing (`-q` suppresses check-ignore's normal output, but `.output()`
+/// guarantees nothing the child writes can reach our stdout regardless). Any
+/// non-zero exit — including "not ignored" (which is what a tracked file, or a
+/// file with no matching ignore rule, both report) and a hard error (not a repo,
+/// no `git` binary) — is treated as `false`. Never panics.
 /// Test: `inject_native_skips_secrets_when_env_local_is_tracked`,
 /// `is_env_local_actually_ignored_true_when_excluded`,
 /// `is_env_local_actually_ignored_false_when_tracked`.
@@ -357,8 +470,8 @@ pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
         .arg("-C")
         .arg(project_path)
         .args(["check-ignore", "-q", "--", ENV_LOCAL_FILENAME])
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// Ensure `.env.local` is listed in the workspace's real `info/exclude` file.
