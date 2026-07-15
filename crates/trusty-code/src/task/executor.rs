@@ -171,7 +171,8 @@ async fn run_and_record(
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so the delegated engineer's
     // `search`/`grep` tools are useful while this run proceeds. Fail-open,
-    // git-gated, and non-blocking — reuses the ONE shared helper (see
+    // non-blocking, and git-optional (git is a nice-to-have, not required) —
+    // reuses the ONE shared helper (see
     // `run_task::ensure_project_indexed_in_background`) so the daemon and CLI
     // paths can never diverge.
     crate::run_task::ensure_project_indexed_in_background(params.project.clone());

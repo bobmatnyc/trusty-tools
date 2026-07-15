@@ -71,23 +71,21 @@ const ENGINEER_AGENT_NAME: &str = "python-engineer";
 /// WHILE the agent loop proceeds rather than blocking it. Fail-open by design:
 /// the shared helper logs-and-swallows every daemon/HTTP error, so a missing or
 /// slow trusty-search daemon never affects the run.
-/// What: cheaply short-circuits when `project` is not inside a git repository
-/// (via [`trusty_common::find_git_root`]) — the bake-off L1 scratch-project case
-/// has nothing worth indexing and would only register a soon-deleted directory.
-/// Otherwise it spawns a detached OS thread that calls the shared helper (which
-/// itself runs the blocking HTTP on its own short-timeout threads) and returns
-/// immediately, so the caller never waits on the network.
-/// Test: the promoted helper's fail-open + no-daemon behaviour is unit-tested in
-/// `trusty_common::search_index::tests`; the git short-circuit in
-/// `trusty_common::index_id::tests::find_git_root_none_when_no_repo`. This thin
-/// spawn wrapper is side-effect-only (detached thread) and has no return to
-/// assert.
+/// What: indexes `project` UNCONDITIONALLY — git is a nice-to-have for tcode,
+/// not a requirement (owner directive), and trusty-search's own orphan-reaper
+/// already garbage-collects indexes for scratch directories that get deleted,
+/// so there is no cost to indexing a non-git or short-lived working directory.
+/// [`trusty_common::search_index::ensure_project_indexed`] already resolves a
+/// sensible root and index id whether or not `project` is inside a git repo.
+/// Spawns a detached OS thread that calls the shared helper (which itself runs
+/// the blocking HTTP on its own short-timeout threads) and returns immediately,
+/// so the caller never waits on the network.
+/// Test: the promoted helper's fail-open + no-daemon + non-git-root behaviour is
+/// unit-tested in `trusty_common::search_index::tests`. This thin spawn wrapper
+/// is side-effect-only (detached thread) and has no return to assert; see
+/// `spawns_indexing_thread_for_non_git_project_path` for the one thing it IS
+/// mechanically checked for here — that it never short-circuits before spawning.
 pub(crate) fn ensure_project_indexed_in_background(project: PathBuf) {
-    // Scratch/bake-off projects have no `.git` anywhere up the tree — nothing to
-    // index, so skip cheaply before spending a thread or touching the daemon.
-    if trusty_common::find_git_root(&project).is_none() {
-        return;
-    }
     std::thread::spawn(move || {
         let _ = trusty_common::search_index::ensure_project_indexed(&project);
     });
@@ -146,7 +144,7 @@ pub struct RunTaskParams {
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
-    // the loop below proceeds. Fail-open, git-gated — see the helper's docs.
+    // the loop below proceeds. Fail-open, git-optional — see the helper's docs.
     ensure_project_indexed_in_background(params.project.clone());
 
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));

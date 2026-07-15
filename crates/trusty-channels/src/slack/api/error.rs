@@ -35,6 +35,13 @@ pub enum SlackError {
     )]
     MissingToken,
 
+    /// A user-scope-only method (`search.messages`) was invoked but no Slack
+    /// *user* token is configured. Never falls back to the bot token — Slack
+    /// rejects a bot token for `search.messages` with a confusing
+    /// `not_allowed_token_type` error, so we fail fast with an actionable hint.
+    #[error("Slack user token required for search; set SLACK_USER_TOKEN")]
+    MissingUserToken,
+
     /// Slack rejected the credentials. Raised on an HTTP 401 **or** a `200` body
     /// carrying an auth-class `ok:false` error (`invalid_auth`, `not_authed`,
     /// …). Never retried — a bad token will not become good on retry, and
