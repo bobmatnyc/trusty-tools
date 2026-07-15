@@ -9,6 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- shared ensure-project-indexed helper; wire tcode task start ([#2701](https://github.com/bobmatnyc/trusty-tools/pull/2701)) ([`28a8d11`](https://github.com/bobmatnyc/trusty-tools/commit/28a8d11d4a5eac21921c3ceeef8707f71cf35459))
+- enable tickets-mcp + port gh-CLI fallback to trusty-common (ticketing quick-wins) ([#2646](https://github.com/bobmatnyc/trusty-tools/pull/2646)) ([`4c5a027`](https://github.com/bobmatnyc/trusty-tools/commit/4c5a027df778410bf350b03fd3e278b334253481))
+- DOC-37 MVP — RepoIdentity join key + identity-filtered listing + grouped prune-orphans ([#2617](https://github.com/bobmatnyc/trusty-tools/pull/2617)) ([`2c51047`](https://github.com/bobmatnyc/trusty-tools/commit/2c510472cb1c5a23526f81881a8bcaf415468016))
+
+### Changed
+
+- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
+## [Unreleased]
+
+### Added
+
 - turnkey launchd bootstrap for the shared daemon set (closes #2557, #2556) ([#2566](https://github.com/bobmatnyc/trusty-tools/pull/2566)) ([`f47b428`](https://github.com/bobmatnyc/trusty-tools/commit/f47b4286aeb42d0a5871939edf0019a70cdfab78))
 - move Bedrock Converse adapter into commons inference layer (closes #2407) ([#2541](https://github.com/bobmatnyc/trusty-tools/pull/2541)) ([`b14ea97`](https://github.com/bobmatnyc/trusty-tools/commit/b14ea9779d68f2ec24b88f6f18b62dca2bed938a))
 - Anthropic-direct + OpenAI-direct inference adapters ([#2540](https://github.com/bobmatnyc/trusty-tools/pull/2540)) ([`2f07eb1`](https://github.com/bobmatnyc/trusty-tools/commit/2f07eb14d0bd24e24ed03632c86e569d1cd5c5ec))

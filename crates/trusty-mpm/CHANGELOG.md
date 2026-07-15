@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- shared ensure-project-indexed helper; wire tcode task start ([#2701](https://github.com/bobmatnyc/trusty-tools/pull/2701)) ([`28a8d11`](https://github.com/bobmatnyc/trusty-tools/commit/28a8d11d4a5eac21921c3ceeef8707f71cf35459))
+
+### Changed
+
+- DispositionReason enum replaces stringly-typed disposition reasons ([#2705](https://github.com/bobmatnyc/trusty-tools/pull/2705)) ([`e7970c8`](https://github.com/bobmatnyc/trusty-tools/commit/e7970c87541d774aa25c315f27da7fee656be492))
+- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
+## [Unreleased]
+
 ### Fixed
 
 - picker launch-new switches client safely and exits instead of hanging ([#2680](https://github.com/bobmatnyc/trusty-tools/pull/2680)) ([`3de0647`](https://github.com/bobmatnyc/trusty-tools/commit/3de0647452f0e77a67aa20c52c8d9610474b8de8))
