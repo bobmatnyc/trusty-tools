@@ -406,14 +406,19 @@ fn test_compute_match_reason_fallback_label() {
     // Why: the `(false,false,false)` arm used to return the bare "fallback"
     // string. Issue #75 renamed it to `"fallback:ripgrep"` so grep-fallback
     // hits are clearly labelled in MCP / HTTP output.
+    // The producer is now typed (`-> MatchReason`); render with `as_str()` to
+    // pin the byte-identical wire labels (issue #2695).
     assert_eq!(
-        compute_match_reason(false, false, false),
+        compute_match_reason(false, false, false).as_str(),
         "fallback:ripgrep"
     );
-    assert_eq!(compute_match_reason(true, false, false), "vector");
-    assert_eq!(compute_match_reason(false, true, false), "bm25");
-    assert_eq!(compute_match_reason(true, true, false), "hybrid");
-    assert_eq!(compute_match_reason(false, false, true), "hybrid+kg");
+    assert_eq!(compute_match_reason(true, false, false).as_str(), "vector");
+    assert_eq!(compute_match_reason(false, true, false).as_str(), "bm25");
+    assert_eq!(compute_match_reason(true, true, false).as_str(), "hybrid");
+    assert_eq!(
+        compute_match_reason(false, false, true).as_str(),
+        "hybrid+kg"
+    );
 }
 
 #[tokio::test]
