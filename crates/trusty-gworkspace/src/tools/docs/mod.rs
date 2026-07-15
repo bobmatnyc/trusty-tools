@@ -4,13 +4,16 @@
 //! What: Appends the Docs tool group to the shared registry vector.
 //! Test: Covered via `tool_list_response()` in `tools::tests`.
 
+mod extra;
+
 use super::schema::{account_schema, action_enum, tool};
 use serde_json::{Value, json};
 
 /// Append the Docs tool group to the registry.
 ///
 /// Why: Keeps Docs-related tools colocated.
-/// What: Pushes the document create/edit/format/table tools.
+/// What: Pushes the document create/edit/format/table tools, plus the extended
+/// tabs/lists/images/tables/templates parity tools (`extra` submodule).
 /// Test: Covered via `tool_list_response()` in `tools::tests`.
 pub(super) fn append(tools: &mut Vec<Value>) {
     tools.push(tool(
@@ -146,4 +149,6 @@ pub(super) fn append(tools: &mut Vec<Value>) {
         }),
         &["action", "document_id", "table_start_index"],
     ));
+
+    extra::append(tools);
 }
