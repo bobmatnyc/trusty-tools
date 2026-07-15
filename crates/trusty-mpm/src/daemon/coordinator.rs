@@ -127,24 +127,6 @@ fn derive_prefix(name: &str) -> String {
     crate::core::names::strip_managed_prefix(name).to_string()
 }
 
-/// Render a [`SessionStatus`] as a capitalised display word.
-///
-/// Why: the snapshot and the LLM prompt show a human status word; the serde
-/// representation is lowercase, but the coordinator surface uses title-case.
-/// What: maps each status variant to its display word.
-/// Test: covered by `context_builds_from_state`.
-fn status_word(status: SessionStatus) -> String {
-    match status {
-        SessionStatus::Starting => "Starting",
-        SessionStatus::Active => "Active",
-        SessionStatus::AwaitingApproval => "AwaitingApproval",
-        SessionStatus::Detached => "Detached",
-        SessionStatus::Paused => "Paused",
-        SessionStatus::Stopped => "Stopped",
-    }
-    .to_string()
-}
-
 /// Build a [`CoordinatorContext`] from the daemon's current state.
 ///
 /// Why: the coordinator chat endpoint needs a fresh activity snapshot on every
@@ -187,7 +169,7 @@ pub fn build_coordinator_context(state: &DaemonState) -> CoordinatorContext {
                 name: session.tmux_name.clone(),
                 prefix: derive_prefix(&session.tmux_name),
                 workdir: session.workdir.clone(),
-                status: status_word(session.status),
+                status: session.status.to_string(),
                 active_delegations: session.active_delegations,
                 recent_output,
             }

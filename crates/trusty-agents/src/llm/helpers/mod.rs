@@ -74,12 +74,13 @@ pub fn create_client() -> Result<Client<OpenAIConfig>> {
     // `use_anthropic_direct=true` which bypasses this client. The base URL
     // stays OpenRouter so any OpenRouter-routed call still works when its
     // key is present.
-    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
-        // Empty key — async-openai will only fail if the request actually
-        // tries to use it. Direct-Anthropic / claude-code paths short-circuit
-        // before then.
-        String::new()
-    });
+    let api_key =
+        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_else(|_| {
+            // Empty key — async-openai will only fail if the request actually
+            // tries to use it. Direct-Anthropic / claude-code paths short-circuit
+            // before then.
+            String::new()
+        });
     // Note: this is the bare-client constructor. We don't have an agent
     // runner context here; pass `None` so claude-code is never auto-selected
     // just because OAuth is in the env.

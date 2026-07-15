@@ -145,7 +145,7 @@ impl AnalyzerAppState {
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
             webhook_secret: None,
-            api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
         }
@@ -168,7 +168,7 @@ impl AnalyzerAppState {
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
             webhook_secret: None,
-            api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
         }

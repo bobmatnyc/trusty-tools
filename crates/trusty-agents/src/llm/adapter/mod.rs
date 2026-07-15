@@ -181,7 +181,7 @@ pub trait ModelAdapter: Send + Sync + std::fmt::Debug {
 pub fn openrouter_endpoint() -> ApiEndpoint {
     let base_url = std::env::var("OPENROUTER_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-    let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    let key = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
     ApiEndpoint {
         base_url,
         auth_header_name: "Authorization".to_string(),

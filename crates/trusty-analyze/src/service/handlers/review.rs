@@ -82,7 +82,7 @@ pub async fn review_github_pr_handler(
     State(state): State<Arc<AnalyzerAppState>>,
     Json(req): Json<crate::core::GithubPrRequest>,
 ) -> Result<Json<crate::core::ReviewReport>, ApiError> {
-    let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
+    let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN).map_err(|_| {
         ApiError::bad_request("GITHUB_TOKEN environment variable is not set on the daemon")
     })?;
     // Why: GitHub API calls can take several seconds on large diffs; without
@@ -233,7 +233,7 @@ async fn process_pr_webhook(
     pr: u64,
     head_sha: &str,
 ) -> Result<()> {
-    let token = std::env::var("GITHUB_TOKEN")
+    let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
         .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set; cannot process webhook PR"))?;
     tracing::info!("processing webhook PR {owner}/{repo}#{pr} (head {head_sha})");
     // Why: this background task fetches a potentially large diff and posts a

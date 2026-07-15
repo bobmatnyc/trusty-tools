@@ -177,7 +177,7 @@ pub async fn get_session_activity(
         }
     };
 
-    let api_key_present = std::env::var("OPENROUTER_API_KEY").is_ok();
+    let api_key_present = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).is_ok();
     let classification = if api_key_present {
         Some(format!("{:?}", result.verdict.state).to_lowercase())
     } else {

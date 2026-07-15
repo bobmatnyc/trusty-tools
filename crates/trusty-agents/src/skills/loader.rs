@@ -314,7 +314,7 @@ impl SkillsLoader {
         }
 
         // Need an API key to call OpenRouter.
-        if std::env::var("OPENROUTER_API_KEY")
+        if std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
             .unwrap_or_default()
             .is_empty()
         {

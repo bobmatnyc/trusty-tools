@@ -211,7 +211,7 @@ impl<'a> ConfigValidator<'a> {
                 .as_deref()
                 .map(|t| !t.trim().is_empty())
                 .unwrap_or(false);
-            let env_present = std::env::var("GITHUB_TOKEN")
+            let env_present = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false);
             if !token_present && !env_present {

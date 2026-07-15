@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::state::DaemonState;
+use super::{session_record_kind::SessionRecordKind, state::DaemonState};
 
 /// MCP backend backed by the daemon's shared state.
 ///
@@ -74,7 +74,7 @@ impl OrchestratorBackend for StateBackend {
         for session in &self.state.list_sessions() {
             let mut value = serde_json::to_value(session).map_err(|e| e.to_string())?;
             if let Value::Object(map) = &mut value {
-                map.insert("kind".into(), Value::String("legacy".into()));
+                map.insert("kind".into(), SessionRecordKind::Legacy.as_str().into());
             }
             items.push(value);
         }
@@ -83,7 +83,7 @@ impl OrchestratorBackend for StateBackend {
         for record in manager.list().await {
             let mut value = crate::daemon::managed_routes::record_to_json(&record);
             if let Value::Object(map) = &mut value {
-                map.insert("kind".into(), Value::String("managed".into()));
+                map.insert("kind".into(), SessionRecordKind::Managed.as_str().into());
             }
             items.push(value);
         }
@@ -108,7 +108,7 @@ impl OrchestratorBackend for StateBackend {
             let delegations = self.state.delegations_for(id);
             return Ok(json!({
                 "session": session,
-                "kind": "legacy",
+                "kind": SessionRecordKind::Legacy.as_str(),
                 "memory": memory,
                 "delegation_count": delegations.len(),
                 "delegations": delegations,
@@ -121,7 +121,7 @@ impl OrchestratorBackend for StateBackend {
             let delegations = self.state.delegations_for(id);
             return Ok(json!({
                 "session": crate::daemon::managed_routes::record_to_json(&record),
-                "kind": "managed",
+                "kind": SessionRecordKind::Managed.as_str(),
                 "memory": Value::Null,
                 "delegation_count": delegations.len(),
                 "delegations": delegations,
