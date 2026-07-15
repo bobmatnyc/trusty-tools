@@ -9,6 +9,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- picker launch-new switches client safely and exits instead of hanging ([#2680](https://github.com/bobmatnyc/trusty-tools/pull/2680)) ([`3de0647`](https://github.com/bobmatnyc/trusty-tools/commit/3de0647452f0e77a67aa20c52c8d9610474b8de8))
+- pm_guard allows read-only sed/awk pipe segments ([#2677](https://github.com/bobmatnyc/trusty-tools/pull/2677)) ([`3881639`](https://github.com/bobmatnyc/trusty-tools/commit/38816393f9d836b79e08c8efd4642fd21f3a6e5f))
+## [Unreleased]
+
+### Fixed
+
 - bound the manager ChatStore conversation-key set with an LRU cap ([#2648](https://github.com/bobmatnyc/trusty-tools/pull/2648)) ([`0d776f9`](https://github.com/bobmatnyc/trusty-tools/commit/0d776f9e8de429b76ac00a9da355bd76fc75b933))
 - exclude dead sessions (missing workspace) from resume/restart offers ([#2652](https://github.com/bobmatnyc/trusty-tools/pull/2652)) ([`4a8870f`](https://github.com/bobmatnyc/trusty-tools/commit/4a8870fb2990ca604f84da4ed7d46ac2203e11e4))
 - tm sessions resume hands terminal to the resumed session's tmux window ([#2656](https://github.com/bobmatnyc/trusty-tools/pull/2656)) ([`6f260cd`](https://github.com/bobmatnyc/trusty-tools/commit/6f260cde3e58849278b00a6160b3ed1e3a116a33))
