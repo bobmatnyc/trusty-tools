@@ -35,17 +35,26 @@
 //! project-scope `.mcp.json` entry, and the same premise
 //! `inject_trusty_memory_mcp`'s cwd-based palace fallback already depends on.
 //! Because `.gitignore`/`.git/info/exclude` do not retroactively protect an
-//! ALREADY-tracked file (`.mcp.json`'s problem), but `.env.local` is a NEW file
-//! we create, excluding it via `.git/info/exclude` genuinely keeps it out of
-//! `git add -A` — mirroring the proven pattern in
-//! `daemon::managed_routes::inproject::untracked_sync::append_to_git_exclude`
+//! ALREADY-tracked file (`.mcp.json`'s problem), but `.env.local` is USUALLY a
+//! NEW, never-tracked file, excluding it via `.git/info/exclude`
+//! ([`ensure_env_local_git_excluded`]) closes that case — mirroring the proven
+//! pattern in `daemon::managed_routes::inproject::untracked_sync::append_to_git_exclude`
 //! (that helper is daemon-private and unreachable from this `core`-layer
-//! module, so [`ensure_env_local_git_excluded`] re-implements the same
+//! module, so `ensure_env_local_git_excluded` re-implements the same
 //! `git rev-parse --git-path info/exclude` + idempotent-append technique rather
 //! than introducing a `core` → `daemon` dependency; flagged here as a future
-//! consolidation candidate). The exclude entry is written BEFORE any secret
-//! content, so there is never a window where an un-excluded file holds a live
-//! token.
+//! consolidation candidate). But `tm` ships into ARBITRARY target repos —
+//! including ones that already TRACK a file literally named `.env.local` (a
+//! second code-critic pass empirically reproduced exactly this: appending to
+//! `info/exclude` is a no-op for an already-tracked path). So
+//! [`route_native_mcp_secrets`] adds a second, independent gate AFTER the
+//! exclude-file write: [`is_env_local_actually_ignored`] asks git itself —
+//! `git check-ignore -q -- .env.local` — whether the path would actually be
+//! staged, and skips secret delivery entirely (fail-closed, same "servers
+//! launch without credentials this session" contract as the not-a-git-repo
+//! case) unless git confirms it is ignored. Both gates run BEFORE any secret
+//! content is written, so there is never a window where a live token sits in a
+//! file git would stage.
 //!
 //! What: [`inject_native_trusty_mcps`] reads the managed `.claude.json`
 //! `mcpServers` map (via the SAME [`crate::core::mcp_config`] reader `tm mcp`
@@ -65,7 +74,8 @@
 //! `inject_native_env_local_routing_is_idempotent`, `inject_native_skips_non_native`,
 //! `inject_native_trust_preseed_covers_injected`,
 //! `inject_native_absent_config_is_noop`,
-//! `inject_native_no_secrets_writes_no_env_local`).
+//! `inject_native_no_secrets_writes_no_env_local`,
+//! `inject_native_skips_secrets_when_env_local_is_tracked`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -254,24 +264,38 @@ pub(super) fn split_public_and_secret_env(
 }
 
 /// Merge collected native-server secrets into the workspace `.env.local`,
-/// after confirming that file is git-excluded.
+/// after confirming — via git itself, not just our own exclude-file write —
+/// that the file is genuinely ignored.
 ///
 /// Why: the delivery half of the #2739 secret-leak fix — this is the ONLY
 /// place a raw token value from the managed registry is ever written to disk
 /// inside the workspace, so it alone carries the exclusion guarantee.
+/// [`ensure_env_local_git_excluded`] appending a line to `info/exclude` is
+/// necessary but NOT sufficient: a code-critic re-review (residual HIGH,
+/// #2739) reproduced a second leak of the SAME class — if the target repo
+/// already TRACKS a file literally named `.env.local` (empirically plausible;
+/// `tm` ships to arbitrary repos, including ones that never adopted the
+/// `.env.local`-is-gitignored convention), `info/exclude` does nothing for an
+/// already-tracked path, so merging a token into it and a routine `git add -A`
+/// would stage — and a commit would leak — the secret. Asking git directly
+/// (`git check-ignore`) is the only check that actually reflects git's own
+/// staging decision, catching both a tracked `.env.local` AND the case where
+/// the exclude append silently didn't take effect (e.g. a `.gitignore`
+/// negation pattern elsewhere overriding it).
 /// What: resolves + ensures the `.env.local` git-exclude entry via
 /// [`ensure_env_local_git_excluded`] FIRST; on failure (not a git repo, `git`
-/// missing, a permissions error) logs a `warn!` and returns `Ok(())` WITHOUT
-/// writing anything — this session's native servers simply lack credentials
-/// (matching the "non-fatal, tools absent" contract every other injector in
-/// this module already has) rather than risk an un-excluded secret file. On
-/// success, reads any existing `<project_path>/.env.local` (missing file →
-/// empty), merges in `secrets` via [`merge_env_file`], and skips the write
-/// entirely when the merge is a byte-for-byte no-op (idempotency).
+/// missing, a permissions error) logs a `warn!` and returns `Ok(())`. THEN —
+/// even after that succeeds — runs `git -C <project_path> check-ignore -q --
+/// .env.local` (git's own authority on whether a path would be staged) and
+/// bails out the SAME way (`warn!` + `Ok(())`, no write) unless it exits `0`.
+/// Only past both gates does it read any existing `<project_path>/.env.local`
+/// (missing file → empty), merge in `secrets` via [`merge_env_file`], and skip
+/// the write entirely when the merge is a byte-for-byte no-op (idempotency).
 /// Test: `inject_native_delivers_secrets_via_env_local`,
 /// `inject_native_env_local_is_git_excluded_and_unstaged`,
 /// `inject_native_env_local_routing_is_idempotent`,
-/// `inject_native_secrets_skipped_outside_git_repo`.
+/// `inject_native_secrets_skipped_outside_git_repo`,
+/// `inject_native_skips_secrets_when_env_local_is_tracked`.
 fn route_native_mcp_secrets(
     project_path: &Path,
     secrets: &BTreeMap<String, String>,
@@ -281,6 +305,17 @@ fn route_native_mcp_secrets(
             "skipping native trusty MCP secret delivery: could not confirm `{}` is \
              git-excluded in {} ({err}) — those servers will launch without credentials \
              this session",
+            ENV_LOCAL_FILENAME,
+            project_path.display()
+        );
+        return Ok(());
+    }
+
+    if !is_env_local_actually_ignored(project_path) {
+        tracing::warn!(
+            "skipping native trusty MCP secret delivery: `{}` in {} is NOT recognised as \
+             git-ignored (it may already be tracked in this repo) — those servers will \
+             launch without credentials this session rather than risk staging a secret",
             ENV_LOCAL_FILENAME,
             project_path.display()
         );
@@ -297,6 +332,33 @@ fn route_native_mcp_secrets(
         path: env_local_path,
         source,
     })
+}
+
+/// Ask git itself whether `.env.local` is ignored (and therefore would never
+/// be staged by `git add -A`) in `project_path`.
+///
+/// Why: the fail-closed gate that catches an already-TRACKED `.env.local` —
+/// the case [`ensure_env_local_git_excluded`] cannot detect on its own, since
+/// appending a line to `info/exclude` succeeds unconditionally regardless of
+/// whether the path is already tracked. `git check-ignore` is git's OWN
+/// authority on whether a path would be excluded from `git add`, so this is
+/// the same check a human would run to verify the guarantee, not a
+/// reimplementation of git's ignore-resolution rules.
+/// What: runs `git -C <project_path> check-ignore -q -- .env.local` and
+/// returns whether it exited `0` (ignored). Any non-zero exit — including
+/// "not ignored" (which is what a tracked file, or a file with no matching
+/// ignore rule, both report) and a hard error (not a repo, no `git` binary) —
+/// is treated as `false`. Never panics.
+/// Test: `inject_native_skips_secrets_when_env_local_is_tracked`,
+/// `is_env_local_actually_ignored_true_when_excluded`,
+/// `is_env_local_actually_ignored_false_when_tracked`.
+pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(["check-ignore", "-q", "--", ENV_LOCAL_FILENAME])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Ensure `.env.local` is listed in the workspace's real `info/exclude` file.

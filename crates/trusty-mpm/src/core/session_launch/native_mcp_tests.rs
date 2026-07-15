@@ -18,7 +18,7 @@
 
 use super::native_mcp::{
     NATIVE_TRUSTY_MCP_SERVERS, ensure_env_local_git_excluded, inject_native_trusty_mcps_from,
-    merge_env_file, split_public_and_secret_env,
+    is_env_local_actually_ignored, merge_env_file, split_public_and_secret_env,
 };
 use super::settings::preseed_workspace_trust;
 use serde_json::{Value, json};
@@ -343,6 +343,130 @@ fn inject_native_secrets_skipped_outside_git_repo() {
         ws.path().join(".mcp.json").exists(),
         ".mcp.json injection must still proceed independently"
     );
+}
+
+/// `git add -f <path> && git commit` a file, so it becomes genuinely TRACKED.
+///
+/// Why: the residual-HIGH regression fixture needs a `.env.local` that git
+/// considers tracked, not merely present on disk — `info/exclude` is a no-op
+/// for a tracked path, which is exactly the gap this test proves is now
+/// closed. `-f` is required here (empirically verified against real git,
+/// version 2.54): a PLAIN `git add` on a path already matching an
+/// `info/exclude` pattern refuses with "paths are ignored ... Use -f if you
+/// really want to add them" and adds nothing — some call sites in this file
+/// add the exclude entry BEFORE constructing the tracked fixture, so this
+/// helper must force past that regardless of ordering.
+/// What: force-stages and commits `path` (relative to `dir`) with a pinned
+/// local identity, matching [`git_init`]'s isolation.
+/// Test: used by `inject_native_skips_secrets_when_env_local_is_tracked`,
+/// `is_env_local_actually_ignored_false_when_tracked`.
+fn git_commit_file(dir: &Path, path: &str) {
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "trusty-tools-test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "trusty-tools-test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .status()
+            .expect("git must be on PATH to run this test");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run(&["add", "-f", path]);
+    run(&["commit", "-q", "-m", "seed a tracked file"]);
+}
+
+#[test]
+fn inject_native_skips_secrets_when_env_local_is_tracked() {
+    // Why (code-critic re-review, residual HIGH on #2739): `info/exclude`
+    // cannot un-track an already-tracked file. If the TARGET repo (tm ships to
+    // arbitrary repos, including Duetto ones) already commits a file literally
+    // named `.env.local`, `ensure_env_local_git_excluded` still "succeeds" (the
+    // append itself never errors), so without the `git check-ignore` gate the
+    // injector would merge the real token into that tracked file and a routine
+    // `git add -A` would stage it — the exact same leak class, relocated. This
+    // reproduces that scenario end-to-end and asserts secret delivery is
+    // correctly SKIPPED.
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    let pre_existing_content = "PRE_EXISTING=\"operator committed this\"\n";
+    std::fs::write(ws.path().join(".env.local"), pre_existing_content).unwrap();
+    git_commit_file(ws.path(), ".env.local");
+    seed_managed_registry(cfg.path());
+
+    inject_native_trusty_mcps_from(ws.path(), cfg.path()).expect("injection still succeeds");
+
+    // (a) The tracked file's committed content is unchanged — no token was
+    // merged into it.
+    let content_after = std::fs::read_to_string(ws.path().join(".env.local")).unwrap();
+    assert_eq!(
+        content_after, pre_existing_content,
+        ".env.local content must be untouched when it is tracked"
+    );
+    assert!(!content_after.contains(FAKE_SLACK_TOKEN));
+    assert!(!content_after.contains("SLACK_BOT_TOKEN"));
+
+    // (b) `git add -A` must not stage any token-bearing change — i.e. there is
+    // no diff to stage at all, since the file was never written to.
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws.path())
+        .args(["add", "-A"])
+        .status()
+        .expect("git add must run");
+    assert!(add.success());
+    let staged = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws.path())
+        .args(["diff", "--cached", "--name-only"])
+        .output()
+        .expect("git diff --cached must run");
+    let staged_files = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        !staged_files.contains(".env.local"),
+        ".env.local must have no pending changes to stage: {staged_files}"
+    );
+
+    // Sanity: `.mcp.json` injection still proceeded (only secret delivery was
+    // skipped), and still carries no raw token either.
+    let mcp_json = std::fs::read_to_string(ws.path().join(".mcp.json")).unwrap();
+    assert!(!mcp_json.contains(FAKE_SLACK_TOKEN));
+}
+
+#[test]
+fn is_env_local_actually_ignored_true_when_excluded() {
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    ensure_env_local_git_excluded(ws.path()).expect("exclude write succeeds");
+
+    assert!(is_env_local_actually_ignored(ws.path()));
+}
+
+#[test]
+fn is_env_local_actually_ignored_false_when_tracked() {
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    // Excluded via info/exclude AND tracked at the same time — git's own
+    // ls-files/staging behaviour wins: a tracked path is never "ignored" in
+    // the sense that matters (it will still be staged by `git add -A`).
+    ensure_env_local_git_excluded(ws.path()).expect("exclude write succeeds");
+    std::fs::write(ws.path().join(".env.local"), "X=1\n").unwrap();
+    git_commit_file(ws.path(), ".env.local");
+
+    assert!(!is_env_local_actually_ignored(ws.path()));
+}
+
+#[test]
+fn is_env_local_actually_ignored_false_when_not_excluded_at_all() {
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    // No ensure_env_local_git_excluded call — nothing lists .env.local in
+    // info/exclude, and it isn't tracked either.
+
+    assert!(!is_env_local_actually_ignored(ws.path()));
 }
 
 #[test]
