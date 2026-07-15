@@ -13,6 +13,10 @@ crate-type = ["rlib"]
 name = "slack-mcp"
 path = "src/bin/slack-mcp.rs"
 
+[[bin]]
+name = "telegram-mcp"
+path = "src/bin/telegram-mcp.rs"
+
 [dependencies]
 trusty-common = { workspace = true, features = ["mcp", "credentials"] }
 anyhow = { workspace = true }

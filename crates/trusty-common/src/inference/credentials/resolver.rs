@@ -55,6 +55,8 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         // substitute for. Kept as a distinct provider so bot-token tools and
         // user-token tools resolve independently (issue #2640, epic #2636).
         "slack-user" => Some("SLACK_USER_TOKEN"),
+        // Non-inference token: the native Telegram MCP server (issue #2641).
+        "telegram" => Some("TELEGRAM_BOT_TOKEN"),
         _ => None,
     }
 }
@@ -153,6 +155,8 @@ mod tests {
         // Second Slack token for user-scope search methods (issue #2640).
         assert_eq!(env_var_for("slack-user"), Some("SLACK_USER_TOKEN"));
         assert_eq!(env_var_for("Slack-User"), Some("SLACK_USER_TOKEN"));
+        // Non-inference token: the native Telegram MCP server (issue #2641).
+        assert_eq!(env_var_for("telegram"), Some("TELEGRAM_BOT_TOKEN"));
     }
 
     /// Why: an unmapped provider must not panic or synthesise a guess.
