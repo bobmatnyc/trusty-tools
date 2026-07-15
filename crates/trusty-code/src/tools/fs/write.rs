@@ -77,7 +77,7 @@ impl ToolExecutor for WriteFileTool {
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Create or overwrite a SINGLE file with the provided content. Parent directories are created automatically. The path must be inside the working directory. If you need to create TWO OR MORE new files, do not call this repeatedly — use write_files instead, passing all of them in one call.",
+                "description": "Create or overwrite a file with the provided content. Parent directories are created automatically. The path must be inside the working directory.",
                 "parameters": {
                     "type": "object",
                     "properties": {
