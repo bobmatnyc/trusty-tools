@@ -19,8 +19,10 @@ live in `/tm-session-management`.
 When invoked, this skill:
 1. Scans the project-local session store at `.trusty-mpm/sessions/` for paused
    snapshots.
-2. Loads the most recent session (by the `LATEST-SESSION.txt` pointer / file
-   modification time) **or** a specific one chosen with `--select`.
+2. Loads the most recent session — for the current session id when known, via
+   the append-only `sessions-log.jsonl`; otherwise the latest overall (last
+   `pause` line), with `LATEST-SESSION.txt` / mtime as back-compat fallbacks —
+   **or** a specific one chosen with `--select`.
 3. **Validates** that the session belongs to the *current* project — snapshots
    whose recorded project path does not match the working directory are skipped,
    so you never accidentally resume another checkout's state.
@@ -87,12 +89,16 @@ attach sessions here; only align within the current tmux client.
 
 ```
 <project-root>/.trusty-mpm/sessions/
-├── LATEST-SESSION.txt          # pointer to the most recent session
+├── sessions-log.jsonl          # append-only per-session pause/resume log
 └── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot (written by pause)
 ```
 
-Resume reads existing snapshots only — it never creates files, and snapshots are
-kept after resume so you can resume more than once.
+Resolution order for "latest": the newest `pause` snapshot for the current
+session id in `sessions-log.jsonl` → the last `pause` line overall → the legacy
+`LATEST-SESSION.txt` pointer → an mtime scan of `session-*.md`. Resume reads
+existing snapshots only — it never creates snapshot files. It MAY append a
+`resume` line to `sessions-log.jsonl` for audit, but snapshots are kept after
+resume so you can resume more than once.
 
 ## No Sessions Found
 

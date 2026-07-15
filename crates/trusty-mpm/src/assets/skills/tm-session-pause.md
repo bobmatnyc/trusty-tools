@@ -21,7 +21,9 @@ When invoked, this skill:
    context summary (plus any message you pass after the command).
 2. Writes a project-local snapshot at
    `.trusty-mpm/sessions/session-{timestamp}.md`.
-3. Updates the `.trusty-mpm/sessions/LATEST-SESSION.txt` pointer.
+3. **Appends** a `pause` line to the append-only
+   `.trusty-mpm/sessions/sessions-log.jsonl` (never overwrites — so concurrent
+   `tm` sessions in the same project don't clobber each other's resume target).
 4. **Prunes stale git worktrees** left behind by decommissioned managed
    sessions (see below).
 5. Prints the snapshot path so you can resume later.
@@ -46,9 +48,24 @@ so pausing in project A and opening project B never loads project A's state:
 
 ```
 <project-root>/.trusty-mpm/sessions/
-├── LATEST-SESSION.txt          # pointer to the most recent session
+├── sessions-log.jsonl          # append-only per-session pause/resume log
 └── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot
 ```
+
+`sessions-log.jsonl` holds one JSON object per line — one per pause/resume
+event:
+
+```json
+{"session_id":"<id>","event":"pause","snapshot":"session-20260715-101500.md","timestamp":"2026-07-15T10:15:00Z"}
+```
+
+Because it is **append-only**, two `tm` sessions pausing in the same project
+each keep their own history: resume resolves the latest snapshot for the
+*current* session id, and "latest overall" is simply the last `pause` line. The
+legacy global `LATEST-SESSION.txt` pointer is **no longer written** (a single
+overwritten pointer let concurrent sessions clobber each other's resume target);
+resume still reads it, and an mtime scan of `session-*.md`, as back-compat
+fallbacks when no log is present.
 
 Add `.trusty-mpm/sessions/` to `.gitignore` — this is machine-local state, not
 a deliverable. No git commit is created by pausing.
@@ -96,10 +113,22 @@ if [ -n "$TMUX" ]; then
   tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'
 fi
 
-# write session-{timestamp}.md using the format above — include a `## Tmux Window`
-# section holding the captured string ONLY if the command above printed one, then:
-# echo "session-{timestamp}.md" > .trusty-mpm/sessions/LATEST-SESSION.txt
+# Resolve a stable session id for the log: prefer $TM_SESSION_ID, else the tmux
+# session:window (stable within a session), else "default".
+SID="${TM_SESSION_ID:-$([ -n "$TMUX" ] && tmux display-message -p '#{session_name}:#{window_index}' || echo default)}"
+SNAP="session-$(date +%Y%m%d-%H%M%S).md"
+TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# write $SNAP using the format above — include a `## Tmux Window` section holding
+# the captured string ONLY if the command above printed one, then APPEND (never
+# overwrite) one pause line to the log:
+printf '{"session_id":"%s","event":"pause","snapshot":"%s","timestamp":"%s"}\n' \
+  "$SID" "$SNAP" "$TS" >> .trusty-mpm/sessions/sessions-log.jsonl
 ```
+
+**Do not** write `LATEST-SESSION.txt` — the append-only log replaces it. Use
+`>>` (append), never `>` (truncate), so a concurrent session's history is
+preserved.
 
 Reconcile the todo list against `git status` first — mark blockers explicitly —
 so the snapshot reflects the *current* state, not a stale one. Then report the

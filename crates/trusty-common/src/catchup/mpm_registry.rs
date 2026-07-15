@@ -84,8 +84,9 @@ pub fn default_registry_path() -> PathBuf {
 /// Why: the ground-truth indicator that a project is actually paused (rather than
 /// merely having been used in the past) is the presence of a session JSON file
 /// under `.claude-mpm/sessions/`.
-/// What: checks for `LATEST-SESSION.txt` first (cheapest), then falls back to
-/// any `session-*.json` glob. Returns false on any I/O error (fail-open).
+/// What: checks for the append-only `sessions-log.jsonl` first, then the legacy
+/// `LATEST-SESSION.txt` pointer, then falls back to any `session-*.json` glob.
+/// Returns false on any I/O error (fail-open).
 /// Test: covered transitively by `discover_filters_missing_dirs`.
 ///
 // CUTOVER BRIDGE — remove post-migration (#1762)
@@ -94,8 +95,15 @@ fn has_live_pause_file(project_dir: &Path) -> bool {
     if !sessions_dir.is_dir() {
         return false;
     }
-    // Fast path: LATEST-SESSION.txt is written at pause time.
-    if sessions_dir.join("LATEST-SESSION.txt").exists() {
+    // Fast path: the append-only session log, or the legacy pointer, is written
+    // at pause time.
+    if sessions_dir
+        .join(crate::catchup::session_log::SESSION_LOG_FILENAME)
+        .exists()
+        || sessions_dir
+            .join(crate::catchup::session_log::LEGACY_POINTER_FILENAME)
+            .exists()
+    {
         return true;
     }
     // Fallback: any session-*.json file.

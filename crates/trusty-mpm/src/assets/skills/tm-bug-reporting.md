@@ -55,9 +55,12 @@ instruction file, a UX gap the user reports directly) have no corresponding
 daemon-captured error event — `list_recent_errors` will not surface them.
 For these, delegate to the **Version Control** agent to file a `gh issue
 create` against `bobmatnyc/trusty-tools` directly, using the same
-information standard below (title, labels, structured body). The MCP
-pipeline is preferred whenever a fingerprint exists; the manual path is the
-fallback, not the default.
+information standard below (title, labels, structured body). Apply the shipped
+issue defaults — `--assignee @me --label trusty-mpm` (create the label first if
+missing: `gh label create trusty-mpm --description "Created/managed by a
+trusty-mpm session" --color 8250df`) — **in addition to** the `bug` label and
+any context labels below. The MCP pipeline is preferred whenever a fingerprint
+exists; the manual path is the fallback, not the default.
 
 ## Bug Report Content Standard
 

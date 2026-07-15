@@ -71,6 +71,33 @@ mcp__trusty-review__review_pr     # open-PR review (correctness/design/security)
 This is CB#8's evidence for a PR-shaped completion claim — "the PR is ready"
 requires a review verdict (or human approval), not just green CI.
 
+## Shipped Defaults: Assignee, Label, and Attribution Footer
+
+These trusty-mpm framework defaults override any harness default and apply to
+both the linked issue and the PR:
+
+- **`--assignee @me --label trusty-mpm`** on every `gh issue create` and
+  `gh pr create`. This is multi-harness support: the assignee + `trusty-mpm`
+  label identify which issues/PRs a trusty-mpm session owns and should pick up.
+  Create the label first if missing:
+
+  ```bash
+  gh label create trusty-mpm \
+    --description "Created/managed by a trusty-mpm session" --color 8250df \
+    2>/dev/null || true
+  gh issue create --assignee @me --label trusty-mpm --title "…" --body "…"
+  gh pr    create --assignee @me --label trusty-mpm --title "…" --body "…"
+  ```
+
+- **Attribution footer** — every commit message and PR body ends with exactly:
+
+  ```
+  🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
+  ```
+
+  NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
+  trailer.
+
 ## Squash-Merge Is Required
 
 PRs merge via **squash-merge only** — one clean commit on `main` per PR.
@@ -89,10 +116,11 @@ the merge failed; see `docs/reference/worktree-discipline.md`.
 
 PR creation itself (branch push, `gh pr create`, description, linking the
 issue, requesting reviews) delegates to the **Version Control** agent —
-provide it: work summary, files changed, test status, and the trusty-review
-verdict. The PM constructs the delegation prompt; it does not run `gh pr
-create` itself (CB#6 boundary — the PM stays out of `gh pr`/`gh issue`
-tooling).
+provide it: work summary, files changed, test status, the trusty-review
+verdict, and the shipped defaults above (`--assignee @me --label trusty-mpm`
+plus the trusty-mpm attribution footer on the PR body). The PM constructs the
+delegation prompt; it does not run `gh pr create` itself (CB#6 boundary — the
+PM stays out of `gh pr`/`gh issue` tooling).
 
 ## Related Skills
 

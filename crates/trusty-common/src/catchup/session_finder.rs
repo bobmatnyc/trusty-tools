@@ -119,6 +119,34 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     Ok(sessions)
 }
 
+/// Resolve the latest native `.trusty-mpm` snapshot, preferring the per-session
+/// log entry when a session id is known.
+///
+/// Why: with concurrent `tm` sessions in one project, resume must reload the
+/// current session's own newest snapshot, not whichever session paused last.
+/// The append-only `sessions-log.jsonl` makes that recoverable; this is the
+/// read side of the global-pointer fix.
+/// What: when `session_id` is `Some`, returns the newest `pause` snapshot logged
+/// for that id (if its file still exists); otherwise, or when that session has
+/// no log entry, falls back to the shared resolver chain
+/// (log-overall → legacy `LATEST-SESSION.txt` → newest `session-*.md` by mtime)
+/// against `<project_dir>/.trusty-mpm/sessions/`. Returns `None` when nothing
+/// resolves.
+/// Test: `latest_snapshot_prefers_session_log`, `latest_snapshot_falls_back`.
+pub fn latest_trusty_mpm_snapshot(project_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
+    let sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
+    if let Some(id) = session_id
+        && let Some(name) =
+            crate::catchup::session_log::latest_snapshot_for_session(&sessions_dir, id)
+    {
+        let path = sessions_dir.join(name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    crate::catchup::session_log::resolve_latest_snapshot(&sessions_dir, "md")
+}
+
 /// Render a markdown catch-up digest for a slice of paused sessions.
 ///
 /// Why: `tm session catchup` prints this digest to stdout so the operator (or
@@ -520,6 +548,48 @@ mod tests {
             !output.contains("Tmux Window"),
             "absent window must not render a line"
         );
+    }
+
+    #[test]
+    fn latest_snapshot_prefers_session_log() {
+        use crate::catchup::session_log::{SessionLogEntry, append_entry};
+        let tmp = TempDir::new().unwrap();
+        let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+
+        // Two sessions interleave; each snapshot file exists on disk.
+        write_file(&sdir, "session-A.md", "## Summary\nS1 work");
+        write_file(&sdir, "session-B.md", "## Summary\nS2 work");
+        let mk = |id: &str, snap: &str, ts: &str| SessionLogEntry {
+            session_id: id.to_string(),
+            event: "pause".to_string(),
+            snapshot: snap.to_string(),
+            timestamp: ts.to_string(),
+        };
+        append_entry(&sdir, &mk("s1", "session-A.md", "t1")).unwrap();
+        append_entry(&sdir, &mk("s2", "session-B.md", "t2")).unwrap();
+
+        // s1 resumes its own snapshot even though s2 paused last.
+        let got = latest_trusty_mpm_snapshot(tmp.path(), Some("s1")).unwrap();
+        assert_eq!(got.file_name().unwrap(), "session-A.md");
+        // No id → latest overall (s2's).
+        let got = latest_trusty_mpm_snapshot(tmp.path(), None).unwrap();
+        assert_eq!(got.file_name().unwrap(), "session-B.md");
+    }
+
+    #[test]
+    fn latest_snapshot_falls_back() {
+        let tmp = TempDir::new().unwrap();
+        let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        // No log at all → mtime scan of session-*.md.
+        write_file(&sdir, "session-20260101-000000.md", "## Summary\nold");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_file(&sdir, "session-20260202-000000.md", "## Summary\nnew");
+        let got = latest_trusty_mpm_snapshot(tmp.path(), Some("unknown-id")).unwrap();
+        assert_eq!(got.file_name().unwrap(), "session-20260202-000000.md");
+        // Missing project dir → None.
+        assert!(latest_trusty_mpm_snapshot(&tmp.path().join("nope"), None).is_none());
     }
 
     #[test]
