@@ -32,6 +32,7 @@ pub mod recall_session;
 pub mod registry;
 pub mod skill;
 pub mod traits;
+pub mod trusty_search;
 
 // Flat re-exports for `crate::tools::*` convenience.
 #[allow(unused_imports)]
@@ -53,6 +54,7 @@ pub use traits::{
     AgentOutput, AgentRunner, HistoryMessage, RunContext, SearchProvider, SearchResult,
     ServiceTier, SkillResolver, ToolExecutor, ToolResult,
 };
+pub use trusty_search::{SEARCH_CODE_TOOL_NAME, TrustySearchTool};
 
 // ── Registry integration tests for the FS tools ──────────────────────────────
 

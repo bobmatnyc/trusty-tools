@@ -1,24 +1,26 @@
 //! LLM provider abstraction for trusty-review.
 //!
 //! Why: the pipeline and diff summarizer must call the LLM through a trait
-//! so the provider (OpenRouter vs Bedrock) is an implementation detail
-//! invisible to the caller, and so tests can inject mocks.
+//! so the provider (OpenRouter, Bedrock, or Fireworks) is an implementation
+//! detail invisible to the caller, and so tests can inject mocks.
 //! What: defines the `LlmProvider` trait (single non-streaming `complete`
 //! call), `LlmRequest` / `LlmResponse` data shapes, the `build_provider`
 //! factory, and re-exports the `LlmError` enum, `OpenRouterProvider`,
-//! `BedrockProvider`, and `models` constants.
+//! `BedrockProvider`, `FireworksProvider`, and `models` constants.
 //! Test: each submodule carries its own unit tests; this module's
 //! `provider_trait_object_compiles` smoke-tests that the trait is
 //! object-safe; `provider_factory_*` tests cover the routing logic.
 
 pub mod bedrock;
 pub mod error;
+pub mod fireworks;
 pub mod models;
 pub mod openrouter;
 pub mod schema;
 
 pub use bedrock::BedrockProvider;
 pub use error::LlmError;
+pub use fireworks::FireworksProvider;
 pub use openrouter::OpenRouterProvider;
 pub use schema::enforce_strict_mode;
 
@@ -27,7 +29,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Provider;
+use crate::config::{Provider, ReviewConfig};
 
 // ─── Chat message (simplified, no tool-use for review calls) ─────────────────
 
@@ -180,23 +182,32 @@ pub trait LlmProvider: Send + Sync {
 pub const BEDROCK_MODEL_PREFIX: &str = "bedrock/";
 /// OpenRouter model-id prefix for explicit routing.
 pub const OPENROUTER_MODEL_PREFIX: &str = "openrouter/";
+/// Fireworks model-id prefix for explicit routing (matches trusty-code's
+/// `fireworks/*` slug convention; the bare id is the provider-native
+/// `accounts/fireworks/models/*` form).
+pub const FIREWORKS_MODEL_PREFIX: &str = "fireworks/";
 
 /// Strip the provider routing prefix from a model id, returning the bare id.
 ///
 /// Why: `LlmRequest.model` must be the bare id sent to the upstream API — the
-/// `bedrock/` and `openrouter/` prefixes are routing hints only and are never
-/// valid API model ids.  Using the prefixed string causes Bedrock to receive
-/// `bedrock/us.anthropic.claude-sonnet-4-6` as the Converse model id, which
-/// produces `POST /model/bedrock%2F.../converse` → HTTP 400 ValidationException.
-/// What: strips `bedrock/` or `openrouter/` prefix if present; returns the
-/// remaining string.  Bare ids (no prefix) are returned unchanged.
+/// `bedrock/`, `openrouter/`, and `fireworks/` prefixes are routing hints only
+/// and are never valid API model ids.  Using the prefixed string causes
+/// Bedrock to receive `bedrock/us.anthropic.claude-sonnet-4-6` as the Converse
+/// model id, which produces `POST /model/bedrock%2F.../converse` → HTTP 400
+/// ValidationException.
+/// What: strips the `bedrock/`, `openrouter/`, or `fireworks/` prefix if
+/// present; returns the remaining string.  Bare ids (no prefix) are returned
+/// unchanged.
 /// Test: `prefix_stripped_model_id_bedrock`, `prefix_stripped_model_id_openrouter`,
-/// `prefix_stripped_model_id_bare`.
+/// `prefix_stripped_model_id_fireworks`, `prefix_stripped_model_id_bare`.
 pub fn strip_provider_prefix(model: &str) -> &str {
     if let Some(bare) = model.strip_prefix(BEDROCK_MODEL_PREFIX) {
         return bare;
     }
     if let Some(bare) = model.strip_prefix(OPENROUTER_MODEL_PREFIX) {
+        return bare;
+    }
+    if let Some(bare) = model.strip_prefix(FIREWORKS_MODEL_PREFIX) {
         return bare;
     }
     model
@@ -208,7 +219,8 @@ pub fn strip_provider_prefix(model: &str) -> &str {
 /// Why: `--reviewer-model bedrock/us.anthropic.claude-sonnet-4-6` must route to
 /// Bedrock regardless of the default provider; a bare `us.anthropic.*` id should
 /// use the default provider; `openrouter/openai/gpt-5.4-mini` must route to
-/// OpenRouter.  This function is the single source of truth for that logic.
+/// OpenRouter; `fireworks/accounts/fireworks/models/*` must route to Fireworks.
+/// This function is the single source of truth for that logic.
 /// What: strips known prefixes and returns `(Provider, bare_model_id)`.
 /// Precedence: explicit prefix in model id > `default_provider` argument.
 /// Test: `provider_factory_prefix_routing`.
@@ -219,6 +231,9 @@ pub fn resolve_provider_and_model(model: &str, default_provider: &Provider) -> (
     if let Some(bare) = model.strip_prefix(OPENROUTER_MODEL_PREFIX) {
         return (Provider::OpenRouter, bare.to_string());
     }
+    if let Some(bare) = model.strip_prefix(FIREWORKS_MODEL_PREFIX) {
+        return (Provider::Fireworks, bare.to_string());
+    }
     (default_provider.clone(), model.to_string())
 }
 
@@ -226,18 +241,21 @@ pub fn resolve_provider_and_model(model: &str, default_provider: &Provider) -> (
 ///
 /// Why: the CLI, HTTP server, and pipeline all need to construct a provider
 /// from the same config fields (provider, model, API key); centralising this
-/// avoids duplicating the `bedrock/` prefix check in every call site.
+/// avoids duplicating the `bedrock/` prefix check in every call site.  Takes
+/// the whole `ReviewConfig` (rather than a single key) because each API-key
+/// provider reads a different key field (`openrouter_api_key`,
+/// `fireworks_api_key`).
 /// What: resolves the effective provider via `resolve_provider_and_model`,
 /// constructs the appropriate concrete type, and returns it as a trait object.
-/// Returns `LlmError::AccessDenied` if OpenRouter is selected but `api_key`
-/// is empty.  Returns `LlmError::Validation` if Bedrock is selected but the
-/// model id is missing an inference-profile prefix.
+/// Returns `LlmError::AccessDenied` if OpenRouter or Fireworks is selected but
+/// its API key is empty.  Returns `LlmError::Validation` if Bedrock is
+/// selected but the model id is missing an inference-profile prefix.
 /// Test: `provider_factory_builds_bedrock`, `provider_factory_builds_openrouter`,
 /// `provider_factory_prefix_routing`.
 pub async fn build_provider(
     model: &str,
     default_provider: &Provider,
-    openrouter_api_key: &str,
+    config: &ReviewConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let (provider, bare_model) = resolve_provider_and_model(model, default_provider);
     match provider {
@@ -246,7 +264,11 @@ pub async fn build_provider(
             Ok(Arc::new(p))
         }
         Provider::OpenRouter => {
-            let p = OpenRouterProvider::new(openrouter_api_key, bare_model)?;
+            let p = OpenRouterProvider::new(&config.openrouter_api_key, bare_model)?;
+            Ok(Arc::new(p))
+        }
+        Provider::Fireworks => {
+            let p = FireworksProvider::new(&config.fireworks_api_key, bare_model)?;
             Ok(Arc::new(p))
         }
     }
@@ -394,6 +416,15 @@ mod tests {
             resolve_provider_and_model("openai/gpt-5.4-mini-20260317", &Provider::Bedrock);
         assert_eq!(prov, Provider::Bedrock);
         assert_eq!(model, "openai/gpt-5.4-mini-20260317");
+
+        // fireworks/ prefix forces Fireworks and strips only the routing
+        // prefix (the provider-native accounts/fireworks/models/* id remains).
+        let (prov, model) = resolve_provider_and_model(
+            "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+            &Provider::Bedrock,
+        );
+        assert_eq!(prov, Provider::Fireworks);
+        assert_eq!(model, "accounts/fireworks/models/llama-v3p1-70b-instruct");
     }
 
     #[test]
@@ -411,6 +442,7 @@ mod tests {
             "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
             "bedrock/us.anthropic.claude-sonnet-4-6",
             "openrouter/openai/gpt-5.4-mini-20260317",
+            "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
         ];
         let expected = [
             (
@@ -419,6 +451,10 @@ mod tests {
             ),
             (Provider::Bedrock, "us.anthropic.claude-sonnet-4-6"),
             (Provider::OpenRouter, "openai/gpt-5.4-mini-20260317"),
+            (
+                Provider::Fireworks,
+                "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            ),
         ];
         for (candidate, (exp_prov, exp_model)) in candidates.iter().zip(expected.iter()) {
             let (prov, model) = resolve_provider_and_model(candidate, &Provider::Bedrock);
@@ -465,6 +501,22 @@ mod tests {
             strip_provider_prefix("openrouter/openai/gpt-5.4-mini-20260317"),
             "openai/gpt-5.4-mini-20260317",
             "openrouter/ prefix must be stripped"
+        );
+    }
+
+    /// Regression test: `fireworks/<id>` must strip to bare `<id>`.
+    ///
+    /// Why: same Bug 1 pattern — the `fireworks/` routing prefix is not part
+    /// of the provider-native `accounts/fireworks/models/*` id and must never
+    /// reach the wire.
+    /// What: asserts `strip_provider_prefix("fireworks/X") == "X"`.
+    /// Test: this test itself.
+    #[test]
+    fn prefix_stripped_model_id_fireworks() {
+        assert_eq!(
+            strip_provider_prefix("fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct"),
+            "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            "fireworks/ routing prefix must be stripped, leaving the provider-native id"
         );
     }
 

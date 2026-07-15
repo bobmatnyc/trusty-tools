@@ -922,291 +922,289 @@ fn conformance_cap_does_not_weaken_correctness_block() {
     );
 }
 
-// ─── Calibration env-var override tests (#1597) ──────────────────────────────
-// These tests mutate process-global env vars.  All env-var-mutating tests are
-// annotated `#[serial_test::serial]` so they run one at a time (a global mutex
-// in the serial_test runtime prevents interleaving with each other).
+// ─── Calibration threshold tests (#1597; parallel-safe injection, #2688) ─────
+// Root cause of the #2688 flake: `derive_verdict` used to read the three
+// TRUSTY_REVIEW_* calibration thresholds from process-global env vars on every
+// call.  The override tests here mutated those env vars under
+// `#[serial_test::serial]`, but `#[serial]` only serialises the annotated tests
+// against EACH OTHER — the dozens of NON-serial tests in this module that call
+// `derive_verdict` still ran in parallel and read whatever override a serial
+// test had transiently set, flipping their verdicts (~2/3 failure rate under
+// `cargo test`).
 //
-// Additionally, every env mutation uses `EnvGuard` (below) to guarantee cleanup
-// via `Drop` even when an assertion panics — a non-RAII approach would leak the
-// override to other test threads if the test thread unwinds.
+// Fix: `grade.rs` now resolves thresholds into an explicit `Thresholds` value
+// (from env in production, injected in tests).  These tests inject a literal
+// `Thresholds` via the `derive_verdict_with` seam and test the pure
+// `parse_threshold` / `Thresholds::from_lookup` helpers directly — so NOTHING
+// here mutates process-global state and there is no race to serialise.  No
+// `#[serial]`, no `EnvGuard`, no `set_var`.
 
-/// RAII guard that restores (or removes) an env var on drop.
+/// Approximate `f32` equality (the codebase convention — avoids `clippy::float_cmp`).
 ///
-/// Why: a plain `set_var` + manual restore after assertions is not panic-safe —
-/// if an assertion panics, the restore code is skipped and the env var stays set
-/// for the lifetime of the test process.  This guard wraps the restore in `drop`
-/// so it runs even on unwinding, preventing env-var leaks across test threads.
-/// What: on construction saves the current value of `key`; on drop restores it
-/// (or removes the var if it was absent before construction).
-/// Test: used by every env-var override test in this module (#1597).
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-impl EnvGuard {
-    /// Set `key` to `value` and return a guard that will restore the previous value.
-    ///
-    /// # Safety
-    /// Caller must ensure no other thread is concurrently reading or writing the
-    /// same env var.  In practice all callers hold the `serial_test` global lock.
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        // SAFETY: serial_test lock held; no concurrent env access on this key.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, prev }
-    }
-}
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: same guarantee as `set`: serial_test lock held.
-        match &self.prev {
-            Some(v) => unsafe { std::env::set_var(self.key, v) },
-            None => unsafe { std::env::remove_var(self.key) },
-        }
-    }
+/// Why: exact `==` on `f32` is lint-flagged and brittle; every threshold assertion
+/// below compares parsed/derived floats against expected literals.
+/// What: returns `true` when `a` and `b` are within one machine epsilon.
+/// Test: used by the calibration threshold tests in this module.
+fn approx(a: f32, b: f32) -> bool {
+    (a - b).abs() < f32::EPSILON
 }
 
-/// REGRESSION GUARD (#1597, defaults): all three calibration thresholds return
-/// their compile-time defaults when the corresponding env vars are absent.
+/// #2688: `Thresholds::defaults()` returns exactly the compile-time constants.
 ///
-/// Why: any future refactor that accidentally changes a default value would be
-/// caught here.  The defaults are the values calibrated over the duetto review
-/// board; silently changing them would affect all deployments.
-/// What: asserts `low_confidence_threshold()` == 0.65, `floor_min_confidence()`
-/// == 0.80, `floor_count_min_confidence()` == 0.50.
-/// Test: this test itself (serialised via `#[serial]`).
-#[serial_test::serial]
+/// Why: replaces the old env-mutating `env_override_defaults_when_unset`.  Any
+/// future refactor that accidentally changes a default value (calibrated over the
+/// duetto review board) is caught here — with zero process-env access.
+/// What: asserts the three `defaults()` fields equal `LOW_CONFIDENCE_THRESHOLD`
+/// (0.65), `FLOOR_MIN_CONFIDENCE` (0.80), `FLOOR_COUNT_MIN_CONFIDENCE` (0.50).
+/// Test: this test itself.
 #[test]
-fn env_override_defaults_when_unset() {
-    // Temporarily remove all three vars so the defaults are exercised.
-    // The EnvGuard restores each on drop — including if an assertion panics.
-    let _g1 = EnvGuard {
-        key: TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV,
-        prev: {
-            let p = std::env::var(TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV).ok();
-            // SAFETY: serial_test lock held.
-            unsafe { std::env::remove_var(TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV) };
-            p
-        },
-    };
-    let _g2 = EnvGuard {
-        key: TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV,
-        prev: {
-            let p = std::env::var(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV).ok();
-            unsafe { std::env::remove_var(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV) };
-            p
-        },
-    };
-    let _g3 = EnvGuard {
-        key: TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV,
-        prev: {
-            let p = std::env::var(TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV).ok();
-            unsafe { std::env::remove_var(TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV) };
-            p
-        },
-    };
-
+fn thresholds_defaults_match_constants() {
+    let d = Thresholds::defaults();
     assert!(
-        (low_confidence_threshold() - LOW_CONFIDENCE_THRESHOLD).abs() < f32::EPSILON,
-        "default LOW_CONFIDENCE_THRESHOLD must be {LOW_CONFIDENCE_THRESHOLD}"
+        approx(d.low_confidence, LOW_CONFIDENCE_THRESHOLD),
+        "default low_confidence must be {LOW_CONFIDENCE_THRESHOLD}"
     );
     assert!(
-        (floor_min_confidence() - FLOOR_MIN_CONFIDENCE).abs() < f32::EPSILON,
-        "default FLOOR_MIN_CONFIDENCE must be {FLOOR_MIN_CONFIDENCE}"
+        approx(d.floor_min, FLOOR_MIN_CONFIDENCE),
+        "default floor_min must be {FLOOR_MIN_CONFIDENCE}"
     );
     assert!(
-        (floor_count_min_confidence() - FLOOR_COUNT_MIN_CONFIDENCE).abs() < f32::EPSILON,
-        "default FLOOR_COUNT_MIN_CONFIDENCE must be {FLOOR_COUNT_MIN_CONFIDENCE}"
+        approx(d.floor_count_min, FLOOR_COUNT_MIN_CONFIDENCE),
+        "default floor_count_min must be {FLOOR_COUNT_MIN_CONFIDENCE}"
     );
-    // _g1, _g2, _g3 drop here and restore the vars.
 }
 
-/// #1597: overriding `TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD` to a higher value
-/// causes findings that would have been advisory under the default (0.65) to now
-/// fall below the raised threshold — collapsing the batch to APPROVE.
+/// #1597 / #2688: `Thresholds::from_lookup` wires each env KEY to the correct
+/// FIELD — verified without mutating the process environment.
+///
+/// Why: this is the last piece of #1597 coverage that used to require a real
+/// env write (`env_override_*_changes_value` set the var, then read it back).
+/// Injecting a pure in-memory lookup closure proves the key→field mapping AND the
+/// absent-key fallback with no global state, so it can never race a parallel test.
+/// What: a lookup returning a distinct value per key must land each value in its
+/// matching field; a lookup returning `None` for every key must yield the
+/// compile-time defaults.
+/// Test: this test itself.
+#[test]
+fn thresholds_from_lookup_reads_each_env_key() {
+    // Distinct value per key so a wiring swap (key→wrong field) would fail here.
+    let t = Thresholds::from_lookup(|key| match key {
+        TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV => Some("0.11".to_string()),
+        TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV => Some("0.22".to_string()),
+        TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV => Some("0.33".to_string()),
+        _ => None,
+    });
+    assert!(
+        approx(t.low_confidence, 0.11),
+        "LOW_CONFIDENCE env key must map to the low_confidence field"
+    );
+    assert!(
+        approx(t.floor_min, 0.22),
+        "FLOOR_MIN env key must map to the floor_min field"
+    );
+    assert!(
+        approx(t.floor_count_min, 0.33),
+        "FLOOR_COUNT_MIN env key must map to the floor_count_min field"
+    );
+
+    // Every key absent → all three fields fall back to the compile-time defaults.
+    let d = Thresholds::from_lookup(|_| None);
+    assert!(approx(d.low_confidence, LOW_CONFIDENCE_THRESHOLD));
+    assert!(approx(d.floor_min, FLOOR_MIN_CONFIDENCE));
+    assert!(approx(d.floor_count_min, FLOOR_COUNT_MIN_CONFIDENCE));
+}
+
+/// #1597: raising the low-confidence collapse line makes findings that were
+/// substantive under the default (0.65) fall below it — collapsing to APPROVE.
 ///
 /// Two Medium findings at confidence 0.66 (just above the default 0.65 → NOT
 /// all-advisory by default → the low-conf collapse does not fire).  With the
-/// threshold raised to 0.70, those same findings are now all ≤ threshold →
-/// the collapse fires → verdict becomes APPROVE even for model=APPROVE*.
+/// line raised to 0.70, those same findings are now all ≤ threshold → the
+/// collapse fires → verdict becomes APPROVE even for model=APPROVE*.
 ///
-/// Why: proves the env var is actually read at runtime (not just at startup).
-/// What: with `TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD=0.70`, derive_verdict
-/// over two Medium@0.66 findings (model=APPROVE*) → APPROVE.
-/// Test: this test itself (serialised via `#[serial]`; cleanup via `EnvGuard`).
-#[serial_test::serial]
+/// Why: proves the `low_confidence` threshold actually drives the verdict.
+/// Injected via `derive_verdict_with` (no env mutation), so this test cannot race
+/// any parallel test — the #2688 fix (was `env_override_..._changes_value`).
+/// What: `Thresholds { low_confidence: 0.70, .. }` over two Medium@0.66
+/// (model=APPROVE*) → APPROVE; the default `Thresholds` → APPROVE* (no collapse).
+/// Test: this test itself.
 #[test]
-fn env_override_low_confidence_threshold_changes_value() {
-    // 0.66 > 0.65 (default) → NOT all-advisory → no collapse.
-    // 0.66 < 0.80 (FLOOR_MIN_CONFIDENCE) → these Mediums don't count toward the
-    // REQUEST_CHANGES floor; floor = APPROVE.
-    // stricter_of(APPROVE*, APPROVE) = APPROVE*.
+fn injected_low_confidence_threshold_changes_verdict() {
+    // 0.66 < 0.80 (floor_min) → Mediums never count toward the RC floor here;
+    // only the low-confidence collapse line is under test.
     let boundary_findings = vec![finding(Effort::Medium, 0.66), finding(Effort::Medium, 0.66)];
 
-    // --- section A: with override (EnvGuard ensures cleanup on panic) ---
-    let _g = EnvGuard::set(TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV, "0.70");
-    // 0.66 ≤ 0.70 (overridden) → all-advisory → collapse fires → APPROVE.
-    let overridden_verdict = derive_verdict(Verdict::ApproveWithReservations, &boundary_findings);
+    // Raised line (0.70): 0.66 ≤ 0.70 → all-advisory → collapse fires → APPROVE.
+    let raised = Thresholds {
+        low_confidence: 0.70,
+        ..Thresholds::defaults()
+    };
     assert_eq!(
-        overridden_verdict,
+        derive_verdict_with(
+            Verdict::ApproveWithReservations,
+            &boundary_findings,
+            &raised
+        ),
         Verdict::Approve,
-        "#1597: raised LOW_CONFIDENCE_THRESHOLD=0.70 triggers collapse on 0.66-conf findings"
+        "#1597: low_confidence=0.70 collapses 0.66-conf findings to APPROVE"
     );
-    assert!(
-        (low_confidence_threshold() - 0.70_f32).abs() < f32::EPSILON,
-        "#1597: low_confidence_threshold() must reflect env override"
-    );
-    drop(_g); // restore the var before section B
 
-    // --- section B: without override (after restore, default must hold) ---
-    // 0.66 > 0.65 (default) → collapse does NOT fire → APPROVE*.
-    let default_verdict = derive_verdict(Verdict::ApproveWithReservations, &boundary_findings);
+    // Default line (0.65): 0.66 > 0.65 → collapse does NOT fire → APPROVE*.
     assert_eq!(
-        default_verdict,
+        derive_verdict_with(
+            Verdict::ApproveWithReservations,
+            &boundary_findings,
+            &Thresholds::defaults()
+        ),
         Verdict::ApproveWithReservations,
-        "#1597: after restore, default LOW_CONFIDENCE_THRESHOLD: 0.66-conf findings do not collapse"
+        "#1597: default low_confidence=0.65 leaves 0.66-conf findings uncollapsed"
     );
 }
 
-/// #1597: overriding `TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE` to a lower value
-/// allows a previously-advisory Medium finding (below the default 0.80) to count
-/// toward the REQUEST_CHANGES floor.
+/// #1597: lowering the Medium-floor gate lets a previously-advisory Medium
+/// finding (below the default 0.80) count toward the REQUEST_CHANGES floor.
 ///
-/// Two Medium findings at confidence 0.70.  Under the default 0.80 threshold they
-/// are advisory (don't count toward REQUEST_CHANGES); with the threshold lowered to
-/// 0.60, 0.70 > 0.60 → they count → REQUEST_CHANGES floor.  Source-of-truth
+/// Two Medium findings at confidence 0.70.  Under the default 0.80 gate they are
+/// advisory (don't count toward REQUEST_CHANGES); with the gate lowered to 0.60,
+/// 0.70 > 0.60 → they count → REQUEST_CHANGES floor.  Source-of-truth
 /// reconciliation does NOT cap here because model=RequestChanges, not APPROVE.
 ///
-/// Why: proves the Medium-floor gate is wirable at runtime without recompiling.
-/// What: with `TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE=0.60`, two Medium@0.70 findings
-/// and model=REQUEST_CHANGES floor to REQUEST_CHANGES.
-/// Test: this test itself (serialised via `#[serial]`; cleanup via `EnvGuard`).
-#[serial_test::serial]
+/// Why: proves the `floor_min` gate drives the verdict.  Injected via
+/// `derive_verdict_with` (no env mutation) — the #2688 fix.
+/// What: `Thresholds { floor_min: 0.60, .. }` + two Medium@0.70 +
+/// model=REQUEST_CHANGES → REQUEST_CHANGES; the default `Thresholds` +
+/// model=APPROVE → APPROVE (Mediums advisory).
+/// Test: this test itself.
 #[test]
-fn env_override_floor_min_confidence_changes_value() {
-    // Two Medium findings at 0.70.
-    // 0.70 > 0.65 (LOW_CONFIDENCE_THRESHOLD) → NOT all-advisory → no collapse.
-    // 0.70 ≥ 0.50 (FLOOR_COUNT_MIN_CONFIDENCE) → substantive.
-    // 0.70 ≤ 0.80 (default FLOOR_MIN_CONFIDENCE) → not counted toward floor.
-    // floor = APPROVE; model = RequestChanges → stricter_of = RequestChanges.
+fn injected_floor_min_confidence_changes_verdict() {
+    // 0.70 > 0.65 (low_confidence) → NOT all-advisory → no collapse.
+    // 0.70 ≥ 0.50 (floor_count_min) → substantive.
     let findings = vec![finding(Effort::Medium, 0.70), finding(Effort::Medium, 0.70)];
 
-    // --- section A: with override (EnvGuard cleans up on panic) ---
-    let _g = EnvGuard::set(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV, "0.60");
-    // 0.70 > 0.60 → Mediums count toward floor; ≥2 → REQUEST_CHANGES floor.
-    // model=RequestChanges; stricter_of(RC, RC) = RC.
-    let overridden_verdict = derive_verdict(Verdict::RequestChanges, &findings);
+    // Lowered gate (0.60): 0.70 > 0.60 → Mediums count → RC floor.
+    let lowered = Thresholds {
+        floor_min: 0.60,
+        ..Thresholds::defaults()
+    };
     assert_eq!(
-        overridden_verdict,
+        derive_verdict_with(Verdict::RequestChanges, &findings, &lowered),
         Verdict::RequestChanges,
-        "#1597: lowered FLOOR_MIN_CONFIDENCE=0.60 makes 0.70-conf Mediums count toward RC floor"
+        "#1597: floor_min=0.60 makes 0.70-conf Mediums count toward the RC floor"
     );
-    assert!(
-        (floor_min_confidence() - 0.60_f32).abs() < f32::EPSILON,
-        "#1597: floor_min_confidence() must reflect env override"
-    );
-    drop(_g); // restore before section B
 
-    // --- section B: without override (after restore; floor = APPROVE) ---
-    // model=Approve; floor=APPROVE (Mediums advisory); stricter_of = APPROVE.
-    let default_verdict = derive_verdict(Verdict::Approve, &findings);
+    // Default gate (0.80): 0.70 ≤ 0.80 → advisory → floor=APPROVE → APPROVE.
     assert_eq!(
-        default_verdict,
+        derive_verdict_with(Verdict::Approve, &findings, &Thresholds::defaults()),
         Verdict::Approve,
-        "#1597: with restored FLOOR_MIN_CONFIDENCE=0.80, 0.70-conf Mediums are advisory → APPROVE"
+        "#1597: default floor_min=0.80 keeps 0.70-conf Mediums advisory → APPROVE"
     );
 }
 
-/// #1597: overriding `TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE` to a lower value
-/// promotes previously-excluded sub-coin-flip findings to substantive so they can
-/// count toward the verdict floor.
+/// #1597: lowering the sub-coin-flip exclusion line promotes previously-excluded
+/// findings to substantive so they can count toward the verdict floor.
 ///
 /// Two Medium findings at confidence 0.45 — by default excluded (0.45 < 0.50 =
-/// FLOOR_COUNT_MIN_CONFIDENCE).  With the count floor lowered to 0.40, 0.45 ≥ 0.40
-/// → substantive.  But: the low-conf override (LOW_CONFIDENCE_THRESHOLD=0.65) would
-/// collapse this batch to APPROVE since all findings ≤ 0.65.  To isolate the
-/// FLOOR_COUNT_MIN_CONFIDENCE knob, we also lower LOW_CONFIDENCE_THRESHOLD to 0.30
-/// (so 0.45 > 0.30 → NOT all-advisory → no collapse) and FLOOR_MIN_CONFIDENCE to
-/// 0.30 (so 0.45 > 0.30 → Mediums count toward the floor).
+/// floor_count_min).  With floor_count_min lowered to 0.40, 0.45 ≥ 0.40 →
+/// substantive.  To isolate this knob we also lower low_confidence to 0.30 (so
+/// 0.45 > 0.30 → NOT all-advisory → no collapse) and floor_min to 0.30 (so
+/// 0.45 > 0.30 → Mediums count toward the floor).
 ///
-/// Why: proves the sub-coin-flip exclusion line is tunable at runtime without
-/// recompiling, and that the three thresholds interact correctly.
-/// What: with the three overrides, two Medium@0.45 findings + model=RequestChanges
-/// remain REQUEST_CHANGES (floor matches model).
-/// Test: this test itself (serialised via `#[serial]`; cleanup via `EnvGuard`).
-#[serial_test::serial]
+/// Why: proves the sub-coin-flip exclusion line drives the verdict and that the
+/// three thresholds interact correctly.  Injected via `derive_verdict_with` (no
+/// env mutation) — the #2688 fix.
+/// What: with all three lowered, two Medium@0.45 + model=REQUEST_CHANGES remain
+/// REQUEST_CHANGES; the default `Thresholds` + model=APPROVE → APPROVE (excluded).
+/// Test: this test itself.
 #[test]
-fn env_override_floor_count_min_confidence_changes_value() {
+fn injected_floor_count_min_confidence_changes_verdict() {
     let findings = vec![finding(Effort::Medium, 0.45), finding(Effort::Medium, 0.45)];
 
-    // --- section A: all three overrides active ---
-    // FLOOR_COUNT_MIN_CONFIDENCE=0.40 → 0.45 ≥ 0.40 → findings are substantive.
-    // LOW_CONFIDENCE_THRESHOLD=0.30   → 0.45 > 0.30 → NOT all-advisory → no collapse.
-    // FLOOR_MIN_CONFIDENCE=0.30       → 0.45 > 0.30 → Mediums counted; ≥2 → RC floor.
-    // model=RequestChanges; stricter_of(RC, RC) = RC.
-    let _g1 = EnvGuard::set(TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV, "0.40");
-    let _g2 = EnvGuard::set(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV, "0.30");
-    let _g3 = EnvGuard::set(TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV, "0.30");
-
-    assert!(
-        (floor_count_min_confidence() - 0.40_f32).abs() < f32::EPSILON,
-        "#1597: floor_count_min_confidence() must reflect env override"
-    );
-    let overridden_verdict = derive_verdict(Verdict::RequestChanges, &findings);
+    // floor_count_min=0.40 → 0.45 ≥ 0.40 → substantive.
+    // low_confidence=0.30  → 0.45 > 0.30 → NOT all-advisory → no collapse.
+    // floor_min=0.30       → 0.45 > 0.30 → Mediums counted; → RC floor.
+    let lowered = Thresholds {
+        low_confidence: 0.30,
+        floor_min: 0.30,
+        floor_count_min: 0.40,
+    };
     assert_eq!(
-        overridden_verdict,
+        derive_verdict_with(Verdict::RequestChanges, &findings, &lowered),
         Verdict::RequestChanges,
-        "#1597: with FLOOR_COUNT_MIN_CONFIDENCE=0.40, Medium@0.45 findings count toward RC floor"
+        "#1597: floor_count_min=0.40 promotes 0.45-conf Mediums to substantive → RC floor"
     );
-    drop(_g3);
-    drop(_g2);
-    drop(_g1); // restore all three before section B
 
-    // --- section B: defaults restored; findings excluded again ---
-    // 0.45 < 0.50 (FLOOR_COUNT_MIN_CONFIDENCE) → excluded → substantive set empty.
-    // all_low_confidence check: substantive is empty → condition false → no collapse.
-    // floor = APPROVE (no qualifying findings); model=APPROVE → APPROVE.
-    let default_verdict = derive_verdict(Verdict::Approve, &findings);
+    // Defaults: 0.45 < 0.50 (floor_count_min) → excluded → substantive empty →
+    // floor=APPROVE; model=APPROVE → APPROVE.
     assert_eq!(
-        default_verdict,
+        derive_verdict_with(Verdict::Approve, &findings, &Thresholds::defaults()),
         Verdict::Approve,
-        "#1597: after restore, 0.45-conf Medium findings are sub-coin-flip → excluded → APPROVE"
+        "#1597: default floor_count_min=0.50 excludes 0.45-conf Mediums → APPROVE"
     );
 }
 
-/// #1597: an invalid env-var value (out of range, or non-numeric) falls back to
-/// the compile-time constant and never panics.
+/// #1597: `parse_threshold` accepts finite in-range values (with surrounding
+/// whitespace) and returns them verbatim.
 ///
-/// Why: a misconfigured deployment must not cause a panic or a silent 0-value
-/// default — it must silently use the safe built-in value.
-/// What: sets each var to "not-a-number" and an out-of-range value; asserts the
-/// accessor returns the constant default.
-/// Test: this test itself (serialised via `#[serial]`; cleanup via `EnvGuard`).
-#[serial_test::serial]
+/// Why: `parse_threshold` is the pure core of the env-override feature; testing it
+/// directly (no process env) is what lets these calibration tests avoid the
+/// #2688 parallel-run env race.
+/// What: valid `f32` strings — including whitespace-padded and the `[0.0, 1.0]`
+/// endpoints — parse to their numeric value.
+/// Test: this test itself.
 #[test]
-fn env_override_invalid_value_falls_back_to_default() {
-    {
-        let _g = EnvGuard::set(TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV, "not-a-number");
-        assert!(
-            (low_confidence_threshold() - LOW_CONFIDENCE_THRESHOLD).abs() < f32::EPSILON,
-            "non-numeric override must fall back to constant"
-        );
-    } // _g drops here, restoring the var
+fn parse_threshold_accepts_valid() {
+    assert!(approx(parse_threshold(Some("0.70"), 0.65), 0.70));
+    assert!(approx(parse_threshold(Some("  0.60  "), 0.80), 0.60));
+    assert!(approx(parse_threshold(Some("0"), 0.5), 0.0));
+    assert!(approx(parse_threshold(Some("1"), 0.5), 1.0));
+}
 
-    {
-        let _g = EnvGuard::set(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV, "2.5");
-        assert!(
-            (floor_min_confidence() - FLOOR_MIN_CONFIDENCE).abs() < f32::EPSILON,
-            "out-of-range (>1.0) override must fall back to constant"
-        );
-    }
+/// #1597: `parse_threshold` returns `default` for `None` (var absent).
+///
+/// Why: the absent-var path is the common production case (no operator override);
+/// it must yield the compile-time default.
+/// What: `parse_threshold(None, default)` returns `default` for two distinct
+/// defaults.
+/// Test: this test itself.
+#[test]
+fn parse_threshold_none_is_default() {
+    assert!(approx(parse_threshold(None, 0.65), 0.65));
+    assert!(approx(parse_threshold(None, 0.80), 0.80));
+}
 
-    {
-        let _g = EnvGuard::set(TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV, "-0.1");
-        assert!(
-            (floor_count_min_confidence() - FLOOR_COUNT_MIN_CONFIDENCE).abs() < f32::EPSILON,
-            "negative override must fall back to constant"
-        );
-    }
+/// #1597: an invalid value (non-numeric, out of range, or non-finite) falls back
+/// to `default` and never panics.
+///
+/// Why: a misconfigured deployment must not panic or silently use a 0-value — it
+/// must fall back to the safe built-in constant.  Replaces the env-mutating
+/// `env_override_invalid_value_falls_back_to_default` (#2688).
+/// What: non-numeric, >1.0, <0.0, and NaN inputs all return the supplied default.
+/// Test: this test itself.
+#[test]
+fn parse_threshold_rejects_invalid_and_out_of_range() {
+    assert!(
+        approx(
+            parse_threshold(Some("not-a-number"), LOW_CONFIDENCE_THRESHOLD),
+            LOW_CONFIDENCE_THRESHOLD
+        ),
+        "non-numeric input must fall back to the default"
+    );
+    assert!(
+        approx(
+            parse_threshold(Some("2.5"), FLOOR_MIN_CONFIDENCE),
+            FLOOR_MIN_CONFIDENCE
+        ),
+        "out-of-range (>1.0) input must fall back to the default"
+    );
+    assert!(
+        approx(
+            parse_threshold(Some("-0.1"), FLOOR_COUNT_MIN_CONFIDENCE),
+            FLOOR_COUNT_MIN_CONFIDENCE
+        ),
+        "negative input must fall back to the default"
+    );
+    assert!(
+        approx(parse_threshold(Some("NaN"), 0.5), 0.5),
+        "non-finite (NaN) input must fall back to the default"
+    );
 }

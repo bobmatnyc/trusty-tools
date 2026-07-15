@@ -19,6 +19,8 @@ mod assembler;
 mod preamble;
 mod version;
 
-pub use assembler::{PromptAssembler, assemble_system_prompt, assemble_system_prompt_for_mode};
+pub use assembler::{
+    DISCOVERY_GUIDANCE, PromptAssembler, assemble_system_prompt, assemble_system_prompt_for_mode,
+};
 pub use preamble::BASE_PREAMBLE;
 pub use version::BASE_PREAMBLE_VERSION;

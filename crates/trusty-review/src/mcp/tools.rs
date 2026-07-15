@@ -427,13 +427,7 @@ async fn deps_from_state(state: &AppState, reviewer_model: &str) -> (ReviewDeps,
         Arc::clone(&state.llm)
     } else {
         // Different backend — build a provider that matches the override prefix.
-        match crate::llm::build_provider(
-            reviewer_model,
-            startup_provider,
-            &state.config.openrouter_api_key,
-        )
-        .await
-        {
+        match crate::llm::build_provider(reviewer_model, startup_provider, &state.config).await {
             Ok(p) => p,
             Err(e) => {
                 let reason = format!(
