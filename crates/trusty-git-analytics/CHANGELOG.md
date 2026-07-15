@@ -5,6 +5,26 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- establish channels crate topology + wire Slack auth ([#2638](https://github.com/bobmatnyc/trusty-tools/pull/2638)) ([#2706](https://github.com/bobmatnyc/trusty-tools/pull/2706)) ([`9f2275b`](https://github.com/bobmatnyc/trusty-tools/commit/9f2275b6487296a08fc99de469e6b641992bc46d))
+
+### Fixed
+
+- bound external-source enrichment concurrency to fix mid-run classify stall (closes #2719) ([#2720](https://github.com/bobmatnyc/trusty-tools/pull/2720)) ([`96d0cba`](https://github.com/bobmatnyc/trusty-tools/commit/96d0cbaf6922acb3febcedf483a6866207211ed0))
+- SLOC-counter /* trap + stray conflict markers (closes #2489, #2509, #2390) ([#2561](https://github.com/bobmatnyc/trusty-tools/pull/2561)) ([`e4aed64`](https://github.com/bobmatnyc/trusty-tools/commit/e4aed64cfffff0eee3593669879b0cf136188137))
+
+### Changed
+
+- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
+- retire duplicate Bedrock ports onto trusty-common::inference ([#2567](https://github.com/bobmatnyc/trusty-tools/pull/2567)) ([`31c9fc0`](https://github.com/bobmatnyc/trusty-tools/commit/31c9fc0467adfda65b702c7433ceded01e0cf884))
+- mount config command on all 10 primary binaries ([#2528](https://github.com/bobmatnyc/trusty-tools/pull/2528)) ([`a58ea52`](https://github.com/bobmatnyc/trusty-tools/commit/a58ea5223167553f0d90fb5258d582d510dca316))
+
+### Documentation
+
+- add missing package metadata to 7 crates ([#2293](https://github.com/bobmatnyc/trusty-tools/pull/2293)) ([`ee58b6a`](https://github.com/bobmatnyc/trusty-tools/commit/ee58b6a4ae01e1338e4761aaa5c27053c49f192b))
 
 ## [2.9.2] — 2026-07-09
 
