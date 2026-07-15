@@ -10,6 +10,7 @@ authors.workspace = true
 
 include = [
     "src/**/*",
+    "assets/**/*",
     "ui/dist/**/*",
     "ui/src/**/*",
     "ui/index.html",

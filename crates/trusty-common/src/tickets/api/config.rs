@@ -99,7 +99,9 @@ impl GithubConfig {
     /// What: Fills empty fields from `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO`.
     /// Test: `tests::github_from_env`.
     pub fn with_env(mut self) -> Self {
-        self.token = self.token.or_else(|| std::env::var("GITHUB_TOKEN").ok());
+        self.token = self
+            .token
+            .or_else(|| std::env::var(crate::env_vars::ENV_GITHUB_TOKEN).ok());
         self.owner = self.owner.or_else(|| std::env::var("GITHUB_OWNER").ok());
         self.repo = self.repo.or_else(|| std::env::var("GITHUB_REPO").ok());
         self
@@ -203,7 +205,7 @@ impl Config {
     /// Test: `tests::auto_register_github_from_env`.
     fn auto_register_from_env(&mut self) {
         if !self.backends.contains_key("github")
-            && std::env::var("GITHUB_TOKEN").is_ok()
+            && std::env::var(crate::env_vars::ENV_GITHUB_TOKEN).is_ok()
             && std::env::var("GITHUB_OWNER").is_ok()
             && std::env::var("GITHUB_REPO").is_ok()
         {

@@ -307,7 +307,8 @@ impl ReviewConfig {
             excluded_repos: std::env::var("PR_INTELLIGENCE_EXCLUDED_REPOS").unwrap_or_default(),
             excluded_authors: std::env::var("PR_INTELLIGENCE_EXCLUDED_AUTHORS").unwrap_or_default(),
             log_dir,
-            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
+            openrouter_api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
+                .unwrap_or_default(),
             search_url: std::env::var("TRUSTY_SEARCH_URL")
                 .unwrap_or_else(|_| "http://localhost:7878".to_string()),
             analyzer_url: std::env::var("PR_INTELLIGENCE_ANALYZER_URL")
@@ -324,7 +325,8 @@ impl ReviewConfig {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.replace("\\n", "\n")), // expand \n-escaped newlines.
-            github_token: std::env::var("GITHUB_TOKEN").unwrap_or_default(),
+            github_token: std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
+                .unwrap_or_default(),
             github_webhook_secret: std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
             github_installations: load_github_installations(),
             bot_username: std::env::var("PR_REVIEW_BOT_USERNAME")

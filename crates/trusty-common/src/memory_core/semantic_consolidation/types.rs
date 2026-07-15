@@ -145,7 +145,7 @@ pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) 
     }
     // Fall back to env var (daemon callers that didn't thread the config
     // through to this level yet).
-    let env_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    let env_key = std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
     !env_key.trim().is_empty()
 }
 

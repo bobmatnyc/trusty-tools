@@ -24,7 +24,8 @@ impl SearchAppState {
     /// to BM25-only mode (no embedder); use [`Self::with_embedder`] to enable
     /// the vector lane.
     pub fn new(registry: IndexRegistry) -> Self {
-        let openrouter_api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+        let openrouter_api_key =
+            std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
         let (events_tx, _) = broadcast::channel::<DaemonEvent>(128);
         // Default-constructed state has no embedder and the readiness watch
         // stays at `false`. Tests exercising BM25-only paths use this default.

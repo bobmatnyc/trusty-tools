@@ -29,6 +29,17 @@
 
 pub mod chat;
 pub mod claude_config;
+
+/// Canonical environment-variable name constants shared across the workspace.
+///
+/// Why: the same credential env-var names were spelled as bare literals at ~40
+/// `std::env::var(...)` call sites across nine crates; centralizing them makes
+/// a typo a compile error instead of a silent misread.
+/// What: exposes [`ENV_OPENROUTER_API_KEY`](env_vars::ENV_OPENROUTER_API_KEY)
+/// and [`ENV_GITHUB_TOKEN`](env_vars::ENV_GITHUB_TOKEN).
+/// Test: `cargo test -p trusty-common -- env_var_names_are_stable`.
+pub mod env_vars;
+
 pub mod project_discovery;
 
 /// Shared graceful-shutdown signal helper for trusty-* daemons (issue #534).

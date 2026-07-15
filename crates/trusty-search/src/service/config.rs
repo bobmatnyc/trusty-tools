@@ -90,7 +90,8 @@ pub struct LoadedUserConfig {
 impl Default for LoadedUserConfig {
     fn default() -> Self {
         Self {
-            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
+            openrouter_api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
+                .unwrap_or_default(),
             openrouter_model: default_openrouter_model(),
             local_model: LocalModelConfig::default(),
         }
@@ -131,7 +132,8 @@ pub fn load_user_config() -> LoadedUserConfig {
             return LoadedUserConfig::default();
         }
     };
-    let env_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    let env_key =
+        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
     let openrouter_api_key = if !env_key.is_empty() {
         env_key
     } else {
