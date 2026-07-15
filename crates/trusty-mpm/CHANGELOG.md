@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- resolve managed MCP registry from real home in fleet-session injector ([#2761](https://github.com/bobmatnyc/trusty-tools/pull/2761)) ([`7c04f1f`](https://github.com/bobmatnyc/trusty-tools/commit/7c04f1f845432edd6b1fb488103a1aba9939fb3c))
+- never traverse $HOME/TCC-protected folders (closes #2759) ([#2760](https://github.com/bobmatnyc/trusty-tools/pull/2760)) ([`74fe7f3`](https://github.com/bobmatnyc/trusty-tools/commit/74fe7f3c682cb5b0c648b63585c44ee47aa6d652))
+- positive stdio field allowlist for fleet native-MCP injection ([#2739](https://github.com/bobmatnyc/trusty-tools/pull/2739)) ([#2755](https://github.com/bobmatnyc/trusty-tools/pull/2755)) ([`e3a5c68`](https://github.com/bobmatnyc/trusty-tools/commit/e3a5c684cc25028202f6ece1a262f515fa3b43da))
+## [Unreleased]
+
 ### Added
 
 - propagate native trusty MCP servers to fleet sessions ([#2739](https://github.com/bobmatnyc/trusty-tools/pull/2739)) ([#2748](https://github.com/bobmatnyc/trusty-tools/pull/2748)) ([`0a87f1d`](https://github.com/bobmatnyc/trusty-tools/commit/0a87f1d70e97fd630bd997db8f17a98d64ca00d4))
