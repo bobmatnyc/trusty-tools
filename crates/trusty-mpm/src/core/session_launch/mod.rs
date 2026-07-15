@@ -571,7 +571,7 @@ fn prepare_session_inner(
     // the injected names flow into `enabledMcpjsonServers` and skip the "new MCP
     // servers found" dialog. Non-fatal: a failure only means those extra tools
     // are absent from this session.
-    if let Err(err) = inject_native_trusty_mcps(fw, project_dir) {
+    if let Err(err) = inject_native_trusty_mcps(project_dir) {
         tracing::warn!("failed to inject native trusty MCP servers: {err}");
     }
 
