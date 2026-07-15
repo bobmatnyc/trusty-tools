@@ -86,6 +86,14 @@ impl TokenStorage {
     }
 
     /// Save tokens to the primary write path (project if known, else user).
+    ///
+    /// Why: `tokens.json` holds live OAuth refresh tokens — on Unix we
+    /// restrict it to owner-only (0600) so other local users/processes can't
+    /// read it off disk. This crate is now a primary minting path (not just
+    /// a reader of Python-written files), so it must not regress that.
+    /// What: Writes the pretty-printed JSON, then (Unix only) chmods the
+    /// file to 0600. Byte content is unchanged — this only affects file mode.
+    /// Test: `save_restricts_permissions_on_unix` (cfg(unix)).
     pub fn save(&self, tokens: &HashMap<String, StoredToken>) -> Result<()> {
         let target = self
             .project_path
@@ -98,6 +106,27 @@ impl TokenStorage {
         let data = serde_json::to_string_pretty(tokens)?;
         std::fs::write(&target, data)
             .with_context(|| format!("write tokens to {}", target.display()))?;
+        Self::restrict_permissions(&target)?;
+        Ok(())
+    }
+
+    /// Restrict the token file to owner read/write only (Unix: mode 0600).
+    ///
+    /// Why: Isolated so the mode-setting logic is a single, obviously-correct
+    /// spot rather than inlined in `save`, and so non-Unix targets get a
+    /// trivial no-op instead of a compile error.
+    /// What: `chmod 0600` on Unix; no-op elsewhere (Windows ACLs already
+    /// default to the owning user for files under the user profile).
+    /// Test: `save_restricts_permissions_on_unix`.
+    #[cfg(unix)]
+    fn restrict_permissions(path: &std::path::Path) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {}", path.display()))
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
         Ok(())
     }
 
@@ -140,5 +169,74 @@ impl TokenStorage {
 impl Default for TokenStorage {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn save_restricts_permissions_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("gw-storage-perms-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokens.json");
+        let storage = TokenStorage::with_path(path.clone());
+
+        storage.save(&HashMap::new()).expect("save");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "tokens.json must be owner-read/write only, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[test]
+    fn save_still_round_trips_content() {
+        // Guards against the permissions change accidentally altering the
+        // byte-serde-compatible wire format.
+        let dir = std::env::temp_dir().join(format!("gw-storage-rt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = TokenStorage::with_path(dir.join("tokens.json"));
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "primary".to_string(),
+            StoredToken {
+                version: 1,
+                metadata: crate::api::auth::models::TokenMetadata {
+                    service_name: "primary".into(),
+                    provider: "google".into(),
+                    created_at: chrono::Utc::now(),
+                    last_refreshed: None,
+                    email: Some("user@example.com".into()),
+                    is_default: true,
+                },
+                token: crate::api::auth::models::OAuthToken {
+                    access_token: "a".into(),
+                    refresh_token: Some("r".into()),
+                    expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+                    scopes: vec!["openid".into()],
+                    token_type: "Bearer".into(),
+                },
+            },
+        );
+
+        storage.save(&tokens).expect("save");
+        let loaded = storage.load().expect("load");
+        assert_eq!(
+            loaded["primary"].metadata.email.as_deref(),
+            Some("user@example.com")
+        );
+        assert!(loaded["primary"].metadata.is_default);
     }
 }

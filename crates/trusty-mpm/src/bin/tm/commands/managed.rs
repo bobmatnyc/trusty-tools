@@ -15,6 +15,8 @@
 //! Test: `cli_parses_catalog_sync` exercises the parse path; the HTTP round-trip
 //! is covered by `tests/session_manager_mvp.rs`.
 
+use std::io::IsTerminal as _;
+
 use trusty_mpm::client::ManagedSessionSummary;
 
 use crate::cli::CatalogAction;
@@ -120,8 +122,14 @@ pub(crate) async fn session_ls(
 /// What: prints a "no managed sessions[ for <slug>]" line when the list is empty;
 /// otherwise prints the header + one row per session (id, state, truncated name,
 /// task/`(interactive)` placeholder, short created-at, and any pending decision).
+/// The STATE column appends `[dead]` (#2595) when the server-computed
+/// `unresumable` flag is set — the session's workspace no longer exists
+/// anywhere on disk, so `tm session resume`/the picker's restart would only
+/// ever fail; the operator's actionable remedy is `tm session rm`.
 /// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
-/// table bytes are exercised by `tests/session_manager_mvp.rs`.
+/// table bytes are exercised by `tests/session_manager_mvp.rs`;
+/// `format_state_column_appends_dead_marker` covers the `[dead]` marker via the
+/// extracted pure helper, [`format_state_column`].
 pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
     if sessions.is_empty() {
         if let Some(sid) = source_id {
@@ -153,16 +161,37 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             .as_deref()
             .map(|d| format!(" [pending: {d}]"))
             .unwrap_or_default();
+        // #2595: flag a dead pick (stopped/errored with no workdir candidate
+        // left on disk) right in the STATE column — the operator sees it
+        // without having to select the session and hit a 422 first.
+        let state = format_state_column(&s.state, s.unresumable);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
             "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
             s.id,
-            s.state,
+            state,
             truncate(&s.name, 24),
             task,
             created,
             pending
         );
+    }
+}
+
+/// Format the STATE column value for one `tm session ls` row (#2595).
+///
+/// Why: extracted as a pure function so the `[dead]` marker is unit-testable
+/// without capturing `render_session_table`'s stdout.
+/// What: returns `state` unchanged when `unresumable` is `false`; appends
+/// `" [dead]"` when `true` — the session is `stopped`/`errored` with no
+/// workdir candidate left on disk, so a resume is guaranteed to fail.
+/// Test: `format_state_column_appends_dead_marker`,
+/// `format_state_column_leaves_healthy_state_unchanged`.
+fn format_state_column(state: &str, unresumable: bool) -> String {
+    if unresumable {
+        format!("{state} [dead]")
+    } else {
+        state.to_string()
     }
 }
 
@@ -306,42 +335,80 @@ pub(crate) async fn session_stop(
     Ok(())
 }
 
-/// `tm session resume <id>` — resume a stopped managed session in its existing workspace.
+/// `tm session resume <id>` — resume a stopped managed session in its existing
+/// workspace AND hand the terminal over to it.
 ///
-/// Why: after `stop`, the workspace is still on disk; `resume` re-spawns the
-/// runtime there without re-cloning. Renamed from the verbose `managed-resume`
-/// in #1205 (which remains a deprecated alias). A missing id or a rejected
-/// resume (daemon `InvalidState`, e.g. the session isn't stopped) are both
-/// genuine failures to perform the requested resume (#2457) — printing a
-/// message and returning `Ok(())` let a script/CI check treat either as
-/// success, so both now return `Err` (non-zero exit) instead, mirroring the
-/// symmetric project-session resume path's own 404 handling just above this
-/// call site in `session.rs`.
-/// What: POSTs `/api/v1/sessions/managed/{id}/resume`; a 404 or 409 bails with
-/// an error instead of printing a status line.
+/// Why (#2649): after `stop`, the workspace is still on disk; `resume`
+/// re-spawns the runtime there without re-cloning. Renamed from the verbose
+/// `managed-resume` in #1205 (which remains a deprecated alias). Before #2649
+/// this handler only printed a status line after the daemon-side resume — the
+/// operator's terminal never moved into the resumed session's tmux window,
+/// unlike the bare-`tm` guided picker's resume path (fixed across #1742/#2001/
+/// #2148/#2453/#2456/#2467). Rather than re-implement that whole state
+/// machine, this now fetches the session record and delegates to the SAME
+/// [`crate::commands::guided_resume::resume_guided_session`] helper the picker
+/// uses, so the two entry points ("resume a session I just picked" and
+/// "resume a session I already know the id of") can never drift apart again —
+/// the exact gap that let this bug survive five rounds of fixes to the
+/// sibling path. That helper also ports the #2001 zombie/stale-Active
+/// auto-reconcile: a session the daemon still marks active/provisioning but
+/// whose tmux pane is gone is auto-stopped then restarted, rather than
+/// dead-ending on a 409. A missing id is still a genuine failure to perform
+/// the requested resume (#2457) — bailing instead of printing a message and
+/// returning `Ok(())`.
+/// What: GETs `/api/v1/sessions/managed/{id}` (a 404 bails with an error); on
+/// success, hands the resulting [`ManagedSessionSummary`] to
+/// [`crate::commands::guided_resume::resume_session`], which picks the right
+/// action (attach directly / restart via the daemon `/resume` endpoint /
+/// auto-reconcile a zombie then restart) purely from the record's state and
+/// live tmux liveness. When stdin is a real terminal, it then attaches (or
+/// `switch-client`s, when already inside tmux) the caller's terminal into the
+/// session's tmux window; otherwise (code-critic HIGH, #2649 review — a
+/// headless/scripted invocation has no controlling terminal to move) it
+/// still performs the daemon-side restart/reconcile but skips the attach and
+/// prints the resulting `resumed <name> (<id>) [<state>]` status line
+/// instead, returning `Ok(())` on daemon-side success either way.
+///
+/// #2649 review, PM-accepted UX change: an `Active` session with a live tmux
+/// pane now resolves to `ResumeAction::Attach` — no `/resume` POST at all,
+/// just an idempotent (re)attach — rather than the pre-#2649 behavior of
+/// bailing with the daemon's raw 409 ("cannot resume a session in state
+/// 'active'"). This makes `tm session resume <id>` idempotent for an
+/// already-running session: "resume" now means "get me into this session",
+/// matching the guided picker's long-standing behavior, instead of treating
+/// an already-active session as a usage error.
 /// Test: HTTP path covered by the integration test; parse by
 /// `cli_parses_session_managed_resume_verb`; `session_resume_not_found_errors`
-/// covers the #2457 exit-code fix for the 404 branch; `session_resume_conflict_state_errors`
-/// (in `managed_tests.rs`, #2521) covers the identical 409/conflict fix by
-/// seeding a session into a non-resumable state.
+/// covers the #2457 exit-code fix for the 404 branch;
+/// `session_resume_restart_failure_errors` (in `managed_tests.rs`, #2649)
+/// covers the same non-swallowing guarantee for a daemon-rejected restart now
+/// that this handler routes through the shared restart/attach helper instead
+/// of POSTing `/resume` directly; `session_resume_headless_active_live_tmux_skips_restart_and_attach`
+/// (`managed_tests.rs`, #2649) proves the new Active+live-tmux idempotent-attach
+/// UX never issues a `/resume` POST (asserted via the record's state staying
+/// unchanged) and that headless mode exits `Ok(())` without attempting a real
+/// tmux attach; `plan_resume`/`needs_restart`/`is_zombie` in
+/// `guided_resume.rs`'s own tests (including
+/// `guided_resume_plan_active_live_tmux_attaches`) exhaustively cover the
+/// branch selection this handler now shares.
 pub(crate) async fn session_resume(
     client: &reqwest::Client,
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
     let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/resume"))
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("managed session '{id}' not found");
     }
-    if resp.status() == reqwest::StatusCode::CONFLICT {
-        let msg = resp.text().await.unwrap_or_default();
-        anyhow::bail!("cannot resume: {msg}");
-    }
-    let body: ManagedSessionSummary = resp.error_for_status()?.json().await?;
-    println!("resumed {} ({}) [{}]", body.name, body.id, body.state);
+    let session: ManagedSessionSummary = resp.error_for_status()?.json().await?;
+    // #2649 review (code-critic HIGH): gate the terminal hand-off on actually
+    // having a terminal — a headless/scripted caller (no stdin TTY) still gets
+    // the daemon-side restart/reconcile, just never a doomed real tmux attach.
+    let no_attach = !std::io::stdin().is_terminal();
+    crate::commands::guided_resume::resume_session(client, url, &session, no_attach).await?;
     Ok(())
 }
 

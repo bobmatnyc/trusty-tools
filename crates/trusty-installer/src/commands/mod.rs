@@ -30,6 +30,8 @@ pub mod probe;
 pub mod progress_ui;
 pub mod runtime;
 pub mod self_update;
+pub mod service_bootstrap;
+pub mod sign;
 pub mod stable_set;
 pub mod stack;
 pub mod status;

@@ -701,6 +701,10 @@ enum Commands {
     ///   trusty-search prune-orphans --dry-run   # preview without any changes
     ///   trusty-search prune-orphans             # interactive confirmation
     ///   trusty-search prune-orphans --yes       # non-interactive (scripted)
+    ///   trusty-search prune-orphans --repo-identity bobmatnyc/trusty-tools
+    ///                                           # read-only grouped report of
+    ///                                           # every facet (live + orphan) of
+    ///                                           # one repo (DOC-37)
     #[command(display_order = 27, name = "prune-orphans")]
     PruneOrphans {
         /// Preview the list of orphaned registrations without removing anything
@@ -710,6 +714,12 @@ enum Commands {
         /// Skip the confirmation prompt and remove immediately
         #[arg(long)]
         yes: bool,
+
+        /// DOC-37: read-only grouped report of every registered index (live and
+        /// orphaned) for this canonical repo identity (`owner/repo` or
+        /// `content:<sha>`). Never mutates the registry.
+        #[arg(long = "repo-identity", value_name = "OWNER/REPO")]
+        repo_identity: Option<String>,
     },
 
     /// Remove idle indexes that have not been searched for N days (issue #1782)
@@ -1425,8 +1435,12 @@ async fn run() -> Result<()> {
             commands::migrate_redb::handle_migrate_redb(path)?;
         }
 
-        Commands::PruneOrphans { dry_run, yes } => {
-            commands::prune_orphans::handle_prune_orphans(dry_run, yes)?;
+        Commands::PruneOrphans {
+            dry_run,
+            yes,
+            repo_identity,
+        } => {
+            commands::prune_orphans::handle_prune_orphans(dry_run, yes, repo_identity)?;
         }
 
         Commands::Prune {

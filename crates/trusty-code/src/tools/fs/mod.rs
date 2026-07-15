@@ -5,24 +5,37 @@
 //! `ToolExecutor` implementations instead of raw shell-exec keeps error handling
 //! structured, scoping to a working directory enforced, and path traversal
 //! impossible.
-//! What: Three `ToolExecutor` impls — `ReadFileTool`, `WriteFileTool`, and
-//! `EditTool` — each with an OpenAI-function-call schema and registration helpers.
-//! `EditTool` (#2068) supports three edit wire formats — SEARCH/REPLACE,
-//! unified-diff, and whole-file — selected per-model via `edit_format`.
-//! Errors use `thiserror` for clean structured error types.
-//! Test: `read.rs`, `write.rs`, and `edit.rs` each carry tempdir-based unit
-//! tests; `edit_format` carries its own matrix/application tests;
-//! `registry_tests` verifies all three tools appear in `schemas()` and
-//! dispatch through `dispatch_gated`.
+//! What: `ToolExecutor` impls for the engineer's filesystem surface —
+//! `ReadFileTool`, `WriteFileTool`, `EditTool`, plus the batch-write and
+//! exploration tools `WriteFilesTool` (#2681), `GlobTool`, `GrepTool`, and
+//! `ListDirTool` (#1027) — each with an OpenAI-function-call schema and
+//! registration helpers. `EditTool` (#2068) supports three edit wire formats —
+//! SEARCH/REPLACE, unified-diff, and whole-file — selected per-model via
+//! `edit_format`. The exploration tools give the engineer native file discovery
+//! so it no longer shells out to `find`/`grep`/`ls` (the dominant bake-off
+//! agent-turn sink). Errors use `thiserror` for clean structured error types.
+//! Test: `read.rs`, `write.rs`, `write_files.rs`, `glob.rs`, `grep.rs`,
+//! `list_dir.rs`, and `edit.rs` each carry tempdir-based unit tests;
+//! `edit_format` carries its own matrix/application tests; `registry_tests`
+//! verifies the tools appear in `schemas()` and dispatch through
+//! `dispatch_gated`.
 
 pub mod edit;
 pub mod edit_format;
+pub mod glob;
+pub mod grep;
+pub mod list_dir;
 pub mod read;
 pub mod write;
+pub mod write_files;
 
 pub use edit::EditTool;
+pub use glob::GlobTool;
+pub use grep::GrepTool;
+pub use list_dir::ListDirTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
+pub use write_files::{WRITE_FILES_TOOL_NAME, WriteFilesTool};
 
 use std::path::{Path, PathBuf};
 
@@ -44,6 +57,18 @@ pub enum FsError {
     /// The file or directory was not found.
     #[error("not found: {0}")]
     NotFound(PathBuf),
+
+    /// `list_dir` was pointed at a path that is not a directory.
+    #[error("not a directory: {0}")]
+    NotADirectory(PathBuf),
+
+    /// A `glob`/`grep` glob pattern failed to compile.
+    #[error("glob: invalid pattern '{pattern}': {reason}")]
+    GlobPattern { pattern: String, reason: String },
+
+    /// A `grep` regular expression failed to compile.
+    #[error("grep: invalid pattern '{pattern}': {reason}")]
+    GrepPattern { pattern: String, reason: String },
 
     /// The file exceeds the maximum allowed read size.
     #[error("file too large ({bytes} bytes, max {max} bytes): {path}")]

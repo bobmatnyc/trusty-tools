@@ -8,6 +8,7 @@
 //! Test: `cargo test -p trusty-mpm` runs the full suite in `tests.rs`.
 
 mod cli;
+mod cli_manager;
 mod commands;
 mod formatters;
 mod gh_identity;
@@ -22,6 +23,7 @@ use commands::{
     daemon::{restart, run_daemon, start, stop_daemon},
     install::install,
     launch::{connect, launch},
+    manager::manager,
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
@@ -67,6 +69,10 @@ mod tests_projects;
 #[cfg(test)]
 #[path = "tests_projects_config_tests.rs"]
 mod tests_projects_config_tests;
+
+#[cfg(test)]
+#[path = "tests_manager.rs"]
+mod tests_manager;
 
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
@@ -325,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
         // #2116: `sessions` (plural) is the canonical top-level command.
         Some(Command::Sessions { action }) => session(&client, &url, action).await,
         Some(Command::Projects { action }) => projects(&client, &url, action).await,
+        Some(Command::Manager { action }) => manager(&client, &url, action).await,
         // #2116: `session` (singular) is a hidden deprecated alias of `sessions`.
         // The notice fires here — exactly once per invocation, regardless of
         // which verb was invoked — before dispatching to the identical handler.

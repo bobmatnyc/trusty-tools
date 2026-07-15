@@ -118,6 +118,44 @@ pub enum AnalyzeCoreArg {
     Skip,
 }
 
+/// CLI value for `trusty-installer sign <target>` (#2558).
+///
+/// Why: A clap-facing enum keeps the `sign` surface declarative and
+/// self-documenting (`--help` lists the two valid targets) while
+/// `commands::sign::run` and `commands::macos_signing` work in terms of the
+/// plain `&str` set names (`SEARCH_SET` / `MPM_SET`) so that module stays
+/// clap-independent.
+///
+/// What: `Search` → the `trusty-search` + `trusty-embedderd` set; `Mpm` → the
+/// `trusty-mpm` set (owner-authorized scope extension, #2558).
+///
+/// Test: `cli_tests::parse_sign` round-trips each value.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SignTargetArg {
+    /// `trusty-search` + its bundled `trusty-embedderd`.
+    #[value(name = "trusty-search")]
+    Search,
+    /// `trusty-mpm`.
+    #[value(name = "trusty-mpm")]
+    Mpm,
+}
+
+impl SignTargetArg {
+    /// The plain set name `commands::macos_signing` expects.
+    ///
+    /// Why: Bridges the clap enum to the plain-`&str` set vocabulary used by
+    /// `macos_signing::binaries_for_set` / `sign_set_strict`, so that module
+    /// has no clap dependency.
+    /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`.
+    /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip).
+    pub fn as_set_name(self) -> &'static str {
+        match self {
+            SignTargetArg::Search => "trusty-search",
+            SignTargetArg::Mpm => "trusty-mpm",
+        }
+    }
+}
+
 /// All `trusty-installer` subcommands.
 ///
 /// Why: A single enum over the entire DOC-5 §1.1 command tree lets the
@@ -170,6 +208,11 @@ pub enum Commands {
     Install {
         /// Specific member(s) to install; omit for all enabled members.
         members: Vec<String>,
+
+        /// Install binaries only — skip the post-install launchd service
+        /// bootstrap (#2556). Also settable via `TCTL_NO_SERVICE_BOOTSTRAP`.
+        #[arg(long)]
+        no_service: bool,
     },
 
     /// Upgrade the stack (or named members) to the BOM-pinned versions, then restart. (DOC-9)
@@ -310,6 +353,29 @@ pub enum Commands {
     /// no prebuilt is available. Prints a restart hint on success — does NOT
     /// re-exec the updated binary. Use `--yes` to skip the crates.io version check.
     SelfUpdate,
+
+    /// Developer-ID codesign a signable binary set — macOS only. (#2558)
+    ///
+    /// The single source of truth for the FDA/App-Data-TCC persistent-signing
+    /// story: `tctl install` already runs this automatically (fail-soft) after
+    /// `trusty-search` / `trusty-mpm` land, but this standalone verb lets an
+    /// operator (re-)sign binaries built from local source
+    /// (`cargo install --path …`) directly, and is what
+    /// `scripts/install-trusty-search-signed.sh` shells out to instead of
+    /// duplicating `codesign` flags in bash. Hard-fails (non-zero exit) when
+    /// no Developer ID Application certificate is available or signing fails —
+    /// unlike the fail-soft `tctl install` hook, this command is the operator
+    /// explicitly asking for signing to happen.
+    Sign {
+        /// Which signable set to sign.
+        #[arg(value_enum)]
+        target: SignTargetArg,
+
+        /// Directory containing the binaries (defaults to `$CARGO_HOME/bin` /
+        /// `~/.cargo/bin`).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 
     /// Generic passthrough: `trusty-installer <tool> <verb> [args]` — any advertised verb. (DOC-1 D3c)
     ///

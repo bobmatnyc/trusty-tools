@@ -162,34 +162,58 @@ This applies especially to verification-critical commands: test runs, `git`/`gh`
 reads and writes, and build output. An unobservable result is never a passing
 result.
 
-## Foreground Execution
+## Foreground Execution — NEVER End Your Turn To Wait
 
-Long-running commands — CI watches (`gh pr checks --watch`, `gh run watch`),
-builds, test suites, deploy waits — MUST run as plain blocking foreground
-commands. Run them and wait for them to exit, even if that takes 15+ minutes.
+🔴 **You must NEVER end your turn to "wait" for anything.** Nothing re-invokes a
+stopped agent. The moment you end your turn, you are stopped — no background
+monitor, watcher, poller, timer, or notification you spawned can ever wake you
+back up. It fires into the void and your task strands until a human notices and
+manually resumes you. Waiting is done ONLY by running a blocking command in the
+FOREGROUND and letting it hold your turn until the thing you're waiting for is
+done.
 
-NEVER stop mid-task to "wait for a notification", "monitor in the background",
-or "check back later". No notification will ever arrive inside a delegated
-agent's turn; stopping stalls the whole delegation chain.
+**Background monitors/watchers/pollers are FORBIDDEN as a wake mechanism.** Do
+not spawn a "background polling monitor", "background watcher", or async job and
+then end your turn expecting it to report back. That mechanism does not exist for
+you — it exists only for a top-level human-driven orchestrator, never for a
+delegated agent.
 
-The tool layer enforces a hard per-invocation timeout (10 minutes / 600000ms).
-If a blocking command hits that ceiling before finishing — or otherwise
-legitimately outlasts a single invocation — immediately RE-ISSUE the same
-blocking command (or its status-check equivalent; e.g. running
-`gh pr checks <n> --watch` again resumes watching) in the SAME turn, looping
-re-invocations until it completes. Re-issuing is not "checking back later";
-the forbidden move is ending the turn to wait for a notification, not the
-re-invocation itself.
+**Ending your turn with any of these — "waiting for…", "monitoring…", "standing
+by…", "will report when…", "I'll report back once…", "checking back later",
+"I'll wait for the notification" — is a PROTOCOL VIOLATION, not a status
+update.** If you catch yourself about to write one of those, you are about to
+strand the task. Instead: run the blocking command now, in this turn.
 
-Do not background such commands (`&` / `run_in_background`) unless the
-dispatching prompt explicitly set up a polling loop. If a command was
-backgrounded, poll it to completion in the same turn before ending.
+### Canonical CI-wait pattern (blocking, foreground)
 
-If a watch command exits nonzero, capture the failure evidence and report it —
-don't retry-by-waiting.
+```bash
+gh pr checks <pr> --watch --fail-fast    # blocks until all checks settle
+```
 
-This rule exists because merge/CI agents repeatedly parked mid-watch waiting
-for a notification that never came (issue #2501).
+Run it as a plain foreground command and let it hold the turn — even 15+ minutes.
+Do NOT background it (`&` / `run_in_background`). Do NOT end the turn to "monitor
+the checks". When it exits, read the result and act. If it exits nonzero, capture
+the failure evidence and report it — don't retry-by-waiting.
+
+### Canonical long-command pattern (blocking, foreground)
+
+Run builds, test suites, and deploy waits as plain foreground commands with a
+long timeout and wait for them to exit. If a command was already backgrounded,
+you MUST poll it to completion with blocking status calls in the SAME turn — you
+may not end the turn while it is still running.
+
+### When a single invocation times out
+
+The tool layer enforces a hard per-invocation timeout (10 minutes / 600000ms). If
+a blocking command hits that ceiling before finishing — or otherwise legitimately
+outlasts one invocation — immediately RE-ISSUE the same blocking command (or its
+status-check equivalent; e.g. running `gh pr checks <pr> --watch` again resumes
+watching) in the SAME turn, looping re-invocations until it completes. Re-issuing
+is not "checking back later"; the forbidden move is ending the turn to wait, not
+the re-invocation itself.
+
+This rule exists because merge/CI/release agents repeatedly parked mid-watch
+waiting for a notification that never came (issues #2501, #2610).
 
 ## Output Format
 

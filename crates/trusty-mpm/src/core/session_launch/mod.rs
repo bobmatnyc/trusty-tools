@@ -19,6 +19,7 @@ mod search_index;
 mod settings;
 #[cfg(test)]
 mod tests;
+mod worktree_sync;
 // Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
 // (issue #2149 roster-deploy-failure-continues coverage) — mirrors the
 // `doctor_output_style.rs` / `doctor_fs_checks.rs` split pattern.
@@ -56,6 +57,19 @@ use settings::{
 /// `core::standalone::settings_defaults` tests (this is a plain re-export, no
 /// logic of its own).
 pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
+
+/// Re-export of the resume-time worktree/upstream sync primitives (issue
+/// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
+///
+/// Why: `mod worktree_sync` above is private; this re-export is the public
+/// boundary the resume path calls through, mirroring the `settings`
+/// re-export just above.
+/// What: re-exports [`worktree_sync::resume_self_heal`] — the single
+/// call-site entry point wrapping [`worktree_sync::sync_worktree_with_upstream`]
+/// and [`worktree_sync::self_heal_claude_md`] with logging.
+/// Test: covered by `worktree_sync`'s own unit tests (this is a plain
+/// re-export, no logic of its own).
+pub use worktree_sync::resume_self_heal;
 
 /// Outcome of the pre-launch preparation for one session.
 ///

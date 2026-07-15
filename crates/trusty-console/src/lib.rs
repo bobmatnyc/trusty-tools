@@ -48,6 +48,7 @@ pub mod poller;
 pub mod proxy;
 pub mod routes;
 pub mod server;
+pub mod service;
 pub(crate) mod url_util;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -86,6 +87,16 @@ pub enum Commands {
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
     Config(trusty_common::inference::config::ConfigCommand),
+    /// Manage the macOS launchd LaunchAgent for the console daemon (#2557).
+    ///
+    /// `install` writes `~/Library/LaunchAgents/com.trusty.trusty-console.plist`
+    /// (running `trusty-console serve`) and bootstraps it; `uninstall` unloads
+    /// and removes it; `status` / `logs` inspect the running agent. macOS-only.
+    /// `tctl install` / `tctl start` call `install` on the operator's behalf.
+    Service {
+        #[command(subcommand)]
+        action: service::ServiceAction,
+    },
 }
 
 /// Arguments for `trusty-console port`.
@@ -186,6 +197,8 @@ pub async fn run_from(argv: Vec<String>) -> Result<()> {
         Commands::Serve(args) => run_serve(args).await,
         Commands::Port(args) => run_port(args),
         Commands::Config(cmd) => cmd.run().await,
+        // `service` drives macOS launchd synchronously; no async work needed.
+        Commands::Service { action } => service::run_service_action(&action),
     }
 }
 

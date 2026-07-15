@@ -58,7 +58,13 @@ libc = { workspace = true }
 
 # verify_gate (#2279): matches a `bash` tool call's command against the
 # finalized test-invocation patterns (`pytest\s+\S+`, `cargo test`, …).
+# Also powers the `grep` exploration tool's content regex matching (#1027).
 regex = { workspace = true }
+
+# Native exploration tools (#1027): `ignore` provides gitignore-aware recursive
+# walking for the `glob`/`grep` tools; `globset` compiles the glob patterns.
+ignore = { workspace = true }
+globset = { workspace = true }
 
 # DOC-28 catch-up digest for PM prompt seed context (#1762 PR2), plus the
 # shared JSON-RPC 2.0 / MCP wire types + STDIO loop (#2053) so `tcode serve

@@ -230,9 +230,7 @@ pub fn handle_key(state: &mut ProjectCtlState, key: KeyEvent) -> Option<PendingA
             }
         }
         KeyCode::Char('k') if state.focus == Pane::Sessions => request_kill(state),
-        KeyCode::Char('r') if state.focus == Pane::Sessions => {
-            selected_session_action(state, PendingAction::Resume)
-        }
+        KeyCode::Char('r') if state.focus == Pane::Sessions => request_resume(state),
         KeyCode::Char('d') if state.focus == Pane::Sessions => request_decommission(state),
         KeyCode::Char('a') if state.focus == Pane::Sessions => {
             selected_session_action(state, PendingAction::Attach)
@@ -295,6 +293,40 @@ fn request_kill(state: &mut ProjectCtlState) -> Option<PendingAction> {
     }
 }
 
+/// `r` in the Sessions pane: resume the selected session.
+///
+/// Why (#2595): a session flagged `unresumable` — `stopped`/`errored` with no
+/// `last_cwd`/`workspace_path`/`cwd` candidate left on disk — can never
+/// actually resume; the daemon's `/resume` would only return the #2594 422.
+/// Mirrors the CLI picker's `PickerDecision::Unresumable` guard
+/// (`bin/tm/commands/session_picker.rs`), adapted to the TUI's
+/// notice-instead-of-daemon-round-trip idiom: no confirm gate is needed here
+/// (nothing destructive to confirm) — just a refusal with the same
+/// "workspace removed — remove the record instead" remedy the picker gives,
+/// pointing at the TUI's own `d` (decommission) key rather than the CLI's
+/// `d<N>` delete verb.
+/// What: no selection → notice, `None`. `unresumable` → sets the dead-session
+/// notice, `None`, no daemon round trip. Otherwise →
+/// `Some(PendingAction::Resume(id))` immediately.
+/// Test: `super::tests::resume_on_unresumable_session_is_blocked`,
+/// `super::tests::resume_on_healthy_session_fires_immediately`.
+fn request_resume(state: &mut ProjectCtlState) -> Option<PendingAction> {
+    let Some(session) = state.selected_session().cloned() else {
+        state.set_notice("select a session first");
+        return None;
+    };
+    if session.unresumable {
+        state.set_notice(format!(
+            "'{}' is dead — its workspace no longer exists on disk; resuming it would only \
+             fail. Press [d] to decommission it instead.",
+            session.name
+        ));
+        None
+    } else {
+        Some(PendingAction::Resume(session.id))
+    }
+}
+
 /// `d` in the Sessions pane: decommission the selected session.
 ///
 /// Why: DOC-35 §5.2 — decommission ALWAYS requires a confirmation gate
@@ -347,9 +379,14 @@ fn move_selection(state: &mut ProjectCtlState, dir: Direction) {
 /// Build a session-targeted [`PendingAction`] from the current selection, or
 /// set an explanatory notice when none is selected.
 ///
-/// Why: `k`/`r`/`d`/`a` share the identical "need a selected session" guard;
-/// factoring it out keeps [`handle_key`]'s match arms one line each.
-/// What: `build` is a tuple-variant constructor (e.g. `PendingAction::Kill`);
+/// Why: `a` (and, before #2595 added its own `unresumable` gate, `r` too)
+/// needs the identical "need a selected session" guard; factoring it out
+/// keeps [`handle_key`]'s match arm one line. `k`/`d`/`r` each layer an
+/// additional gate on top (`request_kill`'s Active-confirm,
+/// `request_decommission`'s unconditional confirm, `request_resume`'s
+/// #2595 dead-session refusal) and so implement the same "no selection →
+/// notice" check themselves rather than calling this helper.
+/// What: `build` is a tuple-variant constructor (e.g. `PendingAction::Attach`);
 /// returns `Some(build(selected session id))` or sets a notice and returns
 /// `None`.
 fn selected_session_action(

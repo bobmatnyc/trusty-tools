@@ -718,6 +718,7 @@ fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> Sessio
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     }
 }
 
@@ -813,6 +814,7 @@ async fn manager_reconcile_skips_decommissioned() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -1374,6 +1376,7 @@ pub(super) async fn seed_record(
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     };
     if seeds_live_tmux {
         mgr.tmux
@@ -1779,6 +1782,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -1866,6 +1870,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 

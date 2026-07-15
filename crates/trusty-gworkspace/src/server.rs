@@ -128,6 +128,48 @@ pub async fn handle_tool_call(state: &AppState, name: &str, args: Value) -> Valu
         "manage_table_structure" => {
             services::docs::table_ops::manage_table_structure(&state.client, args).await
         }
+        "manage_document_tabs" => {
+            services::docs::tabs::manage_document_tabs(&state.client, args).await
+        }
+        "create_document_tab" => {
+            services::docs::tabs::create_document_tab(&state.client, args).await
+        }
+        "move_paragraph_in_document" => {
+            services::docs::paragraphs::move_paragraph_in_document(&state.client, args).await
+        }
+        "format_paragraph_in_document" => {
+            services::docs::paragraphs::format_paragraph_in_document(&state.client, args).await
+        }
+        "create_list_in_document" => {
+            services::docs::paragraphs::create_list_in_document(&state.client, args).await
+        }
+        "insert_image_in_document" => {
+            services::docs::images::insert_image_in_document(&state.client, args).await
+        }
+        "format_table_cells" => {
+            services::docs::table_style::format_table_cells(&state.client, args).await
+        }
+        "set_table_column_widths" => {
+            services::docs::table_style::set_table_column_widths(&state.client, args).await
+        }
+        "apply_table_style" => {
+            services::docs::table_preset::apply_table_style(&state.client, args).await
+        }
+        "format_document_tables" => {
+            services::docs::table_format::format_document_tables(&state.client, args).await
+        }
+        "manage_document_header_footer" => {
+            services::docs::header_footer::manage_document_header_footer(&state.client, args).await
+        }
+        "create_document_from_template" => {
+            services::docs::templates::create_document_from_template(&state.client, args).await
+        }
+        "get_document_named_styles" => {
+            services::docs::templates::get_document_named_styles(&state.client, args).await
+        }
+        "update_document_named_styles" => {
+            services::docs::templates::update_document_named_styles(&state.client, args).await
+        }
 
         // Sheets
         "get_spreadsheet" => services::sheets::core::get_spreadsheet(&state.client, args).await,
@@ -137,12 +179,15 @@ pub async fn handle_tool_call(state: &AppState, name: &str, args: Value) -> Valu
         "modify_sheet_values" => {
             services::sheets::core::modify_sheet_values(&state.client, args).await
         }
-        "format_sheet" => services::sheets::core::format_sheet(&state.client, args).await,
+        "format_sheet" => services::sheets::formatting::format_sheet(&state.client, args).await,
+        "create_chart" => services::sheets::charts::create_chart(&state.client, args).await,
 
         // Slides
         "get_slides" => services::slides::core::get_slides(&state.client, args).await,
         "manage_slides" => services::slides::core::manage_slides(&state.client, args).await,
-        "add_slide_content" => services::slides::core::add_slide_content(&state.client, args).await,
+        "add_slide_content" => {
+            services::slides::content::add_slide_content(&state.client, args).await
+        }
 
         // Tasks
         "manage_task_lists" => services::tasks::manage_task_lists(&state.client, args).await,

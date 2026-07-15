@@ -51,10 +51,13 @@ pub use backend::DirectManagedBackend;
 /// sharing `state`'s persistent focus store.
 ///
 /// Why: every handler below needs the identical construction; centralising it
-/// keeps each handler a one-line call.
+/// keeps each handler a one-line call. Since #2550 the MCP proxy tools
+/// ([`crate::daemon::mcp_proxy`]) build their [`SessionProxy`] through this SAME
+/// helper, so the HTTP and MCP surfaces share one construction site over the one
+/// shared focus store — a focus set on either surface is visible on the other.
 /// What: wraps a fresh [`DirectManagedBackend`] and the daemon's shared focus
 /// map into a [`SessionProxy`].
-fn local_proxy(state: &Arc<DaemonState>) -> SessionProxy {
+pub(crate) fn local_proxy(state: &Arc<DaemonState>) -> SessionProxy {
     let backend: Arc<dyn ManagedBackend> = Arc::new(DirectManagedBackend::new(Arc::clone(state)));
     SessionProxy::with_focus_store(backend, state.proxy_focus_store())
 }
@@ -362,6 +365,33 @@ pub async fn proxy_summary(
     let proxy = local_proxy(&state);
     let outcome = proxy.summarize(&conversation_key).await;
     Json(ProxySummaryResponse::from(outcome)).into_response()
+}
+
+/// Build the sub-router for the local session-manager PROXY surface.
+///
+/// Why: co-locating the five `/api/v1/sessions/proxy/*` route registrations with
+/// their handlers (rather than inlining them in the daemon's monolithic
+/// `api::router`) keeps this cohesive TELUI-6 cluster self-contained and lets
+/// `api::router` compose it with a single `.merge`. Every route here binds the
+/// same [`DaemonState`] the parent router carries, so merging is state-preserving.
+/// What: returns a [`Router`] with the focus/unfocus/message/summary handlers
+/// wired, ready to `.merge` into the daemon router before `.with_state`.
+/// Test: exercised end-to-end by `tests/proxy_routes.rs` (the routes reach the
+/// daemon exactly as before this extraction).
+pub fn proxy_router() -> axum::Router<Arc<DaemonState>> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/api/v1/sessions/proxy/focus", post(proxy_focus))
+        .route(
+            "/api/v1/sessions/proxy/focus/{conversation_key}",
+            get(proxy_get_focus),
+        )
+        .route("/api/v1/sessions/proxy/unfocus", post(proxy_unfocus))
+        .route("/api/v1/sessions/proxy/message", post(proxy_message))
+        .route(
+            "/api/v1/sessions/proxy/summary/{conversation_key}",
+            get(proxy_summary),
+        )
 }
 
 #[cfg(test)]

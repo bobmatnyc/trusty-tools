@@ -9,6 +9,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- turnkey launchd bootstrap for the shared daemon set (closes #2557, #2556) ([#2566](https://github.com/bobmatnyc/trusty-tools/pull/2566)) ([`f47b428`](https://github.com/bobmatnyc/trusty-tools/commit/f47b4286aeb42d0a5871939edf0019a70cdfab78))
+- move Bedrock Converse adapter into commons inference layer (closes #2407) ([#2541](https://github.com/bobmatnyc/trusty-tools/pull/2541)) ([`b14ea97`](https://github.com/bobmatnyc/trusty-tools/commit/b14ea9779d68f2ec24b88f6f18b62dca2bed938a))
+- Anthropic-direct + OpenAI-direct inference adapters ([#2540](https://github.com/bobmatnyc/trusty-tools/pull/2540)) ([`2f07eb1`](https://github.com/bobmatnyc/trusty-tools/commit/2f07eb14d0bd24e24ed03632c86e569d1cd5c5ec))
+- add AtlasCloud direct inference provider (openai/gpt-5.6-sol) ([#2537](https://github.com/bobmatnyc/trusty-tools/pull/2537)) ([`64c7857`](https://github.com/bobmatnyc/trusty-tools/commit/64c785711922765b7b73395ed4bb38069a99aab7))
+
+### Fixed
+
+- credential hardening + registry default-model errors (closes #2474, #2475, #2510) ([#2539](https://github.com/bobmatnyc/trusty-tools/pull/2539)) ([`58f36ca`](https://github.com/bobmatnyc/trusty-tools/commit/58f36cadef0fa1d38e0f15ed1984a956b21131c5))
+## [Unreleased]
+
+### Added
+
 - universal config keys CLI module (set/list/test/unset) ([#2518](https://github.com/bobmatnyc/trusty-tools/pull/2518)) ([`17f0aa9`](https://github.com/bobmatnyc/trusty-tools/commit/17f0aa950bb0ed71c5364e1b55b1dc0503e4c0b2))
 - route together/* models through the shared Together adapter ([#2495](https://github.com/bobmatnyc/trusty-tools/pull/2495)) ([`2bdfccf`](https://github.com/bobmatnyc/trusty-tools/commit/2bdfccfa65c7a5c34cd325b88e3ce78ba4c3c427))
 - add Together.ai as an OpenAI-compat inference provider ([#2490](https://github.com/bobmatnyc/trusty-tools/pull/2490)) ([`98405bb`](https://github.com/bobmatnyc/trusty-tools/commit/98405bbaada82f62bb59805d54f3a9cd0f35236e))

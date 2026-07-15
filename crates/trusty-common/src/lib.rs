@@ -462,6 +462,18 @@ pub mod palace_alias;
 /// Test: `cargo test -p trusty-common -- github_path::tests`.
 pub mod github_path;
 
+/// Canonical repository identity (DOC-37) — the path-independent join key that
+/// relates the live checkout, `.base` clone, and session worktrees of one repo.
+///
+/// Why: index ids are bare path basenames, so every facet of a repo registers
+/// as an unrelated index. [`repo_identity::RepoIdentity`] supplies the missing
+/// `owner/repo` (or content-hash) join key so trusty-search can group and filter
+/// indexes by repo; it lives here so trusty-search and trusty-mpm derive it
+/// identically.
+/// What: exposes [`repo_identity::RepoIdentity`] (`derive`/`canonical`/`parse`).
+/// Test: `cargo test -p trusty-common -- repo_identity::tests`.
+pub mod repo_identity;
+
 /// Data-directory resolution and filesystem utilities.
 ///
 /// Why: All trusty-* tools share the same per-app data-directory resolution

@@ -12,16 +12,18 @@ use serde_json::{Value, json};
 
 use crate::tickets::api::config::GithubConfig;
 
+use super::auth::resolve_token;
 use super::types::{GRAPHQL_URL, GitHubBackend, REST_BASE, USER_AGENT, ensure_ok};
 
 impl GitHubBackend {
-    /// Why: Caller has validated config; we just wire up the client.
-    /// What: Constructs from `GithubConfig` after env-var fallback applied.
-    /// Test: covered by `client.rs` construction tests.
-    pub fn new(cfg: GithubConfig) -> Result<Self> {
-        let token = cfg
-            .token
-            .ok_or_else(|| anyhow!("github: missing token (set GITHUB_TOKEN)"))?;
+    /// Why: Caller has validated config; we just wire up the client. Auth is a
+    /// PAT (config/env) OR the authenticated `gh` CLI, so users with only
+    /// `gh auth login` need no PAT (see `auth::resolve_token`).
+    /// What: Resolves a bearer token, then constructs from `GithubConfig`
+    /// after env-var fallback applied.
+    /// Test: covered by `client.rs` construction tests and `auth::tests`.
+    pub async fn new(cfg: GithubConfig) -> Result<Self> {
+        let token = resolve_token(&cfg).await?;
         let owner = cfg
             .owner
             .ok_or_else(|| anyhow!("github: missing owner (set GITHUB_OWNER)"))?;

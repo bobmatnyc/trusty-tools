@@ -10,8 +10,10 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
-use super::{record_to_json, record_to_summary};
-use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::{checked_summaries, record_to_json, record_to_summary};
+use crate::session_manager::{
+    InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
+};
 
 /// Build a minimal [`SessionRecord`] suitable for serialization tests.
 fn make_record(source_id: Option<&str>) -> SessionRecord {
@@ -38,6 +40,7 @@ fn make_record(source_id: Option<&str>) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: Default::default(),
     }
 }
 
@@ -168,6 +171,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         claude_session_id: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: None,
+        unresumable: false,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -200,6 +205,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         claude_session_id: None,
         deliverable_id: None,
         pane_id: None,
+        injection_status: None,
+        unresumable: false,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,
@@ -211,5 +218,135 @@ fn decommission_workspace_removed_reflects_ownership() {
     assert!(
         json2.get("workspace_path_was").is_none(),
         "unowned: workspace_path_was must be absent (skip_serializing_if = None)"
+    );
+}
+
+/// Why (#2364): a session injection was never attempted for must omit the
+/// `injection_status` key entirely on both wire paths, rather than emitting
+/// the literal string `"not_applicable"` — the field should stay silent for
+/// the (common) case where turnkey injection never applies to a session.
+/// What: asserts `record_to_json` serializes `injection_status` as JSON
+/// `null` and `record_to_summary` carries `None` when the record's
+/// `injection_status` is the `NotApplicable` default.
+/// Test: this test.
+#[test]
+fn injection_status_wire_omits_not_applicable() {
+    let r = make_record(None);
+    assert_eq!(r.injection_status, InjectionStatus::NotApplicable);
+
+    let json = record_to_json(&r);
+    assert!(
+        json["injection_status"].is_null(),
+        "record_to_json must serialize NotApplicable as null, got {:?}",
+        json["injection_status"]
+    );
+
+    let summary = record_to_summary(&r);
+    assert_eq!(
+        summary.injection_status, None,
+        "record_to_summary must carry None for NotApplicable"
+    );
+}
+
+/// Why (#2364): callers polling delivery status need every non-trivial
+/// [`InjectionStatus`] variant to round-trip through BOTH wire paths as its
+/// snake_case string form, so `tm session info`/`tm sessions ls` can surface
+/// exactly `pending`/`success`/`failed_timeout`/`failed_session_died`.
+/// What: for each non-`NotApplicable` variant, asserts `record_to_json`
+/// serializes the matching string and `record_to_summary` carries
+/// `Some(<string>)`.
+/// Test: this test.
+#[test]
+fn injection_status_wire_stringifies_other_variants() {
+    let cases = [
+        (InjectionStatus::Pending, "pending"),
+        (InjectionStatus::Success, "success"),
+        (InjectionStatus::FailedTimeout, "failed_timeout"),
+        (InjectionStatus::FailedSessionDied, "failed_session_died"),
+    ];
+    for (status, expected) in cases {
+        let mut r = make_record(None);
+        r.injection_status = status;
+
+        let json = record_to_json(&r);
+        assert_eq!(
+            json["injection_status"].as_str(),
+            Some(expected),
+            "record_to_json must serialize {status:?} as {expected:?}"
+        );
+
+        let summary = record_to_summary(&r);
+        assert_eq!(
+            summary.injection_status.as_deref(),
+            Some(expected),
+            "record_to_summary must carry {expected:?} for {status:?}"
+        );
+    }
+}
+
+// `unresumable_response`'s header-tagging behavior is unit-tested beside its
+// definition in `resume_error.rs` (#2577 review) — see
+// `resume_error::tests::unresumable_response_tags_reason_header_per_failure_class`.
+
+/// #2595 review (PR #2652, MEDIUM finding 4): [`checked_summaries`] fans its
+/// per-record `unresumable` probes out concurrently via `JoinSet`, which
+/// yields completed tasks in COMPLETION order, not submission order — this
+/// pins that the returned `Vec<SessionSummary>` is nonetheless rebuilt in the
+/// SAME order as the input `records` slice, and that only the genuinely-dead
+/// record among a live/dead/healthy-stopped trio gets flagged.
+#[tokio::test]
+async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() {
+    // r0: Active — the state gate alone skips the filesystem probe.
+    let mut r0 = make_record(None);
+    r0.state = ManagedSessionState::Active;
+
+    // r1: Stopped with NO existing workdir candidate — must end up dead.
+    let mut r1 = make_record(None);
+    r1.state = ManagedSessionState::Stopped;
+    r1.cwd = PathBuf::from("/nonexistent/checked-summaries-order-r1");
+    r1.workspace_path = None;
+    r1.last_cwd = None;
+
+    // r2: Errored but its `cwd` genuinely exists — must stay resumable.
+    let real_dir = tempfile::TempDir::new().expect("tempdir for r2");
+    let mut r2 = make_record(None);
+    r2.state = ManagedSessionState::Errored;
+    r2.cwd = real_dir.path().to_path_buf();
+    r2.workspace_path = None;
+    r2.last_cwd = None;
+
+    let records = vec![r0.clone(), r1.clone(), r2.clone()];
+    let summaries = checked_summaries(&records).await;
+
+    assert_eq!(summaries.len(), 3, "one summary per input record");
+    // Order must match the input slice exactly, regardless of which probe
+    // task happened to finish first.
+    assert_eq!(
+        summaries[0].id,
+        r0.id.to_string(),
+        "r0 must stay at index 0"
+    );
+    assert_eq!(
+        summaries[1].id,
+        r1.id.to_string(),
+        "r1 must stay at index 1"
+    );
+    assert_eq!(
+        summaries[2].id,
+        r2.id.to_string(),
+        "r2 must stay at index 2"
+    );
+
+    assert!(
+        !summaries[0].unresumable,
+        "an Active session must never be flagged, regardless of probe fan-out"
+    );
+    assert!(
+        summaries[1].unresumable,
+        "a stopped session with no existing workdir candidate must be flagged dead"
+    );
+    assert!(
+        !summaries[2].unresumable,
+        "an errored session with a REAL existing cwd must stay resumable"
     );
 }

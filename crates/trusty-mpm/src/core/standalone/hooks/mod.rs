@@ -99,7 +99,7 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
-/// Build the MPM lifecycle hook additions JSON block (five events).
+/// Build the MPM lifecycle hook additions JSON block (six events).
 ///
 /// Why: every call site — the managed global config writer AND `tm install` — must
 /// use the exact same shape so [`trusty_common::claude_config::merge_hook_entries`]
@@ -113,13 +113,16 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
 /// The `merge_hook_entries` dedup logic preserves any existing `SessionStart` entry
 /// (e.g. `trusty-memory inbox-check` from the project-level config) — adding the
 /// `trusty-mpm hook` entry alongside it does NOT clobber the memory hook.
-/// What: returns a JSON object with five `hooks` arrays:
-/// `PreToolUse`, `PostToolUse` (async), `Stop`, `SessionStart`, `SessionEnd`.
+/// What: returns a JSON object with six `hooks` arrays:
+/// `PreToolUse`, `PostToolUse` (async), `Stop`, `SubagentStop`, `SessionStart`,
+/// `SessionEnd`. `SubagentStop` (#2610) fires when a delegated Task-tool
+/// subagent ends its turn, letting the hook handler flag an idle-parking final
+/// message (see `commands::misc::hook` / `core::idle_parking`).
 /// `PostToolUse` is marked `async: true` so Claude Code does not block waiting for
-/// the daemon to ingest tool results; the other four use short synchronous timeouts.
+/// the daemon to ingest tool results; the other five use short synchronous timeouts.
 /// `exe_override` pins the binary path for the hook command; pass `None` to resolve
 /// via `mpm_hook_command(None)`.
-/// Test: `test_mpm_hook_additions_has_five_events`,
+/// Test: `test_mpm_hook_additions_has_six_events`,
 /// covered by `test_ensure_managed_hooks_writes_triad`.
 pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::Value {
     let cmd = mpm_hook_command(exe_override);
@@ -143,6 +146,14 @@ pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::V
                 }]
             }],
             "Stop": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "timeout": 5
+                }]
+            }],
+            "SubagentStop": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
@@ -175,7 +186,7 @@ pub fn mpm_hook_additions_with_exe(exe_override: Option<&Path>) -> serde_json::V
 /// Why: convenience wrapper that calls `mpm_hook_additions_with_exe(None)` so
 /// existing call sites that do not need to pin the exe path stay concise.
 /// What: delegates to [`mpm_hook_additions_with_exe`] with `None`.
-/// Test: covered by `test_mpm_hook_additions_has_five_events`.
+/// Test: covered by `test_mpm_hook_additions_has_six_events`.
 pub fn mpm_hook_additions() -> serde_json::Value {
     mpm_hook_additions_with_exe(None)
 }

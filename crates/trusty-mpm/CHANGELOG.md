@@ -9,6 +9,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- picker launch-new switches client safely and exits instead of hanging ([#2680](https://github.com/bobmatnyc/trusty-tools/pull/2680)) ([`3de0647`](https://github.com/bobmatnyc/trusty-tools/commit/3de0647452f0e77a67aa20c52c8d9610474b8de8))
+- pm_guard allows read-only sed/awk pipe segments ([#2677](https://github.com/bobmatnyc/trusty-tools/pull/2677)) ([`3881639`](https://github.com/bobmatnyc/trusty-tools/commit/38816393f9d836b79e08c8efd4642fd21f3a6e5f))
+## [Unreleased]
+
+### Fixed
+
+- bound the manager ChatStore conversation-key set with an LRU cap ([#2648](https://github.com/bobmatnyc/trusty-tools/pull/2648)) ([`0d776f9`](https://github.com/bobmatnyc/trusty-tools/commit/0d776f9e8de429b76ac00a9da355bd76fc75b933))
+- exclude dead sessions (missing workspace) from resume/restart offers ([#2652](https://github.com/bobmatnyc/trusty-tools/pull/2652)) ([`4a8870f`](https://github.com/bobmatnyc/trusty-tools/commit/4a8870fb2990ca604f84da4ed7d46ac2203e11e4))
+- tm sessions resume hands terminal to the resumed session's tmux window ([#2656](https://github.com/bobmatnyc/trusty-tools/pull/2656)) ([`6f260cd`](https://github.com/bobmatnyc/trusty-tools/commit/6f260cde3e58849278b00a6160b3ed1e3a116a33))
+- sync session worktrees on resume + de-duplicate PM mandate injection ([#2653](https://github.com/bobmatnyc/trusty-tools/pull/2653)) ([`364c71c`](https://github.com/bobmatnyc/trusty-tools/commit/364c71cadb8ec0adc85ea36ea2ae70ef56a436a5))
+
+### Changed
+
+- split bin/tm/cli.rs into cli/ modules ([#2650](https://github.com/bobmatnyc/trusty-tools/pull/2650)) ([`53eb4a6`](https://github.com/bobmatnyc/trusty-tools/commit/53eb4a67f3cec9ba4f9d23ddf65243d20974d5ec))
+## [Unreleased]
+
+### Added
+
+- tm-manager phase 2 — route-task, proposal-and-confirm, route CLI (#2585 #2586 #2587) ([#2615](https://github.com/bobmatnyc/trusty-tools/pull/2615)) ([`87e4d1d`](https://github.com/bobmatnyc/trusty-tools/commit/87e4d1d4851b218bc651a2bb35ae681923633dfd))
+
+### Fixed
+
+- harden agents against idle parking — never end a turn to wait (closes #2610) ([#2620](https://github.com/bobmatnyc/trusty-tools/pull/2620)) ([`cbcfd17`](https://github.com/bobmatnyc/trusty-tools/commit/cbcfd17e797c6db80074e1254dfefb5f1f8fb3c1))
+## [Unreleased]
+
+### Added
+
+- async managed-spawn provisioning with live progress poll route (closes #2605) ([#2607](https://github.com/bobmatnyc/trusty-tools/pull/2607)) ([`f440192`](https://github.com/bobmatnyc/trusty-tools/commit/f44019266928e96973d16ab83cc618a4ac0894ff))
+- tm manager status|digest|chat CLI (TMMGR phase 1) ([#2600](https://github.com/bobmatnyc/trusty-tools/pull/2600)) ([`ed9390a`](https://github.com/bobmatnyc/trusty-tools/commit/ed9390a8a0f3e491f2aa6416cf68b5603975536a))
+- tm manager phase-1b — digest, read-only chat, hermetic suite ([#2601](https://github.com/bobmatnyc/trusty-tools/pull/2601)) ([`6f80f36`](https://github.com/bobmatnyc/trusty-tools/commit/6f80f36999c66ff679f194fe3e2d3bd9b3214c79))
+
+### Fixed
+
+- pm_guard permits PM single-file writes to non-source paths ([#2606](https://github.com/bobmatnyc/trusty-tools/pull/2606)) ([`3c6f9f7`](https://github.com/bobmatnyc/trusty-tools/commit/3c6f9f705760f1e94a37f6b9d966b45bf483c2ed))
+## [Unreleased]
+
+### Added
+
+- tm manager phase-1a — scaffold, status rollup, portfolio palace ([#2598](https://github.com/bobmatnyc/trusty-tools/pull/2598)) ([`3084a3c`](https://github.com/bobmatnyc/trusty-tools/commit/3084a3c406c2aa935c4c736950b81954c47fea39))
+
+### Fixed
+
+- session restart returns 500 for stopped session whose workspace is gone (closes #2577) ([#2594](https://github.com/bobmatnyc/trusty-tools/pull/2594)) ([`f2270f1`](https://github.com/bobmatnyc/trusty-tools/commit/f2270f1f2effb417aaf460f21b56c311d3403b34))
+## [Unreleased]
+
+### Added
+
+- task-injection delivery observability + readiness-probe hardening (closes #2364) ([#2568](https://github.com/bobmatnyc/trusty-tools/pull/2568)) ([`d0fe72b`](https://github.com/bobmatnyc/trusty-tools/commit/d0fe72b943434a4adab735e1973c1446f067f1a0))
+- wire Slack onto the channel-agnostic SessionProxy (closes #2549) ([#2565](https://github.com/bobmatnyc/trusty-tools/pull/2565)) ([`26aa1ae`](https://github.com/bobmatnyc/trusty-tools/commit/26aa1ae5e6a4d890221874d181037180bb9cfde2))
+- expose SessionProxy focus/inject/summarize as MCP tools ([#2562](https://github.com/bobmatnyc/trusty-tools/pull/2562)) ([`4edcc3b`](https://github.com/bobmatnyc/trusty-tools/commit/4edcc3bba3a848e9dba4d97401ee370423edf92f))
+
+### Changed
+
+- retire duplicate Bedrock ports onto trusty-common::inference ([#2567](https://github.com/bobmatnyc/trusty-tools/pull/2567)) ([`31c9fc0`](https://github.com/bobmatnyc/trusty-tools/commit/31c9fc0467adfda65b702c7433ceded01e0cf884))
+## [Unreleased]
+
+### Fixed
+
 - reconcile agent roster drift across deploy destinations ([#2547](https://github.com/bobmatnyc/trusty-tools/pull/2547)) ([`8d8b042`](https://github.com/bobmatnyc/trusty-tools/commit/8d8b04230a646f8c7941754c7cd4684f57d32089))
 - pane-scope session capture reads to the recorded harness pane ([#2545](https://github.com/bobmatnyc/trusty-tools/pull/2545)) ([`18bf5b2`](https://github.com/bobmatnyc/trusty-tools/commit/18bf5b28f8ee47491c3660593195b5ca02ec8883))
 ## [Unreleased]

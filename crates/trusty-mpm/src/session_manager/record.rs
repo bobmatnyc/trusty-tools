@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::injection_status::InjectionStatus;
+
 /// Opaque identifier for a managed session.
 ///
 /// Why: a newtype over [`Uuid`] prevents accidental confusion with other
@@ -314,6 +316,18 @@ pub struct SessionRecord {
     /// `deliverable_id` rollback-safety pattern immediately above.
     #[serde(default)]
     pub pane_id: Option<String>,
+
+    /// Delivery status of the turnkey `--task` pane injection (#2364).
+    ///
+    /// Why: `inject_task_when_ready` was fire-and-forget before this field
+    /// existed — see [`InjectionStatus`]'s doc for the full rationale.
+    ///
+    /// `#[serde(default)]` (→ [`InjectionStatus::NotApplicable`]) keeps every
+    /// pre-#2364 record deserializable — they load as "injection never
+    /// attempted", which is correct: no session before this field existed
+    /// tracked delivery status.
+    #[serde(default)]
+    pub injection_status: InjectionStatus,
 }
 
 /// Error types for session record operations.
@@ -382,6 +396,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -417,6 +432,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -450,6 +466,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -508,6 +525,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -570,6 +588,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -662,6 +681,7 @@ mod tests {
             last_cwd: Some(PathBuf::from("/managed/ws/src")),
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -699,6 +719,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -764,6 +785,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: Some(did),
             pane_id: None,
+            injection_status: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

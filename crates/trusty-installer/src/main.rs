@@ -19,7 +19,7 @@ use trusty_installer::{
     cli::{Cli, Commands, ConfigSubcommand, StackCmd},
     commands::{
         config, doctor, ensure, install, lifecycle, passthrough, port, run_up, runtime,
-        self_update, stack, status, ui, updates, upgrade, version,
+        self_update, sign, stack, status, ui, updates, upgrade, version,
     },
 };
 
@@ -122,8 +122,11 @@ fn dispatch(cli: Cli) {
             ));
         }
 
-        Commands::Install { members } => {
-            std::process::exit(install::run(&members, yes, json));
+        Commands::Install {
+            members,
+            no_service,
+        } => {
+            std::process::exit(install::run(&members, yes, json, no_service));
         }
 
         Commands::Ensure { wait } => {
@@ -172,6 +175,10 @@ fn dispatch(cli: Cli) {
 
         Commands::SelfUpdate => {
             std::process::exit(self_update::run(json));
+        }
+
+        Commands::Sign { target, dir } => {
+            std::process::exit(sign::run(target.as_set_name(), dir, json));
         }
 
         Commands::Passthrough(args) => {

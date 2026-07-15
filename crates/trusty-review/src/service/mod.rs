@@ -37,10 +37,21 @@ use crate::service::webhook::handle_github_webhook;
 
 /// Default listen port for the trusty-review daemon.
 ///
-/// Why: must be distinct from sibling daemons (7878 = search, 7879 = analyze).
-/// What: 7880 per spec REV-803.
-/// Test: `serve_help_shows_default_port` checks the CLI default.
-pub const DEFAULT_PORT: u16 = 7880;
+/// Why: must be distinct from EVERY sibling daemon's default, not just the
+/// ones spec REV-803 originally enumerated. The original default (7880) was
+/// discovered live (#2566 review) to collide with trusty-mpm's
+/// `DEFAULT_DAEMON_ADDR` (`crates/trusty-mpm/src/core/discovery.rs`) — the
+/// `tm` daemon binds `127.0.0.1:7880` on every managed machine, so a launchd
+/// agent that runs `trusty-review serve` with no explicit `--port` collided
+/// with it and crash-looped (`KeepAlive::Always`, 10s throttle) on install.
+/// 7890 is verified free against the full known set: 7070 = trusty-memory,
+/// 7878 = trusty-search, 7879 = trusty-analyze, 7788 = trusty-console,
+/// 7880 = trusty-mpm (`tm`).
+/// What: 7890 (superseding the REV-803 spec's original 7880).
+/// Test: `serve_help_shows_default_port` checks the CLI default;
+/// `default_port_does_not_collide_with_known_siblings` pins uniqueness
+/// against the full known-port table.
+pub const DEFAULT_PORT: u16 = 7890;
 
 /// Resolve the dotfile discovery path `~/.trusty-review/http_addr`.
 ///
@@ -246,5 +257,55 @@ mod tests {
         write_addr_to_path(&target, "127.0.0.1:7880").expect("write_addr_to_path");
         let content = std::fs::read_to_string(&target).expect("read back");
         assert_eq!(content, "127.0.0.1:7880");
+    }
+
+    /// Cross-crate port-uniqueness contract (#2566 review finding).
+    ///
+    /// Why: the original `DEFAULT_PORT` value (7880) silently collided with
+    /// trusty-mpm's `DEFAULT_DAEMON_ADDR` (`core/discovery.rs`), which is bound
+    /// on every managed machine — a launchd agent running `trusty-review serve`
+    /// crash-looped against the live `tm` daemon on install. This table encodes
+    /// every sibling daemon's known default port (pointer-commented to its real
+    /// source constant, mirroring `trusty-installer`'s `plist_label.rs` override
+    /// table) so a future edit to `DEFAULT_PORT` that reintroduces a collision
+    /// fails this test instead of shipping a crash-loop.
+    /// What: asserts `DEFAULT_PORT` is absent from the known-sibling-ports list.
+    /// Test: this is the test.
+    #[test]
+    fn default_port_does_not_collide_with_known_siblings() {
+        // (binary, port, source-of-truth pointer)
+        let known_siblings: &[(&str, u16, &str)] = &[
+            (
+                "trusty-memory",
+                7070,
+                "trusty-memory/src/http_server.rs::DEFAULT_HTTP_PORT",
+            ),
+            (
+                "trusty-search",
+                7878,
+                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-analyze",
+                7879,
+                "trusty-analyze/src/service/events.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-console",
+                7788,
+                "trusty-console/src/lib.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-mpm",
+                7880,
+                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+            ),
+        ];
+        for (binary, port, source) in known_siblings {
+            assert_ne!(
+                DEFAULT_PORT, *port,
+                "trusty-review DEFAULT_PORT {DEFAULT_PORT} collides with {binary}'s {port} ({source})"
+            );
+        }
     }
 }

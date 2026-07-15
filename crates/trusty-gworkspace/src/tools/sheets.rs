@@ -49,12 +49,104 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     tools.push(tool(
         "format_sheet",
-        "Apply a batchUpdate to a spreadsheet (formatting, conditional rules, etc.).",
+        "Format a range via a discrete action (format_cells, set_number_format, \
+         merge, set_column_width) or 'raw' to pass batchUpdate requests directly. \
+         format_cells, set_number_format, and merge REQUIRE all four of \
+         start_row_index/end_row_index/start_column_index/end_column_index — an \
+         omitted bound is rejected rather than silently applied to the rest of \
+         the sheet (this matters most for merge, which would otherwise merge \
+         the entire tab into one cell and discard the other cells' values).",
         json!({
             "account": account_schema(),
             "spreadsheet_id": { "type": "string" },
+            "action": action_enum(&[
+                "format_cells", "set_number_format", "merge", "set_column_width", "raw",
+            ]),
+            // GridRange (0-based, half-open) — used by format_cells / set_number_format / merge.
+            // All four bounds are required for these three actions (see description).
+            "sheet_id": { "type": "integer", "description": "Sheet (tab) id the range lives in." },
+            "start_row_index": { "type": "integer" },
+            "end_row_index": { "type": "integer" },
+            "start_column_index": { "type": "integer" },
+            "end_column_index": { "type": "integer" },
+            // format_cells params.
+            "bold": { "type": "boolean" },
+            "italic": { "type": "boolean" },
+            "font_size": { "type": "integer" },
+            "text_color": {
+                "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
+                "oneOf": [{ "type": "array" }, { "type": "object" }],
+            },
+            "background_color": {
+                "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
+                "oneOf": [{ "type": "array" }, { "type": "object" }],
+            },
+            "horizontal_alignment": {
+                "type": "string", "enum": ["LEFT", "CENTER", "RIGHT"],
+            },
+            "vertical_alignment": {
+                "type": "string", "enum": ["TOP", "MIDDLE", "BOTTOM"],
+            },
+            "wrap_strategy": {
+                "type": "string",
+                "enum": ["OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"],
+            },
+            // set_number_format params.
+            "number_format_type": {
+                "type": "string",
+                "enum": ["TEXT", "NUMBER", "PERCENT", "CURRENCY", "DATE", "TIME", "DATE_TIME", "SCIENTIFIC"],
+            },
+            "pattern": { "type": "string", "description": "Number/date format pattern." },
+            // merge params.
+            "merge_type": {
+                "type": "string", "enum": ["MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"],
+            },
+            // set_column_width params (DimensionRange).
+            "dimension": { "type": "string", "enum": ["COLUMNS", "ROWS"] },
+            "start_index": { "type": "integer" },
+            "end_index": { "type": "integer" },
+            "pixel_size": { "type": "integer" },
+            // raw escape hatch.
             "requests": { "type": "array", "items": { "type": "object" } },
         }),
-        &["spreadsheet_id", "requests"],
+        &["spreadsheet_id"],
+    ));
+    tools.push(tool(
+        "create_chart",
+        "Add a bar/column/line/area/pie chart over a data grid (first column = \
+         labels/domain, remaining columns = series).",
+        json!({
+            "account": account_schema(),
+            "spreadsheet_id": { "type": "string" },
+            "chart_type": {
+                "type": "string",
+                "enum": ["column", "bar", "line", "area", "scatter", "pie"],
+            },
+            "source_sheet_id": { "type": "integer", "description": "Sheet id holding the source data." },
+            "start_row_index": { "type": "integer" },
+            "end_row_index": { "type": "integer" },
+            "start_column_index": { "type": "integer" },
+            "end_column_index": { "type": "integer" },
+            "title": { "type": "string" },
+            "x_axis_title": { "type": "string" },
+            "y_axis_title": { "type": "string" },
+            "has_headers": { "type": "boolean", "description": "First data row is a header (default true)." },
+            "legend_position": {
+                "type": "string",
+                "enum": [
+                    "BOTTOM_LEGEND", "LEFT_LEGEND", "RIGHT_LEGEND", "TOP_LEGEND",
+                    "NO_LEGEND", "LABELED_LEGEND",
+                ],
+                "description": "LABELED_LEGEND (labels drawn next to each slice) is only valid for pie charts.",
+            },
+            "new_sheet": { "type": "boolean", "description": "Place chart on a new sheet (default true)." },
+            "position_sheet_id": { "type": "integer", "description": "Overlay target sheet when new_sheet=false." },
+            "anchor_row": { "type": "integer" },
+            "anchor_column": { "type": "integer" },
+        }),
+        &[
+            "spreadsheet_id", "chart_type", "source_sheet_id",
+            "start_row_index", "end_row_index", "start_column_index", "end_column_index",
+        ],
     ));
 }

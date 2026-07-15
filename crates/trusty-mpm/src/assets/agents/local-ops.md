@@ -84,6 +84,31 @@ npm audit / cargo audit / bandit -r src/
 
 Surface failures with the failing command output and remediation steps — do not silently swallow errors.
 
+## Long Waits — Block In The Foreground, NEVER Park (issues #2501, #2610)
+
+🔴 Release cuts, CI watches, `cargo build --release`, publish waits, and
+`gh pr checks --watch` are where ops/release agents strand tasks. **You must NEVER
+end your turn to "wait" for one — and NEVER spawn a background polling monitor and
+end your turn expecting it to notify you.** Nothing wakes a stopped agent; a
+self-created monitor/watcher fires into the void and the release hangs until a
+human manually resumes you. Ending a turn with "waiting for…", "monitoring in the
+background", "will report back once…", or "standing by" is a PROTOCOL VIOLATION.
+
+Wait ONLY by blocking in the foreground:
+
+```bash
+gh pr checks <pr> --watch --fail-fast    # CI: blocks until checks settle
+cargo build --release -p <crate>         # long build: run it, wait for exit
+```
+
+- Run long commands in the FOREGROUND with a long timeout and wait for them to
+  exit — do NOT background them (`&` / `run_in_background`).
+- If a command was already backgrounded, poll it to completion with blocking
+  status calls in the SAME turn; do not end the turn while it runs.
+- If an invocation hits the 10-min tool ceiling, RE-ISSUE the same blocking
+  command in the SAME turn and loop until it completes.
+- On failure, capture the output and report it — do not retry-by-waiting.
+
 ## GitHub Account Management
 
 Two GitHub CLI accounts are registered:

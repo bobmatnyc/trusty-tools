@@ -1504,88 +1504,17 @@ async fn finish_task_full_shape_propagates_into_output() {
     assert!(out.content.contains("Tests: 4/4 passed"));
 }
 
-// ── #2279: verify-before-finish gate ────────────────────────────────────────────
+// #2279 verify-before-finish gate intercept tests (block → nudge → retry)
+// live in a focused child module to keep this file under its SLOC cap.
+mod gate_intercept;
 
-/// An attached [`crate::verify_gate::default_finish_gate`] rejects a
-/// premature `finish_task` with a RECOVERABLE retry (not a terminal error)
-/// when the task names a runnable test command that was never invoked, and
-/// the loop recovers once the named tests actually run.
-///
-/// Why: This is #2279's core acceptance criterion — a `finish_task` call
-/// that would otherwise have terminated the loop after turn 1 must instead
-/// give the model another turn to run the named tests, then succeed on a
-/// LATER `finish_task` call once the gate is satisfied.
-/// What: Script [finish_task (premature), bash("pytest tests/ -v"),
-/// finish_task (now valid)]; attach the default gate; assert the run
-/// completes only after all THREE chat calls (proving turn 1's finish was
-/// rejected and turn 3's succeeded), with the final structured summary from
-/// the second `finish_task` call.
-/// Test: this test.
-#[tokio::test]
-async fn finish_gate_trips_and_recovers() {
-    let llm = Arc::new(ScriptedLlm::from_json(&[
-        finish_task_call_response(
-            "call-premature",
-            r#"{"status": "completed", "summary": "done (premature)"}"#,
-        ),
-        bash_call_response("call-bash", "pytest tests/ -v"),
-        finish_task_call_response(
-            "call-verified",
-            r#"{"status": "completed", "summary": "done (verified)"}"#,
-        ),
-    ]));
-    let registry = registry_with_finish_task_and_bash();
-    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
-        .with_finish_gate(crate::verify_gate::default_finish_gate());
+// Batched multi-tool-per-turn regression guards (round-trip reduction) live in
+// a focused child module to keep this file under its SLOC cap.
+mod batched_multi_tool;
 
-    let out = agent
-        .run(
-            "system prompt",
-            "implement the parser; run `pytest tests/ -v` before finishing",
-        )
-        .await
-        .expect("loop should recover and terminate on the verified finish call");
-
-    assert_eq!(
-        llm.calls(),
-        3,
-        "turn 1's premature finish must be rejected, turn 2 runs the named \
-         tests, turn 3's finish must succeed"
-    );
-    assert_eq!(out.summary.as_deref(), Some("done (verified)"));
-    assert_eq!(out.content, "Task completed: done (verified)");
-}
-
-/// An attached [`crate::verify_gate::default_finish_gate`] is INERT — the
-/// success path is unchanged — when the task never names a runnable test
-/// command.
-///
-/// Why: #2279 explicitly defers general polyglot test-suite discovery; the
-/// gate must not invent a requirement nothing ever stated, and existing
-/// tasks with no test command must behave exactly as before this change.
-/// What: Script a single valid `finish_task` call for a task that names no
-/// test command; attach the default gate; assert it still terminates after
-/// exactly ONE chat call, identically to
-/// `explicit_finish_task_terminates_loop_with_structured_summary`.
-/// Test: this test.
-#[tokio::test]
-async fn finish_gate_inert_without_named_test_command() {
-    let llm = Arc::new(ScriptedLlm::from_json(&[finish_task_call_response(
-        "call-finish",
-        r#"{"status": "completed", "summary": "implemented the widget"}"#,
-    )]));
-    let registry = registry_with_finish_task_and_bash();
-    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
-        .with_finish_gate(crate::verify_gate::default_finish_gate());
-
-    let out = agent
-        .run("system prompt", "implement a widget")
-        .await
-        .expect("gate must stay inert when no test command is named");
-
-    assert_eq!(llm.calls(), 1, "gate must not force an extra turn");
-    assert_eq!(out.summary.as_deref(), Some("implemented the widget"));
-}
+// Batch file-write regression guards (#2681 — turn-count/file-count decoupling)
+// live in a focused child module to keep this file under its SLOC cap.
+mod write_batch;
 
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///

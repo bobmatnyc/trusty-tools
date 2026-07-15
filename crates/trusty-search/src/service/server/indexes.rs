@@ -46,6 +46,72 @@ pub(super) struct ListIndexesParams {
     /// bare strings so callers can display per-index disk usage.
     #[serde(default)]
     pub(super) details: bool,
+    /// DOC-37 (issue #2611): restrict the listing to indexes whose canonical
+    /// repo identity matches this `owner/repo` (or `content:<sha>`) value.
+    ///
+    /// Why: the whole point of the identity join key is answering "show me every
+    /// index for THIS repo" — the live checkout, the `.base` clone, and every
+    /// session worktree — instead of scanning a flat list of unrelated ids.
+    /// What: the value is parsed to canonical form before comparison so casing /
+    /// slug differences still match; unparseable input is compared verbatim.
+    /// Absent ⇒ no filtering (today's behaviour).
+    #[serde(default)]
+    pub(super) repo_identity: Option<String>,
+}
+
+/// Resolve the canonical repo identity for each registered handle (DOC-37).
+///
+/// Why: `GET /indexes` needs a per-index identity for the `?repo_identity=`
+/// filter and the `?details=true` output. The durable source is
+/// `PersistedIndex::repo_identity` (populated at registration / relocate /
+/// warm-boot backfill in `start_restore.rs`) — this function reads ONLY that
+/// stored value, one `indexes.toml` load for the whole request. It deliberately
+/// does NOT fall back to a live `RepoIdentity::derive` per handle: that would
+/// shell out to `git` (a blocking subprocess) once per handle lacking a
+/// persisted identity, and on a daemon with ~75 legacy indexes that is 100+
+/// synchronous subprocess spawns inside this async handler on every
+/// `GET /indexes` call until the next warm-boot backfill runs. A handle with no
+/// stored identity yet simply reports `None` here (until warm-boot backfills it,
+/// or a `PATCH`/relocate/reindex re-derives it) — bounded, not unbounded, work
+/// per request.
+/// What: loads the persisted registry (best-effort — empty `HashMap` on load
+/// failure) and returns `(id, PersistedIndex::repo_identity)` for every
+/// registered handle; ids with no matching persisted entry map to `None`.
+/// Test: `list_indexes_repo_identity_details_and_filter`,
+/// `list_indexes_repo_identity_tree_filter` (`list_repo_identity_tests.rs`),
+/// which seed `indexes.toml` directly rather than relying on a live derive.
+fn resolve_identities(
+    handles: &[Arc<IndexHandle>],
+) -> std::collections::HashMap<String, Option<String>> {
+    let persisted: std::collections::HashMap<String, Option<String>> =
+        crate::service::persistence::load_index_registry()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.id, e.repo_identity))
+            .collect();
+    handles
+        .iter()
+        .map(|h| {
+            let id = h.id.0.clone();
+            let identity = persisted.get(&id).cloned().flatten();
+            (id, identity)
+        })
+        .collect()
+}
+
+/// Normalise a caller-supplied `?repo_identity=` value to canonical form for
+/// comparison (DOC-37). Unparseable values are trimmed and compared verbatim so
+/// a typo filters to nothing rather than silently matching everything.
+fn normalize_identity_filter(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trusty_common::repo_identity::RepoIdentity::parse(trimmed)
+            .map(|r| r.canonical())
+            .unwrap_or_else(|| trimmed.to_string()),
+    )
 }
 
 /// `GET /indexes[?format=tree][?details=true]` — list registered indexes.
@@ -71,29 +137,57 @@ pub(super) async fn list_indexes_handler(
         .map(|f| f == "tree")
         .unwrap_or(false);
 
+    // DOC-37: an active `?repo_identity=` filter narrows every output format.
+    let identity_filter = params
+        .repo_identity
+        .as_deref()
+        .and_then(normalize_identity_filter);
+
     if want_tree {
-        let handles = state.registry.list_handles();
+        let mut handles = state.registry.list_handles();
+        if let Some(target) = &identity_filter {
+            let ids = resolve_identities(&handles);
+            handles.retain(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target));
+        }
         let entries = crate::core::search::hierarchy::build_tree_entries(&state.registry, &handles);
         Json(serde_json::json!({ "indexes": entries })).into_response()
     } else if params.details {
         // Issue #312: return per-index disk usage alongside each id.
         // Issue #661: also include root_path so callers can derive the index
         // from the current project directory without N status round-trips.
-        let entries: Vec<IndexDetailEntry> = state
-            .registry
-            .list_handles()
+        // DOC-37: also carry repo_identity so callers can group facets by repo.
+        let handles = state.registry.list_handles();
+        let ids = resolve_identities(&handles);
+        let entries: Vec<IndexDetailEntry> = handles
             .into_iter()
-            .map(|handle| {
+            .filter_map(|handle| {
+                let repo_identity = ids.get(&handle.id.0).cloned().flatten();
+                if let Some(target) = &identity_filter {
+                    if repo_identity.as_ref() != Some(target) {
+                        return None;
+                    }
+                }
                 let (size_bytes, _) = index_disk_and_mtime(&handle.id.0);
                 let root_path = handle.root_path.to_str().map(|s| s.to_string());
-                IndexDetailEntry {
+                Some(IndexDetailEntry {
                     id: handle.id.0.clone(),
                     root_path,
                     size_bytes,
-                }
+                    repo_identity,
+                })
             })
             .collect();
         Json(serde_json::json!({ "indexes": entries })).into_response()
+    } else if let Some(target) = &identity_filter {
+        // Flat list, but scoped to one repo identity (DOC-37).
+        let handles = state.registry.list_handles();
+        let ids = resolve_identities(&handles);
+        let indexes: Vec<String> = handles
+            .into_iter()
+            .filter(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target))
+            .map(|h| h.id.0.clone())
+            .collect();
+        Json(IndexListResponse { indexes }).into_response()
     } else {
         Json(IndexListResponse {
             indexes: state.registry.list().into_iter().map(|id| id.0).collect(),
@@ -346,6 +440,13 @@ pub(super) async fn create_index_handler(
             req.id
         );
     }
+    // DOC-37 (issue #2611): derive the canonical repo identity from the
+    // (already-canonical) root and store it alongside `id` so this index can
+    // later be grouped/filtered with the other facets (live checkout, `.base`
+    // clone, sibling worktrees) of the same repo. Best-effort — `None` for roots
+    // with no git remote and no commits keeps the flat-index behaviour intact.
+    let repo_identity =
+        trusty_common::repo_identity::RepoIdentity::derive(&req.root_path).map(|r| r.canonical());
     if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
         crate::service::persistence::PersistedIndex {
             id: req.id.clone(),
@@ -367,6 +468,7 @@ pub(super) async fn create_index_handler(
             // Issue #993: new indexes have no query/index history yet.
             last_queried_unix: None,
             last_indexed_unix: None,
+            repo_identity: repo_identity.clone(),
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
@@ -433,5 +535,12 @@ pub(super) async fn create_index_handler(
     // Push event so connected dashboards refresh their index list without a
     // page reload (mirrors the trusty-memory `palace_created` pattern).
     state.emit(DaemonEvent::IndexRegistered { id: req.id.clone() });
-    Json(serde_json::json!({ "id": req.id, "created": true })).into_response()
+    Json(serde_json::json!({
+        "id": req.id,
+        "created": true,
+        // DOC-37: echo the derived identity so a caller registering an index
+        // learns its repo grouping key without a follow-up list round-trip.
+        "repo_identity": repo_identity,
+    }))
+    .into_response()
 }

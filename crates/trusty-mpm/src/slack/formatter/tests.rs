@@ -370,3 +370,28 @@ fn format_fleet_by_project_slack_provisioning_glyph() {
     let body = SlackFormatter::format(&CommandResult::ManagedFleet(fleet));
     assert!(body.contains("🟡"), "provisioning → 🟡: {body}");
 }
+
+#[test]
+fn mrkdwn_escape_escapes_ampersand_lt_gt() {
+    // The three mrkdwn-significant characters are escaped, in an order that
+    // never double-escapes the `&` produced by the `<`/`>` substitutions.
+    assert_eq!(mrkdwn_escape("a & b"), "a &amp; b");
+    assert_eq!(mrkdwn_escape("<tag>"), "&lt;tag&gt;");
+    assert_eq!(mrkdwn_escape("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+    // Plain text is unchanged.
+    assert_eq!(mrkdwn_escape("plain text"), "plain text");
+}
+
+#[test]
+fn mrkdwn_escape_neutralizes_channel_broadcast_span() {
+    // Why (#2565 review): an unescaped `<!channel>` in a session name would
+    // broadcast-ping the whole channel when interpolated into a proxy reply.
+    // Escaping must turn it into inert literal text.
+    let hostile = "<!channel> pwned";
+    let escaped = mrkdwn_escape(hostile);
+    assert_eq!(escaped, "&lt;!channel&gt; pwned");
+    assert!(
+        !escaped.contains("<!channel>"),
+        "the literal broadcast span must not survive escaping: {escaped}"
+    );
+}

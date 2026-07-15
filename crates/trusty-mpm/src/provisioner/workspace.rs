@@ -252,7 +252,10 @@ impl GitBackend for RealGitBackend {
         // remote's default branch (HEAD). An empty `--branch ""` arg causes
         // git to fail with "not a valid branch name" rather than falling back.
         let dir_str = target_dir.to_string_lossy().into_owned();
-        let mut args: Vec<&str> = vec!["clone", "--depth", "1"];
+        // `--progress` forces git to report byte/object progress even though
+        // stderr is a pipe (not a TTY); `clone_with_progress` streams it as
+        // `CloningRepo` stage detail (#2605).
+        let mut args: Vec<&str> = vec!["clone", "--progress", "--depth", "1"];
         if !git_ref.trim().is_empty() {
             args.push("--branch");
             args.push(git_ref);
@@ -264,19 +267,16 @@ impl GitBackend for RealGitBackend {
         let cwd = target_dir.parent().unwrap_or(std::path::Path::new("/"));
         // #2184: applies the resolved per-project identity (env overrides +
         // commit args) to this clone; a `Default` identity is a no-op.
-        let out = self
-            .command()
-            .args(&args)
-            .current_dir(cwd)
-            .output()
+        let mut cmd = self.command();
+        cmd.args(&args).current_dir(cwd);
+        let outcome = super::clone_progress::clone_with_progress(cmd)
             .map_err(|e| ProvisionError::Git(format!("git clone exec failed: {e}")))?;
-        if out.status.success() {
+        if outcome.success {
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&out.stderr);
             Err(ProvisionError::Git(format!(
-                "git clone failed (exit {}): {stderr}",
-                out.status
+                "git clone failed: {}",
+                outcome.stderr
             )))
         }
     }
@@ -421,21 +421,22 @@ impl GitBackend for RealGitBackend {
         // Use the destination's parent as cwd so a deleted inherited cwd cannot
         // cause git to fail with "fatal: Unable to read current working directory".
         let cwd = base_dir.parent().unwrap_or(std::path::Path::new("/"));
-        let out = self
-            .command()
-            .args(["clone", "--bare", repo_url])
+        // `--progress` + `clone_with_progress` streams byte/object percentages
+        // as `CloningRepo` stage detail for the (long, on a large repo) base
+        // clone — the dominant path for the in-project spawn (#2605).
+        let mut cmd = self.command();
+        cmd.args(["clone", "--bare", "--progress", repo_url])
             .arg(base_dir)
-            .current_dir(cwd)
-            .output()
+            .current_dir(cwd);
+        let outcome = super::clone_progress::clone_with_progress(cmd)
             .map_err(|e| ProvisionError::Git(format!("git clone --bare exec failed: {e}")))?;
-        if out.status.success() {
+        if outcome.success {
             info!(url = %repo_url, dest = %base_dir.display(), "base checkout cloned");
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&out.stderr);
             Err(ProvisionError::Git(format!(
-                "git clone --bare failed (exit {}): {stderr}",
-                out.status
+                "git clone --bare failed: {}",
+                outcome.stderr
             )))
         }
     }

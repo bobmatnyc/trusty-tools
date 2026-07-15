@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "0.19.7"
+version = "0.19.13"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -63,7 +63,13 @@ slack = ["dep:tokio-tungstenite", "dep:futures-util"]
 # `bedrock` gates the Session Manager's AWS Bedrock provider (SM-2, DOC-14 §5.1).
 # NOT in `default`: it pulls the heavy `aws-sdk-bedrockruntime` stack, so the
 # Bedrock provider weight is strictly opt-in. Build/test with `--features bedrock`.
-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
+#
+# As of #2411 the SM Bedrock provider is a thin bridge onto the shared
+# `trusty_common::inference::bedrock` Converse adapter (#2407) instead of a
+# private aws-sdk port — so this feature now just turns on the commons
+# `bedrock-client` feature, which pulls the AWS SDK stack in ONE place. The
+# direct `aws-config`/`aws-sdk-bedrockruntime`/`aws-types` deps were dropped here.
+bedrock = ["trusty-common/bedrock-client"]
 
 # `sm-memory` gates the Session Manager's dedicated memory palace (SM-4, DOC-14
 # §8). NOT in `default`: it turns on `trusty-common/memory-core`, which pulls the
@@ -83,6 +89,19 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
 # for test/bench/example builds, so `cargo test` gets the mock while a plain
 # `cargo build --features sm-memory` does not.
 sm-memory = ["trusty-common/memory-core"]
+
+# `manager-memory` gates the Layer-3 `tm manager` PORTFOLIO memory palace (WI-5,
+# #2582, DOC-36 §3.4) — a single portfolio-scoped `trusty-memory` palace holding
+# digest history, escalation dispositions, and portfolio chat turns, distinct
+# from the SM palace and every per-project palace. Like `sm-memory` it is NOT in
+# `default`: it turns on `trusty-common/memory-core` (the heavy HNSW/ONNX Memory
+# Palace engine), so a default daemon build pays no ONNX/usearch cost. Without
+# this feature the portfolio palace reports "unavailable" and the manager surface
+# still works (DOC-36 §4 degrade bar). The `daemon::manager::memory` live binding
+# is compiled only under this flag. Build/test with `--features manager-memory`;
+# the `embedder-test-support` dev-dependency below supplies the mock embedder so
+# `cargo test --features manager-memory` runs without the ONNX model.
+manager-memory = ["trusty-common/memory-core"]
 
 # `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
 # is ALWAYS available; this flag exists only so the subcommand can optionally
@@ -158,6 +177,12 @@ trusty-common = { workspace = true, features = [
     "update-check",
     # #2405: the universal `tm config keys …` inference-provider credential CLI.
     "config-cli",
+    # #2580/#2581 (DOC-36 §3.3): the Layer-3 `tm manager` digest/chat handlers
+    # resolve providers and issue chat calls through the unified
+    # `trusty_common::inference` adapter/Configurator. `config-cli` already implies
+    # `inference-client`; listing it explicitly documents the direct dependency so
+    # a future config-cli change can't silently drop the manager's inference core.
+    "inference-client",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
@@ -186,6 +211,9 @@ jsonwebtoken.workspace = true
 utoipa.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 tokio.workspace = true
+# #2602: bounds the manager ChatStore's distinct conversation-key set with a
+# capacity-evicting LRU cache — see daemon/manager/chat_store.rs.
+lru.workspace = true
 # async-trait is needed by the SM providers' `LlmProvider` trait (SM-2), which is
 # compiled unconditionally in the `core` library. (The `mcp` feature also lists it
 # below for the OrchestratorBackend trait; declaring it here makes it always-on.)
@@ -213,11 +241,12 @@ trusty-progress = { workspace = true }
 
 # ── Optional dependencies (feature-gated) ────────────────────────────────────
 
-# bedrock feature (SM-2): AWS Bedrock Converse provider for the Session Manager.
-# Opt-in only — keeps the heavy aws-sdk stack out of the default build.
-aws-config             = { workspace = true, optional = true }
-aws-sdk-bedrockruntime = { workspace = true, optional = true }
-aws-types              = { workspace = true, optional = true }
+# bedrock feature (SM-2): the AWS SDK stack is no longer a direct dependency
+# here. As of #2411 the SM Bedrock provider bridges onto
+# `trusty_common::inference::bedrock` (the shared #2407 Converse adapter), so the
+# `aws-config`/`aws-sdk-bedrockruntime`/`aws-types` crates are pulled transitively
+# via `trusty-common/bedrock-client` (see the `bedrock` feature above) — the one
+# place the AWS SDK weight lives now.
 
 # daemon feature
 axum = { workspace = true, optional = true }
@@ -263,7 +292,18 @@ nix = { version = "0.29", features = ["signal"] }
 # `cargo test --features sm-memory` WITHOUT leaking it into a production
 # `cargo build --features sm-memory`. `memory-core` is repeated so the unified
 # feature set still includes the palace storage engine the SM-4 tests exercise.
-trusty-common = { workspace = true, features = ["memory-core", "embedder-test-support"] }
+trusty-common = { workspace = true, features = [
+    "memory-core",
+    "embedder-test-support",
+    # #2584 (DOC-36 §4): the hermetic manager CI suite drives the digest/chat
+    # routes with `ScriptedAdapter` and, for real HTTP-client mechanics,
+    # `test_support::MockInferenceServer` — the latter is gated behind
+    # `axum-server`. `inference-client` is listed for clarity (the runtime dep
+    # already enables it via `config-cli`); `axum-server` is the dev-only
+    # addition that exposes the loopback mock server.
+    "inference-client",
+    "axum-server",
+] }
 # DEV-ONLY (DOC-15 C5 / #1362): the cross-gate AC-18 golden test
 # (`tests/conformance_cross_gate.rs`) drives BOTH conformance gates from one
 # shared `trusty_common::intent_source::ResolvedIntent` — the trusty-mpm FRONT

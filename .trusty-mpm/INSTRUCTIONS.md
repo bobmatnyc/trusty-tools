@@ -318,9 +318,11 @@ convention (i.e. `tga-v<version>`, matching the abbreviation table) works.
 
 🔴 **CRITICAL macOS note:** Never use `cp` to install release binaries on macOS — always use `cargo install`. See release workflow reference for the detailed explanation.
 
-### macOS Full Disk Access must be re-granted after every `cargo install` (issue #873)
+### macOS Full Disk Access / App Data TCC must be re-granted after every `cargo install` (issues #873, #2558)
 
-🟢 **Scope: `trusty-search` and external-volume daemons only.** `trusty-mpm` / `tm` does NOT require FDA re-granting because the daemon manages tmux sessions and git worktrees under `$HOME` only — it never reads TCC-protected or external (`/Volumes/…`) paths. FDA caveat applies only to daemons that index external volumes (currently `trusty-search`); `trusty-memory` and `trusty-analyze` read `$HOME` locations only and also do NOT require FDA. No `install-trusty-mpm-signed.sh` script exists because it is not needed.
+🟢 **Full Disk Access scope: `trusty-search` and external-volume daemons only.** `trusty-mpm` / `tm` does NOT require FDA re-granting because the daemon manages tmux sessions and git worktrees under `$HOME` only — it never reads TCC-protected or external (`/Volumes/…`) paths. FDA caveat applies only to daemons that index external volumes (currently `trusty-search`); `trusty-memory` and `trusty-analyze` read `$HOME` locations only and also do NOT require FDA.
+
+🟢 **App Data TCC scope (owner-authorized extension, #2558, 2026-07-14): `trusty-mpm` IS in scope.** This is a *different* TCC category than FDA above — `tm` reads other apps' `$HOME` containers (Claude config dirs, tmux state), so macOS re-prompts `'trusty-mpm' would like to access data from other apps` after every ad-hoc-signed `cargo install` rebuild, for the same cdhash-identity reason FDA does. `tctl install trusty-mpm` signs it with a stable Developer-ID identity automatically (fail-soft, same as trusty-search); for a local-source build run `cargo install --path crates/trusty-mpm --locked && tctl sign trusty-mpm`. No separate `install-trusty-mpm-signed.sh` script exists — `tctl sign trusty-mpm` (single source of truth in `crates/trusty-installer/src/commands/macos_signing.rs`) is the entry point. See `docs/reference/release-workflow.md#signed-install-trusty-mpm-2558`.
 
 On macOS, every `cargo install` of a binary writes a NEW file at
 `~/.cargo/bin/<binary>` with a new **cdhash** (code-signing hash). macOS TCC

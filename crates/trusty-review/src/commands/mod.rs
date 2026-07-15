@@ -9,7 +9,9 @@
 //! behind `http-server`). Also re-exports the shared helpers `build_deps_async`,
 //! `resolve_diff_source_run`, `resolve_diff_source_compare`, and
 //! `print_compare_table`/`truncate_str` used by the compare printer.
-//! `cmd_calibrate` (calibration harness, #1422) is always present.
+//! `cmd_calibrate` (calibration harness, #1422) is always present. `service`
+//! (the launchd wrapper, #2557) is gated behind `http-server` because it
+//! daemonizes `trusty-review serve`, which does not exist without that feature.
 //!
 //! Test: handlers are tested transitively via `runner::tests` (unit) and the
 //! CLI smoke-tests in this file's sibling modules.
@@ -20,3 +22,5 @@ pub mod port;
 pub mod run;
 #[cfg(feature = "http-server")]
 pub mod serve;
+#[cfg(feature = "http-server")]
+pub mod service;

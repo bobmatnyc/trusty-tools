@@ -136,12 +136,13 @@ use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
     get_managed_session, get_project_registry_route, get_session_activity, list_managed_sessions,
-    list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_focus,
-    proxy_get_focus, proxy_message, proxy_summary, proxy_unfocus, prune_managed_route,
-    prune_worktrees_route, reactivate_managed_session, register_project_registry_route,
-    resume_managed_session, send_to_session, spawn_session, stop_managed_session,
-    stop_managed_session_runtime,
+    list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_router,
+    prune_managed_route, prune_worktrees_route, reactivate_managed_session,
+    register_project_registry_route, resume_managed_session, send_to_session, spawn_session,
+    stop_managed_session, stop_managed_session_runtime,
 };
+// Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
+use super::manager::manager_router;
 
 /// Typed HTTP response bodies for every endpoint.
 ///
@@ -293,6 +294,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             get(get_managed_session).delete(stop_managed_session),
         )
         .route("/api/v1/sessions/managed/{id}/send", post(send_to_session))
+        // #2605: async-spawn progress poll route, merged as a sub-router.
+        .merge(super::managed_routes::provision_status::router())
         .route(
             "/api/v1/sessions/managed/{id}/answer",
             post(answer_session_decision),
@@ -333,21 +336,17 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // TELUI-6 (#1440): the local session-manager PROXY surface — the SAME
         // focus/inject/summarize state machine every channel (Telegram, Slack)
         // binds to, exposed here as plain HTTP so it is `curl`-testable before
-        // any channel connects. Literal segments (`/focus`, `/unfocus`,
-        // `/message`) are registered as their own routes; the two GET routes
-        // take `conversation_key` as a path param, mirroring the `/{id}`
-        // convention used throughout this managed-session block.
-        .route("/api/v1/sessions/proxy/focus", post(proxy_focus))
-        .route(
-            "/api/v1/sessions/proxy/focus/{conversation_key}",
-            get(proxy_get_focus),
-        )
-        .route("/api/v1/sessions/proxy/unfocus", post(proxy_unfocus))
-        .route("/api/v1/sessions/proxy/message", post(proxy_message))
-        .route(
-            "/api/v1/sessions/proxy/summary/{conversation_key}",
-            get(proxy_summary),
-        )
+        // any channel connects. Registrations live with their handlers in
+        // `managed_routes::proxy::proxy_router` and are merged here.
+        .merge(proxy_router())
+        // Layer-3 portfolio manager surface (epic #2109, DOC-36 §3.2), merged as a
+        // self-contained sub-router (like the L2 `proxy_router`). Phase 1: the
+        // read-only capabilities stub, deterministic rollup, LLM digest, and chat
+        // loop. Phase 2: `route-task` (advisory task routing + disambiguation,
+        // #2585) and `act` (session launch/inject/summarize propose→confirm, which
+        // mutates ONLY on an explicit `confirm: true`, #2586). All curl-testable
+        // with no channel/bot token (§4).
+        .merge(manager_router())
         // DOC-35 §10.2/§10.5 (#2378 + #2380): Deliverable/Milestone CRUD, nested
         // under the projects namespace. The literal `/deliverables` and
         // `/milestones` segments come before their `/{id}` param routes so a

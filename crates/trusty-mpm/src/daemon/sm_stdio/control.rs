@@ -150,9 +150,13 @@ impl SessionControl for DaemonSessionControl {
             // already has a live session is the safe default here too.
             force_new: false,
         };
-        let record = spawn_managed(&self.state, spawn)
-            .await
-            .map_err(SessionControlError::Backend)?;
+        let record = spawn_managed(
+            &self.state,
+            crate::session_manager::ManagedSessionId::new(),
+            spawn,
+        )
+        .await
+        .map_err(SessionControlError::Backend)?;
         Ok(serde_json::json!({ "session_id": record.id.to_string() }))
     }
 

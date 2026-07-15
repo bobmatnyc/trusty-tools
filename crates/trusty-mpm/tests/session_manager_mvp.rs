@@ -768,14 +768,15 @@ async fn tcode_session_spawns_and_accepts_commands() {
 
 // ── Typed resume-error tests (regression guard for #1221 review findings) ───────
 //
-// Why: the resume HTTP handler previously chose its 404/409 status by
-// SUBSTRING-matching the error's `Display` string, which silently regressed to
-// 500 whenever wording changed; and it ran a pre-flight `get` before `resume`,
-// opening a TOCTOU window. These tests drive the shared `resume_managed` helper
-// directly and assert on the TYPED `ResumeManagedError` variant — never on the
-// Display string — so the 404/409 contract is enforced structurally.
+// #2577 review: the WorkspaceGone/PaneGone-split mapping tests, and the
+// resume_managed_typed_* tests (NotFound/InvalidState/WorkspaceGone/PaneGone),
+// now live in the sibling integration test `tests/resume_unresumable_mapping.rs`
+// — extracted once the new PaneGoneTmux driver and its coverage pushed this
+// file over the 1500-SLOC test cap. `resume_managed`/`DaemonState`/etc. are
+// still imported below — the LATER tests in this file (self-heal, status-line
+// healing, incomplete-deployment) still call `resume_managed` directly.
 
-use trusty_mpm::daemon::managed_routes::{ResumeManagedError, resume_managed};
+use trusty_mpm::daemon::managed_routes::resume_managed;
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::runtime::RuntimeKind as ResumeRuntimeKind;
 use trusty_mpm::session_manager::ManagedSessionId as ResumeSessionId;
@@ -846,90 +847,6 @@ fn write_fake_tm_binary(dir: &std::path::Path) -> PathBuf {
             .expect("chmod fake tm binary executable");
     }
     bin
-}
-
-/// Resuming a missing session yields the typed `NotFound` variant (→ HTTP 404).
-///
-/// Why: a session decommissioned (or never created) must produce a 404, and the
-/// handler now derives that from the typed variant rather than a Display
-/// substring. Removing the pre-flight `get` means this single round-trip is the
-/// only place the 404 can originate — so we assert it lands here.
-/// What: builds a fresh `DaemonState`, calls `resume_managed` with a random id,
-/// and asserts the error is exactly `ResumeManagedError::NotFound`.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn resume_managed_typed_missing_session_is_not_found() {
-    // Hermetic framework root with FakeNoopTmuxDriver so the test never touches
-    // the operator's real `~/.trusty-mpm` or spawns real tmux sessions (#1790).
-    let root = TempDir::new().unwrap();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
-    let missing = ResumeSessionId::new();
-
-    let err = resume_managed(&state, &missing)
-        .await
-        .expect_err("resuming a missing session must error");
-
-    assert!(
-        matches!(err, ResumeManagedError::NotFound(_)),
-        "missing session must map to the typed NotFound variant (→ 404), got {err:?}"
-    );
-}
-
-/// Resuming a non-resumable session yields the typed `InvalidState` variant
-/// (→ HTTP 409) — driven WITHOUT depending on the Display string.
-///
-/// Why: only `Stopped`/`Errored` sessions are resumable. A freshly created
-/// session is `Provisioning`, so resuming it is an invalid state transition that
-/// must surface as a 409. The handler derives 409 from the typed variant; this
-/// test proves the variant is produced for a non-resumable state.
-/// What: seeds a session via the daemon's session manager (it starts in
-/// `Provisioning`), calls `resume_managed`, and asserts the error matches
-/// `ResumeManagedError::InvalidState`.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn resume_managed_typed_invalid_state_is_conflict() {
-    // Hermetic framework root with FakeNoopTmuxDriver — no real tmux sessions
-    // are created, so nothing can escape into the production store (#1790).
-    let root = TempDir::new().unwrap();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
-    let mgr = state.session_manager().await;
-
-    // A newly created record is in `Provisioning` — not `Stopped`/`Errored` — so
-    // resuming it is an invalid state transition (→ 409), never a 404.
-    let id = ResumeSessionId::new();
-    // Derive a UNIQUE workspace path from the id: the tmux name is derived from
-    // the cwd basename (and truncated to 20 chars), so a fixed path would collide
-    // with a leftover tmux session (or a parallel run). Putting the UUID FIRST
-    // keeps the name unique even after truncation; rooting it under the hermetic
-    // temp dir keeps it isolated.
-    let ws = root.path().join(format!("{id}-resume-ws"));
-    let _seeded = mgr
-        .create_with_id(
-            id,
-            "regression: invalid-state resume".to_string(),
-            Some(ws.clone()),
-            None,
-            Some(ws),
-            Some("https://example.com/r.git".to_string()),
-            Some("main".to_string()),
-            ResumeRuntimeKind::default(),
-            false,
-            false,
-        )
-        .await
-        .expect("seed session");
-
-    // No real tmux session was created (FakeNoopTmuxDriver), so no reap guard is
-    // needed (#1790). The seeded record exists only in the in-memory store.
-
-    let err = resume_managed(&state, &id)
-        .await
-        .expect_err("resuming a Provisioning session must error");
-
-    assert!(
-        matches!(err, ResumeManagedError::InvalidState(_)),
-        "non-resumable state must map to the typed InvalidState variant (→ 409), got {err:?}"
-    );
 }
 
 /// #1913 self-heal: `resume_managed` must backfill a missing `statusLine` key
@@ -1895,6 +1812,220 @@ async fn list_managed_sessions_source_id_filter() {
     assert!(
         ids.contains(&id_b.to_string().as_str()),
         "session B must appear in unfiltered list; ids={ids:?}"
+    );
+}
+
+/// Shared #2595-test fixtures: seed a session with a given workspace, find a
+/// row by id in a decoded JSON array, and seed the "dead" (Errored,
+/// workspace-never-created) case those three tests below all need.
+///
+/// Why: `list_marks_dead_stopped_session_unresumable`,
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked`, and
+/// `fleet_route_marks_dead_session_unresumable` share near-identical
+/// seed/lookup steps; factoring them out keeps this file under its
+/// 1500-SLOC test-cap budget while keeping each test's own body focused on
+/// what it actually asserts.
+/// What: [`seed_session_with_workspace`] wraps `create_with_id` with a single
+/// `workspace_path == cwd` candidate; [`find_row`] locates a session/project
+/// row by `id`/`project_name` in a decoded JSON array or panics with the
+/// full array for debuggability; [`seed_dead_errored_session`] composes the
+/// first with `mark_errored` (mirrors
+/// `resume_managed_typed_missing_workspace_is_unprocessable` in
+/// `resume_unresumable_mapping.rs`) plus the "path really doesn't exist"
+/// precondition assert.
+async fn seed_session_with_workspace(
+    mgr: &trusty_mpm::session_manager::SessionManager,
+    workspace: std::path::PathBuf,
+    repo_url: &str,
+    label: &str,
+) -> ResumeSessionId {
+    let id = ResumeSessionId::new();
+    mgr.create_with_id(
+        id,
+        format!("regression: #2595 {label}"),
+        Some(workspace.clone()),
+        None,
+        Some(workspace),
+        Some(repo_url.to_string()),
+        Some("main".to_string()),
+        ResumeRuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session");
+    id
+}
+
+fn find_row<'a>(rows: &'a [serde_json::Value], key: &str, want: &str) -> &'a serde_json::Value {
+    rows.iter()
+        .find(|r| r[key].as_str() == Some(want))
+        .unwrap_or_else(|| panic!("row with {key}={want:?} must be present, got {rows:?}"))
+}
+
+async fn seed_dead_errored_session(
+    mgr: &trusty_mpm::session_manager::SessionManager,
+    root: &std::path::Path,
+    repo_url: &str,
+    label: &str,
+) -> ResumeSessionId {
+    let gone = root.join(format!("dead-{label}"));
+    let id = seed_session_with_workspace(mgr, gone.clone(), repo_url, label).await;
+    mgr.mark_errored(&id, "regression: simulate prior spawn failure")
+        .await
+        .expect("mark errored");
+    assert!(!gone.exists(), "test precondition: path must not exist");
+    id
+}
+
+/// #2595: a stopped/errored session whose workspace has been GC-pruned must be
+/// flagged `unresumable: true` on the LIST endpoint — the same endpoint the
+/// bare-`tm` guided default, the `tm ls` picker, and `tm sessions ls` all read.
+/// Why: #2577/#2594 fixed the ERROR an operator saw after picking such a
+/// session to restart (bare 500 → actionable 422); this predicate lets the
+/// listing surfaces exclude/mark the session BEFORE it is ever offered as a
+/// restart option, closing the deeper UX defect the issue reports.
+/// What: seeds a dead session via [`seed_dead_errored_session`], then asserts
+/// the LIST endpoint's summary for that id carries `unresumable: true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn list_marks_dead_stopped_session_unresumable() {
+    use std::collections::HashMap;
+    use trusty_mpm::daemon::managed_routes::list_managed_sessions;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+    let id =
+        seed_dead_errored_session(&mgr, root.path(), "https://example.com/r.git", "list").await;
+
+    let (status, body) = decode_response(
+        list_managed_sessions(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(HashMap::new()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+    let row = find_row(sessions, "id", &id.to_string());
+    assert_eq!(
+        row["unresumable"].as_bool(),
+        Some(true),
+        "a stopped/errored session with no workdir candidate on disk must be \
+         flagged unresumable, got {row}"
+    );
+}
+
+/// #2595 counterpart: a HEALTHY stopped session (workspace still on disk) and
+/// a LIVE/provisioning session (workspace missing, but the state gate means
+/// the predicate never even probes the filesystem) must both come back
+/// `unresumable: false` — the predicate must never over-fire (issue #2595's
+/// own acceptance criterion: "healthy stopped sessions unaffected").
+/// What: session A is `Errored` with a REAL `TempDir` workspace (an existing
+/// candidate); session B is left in its default `Provisioning` state with a
+/// workspace path that is never created (the state gate, not a filesystem
+/// check, is what saves it). Both must come back `unresumable: false`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn list_leaves_live_and_healthy_stopped_sessions_unmarked() {
+    use std::collections::HashMap;
+    use trusty_mpm::daemon::managed_routes::list_managed_sessions;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+    let repo_url = "https://example.com/r.git";
+
+    let ws_a = root.path().join("healthy-ws");
+    std::fs::create_dir_all(&ws_a).expect("create real workspace dir for session A");
+    let id_a = seed_session_with_workspace(&mgr, ws_a, repo_url, "healthy-errored").await;
+    mgr.mark_errored(&id_a, "regression: simulate prior spawn failure")
+        .await
+        .expect("mark errored A");
+
+    let gone_b = root.path().join("never-created");
+    let id_b = seed_session_with_workspace(&mgr, gone_b, repo_url, "provisioning-missing").await;
+
+    let (status, body) = decode_response(
+        list_managed_sessions(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(HashMap::new()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+
+    assert_eq!(
+        find_row(sessions, "id", &id_a.to_string())["unresumable"].as_bool(),
+        Some(false),
+        "an errored session with an EXISTING workspace must not be flagged unresumable"
+    );
+    assert_eq!(
+        find_row(sessions, "id", &id_b.to_string())["unresumable"].as_bool(),
+        Some(false),
+        "a provisioning/live session must never be flagged unresumable regardless of workdir"
+    );
+}
+
+/// #2595 (code-critic PR #2652 finding 2): `GET /sessions/managed/fleet` — the
+/// endpoint the `tm projects` TUI polls — must ALSO flag a dead session
+/// `unresumable: true`, not just the flat `list`/`get` endpoints.
+/// Why: the fleet route used the unchecked `record_to_summary` (no
+/// filesystem probe), so `unresumable` was always `false` there regardless of
+/// a session's real state — the TUI's `r` (resume) key had no signal to
+/// refuse a dead session. This pins the fix: the fleet route now goes
+/// through the same checked, concurrently-probed conversion the list/get
+/// handlers use ([`trusty_mpm::daemon::managed_routes`]-internal).
+/// What: registers a project, seeds a dead session bound to it (matching
+/// `repo_url`) via [`seed_dead_errored_session`], calls
+/// `fleet_by_project_route`, and asserts the session inside the matching
+/// project's group carries `unresumable: true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn fleet_route_marks_dead_session_unresumable() {
+    use trusty_mpm::daemon::managed_routes::fleet_by_project_route;
+    use trusty_mpm::project::Project;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let repo_url = "https://github.com/acme/widget".to_string();
+    state
+        .project_registry()
+        .await
+        .register(Project {
+            name: "widget".into(),
+            repo_url: repo_url.clone(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+        })
+        .await
+        .expect("register project");
+
+    let id = seed_dead_errored_session(&mgr, root.path(), &repo_url, "fleet").await;
+
+    let (status, body) =
+        decode_response(fleet_by_project_route(axum::extract::State(state.clone())).await).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let projects = body["projects"].as_array().expect("projects array");
+    let widget = find_row(projects, "project_name", "widget");
+    let sessions = widget["sessions"].as_array().expect("sessions array");
+    let row = find_row(sessions, "id", &id.to_string());
+    assert_eq!(
+        row["unresumable"].as_bool(),
+        Some(true),
+        "the fleet route must flag a dead session unresumable, same as list/get, got {row}"
     );
 }
 

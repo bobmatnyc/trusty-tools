@@ -144,6 +144,12 @@ indicatif = "0.17"
 # Misc utilities used across crates.
 dashmap = "6"
 walkdir = "2"
+# gitignore-aware recursive file walking (ripgrep's walker) + glob matching —
+# power the tcode engineer's native glob/grep exploration tools (#1027). Both
+# are already in the workspace lockfile (transitive via trusty-search), so
+# promoting them to explicit workspace deps adds no new lockfile entries.
+ignore = "0.4"
+globset = "0.4"
 regex = "1"
 gray_matter = "0.2"
 notify = "6"
