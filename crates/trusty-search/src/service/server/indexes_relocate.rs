@@ -112,8 +112,10 @@ pub(super) async fn relocate_index_handler(
         }
     };
 
-    // Validate and canonicalize the new root path.
-    let new_root = match validate_root_path(&req.root_path).await {
+    // Validate and canonicalize the new root path. Relocate has no
+    // `allow_sensitive_path` opt-in on its request type, so this always
+    // enforces the full denylist (`false`) — unchanged from before.
+    let new_root = match validate_root_path(&req.root_path, false).await {
         Ok(p) => p,
         Err(resp) => return resp,
     };

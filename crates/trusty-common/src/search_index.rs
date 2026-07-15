@@ -86,6 +86,34 @@ pub fn ensure_project_indexed(project_root: &Path) -> Option<String> {
     Some(index_id)
 }
 
+/// Build the JSON body for the `POST /indexes` find-or-create call.
+///
+/// Why: extracted from `best_effort_create_index` so the request shape —
+/// specifically, that `allow_sensitive_path` is always `true` here — is
+/// unit-testable without a live daemon or a spawned thread.
+/// What: `allow_sensitive_path: true` (explicit-index-sensitive-path-bypass):
+/// this is ONLY reached from `ensure_project_indexed`, which is ONLY ever
+/// called with one specific project root a client explicitly wants indexed
+/// (tcode's/trusty-mpm's own working project) — never from trusty-search's
+/// auto/broad-discovery paths, which keep the full denylist. That makes this
+/// the "explicit request" case the flag exists for: it lets trusty-search
+/// index a bake-off scratch project living under an OS-temp prefix (e.g.
+/// `/var/folders/…`) instead of hard-rejecting it with 400. Harmless for
+/// ordinary project roots (trusty-mpm worktrees, checked-out repos): none of
+/// those live under `SENSITIVE_PATH_PREFIXES`, so the flag is a no-op for
+/// them, and it never bypasses the OTHER denylist checks (credential dirs,
+/// sensitive file names, top-level home dirs) — see
+/// `trusty-search::allowlist::is_denied_allowing_sensitive_path`'s doc comment
+/// for exactly what stays enforced.
+/// Test: `create_index_request_body_sets_allow_sensitive_path`.
+fn create_index_request_body(index_id: &str, root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "id": index_id,
+        "root_path": root.to_string_lossy(),
+        "allow_sensitive_path": true,
+    })
+}
+
 /// POST `/indexes` to find-or-create `index_id`; failures are logged, never
 /// propagated (issue #1373).
 ///
@@ -94,21 +122,23 @@ pub fn ensure_project_indexed(project_root: &Path) -> Option<String> {
 /// here keeps [`ensure_project_indexed`] readable and the error handling in one
 /// place.
 /// What: issues a short-timeout blocking `POST {base}/indexes` with body
-/// `{id, root_path}` ON A DEDICATED OS THREAD. Callers are frequently inside a
-/// tokio runtime; creating `reqwest::blocking`'s internal runtime directly there
-/// panics with "Cannot drop a runtime in a context where blocking is not
-/// allowed". Running the blocking client on a freshly-spawned `std::thread`
-/// (joined here) keeps that nested runtime entirely off the async worker, so the
-/// call is safe from both sync and async callers. A non-2xx response or
-/// transport error is logged at warn/debug and swallowed; the daemon endpoint is
-/// idempotent so re-creates are harmless. The client uses a tight ~1s overall
-/// timeout (750 ms connect) so the joined thread returns quickly: this call sits
-/// on a hot path and must NOT stall when the daemon is slow or unreachable.
+/// `{id, root_path, allow_sensitive_path}` (built by
+/// [`create_index_request_body`]) ON A DEDICATED OS THREAD. Callers are
+/// frequently inside a tokio runtime; creating `reqwest::blocking`'s internal
+/// runtime directly there panics with "Cannot drop a runtime in a context
+/// where blocking is not allowed". Running the blocking client on a
+/// freshly-spawned `std::thread` (joined here) keeps that nested runtime
+/// entirely off the async worker, so the call is safe from both sync and
+/// async callers. A non-2xx response or transport error is logged at
+/// warn/debug and swallowed; the daemon endpoint is idempotent so re-creates
+/// are harmless. The client uses a tight ~1s overall timeout (750 ms connect)
+/// so the joined thread returns quickly: this call sits on a hot path and
+/// must NOT stall when the daemon is slow or unreachable.
 /// Test: exercised via `ensure_project_indexed_returns_derived_id_when_daemon_down`
 /// (daemon-down path); the live HTTP path is covered by integration use.
 fn best_effort_create_index(base: &str, index_id: &str, root: &Path) {
     let url = format!("{base}/indexes");
-    let body = serde_json::json!({ "id": index_id, "root_path": root.to_string_lossy() });
+    let body = create_index_request_body(index_id, root);
     let index_id = index_id.to_string();
     let root_display = root.display().to_string();
 
@@ -314,6 +344,39 @@ mod tests {
         // Derivation yields an empty id for the filesystem root, so the helper
         // returns None without touching the daemon.
         assert_eq!(ensure_project_indexed(Path::new("/")), None);
+    }
+
+    /// `ensure_project_indexed`'s `POST /indexes` request body always sets
+    /// `allow_sensitive_path: true` (owner directive: explicit index requests
+    /// bypass the temp-dir denylist).
+    ///
+    /// Why: this is the trusty-common-side half of the bypass — without it,
+    /// trusty-search would still hard-reject a tcode bake-off project living
+    /// under an OS-temp prefix even after the daemon-side opt-in field exists.
+    /// Exercising `create_index_request_body` directly (rather than spawning a
+    /// thread and standing up a live daemon) keeps this test fast and offline.
+    /// What: builds the request body for both a plain project root and a
+    /// `/var/folders/…`-style scratch root, and asserts `allow_sensitive_path`
+    /// is `true` in both cases (the flag is unconditional, not path-dependent —
+    /// the daemon is the one that decides what it means).
+    /// Test: this test.
+    #[test]
+    fn create_index_request_body_sets_allow_sensitive_path() {
+        for root in [
+            Path::new("/Users/dev/projects/my-repo"),
+            Path::new("/private/var/folders/xx/scratch-project"),
+        ] {
+            let body = create_index_request_body("my-index", root);
+            assert_eq!(
+                body.get("allow_sensitive_path"),
+                Some(&serde_json::Value::Bool(true)),
+                "request body for root {root:?} must set allow_sensitive_path: true"
+            );
+            assert_eq!(
+                body.get("id").and_then(serde_json::Value::as_str),
+                Some("my-index")
+            );
+        }
     }
 
     #[test]

@@ -59,6 +59,7 @@ async fn validate_root_path_denylist_rejects_ssh() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            allow_sensitive_path: false,
         }),
     )
     .await;
@@ -93,7 +94,7 @@ async fn validate_root_path_denylist_rejects_home() {
     if !home.is_dir() {
         return;
     }
-    let result = super::helpers::validate_root_path(&home).await;
+    let result = super::helpers::validate_root_path(&home, false).await;
     assert!(
         result.is_err(),
         "$HOME itself must be rejected by validate_root_path"
@@ -179,7 +180,7 @@ async fn validate_root_path_accepts_safe_project_dir() {
     .copied();
 
     if let Some(path) = candidate {
-        let result = super::helpers::validate_root_path(path).await;
+        let result = super::helpers::validate_root_path(path, false).await;
         assert!(
             result.is_ok(),
             "expected Ok for safe directory {:?}, got Err",
@@ -187,6 +188,130 @@ async fn validate_root_path_accepts_safe_project_dir() {
         );
     }
     // If none of the well-known paths exist (unusual CI environment), skip gracefully.
+}
+
+/// By default, `create_index_handler` still refuses a real directory living
+/// under an OS-temp prefix (`allow_sensitive_path` omitted / `false`) —
+/// unchanged behaviour (owner directive: auto/broad indexing keeps the
+/// denylist).
+///
+/// Why: regression guard that the new opt-in flag does not accidentally
+/// relax the default path — every pre-existing caller (auto-discovery, the
+/// CLI, MCP) must still be refused for a scratch directory unless it
+/// explicitly opts in.
+/// What: creates a REAL directory via `tempfile::tempdir()` (which on macOS
+/// resolves under `/private/var/folders/…`, a `SENSITIVE_PATH_PREFIXES`
+/// entry), calls `create_index_handler` with `allow_sensitive_path: false`,
+/// and asserts 400 with "indexing refused".
+/// Test: this test.
+#[tokio::test]
+async fn create_index_still_rejects_sensitive_path_by_default() {
+    use crate::core::registry::IndexRegistry;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    let resp = create_index_handler(
+        State(Arc::clone(&state_arc)),
+        Json(CreateIndexRequest {
+            id: "scratch-default-denied".into(),
+            root_path: tmp.path().to_path_buf(),
+            include_paths: None,
+            exclude_globs: None,
+            extensions: None,
+            domain_terms: None,
+            path_filter: None,
+            include_docs: None,
+            respect_gitignore: None,
+            follow_links: None,
+            lexical_only: None,
+            skip_kg: None,
+            defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
+            allow_sensitive_path: false,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a temp-dir root must still be refused by default"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 65536)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("indexing refused"),
+        "error must mention 'indexing refused', got: {err:?}"
+    );
+}
+
+/// `create_index_handler` ACCEPTS a real directory under an OS-temp prefix
+/// when the request opts in via `allow_sensitive_path: true` (owner
+/// directive: an explicit index request may name a scratch working
+/// directory — e.g. tcode's bake-off project root).
+///
+/// Why: this is the core acceptance criterion for the bypass — without it,
+/// `ensure_project_indexed` could never register a tempdir-backed project,
+/// even though the caller named that exact root on purpose.
+/// What: creates a REAL directory via `tempfile::tempdir()`, calls
+/// `create_index_handler` with `allow_sensitive_path: true`, and asserts
+/// `200 {"created": true}` plus that the registry stores the canonicalized
+/// temp-dir root.
+/// Test: this test.
+#[tokio::test]
+async fn create_index_allows_sensitive_path_when_opted_in() {
+    use crate::core::registry::{IndexId, IndexRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let canonical_root = std::fs::canonicalize(tmp.path()).expect("canonicalize tempdir");
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    let resp = create_index_handler(
+        State(Arc::clone(&state_arc)),
+        Json(CreateIndexRequest {
+            id: "scratch-explicitly-allowed".into(),
+            root_path: tmp.path().to_path_buf(),
+            include_paths: None,
+            exclude_globs: None,
+            extensions: None,
+            domain_terms: None,
+            path_filter: None,
+            include_docs: None,
+            respect_gitignore: None,
+            follow_links: None,
+            lexical_only: None,
+            skip_kg: None,
+            defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
+            allow_sensitive_path: true,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a temp-dir root must be accepted when allow_sensitive_path is true"
+    );
+
+    let handle = state_arc
+        .registry
+        .get(&IndexId::new("scratch-explicitly-allowed"))
+        .expect("registered handle");
+    assert_eq!(
+        handle.root_path, canonical_root,
+        "registry must store the canonicalized temp-dir root"
+    );
 }
 
 /// Symlink-bypass test: a symlink pointing at ~/.ssh must still be refused.
@@ -217,7 +342,7 @@ async fn validate_root_path_denylist_blocks_symlink_to_ssh() {
     if std::os::unix::fs::symlink(&ssh, &link).is_err() {
         return; // Cannot create symlink — skip.
     }
-    let result = super::helpers::validate_root_path(&link).await;
+    let result = super::helpers::validate_root_path(&link, false).await;
     let _ = std::fs::remove_file(&link);
     assert!(
         result.is_err(),

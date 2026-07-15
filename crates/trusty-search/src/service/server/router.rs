@@ -185,6 +185,32 @@ pub struct CreateIndexRequest {
     /// Test: `create_index_threads_hygiene_fields` in `service::server::tests_index`.
     #[serde(default)]
     pub data_file_max_bytes: Option<u64>,
+
+    /// Opt-in bypass of the `SENSITIVE_PATH_PREFIXES` hard-denylist check
+    /// (OS-temp dirs like `/tmp`/`/var/folders` and `/Library/Application
+    /// Support`) for THIS request only. `false`/missing (the default)
+    /// preserves today's behaviour exactly — auto-discovery and every
+    /// pre-existing caller still get the full denylist.
+    ///
+    /// Why (owner directive): trusty-search must be able to index a scratch
+    /// directory (e.g. a tcode bake-off working project under
+    /// `/var/folders/…`) when a client EXPLICITLY names that exact root —
+    /// the denylist exists to block unrequested/broad indexing of ephemeral
+    /// or system paths, not to second-guess a caller that named this one
+    /// root on purpose. `trusty_common::search_index::ensure_project_indexed`
+    /// sets this to `true` because it is, by construction, always called
+    /// with one specific project root the caller wants indexed.
+    /// What: threaded through to `validate_root_path`, which — only when
+    /// `true` — calls `allowlist::is_denied_allowing_sensitive_path` instead
+    /// of `allowlist::is_denied`. Every OTHER denylist check (credential
+    /// directories like `.ssh`/`.aws`, sensitive file names like `.env`, and
+    /// top-level home directories like `~/Desktop`) still applies regardless
+    /// of this flag — only the temp/app-support PREFIX check is skippable.
+    /// Test: `create_index_allows_sensitive_path_when_opted_in`,
+    /// `create_index_still_rejects_sensitive_path_by_default` in
+    /// `service::server::tests_denylist`.
+    #[serde(default)]
+    pub allow_sensitive_path: bool,
 }
 
 #[derive(Deserialize)]

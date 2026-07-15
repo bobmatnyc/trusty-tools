@@ -117,8 +117,10 @@ pub(super) async fn reindex_handler(
             // Issue (indexed-paths-mismatch): use the canonical form so a
             // re-register via a symlink alias normalises to the same identity
             // the original `POST /indexes` stored.
-            // Issue #829: validate_root_path is now async.
-            let new_root = match validate_root_path(&new_root).await {
+            // Issue #829: validate_root_path is now async. Reindex's root
+            // override has no `allow_sensitive_path` opt-in, so this always
+            // enforces the full denylist (`false`) — unchanged from before.
+            let new_root = match validate_root_path(&new_root, false).await {
                 Ok(canonical) => canonical,
                 Err(resp) => {
                     let (parts, body) = resp.into_parts();

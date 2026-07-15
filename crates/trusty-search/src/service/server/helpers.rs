@@ -37,13 +37,23 @@ use crate::core::registry::{IndexHandle, IndexId};
 ///
 /// What: in order — (1) rejects empty/non-absolute paths (no I/O); (2)
 /// checks `is_dir` via `tokio::fs::metadata`; (3) canonicalizes via
-/// `tokio::fs::canonicalize`; (4) calls `crate::allowlist::is_denied` on the
-/// canonical path and returns 400 with the denial reason when matched.
+/// `tokio::fs::canonicalize`; (4) calls `crate::allowlist::is_denied` (or, when
+/// `allow_sensitive_path` is `true`, `crate::allowlist::is_denied_allowing_sensitive_path`
+/// — see that function's doc comment for exactly what is and is not skipped)
+/// on the canonical path and returns 400 with the denial reason when matched.
+/// `allow_sensitive_path` should be `true` ONLY for an explicit, single-root
+/// create-index request that opted in (`CreateIndexRequest::allow_sensitive_path`);
+/// every other caller (reindex/relocate root validation) passes `false` to
+/// preserve today's behaviour exactly.
 /// Test: `validate_root_path_denylist_rejects_ssh`, `_rejects_home`,
-/// `_rejects_tmp`, `_accepts_project_dir` in `tests_denylist.rs`.
+/// `_rejects_tmp`, `_accepts_project_dir` in `tests_denylist.rs`;
+/// `create_index_allows_sensitive_path_when_opted_in`,
+/// `create_index_still_rejects_sensitive_path_by_default` in
+/// `tests_denylist.rs`.
 #[allow(clippy::result_large_err)]
 pub(super) async fn validate_root_path(
     path: &std::path::Path,
+    allow_sensitive_path: bool,
 ) -> Result<std::path::PathBuf, Response> {
     if path.as_os_str().is_empty() {
         return Err((
@@ -115,7 +125,17 @@ pub(super) async fn validate_root_path(
     // enforces the policy for direct HTTP callers, MCP tool invocations, and
     // scripts that bypass the CLI. Both checks are intentional — neither is
     // redundant.
-    if let Some(reason) = crate::allowlist::is_denied(&canonical) {
+    //
+    // `allow_sensitive_path` (explicit-index-sensitive-path-bypass): only the
+    // temp-dir/app-support PREFIX check is skippable, and only when the caller
+    // opted in — see `allowlist::is_denied_allowing_sensitive_path`'s doc
+    // comment.
+    let denial = if allow_sensitive_path {
+        crate::allowlist::is_denied_allowing_sensitive_path(&canonical)
+    } else {
+        crate::allowlist::is_denied(&canonical)
+    };
+    if let Some(reason) = denial {
         tracing::warn!(
             path = %canonical.display(),
             %reason,
