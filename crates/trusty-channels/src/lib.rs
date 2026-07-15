@@ -15,3 +15,4 @@
 //! handshake, and tool registry.
 
 pub mod slack;
+pub mod telegram;
