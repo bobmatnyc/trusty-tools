@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use trusty_common::intent_source::{Method, MethodKind, Precedence, ResolvedIntent, TicketRef};
 
 use crate::driver::correlation::{ScopeCheck, SessionCorrelation};
+use crate::driver::disposition::DispositionReason;
 use crate::driver::policy::{
     ActionContext, ChangeClass, CiStatus, Disposition, GuardrailSignals, ReviewVerdict,
 };
@@ -67,16 +68,34 @@ fn ticket_intent(m: &str) -> ResolvedIntent {
     }
 }
 
-fn auto(reason: &str) -> Disposition {
+/// A representative `AutoAccept` disposition for composition tests.
+///
+/// The `reason` argument is retained for call-site readability but does not
+/// affect the composition logic under test (`stricter_of*` only inspect the
+/// `AutoAccept`/`Escalate` discriminant), so every auto-accept maps to one
+/// representative [`DispositionReason`].
+fn auto(_reason: &str) -> Disposition {
     Disposition::AutoAccept {
-        reason: reason.to_string(),
+        reason: DispositionReason::ConformanceMatch,
     }
 }
 
+/// A representative `Escalate` disposition for composition tests.
+///
+/// The `reason` string is mapped to a real [`DispositionReason`] deterministically
+/// (T4 text → `T4Escalate`, otherwise `ConformanceDivergence`) so equality
+/// assertions between the two escalation sources stay meaningful — a `T4`
+/// escalation and a conformance-divergence escalation render distinct values.
 fn esc(reason: &str) -> Disposition {
-    Disposition::Escalate {
-        reason: reason.to_string(),
-    }
+    let mapped = if reason.contains("T4") {
+        DispositionReason::T4Escalate
+    } else {
+        DispositionReason::ConformanceDivergence {
+            prescribed: "prescribed".to_string(),
+            planned: "planned".to_string(),
+        }
+    };
+    Disposition::Escalate { reason: mapped }
 }
 
 // ── front_gate_disposition: matrix rows ─────────────────────────────────────────
@@ -99,7 +118,7 @@ fn unresolved_auto_accepts() {
         "unresolved must auto-accept (fail-open)"
     );
     let reason = match d {
-        Disposition::AutoAccept { reason } => reason,
+        Disposition::AutoAccept { reason } => reason.to_string(),
         Disposition::Escalate { .. } => unreachable!(),
     };
     assert!(reason.contains(NO_INTENT_SOURCE));
@@ -129,7 +148,7 @@ fn divergence_escalates() {
     let d = front_gate_disposition(&intent, Some(&method("use offset pagination")));
     assert!(!d.is_auto_accept(), "divergence must escalate (M5)");
     let reason = match d {
-        Disposition::Escalate { reason } => reason,
+        Disposition::Escalate { reason } => reason.to_string(),
         Disposition::AutoAccept { .. } => unreachable!(),
     };
     assert!(

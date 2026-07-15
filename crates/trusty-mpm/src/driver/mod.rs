@@ -16,9 +16,11 @@
 //! `cargo test -p trusty-mpm driver::`.
 
 pub mod correlation;
+pub mod disposition;
 pub mod policy;
 
 pub use correlation::{ScopeCheck, SessionCorrelation};
+pub use disposition::{DispositionReason, NoIntentKind};
 pub use policy::{
     ActionContext, AutonomyDecision, AutonomyTier, ChangeClass, CiStatus, Disposition,
     GuardrailSignals, PolicyError, ReviewVerdict, evaluate_autonomy_tier,

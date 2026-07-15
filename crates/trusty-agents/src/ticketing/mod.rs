@@ -239,7 +239,7 @@ impl TicketingConfig {
         let provider = std::env::var("TICKETING_PROVIDER").unwrap_or_else(|_| "github".to_string());
         Self {
             provider,
-            github_token: std::env::var("GITHUB_TOKEN").ok(),
+            github_token: std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN).ok(),
             github_repo: std::env::var("GITHUB_REPO").ok(),
             jira_url: std::env::var("JIRA_URL").ok(),
             jira_email: std::env::var("JIRA_EMAIL").ok(),
@@ -286,7 +286,7 @@ impl TicketingConfig {
             .as_deref()
             .filter(|s| !s.is_empty())
             .is_some()
-            || std::env::var("GITHUB_TOKEN")
+            || std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
                 .ok()
                 .filter(|s| !s.is_empty())
                 .is_some();

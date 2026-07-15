@@ -291,7 +291,7 @@ pub(super) fn check_credentials_and_warn() {
     let has_anthropic = std::env::var("ANTHROPIC_API_KEY")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    let has_openrouter = std::env::var("OPENROUTER_API_KEY")
+    let has_openrouter = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
         .map(|v| !v.is_empty())
         .unwrap_or(false);
 
