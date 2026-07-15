@@ -61,7 +61,17 @@
 /// The `trusty-search` signable set: `trusty-search` + its bundled `trusty-embedderd`.
 pub const SEARCH_SET: &str = "trusty-search";
 
-/// The `trusty-mpm` signable set: `trusty-mpm` alone.
+/// The `trusty-mpm` signable set: both binaries `cargo install --path
+/// crates/trusty-mpm` produces — the `trusty-mpm` MCP-bridge binary AND its
+/// `tm` CLI/daemon binary.
+///
+/// Why (#2721): `cargo install` installs `trusty-mpm` and `tm` side by side and
+/// both are ad-hoc/linker-signed with a churning cdhash. Signing only
+/// `trusty-mpm` left `tm` — the primary user-facing binary that also runs the
+/// daemon (`tm daemon`/`tm supervisor`) — ad-hoc, so its App-Data TCC grant kept
+/// being revoked on every reinstall and the "'trusty-mpm' would like to access
+/// data from other apps" prompt still recurred. Both binaries must carry a
+/// stable Developer-ID `--identifier` for the grant to survive.
 pub const MPM_SET: &str = "trusty-mpm";
 
 /// The master table: every signable binary → (its set, its codesign identifier).
@@ -85,6 +95,12 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
         "com.trusty.trusty-embedderd",
     ),
     ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
+    // `tm` is installed alongside `trusty-mpm` by the same `cargo install --path
+    // crates/trusty-mpm` and is the primary user-facing/daemon binary. It MUST
+    // be signed too or its App-Data TCC grant is revoked on every reinstall
+    // (#2721). Ordered after `trusty-mpm` so `binaries_for_set(MPM_SET).first()`
+    // — the binary whose path the guidance/prompt names — stays `trusty-mpm`.
+    ("tm", MPM_SET, "com.trusty.tm"),
 ];
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
@@ -654,8 +670,12 @@ pub fn post_install_mpm(install_dir: &std::path::Path, json: bool) {
 mod tests {
     use super::*;
 
-    /// Why: Both signable sets must resolve to their documented binaries.
-    /// What: Asserts `trusty-search` covers search+embedderd, `trusty-mpm` covers mpm alone.
+    /// Why: Both signable sets must resolve to their documented binaries. The
+    /// `trusty-mpm` set MUST include `tm` (#2721) — omitting it left the primary
+    /// `tm` binary ad-hoc and the App-Data TCC prompt kept recurring. Order
+    /// matters: `trusty-mpm` first so it stays the guidance/prompt "primary".
+    /// What: Asserts `trusty-search` covers search+embedderd, `trusty-mpm` covers
+    /// both `trusty-mpm` and `tm` in that order.
     /// Test: This is the test.
     #[test]
     fn binaries_for_set_covers_search_and_mpm() {
@@ -663,7 +683,7 @@ mod tests {
             binaries_for_set(SEARCH_SET),
             vec!["trusty-search", "trusty-embedderd"]
         );
-        assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm"]);
+        assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm", "tm"]);
     }
 
     /// Why: An unrecognised set name must not silently sign nothing without
@@ -680,7 +700,8 @@ mod tests {
     /// `com.trusty.trusty-<binary>` scheme used by `plist_label.rs` and the
     /// release-workflow docs (the pre-#2558 short-form identifiers were the
     /// drift this module fixes).
-    /// What: Asserts all three target binaries map to the expected IDs.
+    /// What: Asserts all four target binaries map to the expected IDs, including
+    /// the `tm` binary (`com.trusty.tm`, #2721) that shares the trusty-mpm set.
     /// Test: This is the test.
     #[test]
     fn identifier_map_covers_all_signable_binaries() {
@@ -693,6 +714,7 @@ mod tests {
             "com.trusty.trusty-embedderd"
         );
         assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
+        assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
     }
 
     /// Why: PR #2657 review MEDIUM — with set membership and identifier now

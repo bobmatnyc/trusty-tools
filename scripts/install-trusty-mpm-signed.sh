@@ -20,14 +20,15 @@
 #
 # CANONICAL SCHEME NOTE: The single source of truth for trusty-* codesign
 # flags/identifiers is `tctl sign` (crates/trusty-installer/src/commands/
-# macos_signing.rs, #2558). `tctl sign trusty-mpm` already signs the
-# `trusty-mpm` binary with `com.trusty.trusty-mpm`, but its SIGNABLE_BINARIES
-# table does NOT include the `tm` alias binary — so `tm` stays ad-hoc-signed and
-# keeps re-prompting. This script therefore signs BOTH binaries directly,
-# mirroring that canonical scheme exactly (identifiers, `--options runtime
-# --timestamp`, `--verify --deep --strict`, and the identifier-change safety
-# notice). Once `tm` is added to the `tctl` table, this script's signing loop
-# can be replaced with a delegation to `tctl sign trusty-mpm` (see #2721).
+# macos_signing.rs, #2558). As of #2721 the `SIGNABLE_BINARIES` table covers the
+# FULL trusty-mpm set — both `trusty-mpm` (`com.trusty.trusty-mpm`) AND the `tm`
+# binary (`com.trusty.tm`) — so `tctl sign trusty-mpm` and the `tctl install`
+# post-install hook now sign both. This script signs the same two binaries
+# directly, mirroring that canonical scheme exactly (identifiers, `--options
+# runtime --timestamp`, `--verify --deep --strict`, and the identifier-change
+# safety notice); it stays as a cert-guidance-friendly wrapper for local-source
+# installs and can, if desired, be reduced to a delegation to
+# `tctl sign trusty-mpm` now that the table is complete.
 #
 # Hardened Runtime: `--options runtime --timestamp` is applied to both binaries.
 # Unlike trusty-search/trusty-embedderd (which load an ONNX runtime dylib and so
