@@ -9,6 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- implement Slack send + read tools; extract SlackFormatter to trusty-common ([#2722](https://github.com/bobmatnyc/trusty-tools/pull/2722)) ([`847a0c3`](https://github.com/bobmatnyc/trusty-tools/commit/847a0c334e1a8822a7d31696b48946e538aca7cc))
+
+### Fixed
+
+- reconcile zombie-active sessions on in-place relaunch (closes #2743) ([#2744](https://github.com/bobmatnyc/trusty-tools/pull/2744)) ([`f1552c7`](https://github.com/bobmatnyc/trusty-tools/commit/f1552c72e4f20afda74466f97865845660d18a30))
+- pm_guard recognizes git global flags and stops scanning quoted content ([#2741](https://github.com/bobmatnyc/trusty-tools/pull/2741)) ([`6e29e25`](https://github.com/bobmatnyc/trusty-tools/commit/6e29e253c073cb889bdbfce5e99d05d16e6d1fe2))
+- framework workflow conventions — per-session session log, issue/PR assignee+label defaults, trusty-mpm attribution footer ([#2737](https://github.com/bobmatnyc/trusty-tools/pull/2737)) ([`3089600`](https://github.com/bobmatnyc/trusty-tools/commit/3089600b475cc464329132e5f7523536bb730797))
+## [Unreleased]
+
+### Added
+
 - shared ensure-project-indexed helper; wire tcode task start ([#2701](https://github.com/bobmatnyc/trusty-tools/pull/2701)) ([`28a8d11`](https://github.com/bobmatnyc/trusty-tools/commit/28a8d11d4a5eac21921c3ceeef8707f71cf35459))
 
 ### Changed
