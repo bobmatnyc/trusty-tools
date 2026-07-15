@@ -42,6 +42,7 @@ use trusty_common::intent_source::{
 };
 
 use crate::driver::correlation::{ScopeCheck, SessionCorrelation};
+use crate::driver::disposition::{DispositionReason, NoIntentKind};
 use crate::driver::policy::{
     ActionContext, AutonomyDecision, ChangeClass, CiStatus, Disposition, GuardrailSignals,
     ReviewVerdict, evaluate_autonomy_tier,
@@ -129,12 +130,14 @@ impl FrontGateOutcome {
     ///
     /// Why: the spawn path writes this into `SessionRecord.pending_decision` so it
     /// surfaces through every existing channel (activity API, CLI, supervisor).
-    /// What: returns the `Escalate` reason, or `None` on auto-accept.
+    /// This is the HTTP-visible edge where the typed [`DispositionReason`] is
+    /// rendered to a `String` — the wire format is unchanged.
+    /// What: returns the rendered `Escalate` reason, or `None` on auto-accept.
     /// Test: `tests::divergence_escalates`.
     #[must_use]
-    pub fn escalation_reason(&self) -> Option<&str> {
+    pub fn escalation_reason(&self) -> Option<String> {
         match &self.disposition {
-            Disposition::Escalate { reason } => Some(reason),
+            Disposition::Escalate { reason } => Some(reason.to_string()),
             Disposition::AutoAccept { .. } => None,
         }
     }
@@ -281,7 +284,7 @@ pub fn front_gate_disposition(
     // Fail-open: ISR could not resolve → no intent to conform to (spec §4.2).
     if let Some(reason) = &intent.unresolved {
         return Disposition::AutoAccept {
-            reason: format!("{NO_INTENT_SOURCE} (unresolved: {reason})"),
+            reason: DispositionReason::NoIntentSource(NoIntentKind::Unresolved(reason.clone())),
         };
     }
 
@@ -289,7 +292,7 @@ pub fn front_gate_disposition(
         // M3 gap: neither ticket nor spec prescribes a method — nothing to
         // conform to.
         return Disposition::AutoAccept {
-            reason: format!("{NO_INTENT_SOURCE} (no prescribed method; gap)"),
+            reason: DispositionReason::NoIntentSource(NoIntentKind::Gap),
         };
     };
 
@@ -297,21 +300,20 @@ pub fn front_gate_disposition(
         // M1/M2 agree (or no explicit plan pre-work → treat as conformant): the
         // planned approach matches the prescribed method.
         None => Disposition::AutoAccept {
-            reason: "conformance: no divergent plan; ticket/spec method honoured".to_string(),
+            reason: DispositionReason::ConformanceNoDivergentPlan,
         },
         Some(planned) if normalise(&planned.text) == normalise(&prescribed.text) => {
             Disposition::AutoAccept {
-                reason: "conformance: planned method matches the ticket/spec method".to_string(),
+                reason: DispositionReason::ConformanceMatch,
             }
         }
         // M1/M2/M5 divergence: the planned method contradicts an explicit
         // ticket/spec method — escalate before any code is written (spec §5.1).
         Some(planned) => Disposition::Escalate {
-            reason: format!(
-                "conformance divergence: ticket/spec specifies \"{}\"; plan uses \"{}\"",
-                prescribed.text.trim(),
-                planned.text.trim()
-            ),
+            reason: DispositionReason::ConformanceDivergence {
+                prescribed: prescribed.text.trim().to_string(),
+                planned: planned.text.trim().to_string(),
+            },
         },
     }
 }
@@ -414,7 +416,7 @@ pub async fn run_front_gate(
     let Some(ticket_id) = extract_ticket_id(task) else {
         let disposition = stricter_of(
             Disposition::AutoAccept {
-                reason: format!("{NO_INTENT_SOURCE} (non-ticketed work)"),
+                reason: DispositionReason::NoIntentSource(NoIntentKind::NonTicketed),
             },
             autonomy,
         );
@@ -478,7 +480,7 @@ pub fn autonomy_disposition(ctx: &ActionContext, signals: &GuardrailSignals) -> 
         // An empty decision text cannot be classified; fail open rather than
         // block the gate on its own composition input (spec §4.2).
         Err(_) => Disposition::AutoAccept {
-            reason: format!("{NO_INTENT_SOURCE} (autonomy input empty)"),
+            reason: DispositionReason::NoIntentSource(NoIntentKind::AutonomyInputEmpty),
         },
     }
 }

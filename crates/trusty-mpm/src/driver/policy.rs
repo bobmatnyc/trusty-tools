@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::driver::correlation::{ScopeCheck, SessionCorrelation};
+use crate::driver::disposition::DispositionReason;
 
 /// Words in a `pending_decision` that mark an irreversible / destructive action.
 ///
@@ -240,20 +241,21 @@ impl AutonomyTier {
 /// (auto-accept or escalate) and a machine- and human-readable *reason*, so the
 /// decision can be logged, surfaced to the human on escalation, and audited later.
 /// What: an enum with [`Disposition::AutoAccept`] and [`Disposition::Escalate`],
-/// each carrying a reason string; wrapped together with the chosen tier in
-/// [`AutonomyDecision`].
+/// each carrying a typed [`DispositionReason`]; wrapped together with the chosen
+/// tier in [`AutonomyDecision`]. The reason is rendered to a `String` only at the
+/// HTTP-visible edge (`SessionRecord.pending_decision`) via `.to_string()`.
 /// Test: matched in every `evaluate_*` test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disposition {
     /// The proposed default may be auto-accepted.
     AutoAccept {
         /// Why the gate cleared (which guardrails were favorable).
-        reason: String,
+        reason: DispositionReason,
     },
     /// The decision must be escalated to a human.
     Escalate {
         /// Why the gate did not clear / why human review is required.
-        reason: String,
+        reason: DispositionReason,
     },
 }
 
@@ -370,10 +372,7 @@ pub fn evaluate_autonomy_tier(
         return Ok(AutonomyDecision {
             tier,
             disposition: Disposition::Escalate {
-                reason: format!(
-                    "decision previously rejected {} time(s); re-escalating to human",
-                    ctx.prior_rejections
-                ),
+                reason: DispositionReason::PriorRejection(ctx.prior_rejections),
             },
         });
     }
@@ -383,8 +382,7 @@ pub fn evaluate_autonomy_tier(
         AutonomyTier::T2 => gate_t2(signals),
         AutonomyTier::T3 => gate_t3(signals),
         AutonomyTier::T4 => Disposition::Escalate {
-            reason: "T4: irreversible or security-sensitive operation; human confirmation required"
-                .to_string(),
+            reason: DispositionReason::T4Escalate,
         },
     };
 
@@ -400,15 +398,15 @@ pub fn evaluate_autonomy_tier(
 fn gate_t1(signals: &GuardrailSignals) -> Disposition {
     if signals.review == ReviewVerdict::Reject {
         Disposition::Escalate {
-            reason: "T1: trusty-review returned REJECT on a style-only change".to_string(),
+            reason: DispositionReason::T1ReviewReject,
         }
     } else if signals.ci == CiStatus::Red {
         Disposition::Escalate {
-            reason: "T1: CI is red on a style-only change".to_string(),
+            reason: DispositionReason::T1CiRed,
         }
     } else {
         Disposition::AutoAccept {
-            reason: "T1: style-only change with no objecting guardrail".to_string(),
+            reason: DispositionReason::T1StyleOnly,
         }
     }
 }
@@ -424,14 +422,11 @@ fn gate_t1(signals: &GuardrailSignals) -> Disposition {
 fn gate_t2(signals: &GuardrailSignals) -> Disposition {
     if signals.all_clear() {
         Disposition::AutoAccept {
-            reason: "T2: all structured guardrails green (review APPROVE, CI green, search+memory consistent, in-scope)".to_string(),
+            reason: DispositionReason::T2AllClear,
         }
     } else {
         Disposition::Escalate {
-            reason: format!(
-                "T2: guardrail not satisfied: {}",
-                first_failing_signal(signals)
-            ),
+            reason: DispositionReason::T2GuardrailFailed(first_failing_signal(signals)),
         }
     }
 }
@@ -450,14 +445,11 @@ fn gate_t3(signals: &GuardrailSignals) -> Disposition {
     let ci_ok = signals.ci != CiStatus::Red;
     if approved && in_scope && ci_ok {
         Disposition::AutoAccept {
-            reason: "T3: architecture-touching change with explicit trusty-review APPROVE and in-scope validation".to_string(),
+            reason: DispositionReason::T3Approved,
         }
     } else {
         Disposition::Escalate {
-            reason: format!(
-                "T3: requires explicit APPROVE + in-scope + non-red CI; got {}",
-                first_failing_signal(signals)
-            ),
+            reason: DispositionReason::T3RequiresApprove(first_failing_signal(signals)),
         }
     }
 }

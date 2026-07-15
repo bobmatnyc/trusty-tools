@@ -373,28 +373,124 @@ pub(crate) fn definition_boost_query_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Map (`in_hnsw`, `in_bm25`, `in_kg`) booleans to a stable `match_reason`
-/// label.
+/// Retrieval lane that surfaced a search result, rendered verbatim into
+/// `CodeChunk.match_reason`.
+///
+/// Why: the five `match_reason` labels are a documented external MCP/HTTP API
+/// contract (they appear verbatim in `search` / `search_similar` JSON). A
+/// typed enum makes the producer exhaustive and self-documenting while
+/// [`MatchReason::as_str`] pins the wire strings byte-for-byte, so a stray
+/// literal can no longer drift out of the contract (issue #2695). The
+/// `CodeChunk.match_reason` field stays `String` on purpose — see
+/// [`compute_match_reason`] for the boundary rationale.
+/// What: one variant per documented lane; [`MatchReason::as_str`] and the
+/// [`std::fmt::Display`] impl both emit exactly `"vector"`, `"bm25"`,
+/// `"hybrid"`, `"hybrid+kg"`, or `"fallback:ripgrep"`.
+/// Test: `match_reason_labels_are_byte_identical` (helpers unit tests) pins
+/// every rendered string; `test_compute_match_reason_fallback_label` pins the
+/// producer arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchReason {
+    /// HNSW (semantic) lane only.
+    Vector,
+    /// BM25 (lexical) lane only.
+    Bm25,
+    /// Both HNSW and BM25 fused.
+    Hybrid,
+    /// Knowledge-graph neighbour expansion (no direct HNSW/BM25 hit).
+    HybridKg,
+    /// Exact-substring ripgrep fallback when both primary lanes were empty.
+    FallbackRipgrep,
+}
+
+impl MatchReason {
+    /// Render the variant as its documented wire label.
+    ///
+    /// Why: `CodeChunk.match_reason` is a `String` on the wire; this is the
+    /// single point that maps the typed variant to its byte-identical label,
+    /// keeping the external contract in one place.
+    /// What: returns the `'static` string for each variant.
+    /// Test: `match_reason_labels_are_byte_identical`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            MatchReason::Vector => "vector",
+            MatchReason::Bm25 => "bm25",
+            MatchReason::Hybrid => "hybrid",
+            MatchReason::HybridKg => "hybrid+kg",
+            MatchReason::FallbackRipgrep => "fallback:ripgrep",
+        }
+    }
+}
+
+impl std::fmt::Display for MatchReason {
+    /// Why: lets the enum flow through `format!`/`write!` and `.to_string()`
+    /// without callers reaching for [`MatchReason::as_str`] explicitly.
+    /// What: delegates to [`MatchReason::as_str`] so `Display` and `as_str`
+    /// can never disagree.
+    /// Test: `match_reason_labels_are_byte_identical`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Map (`in_hnsw`, `in_bm25`, `in_kg`) booleans to the [`MatchReason`] lane
+/// that surfaced the result.
 ///
 /// Why: lifted out of `search` to keep the materialization loop short and to
-/// make the precedence rules unit-testable in isolation.
+/// make the precedence rules unit-testable in isolation. The result is a
+/// typed [`MatchReason`] rather than a bare label so the producer is
+/// exhaustive; the caller renders it with [`MatchReason::as_str`] at the
+/// single assignment site.
+///
+/// Boundary note (issue #2695): `CodeChunk.match_reason` stays `String`
+/// rather than becoming `MatchReason`. The field is serialized across the
+/// MCP/HTTP wire and legitimately holds values outside these five lanes
+/// (e.g. the empty placeholder in `output.rs`, `"test"` fixtures, benchmark
+/// `"grep"` rows), and its downstream consumer `classify_source` does
+/// substring matching. Typing only the producer keeps the wire byte-identical
+/// with the smallest blast radius.
 /// What: direct hits (HNSW and/or BM25) take precedence over KG-only paths.
-/// `(false,false,false)` returns `"fallback:ripgrep"` for the grep lane.
+/// `(false,false,false)` returns [`MatchReason::FallbackRipgrep`] for the grep
+/// lane.
 /// Test: covered indirectly by `test_kg_expansion_marks_neighbours_with_hybrid_kg`
 /// and `test_compute_match_reason_fallback_label`.
-pub(crate) fn compute_match_reason(in_v: bool, in_b: bool, in_kg: bool) -> &'static str {
+pub(crate) fn compute_match_reason(in_v: bool, in_b: bool, in_kg: bool) -> MatchReason {
     match (in_v, in_b, in_kg) {
-        (true, true, _) => "hybrid",
-        (true, false, _) => "vector",
-        (false, true, _) => "bm25",
-        (false, false, true) => "hybrid+kg",
-        (false, false, false) => "fallback:ripgrep",
+        (true, true, _) => MatchReason::Hybrid,
+        (true, false, _) => MatchReason::Vector,
+        (false, true, _) => MatchReason::Bm25,
+        (false, false, true) => MatchReason::HybridKg,
+        (false, false, false) => MatchReason::FallbackRipgrep,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin every [`MatchReason`] label to its documented wire string,
+    /// byte-for-byte, via both `as_str()` and `Display` (issue #2695).
+    ///
+    /// These five strings are an external MCP/HTTP API contract; any change
+    /// here is a breaking wire change and must fail this test loudly.
+    #[test]
+    fn match_reason_labels_are_byte_identical() {
+        let cases = [
+            (MatchReason::Vector, "vector"),
+            (MatchReason::Bm25, "bm25"),
+            (MatchReason::Hybrid, "hybrid"),
+            (MatchReason::HybridKg, "hybrid+kg"),
+            (MatchReason::FallbackRipgrep, "fallback:ripgrep"),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_str(), expected, "as_str drifted for {variant:?}");
+            assert_eq!(
+                variant.to_string(),
+                expected,
+                "Display drifted for {variant:?}"
+            );
+        }
+    }
 
     /// Watcher idle-suspend: `watch_idle_suspend_secs` honours the default and
     /// the `TRUSTY_WATCH_IDLE_SUSPEND_SECS` override, including `0` (disabled)
