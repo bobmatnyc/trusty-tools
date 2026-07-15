@@ -256,18 +256,18 @@ the Developer ID identity (or honours `TRUSTY_SIGN_IDENTITY`), then codesigns
 `--identifier com.trusty.trusty-mpm` and `~/.cargo/bin/tm` with `--identifier
 com.trusty.tm`.
 
-🟡 **Why a dedicated script and not just `tctl sign trusty-mpm`?** (#2721) —
-`tctl install trusty-mpm` / `tctl sign trusty-mpm` already sign the
-`trusty-mpm` binary with `com.trusty.trusty-mpm` (same flags), but `tctl`'s
-`SIGNABLE_BINARIES` table does **not** yet include the `tm` alias binary, so
-`tm` stays ad-hoc-signed and keeps re-triggering the App-Data prompt on every
-reinstall. The script closes that gap by signing `tm` (`com.trusty.tm`) too.
-`tctl sign trusty-mpm` remains valid for signing just the `trusty-mpm` binary
-in place:
+🟡 **Script vs. `tctl sign trusty-mpm`?** (#2721) — as of the part-2 fix, `tctl`'s
+`SIGNABLE_BINARIES` table covers the **full** trusty-mpm set: both
+`trusty-mpm` (`com.trusty.trusty-mpm`) AND the `tm` binary (`com.trusty.tm`).
+So `tctl install trusty-mpm` (automatic post-install hook) and
+`tctl sign trusty-mpm` (explicit) now sign **both** binaries — closing the gap
+where the primary `tm` binary stayed ad-hoc and kept re-triggering the App-Data
+prompt on every reinstall. The dedicated script signs the same two binaries and
+remains as a cert-guidance-friendly wrapper for local-source installs:
 
 ```bash
 cargo install --path crates/trusty-mpm --locked
-tctl sign trusty-mpm   # signs the trusty-mpm binary only; does NOT sign `tm`
+tctl sign trusty-mpm   # signs BOTH trusty-mpm (com.trusty.trusty-mpm) and tm (com.trusty.tm)
 ```
 
 Both paths print the App-Data-TCC guidance: approve the next `'trusty-mpm'
