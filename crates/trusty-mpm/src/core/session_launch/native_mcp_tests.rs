@@ -593,7 +593,8 @@ fn split_public_and_secret_env_separates_env_from_shape() {
         "env": { "SLACK_BOT_TOKEN": FAKE_SLACK_TOKEN, "SLACK_USER_TOKEN": "xoxp-also-secret" }
     });
 
-    let (public, secrets) = split_public_and_secret_env(&entry, "slack-mcp");
+    let (public, secrets) =
+        split_public_and_secret_env(&entry, "slack-mcp").expect("valid stdio server is accepted");
 
     assert!(
         public.get("env").is_none(),
@@ -623,11 +624,103 @@ fn split_public_and_secret_env_skips_non_string_values() {
         "env": { "GOOD": "value", "BAD": 42 }
     });
 
-    let (public, secrets) = split_public_and_secret_env(&entry, "weird-mcp");
+    let (public, secrets) =
+        split_public_and_secret_env(&entry, "weird-mcp").expect("valid stdio server is accepted");
 
     assert!(public.get("env").is_none());
     assert_eq!(secrets.get("GOOD").map(String::as_str), Some("value"));
     assert!(!secrets.contains_key("BAD"), "non-string value dropped");
+}
+
+// ── split_public_and_secret_env: positive field-allowlist rejection ─────────
+
+#[test]
+fn split_public_and_secret_env_rejects_url_bearing_entry() {
+    // Why (code-critic residual HIGH, #2739): a token can ride in `url`, not just
+    // `env`. An entry carrying a `url` field (the http-server shape) must be
+    // REJECTED wholesale — never partially injected — so the url (and any secret
+    // inside it) never reaches the git-tracked `.mcp.json`.
+    let entry = json!({
+        "type": "http",
+        "url": format!("https://evil.example/mcp?token={FAKE_SLACK_TOKEN}")
+    });
+
+    assert!(
+        split_public_and_secret_env(&entry, "poisoned-http").is_none(),
+        "a url-bearing (http) registration must be rejected, not injected"
+    );
+}
+
+#[test]
+fn split_public_and_secret_env_rejects_header_bearing_entry() {
+    // Why (#2739): an Authorization header is the classic HTTP secret channel.
+    // Even paired with a `command`, a `headers` field is outside the stdio
+    // allowlist → reject the whole entry.
+    let entry = json!({
+        "type": "stdio",
+        "command": "slack-mcp",
+        "headers": { "Authorization": format!("Bearer {FAKE_SLACK_TOKEN}") }
+    });
+
+    assert!(
+        split_public_and_secret_env(&entry, "poisoned-headers").is_none(),
+        "a headers-bearing registration must be rejected, not injected"
+    );
+}
+
+#[test]
+fn split_public_and_secret_env_rejects_unknown_field() {
+    // Why (#2739): the allowlist is POSITIVE — a brand-new field invented
+    // upstream fails closed. Anything outside type/command/args/env rejects.
+    let entry = json!({
+        "type": "stdio",
+        "command": "slack-mcp",
+        "authToken": FAKE_SLACK_TOKEN
+    });
+
+    assert!(
+        split_public_and_secret_env(&entry, "poisoned-unknown").is_none(),
+        "an entry with a field outside the allowlist must be rejected"
+    );
+}
+
+#[test]
+fn split_public_and_secret_env_rejects_non_stdio_type() {
+    // Why (#2739): a `type` other than `stdio` signals a transport that carries
+    // credentials outside `env` (http/sse) — reject.
+    let entry = json!({ "type": "sse", "command": "slack-mcp" });
+
+    assert!(
+        split_public_and_secret_env(&entry, "sse-server").is_none(),
+        "a non-stdio type must be rejected"
+    );
+}
+
+#[test]
+fn split_public_and_secret_env_rejects_missing_command() {
+    // Why (#2739): a stdio server with no string `command` has nothing safe to
+    // inject — reject rather than emit a malformed `.mcp.json` entry.
+    let entry = json!({ "type": "stdio", "args": ["serve"] });
+
+    assert!(
+        split_public_and_secret_env(&entry, "no-command").is_none(),
+        "a registration without a string command must be rejected"
+    );
+}
+
+#[test]
+fn split_public_and_secret_env_accepts_bare_stdio_without_type() {
+    // Why (#2739): `type` is optional in a stdio `.mcp.json` entry; a bare
+    // command+args entry (no explicit `type`) is the common shape and must be
+    // accepted, with the public shape carrying no synthesised `type`.
+    let entry = json!({ "command": "gworkspace-mcp", "args": [] });
+
+    let (public, secrets) = split_public_and_secret_env(&entry, "gworkspace-mcp")
+        .expect("a bare stdio command entry is accepted");
+
+    assert!(public.get("type").is_none(), "no type synthesised");
+    assert_eq!(public["command"], json!("gworkspace-mcp"));
+    assert!(secrets.is_empty());
 }
 
 // ── ensure_env_local_git_excluded: direct unit coverage ─────────────────────
@@ -717,5 +810,95 @@ fn merge_env_file_is_idempotent_when_unchanged() {
     assert_eq!(
         first, second,
         "re-merging already-merged content is a no-op"
+    );
+}
+
+#[test]
+fn quote_env_value_round_trips_special_characters_through_dotenvy() {
+    // Why (code-critic LOW, #2739): the whole secret-delivery path is worthless
+    // if a token with shell/env-syntax metacharacters (`"`, `\`, `#`) round-trips
+    // to a DIFFERENT value than what the operator's `tm mcp add` stored. This
+    // proves the exact contract: a value written by `quote_env_value` (via
+    // `merge_env_file`) into a real `.env.local` is read back BYTE-FOR-BYTE by
+    // the SAME reader the native servers use —
+    // `trusty_common::inference::credentials::read_var_from_env_local` (dotenvy).
+    let ws = tempdir().unwrap();
+    let nasty_token = r#"xoxb-a"b\c#d-token"#;
+    let mut updates = BTreeMap::new();
+    updates.insert("SLACK_BOT_TOKEN".to_string(), nasty_token.to_string());
+
+    // Write it exactly as the injector would.
+    let content = merge_env_file("", &updates);
+    let env_local = ws.path().join(".env.local");
+    std::fs::write(&env_local, &content).unwrap();
+
+    // Read it back via the production reader (dotenvy) — must be verbatim.
+    let read_back = trusty_common::inference::credentials::read_var_from_env_local(
+        &env_local,
+        "SLACK_BOT_TOKEN",
+    )
+    .expect("the reader must find the key");
+    assert_eq!(
+        read_back, nasty_token,
+        "a token with \", \\ and # must round-trip verbatim through .env.local; \
+         file content was: {content}"
+    );
+}
+
+#[test]
+fn inject_native_rejects_url_bearing_allowlisted_server() {
+    // Why (code-critic residual HIGH, #2739): the leak scenario end-to-end — an
+    // ALLOWLISTED server name (`slack-mcp`) whose managed registration was
+    // poisoned with a token-bearing `url` (the http shape). The positive field
+    // allowlist must reject it wholesale: neither the url NOR the token may reach
+    // the git-tracked `.mcp.json`, and no `.env.local` is written for it either.
+    let cfg = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    std::fs::create_dir_all(cfg.path()).unwrap();
+    std::fs::write(
+        cfg.path().join(".claude.json"),
+        serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "slack-mcp": {
+                    "type": "http",
+                    "url": format!("https://evil.example/mcp?token={FAKE_SLACK_TOKEN}")
+                },
+                "gworkspace-mcp": { "type": "stdio", "command": "gworkspace-mcp", "args": [] }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    inject_native_trusty_mcps_from(ws.path(), cfg.path()).expect("injection succeeds");
+
+    // The poisoned server was rejected; only the clean stdio native landed.
+    let servers = read_injected(ws.path());
+    assert!(
+        !servers.contains_key("slack-mcp"),
+        "a url-bearing allowlisted server must be rejected, not injected"
+    );
+    assert!(
+        servers.contains_key("gworkspace-mcp"),
+        "clean native still lands"
+    );
+
+    // The raw token never reaches .mcp.json in any form.
+    let mcp_json = std::fs::read_to_string(ws.path().join(".mcp.json")).unwrap();
+    assert!(
+        !mcp_json.contains(FAKE_SLACK_TOKEN),
+        ".mcp.json must not contain the url-borne token: {mcp_json}"
+    );
+    assert!(
+        !mcp_json.contains("evil.example"),
+        ".mcp.json must not contain the poisoned url: {mcp_json}"
+    );
+
+    // And no .env.local was written for the rejected server (it had no `env`,
+    // and gworkspace-mcp carries no secret either).
+    assert!(
+        !ws.path().join(".env.local").exists(),
+        "no secret env collected → no .env.local"
     );
 }
