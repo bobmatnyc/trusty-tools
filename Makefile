@@ -11,7 +11,7 @@
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: check clean-runtime e2e-docker install-search-signed publish-check
+.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed publish-check
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -93,6 +93,32 @@ e2e-docker:
 #   TRUSTY_CODESIGN_DRY_RUN=1     skip cargo install + codesign, test guidance only
 install-search-signed:
 	bash scripts/install-trusty-search-signed.sh
+
+# Install trusty-mpm from local source and codesign both binaries (trusty-mpm + tm).
+#
+# Why: fixes #2721 — `cargo install trusty-mpm` produces new ad-hoc cdhashes,
+# so macOS revokes the App-Data / File-Provider TCC grant on every reinstall
+# ('trusty-mpm' would like to access data from other apps re-prompts). Signing
+# with a Developer ID cert + fixed --identifier per binary makes the designated
+# requirement (DR) stable, so the one-time approval persists across reinstalls.
+# (Distinct from FDA: tm needs NO Full Disk Access re-grant.)
+#
+# What: delegates to scripts/install-trusty-mpm-signed.sh which runs
+# `cargo install --path crates/trusty-mpm --locked`, auto-detects the Developer
+# ID identity (or prints setup guidance if none), codesigns trusty-mpm
+# (com.trusty.trusty-mpm) and tm (com.trusty.tm), verifies both signatures, and
+# prints the graceful daemon-restart next-steps.
+#
+# Test: run `make install-mpm-signed`; assert both binaries are Developer-ID
+# signed (not ad-hoc) and `codesign --verify --strict` passes for each. Run with
+# TRUSTY_CODESIGN_DRY_RUN=1 (or the --dry-run flag) to exercise guidance paths.
+#
+# Overrides (passed as env vars, not make vars):
+#   TRUSTY_SIGN_IDENTITY=...    override the auto-detected signing identity
+#   TRUSTY_INSTALL_PATH=...     install from an explicit repo checkout path
+#   TRUSTY_CODESIGN_DRY_RUN=1   skip cargo install + codesign, test guidance only
+install-mpm-signed:
+	bash scripts/install-trusty-mpm-signed.sh
 
 # Publish-only-from-merged-main preflight guard (issue #2227).
 #
