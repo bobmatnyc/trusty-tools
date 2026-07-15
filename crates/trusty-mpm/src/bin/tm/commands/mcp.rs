@@ -223,7 +223,15 @@ pub(crate) fn get_cmd(root: Option<&str>, name: &str, json: bool) -> Result<()> 
         println!("{name}:");
         println!("  Type:   {}", entry_type(&entry));
         println!("  Target: {}", entry_target(&entry));
-        println!("  Scope:  User config (available in all managed sessions)");
+        println!("  Scope:  User config");
+        // #2739: the "available everywhere" claim was misleading. Native trusty
+        // servers are bridged into every daemon-managed/fleet session's
+        // `.mcp.json`; non-native (third-party/HTTP) managed servers reach only
+        // the standalone `tm run` driver, NOT fleet sessions.
+        println!(
+            "          Native trusty servers reach all managed/fleet sessions; \
+             non-native managed servers apply to the standalone `tm run` driver only."
+        );
     }
     Ok(())
 }

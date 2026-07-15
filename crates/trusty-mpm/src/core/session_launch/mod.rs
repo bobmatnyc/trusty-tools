@@ -14,11 +14,17 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
+mod native_mcp;
 mod palace_alias;
 mod search_index;
 mod settings;
 #[cfg(test)]
 mod tests;
+// Injector-specific unit tests live in a dedicated `_tests.rs` file (1500-SLOC
+// test cap) rather than inline in `native_mcp.rs` (500-SLOC production cap).
+#[cfg(test)]
+#[path = "native_mcp_tests.rs"]
+mod native_mcp_tests;
 mod worktree_sync;
 // Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
 // (issue #2149 roster-deploy-failure-continues coverage) — mirrors the
@@ -33,6 +39,7 @@ use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::{DeployStats, deploy_skills_filtered};
+use native_mcp::inject_native_trusty_mcps;
 use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
     deploy_output_style, inject_trusty_memory_mcp, preseed_workspace_trust_home,
@@ -550,6 +557,22 @@ fn prepare_session_inner(
         }
     } else {
         tracing::debug!("manifest disables trusty-search MCP injection");
+    }
+
+    // Inject NATIVE trusty MCP servers registered via `tm mcp add` (e.g.
+    // slack-mcp, gworkspace-mcp, trusty-analyze) into the workspace `.mcp.json`
+    // (issue #2739). Fleet sessions launch `claude --setting-sources
+    // project,local`, which never reads the managed `.claude.json` `mcpServers`
+    // map where `tm mcp` writes — so without this bridge those servers are
+    // invisible to managed sessions. Scope is the native-trusty allowlist ONLY
+    // (third-party/HTTP managed servers are deliberately excluded); the memory
+    // and search injectors above already own their own pinned entries and are
+    // excluded from the allowlist. MUST run BEFORE the trust pre-seed below so
+    // the injected names flow into `enabledMcpjsonServers` and skip the "new MCP
+    // servers found" dialog. Non-fatal: a failure only means those extra tools
+    // are absent from this session.
+    if let Err(err) = inject_native_trusty_mcps(fw, project_dir) {
+        tracing::warn!("failed to inject native trusty MCP servers: {err}");
     }
 
     // Pre-seed per-directory trust for this workspace in `~/.claude.json`
