@@ -123,9 +123,14 @@ detect_identity() {
         if [[ "$line" == *"Developer ID Application"* ]]; then
             # `security` prints:  1) <SHA1> "Developer ID Application: Name (TEAM)"
             # Extract the quoted common name (between the first and last '"').
-            # Selecting the cert by common name resolves to the same certificate
-            # — hence the same Team ID and the same designated requirement — as
-            # `tctl sign`, so the resulting DR is identical either way.
+            # This is designed to resolve to the same certificate (hence the same
+            # Team ID and the same designated requirement) as `tctl sign`'s
+            # identity selection. NOTE: tctl's own `has_developer_id_cert`
+            # (macos_signing.rs, `line.split(") ").nth(1)`) has a suspected
+            # pre-existing parse bug that may pass the fingerprint/quotes through
+            # nearly verbatim instead of stripping them — see #2724. This
+            # function deliberately strips both, so its output should NOT be
+            # assumed byte-identical to tctl's until that's fixed/verified.
             ident="${line#*\"}"
             ident="${ident%\"}"
             printf '%s' "$ident"
@@ -230,10 +235,23 @@ run_sign() {
     fi
     info "Using signing identity: $identity"
 
+    # trusty-mpm first: if THIS fails, set -e aborts immediately with the raw
+    # codesign error and nothing has been re-signed yet — no special messaging
+    # needed (the pre-existing state, whatever it was, is untouched).
     sign_binary "$MPM_BIN" "$MPM_IDENTIFIER" "$identity"
     verify_binary "$MPM_BIN"
-    sign_binary "$TM_BIN" "$TM_IDENTIFIER" "$identity"
-    verify_binary "$TM_BIN"
+
+    # tm second: if THIS fails, trusty-mpm is already re-signed with the new
+    # stable DR while tm is not — a HALF-SIGNED state where the two binaries
+    # now carry different identities. Guard this step explicitly (inside an
+    # `if`, which set -e does not abort on) so we can surface that state
+    # clearly instead of just dumping raw codesign stderr and exiting.
+    if ! sign_binary "$TM_BIN" "$TM_IDENTIFIER" "$identity" || ! verify_binary "$TM_BIN"; then
+        error "HALF-SIGNED STATE: trusty-mpm was signed successfully but tm was NOT."
+        error "The two binaries now have different identities (trusty-mpm has the new stable DR; tm is unchanged)."
+        error "Re-run this script to retry — signing trusty-mpm again is idempotent (--force overwrites the existing signature)."
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -267,7 +285,11 @@ main() {
         case "$arg" in
             --dry-run) TRUSTY_CODESIGN_DRY_RUN=1 ;;
             -h|--help)
-                grep '^#' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+                # Print only the header comment block (Why/What/.../Usage),
+                # not every inline comment in the ~300-line script body: stop
+                # at the first non-comment line (the blank line right before
+                # `set -euo pipefail`).
+                awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}" >&2
                 exit 0
                 ;;
             *)
