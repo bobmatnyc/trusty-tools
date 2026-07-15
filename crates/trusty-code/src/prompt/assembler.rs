@@ -25,6 +25,31 @@ use crate::prompt::preamble::BASE_PREAMBLE;
 /// on this exact value.
 const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 
+/// DailyDriver-only discovery guidance (PR A, #2689) appended as a trailing
+/// section, mirroring the `skills_catalog` pattern.
+///
+/// Why: the engineer gains a trusty-search-backed `search_code` tool in
+/// DailyDriver mode; without steering, models default to shelling out or to the
+/// literal `grep`/`glob` tools even for conceptual questions. This section
+/// tells the model when to reach for semantic/call-graph discovery vs. exact
+/// literal search, and to fall back silently when trusty-search is unavailable.
+/// It is intentionally NOT in [`BASE_PREAMBLE`]: the parity spec forbids
+/// MCP/tool catalogs there, so the preamble hash must not change. Parity mode
+/// never appends it.
+/// What: a static Markdown section joined with [`SECTION_SEPARATOR`] in the
+/// `DailyDriver` arm of [`assemble_system_prompt_for_mode`].
+/// Test: `prompt::tests::daily_driver_appends_discovery_guidance`,
+/// `prompt::tests::parity_omits_discovery_guidance`.
+pub const DISCOVERY_GUIDANCE: &str = "## Code discovery\n\n\
+Prefer the `search_code` tool for CONCEPTUAL discovery — \"where is X\", \"how \
+does Y work\", \"what calls Z\", \"find the code that does <behaviour>\". It is \
+backed by trusty-search (semantic + call-graph indexing) and finds code by \
+meaning, not just literal text.\n\n\
+Use the local `grep` and `glob` tools when you already know the exact text — a \
+specific symbol name, a literal string, or a filename/path glob.\n\n\
+If `search_code` reports that trusty-search is unavailable, silently fall back \
+to `grep`/`glob` for the same query — do not retry `search_code`.";
+
 /// Assembles the parity system prompt from its constituent sections.
 ///
 /// Why: A named type gives call sites (the agent loop, the parity report) a
@@ -114,16 +139,17 @@ pub fn assemble_system_prompt(
 /// since parity-spec D2 requires byte-identical schemas/prompts for
 /// benchmark fairness and must never progressively disclose (#2069's own
 /// scope note: "Parity mode should NOT progressively disclose").
-/// `HarnessMode::DailyDriver` appends `skills_catalog` (the cheap,
-/// always-cached `skills::format_skill_catalog` output — NOT any skill's
-/// full body) as a trailing section when non-empty, via the same
-/// [`SECTION_SEPARATOR`] every other section uses; when `skills_catalog` is
-/// `None` or empty, `DailyDriver` output is still byte-identical to
-/// `Parity`, preserving the pre-#2069 M1 contract for projects with no
-/// `.claude/skills/` catalog.
-/// Test: `prompt::tests::assemble_system_prompt_for_mode_identical_when_no_skills`,
+/// `HarnessMode::DailyDriver` appends two trailing sections via the same
+/// [`SECTION_SEPARATOR`] every other section uses: (1) [`DISCOVERY_GUIDANCE`]
+/// (PR A, #2689) — always present, steering the model to the `search_code`
+/// tool for conceptual discovery; then (2) `skills_catalog` (the cheap,
+/// always-cached `skills::format_skill_catalog` output — NOT any skill's full
+/// body) when non-empty. `Parity` appends neither, keeping its schema/prompt
+/// byte-identical for benchmark fairness.
+/// Test: `prompt::tests::daily_driver_appends_discovery_guidance`,
 /// `prompt::tests::daily_driver_appends_skills_catalog`,
-/// `prompt::tests::parity_ignores_skills_catalog`.
+/// `prompt::tests::parity_ignores_skills_catalog`,
+/// `prompt::tests::parity_omits_discovery_guidance`.
 pub fn assemble_system_prompt_for_mode(
     mode: crate::mode::HarnessMode,
     config: &AgentConfig,
@@ -135,10 +161,14 @@ pub fn assemble_system_prompt_for_mode(
     match mode {
         crate::mode::HarnessMode::Parity => base,
         crate::mode::HarnessMode::DailyDriver => {
-            match skills_catalog.map(str::trim).filter(|s| !s.is_empty()) {
-                Some(catalog) => format!("{base}{SECTION_SEPARATOR}{catalog}"),
-                None => base,
+            // Discovery guidance (PR A) is always present in DailyDriver; the
+            // skills catalog is appended after it only when non-empty.
+            let mut out = format!("{base}{SECTION_SEPARATOR}{DISCOVERY_GUIDANCE}");
+            if let Some(catalog) = skills_catalog.map(str::trim).filter(|s| !s.is_empty()) {
+                out.push_str(SECTION_SEPARATOR);
+                out.push_str(catalog);
             }
+            out
         }
     }
 }

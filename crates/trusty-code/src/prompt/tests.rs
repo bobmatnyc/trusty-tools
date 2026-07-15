@@ -11,8 +11,8 @@
 use crate::agents::AgentConfig;
 use crate::mode::HarnessMode;
 use crate::prompt::{
-    BASE_PREAMBLE, BASE_PREAMBLE_VERSION, PromptAssembler, assemble_system_prompt,
-    assemble_system_prompt_for_mode,
+    BASE_PREAMBLE, BASE_PREAMBLE_VERSION, DISCOVERY_GUIDANCE, PromptAssembler,
+    assemble_system_prompt, assemble_system_prompt_for_mode,
 };
 
 /// Build an `AgentConfig` whose `system_prompt.content` is the given string.
@@ -417,23 +417,90 @@ fn all_sections_present_when_supplied() {
 /// Why: pins the "byte-identical when there is nothing to progressively
 /// disclose" contract so a future change to the `DailyDriver` arm cannot
 /// silently regress projects with no skills.
-/// What: asserts `assemble_system_prompt_for_mode` with `skills_catalog:
-/// None` returns the exact same string as `assemble_system_prompt` for both
-/// `HarnessMode` variants.
+/// What: asserts `Parity` with `skills_catalog: None` returns the exact same
+/// string as `assemble_system_prompt`, and `DailyDriver` differs only by the
+/// always-present [`DISCOVERY_GUIDANCE`] trailing section (PR A, #2689).
 /// Test: this test.
 #[test]
 fn assemble_system_prompt_for_mode_identical_when_no_skills() {
     let cfg = config_with_prompt("AGENT");
     let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
 
-    for mode in [HarnessMode::DailyDriver, HarnessMode::Parity] {
-        let via_mode =
-            assemble_system_prompt_for_mode(mode, &cfg, Some("PROJECT"), Some("FALLBACK"), None);
-        assert_eq!(
-            via_mode, baseline,
-            "mode {mode:?} must match baseline when there is no skills catalog"
-        );
-    }
+    let parity = assemble_system_prompt_for_mode(
+        HarnessMode::Parity,
+        &cfg,
+        Some("PROJECT"),
+        Some("FALLBACK"),
+        None,
+    );
+    assert_eq!(parity, baseline, "Parity must match baseline byte-for-byte");
+
+    let daily = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
+        &cfg,
+        Some("PROJECT"),
+        Some("FALLBACK"),
+        None,
+    );
+    assert_eq!(
+        daily,
+        format!("{baseline}\n\n---\n\n{DISCOVERY_GUIDANCE}"),
+        "DailyDriver with no skills = baseline + discovery guidance"
+    );
+}
+
+/// `HarnessMode::DailyDriver` always appends [`DISCOVERY_GUIDANCE`] as a
+/// trailing section, before any skills catalog (PR A, #2689).
+///
+/// Why: the engineer's `search_code` tool needs the model steered toward it;
+/// the guidance is static (not project-dependent) so it is always present in
+/// DailyDriver.
+/// What: asserts the guidance appears after FALLBACK and, when a catalog is
+/// present, before the catalog.
+/// Test: this test.
+#[test]
+fn daily_driver_appends_discovery_guidance() {
+    let cfg = config_with_prompt("AGENT");
+    let catalog = "Available skills:\n- demo-skill: Does demo things";
+    let out = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
+        &cfg,
+        Some("PROJECT"),
+        Some("FALLBACK"),
+        Some(catalog),
+    );
+    assert!(out.contains(DISCOVERY_GUIDANCE));
+    assert!(out.contains("search_code"));
+    let guidance_at = out.find("## Code discovery").expect("guidance present");
+    assert!(
+        out.find("FALLBACK").unwrap() < guidance_at,
+        "guidance after fallback"
+    );
+    assert!(
+        guidance_at < out.find(catalog).unwrap(),
+        "guidance before catalog"
+    );
+}
+
+/// `HarnessMode::Parity` never appends the discovery guidance — the parity
+/// spec forbids MCP/tool catalogs in the shared prompt.
+///
+/// Why: benchmark fairness (D2) requires a byte-identical prompt across models.
+/// What: asserts Parity output equals the plain baseline and omits the guidance.
+/// Test: this test.
+#[test]
+fn parity_omits_discovery_guidance() {
+    let cfg = config_with_prompt("AGENT");
+    let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
+    let out = assemble_system_prompt_for_mode(
+        HarnessMode::Parity,
+        &cfg,
+        Some("PROJECT"),
+        Some("FALLBACK"),
+        Some("Available skills:\n- demo"),
+    );
+    assert_eq!(out, baseline);
+    assert!(!out.contains("## Code discovery"));
 }
 
 /// `HarnessMode::DailyDriver` appends a non-empty skills catalog as a

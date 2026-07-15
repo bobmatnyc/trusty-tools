@@ -39,7 +39,8 @@ use crate::provider::{
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool, GlobTool,
-    GrepTool, ListDirTool, ReadFileTool, RunContext, ToolRegistry, WriteFileTool, WriteFilesTool,
+    GrepTool, ListDirTool, ReadFileTool, RunContext, ToolRegistry, TrustySearchTool, WriteFileTool,
+    WriteFilesTool,
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
@@ -347,6 +348,12 @@ impl RegistryFactory for ProjectToolFactory {
         reg.register(Arc::new(GlobTool::new(&self.project)));
         reg.register(Arc::new(GrepTool::new(&self.project)));
         reg.register(Arc::new(ListDirTool::new(&self.project)));
+        // PR A (#2689): trusty-search-backed conceptual discovery as the PRIMARY
+        // path; the local glob/grep tools above are the fail-open FALLBACK. The
+        // `run_task` CLI is always the daily-driver path (the parity benchmark
+        // runs through `task::executor`, which gates this on `HarnessMode`), so
+        // registration is unconditional here.
+        reg.register(Arc::new(TrustySearchTool::new(&self.project)));
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),

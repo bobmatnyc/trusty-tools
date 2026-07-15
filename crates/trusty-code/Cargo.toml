@@ -81,7 +81,11 @@ globset = { workspace = true }
 # (env > .env.local > secure store), and the capability registry. It composes
 # with `axum-server` to expose `inference::test_support::MockInferenceServer`
 # for the offline black-box e2e in `tests/inference_shared_adapter_e2e.rs`.
-trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server", "inference-client", "config-cli", "bedrock-client"] }
+# `stdio-mcp-client` provides the shared `StdioMcpClient` (spawn an MCP binary,
+# run the JSON-RPC-over-stdio handshake, call tools) the trusty-search-backed
+# code-discovery tool reuses instead of writing its own MCP transport
+# (common-entry-point principle) — mirrors trusty-agents' TrustySearchPlugin.
+trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client"] }
 
 # `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
 # CLAUDE.md, axum stays feature-gated in *library* crates
