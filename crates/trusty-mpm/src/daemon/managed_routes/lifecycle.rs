@@ -1296,8 +1296,7 @@ async fn front_gate_or_escalate(
 
     let reason = outcome
         .escalation_reason()
-        .unwrap_or("conformance escalation")
-        .to_string();
+        .unwrap_or_else(|| "conformance escalation".to_string());
     warn!(
         id = %record.id,
         approval = ?outcome.approval,
