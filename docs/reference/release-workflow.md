@@ -235,26 +235,48 @@ install step entirely:
 tctl sign trusty-search
 ```
 
-### Signed Install: trusty-mpm (#2558)
+### Signed Install: trusty-mpm (#2558, #2721)
 
-`tctl install trusty-mpm` (or `tctl install`, which includes it in the stable
-set) already runs the App-Data-TCC signing hook automatically as a fail-soft
-post-install step — no separate script is needed for the common case. For a
-local-source build, run the same two-step pattern as trusty-search:
+On macOS the preferred local-source install path is
+`scripts/install-trusty-mpm-signed.sh` (or `make install-mpm-signed`):
+
+```bash
+# From the repo root (or any worktree) — installs from source and signs both binaries
+scripts/install-trusty-mpm-signed.sh
+# or
+make install-mpm-signed
+# dry-run (prints every cargo/codesign command without executing):
+scripts/install-trusty-mpm-signed.sh --dry-run
+```
+
+The script runs `cargo install --path crates/trusty-mpm --locked`, auto-detects
+the Developer ID identity (or honours `TRUSTY_SIGN_IDENTITY`), then codesigns
+**both** installed binaries with the canonical scheme (`--options runtime
+--timestamp`, `--verify --deep --strict`): `~/.cargo/bin/trusty-mpm` with
+`--identifier com.trusty.trusty-mpm` and `~/.cargo/bin/tm` with `--identifier
+com.trusty.tm`.
+
+🟡 **Why a dedicated script and not just `tctl sign trusty-mpm`?** (#2721) —
+`tctl install trusty-mpm` / `tctl sign trusty-mpm` already sign the
+`trusty-mpm` binary with `com.trusty.trusty-mpm` (same flags), but `tctl`'s
+`SIGNABLE_BINARIES` table does **not** yet include the `tm` alias binary, so
+`tm` stays ad-hoc-signed and keeps re-triggering the App-Data prompt on every
+reinstall. The script closes that gap by signing `tm` (`com.trusty.tm`) too.
+`tctl sign trusty-mpm` remains valid for signing just the `trusty-mpm` binary
+in place:
 
 ```bash
 cargo install --path crates/trusty-mpm --locked
-tctl sign trusty-mpm
+tctl sign trusty-mpm   # signs the trusty-mpm binary only; does NOT sign `tm`
 ```
 
-`tctl sign trusty-mpm` signs with `--identifier com.trusty.trusty-mpm` (same
-`--options runtime --timestamp` flags and `--verify --deep --strict` check as
-trusty-search) and prints the App-Data-TCC guidance: approve the next
-`'trusty-mpm' would like to access data from other apps` prompt once; a
-Developer ID cert makes that approval persist across every future reinstall.
-There is no separate `install-trusty-mpm-signed.sh` script — the local-source
-build case is covered by the two commands above, and the common (crates.io /
-prebuilt) case is covered by `tctl install trusty-mpm` alone.
+Both paths print the App-Data-TCC guidance: approve the next `'trusty-mpm'
+would like to access data from other apps` prompt once; a stable Developer ID
+identity makes that approval persist across every future reinstall.
+
+**tm needs NO Full Disk Access re-grant** — this fixes the distinct *App-Data /
+File-Provider* TCC category only; the FDA re-granting guidance above stays
+scoped to trusty-search and other external-volume daemons.
 
 ### TRUSTY_SIGN_IDENTITY Override
 
