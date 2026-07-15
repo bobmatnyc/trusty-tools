@@ -418,29 +418,77 @@ pub fn remove_from_allowlist(path: &Path, allowlist_path: Option<&Path>) -> Resu
 /// `None` when the path is safe.
 ///
 /// Why: extracted from `check_path` so tests can assert against the raw
-/// denylist logic without constructing a full config file.
+/// denylist logic without constructing a full config file. This is the
+/// DEFAULT-behaviour entry point — every existing caller (auto-discovery,
+/// the CLI, `add_to_allowlist`, `check_path`) gets the full four-check
+/// denylist, unchanged. Callers that need the opt-in temp-dir bypass (see
+/// [`is_denied_allowing_sensitive_path`]) must ask for it explicitly.
 /// What: applies four anchored checks in order — (1) fixed path-prefix
 /// patterns from `SENSITIVE_PATH_PREFIXES`; (2) whole-component matching
 /// against `SENSITIVE_COMPONENT_NAMES` using `Path::components()` so that
 /// `/Projects/secrets-manager` is NOT denied but `/etc/secrets` IS denied;
 /// (3) exact file-name match against `SENSITIVE_FILE_NAMES`; (4) home-relative
-/// top-level dirs from `SENSITIVE_HOME_TOP_DIRS`.
+/// top-level dirs from `SENSITIVE_HOME_TOP_DIRS`. Delegates to
+/// [`is_denied_inner`] with `allow_sensitive_path: false`.
 /// Test: `denylist_blocks_ssh_dir`, `denylist_blocks_tmp`,
 /// `denylist_blocks_home_toplevel`, `denylist_allows_safe_path`,
 /// `denylist_allows_path_with_sensitive_word_in_name` in `tests.rs`.
 pub fn is_denied(path: &Path) -> Option<String> {
+    is_denied_inner(path, false)
+}
+
+/// Like [`is_denied`], but SKIPS check (1) — the `SENSITIVE_PATH_PREFIXES`
+/// OS-temp-dir / app-support-dir check — while still enforcing checks (2)-(4)
+/// (credential directories, sensitive file names, and top-level home dirs).
+///
+/// Why (owner directive, issue: explicit-index-sensitive-path-bypass): tcode's
+/// working project is frequently a bake-off scratch directory under
+/// `/var/folders/…` — an OS temp path that the broad/auto-discovery denylist
+/// correctly refuses, but that IS the exact project root a caller like
+/// `ensure_project_indexed` explicitly named. The denylist exists to stop
+/// unrequested, broad indexing of ephemeral or system directories; it is not
+/// meant to block a client that names one specific root on purpose. This
+/// function is for that one case: an EXPLICIT, single-root index request that
+/// opts in via `allow_sensitive_path: true`.
+/// What: an explicit request bypasses the WHOLE `SENSITIVE_PATH_PREFIXES` list
+/// (temp dirs AND `/Library/Application Support`), not a partial subset —
+/// the caller named this exact root, so it is honored rather than second-guessed
+/// with a narrower carve-out. Checks (2)-(4) (credential directories like
+/// `.ssh`/`.aws`, sensitive file names like `.env`, and top-level home
+/// directories like `~/Desktop`) are NEVER bypassed — those protect against a
+/// genuinely dangerous root regardless of how explicitly it was requested.
+/// Delegates to [`is_denied_inner`] with `allow_sensitive_path: true`.
+/// Test: `denylist_allowing_sensitive_path_permits_tmp_and_var_folders`,
+/// `denylist_allowing_sensitive_path_still_blocks_ssh_and_home` in `tests.rs`.
+pub fn is_denied_allowing_sensitive_path(path: &Path) -> Option<String> {
+    is_denied_inner(path, true)
+}
+
+/// Shared implementation for [`is_denied`] and [`is_denied_allowing_sensitive_path`].
+///
+/// Why: keeps the four-check denylist logic in exactly one place so the two
+/// public entry points can never drift out of sync on checks (2)-(4).
+/// What: identical to the four checks documented on [`is_denied`], except
+/// check (1) (`SENSITIVE_PATH_PREFIXES`) only runs when `allow_sensitive_path`
+/// is `false`.
+/// Test: exercised transitively via both public wrappers' tests.
+fn is_denied_inner(path: &Path, allow_sensitive_path: bool) -> Option<String> {
     let path_str = path.to_string_lossy();
     // Normalise separators so prefix checks work on Windows too.
     let normalised = path_str.replace('\\', "/");
 
     // 1. Fixed path-prefix patterns (OS-managed temporaries, macOS system dirs).
-    for &prefix in SENSITIVE_PATH_PREFIXES {
-        if normalised.starts_with(prefix) {
-            return Some(format!(
-                "path '{}' is under sensitive prefix '{}'; indexing refused",
-                path.display(),
-                prefix
-            ));
+    // Skipped entirely for an explicit, opted-in single-root request — see
+    // `is_denied_allowing_sensitive_path`'s doc comment for the rationale.
+    if !allow_sensitive_path {
+        for &prefix in SENSITIVE_PATH_PREFIXES {
+            if normalised.starts_with(prefix) {
+                return Some(format!(
+                    "path '{}' is under sensitive prefix '{}'; indexing refused",
+                    path.display(),
+                    prefix
+                ));
+            }
         }
     }
 

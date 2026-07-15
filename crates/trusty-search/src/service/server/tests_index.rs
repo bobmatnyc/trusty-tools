@@ -196,6 +196,7 @@ async fn create_index_rejects_relative_root_path() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            allow_sensitive_path: false,
         }),
     )
     .await;
@@ -239,6 +240,7 @@ async fn create_index_rejects_nonexistent_root_path() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            allow_sensitive_path: false,
         }),
     )
     .await;
@@ -311,6 +313,7 @@ async fn create_index_canonicalizes_symlinked_root_path() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            allow_sensitive_path: false,
         }),
     )
     .await;
@@ -373,6 +376,7 @@ async fn create_index_accepts_valid_absolute_root_path() {
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,
+            allow_sensitive_path: false,
         }),
     )
     .await;

@@ -68,6 +68,62 @@ fn denylist_blocks_tmp() {
     assert!(super::is_denied(&path).is_some());
 }
 
+/// `is_denied_allowing_sensitive_path` permits every OS-temp / app-support
+/// prefix that plain `is_denied` refuses (owner directive: explicit index
+/// requests may opt into indexing a scratch directory).
+///
+/// Why: this is the exact bypass tcode's `ensure_project_indexed` relies on —
+/// a bake-off scratch project living under `/var/folders/…` must be indexable
+/// when the client explicitly named that root.
+/// What: asserts `is_denied` still refuses each `SENSITIVE_PATH_PREFIXES`
+/// example, but `is_denied_allowing_sensitive_path` passes every one of them.
+/// Test: this test.
+#[test]
+fn denylist_allowing_sensitive_path_permits_tmp_and_var_folders() {
+    let examples = [
+        "/tmp/my-project",
+        "/private/tmp/my-project",
+        "/var/folders/xx/scratch-project",
+        "/private/var/folders/xx/scratch-project",
+        "/Library/Application Support/my-project",
+    ];
+    for path_str in examples {
+        let path = PathBuf::from(path_str);
+        assert!(
+            super::is_denied(&path).is_some(),
+            "sanity: {path_str:?} must still be denied by default is_denied"
+        );
+        assert!(
+            super::is_denied_allowing_sensitive_path(&path).is_none(),
+            "{path_str:?} must be permitted when allow_sensitive_path is set"
+        );
+    }
+}
+
+/// `is_denied_allowing_sensitive_path` still blocks credential directories
+/// and top-level home directories — the bypass is scoped to
+/// `SENSITIVE_PATH_PREFIXES` only, never the other three checks.
+///
+/// Why: an explicit index request naming ITS scratch root must not become a
+/// backdoor for indexing `~/.ssh` or `~/Desktop` — those dangers are
+/// independent of whether the path happens to live under a temp prefix.
+/// What: asserts `is_denied_allowing_sensitive_path` still returns `Some` for
+/// `~/.ssh` and for `$HOME` itself.
+/// Test: this test.
+#[test]
+fn denylist_allowing_sensitive_path_still_blocks_ssh_and_home() {
+    let home = dirs::home_dir().unwrap();
+    let ssh = home.join(".ssh");
+    assert!(
+        super::is_denied_allowing_sensitive_path(&ssh).is_some(),
+        "~/.ssh must still be denied even with allow_sensitive_path"
+    );
+    assert!(
+        super::is_denied_allowing_sensitive_path(&home).is_some(),
+        "$HOME itself must still be denied even with allow_sensitive_path"
+    );
+}
+
 #[test]
 fn denylist_blocks_env_file_in_path() {
     // Why: a path containing /.env indicates a directory that holds env files.
