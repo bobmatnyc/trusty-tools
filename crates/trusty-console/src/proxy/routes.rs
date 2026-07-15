@@ -601,14 +601,25 @@ mod tests {
     ///
     /// Why: A minimal HTTP/1.1 responder is enough to prove the proxy client can
     /// reach a freshly-(re)bound upstream; pulling in a full server would add
-    /// noise.  `connection: close` lets reqwest read the body to EOF.
-    /// What: Binds `port`, accepts one socket, reads one buffer of the request
-    /// (headers + tiny body), then writes a fixed `200 OK` response and closes.
-    /// Test: Used by `test_connect_retry_recovers`.
-    async fn serve_one_ok(port: u16) {
+    /// noise.  `connection: close` lets reqwest read the body to EOF.  The
+    /// optional `ready` sender is the #2634 readiness handshake: it fires the
+    /// instant `bind()` returns Ok (i.e. the kernel is provably accepting on
+    /// `port`), so a caller can assert the upstream truly came up instead of
+    /// hoping a bare sleep landed before the retry connected.
+    /// What: Binds `port`; if `ready` is `Some`, signals it once the listener is
+    /// accepting; then accepts one socket, reads one buffer of the request
+    /// (headers + tiny body), writes a fixed `200 OK` response and closes.
+    /// Test: Used by both connect-retry recovery tests below.
+    async fn serve_one_ok(port: u16, ready: Option<tokio::sync::oneshot::Sender<()>>) {
         let l = TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("rebind test server");
+        // `bind()` returned Ok → socket()+bind()+listen() have completed and the
+        // kernel now accepts connections on `port`.  Signalling here (before the
+        // blocking `accept()`) lets the caller prove readiness deterministically.
+        if let Some(tx) = ready {
+            let _ = tx.send(());
+        }
         let (mut sock, _) = l.accept().await.expect("accept");
         let mut buf = [0u8; 4096];
         let _ = sock.read(&mut buf).await;
@@ -632,7 +643,7 @@ mod tests {
         // Bring the upstream up shortly after the first attempt will have failed.
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
-            serve_one_ok(port).await;
+            serve_one_ok(port, None).await;
         });
 
         let client = reqwest::Client::builder()
@@ -656,19 +667,29 @@ mod tests {
     /// recover on a *later* scheduled retry — this guards the bounded-backoff
     /// widening (300 ms + 700 ms) added so the schedule spans the ~1 s restart
     /// window, not just its tail (#1984 review follow-up).
-    /// What: Refuses the port for ~400 ms (past the first 100 ms retry, before the
-    /// second 300 ms one), then binds a one-shot 200 server; asserts the second
-    /// scheduled retry connects and returns 200.
+    /// What: Keeps the port refused past the first 100 ms retry, binds a one-shot
+    /// 200 upstream at the 200 ms mark, and asserts the second scheduled retry
+    /// (at 100 + 400 = 500 ms) connects and returns 200.  Determinism comes from a
+    /// readiness handshake plus provably-ordered deadlines rather than sleep
+    /// alignment: tokio fires timers in deadline order, so the 200 ms bind lands
+    /// ~300 ms before the 500 ms retry connects — a margin dwarfing any
+    /// bind/listen latency.  This replaces the #2634 zero-margin schedule where a
+    /// 400 ms bind coincided with a 400 ms retry and intermittently lost the race
+    /// (ConnectionRefused).  `ready_rx` then *proves* the upstream actually bound
+    /// and accepted, so a future timing regression fails loudly instead of flaking.
     /// Test: this test itself.
     #[tokio::test]
     async fn test_connect_retry_recovers_on_second_attempt() {
         let port = reserve_free_port().await;
         let url = format!("http://127.0.0.1:{port}/api/v1/sessions/managed");
 
-        // Up only after the first retry would already have failed.
+        // Bind the upstream after the first retry has already failed (100 ms) but
+        // well before the second retry connects (500 ms).  The handshake sender
+        // fires the moment the listener is accepting.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            serve_one_ok(port).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            serve_one_ok(port, Some(ready_tx)).await;
         });
 
         let client = reqwest::Client::builder()
@@ -681,11 +702,17 @@ mod tests {
             &url,
             HeaderMap::new(),
             Bytes::from_static(b"{}"),
-            &[Duration::from_millis(100), Duration::from_millis(300)],
+            &[Duration::from_millis(100), Duration::from_millis(400)],
         )
         .await
         .expect("second scheduled retry should recover once upstream is back");
         assert_eq!(resp.status().as_u16(), 200);
+        // The success above is only reachable after the upstream bound and
+        // signalled readiness; assert the handshake explicitly so the test never
+        // silently degrades into a coincidental pass.
+        ready_rx
+            .await
+            .expect("upstream should have signalled readiness before responding");
     }
 
     /// Why: If the upstream never returns, the retry must give up after exactly
