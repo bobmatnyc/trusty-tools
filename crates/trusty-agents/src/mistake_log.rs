@@ -88,10 +88,29 @@ impl MistakeLog {
     /// missing.
     /// Test: `mistake_log_records_nonzero_exit` covers the happy path.
     pub async fn record(project_root: &Path, record: &MistakeRecord) -> Result<()> {
+        Self::record_at(project_root, &global_log_path()?, record).await
+    }
+
+    /// Append a mistake to a project-local log and an *injected* global log path.
+    ///
+    /// Why: `record` resolves the global log path from `$HOME` (via
+    /// `dirs::home_dir`). Tests used to sandbox that by mutating `$HOME` with
+    /// `std::env::set_var`, a process-global write that raced any parallel test
+    /// also touching `$HOME` and flaked this test (#2709, same class as #2688).
+    /// Splitting the env read out to the `record` boundary and taking the global
+    /// path as a parameter gives tests a hermetic seam: they inject a tempdir
+    /// path directly and never touch the process environment.
+    /// What: identical to `record` but writes the global mirror to `global_log`
+    /// instead of the `$HOME`-derived default. Both files are created if missing.
+    /// Test: `mistake_log_records_nonzero_exit` drives this with a tempdir path.
+    pub(crate) async fn record_at(
+        project_root: &Path,
+        global_log: &Path,
+        record: &MistakeRecord,
+    ) -> Result<()> {
         let local = local_log_path(project_root, &record.session_id);
-        let global = global_log_path()?;
         append_line(&local, record).await?;
-        append_line(&global, record).await?;
+        append_line(global_log, record).await?;
         Ok(())
     }
 
@@ -116,11 +135,23 @@ impl MistakeLog {
     /// trailing `n` rows in chronological (oldest-first) order.
     /// Test: Indirectly via the CLI subcommand.
     pub fn read_recent_global(n: usize) -> Result<Vec<MistakeRecord>> {
+        Self::read_recent_global_at(&global_log_path()?, n)
+    }
+
+    /// Read the N most recent mistakes from an *injected* global log path.
+    ///
+    /// Why: sibling seam to `record_at`. `read_recent_global` resolves the path
+    /// from `$HOME`; taking it as a parameter lets `mistake_log_records_nonzero_exit`
+    /// read back exactly the tempdir file it wrote without mutating the process
+    /// environment (#2709).
+    /// What: identical to `read_recent_global` but reads `global_log` instead of
+    /// the `$HOME`-derived default. A missing file yields an empty vec.
+    /// Test: `mistake_log_records_nonzero_exit`.
+    pub(crate) fn read_recent_global_at(global_log: &Path, n: usize) -> Result<Vec<MistakeRecord>> {
         if n == 0 {
             return Ok(Vec::new());
         }
-        let path = global_log_path()?;
-        let all = read_records(&path)?;
+        let all = read_records(global_log)?;
         let start = all.len().saturating_sub(n);
         Ok(all.into_iter().skip(start).collect())
     }
@@ -231,41 +262,24 @@ mod tests {
         }
     }
 
-    // Holding a `std::sync::MutexGuard` across `.await` is intentional here:
-    // the whole point of HOME_LOCK is to serialize HOME-mutating tests for
-    // their entire duration, including all async I/O. tokio's
-    // `await_holding_lock` lint flags the pattern as a deadlock risk for
-    // production code, but in this single-purpose test guard there are no
-    // other tasks contending for the same lock — so we silence it.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn mistake_log_records_nonzero_exit() {
-        // Why: `MistakeLog::record` writes to BOTH a project-local path and
-        // a global path resolved via `dirs::home_dir()` (which honours
-        // `$HOME`). To make this test hermetic we sandbox `$HOME` to a
-        // tempdir. `std::env::set_var` is a process-wide mutation, so
-        // concurrent tests in other modules (e.g. `init::tests::*`) that
-        // also sandbox HOME would race with this one. `crate::test_env::HOME_LOCK`
-        // is a process-wide Mutex shared across modules that serializes
-        // any test mutating HOME — without it this test passes in isolation
-        // but flakes under `cargo test`.
-        let _guard = crate::test_env::HOME_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
+        // Why: `MistakeLog::record` writes to BOTH a project-local path and a
+        // global path that production resolves from `$HOME`. Sandboxing that by
+        // mutating `$HOME` with `std::env::set_var` is a process-global write
+        // that raced parallel HOME-touching tests and flaked this test (#2709,
+        // same class as #2688 / PR #2702). Instead we inject both paths as
+        // tempdir values through the `record_at` / `read_recent_global_at` seam:
+        // fully hermetic, no env mutation, no cross-module lock.
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK is held for the entire test body; restoration
-        // runs before the guard is dropped, so no other test observes a
-        // half-set HOME.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-        }
-
         let project = tmp.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
+        let global_log = tmp.path().join("global-mistakes.jsonl");
+
         let rec = sample_record("sess-1", "qa-agent");
-        MistakeLog::record(&project, &rec).await.unwrap();
+        MistakeLog::record_at(&project, &global_log, &rec)
+            .await
+            .unwrap();
 
         let session_records = MistakeLog::read_session(&project, "sess-1").unwrap();
         assert_eq!(session_records.len(), 1);
@@ -273,21 +287,13 @@ mod tests {
         assert_eq!(session_records[0].mistake_type, MistakeType::NonzeroExit);
         assert_eq!(session_records[0].exit_code, Some(1));
 
-        // Global log mirror — uses the sandboxed HOME, so we know exactly
-        // one record exists and it's the one we just wrote.
-        let recent = MistakeLog::read_recent_global(10).unwrap();
+        // Global log mirror — the injected tempdir path, so we know exactly one
+        // record exists and it's the one we just wrote.
+        let recent = MistakeLog::read_recent_global_at(&global_log, 10).unwrap();
         assert!(
             recent.iter().any(|r| r.agent == "qa-agent"),
             "global log should contain the recorded agent; recent={recent:?}"
         );
-
-        // SAFETY: HOME_LOCK still held; safe to mutate env.
-        unsafe {
-            match prev {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     #[test]
