@@ -89,7 +89,30 @@ impl SearchAppState {
             reconcile_summary: Arc::new(std::sync::Mutex::new(
                 crate::service::server::state::ReconcileSummary::default(),
             )),
+            // Issue #2717: production reads the env-resolved registry path;
+            // tests override via `with_registry_path` to avoid TRUSTY_DATA_DIR.
+            registry_path_override: None,
         }
+    }
+
+    /// Builder-style: pin the persisted `indexes.toml` path (issue #2717).
+    ///
+    /// Why: the `GET /indexes` repo-identity handlers read the persisted
+    /// registry via `TRUSTY_DATA_DIR`-backed `getenv` at request time. Because
+    /// `set_var`/`remove_var` are not thread-safe, a concurrent env-mutating test
+    /// racing that `getenv` can torn-read and make the handler fall back to the
+    /// real system data dir — the parallel-load flake in #2717. This builder is
+    /// the injection seam: tests seed an explicit `indexes.toml` and pass its
+    /// path here so the handler never touches global env, eliminating the race at
+    /// the root instead of serialising around it.
+    /// What: sets [`SearchAppState::registry_path_override`]. `None` (the default)
+    /// keeps production on the env-resolved `load_index_registry()`.
+    /// Test: `list_indexes_repo_identity_tree_filter`,
+    /// `list_indexes_repo_identity_details_and_filter`.
+    #[must_use]
+    pub fn with_registry_path(mut self, path: std::path::PathBuf) -> Self {
+        self.registry_path_override = Some(path);
+        self
     }
 
     /// Builder-style: attach a pre-built embedder worker pool (issue #41
