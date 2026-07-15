@@ -223,7 +223,7 @@ fn classify_transport_error(e: &reqwest::Error) -> String {
 /// What: returns `Ok(value)` when `ok` is `true`; maps `error_code:401` to
 /// [`TelegramError::Auth`] and every other `ok:false` to [`TelegramError::Api`]
 /// carrying the `description`.
-/// Test: `tests/telegram_client_http.rs::auth_ok_false`, `::api_error_ok_false`.
+/// Test: `auth_ok_false_maps_to_auth_error`, `api_ok_false_maps_to_api_error`.
 fn interpret_envelope(status: u16, value: Value) -> Result<Value, TelegramError> {
     if value.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(value);
