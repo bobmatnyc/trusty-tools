@@ -23,8 +23,16 @@
 //!   - Prompts must instruct the model to produce JSON (all trusty-review
 //!     structured prompts do) or the model may emit whitespace until the
 //!     token limit.
-//!   - On reasoning models, `response_format: json_schema` disables the
-//!     reasoning output.
+//!   - On reasoning models (e.g. kimi-k2p6), reasoning goes to a separate
+//!     `reasoning_content` field the pipeline discards — but it still burns
+//!     the `max_tokens` budget, so an unmitigated structured call at the
+//!     verifier's tight ceiling truncates mid-reasoning and yields no JSON.
+//!     Structured calls therefore send `reasoning_effort: "none"` (live-
+//!     verified 2026-07-15: clean enum-conforming JSON in 85 completion
+//!     tokens at a 128-token ceiling; the documented Anthropic-style
+//!     `thinking: {"type": "disabled"}` works equally).  Override via
+//!     `TRUSTY_REVIEW_FIREWORKS_REASONING_EFFORT` (`low`/`medium`/`high`
+//!     to re-enable reasoning, `default` to omit the field entirely).
 //!
 //! The base URL is a constructor field (default `FIREWORKS_BASE_URL`,
 //! overridable via `TRUSTY_REVIEW_FIREWORKS_BASE_URL`) so tests can do a real
@@ -51,6 +59,17 @@ use super::{LlmProvider, LlmRequest, LlmResponse, error::LlmError};
 pub const FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 /// Env var overriding the base URL (tests / proxies).
 pub const FIREWORKS_BASE_URL_ENV: &str = "TRUSTY_REVIEW_FIREWORKS_BASE_URL";
+/// Env var overriding the `reasoning_effort` sent on structured-output calls.
+///
+/// Unset ⇒ `"none"` (reasoning disabled — the pipeline discards
+/// `reasoning_content`, so reasoning tokens on verdict calls are pure cost and
+/// truncate tight budgets like the verifier's).  Set `low`/`medium`/`high` to
+/// re-enable reasoning, or `default` to omit the field from the request.
+pub const FIREWORKS_REASONING_EFFORT_ENV: &str = "TRUSTY_REVIEW_FIREWORKS_REASONING_EFFORT";
+/// Default `reasoning_effort` for structured-output calls.
+const DEFAULT_STRUCTURED_REASONING_EFFORT: &str = "none";
+/// Sentinel env value meaning "omit the `reasoning_effort` field entirely".
+const REASONING_EFFORT_OMIT: &str = "default";
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const READ_TIMEOUT_SECS: u64 = 120;
 
@@ -89,6 +108,13 @@ struct FwRequest<'a> {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<FwResponseFormat<'a>>,
+    /// Reasoning-token control for reasoning models (kimi-k2p6 etc.).  Set to
+    /// `"none"` on structured calls so reasoning doesn't burn the `max_tokens`
+    /// budget before the constrained JSON is emitted (see module docs);
+    /// omitted (`None`) on free-text calls and when the operator opts out via
+    /// `TRUSTY_REVIEW_FIREWORKS_REASONING_EFFORT=default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 /// Single message in the Fireworks request.
@@ -198,7 +224,44 @@ pub struct FireworksProvider {
     api_key: String,
     model: String,
     base_url: String,
+    /// `reasoning_effort` to send on structured-output calls; `None` = omit
+    /// the field (operator set `TRUSTY_REVIEW_FIREWORKS_REASONING_EFFORT=default`).
+    structured_reasoning_effort: Option<String>,
     client: reqwest::Client,
+}
+
+/// Resolve the structured-call `reasoning_effort` from the environment.
+///
+/// Why: reasoning models burn `max_tokens` on `reasoning_content` the pipeline
+/// discards, truncating tight verdict budgets (module docs); `"none"` is the
+/// live-verified mitigation, with an operator escape hatch.
+/// What: reads `TRUSTY_REVIEW_FIREWORKS_REASONING_EFFORT` and delegates to the
+/// pure [`reasoning_effort_from`] (kept env-free so tests never mutate process
+/// env — the #1312 flaky-test hazard).
+/// Test: via `reasoning_effort_from_*` in `fireworks_tests.rs`.
+fn resolve_structured_reasoning_effort() -> Option<String> {
+    reasoning_effort_from(
+        std::env::var(FIREWORKS_REASONING_EFFORT_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure mapping from the raw env value to the structured-call effort.
+///
+/// Why: separated from the env read so the sentinel/default/passthrough cases
+/// are unit-testable without process-env mutation.
+/// What: `None`/blank ⇒ `Some("none")` (the protective default); the sentinel
+/// `default` (case-insensitive) ⇒ `None` (omit the field); anything else is
+/// passed through trimmed (`low`/`medium`/`high`).
+/// Test: `reasoning_effort_from_unset_is_none_effort`,
+/// `reasoning_effort_from_sentinel_omits`, `reasoning_effort_from_passthrough`.
+fn reasoning_effort_from(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case(REASONING_EFFORT_OMIT) => None,
+        Some(v) if !v.is_empty() => Some(v.to_string()),
+        _ => Some(DEFAULT_STRUCTURED_REASONING_EFFORT.to_string()),
+    }
 }
 
 impl FireworksProvider {
@@ -247,6 +310,7 @@ impl FireworksProvider {
             api_key,
             model: model.into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            structured_reasoning_effort: resolve_structured_reasoning_effort(),
             client,
         })
     }
@@ -315,6 +379,15 @@ impl LlmProvider for FireworksProvider {
             },
         });
 
+        // Structured calls disable reasoning so it can't burn the max_tokens
+        // budget before the constrained JSON lands (module docs); free-text
+        // calls leave the model's default behaviour untouched.
+        let reasoning_effort = if response_format.is_some() {
+            self.structured_reasoning_effort.as_deref()
+        } else {
+            None
+        };
+
         let body = FwRequest {
             model: &self.model,
             messages: &messages,
@@ -322,6 +395,7 @@ impl LlmProvider for FireworksProvider {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             response_format,
+            reasoning_effort,
         };
 
         let start = Instant::now();

@@ -125,6 +125,7 @@ fn complete_with_schema_sends_response_format_without_strict() {
                 schema: &schema,
             },
         }),
+        reasoning_effort: Some("none"),
     };
 
     let json_str = serde_json::to_string(&body).expect("must serialise");
@@ -133,6 +134,10 @@ fn complete_with_schema_sends_response_format_without_strict() {
     assert_eq!(
         parsed["response_format"]["type"], "json_schema",
         "response_format.type must be json_schema"
+    );
+    assert_eq!(
+        parsed["reasoning_effort"], "none",
+        "structured calls must disable reasoning so it cannot burn the token budget"
     );
     assert_eq!(
         parsed["response_format"]["json_schema"]["name"], "verification_judgment",
@@ -165,12 +170,43 @@ fn complete_without_schema_omits_response_format() {
         temperature: 0.3,
         max_tokens: 1024,
         response_format: None,
+        reasoning_effort: None,
     };
     let json_str = serde_json::to_string(&body).expect("must serialise");
     let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("must parse");
     assert!(
         parsed.get("response_format").is_none(),
         "response_format must be absent when schema is None"
+    );
+    assert!(
+        parsed.get("reasoning_effort").is_none(),
+        "free-text calls must not constrain reasoning"
+    );
+}
+
+// ── Reasoning-effort resolution (pure, no env mutation — #1312) ─────────────
+
+/// Unset / blank env resolves to the protective `"none"` default.
+#[test]
+fn reasoning_effort_from_unset_is_none_effort() {
+    assert_eq!(reasoning_effort_from(None).as_deref(), Some("none"));
+    assert_eq!(reasoning_effort_from(Some("  ")).as_deref(), Some("none"));
+}
+
+/// The `default` sentinel omits the field entirely (model default behaviour).
+#[test]
+fn reasoning_effort_from_sentinel_omits() {
+    assert_eq!(reasoning_effort_from(Some("default")), None);
+    assert_eq!(reasoning_effort_from(Some(" DEFAULT ")), None);
+}
+
+/// Any other value passes through trimmed, re-enabling reasoning.
+#[test]
+fn reasoning_effort_from_passthrough() {
+    assert_eq!(reasoning_effort_from(Some("low")).as_deref(), Some("low"));
+    assert_eq!(
+        reasoning_effort_from(Some(" high ")).as_deref(),
+        Some("high")
     );
 }
 
@@ -292,6 +328,10 @@ async fn complete_round_trips_through_mock_server() {
             .is_none(),
         "no strict field on the wire"
     );
+    assert_eq!(
+        sent["reasoning_effort"], "none",
+        "structured calls must send reasoning_effort=none"
+    );
 
     // ── Response assertions ─────────────────────────────────────────────
     assert_eq!(
@@ -352,11 +392,13 @@ async fn live_fireworks_structured_output_enforces_enum() {
                 .to_string(),
         }],
         temperature: 0.0,
-        // Reasoning models (kimi-k2p6) spend a reasoning budget BEFORE the
-        // constrained JSON lands in `content` (reasoning goes to the separate
-        // `reasoning_content` field, which we ignore).  256 tokens truncates
-        // mid-reasoning and yields no JSON; give it real headroom.
-        max_tokens: 2048,
+        // Deliberately tight: without the provider's `reasoning_effort:
+        // "none"` mitigation, kimi-k2p6 burns this entire budget on reasoning
+        // and yields no JSON (live-verified 2026-07-15: truncates at 128-256;
+        // with the mitigation the verdict lands in ~85 completion tokens).
+        // A pass here therefore proves the mitigation works end-to-end at a
+        // verifier-class budget.
+        max_tokens: 256,
         response_schema: Some(schema),
     };
 
