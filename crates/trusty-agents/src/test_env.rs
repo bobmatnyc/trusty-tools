@@ -1,21 +1,24 @@
 //! Shared test-only synchronization primitives and executable-file helpers.
 //!
-//! Why: Multiple unit tests across different modules (`init::tests`,
-//! `mistake_log::tests`, etc.) sandbox `$HOME` with `std::env::set_var` to
-//! redirect file I/O into a tempdir. `set_var` is a process-wide mutation
-//! and `cargo test` runs unit tests on a multi-threaded executor by default,
-//! so two concurrent tests sandboxing HOME stomp on each other and one will
-//! observe the other's tempdir (or restore HOME mid-flight). The classic
-//! fix is a per-test-module `static Mutex`, but that only serializes tests
-//! WITHIN one module — cross-module races (e.g. `init::seed_skills_*` vs
-//! `mistake_log::mistake_log_records_nonzero_exit`) still flake.
+//! Why: Multiple unit tests across different modules (`init::tests`, etc.)
+//! sandbox `$HOME` with `std::env::set_var` to redirect file I/O into a
+//! tempdir. `set_var` is a process-wide mutation and `cargo test` runs unit
+//! tests on a multi-threaded executor by default, so two concurrent tests
+//! sandboxing HOME stomp on each other and one will observe the other's
+//! tempdir (or restore HOME mid-flight). The classic fix is a per-test-module
+//! `static Mutex`, but that only serializes tests WITHIN one module —
+//! cross-module races (e.g. `init::seed_skills_*` vs another module's
+//! HOME-mutating test) still flake, and a test that skips the lock races
+//! everyone. The durable fix is to inject the path instead of mutating HOME
+//! (see `mistake_log`'s `record_at` seam, #2709); `HOME_LOCK` remains for
+//! tests not yet migrated to injection.
 //! What: Exposes a single process-wide `HOME_LOCK` that every test mutating
 //! `$HOME` must hold. Also provides `write_executable_script` and
 //! `spawn_script` helpers to avoid ETXTBSY races (#1528).
 //! Compiled only under `#[cfg(test)]` so it costs nothing in release builds.
-//! Test: Used by `mistake_log::tests::mistake_log_records_nonzero_exit` and
-//! `init::tests::*`. The mistake_log test was order-dependent before this
-//! lock was introduced — passed in isolation, failed under `cargo test`.
+//! Test: Used by `init::tests::*` and other modules that still sandbox HOME.
+//! Such tests were order-dependent before this lock — passing in isolation but
+//! failing under `cargo test`.
 
 #![cfg(test)]
 
