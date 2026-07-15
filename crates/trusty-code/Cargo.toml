@@ -85,7 +85,9 @@ globset = { workspace = true }
 # run the JSON-RPC-over-stdio handshake, call tools) the trusty-search-backed
 # code-discovery tool reuses instead of writing its own MCP transport
 # (common-entry-point principle) — mirrors trusty-agents' TrustySearchPlugin.
-trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client"] }
+# `search-index` provides the shared ensure-project-indexed helper for tcode
+# task startup.
+trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index"] }
 
 # `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
 # CLAUDE.md, axum stays feature-gated in *library* crates

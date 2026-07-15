@@ -1,5 +1,5 @@
 use super::search_index::{
-    index_is_fresh, inject_trusty_search_mcp, register_project_index, trusty_search_mcp_value,
+    inject_trusty_search_mcp, register_project_index, trusty_search_mcp_value,
 };
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, inject_trusty_memory_mcp,
@@ -1215,57 +1215,11 @@ fn register_project_index_returns_derived_id() {
 }
 
 // ── index_is_fresh (#1908) ────────────────────────────────────────────────────
-// Pure predicate behind `best_effort_trigger_reindex`'s freshness skip: these
-// tests exercise it directly against synthetic `GET .../status` bodies so the
-// rule is verified without a live trusty-search daemon.
-
-#[test]
-fn index_is_fresh_true_when_recently_indexed_with_chunks() {
-    // Why: the whole point of the optimisation is to skip a redundant reindex
-    // when the index already has content and was built recently.
-    let now = chrono::Utc::now();
-    let status = serde_json::json!({
-        "chunk_count": 42,
-        "last_indexed": now.to_rfc3339(),
-    });
-    assert!(index_is_fresh(&status));
-}
-
-#[test]
-fn index_is_fresh_false_when_no_chunks() {
-    // Why: a zero-chunk index is empty regardless of how recent `last_indexed`
-    // claims to be — it must always be reindexed.
-    let now = chrono::Utc::now();
-    let status = serde_json::json!({
-        "chunk_count": 0,
-        "last_indexed": now.to_rfc3339(),
-    });
-    assert!(!index_is_fresh(&status));
-}
-
-#[test]
-fn index_is_fresh_false_when_stale() {
-    // Why: an index last built more than an hour ago should be refreshed, even
-    // though it has chunks.
-    let stale = chrono::Utc::now() - chrono::Duration::hours(2);
-    let status = serde_json::json!({
-        "chunk_count": 10,
-        "last_indexed": stale.to_rfc3339(),
-    });
-    assert!(!index_is_fresh(&status));
-}
-
-#[test]
-fn index_is_fresh_false_when_last_indexed_missing_or_malformed() {
-    // Why: fail-open toward reindexing — a missing or unparsable timestamp
-    // must never be treated as "fresh".
-    assert!(!index_is_fresh(&serde_json::json!({ "chunk_count": 10 })));
-    assert!(!index_is_fresh(&serde_json::json!({
-        "chunk_count": 10,
-        "last_indexed": "not-a-timestamp",
-    })));
-    assert!(!index_is_fresh(&serde_json::json!({})));
-}
+// The freshness predicate was PROMOTED to trusty-common alongside the rest of
+// the register+reindex logic (common entry-point rule); its unit tests now live
+// in `trusty_common::search_index::tests` (run `cargo test -p trusty-common
+// --features search-index`). This crate keeps only the launch-prep wrapper
+// coverage below.
 
 #[test]
 fn prepare_session_injects_both_mcp_servers() {
