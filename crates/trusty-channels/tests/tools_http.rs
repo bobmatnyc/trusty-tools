@@ -18,10 +18,20 @@ use trusty_channels::slack::server::ToolCallError;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// A client wired to the mock server with a fixed token.
+/// A client wired to the mock server with a fixed bot token (no user token).
 fn client_for(server: &MockServer) -> BaseClient {
     BaseClient::with_endpoint(server.uri(), Some("xoxb-test".to_string()))
         .expect("construct client")
+}
+
+/// A client wired to the mock server with both a bot and a user token.
+fn client_with_user_for(server: &MockServer) -> BaseClient {
+    BaseClient::with_endpoint_tokens(
+        server.uri(),
+        Some("xoxb-test".to_string()),
+        Some("xoxp-test".to_string()),
+    )
+    .expect("construct client")
 }
 
 /// Mount a single POST route returning a 200 + JSON body.
@@ -196,6 +206,169 @@ async fn get_user_returns_profile() {
 
     assert_eq!(out["user"]["id"], "U1");
     assert_eq!(out["user"]["real_name"], "Alice &amp; Co");
+}
+
+#[tokio::test]
+async fn search_messages_with_user_token_returns_matches() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "search.messages",
+        json!({
+            "ok": true,
+            "messages": {
+                "total": 1,
+                "matches": [
+                    {
+                        "channel": { "id": "C1", "name": "general" },
+                        "user": "U1",
+                        "ts": "1700000000.000100",
+                        "text": "<!channel> deploy & ship",
+                        "permalink": "https://x.slack.com/archives/C1/p1700000000000100"
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+
+    let client = client_with_user_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_search_messages",
+        json!({ "query": "deploy", "count": 5 }),
+    )
+    .await
+    .expect("search should succeed");
+
+    assert_eq!(out["query"], "deploy");
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["matches"][0]["channel_id"], "C1");
+    assert_eq!(out["matches"][0]["channel_name"], "general");
+    // Hostile broadcast/mention markup in result text must be neutralised.
+    assert_eq!(
+        out["matches"][0]["text"],
+        "&lt;!channel&gt; deploy &amp; ship"
+    );
+    assert!(!out["matches"][0]["text"].as_str().unwrap().contains('<'));
+    assert_eq!(
+        out["matches"][0]["permalink"],
+        "https://x.slack.com/archives/C1/p1700000000000100"
+    );
+}
+
+#[tokio::test]
+async fn search_messages_without_user_token_errors() {
+    // A server that fails the test if it is ever hit — the missing user token
+    // must be caught before any network call, and must NOT fall back to the bot
+    // token that `client_for` provides.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search.messages"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server); // bot token only, no user token
+    let err = dispatch(
+        &client,
+        "slack_search_messages",
+        json!({ "query": "anything" }),
+    )
+    .await
+    .expect_err("missing user token must error");
+    match err {
+        ToolCallError::Slack(inner) => {
+            let msg = inner.to_string();
+            assert!(
+                msg.contains("user token required for search") && msg.contains("SLACK_USER_TOKEN"),
+                "clear, actionable typed error, got: {msg}"
+            );
+        }
+        other => panic!("expected a Slack MissingUserToken error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn search_channels_filters_by_query() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.list",
+        json!({
+            "ok": true,
+            "channels": [
+                { "id": "C1", "name": "backend-alerts", "is_private": false },
+                { "id": "C2", "name": "random", "topic": { "value": "ALERTS live here" } },
+                { "id": "C3", "name": "general", "is_private": false },
+            ]
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_search_channels",
+        json!({ "query": "alert" }),
+    )
+    .await
+    .expect("search channels should succeed");
+
+    assert_eq!(out["query"], "alert");
+    // C1 by name, C2 by topic (case-insensitive); C3 excluded.
+    assert_eq!(out["count"], 2);
+    let ids: Vec<&str> = out["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"C1"));
+    assert!(ids.contains(&"C2"));
+    assert!(!ids.contains(&"C3"));
+}
+
+#[tokio::test]
+async fn add_reaction_posts_and_confirms() {
+    let server = MockServer::start().await;
+    mount_ok(&server, "reactions.add", json!({ "ok": true })).await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_add_reaction",
+        json!({ "channel": "C1", "timestamp": "1700000000.000100", "name": "thumbsup" }),
+    )
+    .await
+    .expect("add reaction should succeed");
+
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["channel"], "C1");
+    assert_eq!(out["timestamp"], "1700000000.000100");
+    assert_eq!(out["name"], "thumbsup");
+}
+
+#[tokio::test]
+async fn add_reaction_missing_arg_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/reactions.add"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_add_reaction",
+        json!({ "channel": "C1", "timestamp": "1.1" }),
+    )
+    .await
+    .expect_err("missing name should error");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
 }
 
 #[tokio::test]
