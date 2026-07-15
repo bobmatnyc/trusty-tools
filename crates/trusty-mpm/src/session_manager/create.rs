@@ -69,7 +69,11 @@ impl SessionManager {
         ephemeral: bool,
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
-        let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
+        // Never run (and therefore never recursively watch/scan) a managed
+        // session in `$HOME` or a TCC-protected folder — that triggers a cascade
+        // of macOS "trusty-mpm would like to access …" folder prompts (#2758).
+        // A missing or unsafe cwd resolves to a neutral scratch dir, never $HOME.
+        let cwd = crate::core::protected_dirs::safe_session_cwd(cwd);
         let github_project = repo_url
             .as_deref()
             .and_then(trusty_common::github_path::parse_github_path)
@@ -128,7 +132,11 @@ impl SessionManager {
         ephemeral: bool,
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
-        let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
+        // Never run (and therefore never recursively watch/scan) a managed
+        // session in `$HOME` or a TCC-protected folder — that triggers a cascade
+        // of macOS "trusty-mpm would like to access …" folder prompts (#2758).
+        // A missing or unsafe cwd resolves to a neutral scratch dir, never $HOME.
+        let cwd = crate::core::protected_dirs::safe_session_cwd(cwd);
         self.create_with_resolved_name(
             id,
             reserved_name,

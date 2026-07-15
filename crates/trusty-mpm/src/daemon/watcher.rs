@@ -52,10 +52,26 @@ impl FileWatcher {
     ///
     /// Why: each session has its own workdir; the dashboard shows file changes
     /// per session, so the watcher must know which root maps to which session.
-    /// What: records the `session → root` mapping; returns the previous root
-    /// if the session was already watching something.
-    /// Test: `register_and_unregister_roots`.
+    /// A workdir that resolves to `$HOME` or a TCC-protected user folder must be
+    /// rejected here: [`spawn`](Self::spawn) registers every root as a RECURSIVE
+    /// `notify` watch, and on macOS a recursive watch of `$HOME` / `~/Downloads`
+    /// triggers a "trusty-mpm would like to access your Downloads folder" consent
+    /// prompt — even though tm only ever manages git worktrees under the projects
+    /// root (see [`crate::core::protected_dirs::is_home_or_protected_dir`]).
+    /// What: rejects protected/home roots (logs a warning, returns `None` without
+    /// recording anything); otherwise records the `session → root` mapping and
+    /// returns the previous root if the session was already watching something.
+    /// Test: `register_and_unregister_roots`, `watch_session_skips_protected_roots`.
     pub fn watch_session(&self, session: SessionId, root: PathBuf) -> Option<PathBuf> {
+        if crate::core::protected_dirs::is_home_or_protected_dir(&root, dirs::home_dir().as_deref())
+        {
+            warn!(
+                root = %root.display(),
+                "refusing to recursively watch a home/TCC-protected root \
+                 (would trigger a macOS folder-access prompt); skipping session watch"
+            );
+            return None;
+        }
         self.roots.lock().insert(session, root)
     }
 
@@ -230,6 +246,39 @@ mod tests {
         assert_eq!(watcher.watched_count(), 1);
         assert_eq!(watcher.unwatch_session(s), Some(PathBuf::from("/tmp/proj")));
         assert_eq!(watcher.watched_count(), 0);
+    }
+
+    #[test]
+    fn watch_session_skips_protected_roots() {
+        // A home/protected root is refused (not recorded); a normal path is.
+        let watcher = FileWatcher::new(DaemonState::shared());
+        if let Some(home) = dirs::home_dir() {
+            let s = SessionId::new();
+            assert!(
+                watcher.watch_session(s, home).is_none(),
+                "home root must be refused"
+            );
+            let downloads = SessionId::new();
+            assert!(
+                watcher
+                    .watch_session(downloads, dirs::home_dir().unwrap().join("Downloads"))
+                    .is_none(),
+                "~/Downloads must be refused"
+            );
+            assert_eq!(
+                watcher.watched_count(),
+                0,
+                "no protected root may enter the watch set"
+            );
+        }
+        // A safe path is still registered normally.
+        let safe = SessionId::new();
+        assert!(
+            watcher
+                .watch_session(safe, PathBuf::from("/tmp/tm-watch-safe"))
+                .is_none()
+        );
+        assert_eq!(watcher.watched_count(), 1);
     }
 
     #[test]

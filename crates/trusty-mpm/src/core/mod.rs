@@ -68,6 +68,7 @@ pub mod process;
 pub mod project;
 pub mod project_aliases;
 pub mod project_discovery;
+pub mod protected_dirs;
 pub mod provisioning_stage;
 pub mod session;
 pub mod session_launch;
