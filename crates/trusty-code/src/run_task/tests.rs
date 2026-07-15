@@ -1258,3 +1258,29 @@ async fn run_task_registry_never_registers_recall_session() {
         "run_task's one-shot registry must never register recall_session; got {names:?}"
     );
 }
+
+/// `ensure_project_indexed_in_background` spawns its indexing thread even when
+/// the project path is NOT inside a git repository.
+///
+/// Why: regression guard for the removed `find_git_root` short-circuit (owner
+/// directive: git is a nice-to-have for tcode, not a requirement — trusty-search
+/// should index scratch directories same as any other project). Before this
+/// fix, a project with no `.git` anywhere up its tree caused the function to
+/// return before ever spawning the thread.
+/// What: calls the function with a plain tempdir that has no `.git`, and
+/// asserts it returns promptly (proving it did not skip out early nor block on
+/// the network) without panicking. The spawned thread is detached and
+/// fail-open, so no running trusty-search daemon is required for this test.
+/// Test: this test.
+#[test]
+fn spawns_indexing_thread_for_non_git_project_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // No `.git` anywhere under `tmp` — exactly the scratch/bake-off case the
+    // old guard used to skip.
+    let start = std::time::Instant::now();
+    super::ensure_project_indexed_in_background(tmp.path().to_path_buf());
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(500),
+        "must return immediately (spawn-and-detach), never block on the network"
+    );
+}
