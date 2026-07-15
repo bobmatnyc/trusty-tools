@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use super::callback;
+use super::errors::sanitize_oauth_error;
 use super::pkce::{self, Pkce};
 use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
 use crate::api::auth::storage::TokenStorage;
@@ -256,23 +257,61 @@ struct TokenResponse {
 /// a much shorter duration.
 const CONSENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Compose the user-facing consent prompt lines (printed to stderr).
+///
+/// Why: `setup` runs both interactively (auto-open the browser) and in
+/// headless / in-session contexts (`--print-url` / `--no-browser`, where no
+/// browser can be launched). Both modes must display the SAME consent URL — the
+/// only thing that changes is whether we also spawn the browser and how we word
+/// the instruction. Isolating the wording here (a) keeps the URL provably
+/// identical across modes and (b) makes that contract unit-testable without a
+/// live network round-trip.
+/// What: Returns the ordered prompt lines. When `open_browser` is true the
+/// first line announces the launch; otherwise it instructs the user to open the
+/// URL manually. `auth_url` is embedded verbatim in every mode.
+/// Test: `consent_prompt_url_is_identical_regardless_of_browser_mode`,
+/// `consent_prompt_wording_differs_by_mode`.
+fn consent_prompt_lines(auth_url: &str, open_browser: bool, timeout_secs: u64) -> Vec<String> {
+    let mut lines = Vec::new();
+    if open_browser {
+        lines.push("Opening your browser to authorize trusty-gworkspace...".to_string());
+        lines.push(format!(
+            "If it does not open, open this URL manually:\n\n{auth_url}\n"
+        ));
+    } else {
+        lines.push(
+            "Open this URL in a browser to authorize trusty-gworkspace \
+             (no browser will be launched):"
+                .to_string(),
+        );
+        lines.push(format!("\n{auth_url}\n"));
+    }
+    lines.push(format!(
+        "Waiting up to {timeout_secs}s for you to finish in the browser..."
+    ));
+    lines
+}
+
 /// Run the full interactive consent flow and persist the minted token.
 ///
 /// Why: The single entry point the `setup` CLI calls — orchestrates the
 /// browser consent, code capture, token exchange, email resolution, and
 /// persistence so the caller only decides profile name / default mode.
-/// What: Generates PKCE + state, binds a loopback callback, opens the system
-/// browser (falling back to printing the URL), waits (bounded by
-/// [`CONSENT_TIMEOUT`]) for the redirect, exchanges the code, resolves the
-/// email, and writes a wire-compatible `StoredToken`. The default-profile
-/// decision is resolved up front (from on-disk state, before any network
-/// call) so a would-be-displaced default can be warned about immediately.
+/// What: Generates PKCE + state, binds a loopback callback, prints the consent
+/// URL and — when `open_browser` is true — opens the system browser (passing
+/// `false`, via `setup --print-url` / `--no-browser`, prints the URL only, for
+/// headless / in-session re-auth). Waits (bounded by [`CONSENT_TIMEOUT`]) for
+/// the redirect, exchanges the code, resolves the email, and writes a
+/// wire-compatible `StoredToken`. The default-profile decision is resolved up
+/// front (from on-disk state, before any network call) so a would-be-displaced
+/// default can be warned about immediately.
 /// Test: Deferred (needs a live Google client + browser). Constituent pure
-/// helpers are unit-tested.
+/// helpers are unit-tested (`consent_prompt_url_is_identical_regardless_of_browser_mode`).
 pub async fn run_consent(
     storage: &TokenStorage,
     profile: &str,
     default_mode: DefaultMode,
+    open_browser: bool,
 ) -> Result<ConsentOutcome> {
     let creds = resolve_client_creds()?;
 
@@ -305,13 +344,10 @@ pub async fn run_consent(
         &state,
     );
 
-    eprintln!("Opening your browser to authorize trusty-gworkspace...");
-    eprintln!("If it does not open, visit this URL manually:\n\n{auth_url}\n");
-    eprintln!(
-        "Waiting up to {}s for you to finish in the browser...",
-        CONSENT_TIMEOUT.as_secs()
-    );
-    if let Err(e) = open::that(&auth_url) {
+    for line in consent_prompt_lines(&auth_url, open_browser, CONSENT_TIMEOUT.as_secs()) {
+        eprintln!("{line}");
+    }
+    if open_browser && let Err(e) = open::that(&auth_url) {
         warn!(error = %e, "failed to launch browser; user must open the URL manually");
     }
 
@@ -369,45 +405,6 @@ async fn exchange_code(
         ));
     }
     serde_json::from_str(&body).with_context(|| format!("parse token response: {body}"))
-}
-
-/// Google's RFC 6749 §5.2 error-response shape (`error` + optional
-/// `error_description`).
-#[derive(Debug, Deserialize)]
-struct OAuthErrorBody {
-    error: String,
-    #[serde(default)]
-    error_description: Option<String>,
-}
-
-/// Maximum characters of an unparseable error body to surface.
-const MAX_ERROR_BODY_CHARS: usize = 200;
-
-/// Extract a safe, bounded error message from a Google OAuth error response.
-///
-/// Why: The raw response body can be arbitrary third-party text (an HTML
-/// error page, a verbose diagnostic dump) that ends up inside an `anyhow`
-/// error chain and may be printed to the terminal or captured in crash
-/// reports. Surfacing only the structured `error`/`error_description` (or a
-/// short truncated fallback) keeps that surface bounded and predictable.
-/// What: Parses `body` as `{"error": "...", "error_description": "..."}`;
-/// falls back to a message truncated to [`MAX_ERROR_BODY_CHARS`] characters
-/// when the body isn't that shape.
-/// Test: `sanitizes_oauth_error_json`, `truncates_unparseable_body`.
-fn sanitize_oauth_error(status: reqwest::StatusCode, body: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<OAuthErrorBody>(body) {
-        return match parsed.error_description {
-            Some(desc) => format!("{status} {}: {desc}", parsed.error),
-            None => format!("{status} {}", parsed.error),
-        };
-    }
-    let char_count = body.chars().count();
-    let truncated: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-    if char_count > MAX_ERROR_BODY_CHARS {
-        format!("{status} (unparseable error body, truncated): {truncated}...")
-    } else {
-        format!("{status} (unparseable error body): {truncated}")
-    }
 }
 
 /// Resolve the account email: `id_token` claim first, then userinfo endpoint.
@@ -505,193 +502,4 @@ pub fn effective_profile(override_name: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scope_string_matches_constant_set() {
-        let s = assemble_scope_string();
-        assert!(s.starts_with("openid "));
-        assert!(s.contains("https://www.googleapis.com/auth/gmail.modify"));
-        assert!(s.contains("https://www.googleapis.com/auth/presentations"));
-        assert_eq!(s.split(' ').count(), OAUTH_SCOPES.len());
-    }
-
-    #[test]
-    fn build_auth_url_contains_all_params() {
-        let url = build_auth_url(
-            "cid.apps.googleusercontent.com",
-            "http://127.0.0.1:5000",
-            "openid https://www.googleapis.com/auth/calendar",
-            "CHALLENGE",
-            "STATE",
-        );
-        assert!(url.starts_with(OAUTH_AUTH_URL));
-        assert!(url.contains("client_id=cid.apps.googleusercontent.com"));
-        assert!(url.contains("code_challenge=CHALLENGE"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("state=STATE"));
-        assert!(url.contains("access_type=offline"));
-        assert!(url.contains("prompt=consent"));
-        // redirect_uri and scope must be percent-encoded.
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A5000"));
-        assert!(url.contains("scope=openid%20https"));
-    }
-
-    #[test]
-    fn parses_flat_creds() {
-        let c = parse_client_creds_json(r#"{"client_id":"a","client_secret":"b"}"#).unwrap();
-        assert_eq!(c.client_id, "a");
-        assert_eq!(c.client_secret, "b");
-    }
-
-    #[test]
-    fn parses_installed_creds() {
-        let c = parse_client_creds_json(
-            r#"{"installed":{"client_id":"x","client_secret":"y","redirect_uris":["http://localhost"]}}"#,
-        )
-        .unwrap();
-        assert_eq!(c.client_id, "x");
-        assert_eq!(c.client_secret, "y");
-    }
-
-    #[test]
-    fn default_profile_falls_back() {
-        assert_eq!(effective_profile(None), DEFAULT_PROFILE);
-        assert_eq!(effective_profile(Some("  ")), DEFAULT_PROFILE);
-        assert_eq!(effective_profile(Some("work")), "work");
-    }
-
-    fn make_stored(name: &str, is_default: bool) -> StoredToken {
-        StoredToken {
-            version: 1,
-            metadata: TokenMetadata {
-                service_name: name.to_string(),
-                provider: "google".into(),
-                created_at: Utc::now(),
-                last_refreshed: None,
-                email: Some(format!("{name}@example.com")),
-                is_default,
-            },
-            token: OAuthToken {
-                access_token: "a".into(),
-                refresh_token: Some("r".into()),
-                expires_at: Utc::now() + Duration::seconds(3600),
-                scopes: vec!["openid".into()],
-                token_type: "Bearer".into(),
-            },
-        }
-    }
-
-    #[test]
-    fn persist_marks_single_default() {
-        let dir = std::env::temp_dir().join(format!("gw-persist-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let storage = TokenStorage::with_path(dir.join("tokens.json"));
-
-        persist(&storage, "first", make_stored("first", false), true).unwrap();
-        persist(&storage, "second", make_stored("second", false), true).unwrap();
-
-        let all = storage.load().unwrap();
-        assert_eq!(all.len(), 2);
-        assert!(!all["first"].metadata.is_default, "old default cleared");
-        assert!(all["second"].metadata.is_default, "new entry is default");
-    }
-
-    #[test]
-    fn persist_false_does_not_steal_existing_default() {
-        // Regression test: a second `setup` run with set_default=false (the
-        // outcome of DefaultMode::Auto when a default already exists on a
-        // different profile) must leave the existing default untouched.
-        let dir = std::env::temp_dir().join(format!("gw-persist2-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let storage = TokenStorage::with_path(dir.join("tokens.json"));
-
-        persist(&storage, "first", make_stored("first", false), true).unwrap();
-        persist(&storage, "second", make_stored("second", false), false).unwrap();
-
-        let all = storage.load().unwrap();
-        assert_eq!(all.len(), 2);
-        assert!(
-            all["first"].metadata.is_default,
-            "first must remain default — it was not stolen"
-        );
-        assert!(!all["second"].metadata.is_default);
-    }
-
-    #[test]
-    fn auto_sets_default_only_when_absent() {
-        let existing: HashMap<String, StoredToken> = HashMap::new();
-        assert!(should_set_default(DefaultMode::Auto, "first", &existing));
-    }
-
-    #[test]
-    fn auto_does_not_steal_existing_default() {
-        let mut existing = HashMap::new();
-        existing.insert("first".to_string(), make_stored("first", true));
-        assert!(
-            !should_set_default(DefaultMode::Auto, "second", &existing),
-            "second account must not silently steal the default"
-        );
-    }
-
-    #[test]
-    fn auto_keeps_default_on_reauth_of_default_profile() {
-        let mut existing = HashMap::new();
-        existing.insert("first".to_string(), make_stored("first", true));
-        assert!(
-            should_set_default(DefaultMode::Auto, "first", &existing),
-            "re-authorizing the existing default profile should keep it default"
-        );
-    }
-
-    #[test]
-    fn force_overrides_existing_default() {
-        let mut existing = HashMap::new();
-        existing.insert("first".to_string(), make_stored("first", true));
-        assert!(should_set_default(DefaultMode::Force, "second", &existing));
-    }
-
-    #[test]
-    fn never_keeps_existing_default() {
-        let existing: HashMap<String, StoredToken> = HashMap::new();
-        assert!(!should_set_default(DefaultMode::Never, "first", &existing));
-        let mut with_default = HashMap::new();
-        with_default.insert("first".to_string(), make_stored("first", true));
-        assert!(!should_set_default(
-            DefaultMode::Never,
-            "second",
-            &with_default
-        ));
-    }
-
-    #[test]
-    fn sanitizes_oauth_error_json() {
-        let msg = sanitize_oauth_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            r#"{"error":"invalid_grant","error_description":"Bad Request"}"#,
-        );
-        assert!(msg.contains("invalid_grant"));
-        assert!(msg.contains("Bad Request"));
-    }
-
-    #[test]
-    fn sanitizes_oauth_error_json_without_description() {
-        let msg = sanitize_oauth_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            r#"{"error":"invalid_grant"}"#,
-        );
-        assert!(msg.contains("invalid_grant"));
-    }
-
-    #[test]
-    fn truncates_unparseable_body() {
-        let long_body = "x".repeat(500);
-        let msg = sanitize_oauth_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, &long_body);
-        assert!(
-            msg.len() < long_body.len(),
-            "message must be shorter than the raw body"
-        );
-        assert!(msg.contains("truncated"));
-    }
-}
+mod tests;

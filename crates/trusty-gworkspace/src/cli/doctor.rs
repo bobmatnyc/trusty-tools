@@ -1,36 +1,151 @@
-//! `doctor` subcommand: config / credentials health check.
+//! `doctor` subcommand: config / credentials health check + live token probe.
 //!
 //! Why: OAuth onboarding fails in a handful of predictable ways (missing
-//! client creds, no tokens, expired refresh). A one-shot diagnostic tells the
-//! user exactly what to fix before they hit a cryptic API error.
-//! What: Checks client-credential resolution and the tokens.json state, then
-//! prints a checklist. Never mutates anything; read-only.
-//! Test: `report_lines` builds the checklist from injected state so the output
-//! is asserted without touching the environment.
+//! client creds, no tokens, an expired/revoked refresh token). A one-shot
+//! diagnostic tells the user exactly what to fix — and, crucially, for a dead
+//! refresh token it names the exact `gworkspace-mcp setup --profile <name>`
+//! command to run — before they hit a cryptic API error mid-session.
+//! What: Checks client-credential resolution and tokens.json state (read-only),
+//! then, when credentials are available, live-probes each stored profile's
+//! refresh token against Google's token endpoint (bounded per-profile timeout,
+//! no persistence) and reports OK / DEAD / UNKNOWN per profile.
+//! Test: `report_lines` (static checks) and `health_lines` (per-profile
+//! classification) build their output from injected state so the exact wording
+//! is asserted without touching the network. See `report_lines_flags_missing_creds`,
+//! `report_lines_all_green`, `single_account_counts_as_default`,
+//! `health_lines_ok_shows_email`, `health_lines_dead_names_setup_command`,
+//! `health_lines_unknown_is_graceful`.
+
+use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::api::auth::TokenStorage;
+use crate::api::auth::oauth::errors::is_invalid_grant;
+use crate::api::auth::oauth::flow::ClientCreds;
 use crate::api::auth::oauth::resolve_client_creds;
+use crate::api::constants::OAUTH_TOKEN_URL;
+
+/// Per-profile refresh-token health, as classified by the live probe.
+///
+/// Why: The doctor must distinguish a genuinely dead refresh token (actionable:
+/// re-auth) from a transient network failure (not actionable: try again later),
+/// and never hard-fail the whole diagnostic because Google was unreachable.
+/// What: `Live` — the refresh token minted a fresh access token (with its
+/// lifetime); `Dead` — Google returned `invalid_grant`; `Unknown` — offline,
+/// timed out, or an unexpected non-`invalid_grant` error.
+/// Test: `health_lines_ok_shows_email`, `health_lines_dead_names_setup_command`,
+/// `health_lines_unknown_is_graceful`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeResult {
+    /// Refresh succeeded; the new access token lives `expires_in` seconds.
+    Live { expires_in: Option<i64> },
+    /// Google rejected the refresh token as expired or revoked.
+    Dead,
+    /// Could not determine validity (offline, timeout, or unexpected error).
+    Unknown,
+}
+
+/// Per-profile probe timeout. Bounds each network check so `doctor` stays
+/// responsive even with many profiles or a flaky connection.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Run the doctor check and print a report to stdout.
 ///
 /// Why: Human-facing entry point for `gworkspace-mcp doctor`.
-/// What: Probes credentials + storage, prints each line from [`report_lines`],
-/// and returns `Ok` regardless of findings (the report *is* the result).
-/// Test: Delegates to `report_lines`, which is unit-tested.
-pub fn run(storage: &TokenStorage) -> Result<()> {
-    let creds_ok = resolve_client_creds().is_ok();
+/// What: Prints the static credential/storage checks, then — when client
+/// credentials resolve — live-probes each stored profile and prints its health.
+/// Always returns `Ok` (the report *is* the result); never mutates tokens.json.
+/// Test: Delegates to `report_lines` and `health_lines`, both unit-tested.
+pub async fn run(storage: &TokenStorage) -> Result<()> {
+    let creds = resolve_client_creds().ok();
     let accounts = storage.list_accounts().unwrap_or_default();
     let has_default = accounts.iter().any(|(_, _, d)| *d);
 
-    for line in report_lines(creds_ok, accounts.len(), has_default) {
+    for line in report_lines(creds.is_some(), accounts.len(), has_default) {
         println!("{line}");
     }
+
+    if accounts.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("Per-profile refresh-token health:");
+    match &creds {
+        Some(creds) => {
+            let http = reqwest::Client::builder()
+                .timeout(PROBE_TIMEOUT)
+                .build()
+                .unwrap_or_default();
+            for (name, email, _is_default) in &accounts {
+                let result = probe_profile(&http, storage, creds, name).await;
+                for line in health_lines(name, email.as_deref(), &result) {
+                    println!("{line}");
+                }
+            }
+        }
+        None => {
+            println!(
+                "      Skipped — set OAuth client credentials to enable live probing \
+                 (see the check above)."
+            );
+        }
+    }
+
     Ok(())
 }
 
-/// Build the diagnostic checklist lines from resolved state.
+/// Live-probe a single profile's refresh token without persisting anything.
+///
+/// Why: The durable credential is the refresh token; validating it (by minting
+/// a throwaway access token) is the only reliable "is this account still
+/// usable?" check. Doctor is read-only, so this deliberately does NOT call
+/// `OAuthManager::refresh` (which would rewrite tokens.json).
+/// What: Loads the stored refresh token, POSTs `grant_type=refresh_token`, and
+/// classifies the outcome into a [`ProbeResult`]. Any network/timeout error or
+/// missing refresh token becomes `Unknown`; `invalid_grant` becomes `Dead`.
+/// Test: Network path is integration-only; the classification wording is
+/// covered via `health_lines_*`.
+async fn probe_profile(
+    http: &reqwest::Client,
+    storage: &TokenStorage,
+    creds: &ClientCreds,
+    profile: &str,
+) -> ProbeResult {
+    let refresh_token = match storage.get_profile(profile) {
+        Ok(Some(stored)) => match stored.token.refresh_token {
+            Some(rt) => rt,
+            None => return ProbeResult::Unknown,
+        },
+        _ => return ProbeResult::Unknown,
+    };
+
+    let params = [
+        ("client_id", creds.client_id.as_str()),
+        ("client_secret", creds.client_secret.as_str()),
+        ("refresh_token", refresh_token.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+    let resp = match http.post(OAUTH_TOKEN_URL).form(&params).send().await {
+        Ok(r) => r,
+        Err(_) => return ProbeResult::Unknown,
+    };
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        let expires_in = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("expires_in").and_then(|x| x.as_i64()));
+        ProbeResult::Live { expires_in }
+    } else if is_invalid_grant(&body) {
+        ProbeResult::Dead
+    } else {
+        ProbeResult::Unknown
+    }
+}
+
+/// Build the static (offline) diagnostic checklist lines from resolved state.
 ///
 /// Why: Separating formatting from I/O makes the exact wording testable and
 /// keeps `run` trivial.
@@ -72,6 +187,36 @@ pub fn report_lines(creds_ok: bool, account_count: usize, has_default: bool) -> 
     lines
 }
 
+/// Build the per-profile health lines from a probe result.
+///
+/// Why: The live-probe verdict must render identically whether it came from a
+/// real network call or a test — and a `Dead` profile must always print the
+/// exact re-auth command so the fix is copy-pasteable.
+/// What: `Live` → one OK line (email + access-token lifetime); `Dead` → a
+/// failure line plus the `gworkspace-mcp setup --profile <name>` command;
+/// `Unknown` → one graceful "could not determine" line (never fatal).
+/// Test: `health_lines_ok_shows_email`, `health_lines_dead_names_setup_command`,
+/// `health_lines_unknown_is_graceful`.
+pub fn health_lines(profile: &str, email: Option<&str>, result: &ProbeResult) -> Vec<String> {
+    let who = email.unwrap_or("email unknown");
+    match result {
+        ProbeResult::Live { expires_in } => {
+            let expiry = match expires_in {
+                Some(secs) => format!("access token valid ~{secs}s"),
+                None => "access token valid".to_string(),
+            };
+            vec![format!("[+] {profile}: OK ({who}, {expiry})")]
+        }
+        ProbeResult::Dead => vec![
+            format!("[!] {profile}: DEAD — refresh token for {who} is expired or revoked"),
+            format!("      re-authenticate with: gworkspace-mcp setup --profile {profile}"),
+        ],
+        ProbeResult::Unknown => vec![format!(
+            "[?] {profile}: UNKNOWN — could not reach Google to verify ({who}); check your connection"
+        )],
+    }
+}
+
 /// Render a pass/fail check mark.
 fn mark(ok: bool) -> char {
     if ok { '+' } else { '!' }
@@ -108,6 +253,56 @@ mod tests {
             lines
                 .iter()
                 .any(|l| l.contains("[+] Default profile selected"))
+        );
+    }
+
+    #[test]
+    fn health_lines_ok_shows_email() {
+        let lines = health_lines(
+            "work",
+            Some("user@example.com"),
+            &ProbeResult::Live {
+                expires_in: Some(3599),
+            },
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("[+] work: OK"), "OK marker: {joined}");
+        assert!(joined.contains("user@example.com"), "email shown: {joined}");
+        assert!(joined.contains("3599s"), "expiry shown: {joined}");
+        assert!(
+            !joined.contains("setup --profile"),
+            "a healthy profile must not suggest re-auth: {joined}"
+        );
+    }
+
+    #[test]
+    fn health_lines_dead_names_setup_command() {
+        let lines = health_lines("work", Some("user@example.com"), &ProbeResult::Dead);
+        let joined = lines.join("\n");
+        assert!(joined.contains("DEAD"), "dead marker: {joined}");
+        assert!(joined.contains("expired or revoked"), "cause: {joined}");
+        assert!(
+            joined.contains("gworkspace-mcp setup --profile work"),
+            "must name the exact re-auth command for the dead profile: {joined}"
+        );
+    }
+
+    #[test]
+    fn health_lines_unknown_is_graceful() {
+        let lines = health_lines("work", None, &ProbeResult::Unknown);
+        let joined = lines.join("\n");
+        assert!(joined.contains("UNKNOWN"), "unknown marker: {joined}");
+        assert!(
+            joined.contains("could not reach Google"),
+            "graceful offline wording: {joined}"
+        );
+        assert!(
+            !joined.contains("DEAD"),
+            "unreachable must not be misreported as dead: {joined}"
+        );
+        assert!(
+            !joined.contains("setup --profile"),
+            "unknown must not push a re-auth (token may be fine): {joined}"
         );
     }
 }
