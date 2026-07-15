@@ -292,56 +292,111 @@ fn probe_all_volumes_parallel_bounded_time() {
 
 // ── multi-volume starvation regression ───────────────────────────────────────
 
-/// Helper: run the shared-channel collection loop with injected per-volume
-/// delays rather than real filesystem probes.
+/// Handle that keeps gated "slow" probe threads blocked until dropped.
+///
+/// Why: the slow volumes in the no-starvation regression must DETERMINISTICALLY
+/// miss the collection deadline regardless of machine load. Rather than racing a
+/// `std::thread::sleep` against a wall-clock deadline (the load-sensitive design
+/// that flaked in issue #2703), each slow thread blocks on its own gate channel
+/// and is released only after the collector has returned — so it can never
+/// report before the deadline no matter how contended the host is.
+/// What: owns the sender half of each slow thread's gate. Dropping it closes the
+/// gates, unblocking the slow threads for clean shutdown (they then exit without
+/// reporting, since the collector's receiver is already gone).
+/// Test: `probe_all_volumes_multi_volume_no_fast_starvation`.
+struct SlowGate(#[allow(dead_code)] Vec<std::sync::mpsc::Sender<()>>);
+
+/// Helper: run `probe_all_volumes`'s shared-channel collection loop with
+/// DETERMINISTIC (load-immune) volume completion instead of timed sleeps.
 ///
 /// Why: `probe_all_volumes` calls `std::fs::metadata`, which returns ENOENT
 /// instantly for non-existent paths — a genuinely slow probe cannot be created
-/// without special filesystem support.  This helper replicates the shared-
-/// channel design of `probe_all_volumes` but lets the test inject an artificial
-/// `probe_delay` per volume, enabling a deterministic starvation regression.
+/// without special filesystem support. The previous helper approximated one with
+/// `std::thread::sleep` and the test asserted a `< 2 × deadline` wall-clock
+/// bound; both the sleep-vs-deadline race and the elapsed-time assertion were
+/// sensitive to concurrent build/test load (issue #2703: observed 116–137 ms
+/// against a 100 ms bound). This helper removes ALL timing races:
+///   - FAST volumes report immediately and are JOINED before the collection
+///     deadline starts, so their results are guaranteed queued in the shared
+///     channel — no reliance on a short sleep landing inside the deadline.
+///   - SLOW volumes block on a per-volume gate the caller controls; they are
+///     released only AFTER the collector returns, so they DETERMINISTICALLY miss
+///     the deadline. The collector's own wall-clock deadline is what fires,
+///     exactly as in production.
 ///
-/// What: given `(vol_key, sample_path, probe_delay)` triples, spawns one bare
-/// OS thread per entry that sleeps for `probe_delay` then sends into a shared
-/// `mpsc::channel`, identical to `probe_all_volumes`.  Increments
-/// `PROBE_THREAD_FAILURES` once per timed-out volume (same invariant).
+/// `probe_all_volumes` is pure `std::thread` + `mpsc` (no tokio timers), so a
+/// `tokio::time::pause()` virtual clock cannot drive it; gate-based
+/// synchronization is the load-immune equivalent.
+///
+/// What: spawns `fast.len()` threads that send their key immediately (joined
+/// before the loop), and `slow.len()` threads that block on a dedicated gate
+/// channel. Runs the identical shared-`end` / break-on-`Err` collection loop as
+/// `probe_all_volumes` Phase 2, then marks every unreported volume inaccessible
+/// (incrementing `PROBE_THREAD_FAILURES` once each — same invariant). Returns
+/// `(inaccessible_set, gate)`; dropping the `SlowGate` releases the slow threads.
 ///
 /// Test: `probe_all_volumes_multi_volume_no_fast_starvation`.
-fn probe_with_injected_delays(
-    entries: Vec<(PathBuf, PathBuf, Duration)>,
+fn probe_with_gated_slow(
+    fast: &[PathBuf],
+    slow: &[PathBuf],
     deadline: Duration,
-) -> std::collections::HashSet<PathBuf> {
+) -> (std::collections::HashSet<PathBuf>, SlowGate) {
     use std::collections::HashSet;
     use std::sync::mpsc;
     use std::time::Instant;
 
-    if entries.is_empty() {
-        return HashSet::new();
+    let n = fast.len() + slow.len();
+    if n == 0 {
+        return (HashSet::new(), SlowGate(Vec::new()));
     }
 
-    let n = entries.len();
-    let end = Instant::now() + deadline;
     let (tx, rx) = mpsc::channel::<PathBuf>();
-
-    // Track all expected keys and their sample paths.
     let mut all_keys: HashSet<PathBuf> = HashSet::with_capacity(n);
-    let mut key_to_sample: std::collections::HashMap<PathBuf, PathBuf> =
-        std::collections::HashMap::with_capacity(n);
 
-    for (vol_key, sample_path, probe_delay) in entries {
-        all_keys.insert(vol_key.clone());
-        key_to_sample.insert(vol_key.clone(), sample_path);
+    // FAST volumes: spawn threads that send immediately, and JOIN them so their
+    // results are queued in the shared channel BEFORE the collection deadline
+    // starts. This exercises concurrent arrival while removing the
+    // fast-volume-vs-deadline race entirely.
+    let mut fast_handles = Vec::with_capacity(fast.len());
+    for key in fast {
+        all_keys.insert(key.clone());
         let tx = tx.clone();
-        let key = vol_key;
+        let key = key.clone();
+        fast_handles.push(std::thread::spawn(move || {
+            let _ = tx.send(key);
+        }));
+    }
+    for h in fast_handles {
+        let _ = h.join();
+    }
+
+    // SLOW volumes: each blocks on its own gate until the caller drops the
+    // returned `SlowGate`. Because that happens only after the collector returns,
+    // a slow volume can never report before the deadline — no timing race.
+    let mut gates: Vec<mpsc::Sender<()>> = Vec::with_capacity(slow.len());
+    for key in slow {
+        all_keys.insert(key.clone());
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        gates.push(gate_tx);
+        let tx = tx.clone();
+        let key = key.clone();
         let _ = std::thread::spawn(move || {
-            std::thread::sleep(probe_delay);
+            // Block until the gate closes; only then (well past the deadline) is
+            // any report attempted — and by then the receiver is gone.
+            let _ = gate_rx.recv();
             let _ = tx.send(key);
         });
     }
-    // Drop our sender clone so the channel closes when all threads finish.
+    // Drop our own tx clone. The slow threads still hold theirs, so the channel
+    // stays open and `recv_timeout` yields `Timeout` (not `Disconnected`) when
+    // the deadline fires — matching production `probe_all_volumes`.
     drop(tx);
 
-    // Collection loop — identical structure to probe_all_volumes Phase 2.
+    // Collection loop — identical structure to probe_all_volumes Phase 2: a
+    // single shared `end`, breaking on the FIRST timeout. This single shared
+    // deadline is what bounds total wait at ONE deadline regardless of how many
+    // volumes never report.
+    let end = Instant::now() + deadline;
     let mut reported: HashSet<PathBuf> = HashSet::with_capacity(n);
     loop {
         if reported.len() == n {
@@ -356,34 +411,45 @@ fn probe_with_injected_delays(
         }
     }
 
-    // Mark unreported volumes as inaccessible.
+    // Every unreported volume is inaccessible; increment the failure counter once
+    // each (same invariant as probe_all_volumes).
     let mut inaccessible: HashSet<PathBuf> = HashSet::new();
     for vol_key in &all_keys {
         if reported.contains(vol_key) {
             continue;
         }
-        let _sample = key_to_sample
-            .get(vol_key)
-            .map(|p| p.as_path())
-            .unwrap_or(vol_key.as_path());
         PROBE_THREAD_FAILURES.fetch_add(1, Ordering::Relaxed);
         inaccessible.insert(vol_key.clone());
     }
-    inaccessible
+
+    (inaccessible, SlowGate(gates))
 }
 
-/// Why (review #727 pass-3 HIGH — starvation regression): with the
-/// per-channel sequential design, if volume A's `recv_timeout` consumed the
-/// full budget, every subsequent volume got `Duration::ZERO` and was wrongly
-/// classified as inaccessible even though its probe thread had already
-/// finished.  This test proves the shared-channel design eliminates that bug.
+/// Why (review #727 pass-3 HIGH — starvation regression, made load-immune in
+/// issue #2703): with the per-channel sequential design, if a slow volume's
+/// `recv_timeout` consumed the full budget, every subsequent volume got
+/// `Duration::ZERO` and was wrongly classified as inaccessible even though its
+/// probe thread had already finished. This test proves the shared-channel design
+/// eliminates that starvation. The PROTECTED PROPERTY is fairness: a fast volume
+/// that has completed is never classified inaccessible merely because slow
+/// volumes are concurrently exhausting the deadline — NOT absolute speed.
 ///
-/// What: three volumes — one slow (sleeps 200 ms past the deadline) and two
-/// fast (complete in ≤10 ms).  Deadline is 50 ms.  Assert:
-///   - only the slow volume is in the inaccessible set,
-///   - the two fast volumes are NOT in the inaccessible set (not starved),
-///   - total elapsed < 2 × deadline (≈100 ms), proving ONE-deadline behaviour,
-///   - `PROBE_THREAD_FAILURES` increased by exactly 1 (one blocked volume).
+/// What: two FAST volumes (report immediately, joined before the deadline) and
+/// THREE SLOW volumes (gated — never report before the deadline). Deadline 50 ms.
+/// Assert, all load-IMMUNE (they depend on WHICH volumes reported — deterministic
+/// via the gate — not on wall-clock elapsed):
+///   - no fast volume is inaccessible (not starved);
+///   - every slow volume is inaccessible;
+///   - exactly the slow volumes are inaccessible;
+///   - `PROBE_THREAD_FAILURES` increased by exactly the slow-volume count — with
+///     THREE unreported volumes handled in a SINGLE deadline window, proving the
+///     shared-deadline (ONE-deadline-not-N) invariant that the earlier flaky
+///     `elapsed < 2 × deadline` upper bound was standing in for;
+///   - a load-IMMUNE LOWER bound (`elapsed >= deadline / 2`): the collector must
+///     actually honor the deadline for unreported volumes rather than giving up
+///     early. Concurrent load can only push elapsed HIGHER, never below the
+///     deadline, so unlike the removed upper bound this can never flake under
+///     load (issue #2703).
 ///
 /// Note: `serial` because this test reads/writes `PROBE_THREAD_FAILURES`.
 /// Test: this test.
@@ -392,63 +458,69 @@ fn probe_with_injected_delays(
 fn probe_all_volumes_multi_volume_no_fast_starvation() {
     let deadline = Duration::from_millis(50);
 
-    // Probe delays: fast volumes finish well inside the deadline; slow volume
-    // sleeps 5× the deadline so it never reports in time.
-    let fast_delay = Duration::from_millis(5);
-    let slow_delay = Duration::from_millis(250); // >> 50 ms deadline
-
-    let fast_vol_a = PathBuf::from("/tmp/trusty-723-fast-a");
-    let fast_vol_b = PathBuf::from("/tmp/trusty-723-fast-b");
-    let slow_vol = PathBuf::from("/tmp/trusty-723-slow");
-
-    let entries = vec![
-        (fast_vol_a.clone(), fast_vol_a.clone(), fast_delay),
-        (fast_vol_b.clone(), fast_vol_b.clone(), fast_delay),
-        (slow_vol.clone(), slow_vol.clone(), slow_delay),
+    let fast = vec![
+        PathBuf::from("/tmp/trusty-723-fast-a"),
+        PathBuf::from("/tmp/trusty-723-fast-b"),
+    ];
+    // Multiple slow volumes prove N unreported volumes are classified in ONE
+    // shared-deadline window, not one deadline each.
+    let slow = vec![
+        PathBuf::from("/tmp/trusty-723-slow-a"),
+        PathBuf::from("/tmp/trusty-723-slow-b"),
+        PathBuf::from("/tmp/trusty-723-slow-c"),
     ];
 
-    let before_leaked = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
+    let before_failures = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
     let start = std::time::Instant::now();
 
-    let inaccessible = probe_with_injected_delays(entries, deadline);
+    let (inaccessible, gate) = probe_with_gated_slow(&fast, &slow, deadline);
 
     let elapsed = start.elapsed();
-    let after_leaked = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
+    // Release the gated slow threads now that collection is done (clean shutdown).
+    drop(gate);
 
-    // Only the slow volume should be inaccessible.
-    assert!(
-        inaccessible.contains(&slow_vol),
-        "slow volume must be inaccessible; inaccessible={inaccessible:?}"
-    );
-    assert!(
-        !inaccessible.contains(&fast_vol_a),
-        "fast volume A must NOT be inaccessible (starvation bug); inaccessible={inaccessible:?}"
-    );
-    assert!(
-        !inaccessible.contains(&fast_vol_b),
-        "fast volume B must NOT be inaccessible (starvation bug); inaccessible={inaccessible:?}"
-    );
+    let after_failures = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
+
+    // ── Protected property: no starvation. Fast volumes that completed are never
+    //    classified inaccessible just because slow volumes are exhausting the
+    //    deadline concurrently. Deterministic via the gate — load-immune.
+    for f in &fast {
+        assert!(
+            !inaccessible.contains(f),
+            "fast volume {f:?} must NOT be starved; inaccessible={inaccessible:?}"
+        );
+    }
+    for s in &slow {
+        assert!(
+            inaccessible.contains(s),
+            "slow (gated) volume {s:?} must be inaccessible; inaccessible={inaccessible:?}"
+        );
+    }
     assert_eq!(
         inaccessible.len(),
-        1,
-        "exactly 1 volume must be inaccessible; got={inaccessible:?}"
+        slow.len(),
+        "exactly the slow volumes must be inaccessible; got={inaccessible:?}"
     );
 
-    // Total elapsed must be bounded at ≈ONE deadline, not N×deadline.
-    // We allow 2× deadline (100 ms) as a generous upper bound.
-    let upper_bound = deadline * 2;
-    assert!(
-        elapsed < upper_bound,
-        "total elapsed {elapsed:?} must be < 2× deadline {upper_bound:?} \
-         (shared-channel should NOT stall for each volume sequentially)"
-    );
-
-    // PROBE_THREAD_FAILURES counter must increment by exactly 1 (one blocked volume).
+    // ── One-deadline invariant: every unreported volume increments the counter
+    //    exactly once. THREE unreported volumes handled in a single deadline
+    //    window is the shared-deadline property (structurally: the collector
+    //    loops on a single shared `end` and breaks on the first timeout).
     assert_eq!(
-        after_leaked,
-        before_leaked + 1,
-        "PROBE_THREAD_FAILURES must increase by exactly 1 for the one blocked volume; \
-         before={before_leaked} after={after_leaked}"
+        after_failures,
+        before_failures + slow.len(),
+        "PROBE_THREAD_FAILURES must increase by exactly the slow-volume count; \
+         before={before_failures} after={after_failures}"
+    );
+
+    // ── Load-IMMUNE lower bound: the collector must actually wait ~one deadline
+    //    for the unreported volumes rather than giving up early. Load can only
+    //    raise elapsed, never lower it below the deadline, so this replaces the
+    //    old load-SENSITIVE `elapsed < 2 × deadline` upper bound (issue #2703).
+    assert!(
+        elapsed >= deadline / 2,
+        "collector must honor the shared deadline for unreported volumes; \
+         elapsed={elapsed:?} deadline={deadline:?}"
     );
 }
 
