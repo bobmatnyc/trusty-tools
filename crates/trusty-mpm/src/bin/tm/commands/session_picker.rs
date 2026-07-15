@@ -296,8 +296,22 @@ pub(crate) fn parse_picker_choice(
 ///     confirm (force-confirm for a running session) then the managed→local
 ///     routed delete; redisplay the re-fetched menu afterwards;
 ///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
-/// Test: `parse_picker_choice` is the testable seam; I/O path is exercised by
-/// manual smoke tests and the e2e suite.
+///
+/// #2678: both `Resume` and `LaunchNew` can end in a tmux hand-off — either a
+/// blocking `attach-session` (outside tmux; control returns here once the
+/// operator detaches, so the loop legitimately redisplays the menu) or a
+/// non-blocking `switch-client` (inside tmux; control does NOT return to a
+/// visible terminal — this process's own pane is now hidden). The
+/// `AttachOutcome` each helper returns is checked via
+/// [`super::tmux_attach::AttachOutcome::ends_interactive_loop`]; when it is `true`
+/// (a `switch-client` handoff, or a fail-closed skip that could not resolve a
+/// safe target) the loop `break`s immediately instead of falling through to
+/// re-fetch sessions and block on `stdin` again — the exact hang/orphan
+/// #2678 reported.
+/// Test: `parse_picker_choice` is the testable seam; the `AttachOutcome`
+/// decision itself is unit-tested by `attach_outcome_ends_interactive_loop_matrix`
+/// in `tmux_attach.rs`; the full I/O path is exercised by manual smoke tests
+/// and the e2e suite.
 pub(crate) async fn run_tty_picker(
     client: &reqwest::Client,
     url: &str,
@@ -372,12 +386,24 @@ pub(crate) async fn run_tty_picker(
             }
             // #1742: route through daemon resume when the session is stopped or its
             // tmux session is absent — never raw-attach a non-live session.
+            // #2678: a `switch-client` hand-off (or a fail-closed skip) means this
+            // pane is no longer visible to the operator — stop before looping back
+            // to `stdin`.
             PickerDecision::Resume(i) => {
-                super::guided_resume::resume_guided_session(client, url, &sessions[i]).await?
+                let outcome =
+                    super::guided_resume::resume_guided_session(client, url, &sessions[i]).await?;
+                if outcome.ends_interactive_loop() {
+                    break;
+                }
             }
             PickerDecision::LaunchNew => match scope.repo_url.as_deref() {
                 Some(repo) => {
-                    super::guided_launch::launch_new_session_and_attach(client, url, repo).await?
+                    let outcome =
+                        super::guided_launch::launch_new_session_and_attach(client, url, repo)
+                            .await?;
+                    if outcome.ends_interactive_loop() {
+                        break;
+                    }
                 }
                 None => {
                     // Fleet-wide `tm ls` has no single launch target — steer the

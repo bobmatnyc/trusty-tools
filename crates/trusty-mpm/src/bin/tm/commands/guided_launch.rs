@@ -23,6 +23,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::first_run::needs_first_run_clone;
+use super::tmux_attach::AttachOutcome;
 
 /// How long to wait between `provision-status` polls.
 ///
@@ -130,7 +131,11 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// to [`PROVISION_DEADLINE`], upgrading the spinner via [`provisioning_message`]
 /// until `state` is `ready` (attach `name`) or `failed` (surface `error`); a
 /// transient poll error is retried within the deadline. `repo_url` MUST be the
-/// git working-tree root so the daemon sets `source_id` correctly.
+/// git working-tree root so the daemon sets `source_id` correctly. Returns the
+/// [`AttachOutcome`] from the terminal hand-off (#2678) — the picker's
+/// `run_tty_picker` loop uses it to decide whether it must stop reading
+/// stdin (a `switch-client` handoff, or a fail-closed skip, means this
+/// pane is no longer the one the operator sees).
 /// Test: covered by the `POST /api/v1/sessions/managed` + `provision-status`
 /// integration tests; the message formatting by `spawn_progress_message_*` and
 /// `provisioning_message_*`.
@@ -138,7 +143,7 @@ pub(crate) async fn launch_new_session_and_attach(
     client: &reqwest::Client,
     url: &str,
     repo_url: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AttachOutcome> {
     let first_run = needs_first_run_clone(repo_url);
     let progress_output = trusty_progress::Output::to_stderr();
     let spinner = trusty_progress::ProgressHandle::spinner(
