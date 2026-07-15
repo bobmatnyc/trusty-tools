@@ -474,6 +474,20 @@ pub mod github_path;
 /// Test: `cargo test -p trusty-common -- repo_identity::tests`.
 pub mod repo_identity;
 
+/// Shared Slack `mrkdwn` formatting/escaping primitives (epic #2636).
+///
+/// Why: the `mrkdwn` escape rule and code-fence helpers were born in
+/// trusty-mpm's inbound Slack gateway; the native Slack MCP server in
+/// trusty-channels now needs the byte-identical escaping to neutralise markup
+/// injection from untrusted channel/user text. Centralising the pure primitives
+/// here — the crate both already depend on — keeps them from diverging without a
+/// trusty-channels → trusty-mpm dependency edge.
+/// What: exposes [`slack_format::mrkdwn_escape`], [`slack_format::code_block`],
+/// and [`slack_format::code_inline`]. Pure `std` string ops — no dependencies,
+/// no feature gate.
+/// Test: `cargo test -p trusty-common -- slack_format::tests`.
+pub mod slack_format;
+
 /// Data-directory resolution and filesystem utilities.
 ///
 /// Why: All trusty-* tools share the same per-app data-directory resolution
