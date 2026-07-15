@@ -9,6 +9,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- telegram module (rebase) ([#2729](https://github.com/bobmatnyc/trusty-tools/pull/2729)) ([`142675f`](https://github.com/bobmatnyc/trusty-tools/commit/142675fe01cc83b63497578611581921192a850b))
+- implement Slack search + reactions with two-token model ([#2726](https://github.com/bobmatnyc/trusty-tools/pull/2726)) ([`6e4e7d9`](https://github.com/bobmatnyc/trusty-tools/commit/6e4e7d9d8b18ba602f588e700142032789018142))
+- implement Slack send + read tools; extract SlackFormatter to trusty-common ([#2722](https://github.com/bobmatnyc/trusty-tools/pull/2722)) ([`847a0c3`](https://github.com/bobmatnyc/trusty-tools/commit/847a0c334e1a8822a7d31696b48946e538aca7cc))
+- establish channels crate topology + wire Slack auth ([#2638](https://github.com/bobmatnyc/trusty-tools/pull/2638)) ([#2706](https://github.com/bobmatnyc/trusty-tools/pull/2706)) ([`9f2275b`](https://github.com/bobmatnyc/trusty-tools/commit/9f2275b6487296a08fc99de469e6b641992bc46d))
+
+### Fixed
+
+- framework workflow conventions — per-session session log, issue/PR assignee+label defaults, trusty-mpm attribution footer ([#2737](https://github.com/bobmatnyc/trusty-tools/pull/2737)) ([`3089600`](https://github.com/bobmatnyc/trusty-tools/commit/3089600b475cc464329132e5f7523536bb730797))
+## [Unreleased]
+
+### Added
+
 - shared ensure-project-indexed helper; wire tcode task start ([#2701](https://github.com/bobmatnyc/trusty-tools/pull/2701)) ([`28a8d11`](https://github.com/bobmatnyc/trusty-tools/commit/28a8d11d4a5eac21921c3ceeef8707f71cf35459))
 - enable tickets-mcp + port gh-CLI fallback to trusty-common (ticketing quick-wins) ([#2646](https://github.com/bobmatnyc/trusty-tools/pull/2646)) ([`4c5a027`](https://github.com/bobmatnyc/trusty-tools/commit/4c5a027df778410bf350b03fd3e278b334253481))
 - DOC-37 MVP — RepoIdentity join key + identity-filtered listing + grouped prune-orphans ([#2617](https://github.com/bobmatnyc/trusty-tools/pull/2617)) ([`2c51047`](https://github.com/bobmatnyc/trusty-tools/commit/2c510472cb1c5a23526f81881a8bcaf415468016))
