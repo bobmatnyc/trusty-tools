@@ -35,7 +35,7 @@ pub async fn build_verifier_opt(config: &ReviewConfig) -> Option<Arc<dyn LlmProv
         return None;
     }
     let role = &config.role_models.verifier;
-    match build_provider(&role.model, &role.provider, &config.openrouter_api_key).await {
+    match build_provider(&role.model, &role.provider, config).await {
         Ok(p) => Some(p),
         Err(e) => {
             warn!("failed to build verifier provider (continuing without verification): {e}");
@@ -63,7 +63,7 @@ pub async fn build_verifier_for_serve(
         return Ok(None);
     }
     let role = &config.role_models.verifier;
-    let p = build_provider(&role.model, &role.provider, &config.openrouter_api_key)
+    let p = build_provider(&role.model, &role.provider, config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to build verifier provider: {e}"))?;
     Ok(Some(p))
