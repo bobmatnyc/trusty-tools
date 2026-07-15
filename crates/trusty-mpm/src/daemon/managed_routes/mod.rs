@@ -24,6 +24,7 @@ use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
+use crate::session_manager::ManagedSessionId;
 
 pub mod activity;
 mod deliverable_link;
@@ -35,9 +36,11 @@ mod lifecycle;
 mod mcp_spawn_gate;
 mod project_registry_routes;
 mod project_status;
+pub mod provision_status;
 pub mod proxy;
 pub mod prune;
 mod reactivate;
+mod resume_error;
 mod summary;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
@@ -45,8 +48,7 @@ pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
 pub use lifecycle::{
-    ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
-    spawn_runtime_for, write_task_md,
+    SpawnParams, is_local_workdir, resume_managed, spawn_managed, spawn_runtime_for, write_task_md,
 };
 pub use project_registry_routes::{
     PatchProjectBody, ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
@@ -59,15 +61,18 @@ pub use project_status::{
 pub use proxy::{
     DirectManagedBackend, ProxyFocusRequest, ProxyFocusResponse, ProxyMessageRequest,
     ProxyMessageResponse, ProxySummaryResponse, ProxyTargetWire, ProxyUnfocusRequest,
-    ProxyUnfocusResponse, proxy_focus, proxy_get_focus, proxy_message, proxy_summary,
+    ProxyUnfocusResponse, proxy_focus, proxy_get_focus, proxy_message, proxy_router, proxy_summary,
     proxy_unfocus,
 };
 pub use prune::{
     PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
 };
 pub use reactivate::reactivate_managed_session;
+pub use resume_error::ResumeManagedError;
 pub use summary::record_to_json;
-use summary::{attach_cmd_for, parse_id, record_to_summary};
+use summary::{
+    attach_cmd_for, checked_summaries, parse_id, record_to_summary, record_to_summary_checked,
+};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -128,6 +133,18 @@ pub struct SpawnRequest {
     /// fails the whole request with a 400, it is not tolerated as `false`.
     #[serde(default)]
     pub force_new: bool,
+    /// Optional asynchronous-spawn control (#2605): `true` provisions on a
+    /// detached background task and returns `202 Accepted` with
+    /// `{ id, state: "provisioning" }` IMMEDIATELY, instead of holding the
+    /// connection open for the whole clone/deploy. The caller then polls
+    /// `GET /api/v1/sessions/managed/{id}/provision-status` for live progress
+    /// and the terminal outcome. Absent/`false` → the legacy synchronous `201`
+    /// behaviour (unchanged for every existing programmatic/MCP caller), so
+    /// this is a purely additive, opt-in flag. Like `force_new`, it is a plain
+    /// `#[serde(default)]` bool: an explicit `"background": null` is a type
+    /// mismatch (400), not tolerated as `false`.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -308,6 +325,30 @@ pub struct SessionSummary {
     /// reached `Active`) — see `session_manager::InjectionStatus::NotApplicable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injection_status: Option<String>,
+    /// True when this session is a dead pick: it is `stopped`/`errored` AND no
+    /// workdir candidate (`last_cwd`, `workspace_path`, `cwd`) exists on disk
+    /// any more, so a resume is guaranteed to fail (#2595).
+    ///
+    /// Why: #2577/#2594 fixed the ERROR an operator sees after picking a
+    /// GC-pruned session to restart (bare 500 → actionable 422); the deeper UX
+    /// defect was that such a session was OFFERED as a restart option at all.
+    /// Computing this once here — server-side, where the full record (`last_cwd`
+    /// included) and filesystem access both live — lets every listing surface
+    /// (the bare-`tm` guided default, the `tm ls` picker, and `tm sessions ls`,
+    /// all of which read this same list endpoint) mark/exclude the session
+    /// BEFORE the operator selects it, instead of only failing loudly after the
+    /// fact. Always `false` for live/provisioning/decommissioned sessions —
+    /// see `session_manager::resume_workdir::is_unresumable`.
+    /// What: computed by [`list_managed_sessions`]/[`get_managed_session`] via
+    /// `session_manager::resume_workdir::is_unresumable`; every other handler
+    /// that builds a `SessionSummary` via `record_to_summary` leaves it at its
+    /// `false` default (freshly spawned/reactivated/decommissioned sessions are
+    /// never mid-flight through this predicate).
+    /// Test: `list_marks_dead_stopped_session_unresumable`,
+    /// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in
+    /// `super::tests`.
+    #[serde(default)]
+    pub unresumable: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.
@@ -504,7 +545,16 @@ pub async fn spawn_session(
         force_new: req.force_new,
     };
 
-    match spawn_managed(&state, params).await {
+    // Async path (#2605): provision on a detached task and return the job id
+    // immediately, so a large-repo clone never outlasts the client's HTTP
+    // timeout and the blocking provision runs OFF the request path. The runtime
+    // and deliverable validations above already ran synchronously, so an
+    // invalid request is still a fast 400/404 (never a deferred failure).
+    if req.background {
+        return provision_status::accept_async_spawn(state.clone(), params);
+    }
+
+    match spawn_managed(&state, ManagedSessionId::new(), params).await {
         Ok(final_record) => {
             let resp = SpawnResponse {
                 id: final_record.id.to_string(),
@@ -599,21 +649,31 @@ pub async fn adopt_existing_session(
 /// their state, and pending decisions.
 /// What: returns all session records as a JSON list of summaries. When the
 /// optional `?source_id=<id>` query parameter is present, only sessions whose
-/// `source_id` matches exactly are returned.
-/// Test: list handler test; list-with-source-id-filter test.
+/// `source_id` matches exactly are returned. Each summary's `unresumable` flag
+/// (#2595) is computed here — via
+/// `session_manager::resume_workdir::is_unresumable`, which short-circuits to
+/// `false` without any I/O for every state other than `Stopped`/`Errored` — so
+/// every picker/list surface reading this endpoint sees dead sessions flagged
+/// up front rather than discovering them via a failed resume. The per-session
+/// probes run CONCURRENTLY via [`summary::checked_summaries`] (#2595 review,
+/// MEDIUM finding 4) rather than one-at-a-time, so a large fleet's response
+/// latency does not scale with its count of stopped/errored sessions.
+/// Test: list handler test; list-with-source-id-filter test;
+/// `list_marks_dead_stopped_session_unresumable`,
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked`.
 pub async fn list_managed_sessions(
     State(state): State<Arc<DaemonState>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let mgr = state.session_manager().await;
     let sid_filter = q.get("source_id").map(String::as_str);
-    let sessions: Vec<SessionSummary> = mgr
+    let records: Vec<_> = mgr
         .list()
         .await
-        .iter()
+        .into_iter()
         .filter(|r| sid_filter.is_none_or(|sid| r.source_id.as_deref() == Some(sid)))
-        .map(record_to_summary)
         .collect();
+    let sessions = checked_summaries(&records).await;
     Json(ListSessionsResponse { sessions })
 }
 
@@ -621,7 +681,10 @@ pub async fn list_managed_sessions(
 ///
 /// Why: the calling agentic process needs the full record for a specific session
 /// including workspace_path, repo_url, branch, and pending decision fields.
-/// What: looks up the session by id and returns its summary.
+/// What: looks up the session by id and returns its summary, with `unresumable`
+/// (#2595) computed the same way [`list_managed_sessions`] does — kept
+/// consistent so `tm session info <id>` never disagrees with the list/picker
+/// about whether a session is a dead pick.
 /// Test: get handler test.
 pub async fn get_managed_session(
     State(state): State<Arc<DaemonState>>,
@@ -633,7 +696,7 @@ pub async fn get_managed_session(
     };
     let mgr = state.session_manager().await;
     match mgr.get(&id).await {
-        Ok(record) => Json(record_to_summary(&record)).into_response(),
+        Ok(record) => Json(record_to_summary_checked(&record).await).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
     }
 }
@@ -804,22 +867,15 @@ pub async fn resume_managed_session(
 
     // Single round-trip: the shared `resume_managed` helper performs the
     // existence + state check inside `SessionManager::resume` and re-spawns the
-    // runtime. We match on its TYPED error to choose the HTTP status — no
-    // pre-flight `get` (which introduced a TOCTOU race where the session could be
-    // decommissioned between the probe and the resume, yielding 500 instead of
-    // 404) and no `Display`-substring matching (which silently fell through to 500
-    // whenever the error wording changed).
+    // runtime. The TYPED error picks its own HTTP status/headers via its
+    // `IntoResponse` impl (`resume_error.rs`) — no pre-flight `get` (which
+    // introduced a TOCTOU race where the session could be decommissioned
+    // between the probe and the resume, yielding 500 instead of 404) and no
+    // `Display`-substring matching (which silently fell through to 500 whenever
+    // the error wording changed).
     match resume_managed(&state, &id).await {
         Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
-        Err(ResumeManagedError::NotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
-        }
-        Err(ResumeManagedError::InvalidState(reason)) => {
-            (StatusCode::CONFLICT, reason).into_response()
-        }
-        Err(ResumeManagedError::Other(msg)) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-        }
+        Err(e) => e.into_response(),
     }
 }
 

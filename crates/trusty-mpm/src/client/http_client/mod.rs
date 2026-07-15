@@ -23,6 +23,7 @@ mod config;
 pub mod deliverables;
 mod error;
 mod managed;
+pub mod manager;
 pub mod projects;
 mod session_connect;
 #[cfg(test)]

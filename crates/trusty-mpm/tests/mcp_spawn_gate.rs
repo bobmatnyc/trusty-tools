@@ -104,6 +104,7 @@ async fn mcp_initiated_spawn_rejected_by_default_creates_nothing() {
 
     let err = spawn_managed(
         &state,
+        trusty_mpm::session_manager::ManagedSessionId::new(),
         base_params("https://github.com/duettoresearch/aria", true),
     )
     .await
@@ -139,6 +140,7 @@ async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
 
     let err = spawn_managed(
         &state,
+        trusty_mpm::session_manager::ManagedSessionId::new(),
         base_params("https://github.com/duettoresearch/aria", true),
     )
     .await
@@ -196,6 +198,7 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
 
     let err = spawn_managed(
         &state,
+        trusty_mpm::session_manager::ManagedSessionId::new(),
         base_params("https://evil.example.com/attacker/trusty-tools", true),
     )
     .await
@@ -255,9 +258,13 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
         .await
         .expect("register project");
 
-    let err = spawn_managed(&state, base_params(&local_path.to_string_lossy(), true))
-        .await
-        .expect_err("non-git local dir must fail downstream, not at the gate");
+    let err = spawn_managed(
+        &state,
+        trusty_mpm::session_manager::ManagedSessionId::new(),
+        base_params(&local_path.to_string_lossy(), true),
+    )
+    .await
+    .expect_err("non-git local dir must fail downstream, not at the gate");
     assert!(
         err.contains("no git origin remote"),
         "expected the gate to pass through to the local-path branch, got: {err}"
@@ -292,9 +299,13 @@ async fn cli_origin_spawn_bypasses_mcp_gate_even_when_disabled() {
     let local_path = target_dir.path().join("unregistered-cli-project");
     std::fs::create_dir(&local_path).expect("create target dir");
 
-    let err = spawn_managed(&state, base_params(&local_path.to_string_lossy(), false))
-        .await
-        .expect_err("non-git local dir must fail downstream, not at the gate");
+    let err = spawn_managed(
+        &state,
+        trusty_mpm::session_manager::ManagedSessionId::new(),
+        base_params(&local_path.to_string_lossy(), false),
+    )
+    .await
+    .expect_err("non-git local dir must fail downstream, not at the gate");
     assert!(
         err.contains("no git origin remote"),
         "expected the CLI-origin spawn to bypass the gate entirely, got: {err}"

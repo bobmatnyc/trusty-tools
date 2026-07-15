@@ -10,6 +10,7 @@
 //! tests and the tools-list shape test.
 
 pub mod api;
+pub mod cli;
 pub mod openrpc;
 pub mod server;
 pub mod tools;

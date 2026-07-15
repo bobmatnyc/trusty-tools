@@ -6,6 +6,7 @@
 //! labels/milestones; GraphQL for Projects V2.
 //! Test: shape tests in `backend`; live tests gated by env vars.
 
+mod auth;
 mod backend;
 mod client;
 mod types;

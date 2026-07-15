@@ -57,8 +57,8 @@ use crate::session::{SessionRegistry, SessionStatus};
 use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, ClearGoalTool, DelegateToAgentTool, EditTool,
-    FinishTaskTool, ReadFileTool, RecallSessionTool, RunContext, SetGoalTool, SkillResolver,
-    ToolRegistry, UseSkillTool, WriteFileTool,
+    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RecallSessionTool, RunContext,
+    SetGoalTool, SkillResolver, ToolRegistry, UseSkillTool, WriteFileTool, WriteFilesTool,
 };
 
 use super::sink::SessionToolEventSink;
@@ -496,11 +496,18 @@ impl RegistryFactory for ProjectToolFactory {
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(ReadFileTool::new(&self.project)));
         reg.register(Arc::new(WriteFileTool::new(&self.project)));
+        // #2681: batch-write decouples turn-count from file-count.
+        reg.register(Arc::new(WriteFilesTool::new(&self.project)));
         reg.register(Arc::new(
             EditTool::new(&self.project)
                 .with_model_slug(model_slug)
                 .with_mode(self.mode),
         ));
+        // #1027: native file discovery so the engineer stops shelling out to
+        // find/grep/ls (the dominant bake-off agent-turn sink).
+        reg.register(Arc::new(GlobTool::new(&self.project)));
+        reg.register(Arc::new(GrepTool::new(&self.project)));
+        reg.register(Arc::new(ListDirTool::new(&self.project)));
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),

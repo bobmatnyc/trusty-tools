@@ -104,20 +104,81 @@ and renames atomically, which keeps the cache consistent. If you must copy
 manually, follow it with `codesign --force --sign - ~/.cargo/bin/<binary>`
 to regenerate the ad-hoc signature against the final file.
 
-## Developer ID Signing for Persistent macOS FDA (fixes #873)
+## Developer ID Signing for Persistent macOS TCC Grants (fixes #873, #2558)
 
 ### The Problem
 
 `cargo install` produces a new binary with a new **cdhash** every time it
-runs (ad-hoc / linker-signed). macOS TCC keys the Full Disk Access grant by
-cdhash, so FDA is revoked after every reinstall. The workaround is to
-re-grant FDA manually each time — tedious and easy to forget.
+runs (ad-hoc / linker-signed). macOS TCC keys grants by cdhash, so every TCC
+category is revoked after every reinstall — Full Disk Access for
+`trusty-search` (`#873`), and (owner-authorized scope extension, 2026-07-14,
+#2558) App Data access for `trusty-mpm`: `tm` reads other apps' `$HOME`
+containers (Claude config dirs, tmux state), so macOS re-prompts `'trusty-mpm'
+would like to access data from other apps` on every ad-hoc-signed rebuild. The
+workaround for either category is to re-grant/re-approve manually each time —
+tedious and easy to forget.
 
 ### The Fix: Developer ID Application Signing
 
 Signing with a Developer ID Application certificate + a fixed `--identifier`
 per binary makes the **designated requirement (DR)** stable across rebuilds.
-TCC matches the DR, not the cdhash, so the FDA grant persists permanently.
+TCC matches the DR, not the cdhash, so the grant persists permanently — for
+both the FDA (search) and App Data (mpm) categories.
+
+### Single Source of Truth (#2558)
+
+The identifier scheme, signing flags, and guidance text live in exactly one
+place: `crates/trusty-installer/src/commands/macos_signing.rs`. Both
+`tctl install` (automatic, fail-soft post-install hook) and the standalone
+`tctl sign <target>` command (hard-failing, for local-source builds or
+re-signing) call into it — there is no second, independently-maintained
+implementation. `scripts/install-trusty-search-signed.sh` is a thin wrapper:
+it still runs `cargo install` from local source (the one thing `tctl install`
+cannot do), then shells out to `tctl sign trusty-search` for the actual
+codesign step.
+
+🔴 **Identifier migration notice (PR #2657 review):** #2558 canonicalized
+`trusty-search`'s / `trusty-embedderd`'s `--identifier` from the short-form
+`com.trusty.search` / `com.trusty.embedderd` (used by the pre-PR `tctl
+install` hook) to the full-form `com.trusty.trusty-search` /
+`com.trusty.trusty-embedderd` (matching the script and the launchd label
+convention). Changing the identifier changes the designated requirement (DR),
+which **invalidates any existing FDA/App-Data grant keyed to the old value** —
+the same `indexes:2` symptom #873 originally described. To avoid a *silent*
+re-break, every signing path (`tctl install`'s hook and `tctl sign`) now reads
+the binary's CURRENT on-disk identifier before re-signing
+(`macos_signing::current_identifier`, via `codesign -d`) and prints a loud,
+distinct notice when it is about to change:
+
+```
+trusty-installer: ⚠ IDENTIFIER CHANGE for trusty-search: com.trusty.search -> com.trusty.trusty-search.
+Existing macOS Full Disk Access / App Data grants keyed to the old identifier will STOP MATCHING
+after this signing — re-grant/re-approve once after this install.
+```
+
+If you see this notice, re-grant FDA (search) or re-approve the next App-Data
+prompt (mpm) exactly once — subsequent reinstalls will not re-trigger it,
+since the identifier is now stable at the canonical value.
+
+🟡 **Hardened Runtime split (PR #2657 review, PM decision):** `--options
+runtime --timestamp` (Hardened Runtime) is gated per binary set and signing
+context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
+
+| Set | `tctl install` auto-hook | `tctl sign` / wrapper script (explicit) |
+|---|---|---|
+| `trusty-search` / `trusty-embedderd` | **off** (pre-PR hook behavior) | **on** (pre-PR script behavior) |
+| `trusty-mpm` | **on** | **on** |
+
+trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
+library-validation restriction has not yet been empirically verified safe for
+that load path — flipping the automatic hook to hardened-by-default risked
+silently breaking `tctl install trusty-search` on every machine with a
+Developer ID cert already installed. trusty-mpm loads no dylibs, so it is
+hardened unconditionally. **This split does not affect TCC grant stability** —
+that depends on `--identifier` + Team ID, not `--options runtime` — only on
+notarization eligibility and dylib-validation strictness. See the tracking
+issue linked from PR #2657 for lifting this split once ONNX-under-Hardened-
+Runtime is verified.
 
 ### One-Time Certificate Setup
 
@@ -142,7 +203,7 @@ TCC matches the DR, not the cdhash, so the FDA grant persists permanently.
    # 1) AABBCCDDEEFF "Developer ID Application: Your Name (TEAM1234)"
    ```
 
-### Signed Install Script
+### Signed Install: trusty-search
 
 Use `scripts/install-trusty-search-signed.sh` (or `make install-search-signed`)
 instead of bare `cargo install`:
@@ -157,13 +218,43 @@ make install-search-signed
 The script:
 1. Runs `cargo install --path crates/trusty-search --locked` (installs both
    `trusty-search` and the bundled `trusty-embedderd` to `~/.cargo/bin/`).
-2. Auto-detects the Developer ID identity from the login keychain.
-3. Codesigns both binaries with:
-   - `--identifier com.trusty.trusty-search` / `com.trusty.trusty-embedderd`
-   - `--options runtime` (Hardened Runtime — required for notarization)
-   - `--timestamp` (secure timestamp from Apple's servers)
-4. Verifies signatures with `codesign --verify --strict`.
-5. Prints one-time FDA grant instructions and daemon restart commands.
+2. Shells out to `tctl sign trusty-search --dir ~/.cargo/bin`, which:
+   - Auto-detects the Developer ID identity from the login keychain (or honours
+     `TRUSTY_SIGN_IDENTITY`).
+   - Codesigns both binaries with:
+     - `--identifier com.trusty.trusty-search` / `com.trusty.trusty-embedderd`
+     - `--options runtime` (Hardened Runtime — required for notarization)
+     - `--timestamp` (secure timestamp from Apple's servers)
+   - Verifies signatures with `codesign --verify --deep --strict`.
+3. Prints one-time FDA grant instructions and daemon restart commands.
+
+Already have binaries on PATH and just want to (re-)sign them? Skip the cargo
+install step entirely:
+
+```bash
+tctl sign trusty-search
+```
+
+### Signed Install: trusty-mpm (#2558)
+
+`tctl install trusty-mpm` (or `tctl install`, which includes it in the stable
+set) already runs the App-Data-TCC signing hook automatically as a fail-soft
+post-install step — no separate script is needed for the common case. For a
+local-source build, run the same two-step pattern as trusty-search:
+
+```bash
+cargo install --path crates/trusty-mpm --locked
+tctl sign trusty-mpm
+```
+
+`tctl sign trusty-mpm` signs with `--identifier com.trusty.trusty-mpm` (same
+`--options runtime --timestamp` flags and `--verify --deep --strict` check as
+trusty-search) and prints the App-Data-TCC guidance: approve the next
+`'trusty-mpm' would like to access data from other apps` prompt once; a
+Developer ID cert makes that approval persist across every future reinstall.
+There is no separate `install-trusty-mpm-signed.sh` script — the local-source
+build case is covered by the two commands above, and the common (crates.io /
+prebuilt) case is covered by `tctl install trusty-mpm` alone.
 
 ### TRUSTY_SIGN_IDENTITY Override
 
@@ -173,6 +264,9 @@ org), specify which one to use:
 ```bash
 TRUSTY_SIGN_IDENTITY="Developer ID Application: Acme Corp (ABCDE12345)" \
   scripts/install-trusty-search-signed.sh
+# or, for the standalone signing verb:
+TRUSTY_SIGN_IDENTITY="Developer ID Application: Acme Corp (ABCDE12345)" \
+  tctl sign trusty-mpm
 ```
 
 ### Install from a Specific crates.io Version

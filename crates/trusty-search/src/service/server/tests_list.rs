@@ -28,6 +28,7 @@ async fn list_indexes_flat_default_unchanged() {
         Query(ListIndexesParams {
             format: None,
             details: false,
+            repo_identity: None,
         }),
     )
     .await;
@@ -93,6 +94,7 @@ async fn list_indexes_tree_format_shape() {
         Query(ListIndexesParams {
             format: Some("tree".to_string()),
             details: false,
+            repo_identity: None,
         }),
     )
     .await;
@@ -171,6 +173,7 @@ async fn list_indexes_details_includes_size_bytes() {
         Query(ListIndexesParams {
             format: None,
             details: true,
+            repo_identity: None,
         }),
     )
     .await;
@@ -230,6 +233,7 @@ async fn list_indexes_details_includes_root_path() {
         Query(ListIndexesParams {
             format: None,
             details: true,
+            repo_identity: None,
         }),
     )
     .await;
@@ -408,3 +412,8 @@ async fn global_search_sub_index_boost_applied() {
         "sub-index (boost-child) must contribute results to the fan-out"
     );
 }
+
+// DOC-37 (issue #2611) `repo_identity` coverage — `list_indexes_repo_identity_details_and_filter`
+// and `list_indexes_repo_identity_tree_filter` — lives in the sibling
+// `list_repo_identity_tests.rs` (split out to keep this file under the
+// 500-SLOC production cap; its `_tests.rs` basename gets the 1500-SLOC test cap).

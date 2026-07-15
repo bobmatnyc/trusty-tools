@@ -66,6 +66,96 @@ about *a* session; a user talks to L3 about *their work*.
 5. Two-way communication with individual sessions, but *routed through* L2's existing
    inject/summarize primitives rather than reimplementing them (§3, §5).
 
+### 1.1 Primary user story — owner directive (added 2026-07-14)
+
+> **Owner's directive, verbatim (2026-07-14):** "The goal is that a given managed project runs a
+> single primary task, though secondary ones can be added. The user should be able to ask the
+> manager to perform a task in a project, which can include one or more repos. The manager will
+> spin up one or more sessions (a session is always in a single repo) to handle the task, as well
+> as cross project communication and tracking (the manager should have gh project skills and other
+> ticketing agents). The manager spins up the sessions, tracks the goal of the sessions (in a
+> tagged memory), sees them through to completion, asking the user for input when it lacks the
+> confidence to auto-complete a task, watches context and total cost (and pauses, clears, and
+> resumes sessions as needed), handles cross-session communication, and drives the project to
+> completion. Note a project can have multiple sessions in a single repo, it should be orthogonal
+> to the manager which tracks sessions from multiple repos or a single one. The manager tracks all
+> active projects, and prioritizes communication with the user based on urgency and/or user
+> provided scheduling/priority."
+>
+> **Owner's refinement (2026-07-14):** "It also looks like claude code with it's suggestions is
+> doing much of the 'keep going' work for us. We should defer to those (but track them, verify
+> they align with the manager's goals)."
+
+**As the operator**, I want to ask `tm manager` to perform a task in a project — which may span one
+or more repos — and have it own the full lifecycle: spinning up whatever sessions the task
+requires, tracking each session's goal, watching context and total cost, communicating across
+sessions and projects, and asking me only when it lacks the confidence to auto-complete a step —
+so that I never have to hand-orchestrate sessions, babysit cost/context, or relay messages between
+sessions myself.
+
+**Derived requirements** (R1–R5):
+
+- **R1 — Project/task model.** A given managed project runs exactly one PRIMARY task at a time;
+  secondary tasks may be added alongside it. The primary/secondary distinction is a property of the
+  project's task list, not of any one session.
+- **R2 — Project↔repo↔session cardinality.** A project spans **1..N repos**. A session is always
+  bound to **exactly one repo**. A project may run **multiple sessions in a single repo**. Repo
+  count is explicitly **orthogonal** to the manager's session tracking — the manager tracks
+  sessions the same way whether they come from one repo or many.
+- **R3 — Manager responsibilities across a task's lifecycle.** For a task the user hands it, the
+  manager:
+  - spawns one or more sessions to execute the task (each session bound to one repo, per R2);
+  - records each session's goal in **tagged `trusty-memory`** so the goal survives independent of
+    any one conversation turn;
+  - tracks each session through to completion;
+  - **escalates to the user for input** whenever its confidence to auto-complete a step is
+    insufficient — consistent with DOC-23's confidence-signal consumption (§5) and the notify-only
+    posture of §2.2 OWNER DECISION 1;
+  - **monitors context usage and total cost** per session, and **pauses, clears, and resumes**
+    sessions as needed to manage both;
+  - handles **cross-session communication** (within a project) and **cross-project communication**
+    (portfolio-wide);
+  - drives the project to completion end-to-end.
+- **R4 — Tooling.** The manager has **gh-project (GitHub Projects) skills** and access to
+  **ticketing agents** as first-class tool surfaces, alongside #2108's project/session APIs and
+  L2's `SessionProxy` (§3.5).
+- **R5 — Portfolio awareness and prioritization.** The manager tracks **all active projects**
+  simultaneously (consistent with §1's "full scope" framing) and **prioritizes communication with
+  the user based on urgency and/or user-provided scheduling/priority**, rather than a flat
+  first-in-first-out or round-robin notification order.
+- **R6 — Deference to Claude Code's native continuation mechanisms.** The manager **defers to the
+  harness's native continuation/suggestion mechanisms** (Claude Code's suggestions, auto-continue,
+  task notifications) for keeping sessions moving, rather than injecting its own redundant "keep
+  going" nudges. It **tracks** those harness-driven suggestions and **verifies** they align with
+  the session's tagged goal (per R3). It **intervenes** (pause/clear/resume) only on misalignment
+  or cost/context pressure (per R3), never to override or duplicate the harness's native "keep
+  working" signaling. This positions the manager as a **verify-and-steward layer** atop the
+  harness's session mechanics, not as a competing continuation engine.
+
+**Reconciliation note.** This user story *extends* the vision already approved via §7's seven
+resolved owner decisions; it does not reopen or amend any of them. Two places deserve explicit
+reconciliation in a later phase or spec revision, rather than being resolved here:
+
+- **Cost/context-triggered pause/clear/resume, and the "keep going" default (R3, R6)** — The owner's
+  refinement (R6) fundamentally reframes the manager's posture: it defers to the harness's native
+  "keep working" signaling and intervenes only on misalignment or cost/context pressure. This
+  largely resolves the tension between R3's "watches context and pauses/clears/resumes" and §2.1's
+  "never act on a session without an explicit call" boundary rule. The manager's default is to
+  **observe and verify** (consistent with §2.1 and §2.2 OWNER DECISION 1's notify-only default),
+  with pause/clear/resume reserved for resource stewardship or goal misalignment — neither of which
+  is a "proactive intervention" in the sense OWNER DECISION 1 regulated. A later revision should
+  formalize this distinction and ensure cost/context-triggered pause/clear/resume is explicitly
+  carved out (not folded into the opt-in intervention tier WI-13).
+- **gh-project skills and ticketing-agent access (R4)** are new tool-surface additions not yet
+  enumerated in §3's architecture or §5's layering table; a later revision should add them (e.g. a
+  new §3.6 "Ticketing and gh-project tool access" and a corresponding §5 row).
+- **Tagged per-session goal memory (R3)** should be reconciled against §3.4's portfolio-palace
+  design — it is not yet specified whether per-session goal tags live in the portfolio palace or a
+  project-scoped palace.
+
+The remaining requirements (R1, R2, R5) are additive detail consistent with, and do not contradict,
+the vision and boundary contract already approved in §1–§7.
+
 ---
 
 ## 2. Boundary conformance (normative — restates DOC-35 §11)
@@ -442,3 +532,17 @@ both followed, filing happens after §7's decisions are resolved. Grouped by pha
   7 items in §7's owner-decision checklist resolved as proposed (see per-item RESOLVED annotations
   in §7). Implementation green-lit; child issues to be filed and tracked on GitHub milestone 10
   (Chat-Based Project Manager) under epic #2109.
+- **2026-07-14 (v3)** — Added §1.1 Primary user story and owner's refinement: single-primary-task-plus-secondaries
+  project model; project↔repo↔session cardinality (1..N repos per project, exactly 1 repo per
+  session, N sessions per repo, repo count orthogonal to session tracking); full manager-lifecycle
+  responsibilities (R3: spawn, tagged-memory goal tracking, completion tracking, confidence-gated
+  escalation, context/cost monitoring with pause/clear/resume, cross-session and cross-project
+  communication); gh-project/ticketing-agent tooling (R4); portfolio-wide urgency/priority-based
+  user-communication prioritization (R5); **deference to harness-native "keep going" signaling
+  with verify-and-steward oversight (R6)** — the manager observes, verifies against tagged goals,
+  and intervenes on misalignment or cost/context pressure only, never duplicating the harness's
+  continuation engine. Reconciliation note updated to reflect that R6 largely resolves the
+  tension between cost/context-triggered pause/clear/resume and §2.1/§2.2's notify-only default
+  (the manager's default is observe-and-verify, not proactive intervention). Flagged two remaining
+  open points (new tool surfaces in §3/§5; per-session goal memory location) for later
+  reconciliation — does not reopen or amend §7's resolved items.

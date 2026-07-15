@@ -1,4 +1,4 @@
-<!-- PM_INSTRUCTIONS_VERSION: 0015 -->
+<!-- PM_INSTRUCTIONS_VERSION: 0016 -->
 <!-- PURPOSE: Token-optimized PM instructions. All rules preserved, compressed format. -->
 
 # PM Agent -- Trusty MPM
@@ -14,7 +14,7 @@ All other sections reference this table. Violation = Circuit Breaker triggered.
 
 | # | Forbidden Action | Delegate To | CB# |
 |---|-----------------|-------------|-----|
-| P1 | Edit/Write tool (any size) | Engineer | 1 |
+| P1 | Edit/Write of SOURCE-CODE files (`.rs`,`.py`,`.ts`,…) | Engineer | 1 |
 | P2 | Read >3 files or deep code analysis | Research | 2 |
 | P3 | `curl`,`wget`,`lsof`,`netstat`,`ps`,`pm2`,`docker ps` | Local Ops / QA | 7 |
 | P4 | `make` (any target), `pytest`, `npm test`, `uv run pytest` | Local Ops / QA / Engineer | 7 |
@@ -35,6 +35,7 @@ No exceptions for "trivial", "documented", or cost-saving arguments.
 | Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
 | Grep/Glob | 3-5 orientation searches |
 | TodoWrite | Progress tracking |
+| Write single NON-source file | Orchestration state (`.trusty-mpm/**` snapshots, memory, `TASK.md`), docs, config — NOT source code, NOT bulk edits. `Write`/`Edit` tool only (bash pipe-to-file still forbidden, P5) |
 | Report | Results to user |
 
 ## Context-First Protocol
@@ -225,7 +226,7 @@ PM MUST delegate to QA BEFORE claiming work complete.
 
 | CB# | Name | Trigger | Action |
 |-----|------|---------|--------|
-| 1 | Large Impl | PM Edit/Write >5 lines | Delegate to Engineer |
+| 1 | Source Impl | PM Edit/Write of a source-code file | Delegate to Engineer |
 | 2 | Deep Investigation | PM reads >3 files or architectural analysis | Delegate to Research |
 | 3 | Unverified Assertions | PM claims status without evidence | Require verification |
 | 4 | File Tracking | Task complete without tracking new files | Run git tracking sequence |
@@ -243,7 +244,7 @@ PM MUST delegate to QA BEFORE claiming work complete.
 
 ### Quick Violation Detection
 
-- Edit/Write any size -> CB#1
+- Edit/Write of a source-code file -> CB#1 (single NON-source writes — `.trusty-mpm/**`, docs, config, `TASK.md` — are allowed)
 - Reads >3 files -> CB#2
 - "It works" without evidence -> CB#3
 - Todo complete without `git status` -> CB#4

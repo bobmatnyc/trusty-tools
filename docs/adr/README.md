@@ -71,3 +71,4 @@ Proposed ──► Accepted ──► Superseded (by ADR-NNNN)
 | [0011](./0011-tctl-owns-service-lifecycle.md) | `tctl` headless control plane (owns boot/lifecycle); `trusty-console` is the single HTTP surface | Accepted |
 | [0012](./0012-per-instance-guid-and-marker-file-identity.md) | Per-instance GUID and marker-file identity | Accepted |
 | [0013](./0013-rename-trusty-controller-to-trusty-installer.md) | Rename `trusty-controller` → `trusty-installer`; add `tctl` transitional alias; build out interactive installer | Accepted |
+| [0014](./0014-native-mcp-support.md) | Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more) | Accepted |

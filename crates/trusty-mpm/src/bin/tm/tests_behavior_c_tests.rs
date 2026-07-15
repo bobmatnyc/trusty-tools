@@ -42,9 +42,12 @@ use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 #[test]
 fn guided_picker_bare_enter_no_sessions_launches_new() {
     // Why: bare Enter with no sessions must launch a new session, not hang.
-    assert_eq!(parse_picker_choice("", 0, false), PickerDecision::LaunchNew);
     assert_eq!(
-        parse_picker_choice("  \t", 0, false),
+        parse_picker_choice("", 0, false, &[]),
+        PickerDecision::LaunchNew
+    );
+    assert_eq!(
+        parse_picker_choice("  \t", 0, false, &[]),
         PickerDecision::LaunchNew
     );
 }
@@ -54,9 +57,12 @@ fn guided_picker_bare_enter_live_session_resumes_first() {
     // Why: bare Enter when the most-recent session is LIVE (not needing a
     // restart) must resume it directly — attaching to a live pane is safe,
     // it never destroys anything (#2148).
-    assert_eq!(parse_picker_choice("", 1, false), PickerDecision::Resume(0));
     assert_eq!(
-        parse_picker_choice("  ", 3, false),
+        parse_picker_choice("", 1, false, &[]),
+        PickerDecision::Resume(0)
+    );
+    assert_eq!(
+        parse_picker_choice("  ", 3, false, &[]),
         PickerDecision::Resume(0)
     );
 }
@@ -66,12 +72,46 @@ fn guided_picker_bare_enter_stopped_session_requires_confirm() {
     // #2148: bare Enter must NOT silently restart (kill+recreate the tmux pane
     // of) a stopped/errored session — the operator must type the number.
     assert_eq!(
-        parse_picker_choice("", 1, true),
+        parse_picker_choice("", 1, true, &[]),
         PickerDecision::ConfirmRestart(0)
     );
     assert_eq!(
-        parse_picker_choice("  ", 3, true),
+        parse_picker_choice("  ", 3, true, &[]),
         PickerDecision::ConfirmRestart(0)
+    );
+}
+
+#[test]
+fn guided_picker_bare_enter_unresumable_session_blocked() {
+    // #2595: bare Enter must NEVER resume/restart a session whose workspace
+    // is gone for good — no confirmation prompt would help, since the resume
+    // is guaranteed to fail (#2577/#2594). This takes priority over
+    // `ConfirmRestart` (`first_needs_restart=true` here too — a dead session
+    // is ALWAYS stopped/errored, so both flags are set; `Unresumable` must win).
+    assert_eq!(
+        parse_picker_choice("", 1, true, &[true]),
+        PickerDecision::Unresumable(0)
+    );
+    assert_eq!(
+        parse_picker_choice("  ", 3, true, &[true, false, false]),
+        PickerDecision::Unresumable(0)
+    );
+}
+
+#[test]
+fn guided_picker_numeric_unresumable_session_blocked() {
+    // #2595: an EXPLICIT numeric choice must ALSO be blocked when it targets a
+    // dead session — the pre-#2595 comment on the numeric branch ("always
+    // restarts/resumes directly") is no longer true for this one case.
+    assert_eq!(
+        parse_picker_choice("2", 3, false, &[false, true, false]),
+        PickerDecision::Unresumable(1)
+    );
+    // A live session at a DIFFERENT index must still resume normally even
+    // when another slot in the same menu is dead.
+    assert_eq!(
+        parse_picker_choice("1", 3, false, &[false, true, false]),
+        PickerDecision::Resume(0)
     );
 }
 
@@ -79,19 +119,19 @@ fn guided_picker_bare_enter_stopped_session_requires_confirm() {
 fn guided_picker_delete_parses_d_prefix() {
     // #2304: `d<N>` / `d <N>` selects the Nth session (0-based) for deletion.
     assert_eq!(
-        parse_picker_choice("d1", 1, false),
+        parse_picker_choice("d1", 1, false, &[]),
         PickerDecision::Delete(0)
     );
     assert_eq!(
-        parse_picker_choice("d2", 3, true),
+        parse_picker_choice("d2", 3, true, &[]),
         PickerDecision::Delete(1)
     );
     assert_eq!(
-        parse_picker_choice("D3\n", 3, false),
+        parse_picker_choice("D3\n", 3, false, &[]),
         PickerDecision::Delete(2)
     );
     assert_eq!(
-        parse_picker_choice("d 2", 3, false),
+        parse_picker_choice("d 2", 3, false, &[]),
         PickerDecision::Delete(1)
     );
 }
@@ -101,15 +141,15 @@ fn guided_picker_delete_out_of_range_unrecognised() {
     // A `d`-prefixed choice outside 1..=session_count (or non-numeric) is
     // rejected — never falls through to the resume/launch branches.
     assert_eq!(
-        parse_picker_choice("d4", 3, false),
+        parse_picker_choice("d4", 3, false, &[]),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("d0", 3, false),
+        parse_picker_choice("d0", 3, false, &[]),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("dx", 3, false),
+        parse_picker_choice("dx", 3, false, &[]),
         PickerDecision::Unrecognised
     );
 }
@@ -117,15 +157,24 @@ fn guided_picker_delete_out_of_range_unrecognised() {
 #[test]
 fn guided_picker_q_returns_quit() {
     // Why: "q" must quit cleanly without touching tmux or the daemon.
-    assert_eq!(parse_picker_choice("q", 0, false), PickerDecision::Quit);
-    assert_eq!(parse_picker_choice("q", 3, true), PickerDecision::Quit);
+    assert_eq!(
+        parse_picker_choice("q", 0, false, &[]),
+        PickerDecision::Quit
+    );
+    assert_eq!(parse_picker_choice("q", 3, true, &[]), PickerDecision::Quit);
 }
 
 #[test]
 fn guided_picker_q_uppercase_returns_quit() {
     // Why: "Q" must be treated identically to "q" (case-insensitive).
-    assert_eq!(parse_picker_choice("Q", 2, false), PickerDecision::Quit);
-    assert_eq!(parse_picker_choice("Q\n", 0, false), PickerDecision::Quit);
+    assert_eq!(
+        parse_picker_choice("Q", 2, false, &[]),
+        PickerDecision::Quit
+    );
+    assert_eq!(
+        parse_picker_choice("Q\n", 0, false, &[]),
+        PickerDecision::Quit
+    );
 }
 
 #[test]
@@ -133,19 +182,25 @@ fn guided_picker_numeric_valid_resumes() {
     // Why: "[N]" where 1 <= N <= session_count must resume the Nth session
     // (0-based) — an EXPLICIT numeric choice always dispatches directly,
     // regardless of `first_needs_restart` (that flag only gates bare Enter).
-    assert_eq!(parse_picker_choice("1", 1, true), PickerDecision::Resume(0));
-    assert_eq!(parse_picker_choice("1", 3, true), PickerDecision::Resume(0));
     assert_eq!(
-        parse_picker_choice("2", 3, false),
+        parse_picker_choice("1", 1, true, &[]),
+        PickerDecision::Resume(0)
+    );
+    assert_eq!(
+        parse_picker_choice("1", 3, true, &[]),
+        PickerDecision::Resume(0)
+    );
+    assert_eq!(
+        parse_picker_choice("2", 3, false, &[]),
         PickerDecision::Resume(1)
     );
     assert_eq!(
-        parse_picker_choice("3", 3, false),
+        parse_picker_choice("3", 3, false, &[]),
         PickerDecision::Resume(2)
     );
     // With newline (as stdin read_line returns)
     assert_eq!(
-        parse_picker_choice("2\n", 3, false),
+        parse_picker_choice("2\n", 3, false, &[]),
         PickerDecision::Resume(1)
     );
 }
@@ -154,11 +209,11 @@ fn guided_picker_numeric_valid_resumes() {
 fn guided_picker_numeric_launch_new() {
     // Why: "[session_count+1]" must always launch a new session.
     assert_eq!(
-        parse_picker_choice("1", 0, false),
+        parse_picker_choice("1", 0, false, &[]),
         PickerDecision::LaunchNew
     );
     assert_eq!(
-        parse_picker_choice("4", 3, false),
+        parse_picker_choice("4", 3, false, &[]),
         PickerDecision::LaunchNew
     );
 }
@@ -168,15 +223,15 @@ fn guided_picker_out_of_range_unrecognised() {
     // Why: a number out of range (>session_count+1) must not silently
     // resume or launch — it must be rejected cleanly.
     assert_eq!(
-        parse_picker_choice("5", 3, false),
+        parse_picker_choice("5", 3, false, &[]),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("100", 1, false),
+        parse_picker_choice("100", 1, false, &[]),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("0", 3, false),
+        parse_picker_choice("0", 3, false, &[]),
         PickerDecision::Unrecognised
     );
 }
@@ -185,15 +240,15 @@ fn guided_picker_out_of_range_unrecognised() {
 fn guided_picker_non_numeric_unrecognised() {
     // Why: arbitrary text input must be rejected without panicking.
     assert_eq!(
-        parse_picker_choice("abc", 2, false),
+        parse_picker_choice("abc", 2, false, &[]),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("exit", 0, false),
+        parse_picker_choice("exit", 0, false, &[]),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("1a", 3, false),
+        parse_picker_choice("1a", 3, false, &[]),
         PickerDecision::Unrecognised
     );
 }
@@ -803,6 +858,7 @@ fn make_session(
         deliverable_id: None,
         pane_id: None,
         injection_status: None,
+        unresumable: false,
     }
 }
 

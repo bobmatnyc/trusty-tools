@@ -146,7 +146,11 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
                 nested_guard_notice(&record.name)
             );
         }
-        return super::guided_resume::resume_guided_session(client, url, &record).await;
+        // Terminal entry point (not a loop) — the `AttachOutcome` only matters to
+        // a looping caller like `run_tty_picker` (#2678); here, the hand-off (or
+        // fail-closed skip) is this call's whole job, so discard it.
+        super::guided_resume::resume_guided_session(client, url, &record).await?;
+        return Ok(());
     }
 
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;

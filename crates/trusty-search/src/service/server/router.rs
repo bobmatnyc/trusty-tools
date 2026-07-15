@@ -46,6 +46,20 @@ pub(super) struct IndexDetailEntry {
     /// Test: `list_indexes_details_includes_root_path`.
     pub root_path: Option<String>,
     pub size_bytes: Option<u64>,
+    /// Canonical repo identity (`owner/repo` or `content:<sha>`) for this index
+    /// (DOC-37, issue #2611). `None` when no identity is stored.
+    ///
+    /// Why: lets a caller see, in the same `?details=true` response that already
+    /// carries `root_path`, which physical indexes belong to the same repo —
+    /// the visibility layer that makes the existing worktree/clone fragmentation
+    /// groupable without any delta-indexing work.
+    /// What: the persisted `PersistedIndex::repo_identity` (no per-request live
+    /// derive — see `resolve_identities` in `indexes.rs` for why). Serialised
+    /// only when present.
+    /// Test: `list_indexes_repo_identity_details_and_filter`
+    /// (`list_repo_identity_tests.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_identity: Option<String>,
 }
 
 #[derive(Deserialize)]

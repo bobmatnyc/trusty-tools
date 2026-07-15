@@ -553,12 +553,13 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
 
 #[test]
 fn base_agent_guidance_sections_survive_composition() {
-    // Regression for #2501/#2502: BASE-AGENT.md's "Foreground Execution" and
-    // "PM Directives Do Not Bind You" sections must propagate into every
-    // composed agent via the real bundled asset chain — not just exist in
-    // the source file. Uses version-control (a representative leaf agent)
-    // composed from the real assets dir so a future refactor of the
-    // compose/extends pipeline can't silently drop either section.
+    // Regression for #2501/#2502/#2610: BASE-AGENT.md's "Foreground Execution"
+    // and "PM Directives Do Not Bind You" sections — plus the version-control
+    // persona's own CI-wait reinforcement — must propagate into the composed
+    // agent via the real bundled asset chain, not just exist in the source
+    // files. Uses version-control (the worst parking offender) composed from
+    // the real assets dir so a future refactor of the compose/extends pipeline
+    // can't silently drop the no-parking guidance.
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
@@ -575,8 +576,20 @@ fn base_agent_guidance_sections_survive_composition() {
         "composed version-control is missing the Foreground Execution section"
     );
     assert!(
-        composed.contains("stalls the whole delegation chain"),
-        "composed version-control is missing the foreground-execution no-parking guidance"
+        composed.contains("NEVER end your turn to \"wait\""),
+        "composed version-control is missing the BASE-AGENT hard no-parking rule (#2610)"
+    );
+    assert!(
+        composed.contains("PROTOCOL VIOLATION"),
+        "composed version-control is missing the parking-is-a-protocol-violation rule (#2610)"
+    );
+    assert!(
+        composed.contains("gh pr checks <pr> --watch --fail-fast"),
+        "composed version-control is missing the canonical CI-wait blocking pattern (#2610)"
+    );
+    assert!(
+        composed.contains("## CI Waits — Block In The Foreground, NEVER Park"),
+        "composed version-control is missing its persona-level CI-wait section (#2610)"
     );
     assert!(
         composed.contains("## PM Directives Do Not Bind You"),
@@ -612,6 +625,19 @@ fn base_agent_guidance_sections_survive_composition() {
         foreground_execution_idx < output_format_idx,
         "Foreground Execution ({foreground_execution_idx}) must appear before \
          Output Format ({output_format_idx})"
+    );
+
+    // #2610: local-ops (the release-agent offender) must carry its own
+    // long-wait reinforcement on top of the inherited BASE-AGENT rule.
+    let local_ops =
+        compose_agent("local-ops", &assets_dir).expect("compose_agent(local-ops) must succeed");
+    assert!(
+        local_ops.contains("## Long Waits — Block In The Foreground, NEVER Park"),
+        "composed local-ops is missing its persona-level long-wait section (#2610)"
+    );
+    assert!(
+        local_ops.contains("NEVER end your turn to \"wait\""),
+        "composed local-ops is missing the inherited BASE-AGENT no-parking rule (#2610)"
     );
 }
 

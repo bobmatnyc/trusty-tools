@@ -55,17 +55,24 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     tools.push(tool(
         "compose_email",
-        "Send, draft, or send-an-existing-draft email via Gmail.",
+        "Send, draft, send-an-existing-draft, or reply to email via Gmail, with attachments and HTML.",
         json!({
             "account": account_schema(),
-            "action": action_enum(&["send", "draft", "send_draft"]),
-            "to": { "type": "string" },
+            "action": action_enum(&["send", "draft", "send_draft", "reply"]),
+            "to": { "type": "string", "description": "Recipient(s). Optional for reply (defaults to the original sender)." },
             "cc": { "type": "string" },
             "bcc": { "type": "string" },
-            "subject": { "type": "string" },
-            "body": { "type": "string" },
-            "html": { "type": "boolean" },
+            "subject": { "type": "string", "description": "Optional for reply (defaults to 'Re: <original subject>')." },
+            "body": { "type": "string", "description": "Plain-text body." },
+            "html_body": { "type": "string", "description": "HTML body; sent as a text/html alternative alongside `body` when both are present." },
+            "html": { "type": "boolean", "description": "Legacy: if true and no html_body, `body` is treated as HTML." },
+            "message_id": { "type": "string", "description": "Required when action=reply: the message being replied to." },
             "draft_id": { "type": "string", "description": "Required when action=send_draft." },
+            "attachments": {
+                "type": "array",
+                "description": "Attachments: a local path string, or an object {path|local_path}, {content(base64), filename}, or {driveFileId, filename?}.",
+                "items": { "type": ["string", "object"] },
+            },
         }),
         &[],
     ));

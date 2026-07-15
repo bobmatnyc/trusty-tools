@@ -312,9 +312,29 @@ async fn install_all(
                         ));
                     }
                 }
-                // Phase 8: codesign + FDA guidance for trusty-search.
+                // Phase 8: codesign + FDA guidance for trusty-search (single
+                // source of truth: `macos_signing`, unified with
+                // `scripts/install-trusty-search-signed.sh` and `tctl sign` — #2558).
+                // PR #2657 review: this automatic hook signs WITHOUT Hardened
+                // Runtime (matching pre-PR behavior) because trusty-search's
+                // bundled ONNX runtime dylib load path under Hardened Runtime
+                // is not yet empirically verified — see
+                // `macos_signing::use_hardened_runtime`. `tctl sign trusty-search`
+                // / the wrapper script (explicit operator action) DO sign with
+                // Hardened Runtime, also matching pre-PR behavior.
                 if m.crate_name == "trusty-search" {
                     super::macos_signing::post_install_search(&install_dir, json);
+                }
+                // Phase 8b: codesign + App-Data-TCC guidance for trusty-mpm.
+                // Owner-authorized scope extension (#2558, 2026-07-14): `tm`
+                // reads other apps' $HOME containers (Claude config dirs, tmux
+                // state), so macOS's App Data TCC category re-prompts on every
+                // ad-hoc-signed rebuild the same way FDA does for trusty-search;
+                // the same stable-identity Developer-ID signing fixes it. Unlike
+                // trusty-search, trusty-mpm loads no dylibs, so this automatic
+                // hook DOES sign with Hardened Runtime (low risk either way).
+                if m.crate_name == "trusty-mpm" {
+                    super::macos_signing::post_install_mpm(&install_dir, json);
                 }
                 // Phase 7b (#2556): bootstrap the launchd plist for each shared
                 // daemon (search/memory/analyze/review/console) via its own

@@ -233,6 +233,30 @@ pub(crate) async fn restore_one_index(
         }
     }
 
+    // DOC-37 (issue #2611): backfill the canonical repo identity for indexes
+    // registered before identity tracking existed. The warm-boot pass is the
+    // natural reconcile point — `root_path` is present and canonical here, so a
+    // one-time derive + persist upgrades legacy `indexes.toml` entries in place.
+    // Best-effort: a root with no derivable identity (no remote, no commits)
+    // stays `None` and keeps working as a flat index.
+    if entry.repo_identity.is_none() {
+        if let Some(identity) = trusty_common::repo_identity::RepoIdentity::derive(&entry.root_path)
+            .map(|r| r.canonical())
+        {
+            entry.repo_identity = Some(identity.clone());
+            let updated = PersistedIndex {
+                repo_identity: Some(identity),
+                ..entry.clone()
+            };
+            if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
+                tracing::warn!(
+                    "warm-boot: could not persist backfilled repo_identity for '{}': {e}",
+                    entry.id,
+                );
+            }
+        }
+    }
+
     // Issue #954: propagate HNSW alloc failure (OOM) as a skip rather than
     // a panic so the daemon can still serve the remaining indexes.
     let mut indexer = match build_indexer_from_entry(&entry, embedder).await {

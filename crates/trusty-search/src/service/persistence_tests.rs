@@ -490,6 +490,58 @@ root_path = "/tmp/legacy_col"
     );
 }
 
+/// DOC-37 (issue #2611): `repo_identity` defaults to `None`, legacy TOML without
+/// the field loads as `None` (backward compatible), and an explicit value both
+/// round-trips and is serialised to disk.
+#[test]
+fn repo_identity_round_trips() {
+    // Default constructor: no identity.
+    assert_eq!(PersistedIndex::default().repo_identity, None);
+
+    // Legacy TOML without the field must load as None (back-compat).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    std::fs::write(
+        &path,
+        r#"
+[[index]]
+id = "legacy"
+root_path = "/tmp/legacy_identity"
+"#,
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].repo_identity, None,
+        "missing repo_identity must default to None (DOC-37 back-compat)"
+    );
+
+    // Explicit value survives round-trip and is written to disk.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    save_index_registry_at(
+        &path,
+        &[PersistedIndex {
+            id: "with_identity".into(),
+            root_path: "/tmp/with_identity".into(),
+            repo_identity: Some("bobmatnyc/trusty-tools".into()),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let s = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        s.contains("repo_identity") && s.contains("bobmatnyc/trusty-tools"),
+        "explicit repo_identity must be serialised — TOML was: {s}"
+    );
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(
+        entries[0].repo_identity.as_deref(),
+        Some("bobmatnyc/trusty-tools")
+    );
+}
+
 /// Issue #1372: `extra_skip_dirs` / `data_file_max_bytes` default to the
 /// targeted hygiene values on every code path — constructor, missing-field
 /// deserialisation (legacy TOML picks up the fix), and explicit round-trip.

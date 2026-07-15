@@ -89,7 +89,12 @@ pub async fn session_new(
         // callers (prevents LLM-driven session proliferation).
         force_new: false,
     };
-    let record = spawn_managed(state, params).await?;
+    let record = spawn_managed(
+        state,
+        crate::session_manager::ManagedSessionId::new(),
+        params,
+    )
+    .await?;
     Ok(record_to_json(&record))
 }
 

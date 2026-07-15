@@ -10834,6 +10834,8 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "globset",
+ "ignore",
  "libc",
  "regex",
  "reqwest 0.12.28",
@@ -10994,7 +10996,9 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "clap",
  "dirs 5.0.1",
+ "open",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -11073,7 +11077,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.19.8"
+version = "0.19.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11090,6 +11094,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "libc",
+ "lru",
  "nix 0.29.0",
  "notify 6.1.1",
  "parking_lot",
@@ -11273,6 +11278,20 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 6.0.3",
+]
+
+[[package]]
+name = "trusty-slack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "trusty-common",
 ]
 
 [[package]]

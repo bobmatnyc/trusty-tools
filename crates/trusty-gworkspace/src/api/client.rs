@@ -15,6 +15,59 @@ use tracing::{debug, warn};
 
 use crate::api::auth::{OAuthManager, StoredToken, TokenStorage};
 
+/// Request body variants understood by [`BaseClient::send_with_retry`].
+///
+/// Why: The client must speak three wire encodings — no body (GET/DELETE),
+/// JSON (`application/json`), and arbitrary raw bytes with a caller-chosen
+/// `Content-Type` (Drive multipart upload, Gmail already-encoded payloads).
+/// Modelling them as one enum lets the 401-refresh-retry logic live in a
+/// single place instead of being duplicated per encoding.
+/// What: Borrowed so `send_with_retry` can rebuild the request cheaply for
+/// the one retry attempt.
+/// Test: Exercised transitively by every `get`/`post`/`post_raw`/`get_bytes`.
+enum ReqBody<'a> {
+    None,
+    Json(&'a Value),
+    Raw {
+        content_type: &'a str,
+        bytes: &'a [u8],
+    },
+}
+
+impl ReqBody<'_> {
+    /// Attach this body to a request builder.
+    ///
+    /// Why: Both the initial send and the post-refresh retry need identical
+    /// body application; centralising avoids drift between the two.
+    /// What: Sets JSON body, or raw bytes with an explicit `Content-Type`.
+    /// Test: Covered transitively by the raw-body service tests.
+    fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            ReqBody::None => req,
+            ReqBody::Json(v) => req.json(v),
+            ReqBody::Raw {
+                content_type,
+                bytes,
+            } => req
+                .header(reqwest::header::CONTENT_TYPE, *content_type)
+                .body(bytes.to_vec()),
+        }
+    }
+}
+
+/// A non-JSON HTTP response captured as raw bytes plus its `Content-Type`.
+///
+/// Why: Binary Drive downloads (`alt=media` on images/PDFs/zips) must not be
+/// force-decoded as UTF-8; callers need the bytes and the MIME to decide.
+/// What: Holds the status, optional `Content-Type` header, and the body bytes.
+/// Test: Consumed by `drive::files::get_drive_file_content`; branching logic
+/// is unit-tested via `is_textual_mime`.
+pub struct RawResponse {
+    pub status: reqwest::StatusCode,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 /// Authenticated Google API client.
 ///
 /// Why: One handle per process; `Arc<TokenStorage>` because tools may run
@@ -105,14 +158,11 @@ impl BaseClient {
         &self,
         method: reqwest::Method,
         url: &str,
-        body: Option<&Value>,
+        body: ReqBody<'_>,
         account: Option<&str>,
     ) -> Result<reqwest::Response> {
         let token = self.get_access_token(account).await?;
-        let mut req = self.http.request(method.clone(), url).bearer_auth(&token);
-        if let Some(b) = body {
-            req = req.json(b);
-        }
+        let req = body.apply(self.http.request(method.clone(), url).bearer_auth(&token));
         debug!(method = %method, url = %url, "google api request");
         let resp = req
             .send()
@@ -122,13 +172,11 @@ impl BaseClient {
             warn!(url = %url, "401 received — forcing refresh and retrying once");
             if let (Some(oauth), Ok((profile, _))) = (&self.oauth, self.resolve_stored(account)) {
                 let new = oauth.refresh(&self.storage, &profile).await?;
-                let mut retry = self
-                    .http
-                    .request(method.clone(), url)
-                    .bearer_auth(new.access_token);
-                if let Some(b) = body {
-                    retry = retry.json(b);
-                }
+                let retry = body.apply(
+                    self.http
+                        .request(method.clone(), url)
+                        .bearer_auth(new.access_token),
+                );
                 return retry.send().await.context("retry after refresh");
             }
         }
@@ -157,35 +205,90 @@ impl BaseClient {
 
     pub async fn get(&self, url: &str, account: Option<&str>) -> Result<Value> {
         let resp = self
-            .send_with_retry(reqwest::Method::GET, url, None, account)
+            .send_with_retry(reqwest::Method::GET, url, ReqBody::None, account)
             .await?;
         Self::json_or_error(resp).await
     }
 
+    /// GET a URL and return the raw bytes plus `Content-Type` (no JSON parse).
+    ///
+    /// Why: Binary Drive downloads (`alt=media` on non-text files) and Drive
+    /// attachments must be fetched as bytes; parsing as UTF-8 text corrupts
+    /// images, PDFs, and archives.
+    /// What: Issues the request through the shared 401-refresh path, then reads
+    /// the body as bytes and captures the `Content-Type` header.
+    /// Test: Consumed by `drive::files::get_drive_file_content`.
+    pub async fn get_bytes(&self, url: &str, account: Option<&str>) -> Result<RawResponse> {
+        let resp = self
+            .send_with_retry(reqwest::Method::GET, url, ReqBody::None, account)
+            .await?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.bytes().await.context("read response bytes")?.to_vec();
+        Ok(RawResponse {
+            status,
+            content_type,
+            bytes,
+        })
+    }
+
     pub async fn post(&self, url: &str, body: Value, account: Option<&str>) -> Result<Value> {
         let resp = self
-            .send_with_retry(reqwest::Method::POST, url, Some(&body), account)
+            .send_with_retry(reqwest::Method::POST, url, ReqBody::Json(&body), account)
+            .await?;
+        Self::json_or_error(resp).await
+    }
+
+    /// POST a raw byte body with an explicit `Content-Type`.
+    ///
+    /// Why: Drive multipart upload (`multipart/related`) and other non-JSON
+    /// wire formats cannot go through the JSON helper.
+    /// What: Sends `bytes` verbatim under `content_type` through the shared
+    /// 401-refresh path, then parses the JSON response envelope.
+    /// Test: Consumed by `drive::files::manage_drive_file` (`upload`); body
+    /// shape is unit-tested via `build_multipart_related`.
+    pub async fn post_raw(
+        &self,
+        url: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+        account: Option<&str>,
+    ) -> Result<Value> {
+        let resp = self
+            .send_with_retry(
+                reqwest::Method::POST,
+                url,
+                ReqBody::Raw {
+                    content_type,
+                    bytes: &bytes,
+                },
+                account,
+            )
             .await?;
         Self::json_or_error(resp).await
     }
 
     pub async fn patch(&self, url: &str, body: Value, account: Option<&str>) -> Result<Value> {
         let resp = self
-            .send_with_retry(reqwest::Method::PATCH, url, Some(&body), account)
+            .send_with_retry(reqwest::Method::PATCH, url, ReqBody::Json(&body), account)
             .await?;
         Self::json_or_error(resp).await
     }
 
     pub async fn put(&self, url: &str, body: Value, account: Option<&str>) -> Result<Value> {
         let resp = self
-            .send_with_retry(reqwest::Method::PUT, url, Some(&body), account)
+            .send_with_retry(reqwest::Method::PUT, url, ReqBody::Json(&body), account)
             .await?;
         Self::json_or_error(resp).await
     }
 
     pub async fn delete(&self, url: &str, account: Option<&str>) -> Result<Value> {
         let resp = self
-            .send_with_retry(reqwest::Method::DELETE, url, None, account)
+            .send_with_retry(reqwest::Method::DELETE, url, ReqBody::None, account)
             .await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();

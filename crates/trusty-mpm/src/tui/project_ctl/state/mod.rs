@@ -138,6 +138,19 @@ pub struct SessionRow {
     /// here, so a poll-driven change in the deliverable set is picked up on
     /// the very next frame without re-deriving this row.
     pub deliverable_id: Option<String>,
+    /// True when this session is a dead pick — `stopped`/`errored` with no
+    /// workdir candidate left on disk, so a resume is guaranteed to fail
+    /// (mirrors `ManagedSessionSummary::unresumable`, #2595).
+    ///
+    /// Why: the Sessions pane's `r` (resume) key must refuse a dead session
+    /// with the same "workspace removed — decommission instead" guidance the
+    /// CLI picker gives (`bin/tm/commands/session_picker.rs`'s
+    /// `PickerDecision::Unresumable`), rather than firing a daemon round trip
+    /// that can only 422.
+    /// What: copied verbatim from the fleet DTO by
+    /// [`crate::tui::project_ctl::poll::rows::session_to_row`].
+    /// Test: `crate::tui::project_ctl::events::tests::resume_on_unresumable_session_is_blocked`.
+    pub unresumable: bool,
 }
 
 /// Live per-session activity fetched from `GET .../{id}/activity` (DOC-35
@@ -638,6 +651,7 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             deliverable_id: None,
+            unresumable: false,
         }
     }
 

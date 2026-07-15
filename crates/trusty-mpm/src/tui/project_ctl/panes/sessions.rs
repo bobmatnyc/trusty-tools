@@ -233,6 +233,7 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             deliverable_id: None,
+            unresumable: false,
         }
     }
 

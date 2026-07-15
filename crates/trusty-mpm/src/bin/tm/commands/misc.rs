@@ -426,6 +426,87 @@ pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
     }
 }
 
+/// Best-effort, bounded read of the last `max_bytes` of a transcript file.
+///
+/// Why (#2610): the idle-parking detector needs the agent's final assistant
+/// message, which lives at the END of Claude Code's JSONL transcript. Reading
+/// only the tail bounds both time and memory on a large session transcript, so
+/// the Stop/SubagentStop hook can never block the user's prompt. A tail read may
+/// slice mid-line; the detector tolerates a truncated leading line, so we accept
+/// the boundary rather than paying to align it.
+///
+/// Code-critic finding (PR #2620): the caller wraps this whole function in
+/// `tokio::time::timeout`, but that only bounds the `.await` — the underlying
+/// `open()` syscall still runs to completion on a `spawn_blocking` worker
+/// thread. If `transcript_path` ever pointed at a FIFO with no writer, `open()`
+/// blocks the kernel thread indefinitely; the `timeout` future resolves (the
+/// hook process still exits promptly), but the leaked blocking task pins a
+/// worker thread forever. `stat()` (unlike `open()`) never blocks on a FIFO, so
+/// checking the file type first — and refusing anything that is not a regular
+/// file — closes that leak before the `open()` call can ever be reached.
+/// What: `tokio::fs::metadata` (stat)-checks `path` first and returns `None`
+/// immediately unless it names a regular file (rejects FIFOs, sockets, device
+/// nodes, directories, and anything `stat` can't resolve). Only then opens
+/// `path`, seeks to `len - max_bytes` (clamped at 0), reads up to `max_bytes`,
+/// and returns the bytes as a lossy UTF-8 string. Any I/O error yields `None`
+/// (fail-open — detection is advisory, never load-bearing).
+/// Test: `rejects_fifo_without_blocking` (unix-only, `#[cfg(unix)]`) proves the
+/// FIFO case returns promptly instead of hanging; also exercised end-to-end via
+/// [`detect_idle_parking_from_payload`]'s callers and the `core::idle_parking`
+/// unit tests that cover truncated tails.
+async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let len = file.metadata().await.ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes).read_to_end(&mut bytes).await.ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Detect an idle-parking final message from a Stop/SubagentStop hook payload.
+///
+/// Why (#2610): prompt-level prohibitions did not fully stop delegated agents
+/// from ending their turn to "wait" for a self-spawned monitor. This is the
+/// mechanical back-stop: on a turn-end event, check what the agent actually said
+/// last and flag the stall so it can be surfaced (and later auto-nudged).
+/// What: reads `transcript_path` from the hook payload, tail-reads the transcript
+/// (bounded to [`MAX_TRANSCRIPT_TAIL`]) under a short [`DETECT_TIMEOUT`] so the
+/// hook stays within its non-blocking budget, then runs
+/// [`trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript`]. Returns
+/// the matched phrase, or `None` on any missing field / timeout / I/O error /
+/// clean message. Entirely fail-open.
+/// Test: the pure detection is covered by `core::idle_parking` tests;
+/// `hook_flags_idle_parking_final_message` (integration) drives this end to end.
+async fn detect_idle_parking_from_payload(
+    payload: Option<&serde_json::Value>,
+) -> Option<&'static str> {
+    /// Cap on transcript bytes read from the tail (256 KiB is far more than one
+    /// final assistant turn, yet bounds cost on a multi-MB session transcript).
+    const MAX_TRANSCRIPT_TAIL: u64 = 256 * 1024;
+    /// Hard ceiling on the whole detection so the hook never blocks the prompt.
+    const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+    let path = payload?.get("transcript_path")?.as_str()?;
+    let path = std::path::PathBuf::from(path);
+    let jsonl = tokio::time::timeout(
+        DETECT_TIMEOUT,
+        read_transcript_tail(&path, MAX_TRANSCRIPT_TAIL),
+    )
+    .await
+    .ok()??;
+    trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript(&jsonl)
+}
+
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.
 ///
 /// Why: Claude Code invokes the configured hook command on every PreToolUse /
@@ -539,6 +620,25 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         return Ok(());
     }
 
+    // #2610: on turn-end events (main agent Stop / delegated SubagentStop),
+    // flag a final message that "parks" the agent — one that ends the turn to
+    // wait on a monitor/watcher/notification that can never re-wake a stopped
+    // agent. Fail-open and bounded so this never blocks the user's prompt.
+    let idle_parking = if matches!(event.as_str(), "Stop" | "SubagentStop") {
+        detect_idle_parking_from_payload(stdin_payload.as_ref()).await
+    } else {
+        None
+    };
+    if let Some(phrase) = idle_parking {
+        // Loud, greppable structured warning to stderr so operators and session
+        // logs see the stall even before the daemon/dashboard surfaces it.
+        eprintln!(
+            "trusty-mpm: IDLE-PARKING WARNING (#2610) event={event} session={session_id} \
+             phrase={phrase:?} — the agent ended its turn with parking language; a stopped \
+             agent cannot be re-woken by a self-spawned monitor. It needs a foreground nudge."
+        );
+    }
+
     // Include the caller's cwd so the daemon can correlate this SessionStart
     // event to the right managed session by workspace_path (issue #1744).
     let cwd = std::env::current_dir()
@@ -546,6 +646,13 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
     let mut payload = serde_json::json!({ "cwd": cwd });
+    // #2610: forward the idle-parking signal in the structured hook payload so
+    // the daemon can surface it (dashboard / errors feed) and a future pass can
+    // auto-nudge. Additive fields — harmless to existing hook_service consumers.
+    if let Some(phrase) = idle_parking {
+        payload["idle_parking"] = serde_json::Value::Bool(true);
+        payload["idle_parking_phrase"] = serde_json::Value::String(phrase.to_string());
+    }
     // #1956: enrich the observability payload with tool/input when present —
     // the daemon's hook_service already reads `payload["tool"]`/`["input"]`
     // (see `daemon::services::hook_service::OverseerContext` construction).

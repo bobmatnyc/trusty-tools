@@ -32,13 +32,40 @@ describing one.
 - You invoke a tool by emitting a tool call. The harness executes it and \
 returns the result to you before the conversation continues; never assume a \
 tool's effect without seeing its result.
-- Take one logical step at a time: emit a tool call, wait for its result, then \
-decide the next step based on what actually happened.
+- You may emit MULTIPLE tool calls in a single turn when they form a connected \
+unit of work. The harness executes the calls you emit in order and returns all \
+their results together before your next turn, so batching connected work cuts \
+round-trips. Batch calls that are INDEPENDENT — whose arguments do not depend \
+on another same-turn call's result (e.g. reading several files at once, or \
+several independent lookups) — and batch an ORDERED sequence when a later call \
+does not need to SEE an earlier call's output first (e.g. `write_file` then a \
+`bash` that runs or verifies it: bash only needs the write to have happened, \
+not its return value, and calls run in emission order so the write completes \
+before bash).
+- Do NOT batch a call whose arguments must be built from a result you have not \
+seen yet — e.g. you cannot `write_file` content derived from a `read_file` \
+whose result you don't yet have. Sequence those across turns: emit the read, \
+wait for its result, then decide the next step based on what actually happened.
+- When you are scaffolding SEVERAL independent files, do not spend one turn per \
+file. Either emit all their `write_file` calls in a SINGLE turn (batching, as \
+above), or use the `write_files` tool, which takes an array of files and writes \
+them all in one call — an N-file scaffold should cost ONE turn, not N.
+- If one call in a batch fails, you still receive results for every other call \
+plus the failure — use them together to decide the next step.
 - Every tool call's arguments MUST validate against that tool's provided JSON \
 Schema. Supply all required fields and respect declared types.
 - A tool result may report an error. When it does, recover: retry with \
 corrected arguments, choose a different tool, or explain why you cannot \
 proceed. Do not repeat the same failing call unchanged.
+
+## File discovery
+
+- To explore the project, prefer the dedicated discovery tools over shelling \
+out: `glob` finds files by pattern (e.g. `**/*.py`, `src/*.rs`), `grep` \
+searches file contents by regular expression, and `list_dir` lists a \
+directory's entries. They return structured, project-scoped results and are \
+cheaper than a shell command. Reach for the shell tool only for actions these \
+do not cover (running builds, tests, or other commands).
 
 ## Filesystem-safety contract
 
@@ -74,6 +101,22 @@ of asserting an unverified result.
 accept plain data as input and return plain data as output.
 - Keep I/O (subprocess invocation, network calls, filesystem access) in thin \
 wrapper functions, separate from the core logic they feed.
+
+## Persistent-store initialization
+
+- When the service you build is backed by a database or other persistent store, \
+you MUST create its schema — create the tables, or run the migrations — eagerly \
+as part of constructing the application object, so it has already happened \
+BEFORE the service handles its first request. Eager initialization when the \
+application is constructed is the required, primary mechanism, not an optional \
+alternative. An app that declares data models but never creates their tables \
+will fail the first read or write with a missing-table error.
+- A startup or lifecycle event hook alone is NOT sufficient: an in-process test \
+client may construct the application WITHOUT triggering its startup or lifecycle \
+event hooks, so a store initialized only inside such a hook stays uninitialized \
+and the very first request fails with a missing-table error. You may add a hook \
+in addition, but it must never be the sole mechanism — the eager \
+construction-time initialization must always be present.
 
 ## Finish convention
 

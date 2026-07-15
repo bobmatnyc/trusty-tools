@@ -21,10 +21,16 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::inproject::try_inproject_spawn;
+use super::resume_error::ResumeManagedError;
 use crate::daemon::state::DaemonState;
 use crate::provisioner::WorkspaceProvisioner;
 use crate::runtime::{RuntimeKind, build_adapter};
-use crate::session_manager::{ManagedError, ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+// `ManagedError` moved out of this file's non-test code with the #2577 review
+// enum split (see `resume_error.rs`); it is still used by this module's own
+// `#[cfg(test)]` `StubTmux` double below.
+#[cfg(test)]
+use crate::session_manager::ManagedError;
 
 /// Transport-agnostic inputs for spawning a managed session.
 ///
@@ -122,8 +128,20 @@ pub struct SpawnParams {
 /// Test: `crate::daemon::mcp_session::tests::session_new_invalid_runtime_errors`
 /// covers the early runtime-rejection path; the HTTP spawn tests cover the
 /// provision/create/spawn path.
+///
+/// #2605: the session id is now a CALLER-SUPPLIED parameter rather than minted
+/// internally, so the asynchronous-spawn path (`background: true`) can learn it
+/// BEFORE provisioning starts — it returns that id to the client immediately
+/// (to poll `provision-status`), keys the
+/// [`crate::daemon::provisioning::ProvisioningRegistry`] on it, and correlates
+/// the `provisioning_stage` SSE frames the background task streams by it. NOTE:
+/// on the reconnect-to-existing-session outcome (#1707) the returned record's
+/// id may DIFFER from `session_id`; callers that keyed anything on `session_id`
+/// must read the final id off the returned record. Synchronous callers simply
+/// pass a fresh [`ManagedSessionId::new()`].
 pub async fn spawn_managed(
     state: &Arc<DaemonState>,
+    session_id: ManagedSessionId,
     params: SpawnParams,
 ) -> Result<SessionRecord, String> {
     // Config is loaded ONCE here and reused below for both the MCP spawn gate
@@ -149,8 +167,6 @@ pub async fn spawn_managed(
         super::mcp_spawn_gate::ensure_mcp_spawn_allowed(&registry, &config, &params.repo_url)
             .await?;
     }
-
-    let session_id = ManagedSessionId::new();
 
     // Wrap the ENTIRE spawn dispatch — in-project, local-path, AND clone-based
     // — in a `provisioning_stage` scope (issue #1904 stretch goal; #1919 fix).
@@ -1301,55 +1317,6 @@ async fn front_gate_or_escalate(
     ))
 }
 
-/// Typed failure modes for [`resume_managed`], shared across transports.
-///
-/// Why: the prior design mapped resume failures to HTTP status codes by
-/// substring-matching the `Display` string (`msg.contains("invalid state
-/// transition")` → 409, `msg.contains("session not found")` → 404), which
-/// silently regressed to 500 the moment any error wording changed. A typed enum
-/// lets the HTTP handler match on variants (→ 404/409/500) with no stringly-typed
-/// coupling, and lets the MCP path render a stable `Display` string whose
-/// "not found" substring the existing MCP tests rely on.
-/// What: three variants — `NotFound` (the id is absent), `InvalidState` (the
-/// session is not `Stopped`/`Errored`, carrying the descriptive reason), and
-/// `Other` (any remaining failure: tmux/store/I-O). The `Display` strings are
-/// chosen so the not-found variant still contains the literal "not found".
-/// Test: `resume_managed_typed_*` in tests/session_manager_mvp.rs drive the
-/// 404/409 paths through the typed value (no `Display` matching), and the MCP
-/// `session_resume_unknown_id_errors` test asserts the rendered string.
-#[derive(Debug, thiserror::Error)]
-pub enum ResumeManagedError {
-    /// The requested session id was not present in the store → HTTP 404.
-    #[error("session not found: {0}")]
-    NotFound(String),
-
-    /// The session is not in a resumable state (only `Stopped`/`Errored` are) →
-    /// HTTP 409. Carries the manager's descriptive reason.
-    #[error("invalid state transition: {0}")]
-    InvalidState(String),
-
-    /// Any other failure (tmux/store/I-O) → HTTP 500.
-    #[error("{0}")]
-    Other(String),
-}
-
-impl From<ManagedError> for ResumeManagedError {
-    /// Why: `SessionManager::resume` returns a typed [`ManagedError`]; mapping its
-    /// variants here (rather than at each call site) keeps the not-found/invalid-state
-    /// HTTP distinction in one place and prevents a wording change from regressing
-    /// a 404/409 to a 500.
-    /// What: maps `SessionNotFound` → `NotFound`, `InvalidState` → `InvalidState`
-    /// (preserving the descriptive reason), and every other variant → `Other`.
-    /// Test: covered transitively by the resume handler 404/409 tests.
-    fn from(e: ManagedError) -> Self {
-        match e {
-            ManagedError::SessionNotFound(id) => ResumeManagedError::NotFound(id),
-            ManagedError::InvalidState(_, reason) => ResumeManagedError::InvalidState(reason),
-            other => ResumeManagedError::Other(other.to_string()),
-        }
-    }
-}
-
 /// Resume a stopped session and re-spawn its runtime, shared across transports.
 ///
 /// Why: the HTTP resume handler and the MCP `session_resume` tool must both
@@ -1372,10 +1339,24 @@ impl From<ManagedError> for ResumeManagedError {
 /// is intentionally NOT re-run here: those steps are not all confirmed safe to
 /// repeat against an already-running workspace, so re-running them on every
 /// resume risks a different class of bug for a narrower payoff.
+///
+/// #2647 worktree/upstream sync: before the statusline self-heal, every
+/// resume also calls
+/// [`crate::core::session_launch::sync_worktree_with_upstream`] (fetch +
+/// fast-forward-only merge — never resets the branch, never touches
+/// uncommitted changes) and
+/// [`crate::core::session_launch::self_heal_claude_md`] (strips legacy #2170
+/// delegation-directive pollution from `CLAUDE.md`, including when it is an
+/// uncommitted diff the fast-forward alone cannot touch). Both are
+/// best-effort and never block the resume — a long-lived session worktree
+/// that was previously frozen at its creation commit now catches up to
+/// `origin/main` on every resume instead of silently drifting forever.
 /// Test: covered by the HTTP `resume_managed_session` tests and the MCP
 /// `session_resume_unknown_id_errors` test;
 /// `resume_managed_backfills_missing_status_line` in
-/// `tests/session_manager_mvp.rs` covers the self-heal call added here.
+/// `tests/session_manager_mvp.rs` covers the self-heal call added here;
+/// `core::session_launch::worktree_sync`'s own unit tests cover the sync/
+/// self-heal primitives.
 pub async fn resume_managed(
     state: &Arc<DaemonState>,
     id: &ManagedSessionId,
@@ -1387,6 +1368,15 @@ pub async fn resume_managed(
         .workspace_path
         .clone()
         .unwrap_or_else(|| record.cwd.clone());
+
+    // Worktree/upstream sync + legacy CLAUDE.md self-heal (#2647): fast-forward
+    // -only, best-effort, never blocks the resume — see
+    // `core::session_launch::resume_self_heal` for the full safety contract
+    // (never resets the branch, never touches uncommitted changes). This is
+    // the resume-time counterpart to `WorkspaceProvisioner::fetch_and_reset`
+    // for the shared `.base` checkout, closing the gap that let a session
+    // worktree silently drift from `origin/main` forever.
+    crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string()).await;
 
     // Defensive self-heal (#1913): best-effort, never blocks the resume.
     if let Err(e) = crate::core::session_launch::ensure_status_line(&workspace) {

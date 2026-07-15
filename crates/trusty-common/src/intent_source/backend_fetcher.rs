@@ -66,7 +66,9 @@ impl TicketFetcher for BackendTicketFetcher {
             gh_cli_user: None,
             gh_cli_host: None,
         };
-        let backend = GitHubBackend::new(cfg).map_err(|e| IsrError::TicketFetch(e.to_string()))?;
+        let backend = GitHubBackend::new(cfg)
+            .await
+            .map_err(|e| IsrError::TicketFetch(e.to_string()))?;
         // GitHub issue ids are numeric; strip a leading `#` if present.
         let id = ticket_id.trim_start_matches('#');
         let issue = backend

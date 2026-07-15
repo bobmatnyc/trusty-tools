@@ -290,6 +290,36 @@ pub struct DaemonState {
     /// `commands::launchd_probe::tests` cover the pure decision logic that
     /// `daemon_run` uses to compute the value passed to `set_supervised`.
     pub(super) supervised: std::sync::atomic::AtomicBool,
+    /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
+    ///
+    /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
+    /// `ManagerState` "sits alongside `DaemonState`" — so it is owned HERE and
+    /// threaded into the `/api/v1/manager/*` handlers, exactly as
+    /// [`proxy_focus`](Self::proxy_focus) is owned for the L2 proxy surface.
+    /// Provisioned once at construction (§7 Q3 "auto-created at daemon startup");
+    /// held behind an `Arc` so the accessor hands out cheap clones without
+    /// requiring `&mut self` through the shared daemon `Arc`.
+    /// What: the portfolio palace handle (WI-5) today; the inference adapter and
+    /// proactive poll loop attach onto the same `ManagerState` in later phases.
+    /// Test: `manager_state_is_provisioned` in `state/tests.rs`;
+    /// `manager_version_route_reports_capabilities` in `tests/manager_routes.rs`.
+    pub(super) manager: Arc<crate::daemon::manager::ManagerState>,
+    /// Progress registry for asynchronous managed-session provisioning (#2605).
+    ///
+    /// Why: `POST /api/v1/sessions/managed` with `background: true` returns a
+    /// job id immediately and runs the (potentially minutes-long, on a large
+    /// repo) workspace provision on a detached task. That task records live
+    /// phase/detail progress and its terminal outcome HERE so the poll route
+    /// (`GET .../{id}/provision-status`) and the CLI can follow along without
+    /// holding one long HTTP request open. Owned as a plain field (not a
+    /// `OnceCell`) because it is a cheap, interior-mutable `DashMap` with a
+    /// trivial `Default` — the same ownership shape as `session_registry`.
+    /// What: a [`crate::daemon::provisioning::ProvisioningRegistry`] keyed by
+    /// job id; shared across the handler, its stage-updater task, and the poll
+    /// route via the daemon `Arc`.
+    /// Test: `crate::daemon::managed_routes::provision_status` tests exercise
+    /// the async state machine through the router.
+    pub provisioning: crate::daemon::provisioning::ProvisioningRegistry,
 }
 
 impl Default for DaemonState {
@@ -350,6 +380,9 @@ impl DaemonState {
         // §9 (WI-5): build the control-plane registry with the operator's
         // [control_plane] auth+cost config (cap, stagger, classifier gate).
         let session_registry = Arc::new(build_session_registry(&root));
+        // §7 Q3: auto-provision the portfolio manager palace at startup; a palace
+        // failure degrades inside `provision` and never fails daemon startup.
+        let manager = Arc::new(crate::daemon::manager::ManagerState::provision(&root));
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -377,6 +410,8 @@ impl DaemonState {
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
+            manager,
+            provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
         }
     }
 
@@ -410,6 +445,11 @@ impl DaemonState {
         // this (possibly temp-dir) framework root, so e2e tests can inject a
         // hermetic auth+cost config and the real daemon reads the operator's.
         let session_registry = Arc::new(build_session_registry(&framework_root));
+        // §7 Q3: auto-provision the portfolio manager palace at startup; a palace
+        // failure degrades inside `provision` and never fails daemon startup.
+        let manager = Arc::new(crate::daemon::manager::ManagerState::provision(
+            &framework_root,
+        ));
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -437,6 +477,8 @@ impl DaemonState {
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
+            manager,
+            provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
         }
     }
 
@@ -488,6 +530,20 @@ impl DaemonState {
         &self,
     ) -> Arc<std::sync::Mutex<HashMap<String, crate::client::proxy::FocusTarget>>> {
         Arc::clone(&self.proxy_focus)
+    }
+
+    /// The Layer-3 portfolio manager state (`tm manager`, epic #2109).
+    ///
+    /// Why: the `/api/v1/manager/*` handlers reach the portfolio palace (and, in
+    /// later phases, the inference adapter + poll loop) through this shared
+    /// handle — the same cheap-`Arc`-clone accessor shape as
+    /// [`Self::proxy_focus_store`], provisioned once at daemon startup.
+    /// What: clones the `Arc<ManagerState>` (cheap); every clone shares the SAME
+    /// provisioned manager state.
+    /// Test: `manager_state_is_provisioned` in `state/tests.rs`;
+    /// `manager_version_route_reports_capabilities` in `tests/manager_routes.rs`.
+    pub fn manager_state(&self) -> Arc<crate::daemon::manager::ManagerState> {
+        Arc::clone(&self.manager)
     }
 
     /// The PID-file registry rooted under this daemon's framework root.
