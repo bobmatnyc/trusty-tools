@@ -10825,6 +10825,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-channels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "trusty-common",
+ "wiremock",
+]
+
+[[package]]
 name = "trusty-code"
 version = "0.1.0"
 dependencies = [
@@ -11278,20 +11294,6 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 6.0.3",
-]
-
-[[package]]
-name = "trusty-slack"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "trusty-common",
 ]
 
 [[package]]

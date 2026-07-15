@@ -15,7 +15,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::api::client::BaseClient;
+use crate::slack::api::client::BaseClient;
 use trusty_common::mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
 
 /// Shared state passed to every dispatcher invocation.
@@ -74,7 +74,7 @@ pub async fn handle_tool_call(
     name: &str,
     _args: Value,
 ) -> Result<Value, ToolCallError> {
-    if crate::tools::is_known_tool(name) {
+    if crate::slack::tools::is_known_tool(name) {
         // Stub: schema is authoritative, live call deferred (see ADR-0014).
         return Err(ToolCallError::NotImplemented(name.to_string()));
     }
@@ -96,7 +96,7 @@ pub async fn handle_message(state: AppState, req: Value) -> Value {
         "initialize" => initialize_response("slack-mcp", env!("CARGO_PKG_VERSION"), None),
         "notifications/initialized" | "notifications/cancelled" => Value::Null,
         "ping" => json!({}),
-        "tools/list" => crate::tools::tool_list_response(),
+        "tools/list" => crate::slack::tools::tool_list_response(),
         "tools/call" => {
             let params = &req["params"];
             let name = params["name"].as_str().unwrap_or("");
@@ -184,7 +184,7 @@ mod tests {
         let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(state, req).await;
         let tools = resp["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), crate::tools::TOOL_NAMES.len());
+        assert_eq!(tools.len(), crate::slack::tools::TOOL_NAMES.len());
     }
 
     #[tokio::test(flavor = "current_thread")]
