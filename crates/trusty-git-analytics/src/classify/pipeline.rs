@@ -533,27 +533,35 @@ impl ClassificationPipeline {
             }
         }
 
-        // Tier 0.5: external sources (JIRA / GitHub Issues).
+        // Tier 0.5: external sources (JIRA / GitHub Issues), resolved with
+        // bounded concurrency (issue #2719).
         //
         // Why: external ticket-type signals are more authoritative than
         // commit-message heuristics but must still defer to manual overrides
-        // (Tier 0). We run the resolver serially (network I/O bound) for
-        // commits that do not already have a Tier-0 override verdict.
-        // The resolver caches results in-memory so the same ticket is only
-        // fetched once per run, keeping the HTTP budget proportional to the
-        // number of *unique* referenced tickets — not the number of commits.
+        // (Tier 0). The previous implementation resolved tickets strictly
+        // serially — one network round-trip per commit, each up to the 30s
+        // JIRA timeout — which produced multi-minute "zero progress" stalls on
+        // large corpora. We now warm the resolver's cache from the full
+        // ticket-KEY set extracted across every unique commit message (NOT a
+        // message-level dedupe — two differently-worded commits referencing
+        // the same ticket must still resolve to one fetch; see
+        // `pipeline_external`'s module doc for the code-critic HIGH finding
+        // this closes), fetching each unique ticket with a bounded
+        // `buffer_unordered` (mirroring the LLM fallback tier), then apply the
+        // resulting signal to every commit sharing a message that referenced
+        // it. Commits with a Tier-0 override are excluded (manual overrides
+        // win).
         if let Some(res) = &resolver {
-            let pb = super::pipeline_db::make_progress(commits.len() as u64, "External sources");
+            let signals =
+                super::pipeline_external::resolve_external_signals(&commits, &overrides, res).await;
             for (idx, commit) in commits.iter().enumerate() {
-                // Skip commits already resolved by Tier 0 (manual override).
                 if overrides.contains_key(&commit.id) {
-                    pb.inc(1);
                     continue;
                 }
-                if let Some(signal) = res.resolve(&commit.message).await {
+                if let Some(signal) = signals.get(commit.message.as_str()) {
                     let top_level = engine.taxonomy().resolve(&signal.category);
                     results[idx] = ClassificationResult {
-                        category: signal.category,
+                        category: signal.category.clone(),
                         subcategory: None,
                         top_level,
                         confidence: signal.confidence,
@@ -565,9 +573,7 @@ impl ClassificationPipeline {
                         complexity: None,
                     };
                 }
-                pb.inc(1);
             }
-            pb.finish_and_clear();
         }
 
         // 4. LLM fallback (async, bounded-concurrency) for entries whose
