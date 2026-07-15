@@ -661,6 +661,53 @@ The parity-spec document itself remains frozen and normative for benchmark runs.
 
 ---
 
+### 5.10 Execution Patterns
+
+**Owner intent:** every task tcode handles falls into one of three operating
+patterns, distinguished by ceremony — how much process (tests, tickets,
+worktrees, review) the work is required to carry:
+
+- **QUICK OPS** — jobs achievable in fewer than ~3 tool calls; trivial,
+  no ceremony. A direct answer or a couple of reads, nothing more.
+- **VIBE** — quick coding: no full test suite, no full spec, no tickets,
+  work directly from `main`. Lighter-weight than the full pipeline, for
+  small changes where the full-loop ceremony is disproportionate to the risk.
+- **FULL LOOP** — the full engineering lifecycle: spec → issues →
+  worktrees → branching → PR → review → merge → CI/scripted deploy. This is
+  the mandatory-gate pipeline described in §5.9's sibling document
+  ([`docs/trusty-code/research/claude-compat-spec-2026-06-02.md:323-337`](research/claude-compat-spec-2026-06-02.md))
+  and enforced today for every `Implementation`-class task.
+
+This is a **new, orthogonal axis** to the `HarnessMode` selection described in
+§5.9. `HarnessMode::{DailyDriver, Parity}`
+([`crates/trusty-code/src/mode.rs`](../../crates/trusty-code/src/mode.rs))
+governs prompt/schema **fidelity** — whether the model sees full or deferred
+tool schemas, for benchmark-vs-production parity. Execution Patterns govern
+**engineering ceremony** — how much process a piece of work is required to
+go through, independent of which schema mode is in effect. Do not conflate
+the two: a VIBE task could in principle still run under either `DailyDriver`
+or `Parity` schema mode, and vice versa.
+
+**Current implementation status:**
+
+| Pattern | Status | Code construct | Gap |
+|---|---|---|---|
+| **QUICK OPS** | ✅ Implemented | `IntentClass::Conversational` in [`crates/trusty-code/src/intent/mod.rs`](../../crates/trusty-code/src/intent/mod.rs) — classifier replies directly, no tools, no pipeline. | None; already matches owner intent. |
+| **VIBE** | ❌ Not implemented (target-state / roadmap) | None today — every task the classifier routes to `IntentClass::Implementation` receives the *same* full gated pipeline. | Requires splitting `IntentClass::Implementation` into a lighter VIBE sub-path and a FULL LOOP sub-path at the dispatch point in `intent/mod.rs` — a new classification axis, not yet designed or built. |
+| **FULL LOOP** | ✅ Implemented (and currently the *only* path for `Implementation`-class work) | `IntentClass::Implementation` → deterministic Research → Plan → Code → QA pipeline with mandatory verification gates and circuit breakers (see `docs/trusty-code/research/claude-compat-spec-2026-06-02.md:323-337`, which calls the always-on gates "a deliberate design choice, not a compatibility gap"). | None functionally, but see below: it is currently applied unconditionally, with no lighter alternative. |
+
+**Important framing:** `IntentClass::Implementation` is not itself "FULL LOOP" —
+today it is the *only* tier `IntentClass::Implementation` work can enter. VIBE
+does not exist as a separate code path. Introducing it means sub-splitting
+`Implementation` dispatch so some tasks route to a lighter pipeline instead of
+the mandatory-gate one. Until that work lands, all Implementation-class tasks
+get FULL LOOP by default, with no VIBE tier available. See Decision record
+§10, item 8 for the amendment this implies to the always-gated Implementation
+decision, and tracking issue [#2596](https://github.com/bobmatnyc/trusty-tools/issues/2596)
+for the implementation work.
+
+---
+
 ## 6. Self-Awareness & Embedded Documentation Model
 
 **Purpose:** trusty-code is self-describing without polluting the context. The harness ships embedded documentation (not external files), and agents access harness identity/capability/doc information via progressive-disclosure JSON-RPC methods, not full-text dumps.
@@ -1106,6 +1153,26 @@ A milestone is not complete until its e2e suite passes. All pull requests contri
 
 7. **Skill Progressive Disclosure: Adapt trusty-mpm loader for `.claude/skills/` path** (DECIDED).  
    Reuse trusty-mpm's loader pattern; configure for `.claude/skills/` (Claude-Code-compatible path, NOT `~/.trusty-mpm/skills/`). See §5.3 and Phase 1 roadmap.
+
+8. **D3: Three execution patterns (quick-ops / vibe / full-loop)** (DECIDED — intent; VIBE UNIMPLEMENTED).  
+   Owner-defined ceremony tiers: QUICK OPS (<~3 tool calls, no ceremony), VIBE
+   (quick coding — no full test suite, no full spec, no tickets, work directly
+   from `main`), FULL LOOP (spec → issues → worktrees → branching → PR →
+   review → merge → CI/scripted deploy). QUICK OPS maps onto the existing
+   `IntentClass::Conversational`; FULL LOOP maps onto the existing
+   `IntentClass::Implementation` pipeline. **VIBE does not exist in the
+   codebase today.** This decision **amends** the always-on-gates
+   determination recorded in `docs/trusty-code/research/claude-compat-spec-2026-06-02.md:323-337`
+   (previously: mandatory verification gates and circuit breakers apply
+   uniformly to all Implementation-class work, "a deliberate design choice,
+   not a compatibility gap"). Building VIBE requires a new sub-split of
+   `IntentClass::Implementation` at the dispatch point in
+   [`crates/trusty-code/src/intent/mod.rs`](../../crates/trusty-code/src/intent/mod.rs),
+   distinct from and orthogonal to the existing `HarnessMode::{DailyDriver,
+   Parity}` axis in [`crates/trusty-code/src/mode.rs`](../../crates/trusty-code/src/mode.rs)
+   (§5.9), which governs prompt/schema fidelity, not engineering ceremony. See
+   §5.10 for the full pattern definitions and gap analysis. Tracking issue for
+   the VIBE implementation gap: [#2596](https://github.com/bobmatnyc/trusty-tools/issues/2596).
 
 ---
 
