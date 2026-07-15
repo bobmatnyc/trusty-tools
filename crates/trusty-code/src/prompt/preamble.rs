@@ -46,10 +46,16 @@ before bash).
 seen yet — e.g. you cannot `write_file` content derived from a `read_file` \
 whose result you don't yet have. Sequence those across turns: emit the read, \
 wait for its result, then decide the next step based on what actually happened.
-- When you are scaffolding SEVERAL independent files, do not spend one turn per \
-file. Either emit all their `write_file` calls in a SINGLE turn (batching, as \
-above), or use the `write_files` tool, which takes an array of files and writes \
-them all in one call — an N-file scaffold should cost ONE turn, not N.
+- When creating TWO OR MORE new files, you MUST put them ALL into a SINGLE \
+`write_files` call, each with its COMPLETE final contents. This is a directive, \
+not a suggestion: do NOT call `write_files` as a scaffolding or placeholder step \
+and then follow it with individual `write_file` calls to fill in or rewrite \
+those same files — that defeats the entire purpose of `write_files` and costs \
+exactly as many turns as not using it at all. Plan every new file's full content \
+BEFORE emitting the call, then emit ONE `write_files` call carrying every file. \
+`write_file` (singular) is for a SINGLE file: editing or adding one file after \
+the initial multi-file batch already exists via `write_files`. An N-file \
+from-scratch task should therefore cost ONE write turn, not N.
 - If one call in a batch fails, you still receive results for every other call \
 plus the failure — use them together to decide the next step.
 - Every tool call's arguments MUST validate against that tool's provided JSON \

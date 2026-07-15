@@ -87,7 +87,7 @@ impl ToolExecutor for WriteFilesTool {
             "type": "function",
             "function": {
                 "name": WRITE_FILES_TOOL_NAME,
-                "description": "Create or overwrite MULTIPLE files in a single call. Prefer this over several separate write_file calls when scaffolding independent files — it writes them all in one turn. Parent directories are created automatically. Each path must be inside the working directory.",
+                "description": "THE way to create two or more new files: pass every file's COMPLETE final content in ONE call and they are all written in a single turn. This is not a scaffolding or placeholder step — do not follow it with individual write_file calls to fill in or rewrite the same files; that costs as many turns as never using write_files. If you are about to emit two or more write_file calls in the same task, stop and use this tool instead with all of them included. Parent directories are created automatically. Each path must be inside the working directory.",
                 "parameters": {
                     "type": "object",
                     "properties": {
