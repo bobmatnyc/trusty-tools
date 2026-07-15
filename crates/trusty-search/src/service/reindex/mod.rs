@@ -101,6 +101,10 @@ pub(crate) use batch::inprocess_embedder_ever_ready_for_tests;
 pub(crate) use batch::reset_inprocess_embedder_flag_for_tests;
 #[cfg(test)]
 pub(crate) use guard::ReindexTerminationGuard;
+// Issue #2730: deterministic-rendezvous spawn seam for tests — await the task
+// instead of polling `progress.status` on a wall-clock budget.
+#[cfg(test)]
+pub(crate) use orchestrator::spawn_reindex_awaitable;
 #[cfg(test)]
 pub(crate) use semaphore::{
     reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH, MAX_PARALLEL_BACKGROUND_REINDEXES,

@@ -58,17 +58,6 @@ fn chunk(file: &str, id: &str) -> RawChunk {
     }
 }
 
-/// Wait up to 5s for `progress` to reach a terminal status.
-async fn wait_for_terminal(progress: &ReindexProgress) {
-    for _ in 0..100 {
-        let status = progress.status.load();
-        if status == ReindexStatus::Failed || status == ReindexStatus::Complete {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
-
 /// THE core #2178 regression: an in-memory handle whose `root_path` diverges
 /// from both the corpus's own persisted `indexed_root` AND the durably
 /// persisted `indexes.toml` `root_path` must NEVER be trusted enough to walk
@@ -154,8 +143,15 @@ async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
     .expect("persist indexes.toml entry");
 
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-    wait_for_terminal(&progress).await;
+    // Issue #2730: await the reindex task's JoinHandle rather than polling
+    // `progress.status` on a wall-clock budget. Under load the task queues on
+    // the global 2-permit interactive semaphore and is CPU-starved, so a fixed
+    // poll could time out with the status still `Running`. Awaiting is a
+    // deterministic rendezvous — `run_reindex` has set a terminal status before
+    // the handle resolves.
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
 
     assert_eq!(
         progress.status.load(),
@@ -245,8 +241,11 @@ async fn reindex_accepts_root_move_that_matches_persisted_config() {
     .expect("persist indexes.toml entry");
 
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-    wait_for_terminal(&progress).await;
+    // Issue #2730: deterministic rendezvous — await the task instead of polling
+    // status on a wall-clock budget (see the hijack test above).
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
 
     assert_eq!(
         progress.status.load(),
