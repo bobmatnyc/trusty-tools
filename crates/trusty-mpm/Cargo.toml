@@ -211,6 +211,9 @@ dirs.workspace = true
 tempfile.workspace = true
 sha2.workspace = true
 regex.workspace = true
+# #2734: quote-aware shell word-splitting for the PM Bash guard's git-argv
+# parsing (`src/bin/tm/commands/pm_guard_bash/shell_lex.rs`).
+shlex.workspace = true
 jsonwebtoken.workspace = true
 utoipa.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
