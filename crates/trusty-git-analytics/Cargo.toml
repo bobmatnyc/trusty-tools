@@ -116,7 +116,7 @@ bedrock = ["trusty-common/bedrock-client"]
 
 [dev-dependencies]
 # HTTP mocking for async reqwest tests
-wiremock = "0.6"
+wiremock = { workspace = true }
 # Statistical benchmarking
 criterion = { workspace = true }
 # Capture tracing events in tests (used by ticket_regex warn-log assertions)

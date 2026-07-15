@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use trusty_slack::api::client::BaseClient;
-use trusty_slack::server::{run_stdio, AppState};
+use trusty_channels::slack::api::client::BaseClient;
+use trusty_channels::slack::server::{run_stdio, AppState};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {

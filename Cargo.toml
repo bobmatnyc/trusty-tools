@@ -185,6 +185,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads. Used by bug-report token tests.
 serial_test = "3"
+# wiremock: async HTTP mock server for hermetic reqwest-based client tests
+# (e.g. trusty-channels' 200/401/429 Slack Web API paths). Also pinned locally by
+# trusty-git-analytics; this shared entry is the canonical version.
+wiremock = "0.6"
 
 # ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + trusty-agents + tga) ──
 # Versions pinned to what is already resolved in Cargo.lock (1.8.17 / 1.131.0).
