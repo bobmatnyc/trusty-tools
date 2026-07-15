@@ -151,6 +151,11 @@ walkdir = "2"
 ignore = "0.4"
 globset = "0.4"
 regex = "1"
+# POSIX shell word-splitting for the PM Bash guard's git-argv parsing (#2734):
+# quote-aware tokenization so quoted `-m` message content is not mistaken for
+# shell operators, and git global flags (`-C <path>`, `-c <kv>`, …) are skipped
+# to resolve the real subcommand.
+shlex = "1.3"
 gray_matter = "0.2"
 notify = "6"
 # Process / system introspection (RSS, CPU sampling for daemon /health).

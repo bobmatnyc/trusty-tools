@@ -63,7 +63,8 @@ pub(super) fn sed_is_readonly(segment: &str) -> bool {
 /// flag alone.
 /// What: mirrors [`sed_is_readonly`]'s short-circuit shape for the
 /// awk-specific checks: [`has_unbalanced_quotes`], [`awk_has_inplace_flag`],
-/// [`awk_has_external_script_flag`], and [`awk_program_has_system_call`].
+/// [`awk_has_external_script_flag`], [`awk_program_has_system_call`], and
+/// [`awk_program_has_quoted_pipe_or_redirect`].
 /// Test: `awk_is_readonly_allows_stream_filters`,
 /// `awk_is_readonly_denies_in_place`, `awk_is_readonly_denies_external_script`,
 /// `awk_is_readonly_denies_system_call`, `awk_is_readonly_denies_coprocess`.
@@ -78,6 +79,9 @@ pub(super) fn awk_is_readonly(segment: &str) -> bool {
         return false;
     }
     if awk_program_has_system_call(segment) {
+        return false;
+    }
+    if awk_program_has_quoted_pipe_or_redirect(segment) {
         return false;
     }
     true
@@ -456,6 +460,40 @@ fn awk_program_has_system_call(segment: &str) -> bool {
     false
 }
 
+/// Whether an `awk`-family segment has a `|` or `>` INSIDE a quoted region — an
+/// in-program co-process pipe or an output redirect.
+///
+/// Why (issue #2734): the outer guard scanners (`super::split_shell_segments`,
+/// `super::has_file_write_redirection`) became quote-aware to stop mis-reading a
+/// PM's quoted `-m` message content as shell syntax. That removed the
+/// *incidental* protection they used to give awk: a co-process
+/// `awk 'BEGIN{print | "sort"}'` no longer gets its quoted `|` split off into an
+/// unbalanced fragment, and an in-program `awk '{print > "f"}'` file write no
+/// longer trips the quote-unaware `>` scan. Both are full shell/file-write
+/// escapes needing no `-i` and no shell-level redirect, so awk must detect them
+/// itself. A `|`/`>` that is *unquoted* is a shell-level pipe/redirect handled
+/// upstream (the read-only `git log | awk '{print $1}'` pipeline splits there),
+/// so only *quoted* occurrences are this module's concern.
+/// What: a single left-to-right scan tracking single-/double-quote state (the
+/// same mutually-exclusive shape as [`has_unbalanced_quotes`]); returns `true`
+/// on the first `|` or `>` seen while inside either quote kind. Conservatively
+/// also flags an in-program `>` comparison (`awk '$1 > 5'`) — matching the prior
+/// quote-unaware behaviour, which already denied it — rather than parse awk.
+/// Test: `awk_is_readonly_denies_coprocess`, `awk_is_readonly_denies_in_program_redirect`.
+fn awk_program_has_quoted_pipe_or_redirect(segment: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    for b in segment.bytes() {
+        match b {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'|' | b'>' if in_single || in_double => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,25 +654,33 @@ mod tests {
 
     #[test]
     fn awk_is_readonly_denies_coprocess() {
-        // A co-process `|` inside a quoted awk program is itself a bare `|`
-        // to the (quote-unaware) upstream segment splitter, so it gets cut
-        // in half. Exercise `awk_is_readonly` on the resulting fragment —
-        // the shape `evaluate_bash_command` actually hands it — rather than
-        // the pre-split whole command, which has balanced quotes and would
-        // pass this check by construction.
+        // A co-process `|` inside a quoted awk program is a full shell escape
+        // (`print | "cmd"`, `"cmd" | getline`). Since #2734 the upstream
+        // splitter is quote-aware and no longer cuts the quoted `|` into an
+        // unbalanced fragment, so `awk_program_has_quoted_pipe_or_redirect`
+        // must detect the in-quote `|` directly on the whole segment.
         for cmd in [
             r#"awk 'BEGIN{print | "sort"}'"#,
             r#"awk 'BEGIN{"date" | getline}'"#,
         ] {
-            for fragment in super::super::split_shell_segments(cmd) {
-                let trimmed = fragment.trim();
-                if trimmed.starts_with("awk") {
-                    assert!(
-                        !awk_is_readonly(trimmed),
-                        "expected deny for split co-process fragment: {trimmed:?} (from {cmd})"
-                    );
-                }
-            }
+            assert!(
+                !awk_is_readonly(cmd),
+                "expected deny for co-process awk: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn awk_is_readonly_denies_in_program_redirect() {
+        // An in-program `print > "file"` / `>>` writes a file with no `-i` and
+        // no shell-level `>`; the now quote-aware outer redirection scan skips
+        // the quoted `>`, so awk must catch it itself (#2734).
+        for cmd in [
+            r#"awk '{print > "out.txt"}'"#,
+            r#"awk '{print $0 >> "log"}'"#,
+            r#"awk '{printf "%s", $1 > "f"}'"#,
+        ] {
+            assert!(!awk_is_readonly(cmd), "expected deny (in-program >): {cmd}");
         }
     }
 
