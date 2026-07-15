@@ -30,6 +30,19 @@ pub const SLACK_PROVIDER: &str = "slack";
 /// in the process env or `.env.local` is honoured by `resolve_key`.
 pub const SLACK_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 
+/// Provider identifier for the Slack **user** token. Slack's `search.messages`
+/// (and other user-scope-only methods) reject a bot token, so the client
+/// resolves a second, independent token under this key. Kept separate from
+/// [`SLACK_PROVIDER`] so a missing user token never disables bot-token tools.
+/// Keep it in sync with the `"slack-user"` arm of
+/// `credentials::resolver::env_var_for` (issue #2640).
+pub const SLACK_USER_PROVIDER: &str = "slack-user";
+
+/// Canonical environment variable holding the Slack user token. Same name the
+/// credential resolver's `env_var_for("slack-user")` returns, so setting it in
+/// the process env or `.env.local` is honoured by `resolve_key`.
+pub const SLACK_USER_TOKEN_ENV: &str = "SLACK_USER_TOKEN";
+
 /// Maximum number of automatic retries after a `429 Too Many Requests` before
 /// giving up with [`crate::slack::api::error::SlackError::RateLimited`]. Bounds
 /// the worst-case latency of a rate-limited call.
