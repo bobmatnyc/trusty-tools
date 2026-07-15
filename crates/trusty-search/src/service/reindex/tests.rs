@@ -55,15 +55,10 @@ async fn reindex_honours_include_paths_filter() {
         )),
     });
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    // Wait up to 10s for completion.
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    // Issue #2730: deterministic rendezvous — await the task instead of polling.
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
     assert_eq!(
         progress.total_files.load(Ordering::Acquire),
@@ -141,14 +136,9 @@ async fn reindex_honours_path_filter() {
         )),
     });
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
     assert_eq!(
         progress.total_files.load(Ordering::Acquire),
@@ -200,15 +190,10 @@ async fn reindex_walks_directory_and_emits_events() {
         root.clone(),
     ));
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle, progress.clone(), false);
-
-    // Wait up to 10s for completion.
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    // Issue #2730: deterministic rendezvous — await the task instead of polling.
+    spawn_reindex_awaitable(handle, progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
     assert_eq!(progress.total_files.load(Ordering::Acquire), 2);
     assert_eq!(progress.indexed.load(Ordering::Acquire), 2);
@@ -306,13 +291,9 @@ async fn reindex_persists_chunks_end_to_end() {
 
     // ----- First reindex: cold cache, chunks must be produced. -----
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     // Walker yields exactly one file (`crates/foo/src/lib.rs`).
@@ -408,13 +389,9 @@ async fn reindex_persists_chunks_end_to_end() {
     // intentionally bypassed. Pin this behaviour so the next bisection
     // doesn't waste another round chasing a non-existent walker bug.
     let progress2 = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress2.clone(), false);
-    for _ in 0..100 {
-        if progress2.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress2.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress2.status.load(), ReindexStatus::Complete);
     assert_eq!(
         progress2.total_files.load(Ordering::Acquire),
@@ -472,14 +449,9 @@ async fn context_embedding_populated_after_reindex() {
         root.clone(),
     ));
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     let ctx = handle.context_embedding.read().await.clone();
@@ -566,20 +538,14 @@ async fn reindex_marks_failed_on_zero_vectors_and_preserves_corpus() {
     handle_inner.defer_embed = false;
     let handle = Arc::new(handle_inner);
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
+    // Issue #2730: await the task's completion (deterministic rendezvous)
+    // rather than polling `progress.status` on a wall-clock budget.
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
 
-    // Wait for a terminal state (Failed expected).
-    let mut terminal = ReindexStatus::Running;
-    for _ in 0..100 {
-        let s = progress.status.load();
-        if s != ReindexStatus::Running {
-            terminal = s;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
     assert_eq!(
-        terminal,
+        progress.status.load(),
         ReindexStatus::Failed,
         "embed failure must mark the reindex Failed, not Complete"
     );
@@ -693,15 +659,13 @@ async fn defer_embed_semantic_stage_not_ready_before_background_pass_completes()
         "precondition: defer_embed must default true"
     );
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    // Wait for the fast pass to complete (lexical/BM25/KG done, embedding deferred).
-    for _ in 0..200 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    // Issue #2730: await the fast pass deterministically. `run_reindex` returns
+    // once the fast pass has set `Complete` and spawned the deferred embed pass;
+    // the deferred pass runs as a separate task (polled for below). This
+    // replaces a wall-clock poll that could time out under load.
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     // Issue #2211: right after the fast pass, the background embed pass has
@@ -753,14 +717,9 @@ async fn context_embedding_none_when_no_metadata() {
         root.clone(),
     ));
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
     assert!(handle.context_embedding.read().await.is_none());
     assert!(handle.context_summary.read().await.is_none());
@@ -867,14 +826,9 @@ async fn stage_1_completes_and_search_works_before_embedding() {
     // search capabilities must advertise the lexical lane.
     let handle = make_handle_with_flag("stage1-test", root.clone(), false);
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..200 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     // Lexical lane must be Ready (and so should the others — Stage 1
@@ -930,13 +884,9 @@ async fn lexical_only_index_never_runs_stage_2() {
     );
 
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-    for _ in 0..200 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     // The reindex finished but semantic + graph must STILL be Skipped.
@@ -1017,13 +967,9 @@ async fn skip_kg_index_never_runs_phase3() {
     );
 
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-    for _ in 0..200 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     // After reindex: graph must STILL be Skipped.
@@ -1110,14 +1056,9 @@ async fn walk_diagnostics_populated_after_reindex() {
 
     let handle = make_handle_with_flag("diag-test", root.clone(), false);
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     let diag = handle.walk_diagnostics.read().await.clone();
@@ -1155,14 +1096,9 @@ async fn walk_diagnostics_error_set_when_zero_files() {
 
     let handle = make_handle_with_flag("diag-zero-test", root.clone(), false);
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..100 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     let diag = handle.walk_diagnostics.read().await.clone();
@@ -1787,14 +1723,9 @@ async fn last_indexed_stamped_after_reindex() {
 
     let handle = make_handle_with_flag("li-stamp-test", root, false);
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress.clone(), false);
-
-    for _ in 0..200 {
-        if progress.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress.status.load(), ReindexStatus::Complete);
 
     let ts = handle.last_indexed_at.read().await.clone();
@@ -1837,13 +1768,9 @@ async fn lexical_chunks_reports_corpus_total_not_pass_count() {
 
     // ── First reindex: commits real chunks ────────────────────────────────
     let progress1 = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress1.clone(), false);
-    for _ in 0..200 {
-        if progress1.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress1.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress1.status.load(), ReindexStatus::Complete);
     let chunks_pass1 = progress1.total_chunks.load(Ordering::Acquire);
     assert!(
@@ -1861,13 +1788,9 @@ async fn lexical_chunks_reports_corpus_total_not_pass_count() {
 
     // ── Second reindex: no-change (all files hash-skipped, 0 new chunks) ─
     let progress2 = Arc::new(ReindexProgress::new());
-    spawn_reindex(handle.clone(), progress2.clone(), false);
-    for _ in 0..200 {
-        if progress2.status.load() == ReindexStatus::Complete {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    spawn_reindex_awaitable(handle.clone(), progress2.clone(), false)
+        .await
+        .expect("reindex task must not panic");
     assert_eq!(progress2.status.load(), ReindexStatus::Complete);
     let chunks_pass2 = progress2.total_chunks.load(Ordering::Acquire);
     assert_eq!(

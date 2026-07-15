@@ -37,6 +37,35 @@ pub fn spawn_reindex(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>, f
     spawn_reindex_with_cleanup(handle, progress, force, None, None, None, true, None);
 }
 
+/// Test-only variant of [`spawn_reindex`] that hands back the task's
+/// `JoinHandle` so tests can `.await` deterministic completion.
+///
+/// Why: production [`spawn_reindex`] is fire-and-forget (returns `()`), so
+/// tests historically polled `progress.status` on a fixed wall-clock budget
+/// (`for _ in 0..N { sleep(ms) }`). Under a loaded host the reindex task first
+/// queues on the process-global 2-permit interactive semaphore
+/// (`semaphore::reindex_semaphore`) and is then CPU-starved, so that budget can
+/// elapse *before* the task reaches a terminal status — surfacing as spurious
+/// `left: Running, right: Complete/Failed` assertion failures (issue #2730).
+/// Awaiting the real `JoinHandle` is a rendezvous with no timing assumption.
+/// What: spawns exactly the same task as [`spawn_reindex`] (interactive
+/// priority, no cleanup / aborted maps / embedderd pid slot / quarantine) but
+/// returns the `tokio::task::JoinHandle`. `run_reindex` always sets a terminal
+/// status (`Complete`/`Failed`/`AbortedMemory`) and flushes every side effect
+/// (prune, corpus swap, terminal SSE event, stage marks) before returning, so
+/// once the handle resolves the status and all observable state are final.
+/// Test: `root_hijack_tests` and every terminal-wait test in `reindex::tests`.
+#[cfg(test)]
+pub(crate) fn spawn_reindex_awaitable(
+    handle: Arc<IndexHandle>,
+    progress: Arc<ReindexProgress>,
+    force: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(super::runner::run_reindex(
+        handle, progress, force, None, None, None, true, None,
+    ))
+}
+
 /// Walk every configured subtree under `handle.root_path`, apply repo-config
 /// filters (`exclude_globs`, `extensions`), and de-duplicate.
 ///
