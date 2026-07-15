@@ -435,28 +435,57 @@ fn probe_with_gated_slow(
 /// volumes are concurrently exhausting the deadline — NOT absolute speed.
 ///
 /// What: two FAST volumes (report immediately, joined before the deadline) and
-/// THREE SLOW volumes (gated — never report before the deadline). Deadline 50 ms.
-/// Assert, all load-IMMUNE (they depend on WHICH volumes reported — deterministic
-/// via the gate — not on wall-clock elapsed):
-///   - no fast volume is inaccessible (not starved);
-///   - every slow volume is inaccessible;
-///   - exactly the slow volumes are inaccessible;
-///   - `PROBE_THREAD_FAILURES` increased by exactly the slow-volume count — with
-///     THREE unreported volumes handled in a SINGLE deadline window, proving the
-///     shared-deadline (ONE-deadline-not-N) invariant that the earlier flaky
-///     `elapsed < 2 × deadline` upper bound was standing in for;
-///   - a load-IMMUNE LOWER bound (`elapsed >= deadline / 2`): the collector must
-///     actually honor the deadline for unreported volumes rather than giving up
-///     early. Concurrent load can only push elapsed HIGHER, never below the
-///     deadline, so unlike the removed upper bound this can never flake under
-///     load (issue #2703).
+/// THREE SLOW volumes (gated — never report before the deadline). Base deadline
+/// 150 ms (see the rationale comment at the `deadline` binding in the test body
+/// for why 150 ms rather than the originally-flaky 50 ms). Assert:
+///   - no fast volume is inaccessible (not starved) — deterministic via the gate,
+///     load-IMMUNE;
+///   - every slow volume is inaccessible — deterministic via the gate, load-IMMUNE;
+///   - exactly the slow volumes are inaccessible — deterministic, load-IMMUNE;
+///   - `PROBE_THREAD_FAILURES` increased by exactly the slow-volume count —
+///     deterministic, load-IMMUNE, but by itself does NOT discriminate a
+///     one-deadline design from an N-sequential-deadlines regression: both
+///     eventually count all 3 slow volumes as failures, they just take different
+///     WALL-CLOCK TIME to get there — which is exactly what the two elapsed-time
+///     bounds below check;
+///   - a LOWER bound (`elapsed >= deadline / 2`, i.e. >= 75 ms): the collector
+///     must actually honor the deadline for unreported volumes rather than
+///     giving up early. Concurrent load can only push elapsed HIGHER, never
+///     below the deadline, so this bound alone can never flake under load;
+///   - an UPPER bound (`elapsed < deadline * slow.len() as u32`, i.e. < 450 ms):
+///     the assertion that actually DISCRIMINATES the shared-deadline design from
+///     a reintroduced N-sequential-deadlines regression. A one-shared-deadline
+///     collector (the correct design) waits ≈1×deadline (≈150 ms) regardless of
+///     how many volumes are unreported, so 450 ms leaves ample scheduler-jitter
+///     margin (≈3×). A regression to the old per-channel *sequential* design
+///     would instead wait ≈N×deadline = 3×150 ms = 450 ms or more for the 3 slow
+///     volumes — this bound catches that because a genuine regression meets or
+///     exceeds the very threshold the one-deadline design comfortably clears.
+///     Scaling the bound by `slow.len()` (not a fixed constant) is what keeps it
+///     load-tolerant without being defeated by adding more slow volumes: the
+///     original flaky bound was a fixed `2 × deadline` sized for N=1 at a 50 ms
+///     base deadline (100 ms bound, issue #2703: 137 ms observed); even a
+///     deadline-scaled `1 × deadline × N` bound at the same 50 ms base deadline
+///     (150 ms) still flaked under mere default-test-harness parallelism
+///     (152-180 ms observed, no external load) — the 150 ms base deadline
+///     widens absolute headroom while preserving the same discriminating
+///     formula.
 ///
 /// Note: `serial` because this test reads/writes `PROBE_THREAD_FAILURES`.
 /// Test: this test.
 #[test]
 #[serial_test::serial]
 fn probe_all_volumes_multi_volume_no_fast_starvation() {
-    let deadline = Duration::from_millis(50);
+    // 150 ms (not 50 ms): empirically, even default-parallelism test-harness
+    // contention alone (other tests' threads competing for CPU in the same
+    // binary run, no external load) pushed a correct one-shared-deadline
+    // collector's elapsed time past a 150 ms upper bound derived from a 50 ms
+    // base deadline (observed 152-180 ms in 50 repeated runs). Scaling the base
+    // deadline to 150 ms keeps the SAME discriminating formula
+    // (`deadline * slow.len()`) but gives ample absolute headroom over realistic
+    // scheduling jitter while a genuine N-sequential-deadlines regression would
+    // still be caught at ~3x this deadline (450 ms).
+    let deadline = Duration::from_millis(150);
 
     let fast = vec![
         PathBuf::from("/tmp/trusty-723-fast-a"),
@@ -502,10 +531,12 @@ fn probe_all_volumes_multi_volume_no_fast_starvation() {
         "exactly the slow volumes must be inaccessible; got={inaccessible:?}"
     );
 
-    // ── One-deadline invariant: every unreported volume increments the counter
-    //    exactly once. THREE unreported volumes handled in a single deadline
-    //    window is the shared-deadline property (structurally: the collector
-    //    loops on a single shared `end` and breaks on the first timeout).
+    // ── Failure-count check: every unreported volume increments the counter
+    //    exactly once. This alone does NOT distinguish a one-shared-deadline
+    //    collector from a reintroduced N-sequential-deadlines regression — both
+    //    eventually count all 3 slow volumes as failures. Discriminating between
+    //    the two designs is what the upper-bound elapsed-time assertion below is
+    //    for.
     assert_eq!(
         after_failures,
         before_failures + slow.len(),
@@ -515,12 +546,29 @@ fn probe_all_volumes_multi_volume_no_fast_starvation() {
 
     // ── Load-IMMUNE lower bound: the collector must actually wait ~one deadline
     //    for the unreported volumes rather than giving up early. Load can only
-    //    raise elapsed, never lower it below the deadline, so this replaces the
-    //    old load-SENSITIVE `elapsed < 2 × deadline` upper bound (issue #2703).
+    //    raise elapsed, never lower it below the deadline, so this bound alone
+    //    can never flake under load.
     assert!(
         elapsed >= deadline / 2,
         "collector must honor the shared deadline for unreported volumes; \
          elapsed={elapsed:?} deadline={deadline:?}"
+    );
+
+    // ── Discriminating, load-tolerant upper bound: this is what actually proves
+    //    the shared-deadline (ONE-deadline-not-N) invariant. A one-shared-deadline
+    //    collector waits ≈1×deadline (≈50 ms) for the 3 slow volumes regardless of
+    //    N; a regression to the old per-channel *sequential* design would instead
+    //    wait ≈N×deadline (3×50 ms = 150 ms) or more. Scaling by `slow.len()`
+    //    (rather than a fixed constant sized for N=1, which is what flaked under
+    //    load in issue #2703 at 137 ms vs a 100 ms bound) gives a regression-catch
+    //    threshold with ample scheduler-jitter margin (≈3× the expected ≈50 ms).
+    let upper_bound = deadline * (slow.len() as u32);
+    assert!(
+        elapsed < upper_bound,
+        "total elapsed {elapsed:?} must be < {upper_bound:?} (deadline × slow-volume \
+         count) — a one-shared-deadline collector waits ≈1×deadline regardless of N; \
+         elapsed at or above N×deadline indicates a regression to per-volume \
+         sequential deadlines"
     );
 }
 
