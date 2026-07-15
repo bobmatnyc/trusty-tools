@@ -481,6 +481,94 @@ async fn backfill_complexity_updates_only_null_rows() {
     assert_eq!(unchanged, Some(3), "already-scored row must be unchanged");
 }
 
+/// Why: regression guard for issue #2719. The Tier-0.5 external-source pass now
+/// runs with bounded concurrency instead of a serial per-commit loop; the
+/// dedupe-before-spawn step must still fetch each referenced ticket exactly once
+/// (so a slow source cannot stall the run), and the resolved signal must land on
+/// EVERY commit that references that ticket.
+/// What: seed three commits that all reference the same JIRA key `PROJ-100`,
+/// stand up a wiremock JIRA server that permits exactly one issue fetch
+/// (`.expect(1)`), run the pipeline through `run_with_engine_and_resolver`, then
+/// assert all three commits carry the `external_source` / `bug_fix` verdict. If
+/// the concurrent path fired a duplicate in-flight request the mock's `expect(1)`
+/// would fail on drop.
+/// Test: in-memory DB + wiremock; no LLM tier.
+#[tokio::test]
+async fn pipeline_external_sources_dedupe_and_apply() {
+    use crate::classify::sources::{
+        ExternalSourceResolver, JiraFieldMappings, JiraSourceConfig, SourceConfig,
+    };
+    use std::collections::HashMap;
+
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "key": "PROJ-100",
+        "fields": { "issuetype": {"name": "Bug"}, "labels": [], "components": [] }
+    });
+    Mock::given(method("GET"))
+        .and(path("/rest/api/3/issue/PROJ-100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        // Exactly one fetch is allowed: three commits share PROJ-100, so the
+        // dedupe-before-spawn step must collapse them to a single request.
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    unsafe { std::env::set_var("JIRA_TOKEN_2719", "test-token") };
+
+    let mut issue_type_map = HashMap::new();
+    issue_type_map.insert("Bug".to_string(), "bug_fix".to_string());
+    let jira = JiraSourceConfig {
+        base_url: server.uri(),
+        token_env: "JIRA_TOKEN_2719".to_string(),
+        username: None,
+        email_env: None,
+        project_keys: vec![],
+        field_mappings: JiraFieldMappings {
+            issue_type: issue_type_map,
+            labels: HashMap::new(),
+            components: HashMap::new(),
+        },
+    };
+    let resolver = ExternalSourceResolver::new(&[SourceConfig::Jira(jira)])
+        .with_jira_base_url(0, server.uri());
+
+    let mut db = Database::open_in_memory().expect("db");
+    for sha in ["sha-a", "sha-b", "sha-c"] {
+        insert_commit(&db, sha, "PROJ-100 fix the crash");
+    }
+
+    let pipeline = ClassificationPipeline::new(Config::default());
+    let engine = ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+        .expect("engine");
+    pipeline
+        .run_with_engine_and_resolver(&mut db, engine, Some(resolver))
+        .await
+        .expect("run with resolver");
+
+    // All three commits must carry the external-source verdict.
+    for sha in ["sha-a", "sha-b", "sha-c"] {
+        let (category, method): (String, String) = db
+            .connection()
+            .query_row(
+                "SELECT cl.category, cl.method FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = ?1",
+                params![sha],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_else(|e| panic!("query {sha}: {e}"));
+        assert_eq!(category, "bug_fix", "{sha} must adopt the JIRA Bug mapping");
+        assert_eq!(
+            method, "external_source",
+            "{sha} must be tagged as an external-source verdict"
+        );
+    }
+
+    unsafe { std::env::remove_var("JIRA_TOKEN_2719") };
+    // Dropping the server asserts `.expect(1)` — exactly one JIRA fetch.
+    drop(server);
+}
+
 /// Why: regression guard for the source-aware LLM model default (bug fix
 /// 2.3.1). When `llm.model` is absent, `build_engine` must pick the
 /// default model for the configured source rather than always falling back
