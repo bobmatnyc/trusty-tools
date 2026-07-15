@@ -62,6 +62,12 @@ Ask: "I didn't find an existing issue for [topic]. Create one, or did you
 mean a different one?" Auto-create only on explicit "create a
 ticket/issue for X."
 
+When a GitHub issue *is* created, apply the shipped trusty-mpm defaults:
+`--assignee @me --label trusty-mpm` (create the label first if missing:
+`gh label create trusty-mpm --description "Created/managed by a trusty-mpm
+session" --color 8250df`). This is multi-harness support — the assignee +
+`trusty-mpm` label mark which issues a trusty-mpm session owns.
+
 ## Ticket-Driven Development Protocol (TkDD)
 
 When a ticket/issue reference is detected (an ID pattern, a URL, "work on

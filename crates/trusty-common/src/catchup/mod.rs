@@ -17,6 +17,7 @@ pub mod mpm_registry;
 pub mod mpm_session;
 pub mod palace;
 pub mod session_finder;
+pub mod session_log;
 pub mod state;
 
 use std::path::{Path, PathBuf};

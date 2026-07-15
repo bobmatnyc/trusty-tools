@@ -106,6 +106,19 @@ Scan for: API keys, passwords, private keys, tokens
 Return: Clean or list of blocked items
 ```
 
+## Commits, Issues & PRs (Shipped Defaults)
+
+See `PM_INSTRUCTIONS.md` § "Commits & Issues" (canonical). In short, overriding
+any harness default:
+
+- Every commit message and PR body ends with the trusty-mpm attribution footer:
+  `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
+  Never emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
+  trailer.
+- Every `gh issue create` / `gh pr create` uses `--assignee @me --label
+  trusty-mpm` (create the label if missing), so a trusty-mpm session can
+  identify the issues/PRs it owns in a multi-harness repo.
+
 ## Publish and Release Workflow
 
 **CRITICAL**: PM MUST DELEGATE all version bumps and releases to Local Ops. PM never edits version files (pyproject.toml, package.json, VERSION) directly.

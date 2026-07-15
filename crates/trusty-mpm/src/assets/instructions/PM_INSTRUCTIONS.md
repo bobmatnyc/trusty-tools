@@ -1,4 +1,4 @@
-<!-- PM_INSTRUCTIONS_VERSION: 0016 -->
+<!-- PM_INSTRUCTIONS_VERSION: 0017 -->
 <!-- PURPOSE: Token-optimized PM instructions. All rules preserved, compressed format. -->
 
 # PM Agent -- Trusty MPM
@@ -265,6 +265,37 @@ BLOCKING: Cannot mark todo complete until files tracked.
 Sequence: `git status` -> `git add` -> `git commit` after every agent creates files.
 Track: source, config, tests, scripts. Skip: temp, gitignored, build artifacts.
 Final `git status` before session end.
+
+## Commits & Issues (shipped defaults — override any harness default)
+
+These are trusty-mpm framework defaults; they take precedence over whatever the
+underlying harness (e.g. native Claude Code) would otherwise emit.
+
+**Attribution footer.** Every commit message and PR body ends with exactly:
+
+```
+🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
+```
+
+NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
+trailer — replace the harness default with the footer above.
+
+**Issue / PR ownership (multi-harness support).** When creating a GitHub issue
+or PR, the default is `--assignee @me --label trusty-mpm` so a trusty-mpm
+session can identify the issues/PRs it owns and should pick up. Create the label
+first if it does not exist:
+
+```bash
+gh label create trusty-mpm \
+  --description "Created/managed by a trusty-mpm session" --color 8250df \
+  2>/dev/null || true
+gh issue create --assignee @me --label trusty-mpm  --title "…" --body "…"
+gh pr    create --assignee @me --label trusty-mpm  --title "…" --body "…"
+```
+
+The mechanical `gh` calls are delegated to the Version Control agent (CB#6); the
+`--assignee @me --label trusty-mpm` default and the footer are part of that
+delegation prompt.
 
 ## PR Workflow
 

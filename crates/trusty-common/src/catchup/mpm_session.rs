@@ -12,7 +12,7 @@
 //!
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context as _;
 use serde::Deserialize;
@@ -73,9 +73,11 @@ pub struct ClaudeMpmSession {
 ///
 /// Why: callers (the resume bridge) want a single "best guess" session for a
 /// given project without iterating all files themselves.
-/// What: reads `<project_dir>/.claude-mpm/sessions/LATEST-SESSION.txt`; if it
-/// contains a filename, loads that file. Otherwise falls back to the session-*.json
-/// file with the most-recent mtime. Returns `Ok(None)` when no sessions exist.
+/// What: resolves the latest snapshot in `<project_dir>/.claude-mpm/sessions/`
+/// via the shared [`session_log`] fallback chain — the append-only
+/// `sessions-log.jsonl` first, then the legacy `LATEST-SESSION.txt` pointer,
+/// then the newest `session-*.json` by mtime — and parses it. Returns `Ok(None)`
+/// when no sessions exist.
 /// Test: `load_latest_uses_pointer`, `load_latest_falls_back_to_newest_mtime`.
 ///
 // CUTOVER BRIDGE — remove post-migration (#1762)
@@ -83,41 +85,10 @@ pub fn load_latest_claude_mpm_session(
     project_dir: &Path,
 ) -> anyhow::Result<Option<ClaudeMpmSession>> {
     let sessions_dir = project_dir.join(".claude-mpm").join("sessions");
-    if !sessions_dir.is_dir() {
-        return Ok(None);
+    match crate::catchup::session_log::resolve_latest_snapshot(&sessions_dir, "json") {
+        Some(path) => Ok(Some(parse_session_file(&path)?)),
+        None => Ok(None),
     }
-
-    // Try the LATEST-SESSION.txt pointer first.
-    let pointer = sessions_dir.join("LATEST-SESSION.txt");
-    if let Ok(content) = std::fs::read_to_string(&pointer) {
-        // The pointer may be a bare filename OR a multi-line human-readable text;
-        // extract the first token that ends with ".json".
-        let candidate = content
-            .lines()
-            .find(|l| l.trim().ends_with(".json"))
-            .map(|l| l.trim().to_owned());
-        if let Some(fname) = candidate {
-            let path = sessions_dir.join(&fname);
-            if path.exists() {
-                let session = parse_session_file(&path)?;
-                return Ok(Some(session));
-            }
-        }
-        // Some pointer files contain just the filename on the first line.
-        let first_line = content.lines().next().unwrap_or("").trim().to_owned();
-        if !first_line.is_empty() {
-            let path = sessions_dir.join(&first_line);
-            if path.exists() && first_line.ends_with(".json") {
-                let session = parse_session_file(&path)?;
-                return Ok(Some(session));
-            }
-        }
-    }
-
-    // Fallback: pick the session-*.json file with the newest mtime.
-    newest_session_file(&sessions_dir)
-        .map(|opt| opt.map(|p| parse_session_file(&p)).transpose())
-        .unwrap_or(Ok(None))
 }
 
 /// Load all paused claude-mpm sessions for a project directory.
@@ -187,33 +158,11 @@ fn parse_session_file(path: &Path) -> anyhow::Result<ClaudeMpmSession> {
         .with_context(|| format!("parsing session file {}", path.display()))
 }
 
-/// Return the `session-*.json` file with the most-recent mtime, if any.
-///
-/// Why: provides the fallback discovery path when no LATEST-SESSION.txt pointer
-/// is available.
-/// What: reads the directory, filters to `session-*.json` filenames, and picks
-/// the entry with the greatest `modified()` timestamp. Returns `None` when none
-/// exist.
-/// Test: covered by `load_latest_falls_back_to_newest_mtime`.
-///
-// CUTOVER BRIDGE — remove post-migration (#1762)
-fn newest_session_file(sessions_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let best = std::fs::read_dir(sessions_dir)
-        .with_context(|| format!("reading {}", sessions_dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().into_string().unwrap_or_default();
-            name.starts_with("session-") && name.ends_with(".json")
-        })
-        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
-
-    Ok(best.map(|e| e.path()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn write_session(dir: &Path, filename: &str, json: &str) -> PathBuf {

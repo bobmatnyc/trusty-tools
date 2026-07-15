@@ -44,9 +44,17 @@ Sessions are stored **project-local**, not under the user's home directory:
 
 ```
 <project-root>/.trusty-mpm/sessions/
-├── LATEST-SESSION.txt          # pointer to the most recent session
+├── sessions-log.jsonl          # append-only per-session pause/resume log
 └── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot
 ```
+
+Pausing **appends** one `pause` line per snapshot to `sessions-log.jsonl`
+(`{"session_id","event","snapshot","timestamp"}`) instead of overwriting a
+single global pointer — so concurrent `tm` sessions in the same project never
+clobber each other's resume target. Resume resolves the latest snapshot for the
+current session id from the log (latest-overall = last `pause` line), with the
+legacy `LATEST-SESSION.txt` pointer and an mtime scan of `session-*.md` as
+back-compat fallbacks. `LATEST-SESSION.txt` is **no longer written**.
 
 Add `.trusty-mpm/sessions/` to `.gitignore` — this is machine-local state,
 not a deliverable.
@@ -85,7 +93,8 @@ re-align to it. Capture it ONLY when inside tmux (`[ -n "$TMUX" ]`) via
 Procedure: `git status` + `git log --oneline -10` for context → `mkdir -p
 .trusty-mpm/sessions` → when inside tmux, capture the window string (above) →
 write `session-{timestamp}.md` (include `## Tmux Window` only if captured) →
-update `LATEST-SESSION.txt` → report the path to the user.
+**append** one `pause` line to `sessions-log.jsonl` (never overwrite; do not
+write `LATEST-SESSION.txt`) → report the path to the user.
 
 ## Resuming: `tm session catchup`
 
