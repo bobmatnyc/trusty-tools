@@ -263,7 +263,8 @@ pub(super) async fn run_workflow(
         .join(".trusty-agents")
         .join("state")
         .join("history");
-    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+    let api_key =
+        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
     let indexer = context::HistoryIndexer::spawn(store_dir.clone(), api_key.clone());
     let cleaner = context::cleaner::MemoryCleaner::spawn(store_dir.clone(), api_key.clone(), 20);
 

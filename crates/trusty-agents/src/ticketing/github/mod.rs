@@ -40,7 +40,7 @@ impl GitHubClient {
         let token = config
             .github_token
             .clone()
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+            .or_else(|| std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN).ok())
             .ok_or_else(|| {
                 anyhow!("GitHub token required (set github_token or GITHUB_TOKEN env)")
             })?;

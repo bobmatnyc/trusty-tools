@@ -37,6 +37,7 @@ pub mod pairing_store;
 pub mod provisioning;
 pub mod runtime_reap;
 pub mod services;
+pub(crate) mod session_record_kind;
 pub mod sm_stdio;
 pub(crate) mod spawn_command;
 pub mod state;

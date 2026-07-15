@@ -204,8 +204,9 @@ impl LlmClassifier {
                 }
             }
             "auto" | "" => {
-                let or_key =
-                    openrouter_api_key.or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+                let or_key = openrouter_api_key.or_else(|| {
+                    std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok()
+                });
                 if or_key.is_some() {
                     info!("LLM provider auto-selected: openrouter");
                     Ok(Self::build_openrouter(model, or_key))
@@ -354,7 +355,8 @@ impl LlmClassifier {
     /// Internal helper: build an OpenRouter-configured classifier with
     /// attribution headers set.
     fn build_openrouter(model: &str, api_key: Option<String>) -> Self {
-        let key = api_key.or_else(|| std::env::var("OPENROUTER_API_KEY").ok());
+        let key =
+            api_key.or_else(|| std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok());
         let mut headers = HeaderMap::new();
         // These are static, valid ASCII strings — `from_static` cannot panic
         // on them at runtime.

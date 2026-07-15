@@ -44,18 +44,39 @@ use std::path::{Path, PathBuf};
 /// Test: `resolve_project_root_finds_git_root` and
 /// `resolve_project_root_falls_back_to_start` in `tests`.
 pub fn resolve_project_root(start: &Path) -> PathBuf {
+    find_git_root(start).unwrap_or_else(|| start.to_path_buf())
+}
+
+/// Walk up from `start` to the nearest `.git` root, returning `None` when no
+/// enclosing git repository exists.
+///
+/// Why: some callers must DISTINGUISH "inside a git repo" from "no repo at all"
+/// — [`resolve_project_root`] can't, because it collapses both cases to a
+/// `PathBuf` (returning `start` itself on a miss). trusty-code's task-start
+/// index hook uses this to cheaply short-circuit the bake-off/scratch case: a
+/// throwaway directory with no `.git` has nothing worth registering with
+/// trusty-search, so indexing is skipped entirely rather than creating an index
+/// keyed to a directory that will be deleted moments later.
+/// What: returns `Some(first_ancestor_with_.git)` (inclusive of `start`), or
+/// `None` when the walk reaches the filesystem root without finding one. `.git`
+/// is matched via `exists()` so both a normal clone (`.git` directory) and a git
+/// worktree/submodule (`.git` file) resolve. This is the exact walk
+/// [`resolve_project_root`] performs, exposed as an `Option` — the two share one
+/// implementation so they can never disagree on which directory is the root.
+/// Test: `find_git_root_some_when_repo`, `find_git_root_none_when_no_repo`.
+pub fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
         // `.git` is a directory in a normal clone and a file in a git worktree
         // / submodule; `exists()` matches both so worktrees resolve correctly.
         if current.join(".git").exists() {
-            return current;
+            return Some(current);
         }
         if !current.pop() {
             break;
         }
     }
-    start.to_path_buf()
+    None
 }
 
 /// Derive the trusty-search index id for a project root.
@@ -141,6 +162,30 @@ mod tests {
 
         let root = resolve_project_root(&tmp);
         assert_eq!(root, tmp);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_git_root_some_when_repo() {
+        let tmp = scratch_dir("fgr-git");
+        fs::create_dir_all(tmp.join(".git")).unwrap();
+        let nested = tmp.join("a/b/c");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_git_root(&nested), Some(tmp.clone()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_git_root_none_when_no_repo() {
+        // A scratch dir with no `.git` anywhere up the chain: the tcode
+        // short-circuit relies on this returning None so nothing is indexed.
+        let tmp = scratch_dir("fgr-no-git");
+        fs::create_dir_all(&tmp).unwrap();
+
+        assert_eq!(find_git_root(&tmp), None);
 
         let _ = fs::remove_dir_all(&tmp);
     }

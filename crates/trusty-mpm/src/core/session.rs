@@ -6,6 +6,7 @@
 //! exchanged over IPC.
 //! Test: `cargo test -p trusty-mpm-core` round-trips a `Session` through JSON.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -45,6 +46,40 @@ pub enum SessionStatus {
     Paused,
     /// Session process has exited.
     Stopped,
+}
+
+impl SessionStatus {
+    /// The canonical display word for this status.
+    ///
+    /// Why: several surfaces (the coordinator LLM prompt, the dashboard) render
+    /// a status as a human word. Historically each hand-rolled its own match,
+    /// which drifted from the serde wire form; centralizing the mapping here —
+    /// next to the enum — keeps every surface byte-identical to the wire form
+    /// (the enum has no `rename_all`, so the serde name and this word match).
+    /// What: maps each variant to its PascalCase name.
+    /// Test: `status_word_matches_serde` pins it against the serde form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatus::Starting => "Starting",
+            SessionStatus::Active => "Active",
+            SessionStatus::AwaitingApproval => "AwaitingApproval",
+            SessionStatus::Detached => "Detached",
+            SessionStatus::Paused => "Paused",
+            SessionStatus::Stopped => "Stopped",
+        }
+    }
+}
+
+impl fmt::Display for SessionStatus {
+    /// Render the canonical display word (see [`SessionStatus::as_str`]).
+    ///
+    /// Why: lets callers use `status.to_string()` / `{status}` instead of a
+    /// bespoke match; the output is byte-identical to the serde wire token.
+    /// What: writes [`SessionStatus::as_str`].
+    /// Test: `status_word_matches_serde`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Control model used to host a session.
@@ -316,6 +351,36 @@ mod tests {
         let back: Session = serde_json::from_str(legacy).unwrap();
         assert_eq!(back.origin, SessionHost::Tmux);
         assert_eq!(back.pid, None);
+    }
+
+    #[test]
+    fn status_word_matches_serde() {
+        // The Display/as_str rendering MUST stay byte-identical to the serde
+        // wire token for every variant — that byte-identity is the whole point
+        // of removing the duplicated coordinator match (PR: stringly-typed).
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Active,
+            SessionStatus::AwaitingApproval,
+            SessionStatus::Detached,
+            SessionStatus::Paused,
+            SessionStatus::Stopped,
+        ] {
+            let serde = serde_json::to_string(&status).unwrap();
+            let serde_word = serde.trim_matches('"');
+            assert_eq!(status.as_str(), serde_word);
+            assert_eq!(status.to_string(), serde_word);
+        }
+        // Pin the exact literals the coordinator surface historically emitted.
+        assert_eq!(SessionStatus::Starting.to_string(), "Starting");
+        assert_eq!(SessionStatus::Active.to_string(), "Active");
+        assert_eq!(
+            SessionStatus::AwaitingApproval.to_string(),
+            "AwaitingApproval"
+        );
+        assert_eq!(SessionStatus::Detached.to_string(), "Detached");
+        assert_eq!(SessionStatus::Paused.to_string(), "Paused");
+        assert_eq!(SessionStatus::Stopped.to_string(), "Stopped");
     }
 
     #[test]

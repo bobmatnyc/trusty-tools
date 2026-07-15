@@ -282,7 +282,7 @@ pub(super) async fn send_raw_completion(
     let auth_value = if endpoint.auth_header_value.is_empty() {
         // Fall back to the OpenRouter env var when the adapter doesn't supply
         // a credential (legacy callers that rely on OPENROUTER_API_KEY here).
-        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
     } else {
         endpoint
             .auth_header_value

@@ -145,7 +145,7 @@ fn select_highest_semver(releases: &[GhRelease], crate_name: &str) -> anyhow::Re
 /// Test: The env-read is side-effecting; the token plumbing into the header is
 /// tested via the live `#[ignore]` test.
 fn github_token() -> Option<String> {
-    std::env::var("GITHUB_TOKEN")
+    std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
         .or_else(|_| std::env::var("GH_TOKEN"))
         .ok()
         .filter(|s| !s.is_empty())

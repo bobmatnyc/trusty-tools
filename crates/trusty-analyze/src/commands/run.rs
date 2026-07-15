@@ -233,7 +233,7 @@ pub async fn run_review_pr(
     let (owner, repo_name) = repo
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repo must be in 'owner/repo' form, got '{repo}'"))?;
-    let token = std::env::var("GITHUB_TOKEN")
+    let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
         .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN is not set; required to fetch the PR diff"))?;
     let index_id = index_id
         .ok_or_else(|| anyhow::anyhow!("--index-id is required to cross-reference the diff"))?;

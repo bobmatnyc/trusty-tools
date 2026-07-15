@@ -327,7 +327,7 @@ fn build_consolidator_from_config(config: &DreamConfig) -> Option<Arc<SemanticCo
     let api_key = if !config.openrouter_api_key.is_empty() {
         config.openrouter_api_key.clone()
     } else {
-        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+        std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
     };
     if !inference_available(&api_key, config.local_model_enabled) {
         return None;

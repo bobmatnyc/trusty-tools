@@ -183,7 +183,7 @@ fn non_interactive_credentials(
     //    the canonical `x-access-token` username that GitHub expects for
     //    PAT / GitHub App token authentication over HTTPS.
     if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
-        let token = std::env::var("GITHUB_TOKEN")
+        let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
             .or_else(|_| std::env::var("GH_TOKEN"))
             .ok();
         if let Some(tok) = token {

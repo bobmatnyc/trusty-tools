@@ -462,8 +462,8 @@ impl LlmClassifier for OpenRouterClassifier {
         use trusty_common::ChatMessage;
         use trusty_common::chat::{ChatEvent, ChatProvider, OpenRouterProvider};
 
-        let api_key =
-            std::env::var("OPENROUTER_API_KEY").map_err(|_| ActivityError::MissingApiKey)?;
+        let api_key = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
+            .map_err(|_| ActivityError::MissingApiKey)?;
 
         let prompt = format!(
             "Classify the activity state of this Claude Code terminal session.\n\

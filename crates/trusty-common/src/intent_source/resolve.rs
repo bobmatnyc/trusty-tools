@@ -52,7 +52,7 @@ pub struct EnvTokenResolver;
 #[async_trait]
 impl IntentTokenResolver for EnvTokenResolver {
     async fn token(&self, _owner: &str, _repo: &str) -> Result<String, IsrError> {
-        std::env::var("GITHUB_TOKEN")
+        std::env::var(crate::env_vars::ENV_GITHUB_TOKEN)
             .map_err(|_| IsrError::NoToken("GITHUB_TOKEN not set".to_string()))
     }
 }

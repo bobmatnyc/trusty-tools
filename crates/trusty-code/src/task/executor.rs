@@ -58,7 +58,8 @@ use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, ClearGoalTool, DelegateToAgentTool, EditTool,
     FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RecallSessionTool, RunContext,
-    SetGoalTool, SkillResolver, ToolRegistry, UseSkillTool, WriteFileTool, WriteFilesTool,
+    SetGoalTool, SkillResolver, ToolRegistry, TrustySearchTool, UseSkillTool, WriteFileTool,
+    WriteFilesTool,
 };
 
 use super::sink::SessionToolEventSink;
@@ -167,6 +168,14 @@ async fn run_and_record(
     params: TaskRunParams,
     cancel: Arc<AtomicBool>,
 ) {
+    // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
+    // ensure the working project is indexed so the delegated engineer's
+    // `search`/`grep` tools are useful while this run proceeds. Fail-open,
+    // git-gated, and non-blocking — reuses the ONE shared helper (see
+    // `run_task::ensure_project_indexed_in_background`) so the daemon and CLI
+    // paths can never diverge.
+    crate::run_task::ensure_project_indexed_in_background(params.project.clone());
+
     let session_id = params.session_id.clone();
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
     let sink: Arc<dyn ToolEventSink> = Arc::new(SessionToolEventSink::new(
@@ -508,6 +517,14 @@ impl RegistryFactory for ProjectToolFactory {
         reg.register(Arc::new(GlobTool::new(&self.project)));
         reg.register(Arc::new(GrepTool::new(&self.project)));
         reg.register(Arc::new(ListDirTool::new(&self.project)));
+        // PR A (#2689): trusty-search-backed conceptual discovery as the PRIMARY
+        // path, with the local glob/grep tools above as the fail-open FALLBACK.
+        // DailyDriver ONLY — Parity must keep a byte-identical tool surface for
+        // benchmark fairness (it never sees MCP-backed tools), so this is gated
+        // on the delegating run's resolved `HarnessMode`.
+        if self.mode == HarnessMode::DailyDriver {
+            reg.register(Arc::new(TrustySearchTool::new(&self.project)));
+        }
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),

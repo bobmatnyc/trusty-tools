@@ -29,6 +29,17 @@
 
 pub mod chat;
 pub mod claude_config;
+
+/// Canonical environment-variable name constants shared across the workspace.
+///
+/// Why: the same credential env-var names were spelled as bare literals at ~40
+/// `std::env::var(...)` call sites across nine crates; centralizing them makes
+/// a typo a compile error instead of a silent misread.
+/// What: exposes [`ENV_OPENROUTER_API_KEY`](env_vars::ENV_OPENROUTER_API_KEY)
+/// and [`ENV_GITHUB_TOKEN`](env_vars::ENV_GITHUB_TOKEN).
+/// Test: `cargo test -p trusty-common -- env_var_names_are_stable`.
+pub mod env_vars;
+
 pub mod project_discovery;
 
 /// Shared graceful-shutdown signal helper for trusty-* daemons (issue #534).
@@ -394,10 +405,26 @@ pub use slug::slugify_string;
 /// index id from the same project root, or a session pins one id while querying
 /// another. Centralising the rule here — the crate both already depend on —
 /// keeps them in lockstep without a trusty-mpm → trusty-search dependency edge.
-/// What: Exposes [`index_id::derive_index_id`] and [`index_id::resolve_project_root`].
+/// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
+/// and [`index_id::find_git_root`].
 /// Test: `cargo test -p trusty-common -- index_id::tests`.
 pub mod index_id;
-pub use index_id::{derive_index_id, resolve_project_root};
+pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
+
+/// Shared best-effort trusty-search "ensure this project is indexed" helper
+/// (issues #1373 / #1908), gated behind the `search-index` feature.
+///
+/// Why: the register-and-populate logic originally lived only in trusty-mpm's
+/// session-launch path; trusty-code now wants the same behaviour at task start.
+/// Promoting it here makes it the ONE implementation both crates call, per the
+/// workspace common-entry-point rule, so they can never diverge.
+/// What: exposes [`search_index::ensure_project_indexed`] (derive id →
+/// best-effort find-or-create + freshness-gated reindex, fail-open) and the
+/// [`search_index::index_is_fresh`] predicate. Feature-gated because it enables
+/// `reqwest`'s `blocking` client; default builds pay nothing.
+/// Test: `cargo test -p trusty-common --features search-index -- search_index::tests`.
+#[cfg(feature = "search-index")]
+pub mod search_index;
 
 /// Canonical tmux-session naming shared by both session managers (SPEC-ONESM-01).
 ///

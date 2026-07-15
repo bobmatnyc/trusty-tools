@@ -29,6 +29,14 @@
 //!   - `provider = "openrouter"` in the config file, or
 //!   - an `openrouter/<model-id>` prefix on the model slug.
 //!
+//! Fireworks.ai is likewise available for all roles (requires
+//! `FIREWORKS_API_KEY`); select it with `--provider fireworks`,
+//! `TRUSTY_REVIEW_PROVIDER=fireworks`, `provider = "fireworks"` in the config
+//! file, or a `fireworks/<model-id>` prefix on the model slug, e.g.
+//! `fireworks/accounts/fireworks/models/kimi-k2p6` (the bare id after the
+//! prefix is the provider-native `accounts/fireworks/models/*` form; list
+//! currently-deployed serverless models via `GET /inference/v1/models`).
+//!
 //! Test: `bedrock_defaults_have_inference_profile_prefix`,
 //! `compare_set_models_are_bedrock_only`,
 //! `haiku_default_has_correct_date_versioned_id`,

@@ -47,7 +47,7 @@ impl MemorySearchTool {
     pub fn from_env() -> Self {
         Self::new(
             PathBuf::from(".trusty-agents").join("history"),
-            std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
+            std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default(),
         )
     }
 }
