@@ -7,9 +7,20 @@
 //! `PersistedIndex::repo_identity` value — no per-request live derive (that
 //! would shell out to `git` once per handle lacking a stored identity,
 //! unbounded work inside an async HTTP handler). These tests therefore seed
-//! `indexes.toml` directly via the `TRUSTY_DATA_DIR` isolation pattern
-//! established by `residency_sweep_tests.rs` / `tests_index_config.rs`, rather
-//! than relying on a live git-remote derive.
+//! `indexes.toml` directly.
+//!
+//! Issue #2717 (parallel-load flake): these tests previously isolated via the
+//! shared `TRUSTY_DATA_DIR` env var and a `#[serial_test::serial]` guard. That
+//! serialised them against each OTHER, but `set_var`/`remove_var` are not
+//! thread-safe (they realloc the C `environ` array), so a concurrent NON-serial
+//! env-mutating test — e.g. `hnsw_idle_demotion_skips_when_disabled_via_env`
+//! setting `TRUSTY_HNSW_REVIEW_IDLE` — racing this handler's
+//! `getenv(TRUSTY_DATA_DIR)` torn-read the value, dropped the daemon back onto
+//! the real system data dir, and the `?repo_identity=` filter assertions failed
+//! intermittently. The fix injects the registry path via
+//! `SearchAppState::with_registry_path`, so these tests seed an explicit
+//! `indexes.toml` and NEVER touch global env — the race window is gone and no
+//! serial guard is needed.
 //! What: `list_indexes_repo_identity_details_and_filter` covers the flat +
 //! `?details=true` response shapes; `list_indexes_repo_identity_tree_filter`
 //! covers the `format=tree` branch, which was previously untested for the
@@ -19,22 +30,19 @@
 use super::*;
 use axum::extract::{Query, State};
 
-/// Point `TRUSTY_DATA_DIR` at a fresh tempdir and write `entries` to its
-/// `indexes.toml`. `TRUSTY_DATA_DIR` is shared process env state, so every
-/// caller MUST be `#[serial_test::serial]`. Returns the tempdir; keep it alive
-/// for the test's duration, then call [`clear_data_dir_env`].
-fn isolate_and_seed_toml(
+/// Write `entries` to an `indexes.toml` inside a fresh tempdir and return
+/// `(tempdir, toml_path)`. Issue #2717: seeds via the path-injectable
+/// `save_index_registry_at` with NO env mutation; pass `toml_path` to
+/// `SearchAppState::with_registry_path` so the handler reads it directly rather
+/// than resolving `TRUSTY_DATA_DIR`. Keep the returned tempdir alive for the
+/// test's duration.
+fn seed_registry_toml(
     entries: &[crate::service::persistence::PersistedIndex],
-) -> tempfile::TempDir {
+) -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    let path = crate::service::persistence::indexes_toml_path().expect("indexes_toml_path");
+    let path = tmp.path().join("indexes.toml");
     crate::service::persistence::save_index_registry_at(&path, entries).expect("seed indexes.toml");
-    tmp
-}
-
-fn clear_data_dir_env() {
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+    (tmp, path)
 }
 
 /// `GET /indexes?details=true` carries the PERSISTED `repo_identity` (never a
@@ -54,7 +62,6 @@ fn clear_data_dir_env() {
 /// returns only the matching index.
 /// Test: this function.
 #[tokio::test]
-#[serial_test::serial]
 async fn list_indexes_repo_identity_details_and_filter() {
     use super::indexes::ListIndexesParams;
     use crate::core::{
@@ -67,7 +74,7 @@ async fn list_indexes_repo_identity_details_and_filter() {
 
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
-    let _data_dir = isolate_and_seed_toml(&[
+    let (_data_dir, toml_path) = seed_registry_toml(&[
         PersistedIndex {
             id: "idx-a".into(),
             root_path: root_a.path().to_path_buf(),
@@ -91,7 +98,7 @@ async fn list_indexes_repo_identity_details_and_filter() {
             dir.to_path_buf(),
         ));
     }
-    let state = Arc::new(SearchAppState::new(registry));
+    let state = Arc::new(SearchAppState::new(registry).with_registry_path(toml_path));
 
     // details=true → each entry carries its PERSISTED repo_identity.
     let resp = list_indexes_handler(
@@ -144,8 +151,6 @@ async fn list_indexes_repo_identity_details_and_filter() {
         vec!["idx-a"],
         "filter must return only the matching repo (case-normalised)"
     );
-
-    clear_data_dir_env();
 }
 
 /// `GET /indexes?format=tree&repo_identity=…` applies the identity filter
@@ -161,7 +166,6 @@ async fn list_indexes_repo_identity_details_and_filter() {
 /// object-array response contains exactly the two matching ids.
 /// Test: this function.
 #[tokio::test]
-#[serial_test::serial]
 async fn list_indexes_repo_identity_tree_filter() {
     use super::indexes::ListIndexesParams;
     use crate::core::{
@@ -175,7 +179,7 @@ async fn list_indexes_repo_identity_tree_filter() {
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
     let root_c = tempfile::tempdir().unwrap();
-    let _data_dir = isolate_and_seed_toml(&[
+    let (_data_dir, toml_path) = seed_registry_toml(&[
         PersistedIndex {
             id: "tree-a".into(),
             root_path: root_a.path().to_path_buf(),
@@ -209,7 +213,7 @@ async fn list_indexes_repo_identity_tree_filter() {
             dir.to_path_buf(),
         ));
     }
-    let state = Arc::new(SearchAppState::new(registry));
+    let state = Arc::new(SearchAppState::new(registry).with_registry_path(toml_path));
 
     let resp = list_indexes_handler(
         State(state),
@@ -232,6 +236,4 @@ async fn list_indexes_repo_identity_tree_filter() {
         vec!["tree-a", "tree-b"],
         "tree format must apply the repo_identity filter before building entries"
     );
-
-    clear_data_dir_env();
 }

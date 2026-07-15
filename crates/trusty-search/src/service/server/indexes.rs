@@ -77,18 +77,28 @@ pub(super) struct ListIndexesParams {
 /// What: loads the persisted registry (best-effort — empty `HashMap` on load
 /// failure) and returns `(id, PersistedIndex::repo_identity)` for every
 /// registered handle; ids with no matching persisted entry map to `None`.
+/// Issue #2717: the registry source is taken from `state` — either the
+/// test-injected `registry_path_override` (via `load_index_registry_at`) or,
+/// in production, the env-resolved `load_index_registry()`. Reading the path
+/// off `state` rather than calling `getenv(TRUSTY_DATA_DIR)` here is what lets
+/// tests avoid mutating global env, closing the parallel-load flake where a
+/// concurrent env mutation torn-read this handler's data-dir lookup.
 /// Test: `list_indexes_repo_identity_details_and_filter`,
 /// `list_indexes_repo_identity_tree_filter` (`list_repo_identity_tests.rs`),
 /// which seed `indexes.toml` directly rather than relying on a live derive.
 fn resolve_identities(
+    state: &SearchAppState,
     handles: &[Arc<IndexHandle>],
 ) -> std::collections::HashMap<String, Option<String>> {
-    let persisted: std::collections::HashMap<String, Option<String>> =
-        crate::service::persistence::load_index_registry()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| (e.id, e.repo_identity))
-            .collect();
+    let loaded = match &state.registry_path_override {
+        Some(path) => crate::service::persistence::load_index_registry_at(path),
+        None => crate::service::persistence::load_index_registry(),
+    };
+    let persisted: std::collections::HashMap<String, Option<String>> = loaded
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (e.id, e.repo_identity))
+        .collect();
     handles
         .iter()
         .map(|h| {
@@ -146,7 +156,7 @@ pub(super) async fn list_indexes_handler(
     if want_tree {
         let mut handles = state.registry.list_handles();
         if let Some(target) = &identity_filter {
-            let ids = resolve_identities(&handles);
+            let ids = resolve_identities(&state, &handles);
             handles.retain(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target));
         }
         let entries = crate::core::search::hierarchy::build_tree_entries(&state.registry, &handles);
@@ -157,7 +167,7 @@ pub(super) async fn list_indexes_handler(
         // from the current project directory without N status round-trips.
         // DOC-37: also carry repo_identity so callers can group facets by repo.
         let handles = state.registry.list_handles();
-        let ids = resolve_identities(&handles);
+        let ids = resolve_identities(&state, &handles);
         let entries: Vec<IndexDetailEntry> = handles
             .into_iter()
             .filter_map(|handle| {
@@ -181,7 +191,7 @@ pub(super) async fn list_indexes_handler(
     } else if let Some(target) = &identity_filter {
         // Flat list, but scoped to one repo identity (DOC-37).
         let handles = state.registry.list_handles();
-        let ids = resolve_identities(&handles);
+        let ids = resolve_identities(&state, &handles);
         let indexes: Vec<String> = handles
             .into_iter()
             .filter(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target))

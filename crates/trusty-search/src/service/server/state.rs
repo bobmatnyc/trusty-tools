@@ -412,6 +412,30 @@ pub struct SearchAppState {
     /// Test: `health_includes_reconcile_summary` in tests_health.rs verifies the
     /// field appears in the JSON response after reconcile runs.
     pub reconcile_summary: Arc<std::sync::Mutex<ReconcileSummary>>,
+    /// Test-only override for the persisted `indexes.toml` path (issue #2717).
+    ///
+    /// Why: `GET /indexes` handlers resolve `PersistedIndex::repo_identity`
+    /// through `persistence::load_index_registry()`, which reads the process-wide
+    /// `TRUSTY_DATA_DIR` env var via `getenv` at request time. `set_var` /
+    /// `remove_var` are NOT thread-safe (they realloc the C `environ` array), so a
+    /// concurrent env-mutating test — even one touching an unrelated variable —
+    /// racing this `getenv` produces a torn read: `data_dir()` then falls back to
+    /// the real system data dir, the seeded registry is not found, and the
+    /// `?repo_identity=` filter assertions fail intermittently under parallel
+    /// load. This is the injection seam (mirroring the existing
+    /// `load_index_registry_at` / `save_index_registry_at` path-injectable
+    /// variants) that lets tests point the handler at an explicit `indexes.toml`
+    /// and never touch global env — matching the #2702 / #2715 precedent of
+    /// removing shared env state from the tested path rather than serialising
+    /// around it.
+    /// What: `None` in production ⇒ handlers read the env-resolved
+    /// `load_index_registry()`. `Some(path)` ⇒ they read that file directly via
+    /// `load_index_registry_at`, bypassing `TRUSTY_DATA_DIR` entirely. Set only by
+    /// [`SearchAppState::with_registry_path`].
+    /// Test: `list_indexes_repo_identity_tree_filter` and
+    /// `list_indexes_repo_identity_details_and_filter` construct state with this
+    /// override and assert with zero env mutation.
+    pub registry_path_override: Option<std::path::PathBuf>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.
