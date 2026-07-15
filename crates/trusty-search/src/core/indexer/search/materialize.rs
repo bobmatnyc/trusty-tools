@@ -53,7 +53,8 @@ impl CodeIndexer {
                 in_hnsw.contains(&id),
                 in_bm25.contains(&id),
                 kg_ids.contains(&id),
-            );
+            )
+            .as_str();
             let snippet = if query.compact {
                 Some(build_compact_snippet(&raw.content))
             } else {
