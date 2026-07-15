@@ -175,8 +175,8 @@ const FLOOR_COUNT_MIN_CONFIDENCE: f32 = 0.50;
 /// compile-time constant (closes #1597).
 /// What: when set to a valid `f32` in `[0.0, 1.0]`, overrides the advisory-batch
 /// collapse threshold.  Default value when unset: `0.65`.
-/// Test: `env_override_low_confidence_threshold_changes_value`,
-/// `env_override_defaults_when_unset`.
+/// Test: `injected_low_confidence_threshold_changes_verdict`,
+/// `thresholds_from_lookup_reads_each_env_key`.
 pub const TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV: &str =
     "TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD";
 
@@ -186,8 +186,8 @@ pub const TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV: &str =
 /// count toward the REQUEST_CHANGES floor (closes #1597).
 /// What: when set to a valid `f32` in `[0.0, 1.0]`, overrides the Medium-floor
 /// gate.  Default value when unset: `0.80`.
-/// Test: `env_override_floor_min_confidence_changes_value`,
-/// `env_override_defaults_when_unset`.
+/// Test: `injected_floor_min_confidence_changes_verdict`,
+/// `thresholds_from_lookup_reads_each_env_key`.
 pub const TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV: &str = "TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE";
 
 /// Environment variable for overriding [`FLOOR_COUNT_MIN_CONFIDENCE`] at runtime.
@@ -196,69 +196,114 @@ pub const TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV: &str = "TRUSTY_REVIEW_FLOOR_MI
 /// What: when set to a valid `f32` in `[0.0, 1.0]`, overrides the minimum
 /// confidence for a finding to participate in the verdict floor at all.  Default
 /// value when unset: `0.50`.
-/// Test: `env_override_floor_count_min_confidence_changes_value`,
-/// `env_override_defaults_when_unset`.
+/// Test: `injected_floor_count_min_confidence_changes_verdict`,
+/// `thresholds_from_lookup_reads_each_env_key`.
 pub const TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV: &str =
     "TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE";
 
-/// Read a calibration threshold from an env var, falling back to `default`.
+/// Parse a calibration threshold from an optional raw string, else `default`.
 ///
-/// Why: centralises the parse-or-fallback logic so every threshold reads the same
-/// way (close #1597 without any runtime config struct or re-compilation).
-/// What: tries `std::env::var(key)`; on success parses as `f32` and accepts the
-/// value only when it is finite and in `[0.0, 1.0]`.  Any other outcome returns
-/// `default` silently (operators who want to debug set `RUST_LOG=debug`).
-/// Test: `env_override_low_confidence_threshold_changes_value` (verifies a valid
-/// override is applied); `env_override_defaults_when_unset` (verifies the
-/// constant default is returned when the var is absent or invalid).
-fn read_threshold_env(key: &str, default: f32) -> f32 {
-    match std::env::var(key) {
-        Ok(raw) => match raw.trim().parse::<f32>() {
-            Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {
-                debug!(key, value = v, "calibration threshold overridden via env");
-                v
-            }
+/// Why: the parse-and-validate step is the only non-trivial logic in the #1597
+/// env-override feature.  Keeping it a PURE function (no `std::env` access) lets
+/// it be unit-tested exhaustively without mutating any process-global state —
+/// the root-cause fix for the #2688 parallel-test flake, where env writes in one
+/// test leaked into `derive_verdict` reads on a parallel test thread.
+/// What: trims `raw` and parses it as `f32`, accepting the value only when it is
+/// finite and in `[0.0, 1.0]`; every other outcome (absent, non-numeric, or
+/// out-of-range) returns `default` silently.
+/// Test: `parse_threshold_accepts_valid`,
+/// `parse_threshold_rejects_invalid_and_out_of_range`,
+/// `parse_threshold_none_is_default`.
+fn parse_threshold(raw: Option<&str>, default: f32) -> f32 {
+    match raw {
+        Some(raw) => match raw.trim().parse::<f32>() {
+            Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => v,
             _ => default,
         },
-        Err(_) => default,
+        None => default,
     }
 }
 
-/// Effective `LOW_CONFIDENCE_THRESHOLD` (env-override aware, closes #1597).
+/// The three calibration thresholds `derive_verdict` consults, resolved once.
 ///
-/// Why: exposes the advisory-batch collapse line as an operator knob so
-/// per-deployment strictness can be tuned without recompiling.
-/// What: returns the env-var value when set and valid; otherwise the compile-time
-/// constant `0.65`.
-/// Test: `env_override_low_confidence_threshold_changes_value`.
-fn low_confidence_threshold() -> f32 {
-    read_threshold_env(
-        TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV,
-        LOW_CONFIDENCE_THRESHOLD,
-    )
+/// Why: previously each threshold was read from `std::env` on every call
+/// (`low_confidence_threshold()` and friends), so `derive_verdict` carried a
+/// hidden dependency on process-global env state.  A test that overrode one of
+/// the `TRUSTY_REVIEW_*` env vars therefore raced with any parallel test that
+/// called `derive_verdict` — the #2688 flake.  Resolving the three values ONCE
+/// into an explicit value (from env in production, injected directly in tests)
+/// removes the global dependency and gives tests a clean seam to pin thresholds
+/// without touching the process environment.
+/// What: holds the effective `low_confidence`, `floor_min`, and `floor_count_min`
+/// confidence gates; construct via [`Thresholds::from_env`] (production) or, in
+/// tests, `Thresholds::defaults` (compile-time constants) / a direct literal.
+/// Test: `thresholds_defaults_match_constants`,
+/// `thresholds_from_lookup_reads_each_env_key`.
+#[derive(Debug, Clone, Copy)]
+struct Thresholds {
+    /// Advisory-batch collapse line (`LOW_CONFIDENCE_THRESHOLD`, default 0.65).
+    low_confidence: f32,
+    /// Medium-counts-toward-the-floor line (`FLOOR_MIN_CONFIDENCE`, default 0.80).
+    floor_min: f32,
+    /// Sub-coin-flip exclusion line (`FLOOR_COUNT_MIN_CONFIDENCE`, default 0.50).
+    floor_count_min: f32,
 }
 
-/// Effective `FLOOR_MIN_CONFIDENCE` (env-override aware, closes #1597).
-///
-/// Why: exposes the Medium-floor confidence gate so operators can tighten or
-/// loosen the REQUEST_CHANGES escalation without recompiling.
-/// What: returns the env-var value when set and valid; otherwise `0.80`.
-/// Test: `env_override_floor_min_confidence_changes_value`.
-fn floor_min_confidence() -> f32 {
-    read_threshold_env(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV, FLOOR_MIN_CONFIDENCE)
-}
+impl Thresholds {
+    /// The compile-time default thresholds (no env access).
+    ///
+    /// Why: the calibrated baseline used when no operator override is present, and
+    /// the value tests inject when they want the shipped behaviour.  Only tests
+    /// construct it directly (production always goes through `from_env`), so it is
+    /// `#[cfg(test)]` to stay off the shipped surface and avoid a dead-code warning.
+    /// What: returns the three `const` defaults verbatim.
+    /// Test: `thresholds_defaults_match_constants`.
+    #[cfg(test)]
+    fn defaults() -> Self {
+        Self {
+            low_confidence: LOW_CONFIDENCE_THRESHOLD,
+            floor_min: FLOOR_MIN_CONFIDENCE,
+            floor_count_min: FLOOR_COUNT_MIN_CONFIDENCE,
+        }
+    }
 
-/// Effective `FLOOR_COUNT_MIN_CONFIDENCE` (env-override aware, closes #1597).
-///
-/// Why: exposes the sub-coin-flip exclusion floor so operators can widen or
-/// narrow which findings are considered substantive without recompiling.
-/// What: returns the env-var value when set and valid; otherwise `0.50`.
-/// Test: `env_override_floor_count_min_confidence_changes_value`.
-fn floor_count_min_confidence() -> f32 {
-    read_threshold_env(
-        TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV,
-        FLOOR_COUNT_MIN_CONFIDENCE,
-    )
+    /// Resolve thresholds via an injected key→value lookup (closes #1597).
+    ///
+    /// Why: factoring the env-key→field wiring behind a lookup closure lets tests
+    /// verify the wiring (which key maps to which field) WITHOUT mutating the
+    /// process environment — the #2688 root-cause fix.  Production passes a
+    /// closure that reads `std::env`; tests pass a pure in-memory map.
+    /// What: for each of the three env keys, parses `lookup(key)` via
+    /// [`parse_threshold`], falling back to the matching compile-time constant.
+    /// Test: `thresholds_from_lookup_reads_each_env_key`.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            low_confidence: parse_threshold(
+                lookup(TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV).as_deref(),
+                LOW_CONFIDENCE_THRESHOLD,
+            ),
+            floor_min: parse_threshold(
+                lookup(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV).as_deref(),
+                FLOOR_MIN_CONFIDENCE,
+            ),
+            floor_count_min: parse_threshold(
+                lookup(TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV).as_deref(),
+                FLOOR_COUNT_MIN_CONFIDENCE,
+            ),
+        }
+    }
+
+    /// Resolve thresholds from the process environment (production entry point).
+    ///
+    /// Why: the runtime path — reads each `TRUSTY_REVIEW_*` env var so operators
+    /// can tune grading strictness without recompiling (#1597).
+    /// What: delegates to [`Thresholds::from_lookup`] with a closure over
+    /// `std::env::var`.
+    /// Test: exercised end-to-end by every `derive_verdict` test (default env) and
+    /// by `thresholds_from_lookup_reads_each_env_key` (key→field wiring).
+    fn from_env() -> Self {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -302,6 +347,26 @@ fn floor_count_min_confidence() -> f32 {
 ///
 /// Test: see module-level test list.
 pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict {
+    derive_verdict_with(model_proposed, findings, &Thresholds::from_env())
+}
+
+/// `derive_verdict` with the calibration thresholds supplied explicitly.
+///
+/// Why: this is the injection seam introduced for #2688.  The public
+/// `derive_verdict` resolves thresholds from the process environment; splitting
+/// the derivation logic out so it takes an explicit `&Thresholds` lets tests
+/// exercise every threshold behaviour by passing a literal struct — with no
+/// `std::env` mutation, so nothing can race a parallel test that reads the same
+/// env keys.
+/// What: applies the two-pass derivation (low-confidence override, then severity
+/// floor) using `thresholds` for every confidence gate.  Behaviour is identical
+/// to the pre-#2688 code when `thresholds == Thresholds::from_env()`.
+/// Test: every `derive_verdict` / `injected_*` test in `grade_tests.rs`.
+fn derive_verdict_with(
+    model_proposed: Verdict,
+    findings: &[Finding],
+    thresholds: &Thresholds,
+) -> Verdict {
     // UNKNOWN is a special terminal state — preserve it unconditionally.
     if model_proposed == Verdict::Unknown {
         debug!("verdict=UNKNOWN from model — preserving (diff unassessable)");
@@ -313,7 +378,10 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // `confidence: 0.1` finding is noise, not evidence — it must never harden the
     // verdict above what the model holistically concluded.  This is the source-of-
     // truth reconciliation: the floor only sees substantive findings.
-    let substantive: Vec<&Finding> = findings.iter().filter(|f| is_substantive(f)).collect();
+    let substantive: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| is_substantive(f, thresholds))
+        .collect();
 
     // Low-confidence override (ceiling): if ALL substantive findings are advisory-
     // only (confidence ≤ threshold) AND none are High-effort, the batch is noise.
@@ -321,7 +389,7 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // over-fire (Fix 4).  High-effort findings escape this gate: a confirmed
     // bug with low confidence should still BLOCK, not disappear.
     let has_high = substantive.iter().any(|f| is_high_severity(f));
-    let threshold = low_confidence_threshold();
+    let threshold = thresholds.low_confidence;
     let all_low_confidence =
         !substantive.is_empty() && substantive.iter().all(|f| f.confidence <= threshold);
 
@@ -346,7 +414,7 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // heuristic", so it is never capped back down merely because the model's
     // own verdict was a clean APPROVE — see the function doc for the shadow-eval
     // rationale (#1876).
-    let floor = severity_floor(&substantive);
+    let floor = severity_floor(&substantive, thresholds);
 
     let final_verdict = stricter_of(model_proposed.clone(), floor.clone());
 
@@ -381,7 +449,7 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
 /// Test: `floor_excludes_refuted_and_low_confidence_findings`,
 /// `low_confidence_high_effort_finding_still_drives_floor`,
 /// `refuted_high_effort_finding_is_still_excluded`.
-fn is_substantive(f: &Finding) -> bool {
+fn is_substantive(f: &Finding, thresholds: &Thresholds) -> bool {
     let refuted = matches!(
         f.verified,
         Some(VerifyOutcome::Refuted)
@@ -393,7 +461,7 @@ fn is_substantive(f: &Finding) -> bool {
     // (critical or high) finding: a genuine critical or high-severity concern must
     // keep its place at the verdict floor even when the model is only uncertain
     // about it.
-    !refuted && (f.confidence >= floor_count_min_confidence() || is_high_severity(f))
+    !refuted && (f.confidence >= thresholds.floor_count_min || is_high_severity(f))
 }
 
 /// Return `true` when a finding is critical- or high-severity (closes #1352).
@@ -458,7 +526,7 @@ fn is_high_severity(f: &Finding) -> bool {
 /// the three-tier rule above, while method-conformance findings run a separate,
 /// strictly-weaker rule (see [`conformance_floor`]) that caps at `REQUEST_CHANGES`
 /// and never contributes `BLOCK`.  The combined floor is the stricter of the two.
-fn severity_floor(findings: &[&Finding]) -> Verdict {
+fn severity_floor(findings: &[&Finding], thresholds: &Thresholds) -> Verdict {
     if findings.is_empty() {
         return Verdict::Approve;
     }
@@ -471,8 +539,8 @@ fn severity_floor(findings: &[&Finding]) -> Verdict {
         .iter()
         .partition(|f| f.category == FindingCategory::MethodConformance);
 
-    let correctness_floor = correctness_floor(&correctness);
-    let conformance_floor = conformance_floor(&conformance);
+    let correctness_floor = correctness_floor(&correctness, thresholds);
+    let conformance_floor = conformance_floor(&conformance, thresholds);
     stricter_of(correctness_floor, conformance_floor)
 }
 
@@ -494,7 +562,7 @@ fn severity_floor(findings: &[&Finding]) -> Verdict {
 /// Test: `grade_two_medium_yields_request_changes`,
 ///       `grade_one_medium_yields_request_changes` (#1876),
 ///       `grade_advisory_medium_below_floor_threshold_does_not_escalate`.
-fn correctness_floor(findings: &[&&Finding]) -> Verdict {
+fn correctness_floor(findings: &[&&Finding], thresholds: &Thresholds) -> Verdict {
     if findings.is_empty() {
         return Verdict::Approve;
     }
@@ -504,7 +572,7 @@ fn correctness_floor(findings: &[&&Finding]) -> Verdict {
 
     // Only count Medium findings whose confidence clears the floor threshold
     // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).
-    let medium_floor = floor_min_confidence();
+    let medium_floor = thresholds.floor_min;
     let has_confident_medium = findings
         .iter()
         .any(|f| f.effort == Effort::Medium && f.confidence > medium_floor);
@@ -544,9 +612,9 @@ fn correctness_floor(findings: &[&&Finding]) -> Verdict {
 /// Test: `conformance_finding_caps_at_request_changes`,
 /// `conformance_high_effort_never_blocks`,
 /// `conformance_below_floor_confidence_is_advisory`.
-fn conformance_floor(findings: &[&&Finding]) -> Verdict {
+fn conformance_floor(findings: &[&&Finding], thresholds: &Thresholds) -> Verdict {
     // Effort is intentionally ignored: the conformance cap is confidence-only (never BLOCK).
-    let floor = floor_min_confidence();
+    let floor = thresholds.floor_min;
     let any_confident = findings.iter().any(|f| f.confidence >= floor);
     if any_confident {
         // Capped at REQUEST_CHANGES — conformance NEVER drives BLOCK.
