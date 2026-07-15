@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::slack::api::constants::{
     DEFAULT_RETRY_AFTER, MAX_RATE_LIMIT_RETRIES, MAX_RETRY_AFTER, SLACK_API_BASE, SLACK_PROVIDER,
+    SLACK_USER_PROVIDER,
 };
 use crate::slack::api::error::SlackError;
 
@@ -39,20 +40,31 @@ const AUTH_ERROR_SLUGS: &[&str] = &[
     "no_permission",
 ];
 
-/// Authenticated Slack Web API client.
+/// Authenticated Slack Web API client (two-token model).
 ///
-/// Why: One handle per process; live request methods send the bearer token on
+/// Why: One handle per process; live request methods send a bearer token on
 /// every call and unwrap Slack's `{"ok": bool, ...}` envelope in one place.
-/// What: Wraps a `reqwest::Client`, the resolved token (`None` when
+/// Slack splits its API across two token *types*: almost every method
+/// (`chat.postMessage`, `conversations.*`, `reactions.add`, …) is served by a
+/// **bot** token, but `search.messages` is a **user**-scope-only method a bot
+/// token cannot call. The client therefore holds both — the bot token is
+/// required for normal operation, the user token is optional and only consulted
+/// by the user-scope methods (issue #2640).
+/// What: Wraps a `reqwest::Client`, the resolved bot token (`None` when
 /// unconfigured — construction still succeeds so `tools/list` and the MCP
-/// handshake work without secrets), and the API base URL (overridable for
-/// tests / enterprise endpoints).
+/// handshake work without secrets), an optional resolved user token, and the
+/// API base URL (overridable for tests / enterprise endpoints).
 /// Test: `new_succeeds_without_token`; request behaviour in `tests/client_http.rs`.
 pub struct BaseClient {
     /// Shared HTTP client / connection pool.
     http: reqwest::Client,
-    /// Resolved Slack bearer token, or `None` when unconfigured.
+    /// Resolved Slack **bot** bearer token, or `None` when unconfigured. Used by
+    /// [`BaseClient::call_method`] for every bot-scope method.
     token: Option<String>,
+    /// Resolved Slack **user** bearer token, or `None` when unconfigured. Used
+    /// only by [`BaseClient::call_method_user`] for user-scope-only methods
+    /// (`search.messages`); never substituted for the bot token.
+    user_token: Option<String>,
     /// API root every method path is appended to. Defaults to [`SLACK_API_BASE`].
     base_url: String,
 }
@@ -64,44 +76,77 @@ impl BaseClient {
     /// infallible-on-missing-token (returns `Ok` with `token: None`) means the
     /// server boots for `tools/list` without credentials; the `MissingToken`
     /// error is deferred to the first call that actually needs auth.
-    /// What: Builds the `reqwest::Client` and resolves the bot token through
-    /// `trusty_common::inference::credentials::resolve_key(SLACK_PROVIDER)` —
-    /// process env (`SLACK_BOT_TOKEN`) → `.env.local` → secure store, in that
-    /// order. Returns `Err` only if the HTTP client fails to build.
+    /// What: Builds the `reqwest::Client` and resolves both tokens through
+    /// `trusty_common::inference::credentials::resolve_key` — the bot token from
+    /// [`SLACK_PROVIDER`] (`SLACK_BOT_TOKEN`) and the optional user token from
+    /// [`SLACK_USER_PROVIDER`] (`SLACK_USER_TOKEN`), each via process env →
+    /// `.env.local` → secure store. Returns `Err` only if the HTTP client fails
+    /// to build.
     /// Test: `new_succeeds_without_token`; env-tier pickup in `tests/client_http.rs`.
     pub fn new() -> Result<Self> {
         let http = build_http_client()?;
         let token = trusty_common::inference::credentials::resolve_key(SLACK_PROVIDER);
+        let user_token = trusty_common::inference::credentials::resolve_key(SLACK_USER_PROVIDER);
         Ok(Self {
             http,
             token,
+            user_token,
             base_url: SLACK_API_BASE.to_string(),
         })
     }
 
-    /// Construct against an explicit base URL and token.
+    /// Construct against an explicit base URL and bot token (no user token).
     ///
     /// Why: lets tests point the client at a local mock server, and leaves room
-    /// to target an enterprise/Gov Slack endpoint without a code change.
-    /// What: same as [`BaseClient::new`] but takes the base URL and token
-    /// directly instead of resolving them.
-    /// Test: the constructor used by every case in `tests/client_http.rs`.
+    /// to target an enterprise/Gov Slack endpoint without a code change. Kept
+    /// as a bot-token-only shortcut so existing #2638 call sites are unchanged.
+    /// What: same as [`BaseClient::with_endpoint_tokens`] with `user_token: None`.
+    /// Test: the constructor used by the bot-token cases in `tests/client_http.rs`.
     pub fn with_endpoint(base_url: impl Into<String>, token: Option<String>) -> Result<Self> {
+        Self::with_endpoint_tokens(base_url, token, None)
+    }
+
+    /// Construct against an explicit base URL with both tokens.
+    ///
+    /// Why: the two-token analogue of [`BaseClient::with_endpoint`], so tests can
+    /// exercise the user-scope search path (present, missing, or bot-only) against
+    /// a mock server without touching the real environment.
+    /// What: takes the base URL, bot token, and optional user token directly
+    /// instead of resolving them.
+    /// Test: the search cases in `tests/tools_http.rs`.
+    pub fn with_endpoint_tokens(
+        base_url: impl Into<String>,
+        token: Option<String>,
+        user_token: Option<String>,
+    ) -> Result<Self> {
         Ok(Self {
             http: build_http_client()?,
             token,
+            user_token,
             base_url: base_url.into(),
         })
     }
 
-    /// Whether a token was resolved (a live call can be attempted).
+    /// Whether a bot token was resolved (a bot-scope call can be attempted).
     ///
     /// Why: callers and tests need to know if auth is configured without
     /// exposing the secret value itself.
-    /// What: `true` iff a non-`None` token is held.
+    /// What: `true` iff a non-`None` bot token is held.
     /// Test: `tests/client_http.rs::base_client_new_resolves_env_token`.
     pub fn has_token(&self) -> bool {
         self.token.is_some()
+    }
+
+    /// Whether a user token was resolved (a user-scope search call can be
+    /// attempted).
+    ///
+    /// Why: the search handler needs to distinguish "no user token configured"
+    /// (a clear, actionable typed error) from a live Slack failure, without
+    /// exposing the secret value itself.
+    /// What: `true` iff a non-`None` user token is held.
+    /// Test: `tests/tools_http.rs::search_messages_without_user_token_errors`.
+    pub fn has_user_token(&self) -> bool {
+        self.user_token.is_some()
     }
 
     /// Call a Slack Web API `method` with a JSON `body`, returning the decoded
@@ -123,6 +168,48 @@ impl BaseClient {
         B: Serialize + ?Sized,
     {
         let token = self.token.as_deref().ok_or(SlackError::MissingToken)?;
+        self.request(token, method, body).await
+    }
+
+    /// Call a **user-scope-only** Slack method (`search.messages`) with the user
+    /// token, returning the decoded response envelope on success.
+    ///
+    /// Why: `search.messages` rejects a bot token, so it must select the
+    /// separately-resolved user token. When no user token is configured this
+    /// fails fast with [`SlackError::MissingUserToken`] — it never falls back to
+    /// the bot token, which Slack would reject with a confusing
+    /// `not_allowed_token_type` error.
+    /// What: identical hardened request path as [`BaseClient::call_method`]
+    /// (401/`ok:false` auth mapping, bounded 429 backoff) but authenticated with
+    /// the user token.
+    /// Test: `tests/tools_http.rs::search_messages_with_user_token_returns_matches`
+    /// (happy path) and `::search_messages_without_user_token_errors` (missing).
+    pub async fn call_method_user<B>(&self, method: &str, body: &B) -> Result<Value, SlackError>
+    where
+        B: Serialize + ?Sized,
+    {
+        let token = self
+            .user_token
+            .as_deref()
+            .ok_or(SlackError::MissingUserToken)?;
+        self.request(token, method, body).await
+    }
+
+    /// The shared hardened request loop, parameterised by bearer `token`.
+    ///
+    /// Why: bot-scope and user-scope calls differ only in *which* token they
+    /// present; every other concern (auth classification, rate-limit backoff,
+    /// envelope decoding) is identical and must not be duplicated.
+    /// What: POSTs `{base_url}/{method}` with `token` as the bearer credential;
+    /// maps 401 / auth-class `ok:false` to [`SlackError::Auth`], honours
+    /// `429 Retry-After` up to [`MAX_RATE_LIMIT_RETRIES`], and returns the
+    /// decoded `Value` on `ok:true`.
+    /// Test: exercised through both public entry points in `tests/tools_http.rs`
+    /// and `tests/client_http.rs`.
+    async fn request<B>(&self, token: &str, method: &str, body: &B) -> Result<Value, SlackError>
+    where
+        B: Serialize + ?Sized,
+    {
         let url = format!("{}/{}", self.base_url.trim_end_matches('/'), method);
 
         let mut retries: u32 = 0;
@@ -237,6 +324,42 @@ mod tests {
         // and tools/list work in CI without secrets.
         let client = BaseClient::new().expect("construct base client");
         let _ = client.has_token();
+        let _ = client.has_user_token();
+    }
+
+    #[test]
+    fn with_endpoint_has_no_user_token() {
+        // The bot-token-only shortcut must leave the user token absent.
+        let client = BaseClient::with_endpoint("http://127.0.0.1:9", Some("xoxb".into()))
+            .expect("construct");
+        assert!(client.has_token());
+        assert!(!client.has_user_token());
+    }
+
+    #[test]
+    fn with_endpoint_tokens_reports_both() {
+        let client = BaseClient::with_endpoint_tokens(
+            "http://127.0.0.1:9",
+            Some("xoxb".into()),
+            Some("xoxp".into()),
+        )
+        .expect("construct");
+        assert!(client.has_token());
+        assert!(client.has_user_token());
+    }
+
+    #[tokio::test]
+    async fn call_method_user_without_user_token_is_missing_user_token() {
+        // No user token → a clear typed error, never a bot-token fallback and
+        // never a network call.
+        let client =
+            BaseClient::with_endpoint_tokens("http://127.0.0.1:9", Some("xoxb".into()), None)
+                .expect("construct");
+        let err = client
+            .call_method_user("search.messages", &serde_json::json!({ "query": "x" }))
+            .await
+            .expect_err("missing user token must error");
+        assert!(matches!(err, SlackError::MissingUserToken));
     }
 
     #[test]

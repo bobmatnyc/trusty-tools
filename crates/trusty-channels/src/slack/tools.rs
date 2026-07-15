@@ -3,8 +3,8 @@
 //! Why: Claude Code (and any MCP client) needs a machine-readable contract
 //! describing each tool's arguments so the model can fill them correctly. This
 //! is the single source of truth for the Slack MCP surface; the dispatcher in
-//! `server` routes on the same names. Every schema here is authoritative even
-//! though the handlers are still stubs (live calls deferred, see ADR-0014).
+//! `server` routes on the same names. All nine tools now have live handlers
+//! (issues #2639 + #2640, see ADR-0014).
 //! What: `tool_list_response()` returns `{"tools": [{name, description,
 //! inputSchema}, ...]}`; `is_known_tool()` reports whether a name is part of
 //! the planned surface so the dispatcher can distinguish "not yet implemented"
@@ -130,12 +130,13 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_search_messages",
-            "Search messages across the workspace.",
+            "Search messages across the workspace. Requires a Slack user token \
+             (SLACK_USER_TOKEN); a bot token cannot call search.",
             json!({
                 "query": { "type": "string", "description": "Slack search query string." },
                 "count": {
                     "type": "integer",
-                    "description": "Maximum number of results to return.",
+                    "description": "Maximum number of results to return (default 20).",
                 },
             }),
             &["query"],

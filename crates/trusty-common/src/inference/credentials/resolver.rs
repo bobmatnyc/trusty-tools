@@ -50,6 +50,11 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         "together" => Some("TOGETHER_API_KEY"),
         "atlascloud" => Some("ATLASCLOUD_API_KEY"),
         "slack" => Some("SLACK_BOT_TOKEN"),
+        // Second Slack token: `search.messages` (and other user-scope-only
+        // methods) require a Slack *user* token, which a bot token cannot
+        // substitute for. Kept as a distinct provider so bot-token tools and
+        // user-token tools resolve independently (issue #2640, epic #2636).
+        "slack-user" => Some("SLACK_USER_TOKEN"),
         _ => None,
     }
 }
@@ -145,6 +150,9 @@ mod tests {
         // Non-inference token: the native Slack MCP server (issue #2638).
         assert_eq!(env_var_for("slack"), Some("SLACK_BOT_TOKEN"));
         assert_eq!(env_var_for("Slack"), Some("SLACK_BOT_TOKEN"));
+        // Second Slack token for user-scope search methods (issue #2640).
+        assert_eq!(env_var_for("slack-user"), Some("SLACK_USER_TOKEN"));
+        assert_eq!(env_var_for("Slack-User"), Some("SLACK_USER_TOKEN"));
     }
 
     /// Why: an unmapped provider must not panic or synthesise a guess.

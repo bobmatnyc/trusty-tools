@@ -1,24 +1,30 @@
-//! Live `tools/call` handlers for the send + read Slack tools (issue #2639).
+//! Live `tools/call` handlers for the Slack MCP tools (issues #2639 + #2640).
 //!
 //! Why: the MCP dispatcher in [`crate::slack::server`] routes a `tools/call` by
 //! name; the actual Slack Web API work — request shaping, response cleaning, and
 //! markup-escaping of untrusted inbound text — belongs in one focused module so
 //! the dispatcher stays a thin table and each handler is unit-testable. This
-//! module implements the six send/read/list tools; the search + reaction tools
-//! remain deferred to #2640 and fall through to [`ToolCallError::NotImplemented`].
+//! module implements all nine tools: the six send/read/list tools (#2639) plus
+//! the search + reaction tools (#2640).
 //! What: [`dispatch`] matches the tool name to a handler; each handler validates
 //! its arguments (missing/typed args → [`ToolCallError::InvalidArgs`] *before*
 //! any network call), POSTs the matching Slack method through the authenticated
 //! [`BaseClient`], and returns a compact structured result. Every field of
-//! inbound, user-authored text (message bodies, channel/user display names) is
-//! passed through [`trusty_common::slack_format::mrkdwn_escape`] so a hostile
-//! message (e.g. one containing a `<!channel>` broadcast span) cannot inject live
-//! markup into the model-facing output. The outbound `send_message` text is the
-//! caller's own composed message and is forwarded verbatim (the caller owns its
-//! content; Slack renders it as `mrkdwn`).
+//! inbound, user-authored text (message bodies, channel/user display names,
+//! search-result text) is passed through
+//! [`trusty_common::slack_format::mrkdwn_escape`] so a hostile message (e.g. one
+//! containing a `<!channel>` broadcast span) cannot inject live markup into the
+//! model-facing output. The outbound `send_message` text is the caller's own
+//! composed message and is forwarded verbatim (the caller owns its content;
+//! Slack renders it as `mrkdwn`).
+//! Two-token model (#2640): `slack_search_messages` routes through the client's
+//! **user** token (`search.messages` rejects a bot token); every other tool —
+//! including `slack_search_channels` and `slack_add_reaction` — uses the **bot**
+//! token. When no user token is configured, `slack_search_messages` fails fast
+//! with a clear typed error and never falls back to the bot token.
 //! Test: pure argument-parsing and response-cleaning helpers are unit-tested
-//! inline; the full request path (200 / `ok:false` / auth) is covered against a
-//! `wiremock` Slack in `tests/tools_http.rs`.
+//! inline; the full request path (200 / `ok:false` / auth / user-token-missing)
+//! is covered against a `wiremock` Slack in `tests/tools_http.rs`.
 
 use serde_json::{json, Value};
 
@@ -30,6 +36,14 @@ use trusty_common::slack_format::mrkdwn_escape;
 /// omits `limit` (mirrors the tool's declared schema default).
 const DEFAULT_READ_LIMIT: i64 = 50;
 
+/// Default number of search results returned by `slack_search_messages` when the
+/// caller omits `count`.
+const DEFAULT_SEARCH_COUNT: i64 = 20;
+
+/// Default cap on channels scanned by `slack_search_channels` (it filters
+/// `conversations.list` locally, so bound how many the API returns).
+const DEFAULT_CHANNEL_SCAN_LIMIT: i64 = 200;
+
 // Slack Web API method paths. Appended to the client's base URL.
 const CHAT_POST_MESSAGE: &str = "chat.postMessage";
 const CONVERSATIONS_HISTORY: &str = "conversations.history";
@@ -37,6 +51,10 @@ const CONVERSATIONS_REPLIES: &str = "conversations.replies";
 const CONVERSATIONS_LIST: &str = "conversations.list";
 const USERS_LIST: &str = "users.list";
 const USERS_INFO: &str = "users.info";
+/// User-scope-only: reached through the client's **user** token.
+const SEARCH_MESSAGES: &str = "search.messages";
+/// Bot-scope: adds an emoji reaction to a message.
+const REACTIONS_ADD: &str = "reactions.add";
 
 /// Route a known Slack tool call to its handler.
 ///
@@ -44,11 +62,11 @@ const USERS_INFO: &str = "users.info";
 /// ([`crate::slack::server::handle_tool_call`]) has already rejected unknown
 /// names, so anything not matched here is a *planned* tool whose live handler is
 /// deferred to #2640.
-/// What: dispatches the six implemented send/read/list tools; returns
-/// [`ToolCallError::NotImplemented`] for the still-deferred search + reaction
-/// tools.
-/// Test: `tests/tools_http.rs` drives each implemented arm; the deferred arm is
-/// covered by `server::tests::tools_call_returns_not_implemented`.
+/// What: dispatches all nine implemented tools; a name not matched here is not a
+/// planned tool (the server layer already gated it via `is_known_tool`), so it
+/// maps to [`ToolCallError::UnknownTool`].
+/// Test: `tests/tools_http.rs` drives each arm, including the search + reaction
+/// tools and the user-token-missing path.
 pub async fn dispatch(
     client: &BaseClient,
     name: &str,
@@ -61,8 +79,10 @@ pub async fn dispatch(
         "slack_list_channels" => list_channels(client, args).await,
         "slack_list_users" => list_users(client, args).await,
         "slack_get_user" => get_user(client, args).await,
-        // Search + reactions land in #2640.
-        other => Err(ToolCallError::NotImplemented(other.to_string())),
+        "slack_search_messages" => search_messages(client, args).await,
+        "slack_search_channels" => search_channels(client, args).await,
+        "slack_add_reaction" => add_reaction(client, args).await,
+        other => Err(ToolCallError::UnknownTool(other.to_string())),
     }
 }
 
@@ -180,6 +200,69 @@ async fn get_user(client: &BaseClient, args: Value) -> Result<Value, ToolCallErr
     Ok(json!({ "user": user_obj }))
 }
 
+/// Search messages across the workspace via `search.messages` (USER token).
+///
+/// Why: `search.messages` is a user-scope-only method — Slack rejects a bot
+/// token — so this is the one handler that routes through the client's user
+/// token. When no user token is configured the client returns
+/// [`crate::slack::api::error::SlackError::MissingUserToken`] *before* any
+/// network call, which surfaces here as a clear typed tool error rather than a
+/// confusing Slack rejection or a silent bot-token fallback.
+/// What: requires `query`; honours `count` (default [`DEFAULT_SEARCH_COUNT`]);
+/// returns `{query, count, matches:[{channel_id, channel_name, user, ts, text,
+/// permalink}]}`. Result `text`, `channel_name`, and `username` are untrusted
+/// (authored by arbitrary workspace members) → markup-escaped.
+/// Test: `tests/tools_http.rs::search_messages_with_user_token_returns_matches`,
+/// `::search_messages_without_user_token_errors`.
+async fn search_messages(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
+    let query = require_str(&args, "query")?;
+    let count = opt_i64(&args, "count").unwrap_or(DEFAULT_SEARCH_COUNT);
+    let body = json!({ "query": query.as_str(), "count": count });
+    let resp = client.call_method_user(SEARCH_MESSAGES, &body).await?;
+    let matches = clean_search_matches(&resp);
+    Ok(json!({ "query": query, "count": matches.len(), "matches": matches }))
+}
+
+/// Search channels by name/topic/purpose via `conversations.list` (BOT token).
+///
+/// Why: Slack has no bot-callable `search.channels` method, so the tool lists
+/// channels and filters them locally. This is a bot-scope operation — it must
+/// keep working with only the bot token present, independent of the search
+/// user token.
+/// What: requires `query`; fetches up to [`DEFAULT_CHANNEL_SCAN_LIMIT`] channels
+/// and keeps those whose name, topic, or purpose contains `query`
+/// (case-insensitive); returns `{query, count, channels:[{id, name,
+/// is_private}]}` with escaped names.
+/// Test: `tests/tools_http.rs::search_channels_filters_by_query`.
+async fn search_channels(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
+    let query = require_str(&args, "query")?;
+    let body = json!({ "limit": DEFAULT_CHANNEL_SCAN_LIMIT });
+    let resp = client.call_method(CONVERSATIONS_LIST, &body).await?;
+    let channels = filter_channels(&resp, &query);
+    Ok(json!({ "query": query, "count": channels.len(), "channels": channels }))
+}
+
+/// Add an emoji reaction to a message via `reactions.add` (BOT token).
+///
+/// Why: reactions are a bot-scope write; keeping them on the bot token means an
+/// agent can acknowledge messages without a user token being configured.
+/// What: requires `channel`, `timestamp`, and `name` (emoji name without
+/// colons); returns `{ok, channel, timestamp, name}` echoing the caller's own
+/// arguments (they are not untrusted inbound text, so no escaping is needed).
+/// Test: `tests/tools_http.rs::add_reaction_posts_and_confirms`.
+async fn add_reaction(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
+    let channel = require_str(&args, "channel")?;
+    let timestamp = require_str(&args, "timestamp")?;
+    let name = require_str(&args, "name")?;
+    let body = json!({
+        "channel": channel.as_str(),
+        "timestamp": timestamp.as_str(),
+        "name": name.as_str(),
+    });
+    client.call_method(REACTIONS_ADD, &body).await?;
+    Ok(json!({ "ok": true, "channel": channel, "timestamp": timestamp, "name": name }))
+}
+
 // ── Argument extraction ───────────────────────────────────────────────────
 
 /// Require a string argument, erroring before any network call if absent.
@@ -253,6 +336,96 @@ fn clean_channels(resp: &Value) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Clean a `search.messages` response into escaped match entries.
+///
+/// Why: Slack nests results under `messages.matches`, and each match's `text`,
+/// `username`, and channel `name` are authored by arbitrary workspace members —
+/// exactly the hostile-text vector `mrkdwn_escape` defends against. Ids and the
+/// Slack-generated `permalink` are platform-controlled and forwarded verbatim so
+/// the permalink stays a usable URL.
+/// What: maps each `messages.matches[]` element to
+/// `{channel_id, channel_name, user, ts, text, permalink}` with `channel_name`
+/// and `text` escaped; a missing path yields an empty vec.
+/// Test: `clean_search_matches_escapes_and_shapes`.
+fn clean_search_matches(resp: &Value) -> Vec<Value> {
+    resp.get("messages")
+        .and_then(|m| m.get("matches"))
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(clean_search_match).collect())
+        .unwrap_or_default()
+}
+
+/// Shape one `search.messages` match with escaped untrusted text.
+fn clean_search_match(m: &Value) -> Value {
+    let channel = m.get("channel");
+    let channel_id = channel
+        .and_then(|c| c.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let channel_name = channel
+        .and_then(|c| c.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    json!({
+        "channel_id": channel_id,
+        "channel_name": mrkdwn_escape(channel_name),
+        "user": field_str(m, "user"),
+        "ts": field_str(m, "ts"),
+        "text": mrkdwn_escape(m.get("text").and_then(Value::as_str).unwrap_or("")),
+        "permalink": field_str(m, "permalink"),
+    })
+}
+
+/// Filter a `conversations.list` response to channels matching `query`.
+///
+/// Why: `slack_search_channels` has no server-side search, so it matches
+/// `query` (case-insensitive) against each channel's name, topic, and purpose
+/// locally. Names are still escaped for defence in depth.
+/// What: keeps channels whose name / `topic.value` / `purpose.value` contains
+/// `query`; returns escaped `{id, name, is_private}` entries.
+/// Test: `filter_channels_matches_name_and_topic`.
+fn filter_channels(resp: &Value, query: &str) -> Vec<Value> {
+    let needle = query.to_lowercase();
+    resp.get("channels")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| channel_matches(c, &needle))
+                .map(|c| {
+                    json!({
+                        "id": field_str(c, "id"),
+                        "name": mrkdwn_escape(c.get("name").and_then(Value::as_str).unwrap_or("")),
+                        "is_private": c.get("is_private").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a channel object matches the lowercased search `needle`.
+///
+/// Why: a single predicate keeps the name/topic/purpose match rule in one place.
+/// What: `true` if the lowercased name, `topic.value`, or `purpose.value`
+/// contains `needle`.
+/// Test: `filter_channels_matches_name_and_topic`.
+fn channel_matches(c: &Value, needle: &str) -> bool {
+    let name = c.get("name").and_then(Value::as_str).unwrap_or("");
+    let topic = c
+        .get("topic")
+        .and_then(|t| t.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let purpose = c
+        .get("purpose")
+        .and_then(|p| p.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    name.to_lowercase().contains(needle)
+        || topic.to_lowercase().contains(needle)
+        || purpose.to_lowercase().contains(needle)
 }
 
 /// Clean a Slack `members` array into escaped `{id, name, real_name}` entries.
@@ -334,5 +507,58 @@ mod tests {
         assert_eq!(out["id"], "U1");
         assert_eq!(out["name"], "&lt;b&gt;");
         assert_eq!(out["real_name"], "A &amp; B");
+    }
+
+    #[test]
+    fn clean_search_matches_escapes_and_shapes() {
+        let resp = json!({
+            "messages": {
+                "matches": [
+                    {
+                        "channel": { "id": "C1", "name": "gen<x>" },
+                        "user": "U1",
+                        "ts": "1.1",
+                        "text": "<!channel> secret & stuff",
+                        "permalink": "https://x.slack.com/archives/C1/p1"
+                    }
+                ]
+            }
+        });
+        let out = clean_search_matches(&resp);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["channel_id"], "C1");
+        assert_eq!(out[0]["channel_name"], "gen&lt;x&gt;");
+        assert_eq!(out[0]["text"], "&lt;!channel&gt; secret &amp; stuff");
+        assert!(!out[0]["text"].as_str().unwrap().contains('<'));
+        assert_eq!(out[0]["permalink"], "https://x.slack.com/archives/C1/p1");
+    }
+
+    #[test]
+    fn clean_search_matches_missing_path_is_empty() {
+        assert!(clean_search_matches(&json!({ "ok": true })).is_empty());
+    }
+
+    #[test]
+    fn filter_channels_matches_name_and_topic() {
+        let resp = json!({
+            "channels": [
+                { "id": "C1", "name": "backend-alerts", "is_private": false },
+                { "id": "C2", "name": "random", "topic": { "value": "ALERTS go here" } },
+                { "id": "C3", "name": "general", "purpose": { "value": "chatter" } },
+            ]
+        });
+        let out = filter_channels(&resp, "alert");
+        // C1 (name) and C2 (topic, case-insensitive) match; C3 does not.
+        assert_eq!(out.len(), 2);
+        let ids: Vec<&str> = out.iter().map(|c| c["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"C1"));
+        assert!(ids.contains(&"C2"));
+    }
+
+    #[test]
+    fn filter_channels_escapes_names() {
+        let resp = json!({ "channels": [ { "id": "C1", "name": "al<e>rt" } ] });
+        let out = filter_channels(&resp, "al");
+        assert_eq!(out[0]["name"], "al&lt;e&gt;rt");
     }
 }
