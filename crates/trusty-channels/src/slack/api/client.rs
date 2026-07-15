@@ -188,7 +188,7 @@ fn build_http_client() -> Result<reqwest::Client> {
 /// "..."}`, so success is not implied by the status code alone.
 /// What: returns `Ok(value)` when `ok` is `true`; maps auth-class error slugs
 /// to [`SlackError::Auth`] and every other `ok:false` to [`SlackError::Api`].
-/// Test: `tests/client_http.rs::auth_ok_false`, `::api_error_ok_false`.
+/// Test: `auth_ok_false_maps_to_auth_error`, `api_ok_false_maps_to_api_error`.
 fn interpret_envelope(status: u16, value: Value) -> Result<Value, SlackError> {
     if value.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(value);
