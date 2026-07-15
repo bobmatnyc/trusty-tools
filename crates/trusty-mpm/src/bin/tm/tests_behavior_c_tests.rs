@@ -27,9 +27,9 @@ use crate::commands::first_run::needs_first_run_clone;
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     CwdProject, classify_cwd_project, cwd_owns_git_entry, derive_project, fallback_protected,
-    github_host, is_github_remote, ls_tree_reports_tracked_dir, nested_guard_notice,
-    nested_managed_match, non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint,
-    print_project_context, tty_gate, untracked_ancestor_message,
+    github_host, inplace_self_relaunch_hint, is_github_remote, ls_tree_reports_tracked_dir,
+    nested_guard_notice, nested_managed_match, non_github_refusal_message, pane_identity_confirmed,
+    print_non_tty_hint, print_project_context, tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -1832,5 +1832,43 @@ fn nested_guard_notice_mentions_reconnect_target() {
     assert!(
         msg.contains("reconnecting"),
         "nested_guard_notice must still communicate the reconnect action: {msg:?}"
+    );
+}
+
+#[test]
+fn inplace_self_relaunch_hint_uses_resume_when_session_id_present() {
+    // #2789: when the record carries a claude_session_id, the honest
+    // self-relaunch hint must offer `claude --resume <id>` so the operator
+    // resumes the exact conversation instead of a self-switch no-op.
+    let mut record = make_session("tm-cto-01", "active", None);
+    record.claude_session_id = Some("bfc69db6-cb98-4aa7-a07d-89fd69ba710b".to_string());
+    let hint = inplace_self_relaunch_hint(&record);
+    assert!(
+        hint.contains("claude --resume bfc69db6-cb98-4aa7-a07d-89fd69ba710b"),
+        "hint must suggest resuming the exact claude session: {hint:?}"
+    );
+    assert!(
+        hint.contains("already inside this session's pane"),
+        "hint must explain why a reconnect would be a no-op: {hint:?}"
+    );
+}
+
+#[test]
+fn inplace_self_relaunch_hint_bare_claude_when_no_session_id() {
+    // Without a claude_session_id (or a blank one) the hint falls back to a
+    // bare `claude` rather than emitting `claude --resume ` with an empty arg.
+    let mut record = make_session("tm-cto-01", "active", None);
+    record.claude_session_id = None;
+    let hint = inplace_self_relaunch_hint(&record);
+    assert!(
+        hint.contains("claude") && !hint.contains("--resume"),
+        "hint must suggest a bare `claude` when no session id is known: {hint:?}"
+    );
+
+    record.claude_session_id = Some("   ".to_string());
+    let hint_blank = inplace_self_relaunch_hint(&record);
+    assert!(
+        !hint_blank.contains("--resume"),
+        "a blank claude_session_id must not produce `claude --resume`: {hint_blank:?}"
     );
 }

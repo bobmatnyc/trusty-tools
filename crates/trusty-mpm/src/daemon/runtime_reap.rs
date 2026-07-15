@@ -287,6 +287,7 @@ mod tests {
             session_name: name.to_string(),
             pane_current_command: cmd.to_string(),
             pane_pid: Some(4242),
+            pane_id: None,
         }
     }
 

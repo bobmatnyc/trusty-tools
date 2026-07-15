@@ -101,54 +101,67 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             // Safe to attempt: its daemon reactivate call independently
             // reconciles a stale-`Active` record whose pane is confirmed
             // idle (#2453 daemon-side fix, `daemon::managed_routes::
-            // reactivate::reconcile_stale_active_then_reactivate`) and
-            // refuses — falling through to the notice + reconnect below —
-            // when the runtime is still genuinely live.
+            // reactivate::reconcile_stale_active_then_reactivate`) — and, as
+            // of #2789, no longer 409s just because the requesting `tm` is
+            // this pane's own foreground command (the caller's pane_id is
+            // forwarded so the daemon treats it as idle). It still refuses
+            // when the runtime is genuinely live in a SIBLING window.
             match super::guided_inplace::run_inplace_relaunch(
                 client,
                 url,
                 &record.id,
                 record.clone(),
+                current_pane_id.as_deref(),
             )
             .await
             {
                 super::guided_inplace::InPlaceOutcome::Result(Ok(())) => return Ok(()),
                 super::guided_inplace::InPlaceOutcome::Result(Err(e)) => {
-                    // #2456 review finding 2: a failure here — whether it
-                    // happened BEFORE any daemon mutation (cwd resolution,
-                    // resolving the `claude` binary) or the `exec` syscall
-                    // itself failing AFTER a successful reactivate — must
-                    // not hard-fail this call site the way it correctly does
-                    // for `try_inplace_relaunch`'s OWN env-var entry point
-                    // (component C). Pre-#2453 this whole branch always fell
-                    // back to `resume_guided_session`'s switch-client
-                    // reconnect for every one of these scenarios; regressing
-                    // that to a hard non-zero exit — e.g. simply because
-                    // `claude` is not on THIS pane's `PATH` — would be worse
-                    // than the original bug. Report the concrete error and
-                    // fall back exactly like a daemon-refused reactivate.
-                    eprintln!("tm: in-place relaunch failed ({e}) — falling back to reconnect…");
+                    // #2789: we are provably inside THIS record's OWN pane
+                    // (`pane_identity_confirmed`). The pre-existing fallback —
+                    // `resume_guided_session` → `switch-client -t <this very
+                    // session>` — is a guaranteed NO-OP that strands the
+                    // operator in the bare shell they are already looking at
+                    // (the reported dead-end). Report the failure honestly and
+                    // tell them how to relaunch the agent in THIS pane, instead
+                    // of the misleading "switching client" no-op. A failure
+                    // here — pre-mutation (cwd/`claude`-binary resolution) or
+                    // the `exec` itself — must NOT hard-fail (exit non-zero),
+                    // matching the #2456 finding-2 contract for this call site.
+                    eprintln!("tm: in-place relaunch failed ({e})");
+                    eprintln!("{}", inplace_self_relaunch_hint(&record));
+                    return Ok(());
                 }
                 super::guided_inplace::InPlaceOutcome::FallThrough => {
+                    // #2789: the daemon still declined to reconcile — a
+                    // genuinely live sibling window keeps the tmux session
+                    // busy (the correct #2157 refusal), or the daemon predates
+                    // the caller-pane reconcile. Either way a switch-client to
+                    // the session this pane already belongs to is a no-op, so
+                    // do NOT offer it; give the honest self-relaunch hint.
                     eprintln!(
-                        "tm: in-place relaunch unavailable for '{}' (state={}) — {}",
-                        record.name,
-                        record.state,
-                        nested_guard_notice(&record.name)
+                        "tm: in-place relaunch unavailable for '{}' (state={})",
+                        record.name, record.state
                     );
+                    eprintln!("{}", inplace_self_relaunch_hint(&record));
+                    return Ok(());
                 }
             }
-        } else {
-            eprintln!(
-                "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
-                record.name,
-                record.state,
-                nested_guard_notice(&record.name)
-            );
         }
+
+        // Session-name-only match: the operator is in a DIFFERENT pane/window of
+        // the SAME tmux session (not the record's own pane), so a switch-client
+        // reconnect to the managed session is legitimate — not a self no-op.
+        // Preserve the pre-existing refuse+reconnect behavior for that case.
         // Terminal entry point (not a loop) — the `AttachOutcome` only matters to
         // a looping caller like `run_tty_picker` (#2678); here, the hand-off (or
         // fail-closed skip) is this call's whole job, so discard it.
+        eprintln!(
+            "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
+            record.name,
+            record.state,
+            nested_guard_notice(&record.name)
+        );
         super::guided_resume::resume_guided_session(client, url, &record).await?;
         return Ok(());
     }
@@ -426,6 +439,35 @@ pub(crate) fn pane_identity_confirmed(
 /// `nested_guard_notice_mentions_reconnect_target`.
 pub(crate) fn nested_guard_notice(name: &str) -> String {
     format!("not nesting a new session here; reconnecting to '{name}' instead…")
+}
+
+/// Actionable hint (#2789) printed when bare `tm` runs inside a managed
+/// session's OWN pane (pane identity confirmed) but the in-place relaunch could
+/// not proceed.
+///
+/// Why: reconnecting to the very session whose pane the operator is already
+/// inside is a `switch-client` no-op that strands them in a bare shell — the
+/// reported dead-end (`tm-cto-01` transcript). When the in-place relaunch
+/// cannot run (a genuinely live sibling window, a daemon predating the
+/// caller-pane reconcile, or a failed `exec`), the honest response is to tell
+/// the operator how to relaunch the agent in THIS pane themselves rather than
+/// pretend a reconnect happened.
+/// What: a single-line hint. When `record.claude_session_id` is present, it
+/// suggests `claude --resume <id>` (resume the exact conversation); otherwise a
+/// bare `claude`. Pure — takes an already-fetched record, returns the string.
+/// Test: `inplace_self_relaunch_hint_uses_resume_when_session_id_present`,
+/// `inplace_self_relaunch_hint_bare_claude_when_no_session_id`.
+pub(crate) fn inplace_self_relaunch_hint(
+    record: &trusty_mpm::client::ManagedSessionSummary,
+) -> String {
+    let relaunch = match record.claude_session_id.as_deref() {
+        Some(sid) if !sid.trim().is_empty() => format!("claude --resume {sid}"),
+        _ => "claude".to_string(),
+    };
+    format!(
+        "tm: you are already inside this session's pane — its agent has exited; \
+         relaunch it here with:  {relaunch}"
+    )
 }
 
 /// Fetch EVERY managed session, unfiltered — `GET /api/v1/sessions/managed`
