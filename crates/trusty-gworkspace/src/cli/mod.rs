@@ -66,6 +66,11 @@ pub enum Command {
         /// one (a warning is printed naming the displaced profile).
         #[arg(long, conflicts_with = "no_default")]
         make_default: bool,
+        /// Do NOT launch a browser; print the consent URL for you to open
+        /// manually. Enables re-authenticating from a headless / in-session
+        /// context (the loopback callback still captures the redirect).
+        #[arg(long = "no-browser", visible_alias = "print-url")]
+        no_browser: bool,
     },
     /// Check OAuth client credentials and token state.
     Doctor,
@@ -111,6 +116,7 @@ pub async fn dispatch(command: Command) -> Result<()> {
             profile,
             no_default,
             make_default,
+            no_browser,
         } => {
             let profile = flow::effective_profile(profile.as_deref());
             let mode = if no_default {
@@ -120,7 +126,7 @@ pub async fn dispatch(command: Command) -> Result<()> {
             } else {
                 DefaultMode::Auto
             };
-            let outcome = run_consent(&storage, &profile, mode).await?;
+            let outcome = run_consent(&storage, &profile, mode, !no_browser).await?;
             let suffix = if outcome.default_applied {
                 " (default)"
             } else {
@@ -140,7 +146,7 @@ pub async fn dispatch(command: Command) -> Result<()> {
             }
             Ok(())
         }
-        Command::Doctor => doctor::run(&storage),
+        Command::Doctor => doctor::run(&storage).await,
         Command::Accounts { action } => match action {
             AccountsAction::List => accounts::list(&storage),
             AccountsAction::Default { name } => accounts::set_default(&storage, &name),
@@ -168,7 +174,7 @@ mod tests {
             Cli::try_parse_from(["gworkspace-mcp", "setup", "--profile", "work"]).expect("setup");
         assert!(matches!(
             setup.command,
-            Some(Command::Setup { profile: Some(p), no_default: false, make_default: false }) if p == "work"
+            Some(Command::Setup { profile: Some(p), no_default: false, make_default: false, no_browser: false }) if p == "work"
         ));
 
         let doctor = Cli::try_parse_from(["gworkspace-mcp", "doctor"]).expect("doctor");
@@ -206,6 +212,7 @@ mod tests {
                 profile: None,
                 no_default: true,
                 make_default: false,
+                no_browser: false,
             })
         ));
     }
@@ -220,6 +227,31 @@ mod tests {
                 profile: None,
                 no_default: false,
                 make_default: true,
+                no_browser: false,
+            })
+        ));
+    }
+
+    #[test]
+    fn setup_no_browser_flag_parses() {
+        let cli = Cli::try_parse_from(["gworkspace-mcp", "setup", "--no-browser"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Setup {
+                no_browser: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn setup_print_url_alias_parses() {
+        let cli = Cli::try_parse_from(["gworkspace-mcp", "setup", "--print-url"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Setup {
+                no_browser: true,
+                ..
             })
         ));
     }

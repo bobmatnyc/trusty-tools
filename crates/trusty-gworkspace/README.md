@@ -5,9 +5,10 @@ Python [`gworkspace-mcp`](https://pypi.org/project/gworkspace-mcp/) project.
 
 Exposes 43 [Model Context Protocol](https://modelcontextprotocol.io/) tools
 across Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Accounts.
-Reads OAuth tokens from `~/.gworkspace-mcp/tokens.json`, so a user who
-already authenticated with the Python CLI can switch to this Rust binary
-without re-auth.
+Authentication is fully native: the `gworkspace-mcp` binary runs the OAuth
+consent flow itself and reads/writes `~/.gworkspace-mcp/tokens.json` — no
+external CLI is required. The token file is wire-compatible with the original
+Python `gworkspace-mcp`, so an existing token file is picked up unchanged.
 
 ## Installation
 
@@ -15,63 +16,155 @@ without re-auth.
 cargo install --path crates/trusty-gworkspace
 ```
 
-This installs the `gworkspace-mcp` binary into `~/.cargo/bin`.
+This installs the `gworkspace-mcp` binary into `~/.cargo/bin`. The same binary
+is both the MCP stdio server (run with no subcommand) and the onboarding CLI
+(`setup` / `doctor` / `accounts`).
 
-## Quick Start
+## Authentication
 
-1. **Authenticate** using the Python CLI (one-time):
+### 1. Provide an OAuth client
 
-   ```sh
-   pipx install gworkspace-mcp
-   gworkspace-mcp auth
-   ```
+`setup` needs a Google OAuth **client id + secret** (a "Desktop app" /
+installed-app client from the Google Cloud console). Supply them either via
+environment variables:
 
-   This writes `~/.gworkspace-mcp/tokens.json`. Token refresh is handled
-   automatically by `trusty-gworkspace` afterward (via `GOOGLE_CLIENT_ID` /
-   `GOOGLE_CLIENT_SECRET` env vars when refresh is needed).
+```sh
+export GOOGLE_OAUTH_CLIENT_ID="…apps.googleusercontent.com"
+export GOOGLE_OAUTH_CLIENT_SECRET="…"
+```
 
-2. **Wire into Claude Code** (or any MCP client):
-
-   ```jsonc
-   // ~/.claude.json
-   {
-     "mcpServers": {
-       "gworkspace": {
-         "command": "gworkspace-mcp"
-       }
-     }
-   }
-   ```
-
-3. **Use from Claude Code:** the model can now call `search_gmail_messages`,
-   `manage_events`, `create_document`, `manage_slides`, etc.
-
-## Configuration
-
-| Env var                       | Purpose                                                    |
-|-------------------------------|------------------------------------------------------------|
-| `GOOGLE_CLIENT_ID`            | OAuth client ID (only required when refreshing tokens)     |
-| `GOOGLE_CLIENT_SECRET`        | OAuth client secret (only required when refreshing tokens) |
-| `GWORKSPACE_TOKENS_DIR`       | Override token storage directory (default `~/.gworkspace-mcp`) |
-| `RUST_LOG`                    | Standard `tracing` filter (e.g. `trusty_gworkspace=debug`) |
-
-Token files use the same format as the Python project:
+…or by writing `~/.gworkspace-mcp/oauth_client.json`. Both a flat shape and the
+console's downloaded shape are accepted:
 
 ```json
+{ "client_id": "…apps.googleusercontent.com", "client_secret": "…" }
+```
+
+```json
+{ "installed": { "client_id": "…", "client_secret": "…" } }
+```
+
+(`web` is accepted in place of `installed`.) Environment variables take
+precedence over the file.
+
+### 2. Authorize an account
+
+```sh
+gworkspace-mcp setup                       # authorize the default profile
+gworkspace-mcp setup --profile work        # authorize a named profile
+```
+
+`setup` opens your browser to Google's consent screen, captures the redirect on
+a loopback listener, and writes the minted token to `~/.gworkspace-mcp/tokens.json`.
+Access tokens are then refreshed automatically by the server; you only re-run
+`setup` when the refresh token itself is revoked or expired.
+
+Default-profile rules: the first profile you authorize becomes the default; a
+later `setup` of a *different* profile leaves the existing default untouched.
+Use `--make-default` to switch it deliberately, or `--no-default` to guarantee
+it is never changed.
+
+### 3. Wire into Claude Code (or any MCP client)
+
+```jsonc
+// ~/.claude.json
 {
-  "version": 1,
-  "metadata": { "default": "gworkspace-mcp" },
-  "tokens": {
-    "gworkspace-mcp": {
-      "metadata": { "email": "user@example.com", "is_default": true },
-      "token": { "access_token": "...", "refresh_token": "...", "expires_at": "..." }
+  "mcpServers": {
+    "gworkspace": {
+      "command": "gworkspace-mcp"
     }
   }
 }
 ```
 
-Multi-account support: any number of named profiles in `tokens.json`. Pass
-`account = "<profile-name>"` to any tool to switch.
+The model can now call `search_gmail_messages`, `manage_events`,
+`create_document`, `manage_slides`, etc. Pass `account = "<profile-name>"` to
+any tool to target a non-default profile.
+
+## Re-authenticating from within a session
+
+When a refresh token dies mid-session (Google returns `invalid_grant`), tools
+fail with an actionable message naming the exact fix, e.g.:
+
+```
+Google refresh token for profile 'work' is expired or revoked — re-authenticate
+with: gworkspace-mcp setup --profile work (400 Bad Request invalid_grant: …)
+```
+
+You can run the fix without leaving the session:
+
+```sh
+! gworkspace-mcp setup --profile work        # interactive browser consent
+! gworkspace-mcp setup --profile work --print-url   # headless: prints the URL
+```
+
+`--print-url` (alias `--no-browser`) skips the browser launch and prints the
+full consent URL for you to open manually — the loopback callback still binds
+and captures the redirect exactly as the interactive path does. This is the
+path to use from a headless or in-session context where no browser can be
+spawned for you.
+
+## Diagnosing token health
+
+`doctor` reports the static config checks **and** live-probes each stored
+profile's refresh token, classifying it OK / DEAD / UNKNOWN:
+
+```sh
+gworkspace-mcp doctor
+```
+
+For any DEAD profile it prints the exact `gworkspace-mcp setup --profile <name>`
+command to fix it. The probe is read-only (it never rewrites `tokens.json`),
+bounded by a short per-profile timeout, and degrades to UNKNOWN when Google is
+unreachable rather than failing the whole diagnostic.
+
+## Managing accounts
+
+```sh
+gworkspace-mcp accounts list                 # show profiles + which is default
+gworkspace-mcp accounts default work         # switch the default profile
+gworkspace-mcp accounts remove work          # forget a local token (no revoke)
+```
+
+## Configuration
+
+| Env var                       | Purpose                                                        |
+|-------------------------------|----------------------------------------------------------------|
+| `GOOGLE_OAUTH_CLIENT_ID`      | OAuth client ID (required to run `setup` and to refresh)       |
+| `GOOGLE_OAUTH_CLIENT_SECRET`  | OAuth client secret (required to run `setup` and to refresh)   |
+| `RUST_LOG`                    | Standard `tracing` filter (e.g. `trusty_gworkspace=debug`)     |
+
+### Token file shape
+
+`~/.gworkspace-mcp/tokens.json` is a **flat JSON object mapping profile name →
+stored token** (created 0600 on Unix). Multi-account support is any number of
+named keys in this map:
+
+```json
+{
+  "gworkspace-mcp": {
+    "version": 1,
+    "metadata": {
+      "service_name": "gworkspace-mcp",
+      "provider": "google",
+      "created_at": "2026-01-01T00:00:00Z",
+      "last_refreshed": null,
+      "email": "user@example.com",
+      "is_default": true
+    },
+    "token": {
+      "access_token": "ya29.…",
+      "refresh_token": "1//…",
+      "expires_at": "2026-01-01T01:00:00Z",
+      "scopes": ["openid", "https://www.googleapis.com/auth/gmail.modify"],
+      "token_type": "Bearer"
+    }
+  }
+}
+```
+
+A project-level `./.gworkspace-mcp/tokens.json` overrides the user-level file
+per profile (two-tier lookup) — useful for per-project accounts.
 
 ## Tool Surface
 
@@ -121,12 +214,14 @@ adding a new tool means: write the function, add a `match` arm in
 
 ## Design Notes
 
-- **Token format compatibility.** Wire-compatible with the Python project
-  so a single auth flow serves both implementations. See
-  [`src/api/auth/models.rs`](src/api/auth/models.rs).
-- **No interactive OAuth.** Refresh is implemented in Rust; the initial
-  consent flow is delegated to the Python CLI. This keeps the binary
-  headless and CI-friendly.
+- **Token format compatibility.** Wire-compatible with the original Python
+  `gworkspace-mcp` token file, so an existing `tokens.json` is read unchanged.
+  See [`src/api/auth/models.rs`](src/api/auth/models.rs).
+- **Native interactive OAuth.** The authorization-code + PKCE consent flow is
+  implemented in Rust (`src/api/auth/oauth/`): `setup` binds a loopback
+  redirect listener, opens the browser (or, with `--print-url`, prints the URL
+  for headless use), and mints the token itself. Access-token refresh is also
+  native; no external CLI is involved.
 - **Two-tier token lookup.** `./.gworkspace-mcp/tokens.json` overrides
   `~/.gworkspace-mcp/tokens.json` — useful for per-project profiles.
 - **Errors as data.** Tool failures return `{"error": "..."}` inside the

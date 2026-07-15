@@ -1,18 +1,24 @@
 //! OAuth refresh manager — exchanges a refresh token for a new access token.
 //!
-//! Why: Access tokens expire ~1 hour. We don't run the interactive flow
-//! here (that's the Python CLI's job for now) but we *do* need to refresh
-//! before requests go stale.
-//! What: POSTs `grant_type=refresh_token` to Google's OAuth token endpoint
-//! and updates the on-disk record.
-//! Test: Manual — requires real Google credentials. Logic-only branches
-//! (env-var presence, JSON shape) are exercised indirectly by `BaseClient`.
+//! Why: Access tokens expire ~1 hour, so we refresh before requests go stale.
+//! When the *refresh* token itself is expired or revoked Google replies with
+//! `invalid_grant`; the only fix is interactive re-consent, so this path must
+//! surface the exact `gworkspace-mcp setup --profile <name>` command rather
+//! than an opaque HTTP body.
+//! What: POSTs `grant_type=refresh_token` to Google's OAuth token endpoint,
+//! updates the on-disk record on success, and routes failures through the
+//! shared [`refresh_failure_message`] helper (actionable re-auth hint on
+//! `invalid_grant`, sanitized error otherwise).
+//! Test: Manual — requires real Google credentials. The failure-message mapping
+//! is unit-tested in `oauth::errors`
+//! (`refresh_failure_message_names_profile_and_setup_command`).
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
 use super::models::{OAuthToken, StoredToken};
+use super::oauth::errors::refresh_failure_message;
 use super::storage::TokenStorage;
 use crate::api::constants::OAUTH_TOKEN_URL;
 
@@ -64,8 +70,11 @@ impl OAuthManager {
     /// before the next API call.
     /// What: POSTs to Google's OAuth endpoint with `grant_type=refresh_token`,
     /// parses the response, updates `expires_at` to `now + expires_in`, and
-    /// writes the updated `StoredToken` back to disk.
-    /// Test: integration with real Google creds only.
+    /// writes the updated `StoredToken` back to disk. On an HTTP failure it
+    /// returns [`refresh_failure_message`]'s actionable error (naming the exact
+    /// re-auth command on `invalid_grant`).
+    /// Test: live path needs real Google creds; the failure-message mapping is
+    /// covered by `refresh_failure_message_names_profile_and_setup_command`.
     pub async fn refresh(&self, storage: &TokenStorage, profile: &str) -> Result<OAuthToken> {
         let mut stored: StoredToken = storage
             .get_profile(profile)?
@@ -92,7 +101,10 @@ impl OAuthManager {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("token refresh failed ({status}): {body}"));
+            return Err(anyhow!(
+                "{}",
+                refresh_failure_message(status, &body, profile)
+            ));
         }
         let parsed: GoogleTokenResponse =
             serde_json::from_str(&body).with_context(|| format!("parse token response: {body}"))?;

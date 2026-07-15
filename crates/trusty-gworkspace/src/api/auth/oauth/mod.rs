@@ -11,7 +11,8 @@
 //! the live browser round-trip is deferred (needs real Google creds).
 
 pub mod callback;
+pub mod errors;
 pub mod flow;
 pub mod pkce;
 
-pub use flow::{ConsentOutcome, DefaultMode, resolve_client_creds, run_consent};
+pub use flow::{ClientCreds, ConsentOutcome, DefaultMode, resolve_client_creds, run_consent};
