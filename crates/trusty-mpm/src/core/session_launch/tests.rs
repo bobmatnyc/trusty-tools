@@ -1397,12 +1397,21 @@ fn preseed_trust_enables_empty_when_no_mcp_json() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_preseeds_enabled_mcp_servers() {
     // Why (#1296): the single launch-prep entry point injects trusty-memory and
     // trusty-search into `.mcp.json`, then seeds trust. The pre-seeded trust
     // entry in ~/.claude.json must list BOTH injected servers under
     // `enabledMcpjsonServers` so the spawned session runs non-interactively.
+    //
+    // #2756: `inject_native_trusty_mcps` now resolves the managed registry from
+    // the REAL `$HOME` (not `fw`), and `preseed_workspace_trust_home` writes to
+    // `$HOME/.claude.json`. Both are pointed at `tmp_home` here (via a serial
+    // `$HOME` override) so this test neither leaks into — nor is contaminated by
+    // — the operator's real registry (which on a dev box HAS native servers like
+    // slack-mcp registered, which would otherwise appear in the assertion below).
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());

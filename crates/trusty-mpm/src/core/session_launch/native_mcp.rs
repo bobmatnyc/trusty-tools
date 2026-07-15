@@ -88,8 +88,7 @@ use serde_json::Value;
 use super::PrepError;
 use super::settings::inject_mcp_server;
 use crate::core::mcp_config;
-use crate::core::paths::FrameworkPaths;
-use crate::core::trusty_tools_config::managed_claude_config_dir_at;
+use crate::core::trusty_tools_config::managed_claude_config_dir;
 
 /// Basename of the git-excluded file native MCP server secrets are delivered
 /// through.
@@ -136,29 +135,41 @@ pub(super) const NATIVE_TRUSTY_MCP_SERVERS: &[&str] = &[
 /// into the workspace `.mcp.json` (issue #2739).
 ///
 /// Why: this is the `prepare_session` call site. It resolves the tm-owned managed
-/// config dir — the SAME `.claude.json` the `tm mcp` CLI reads and writes —
-/// relative to `fw`'s home base rather than the ambient process env. Using `fw`
-/// (not `CLAUDE_CONFIG_DIR`) keeps this hermetic: production managed sessions
-/// build `fw` under the real home, so it resolves to the real managed dir; test
-/// `FrameworkPaths::under(tempdir)` callers stay confined to the temp dir instead
-/// of leaking the operator's real registry into a fixture (mirroring the
-/// `deploy_output_style(&fw.claude_home_dir())` isolation pattern). `tm mcp`
-/// likewise resolves this dir home-relative via
-/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] — it does not
-/// consult `CLAUDE_CONFIG_DIR` — so the two see the same file.
-/// What: computes
-/// [`managed_claude_config_dir_at`]`(fw.claude_home_dir())` and delegates to
-/// [`inject_native_trusty_mcps_from`]. A missing/empty managed `.claude.json`
-/// makes the delegate a no-op.
-/// Test: covered end-to-end via the `inject_native_*` tests, which drive the
-/// hermetic `_from` core directly with a tempdir config dir, and by
-/// `prepare_session_preseeds_enabled_mcp_servers` (which asserts an isolated `fw`
-/// injects no natives).
-pub(super) fn inject_native_trusty_mcps(
-    fw: &FrameworkPaths,
-    project_path: &Path,
-) -> Result<(), PrepError> {
-    let config_dir = managed_claude_config_dir_at(&fw.claude_home_dir());
+/// config dir — the SAME `.claude.json` the `tm mcp` CLI reads and writes — from
+/// the REAL operator home (`dirs::home_dir()`/`$HOME`), exactly as `tm mcp` does.
+///
+/// #2756: the original version resolved this relative to `fw.claude_home_dir()`,
+/// which is a NO-OP in every real daemon-managed fleet session. Managed spawns
+/// build `fw` via [`crate::core::paths::FrameworkPaths::for_managed_workspace`],
+/// which by design (#1931, for `CLAUDE_CONFIG_DIR` isolation of agent/skill
+/// deploy targets) makes `claude_home_dir()` return the WORKSPACE directory — NOT
+/// real `$HOME`. So the injector looked for
+/// `<workspace>/.trusty-tools/trusty-mpm/claude-config/.claude.json` — a path that
+/// never exists in a freshly cloned workspace — [`mcp_config::list_servers`]
+/// treated the missing file as an empty map, and nothing was ever injected. But
+/// the managed `.claude.json` registry `tm mcp add` writes is ALWAYS
+/// home-relative regardless of which workspace is being provisioned, so it must
+/// be read from the real home too. The `tm mcp` CLI resolves it identically via
+/// [`managed_claude_config_dir`] (which does not consult `CLAUDE_CONFIG_DIR`
+/// either), so the two see the same file. The daemon process runs under the real
+/// user, so real `$HOME` is available at spawn time.
+/// What: resolves [`managed_claude_config_dir`] (real home) and delegates to
+/// [`inject_native_trusty_mcps_from`]. If the home directory cannot be resolved
+/// (a stripped environment), logs a `warn!` and no-ops so the session still
+/// launches — just without the extra native servers. A missing/empty managed
+/// `.claude.json` likewise makes the delegate a no-op.
+/// Test: `inject_native_resolves_managed_registry_from_real_home` (#2756) drives
+/// the ACTUAL `for_managed_workspace` → real-home resolution end-to-end; the
+/// `inject_native_*` tests cover the hermetic `_from` core directly with a
+/// tempdir config dir.
+pub(super) fn inject_native_trusty_mcps(project_path: &Path) -> Result<(), PrepError> {
+    let Some(config_dir) = managed_claude_config_dir() else {
+        tracing::warn!(
+            "skipping native trusty MCP injection: cannot resolve the home directory for the \
+             managed claude config dir — native servers will be absent from this session"
+        );
+        return Ok(());
+    };
     inject_native_trusty_mcps_from(project_path, &config_dir)
 }
 

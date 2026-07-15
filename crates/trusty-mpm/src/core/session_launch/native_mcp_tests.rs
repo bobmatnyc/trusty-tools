@@ -902,3 +902,116 @@ fn inject_native_rejects_url_bearing_allowlisted_server() {
         "no secret env collected → no .env.local"
     );
 }
+
+// ── #2756: real-home resolution of the PRODUCTION injector ──────────────────
+
+/// Redirect `$HOME` to a temp dir for the body, restoring it (or removing it)
+/// afterwards even on panic.
+///
+/// Why (#2756): the production injector resolves the managed registry from the
+/// real operator home (`dirs::home_dir()` → `$HOME`). To drive that resolution
+/// hermetically — without reading or polluting the operator's real
+/// `~/.trusty-tools/...` — the test must point `$HOME` at a fake home holding a
+/// seeded managed registry. A failed assertion must still restore `$HOME` so
+/// sibling `#[serial]` tests are not poisoned, so this mirrors
+/// `home_trust_seed::tests::with_fake_home`.
+/// What: snapshots `$HOME`, sets it to `home`, runs `body` under
+/// `catch_unwind`, restores the snapshot, then re-raises any panic. Callers MUST
+/// be `#[serial_test::serial]` so the process-global `$HOME` mutation cannot race.
+/// Test: used by `inject_native_resolves_managed_registry_from_real_home`.
+fn with_fake_home<F: FnOnce()>(home: &Path, body: F) {
+    let prev = std::env::var("HOME").ok();
+    // SAFETY: callers are `#[serial_test::serial]`, so no other thread races this
+    // set/restore; the restore below runs regardless of a panic in `body`.
+    unsafe { std::env::set_var("HOME", home) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    match prev {
+        Some(p) => unsafe { std::env::set_var("HOME", p) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn inject_native_resolves_managed_registry_from_real_home() {
+    // Why (#2756): the PRODUCTION entry point `inject_native_trusty_mcps` must
+    // resolve the managed `.claude.json` registry from the REAL operator home,
+    // NOT from `fw.claude_home_dir()`. Every daemon-managed fleet session builds
+    // `fw` via `FrameworkPaths::for_managed_workspace(&workspace)`, which by
+    // design (#1931) makes `claude_home_dir()` return the WORKSPACE directory. The
+    // pre-fix injector therefore read
+    // `<workspace>/.trusty-tools/trusty-mpm/claude-config/.claude.json` (never
+    // present in a fresh clone) and silently injected nothing — invisible in CI
+    // because the older tests only drove the hermetic `_from` core against a
+    // tempdir. This test drives the ACTUAL `for_managed_workspace` construction
+    // + real-home resolution end-to-end: it FAILS against the old (fw-relative)
+    // code and PASSES after the fix.
+    let home = tempdir().unwrap();
+    let ws_root = tempdir().unwrap();
+    // A realistic managed workspace path: <root>/<owner>/<repo>/<session-id>.
+    let workspace = ws_root.path().join("bobmatnyc").join("repo").join("sess-1");
+    std::fs::create_dir_all(&workspace).unwrap();
+    git_init(&workspace);
+
+    // Seed the managed registry at the SAME real-home location `tm mcp add`
+    // writes to: <home>/.trusty-tools/trusty-mpm/claude-config/.claude.json.
+    let managed_dir = home
+        .path()
+        .join(".trusty-tools")
+        .join("trusty-mpm")
+        .join("claude-config");
+    seed_managed_registry(&managed_dir);
+
+    // Build `fw` exactly as the daemon managed-spawn path does
+    // (`provisioner::workspace`): its `claude_home_dir()` points at the
+    // WORKSPACE, not `$HOME` — precisely the config that made the bug a no-op.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    // Precondition: the workspace-relative managed registry the buggy code read
+    // does NOT exist, so a green result below can ONLY come from the real-home
+    // read — the exact distinction this regression guards.
+    assert!(
+        !fw.claude_home_dir()
+            .join(".trusty-tools")
+            .join("trusty-mpm")
+            .join("claude-config")
+            .join(".claude.json")
+            .exists(),
+        "precondition: the workspace-relative managed registry must be absent"
+    );
+
+    with_fake_home(home.path(), || {
+        super::native_mcp::inject_native_trusty_mcps(&workspace)
+            .expect("injection succeeds from the real-home managed registry");
+    });
+
+    // The natives from the HOME registry landed in the WORKSPACE `.mcp.json`.
+    let servers = read_injected(&workspace);
+    assert!(
+        servers.contains_key("slack-mcp"),
+        "native slack-mcp must be injected from the real-home managed registry, \
+         not the (empty) workspace-relative path the pre-#2756 code read"
+    );
+    assert!(
+        servers.contains_key("gworkspace-mcp"),
+        "native gworkspace-mcp injected from the real-home registry too"
+    );
+    // Non-native servers are still excluded, proving the allowlist still applies.
+    assert!(
+        !servers.contains_key("github"),
+        "non-native github must not be injected"
+    );
+    // The slack secret was routed to `.env.local`, never into git-tracked
+    // `.mcp.json` — the #2739 guarantee still holds on the real-home path.
+    let mcp_json = std::fs::read_to_string(workspace.join(".mcp.json")).unwrap();
+    assert!(
+        !mcp_json.contains(FAKE_SLACK_TOKEN),
+        ".mcp.json must never carry the raw token: {mcp_json}"
+    );
+    assert!(
+        workspace.join(".env.local").exists(),
+        ".env.local must be written for the slack secret"
+    );
+}
