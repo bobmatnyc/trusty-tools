@@ -357,6 +357,31 @@ mod tests {
         );
     }
 
+    /// `grep` truncates match sets larger than `MAX_GREP_HITS`.
+    ///
+    /// Why: An unbounded result would overflow the context window — this is the
+    /// exact guarantee `MAX_GREP_HITS`'s doc comment promises.
+    /// What: Seeds a single file with `MAX_GREP_HITS + 5` matching lines, greps
+    /// for the shared marker, asserts the truncation notice appears.
+    /// Test: This test.
+    #[tokio::test]
+    async fn grep_truncates_large_result_sets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut content = String::new();
+        for i in 0..(MAX_GREP_HITS + 5) {
+            content.push_str(&format!("MATCH_MARKER line {i}\n"));
+        }
+        fs::write(tmp.path().join("big.txt"), content).expect("write");
+        let tool = GrepTool::new(tmp.path());
+        let result = tool.execute(json!({"pattern": "MATCH_MARKER"})).await;
+        assert!(!result.is_error(), "{}", result.content());
+        assert!(
+            result.content().contains("truncated"),
+            "expected truncation notice: {}",
+            result.content()
+        );
+    }
+
     /// `grep` reports a bad regex as a recoverable error.
     ///
     /// Why: A malformed pattern must surface as a structured error the model can
