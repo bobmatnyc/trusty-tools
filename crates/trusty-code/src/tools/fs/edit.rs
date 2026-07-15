@@ -14,7 +14,10 @@
 //! present in the tool-call arguments (`old_string`+`new_string`, `diff`, or
 //! `content`), and delegates to `edit_format::select_and_apply` to pick and
 //! apply the best-fit format, then writes the result back. All paths are
-//! scoped to the working directory.
+//! scoped to the working directory. On success it also best-effort fires a
+//! mid-task incremental trusty-search index update for the edited path (issue:
+//! mid-task incremental re-indexing) so `search_code` reflects the edit within
+//! the same task.
 //! Test: See `#[cfg(test)]` below — covers each format, zero/ambiguous
 //! SEARCH/REPLACE errors, malformed-diff errors, and path traversal.
 
@@ -202,7 +205,13 @@ impl ToolExecutor for EditTool {
     /// What: Builds an `EditPayload` for each format present in `args`
     /// (`old_string`+`new_string`, `diff`, `content`), errors if none are
     /// present or `old_string`/`new_string` are only partially supplied, then
-    /// calls `edit_inner` and converts the result into a `ToolResult`.
+    /// calls `edit_inner` and converts the result into a `ToolResult`. On
+    /// success, best-effort fires a mid-task incremental trusty-search index
+    /// update (issue: mid-task incremental re-indexing) for the edited path so
+    /// `search_code` reflects the edit within the same task — this never
+    /// affects the returned `ToolResult`; see
+    /// [`trusty_common::search_index::index_files_best_effort`]'s fail-open
+    /// contract.
     /// Test: `edit_replaces_unique_match`, `edit_errors_on_zero_matches`,
     /// `edit_applies_unified_diff`, `edit_applies_whole_file`, etc.
     async fn execute(&self, args: Value) -> ToolResult {
@@ -243,7 +252,13 @@ impl ToolExecutor for EditTool {
         }
 
         match self.edit_inner(std::path::Path::new(path_str), &payloads) {
-            Ok(format) => ToolResult::ok(format!("edited {path_str} ({format})")),
+            Ok(format) => {
+                trusty_common::search_index::index_files_best_effort(
+                    &self.working_dir,
+                    &[PathBuf::from(path_str)],
+                );
+                ToolResult::ok(format!("edited {path_str} ({format})"))
+            }
             Err(e) => ToolResult::err(e.to_string()),
         }
     }

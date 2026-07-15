@@ -10,7 +10,10 @@
 //! What: `WriteFilesTool` takes a `files` array of `{path, content}` objects,
 //! writes each (creating parent dirs) scoped to `working_dir`, and reports a
 //! per-file result. A failure on one file does not abort the others — every
-//! file's outcome is reported so the model can retry only what failed.
+//! file's outcome is reported so the model can retry only what failed. Every
+//! successfully written path is batched into ONE best-effort mid-task
+//! incremental trusty-search index update (issue: mid-task incremental
+//! re-indexing) so `search_code` sees the whole batch within the same task.
 //! Test: See `#[cfg(test)]` below — covers a multi-file write, partial failure,
 //! empty array, and path traversal.
 
@@ -124,7 +127,13 @@ impl ToolExecutor for WriteFilesTool {
     /// bad entry does not lose the successful writes.
     /// What: Parses `{files:[{path, content}, …]}`, writes each, and returns a
     /// per-file summary. Returns an error only when `files` is missing/not an
-    /// array, or when EVERY write failed.
+    /// array, or when EVERY write failed. Batches every SUCCESSFULLY written
+    /// path into ONE best-effort mid-task incremental trusty-search index
+    /// update (issue: mid-task incremental re-indexing) so `search_code` can
+    /// see the whole batch within the same task — this never affects the
+    /// returned `ToolResult`; see
+    /// [`trusty_common::search_index::index_files_best_effort`]'s fail-open
+    /// contract.
     /// Test: `write_files_writes_all`, `write_files_partial_failure`.
     async fn execute(&self, args: Value) -> ToolResult {
         let Some(files) = args.get("files").and_then(Value::as_array) else {
@@ -136,6 +145,7 @@ impl ToolExecutor for WriteFilesTool {
 
         let mut lines = Vec::with_capacity(files.len());
         let mut ok_count = 0usize;
+        let mut written_paths = Vec::with_capacity(files.len());
         for (i, entry) in files.iter().enumerate() {
             let path = entry.get("path").and_then(Value::as_str);
             let content = entry.get("content").and_then(Value::as_str);
@@ -144,6 +154,7 @@ impl ToolExecutor for WriteFilesTool {
                     Ok(()) => {
                         ok_count += 1;
                         lines.push(format!("wrote {p}"));
+                        written_paths.push(PathBuf::from(p));
                     }
                     Err(e) => lines.push(format!("FAILED {p}: {e}")),
                 },
@@ -151,6 +162,10 @@ impl ToolExecutor for WriteFilesTool {
                     "FAILED entry {i}: each element needs both 'path' and 'content'"
                 )),
             }
+        }
+
+        if !written_paths.is_empty() {
+            trusty_common::search_index::index_files_best_effort(&self.working_dir, &written_paths);
         }
 
         let summary = lines.join("\n");

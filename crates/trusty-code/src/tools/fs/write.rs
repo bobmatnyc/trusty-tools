@@ -6,17 +6,44 @@
 //! before anything touches the filesystem.
 //! What: `WriteFileTool` writes `content` to `path` (relative or absolute within
 //! `working_dir`), creating all missing parent directories. Existing files are
-//! overwritten atomically.
+//! overwritten atomically. On success it also best-effort fires a mid-task
+//! incremental trusty-search index update for the written path (issue:
+//! mid-task incremental re-indexing) so `search_code` sees code written
+//! during the task, not just what existed at task start.
 //! Test: See `#[cfg(test)]` below — covers new file, parent dir creation,
 //! overwrite, and path traversal.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::tools::fs::{FsError, scoped_path};
 use crate::tools::traits::{ToolExecutor, ToolResult};
+
+/// Signature for the mid-task incremental index hook fired after a successful
+/// write (issue: mid-task incremental re-indexing).
+///
+/// Why: boxed as a trait object (not called inline) so tests can inject a
+/// closure that records its arguments and observe that `execute` actually
+/// invokes it, WITHOUT depending on trusty-search's real, process-global
+/// daemon-discovery mechanism (`TRUSTY_DATA_DIR_OVERRIDE` + the on-disk
+/// `http_addr` file). That mechanism is unsafe to mutate from a single test in
+/// this crate's parallel suite: once this hook is wired into `execute`, EVERY
+/// concurrently-running write-tool test would also attempt to resolve and
+/// notify whatever daemon address a test-under-observation happened to have
+/// configured at that instant, causing nondeterministic cross-talk between
+/// unrelated tests (observed directly while developing this hook — a
+/// TCP-mock-daemon-based first draft of this test intermittently captured
+/// ANOTHER test's write instead of its own). Mirrors `RecallSessionTool`'s
+/// existing `rpc_url` constructor-injection precedent in this same crate,
+/// generalised to a full callback since `trusty_common::search_index` has no
+/// injectable base-URL parameter.
+/// What: `(working_dir, paths)` — the exact arguments
+/// [`trusty_common::search_index::index_files_best_effort`] expects; the
+/// default (production) notifier is that function itself.
+type IndexNotifier = Arc<dyn Fn(&std::path::Path, &[PathBuf]) + Send + Sync>;
 
 /// `ToolExecutor` that creates or overwrites a file.
 ///
@@ -28,6 +55,7 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 /// Test: `cargo test -p trusty-code -- tools::fs::write`.
 pub struct WriteFileTool {
     working_dir: PathBuf,
+    index_notifier: IndexNotifier,
 }
 
 impl WriteFileTool {
@@ -35,12 +63,33 @@ impl WriteFileTool {
     ///
     /// Why: The working directory is the security boundary; it must be set at
     /// construction time and cannot be overridden per-call by the LLM.
-    /// What: Stores `working_dir`.
+    /// What: Stores `working_dir`; wires `index_notifier` to the real
+    /// production hook, [`trusty_common::search_index::index_files_best_effort`].
     /// Test: `write_creates_new_file`, et al.
     pub fn new(working_dir: impl Into<PathBuf>) -> Self {
         Self {
             working_dir: working_dir.into(),
+            index_notifier: Arc::new(trusty_common::search_index::index_files_best_effort),
         }
+    }
+
+    /// Override the mid-task incremental-index hook for testing.
+    ///
+    /// Why: lets a test observe that `execute` invokes the hook (and with
+    /// what arguments) on a successful write, without touching trusty-search's
+    /// real, process-global daemon-discovery state — see [`IndexNotifier`]'s
+    /// doc comment for why that matters in this crate's parallel test suite.
+    /// What: replaces `index_notifier`. Test-only (`#[cfg(test)]`); no
+    /// production call site can reach this.
+    /// Test: `write_file_success_triggers_incremental_index_update`,
+    /// `write_file_failure_does_not_trigger_incremental_index_update`.
+    #[cfg(test)]
+    fn with_index_notifier(
+        mut self,
+        notifier: impl Fn(&std::path::Path, &[PathBuf]) + Send + Sync + 'static,
+    ) -> Self {
+        self.index_notifier = Arc::new(notifier);
+        self
     }
 
     /// Write `content` to `path`, creating parent directories as needed.
@@ -101,7 +150,12 @@ impl ToolExecutor for WriteFileTool {
     ///
     /// Why: Writes content to a file within the working directory.
     /// What: Parses `{path, content}` from `args`, calls `write_inner`, and
-    /// converts the result into a `ToolResult`.
+    /// converts the result into a `ToolResult`. On success, best-effort fires
+    /// a mid-task incremental trusty-search index update (issue: mid-task
+    /// incremental re-indexing) for the written path so `search_code` can see
+    /// it within the same task — this never affects the returned
+    /// `ToolResult`; see [`trusty_common::search_index::index_files_best_effort`]'s
+    /// fail-open contract.
     /// Test: `write_creates_new_file`, `write_creates_parent_dirs`, etc.
     async fn execute(&self, args: Value) -> ToolResult {
         let Some(path_str) = args.get("path").and_then(Value::as_str) else {
@@ -112,7 +166,10 @@ impl ToolExecutor for WriteFileTool {
         };
 
         match self.write_inner(std::path::Path::new(path_str), content) {
-            Ok(()) => ToolResult::ok(format!("wrote {path_str}")),
+            Ok(()) => {
+                (self.index_notifier)(&self.working_dir, &[PathBuf::from(path_str)]);
+                ToolResult::ok(format!("wrote {path_str}"))
+            }
             Err(e) => ToolResult::err(e.to_string()),
         }
     }
@@ -221,5 +278,87 @@ mod tests {
         let names: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
         assert!(names.contains(&"path"), "must require 'path'");
         assert!(names.contains(&"content"), "must require 'content'");
+    }
+
+    // ── Mid-task incremental re-index hook ──────────────────────────────────
+
+    /// Recorded `(working_dir, paths)` arguments from a test's injected
+    /// `index_notifier` closure.
+    type RecordedCalls = Arc<std::sync::Mutex<Vec<(PathBuf, Vec<PathBuf>)>>>;
+
+    /// A successful `write_file` invokes the mid-task incremental
+    /// trusty-search index hook exactly once, with the working directory and
+    /// the written path.
+    ///
+    /// Why: this is the acceptance criterion for the "search_code sees code
+    /// written during the task" feature — without this hook, `search_code`
+    /// only ever reflects the project's state at task start. Uses the
+    /// injectable `index_notifier` seam (see its doc comment) rather than a
+    /// real network daemon, so this test has zero dependence on process-global
+    /// state and cannot race with any other test in this crate's parallel
+    /// suite.
+    /// What: constructs a `WriteFileTool` with a notifier that records its
+    /// arguments into a shared `Vec`, writes a file, asserts the write
+    /// succeeded, and asserts the notifier fired exactly once with the
+    /// tool's `working_dir` and `[path]`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn write_file_success_triggers_incremental_index_update() {
+        let calls: RecordedCalls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = calls.clone();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tool = WriteFileTool::new(tmp.path()).with_index_notifier(move |root, paths| {
+            recorder
+                .lock()
+                .expect("lock")
+                .push((root.to_path_buf(), paths.to_vec()));
+        });
+
+        let result = tool
+            .execute(json!({"path": "src/lib.rs", "content": "pub fn hi() {}\n"}))
+            .await;
+        assert!(!result.is_error(), "{}", result.content());
+
+        let recorded = calls.lock().expect("lock");
+        assert_eq!(
+            recorded.len(),
+            1,
+            "the incremental-index hook must fire exactly once for a successful write"
+        );
+        let (root, paths) = &recorded[0];
+        assert_eq!(root, tmp.path());
+        assert_eq!(paths, &[PathBuf::from("src/lib.rs")]);
+    }
+
+    /// A FAILED `write_file` (path traversal) does NOT invoke the
+    /// incremental-index hook.
+    ///
+    /// Why: the hook only makes sense for content that actually landed on
+    /// disk; firing it for a rejected write would post stale-or-nonexistent
+    /// file state to the index.
+    /// What: constructs a `WriteFileTool` with a recording notifier, attempts
+    /// a traversal-escaping write, asserts it errors, and asserts the
+    /// notifier never fired.
+    /// Test: this test.
+    #[tokio::test]
+    async fn write_file_failure_does_not_trigger_incremental_index_update() {
+        let calls: RecordedCalls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = calls.clone();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tool = WriteFileTool::new(tmp.path()).with_index_notifier(move |root, paths| {
+            recorder
+                .lock()
+                .expect("lock")
+                .push((root.to_path_buf(), paths.to_vec()));
+        });
+
+        let result = tool
+            .execute(json!({"path": "../../evil.sh", "content": "harm"}))
+            .await;
+        assert!(result.is_error());
+        assert!(
+            calls.lock().expect("lock").is_empty(),
+            "the incremental-index hook must not fire for a failed write"
+        );
     }
 }

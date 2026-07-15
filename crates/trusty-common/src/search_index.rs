@@ -23,9 +23,21 @@
 //! unreachable/slow search daemon. The blocking HTTP calls run on dedicated OS
 //! threads so the function is safe to call from inside a tokio runtime.
 //!
+//! Mid-task incremental re-indexing: [`ensure_project_indexed`] runs once, at
+//! task start — for a greenfield project that starts EMPTY, that means
+//! `search_code` finds nothing the engineer writes DURING the task.
+//! [`index_files_best_effort`] complements it: called after each successful
+//! file write/edit, it POSTs just that file's fresh content to the daemon's
+//! cheap per-file `POST /indexes/{id}/index-file` endpoint (never a full
+//! reindex walk), so the growing codebase stays searchable within the same
+//! task. Same fail-open contract, and non-blocking by construction (spawns its
+//! own detached thread rather than relying on the caller to wrap it, since
+//! its call sites are tcode's tool executors, not a one-shot task-start hook).
+//!
 //! Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
-//! `ensure_project_indexed_none_for_root`, and the `index_is_fresh_*` predicate
-//! tests in the `tests` module below.
+//! `ensure_project_indexed_none_for_root`, the `index_is_fresh_*` predicate
+//! tests, and the `index_files_inner_*` / `relative_index_path_*` /
+//! `index_file_request_body_*` tests in the `tests` module below.
 
 use std::path::Path;
 
@@ -84,6 +96,188 @@ pub fn ensure_project_indexed(project_root: &Path) -> Option<String> {
     }
 
     Some(index_id)
+}
+
+/// Best-effort, non-blocking incremental re-index of specific files into an
+/// ALREADY-REGISTERED trusty-search index (mid-task incremental re-indexing).
+///
+/// Why: [`ensure_project_indexed`] runs once at task start, when a greenfield
+/// project is often EMPTY — so `search_code` finds nothing the engineer goes
+/// on to write during the task. Re-registering (or fully reindexing) the
+/// whole project after every write would mean a full-tree walk per file
+/// (expensive); the daemon's per-file `POST /indexes/{id}/index-file`
+/// endpoint lets a caller add or update ONE file's chunks cheaply, so the
+/// growing codebase stays searchable within the same task.
+/// What: spawns ONE detached OS thread and returns immediately — the caller
+/// (a tool executor mid-turn) must never block or fail because trusty-search
+/// is unreachable or slow. Inside the thread, [`index_files_inner`] derives
+/// the same `(root, index_id)` [`ensure_project_indexed`] would (so this
+/// always targets the same index a task-start call already created) and
+/// POSTs each of `paths` to the daemon. A no-op with zero thread spawn when
+/// `paths` is empty.
+///
+/// Sensitive-path note (issue #2747): unlike `POST /indexes`, the per-file
+/// `index-file` endpoint does NOT re-run the sensitive-path denylist — it
+/// looks the index up by id in the daemon's in-memory registry
+/// (`crates/trusty-search/src/service/server/files.rs`'s `index_file_handler`
+/// calls `state.registry.get(&index_id)`, never `allowlist::is_denied`), so
+/// an index created under the #2747 `allow_sensitive_path` bypass (a tempdir
+/// root) accepts incremental updates unconditionally. No bypass flag is
+/// threaded through here because none is needed.
+/// Test: this function is a thin spawn wrapper (side-effect only, no return
+/// to assert); its logic is [`index_files_inner`], which the
+/// `index_files_inner_*` tests below exercise directly (synchronously, off
+/// the spawned thread) for determinism.
+pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let project_root = project_root.to_path_buf();
+    let paths = paths.to_vec();
+    std::thread::spawn(move || {
+        index_files_inner(&project_root, &paths);
+    });
+}
+
+/// Synchronous body of [`index_files_best_effort`], run on its detached
+/// thread (or called directly by tests for determinism).
+///
+/// Why: split out so tests can exercise the fail-open branches (empty index
+/// id, undiscoverable daemon) synchronously, without waiting on — or racing
+/// — a spawned thread.
+/// What: derives `(root, index_id)` via [`crate::resolve_project_root`] /
+/// [`crate::derive_index_id`]; returns early (logged at debug) when the id is
+/// empty or [`crate::resolve_daemon_base_url`] finds no running daemon;
+/// otherwise, for each path, resolves it against `root`, reads its current
+/// content from disk (an unreadable file — e.g. deleted since the write —
+/// is logged at debug and skipped, not fatal to the batch), and POSTs it via
+/// [`best_effort_index_one_file`]. Every step fails open.
+/// Test: `index_files_inner_is_noop_for_empty_paths`,
+/// `index_files_inner_skips_when_index_id_empty`,
+/// `index_files_inner_skips_gracefully_when_daemon_down`.
+fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let root = crate::resolve_project_root(project_root);
+    let index_id = crate::derive_index_id(&root);
+    if index_id.trim().is_empty() {
+        tracing::debug!(
+            "skipping incremental trusty-search index update: empty index id for {}",
+            root.display()
+        );
+        return;
+    }
+    let Some(base) = crate::resolve_daemon_base_url("trusty-search") else {
+        tracing::debug!(
+            "trusty-search daemon address not found; skipping incremental index \
+             update for '{index_id}' ({} file(s))",
+            paths.len()
+        );
+        return;
+    };
+
+    for path in paths {
+        let abs = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+        let rel = relative_index_path(&root, &abs);
+        let content = match std::fs::read_to_string(&abs) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    "skipping incremental index update for {}: {e}",
+                    abs.display()
+                );
+                continue;
+            }
+        };
+        best_effort_index_one_file(&base, &index_id, &rel, &content);
+    }
+}
+
+/// Resolve `abs` to the path string the corpus stores for a file under `root`.
+///
+/// Why: the reindex walker stores every chunk's `file` field relative to the
+/// index root (`crates/trusty-search/src/service/walker.rs` strips the
+/// canonical root prefix); posting an absolute path here would create a
+/// duplicate, differently-keyed corpus entry for the same file instead of
+/// updating the one the walker already produced.
+/// What: strips `root` as a prefix and forward-slash-normalises the
+/// remainder; falls back to `abs` itself (lossy) when it does not live under
+/// `root` — should not happen for a working-directory-scoped tool write, but
+/// fails safe rather than panicking or silently dropping the update.
+/// Test: `relative_index_path_strips_root_prefix`,
+/// `relative_index_path_falls_back_for_paths_outside_root`.
+fn relative_index_path(root: &Path, abs: &Path) -> String {
+    abs.strip_prefix(root)
+        .unwrap_or(abs)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// POST `/indexes/{id}/index-file` for a single file; failures are logged,
+/// never propagated.
+///
+/// Why: mirrors [`best_effort_create_index`]'s fail-open contract for the
+/// per-file endpoint.
+/// What: issues a short-timeout blocking `POST
+/// {base}/indexes/{index_id}/index-file` with body `{path, content}` (built
+/// by [`index_file_request_body`]). Unlike [`best_effort_create_index`],
+/// this does NOT spawn-and-join its own nested OS thread: it is only ever
+/// reached from inside [`index_files_inner`]'s own detached thread (spawned
+/// by [`index_files_best_effort`]), which is already off any tokio runtime,
+/// so a direct blocking call here cannot trigger the "cannot drop a runtime
+/// in a context where blocking is not allowed" panic — nesting another
+/// spawn+join per file would only double the thread count for no benefit. A
+/// non-2xx response (including 404 for an unregistered/unknown index — e.g.
+/// the daemon restarted since task start) or transport error is logged at
+/// warn and swallowed.
+/// Test: exercised via `index_files_inner_skips_gracefully_when_daemon_down`
+/// (daemon-down path, never reaches this function); the live HTTP path is
+/// covered by integration use.
+fn best_effort_index_one_file(base: &str, index_id: &str, rel_path: &str, content: &str) {
+    let url = format!("{base}/indexes/{index_id}/index-file");
+    let body = index_file_request_body(rel_path, content);
+
+    let result = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_millis(750))
+        .build()
+        .and_then(|client| client.post(&url).json(&body).send());
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!("incrementally indexed '{rel_path}' into '{index_id}'");
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                "incremental index update for '{rel_path}' in '{index_id}' returned HTTP {}",
+                resp.status()
+            );
+        }
+        Err(e) => {
+            tracing::warn!("incremental index update for '{rel_path}' in '{index_id}' failed: {e}");
+        }
+    }
+}
+
+/// Build the JSON body for the `POST /indexes/{id}/index-file` call.
+///
+/// Why: extracted so the request shape is unit-testable without a live
+/// daemon or a spawned thread — mirrors [`create_index_request_body`].
+/// What: `{path, content}` — the exact shape the per-file endpoint's
+/// `IndexFileRequest` expects (`crates/trusty-search/src/service/server/router.rs`).
+/// No `allow_sensitive_path` field: see [`index_files_best_effort`]'s doc
+/// comment for why the per-file endpoint needs no such opt-in.
+/// Test: `index_file_request_body_targets_relative_path_and_content`.
+fn index_file_request_body(rel_path: &str, content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": rel_path,
+        "content": content,
+    })
 }
 
 /// Build the JSON body for the `POST /indexes` find-or-create call.
@@ -344,6 +538,143 @@ mod tests {
         // Derivation yields an empty id for the filesystem root, so the helper
         // returns None without touching the daemon.
         assert_eq!(ensure_project_indexed(Path::new("/")), None);
+    }
+
+    /// `index_files_inner` is a true no-op — no filesystem or network I/O —
+    /// when handed an empty path list.
+    ///
+    /// Why: [`index_files_best_effort`] is called from every successful write
+    /// tool executor; a batch write with zero files (should not normally
+    /// happen, but must not misbehave if it does) must not derive an index id
+    /// or attempt any I/O.
+    /// What: calls `index_files_inner` with `project_root = "/"` (which would
+    /// otherwise short-circuit on the empty-id path anyway) and an empty
+    /// `paths` slice; asserts it returns immediately without panicking.
+    /// Test: this test.
+    #[test]
+    fn index_files_inner_is_noop_for_empty_paths() {
+        index_files_inner(Path::new("/"), &[]);
+    }
+
+    /// `index_files_inner` skips cleanly when `derive_index_id` yields an
+    /// empty id (mirrors `ensure_project_indexed_none_for_root`'s "no index to
+    /// target" case for the incremental path).
+    ///
+    /// Why: the filesystem root has no meaningful basename to derive an id
+    /// from; posting to a daemon under an empty id would be meaningless. This
+    /// must be detected and skipped before any daemon lookup or file read.
+    /// What: calls `index_files_inner` with `project_root = "/"` and a
+    /// non-empty `paths` slice; asserts it returns without panicking (no
+    /// index id to target, so no I/O is attempted).
+    /// Test: this test.
+    #[test]
+    fn index_files_inner_skips_when_index_id_empty() {
+        index_files_inner(Path::new("/"), &[PathBuf::from("some/file.rs")]);
+    }
+
+    /// `index_files_inner` fails open — no panic, no propagated error — when
+    /// the trusty-search daemon is unreachable.
+    ///
+    /// Why: this is the core "never block or fail a tool result on index
+    /// error" contract the mid-task incremental re-index hook depends on. We
+    /// force the daemon-down path the same way
+    /// `ensure_project_indexed_returns_derived_id_when_daemon_down` does:
+    /// point the data dir at an empty temp dir so `resolve_daemon_base_url`
+    /// finds no address file, guaranteeing no HTTP call is attempted.
+    /// What: seeds a git-rooted scratch project with one real file, calls
+    /// `index_files_inner` with that file's path, and asserts it returns
+    /// promptly without panicking.
+    /// Test: this test.
+    #[test]
+    fn index_files_inner_skips_gracefully_when_daemon_down() {
+        let _guard = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let data_dir = scratch_dir("data-incr");
+        fs::create_dir_all(&data_dir).unwrap();
+        // SAFETY: guarded by ENV_LOCK; removed below before returning.
+        unsafe {
+            std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+        }
+
+        let project = scratch_dir("git-incr");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
+
+        index_files_inner(&project, &[PathBuf::from("main.rs")]);
+
+        unsafe {
+            std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        }
+        let _ = fs::remove_dir_all(&project);
+        let _ = fs::remove_dir_all(&data_dir);
+        // No assertion beyond "did not panic" — fail-open with no daemon
+        // means there is nothing further to observe from this call.
+    }
+
+    /// `relative_index_path` strips the project root prefix so the posted
+    /// path matches the corpus's existing `file` field convention.
+    ///
+    /// Why: the reindex walker stores chunk `file` fields relative to the
+    /// index root; posting an absolute path for an incremental update would
+    /// create a second, differently-keyed corpus entry for the same file
+    /// instead of updating the walker's original one.
+    /// What: builds `root/src/main.rs`, asserts `relative_index_path` returns
+    /// `"src/main.rs"`.
+    /// Test: this test.
+    #[test]
+    fn relative_index_path_strips_root_prefix() {
+        let root = Path::new("/Users/dev/my-project");
+        let abs = root.join("src/main.rs");
+        assert_eq!(relative_index_path(root, &abs), "src/main.rs");
+    }
+
+    /// `relative_index_path` falls back to the absolute path (lossy) rather
+    /// than panicking when the candidate does not live under `root`.
+    ///
+    /// Why: should not happen for a working-directory-scoped tool write, but
+    /// the fallback must fail safe, not crash the caller's thread.
+    /// What: passes a path with a different root; asserts the returned string
+    /// equals the absolute path.
+    /// Test: this test.
+    #[test]
+    fn relative_index_path_falls_back_for_paths_outside_root() {
+        let root = Path::new("/Users/dev/my-project");
+        let elsewhere = Path::new("/somewhere/else/file.py");
+        assert_eq!(
+            relative_index_path(root, elsewhere),
+            "/somewhere/else/file.py"
+        );
+    }
+
+    /// `index_file_request_body` targets exactly `{path, content}` with no
+    /// extraneous fields — in particular, no `allow_sensitive_path` (the
+    /// per-file endpoint does not consult the denylist at all; see
+    /// `index_files_best_effort`'s doc comment).
+    ///
+    /// Why: pins the wire shape the daemon's `IndexFileRequest`
+    /// (`crates/trusty-search/src/service/server/router.rs`) expects, and
+    /// documents — via a negative assertion — the Step 0 finding that this
+    /// endpoint needs no sensitive-path opt-in.
+    /// What: builds the body for a relative path + content, asserts both
+    /// fields round-trip and that no `allow_sensitive_path` key is present.
+    /// Test: this test.
+    #[test]
+    fn index_file_request_body_targets_relative_path_and_content() {
+        let body = index_file_request_body("src/main.rs", "fn main() {}\n");
+        assert_eq!(
+            body.get("path").and_then(serde_json::Value::as_str),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            body.get("content").and_then(serde_json::Value::as_str),
+            Some("fn main() {}\n")
+        );
+        assert!(
+            body.get("allow_sensitive_path").is_none(),
+            "the per-file endpoint does not re-check the denylist, so no bypass \
+             flag should be sent: {body:?}"
+        );
     }
 
     /// `ensure_project_indexed`'s `POST /indexes` request body always sets
