@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
+use serde::Deserialize;
 
 use crate::daemon::orphan_gc::{ChildLivenessProbe, PaneInfo, ProcessTreeProbe};
 use crate::daemon::runtime_reap::find_runtime_exited;
@@ -29,6 +30,29 @@ use crate::session_manager::{
 };
 
 use super::{parse_id, record_to_summary};
+
+/// Query parameters for the reactivate route.
+///
+/// Why: an in-place-relaunch client (`bin/tm`'s `guided_inplace`) runs `tm`
+/// as the foreground process of the very pane it is relaunching. At the exact
+/// moment it POSTs here, `tmux list-panes` reports THAT pane's
+/// `pane_current_command` as `tm` (and its shell PID has `tm` as a live child)
+/// — so the daemon's own idleness classification would see the pane as "still
+/// running a runtime" and refuse the stale-`Active` reconcile with a 409, even
+/// though the agent has genuinely exited (#2789, the reported dead-end). The
+/// client therefore tells the daemon which pane is ITS OWN via the stable tmux
+/// `pane_id`, so [`reconcile_stale_active_then_reactivate`] can exclude that
+/// one self-referential pane from the liveness check.
+/// What: an optional `caller_pane_id` (tmux's `%N`). Absent for non-tmux or
+/// pre-#2789 clients, in which case reconciliation behaves exactly as before.
+/// Test: `should_reconcile_stale_active_true_when_only_caller_pane_busy`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReactivateQuery {
+    /// The stable tmux `pane_id` of the pane the reactivate request originates
+    /// from (the pane about to `exec` `claude` in place).
+    #[serde(default)]
+    pub caller_pane_id: Option<String>,
+}
 
 /// POST /api/v1/sessions/managed/{id}/reactivate — flip Stopped -> Active IN
 /// PLACE, with NO tmux mutation (#2023 component C).
@@ -47,14 +71,17 @@ use super::{parse_id, record_to_summary};
 /// exited but the periodic reap tick (or a racing `SessionEnd` hook) has not
 /// yet flipped the record's `state` to `Stopped`; still 409 when the record is
 /// genuinely not reconcilable (a live runtime, a different lifecycle state, or
-/// a sibling pane in the same tmux session that is still active). 200 with the
-/// updated summary on success either way.
+/// a sibling pane in the same tmux session that is still active). The optional
+/// `caller_pane_id` query param (#2789) lets an in-place-relaunch client name
+/// its OWN pane so the reconcile does not count the requesting `tm` process
+/// itself as a live runtime. 200 with the updated summary on success either way.
 /// Test: `mark_reactivated_flips_stopped_to_active`,
 /// `mark_reactivated_rejects_non_stopped` in `session_manager::reactivate_tests`;
 /// `should_reconcile_stale_active_*` below.
 pub async fn reactivate_managed_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
+    Query(params): Query<ReactivateQuery>,
 ) -> impl IntoResponse {
     let id = match parse_id(&id_str) {
         Ok(id) => id,
@@ -66,12 +93,16 @@ pub async fn reactivate_managed_session(
         Err(ManagedError::SessionNotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
         }
-        Err(ManagedError::InvalidState(_, reason)) => {
-            match reconcile_stale_active_then_reactivate(&mgr, &id).await {
-                Some(record) => Json(record_to_summary(&record)).into_response(),
-                None => (StatusCode::CONFLICT, reason).into_response(),
-            }
-        }
+        Err(ManagedError::InvalidState(_, reason)) => match reconcile_stale_active_then_reactivate(
+            &mgr,
+            &id,
+            params.caller_pane_id.as_deref(),
+        )
+        .await
+        {
+            Some(record) => Json(record_to_summary(&record)).into_response(),
+            None => (StatusCode::CONFLICT, reason).into_response(),
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -94,10 +125,11 @@ pub async fn reactivate_managed_session(
 /// reap tick.
 /// What: re-fetches the record; bails (`None`) unless it is `Active` and
 /// [`should_reconcile_stale_active`] confirms every pane belonging to its tmux
-/// session is idle (a still-live pane — including a genuinely different,
-/// still-active sibling window in the SAME tmux session, #2157 — keeps the
-/// existing 409 refusal, preserving that safety boundary). On confirmation,
-/// calls [`SessionManager::mark_runtime_exited_stopped`] then
+/// session — EXCEPT the caller's own pane (`caller_pane_id`, #2789) — is idle
+/// (a still-live pane — including a genuinely different, still-active sibling
+/// window in the SAME tmux session, #2157 — keeps the existing 409 refusal,
+/// preserving that safety boundary). On confirmation, calls
+/// [`SessionManager::mark_runtime_exited_stopped`] then
 /// [`SessionManager::mark_reactivated`]; any failure at either step (tmux
 /// discovery, pane listing, or either state transition) also yields `None` so
 /// the caller falls back to the ordinary 409.
@@ -107,13 +139,14 @@ pub async fn reactivate_managed_session(
 async fn reconcile_stale_active_then_reactivate(
     mgr: &SessionManager,
     id: &ManagedSessionId,
+    caller_pane_id: Option<&str>,
 ) -> Option<SessionRecord> {
     let record = mgr.get(id).await.ok()?;
     let panes = crate::daemon::tmux::TmuxDriver::discover()
         .ok()?
         .list_managed_panes()
         .ok()?;
-    if !should_reconcile_stale_active(&record, &panes, &ProcessTreeProbe) {
+    if !should_reconcile_stale_active(&record, &panes, caller_pane_id, &ProcessTreeProbe) {
         return None;
     }
     mgr.mark_runtime_exited_stopped(id).await.ok()?;
@@ -132,23 +165,79 @@ async fn reconcile_stale_active_then_reactivate(
 /// different window, #2157) keeps the WHOLE session "live" and this predicate
 /// correctly returns `false`, preserving the existing refuse+switch-client
 /// contract for that case.
+///
+/// #2789: the caller's OWN pane is first neutralized to an idle shell via
+/// [`neutralize_caller_pane`]. Without this, an in-place-relaunch request is
+/// self-defeating: the requesting `tm` process is the foreground command of
+/// the pane being relaunched, so tmux reports that pane as running `tm` (a
+/// non-shell command, and its shell PID has `tm` as a live child) — which the
+/// unmodified liveness check reads as "runtime still alive", refusing the
+/// reconcile with a 409 and stranding the operator in a bare shell. Because a
+/// pane cannot simultaneously run `tm` in the foreground AND a live interactive
+/// `claude`, treating the caller's own pane as idle is SOUND, not merely a
+/// trust assumption — while every OTHER (sibling) pane is checked unchanged, so
+/// a genuinely live sibling window still blocks the reconcile.
 /// What: `true` only when `record.state == Active` AND `find_runtime_exited`
-/// (scoped to just this one record) selects it — i.e. its tmux session has at
-/// least one present pane and NONE of them are still running an agent.
+/// (scoped to just this one record, over the caller-neutralized pane list)
+/// selects it — i.e. its tmux session has at least one present pane and NONE of
+/// them (other than the caller's own) are still running an agent.
 /// `false` for every other state (Provisioning/Errored/Decommissioned — those
 /// fall through to the ordinary 409, matching `mark_reactivated`'s Stopped-only
-/// contract) and for a missing/still-live pane.
+/// contract) and for a missing/still-live-sibling pane.
 /// Test: `should_reconcile_stale_active_true_when_active_and_idle`,
 /// `should_reconcile_stale_active_false_when_pane_still_live`,
 /// `should_reconcile_stale_active_false_when_pane_missing`,
-/// `should_reconcile_stale_active_false_when_not_active`.
+/// `should_reconcile_stale_active_false_when_not_active`,
+/// `should_reconcile_stale_active_true_when_only_caller_pane_busy`,
+/// `should_reconcile_stale_active_false_when_sibling_pane_live_despite_caller`.
 pub(crate) fn should_reconcile_stale_active(
     record: &SessionRecord,
     panes: &[PaneInfo],
+    caller_pane_id: Option<&str>,
     probe: &dyn ChildLivenessProbe,
 ) -> bool {
-    record.state == ManagedSessionState::Active
-        && !find_runtime_exited(std::slice::from_ref(record), panes, probe).is_empty()
+    if record.state != ManagedSessionState::Active {
+        return false;
+    }
+    let neutralized = neutralize_caller_pane(panes, caller_pane_id);
+    !find_runtime_exited(std::slice::from_ref(record), &neutralized, probe).is_empty()
+}
+
+/// #2789: return `panes` with the caller's OWN pane rewritten to look like an
+/// idle shell, so the liveness aggregation does not count the requesting `tm`
+/// process against its own session.
+///
+/// Why: see [`should_reconcile_stale_active`]. The caller's pane is kept in the
+/// list (its session must still count as "present" for `find_runtime_exited` to
+/// consider it) but its command/PID are replaced so it reads as idle — as if
+/// the pane had already dropped back to the bare shell it will become the
+/// instant `tm` `exec`s `claude`. Matching is by the stable tmux `pane_id`
+/// (never reused across panes), so exactly one pane can match.
+/// What: when `caller_pane_id` is `None`/blank, or no pane matches it, returns
+/// the panes unchanged (behaviorally identical to the pre-#2789 path). When a
+/// pane matches, that entry's `pane_current_command` becomes a bare shell and
+/// its `pane_pid` becomes `None` (so [`ChildLivenessProbe`] reports no live
+/// child); all other panes are copied verbatim.
+/// Test: exercised via `should_reconcile_stale_active_true_when_only_caller_pane_busy`
+/// and `..._false_when_sibling_pane_live_despite_caller`.
+fn neutralize_caller_pane(panes: &[PaneInfo], caller_pane_id: Option<&str>) -> Vec<PaneInfo> {
+    let Some(caller) = caller_pane_id.filter(|s| !s.is_empty()) else {
+        return panes.to_vec();
+    };
+    panes
+        .iter()
+        .map(|p| {
+            if p.pane_id.as_deref() == Some(caller) {
+                PaneInfo {
+                    pane_current_command: "zsh".to_string(),
+                    pane_pid: None,
+                    ..p.clone()
+                }
+            } else {
+                p.clone()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -194,6 +283,18 @@ mod tests {
             session_name: name.to_string(),
             pane_current_command: cmd.to_string(),
             pane_pid: Some(4242),
+            pane_id: None,
+        }
+    }
+
+    /// A pane carrying a stable tmux `pane_id` — needed to exercise the #2789
+    /// caller-pane neutralization.
+    fn pane_with_id(name: &str, cmd: &str, pane_id: &str) -> PaneInfo {
+        PaneInfo {
+            session_name: name.to_string(),
+            pane_current_command: cmd.to_string(),
+            pane_pid: Some(4242),
+            pane_id: Some(pane_id.to_string()),
         }
     }
 
@@ -206,6 +307,7 @@ mod tests {
         assert!(should_reconcile_stale_active(
             &record,
             &panes,
+            None,
             &AlwaysIdleProbe
         ));
     }
@@ -219,6 +321,7 @@ mod tests {
         assert!(!should_reconcile_stale_active(
             &record,
             &panes,
+            None,
             &AlwaysIdleProbe
         ));
     }
@@ -234,6 +337,7 @@ mod tests {
         assert!(!should_reconcile_stale_active(
             &record,
             &panes,
+            None,
             &AlwaysIdleProbe
         ));
     }
@@ -246,6 +350,7 @@ mod tests {
         assert!(!should_reconcile_stale_active(
             &record,
             &[],
+            None,
             &AlwaysIdleProbe
         ));
     }
@@ -263,9 +368,60 @@ mod tests {
             record.state = state.clone();
             let panes = vec![pane("tm-demo", "zsh")];
             assert!(
-                !should_reconcile_stale_active(&record, &panes, &AlwaysIdleProbe),
+                !should_reconcile_stale_active(&record, &panes, None, &AlwaysIdleProbe),
                 "state {state} must not be reconciled"
             );
         }
+    }
+
+    #[test]
+    fn should_reconcile_stale_active_true_when_only_caller_pane_busy() {
+        // #2789 core repro: bare `tm` typed in the just-vacated pane runs as
+        // that pane's foreground command, so tmux reports it as running `tm`
+        // (NOT an idle shell). Without the caller-pane exclusion this reads as
+        // "runtime still alive" and 409s — the reported dead-end. Naming the
+        // caller's own pane_id neutralizes exactly that one pane, so the
+        // session reconciles.
+        let record = active_record("tm-cto-01");
+        let panes = vec![pane_with_id("tm-cto-01", "tm", "%3")];
+        assert!(
+            !should_reconcile_stale_active(&record, &panes, None, &AlwaysIdleProbe),
+            "pre-#2789 behavior (no caller_pane_id): the caller's own `tm` pane \
+             is still (wrongly) seen as live"
+        );
+        assert!(
+            should_reconcile_stale_active(&record, &panes, Some("%3"), &AlwaysIdleProbe),
+            "#2789: naming the caller's own pane must let its session reconcile"
+        );
+    }
+
+    #[test]
+    fn should_reconcile_stale_active_false_when_sibling_pane_live_despite_caller() {
+        // #2789 genuine-conflict guard: neutralizing the caller's OWN pane must
+        // NOT hide a genuinely live claude in a DIFFERENT pane of the same tmux
+        // session (#2157). The sibling keeps the session live → 409 stands.
+        let record = active_record("tm-cto-01");
+        let panes = vec![
+            pane_with_id("tm-cto-01", "tm", "%3"),     // caller's own pane
+            pane_with_id("tm-cto-01", "claude", "%4"), // genuinely live sibling
+        ];
+        assert!(
+            !should_reconcile_stale_active(&record, &panes, Some("%3"), &AlwaysIdleProbe),
+            "a live sibling pane must still block reconcile even when the \
+             caller's own pane is excluded"
+        );
+    }
+
+    #[test]
+    fn should_reconcile_stale_active_ignores_unmatched_caller_pane_id() {
+        // A caller_pane_id that matches no pane in the record's session must
+        // leave the liveness check unchanged — no accidental neutralization of
+        // an unrelated pane.
+        let record = active_record("tm-demo");
+        let panes = vec![pane_with_id("tm-demo", "claude", "%1")];
+        assert!(
+            !should_reconcile_stale_active(&record, &panes, Some("%99"), &AlwaysIdleProbe),
+            "an unmatched caller_pane_id must not force any pane idle"
+        );
     }
 }

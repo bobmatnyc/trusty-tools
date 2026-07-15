@@ -57,6 +57,7 @@ fn pane(name: &str, cmd: &str) -> PaneInfo {
         session_name: name.to_string(),
         pane_current_command: cmd.to_string(),
         pane_pid: Some(9999),
+        pane_id: None,
     }
 }
 

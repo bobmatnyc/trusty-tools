@@ -1787,6 +1787,7 @@ fn pane_for_gate_test(name: &str, cmd: &str) -> crate::daemon::orphan_gc::PaneIn
         session_name: name.to_string(),
         pane_current_command: cmd.to_string(),
         pane_pid: Some(4242),
+        pane_id: None,
     }
 }
 

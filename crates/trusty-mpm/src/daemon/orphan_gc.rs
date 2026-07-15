@@ -70,9 +70,15 @@ pub fn is_idle_shell(pane_command: &str) -> bool {
 /// Why: the reconciler needs the session name, what the pane is running, and
 /// (when cheaply available) the pane's shell PID so it can do a second liveness
 /// check before reaping. Bundling them keeps [`classify_session`] a pure
-/// function of plain data, fully testable without spawning tmux.
-/// What: the tmux `session_name`, its `pane_current_command`, and an optional
-/// `pane_pid` (the pane's shell PID, `None` when tmux did not report one).
+/// function of plain data, fully testable without spawning tmux. The stable
+/// tmux `pane_id` (#2789) additionally lets the reactivate-reconcile path
+/// (`daemon::managed_routes::reactivate`) identify the ONE pane that belongs to
+/// the caller making an in-place-relaunch request — see that module for why
+/// that pane must be treated as idle rather than as a live runtime.
+/// What: the tmux `session_name`, its `pane_current_command`, an optional
+/// `pane_pid` (the pane's shell PID, `None` when tmux did not report one), and
+/// an optional stable `pane_id` (tmux's `%N`, `None` when tmux did not report
+/// one or an older enumeration path did not capture it).
 /// Test: constructed throughout the `tests` submodule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneInfo {
@@ -82,6 +88,10 @@ pub struct PaneInfo {
     pub pane_current_command: String,
     /// The pane's shell PID, if tmux reported it.
     pub pane_pid: Option<u32>,
+    /// The pane's stable tmux id (e.g. `"%5"`), if the enumeration captured it.
+    /// Distinct from `pane_pid` (which the OS can reuse across a pane's
+    /// lifetime); never inherited across panes, unlike an env var.
+    pub pane_id: Option<String>,
 }
 
 /// The GC's verdict for a single tmux session.
@@ -558,6 +568,7 @@ mod tests {
             session_name: name.to_string(),
             pane_current_command: cmd.to_string(),
             pane_pid: Some(4242),
+            pane_id: None,
         }
     }
 
@@ -880,6 +891,7 @@ mod tests {
                 session_name: "tmpm-my-session".to_string(),
                 pane_current_command: "claude".to_string(),
                 pane_pid: Some(45162),
+                pane_id: None,
             },
             &tracked,
             &AlwaysIdleProbe,
@@ -897,6 +909,7 @@ mod tests {
                 session_name: "tmpm-orphan".to_string(),
                 pane_current_command: "zsh".to_string(),
                 pane_pid: Some(99999),
+                pane_id: None,
             },
             &tracked,
             &AlwaysIdleProbe,
@@ -913,6 +926,7 @@ mod tests {
                 session_name: "tmpm-my-session".to_string(),
                 pane_current_command: "zsh".to_string(),
                 pane_pid: Some(55555),
+                pane_id: None,
             },
             &tracked,
             &AlwaysIdleProbe,

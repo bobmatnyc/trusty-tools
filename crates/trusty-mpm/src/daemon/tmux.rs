@@ -459,10 +459,12 @@ impl TmuxDriver {
     /// Why: the orphan-GC must reconcile live tmux against the registries, and
     /// to decide whether a session is idle it needs each pane's
     /// `pane_current_command` (and, for the belt-and-braces liveness check, the
-    /// pane's shell PID). `list-panes -a` reports all of that across every
+    /// pane's shell PID). The reactivate-reconcile path (#2789) additionally
+    /// needs each pane's stable `pane_id` to identify the caller's OWN pane and
+    /// treat it as idle. `list-panes -a` reports all of that across every
     /// session in a single tmux call.
     /// What: runs
-    /// `tmux list-panes -a -F "#{session_name}\t#{pane_current_command}\t#{pane_pid}"`
+    /// `tmux list-panes -a -F "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}"`
     /// and parses each row into a [`orphan_gc::PaneInfo`]. A tab delimiter avoids
     /// colliding with the colons in session names. An empty tmux server (`no
     /// server running`) yields an empty `Vec` rather than an error, so a quiet
@@ -475,7 +477,7 @@ impl TmuxDriver {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_current_command}\t#{pane_pid}",
+                "#{session_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_id}",
             ])
             .output()?;
         if !output.status.success() {
@@ -493,23 +495,30 @@ impl TmuxDriver {
             .collect())
     }
 
-    /// Parse one `session_name\tpane_current_command\tpane_pid` row.
+    /// Parse one `session_name\tpane_current_command\tpane_pid\tpane_id` row.
     ///
     /// Why: keeping the parse separate from the subprocess call makes it
     /// unit-testable without spawning tmux.
     /// What: splits on the tab delimiter; a row missing the session name is
     /// dropped (`None`); a missing or unparsable PID degrades to `None` PID
-    /// rather than dropping the whole row (the command is the primary signal).
+    /// rather than dropping the whole row (the command is the primary signal);
+    /// a missing/blank `pane_id` degrades to `None` (an older tmux or a
+    /// truncated row still yields a usable pane for the idleness sweep).
     /// Test: `parses_managed_pane_row`.
     fn parse_managed_pane_row(line: &str) -> Option<crate::daemon::orphan_gc::PaneInfo> {
-        let mut parts = line.splitn(3, '\t');
+        let mut parts = line.splitn(4, '\t');
         let session_name = parts.next().filter(|s| !s.is_empty())?.to_string();
         let pane_current_command = parts.next().unwrap_or("").trim().to_string();
         let pane_pid = parts.next().and_then(|s| s.trim().parse::<u32>().ok());
+        let pane_id = parts
+            .next()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Some(crate::daemon::orphan_gc::PaneInfo {
             session_name,
             pane_current_command,
             pane_pid,
+            pane_id,
         })
     }
 
@@ -915,18 +924,27 @@ mod tests {
 
     #[test]
     fn parses_managed_pane_row() {
-        let row = TmuxDriver::parse_managed_pane_row("tmpm-brave-otter\tclaude\t12345").unwrap();
+        let row =
+            TmuxDriver::parse_managed_pane_row("tmpm-brave-otter\tclaude\t12345\t%7").unwrap();
         assert_eq!(row.session_name, "tmpm-brave-otter");
         assert_eq!(row.pane_current_command, "claude");
         assert_eq!(row.pane_pid, Some(12345));
+        assert_eq!(row.pane_id.as_deref(), Some("%7"));
 
         // Missing/garbage PID degrades to None but keeps the row (command is key).
-        let no_pid = TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t").unwrap();
+        let no_pid = TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t\t%9").unwrap();
         assert_eq!(no_pid.pane_pid, None);
         assert_eq!(no_pid.pane_current_command, "zsh");
+        assert_eq!(no_pid.pane_id.as_deref(), Some("%9"));
+
+        // A row from an older tmux with no pane_id column degrades to None
+        // pane_id rather than dropping the row.
+        let no_pane_id = TmuxDriver::parse_managed_pane_row("tmpm-y\tclaude\t222").unwrap();
+        assert_eq!(no_pane_id.pane_id, None);
+        assert_eq!(no_pane_id.pane_pid, Some(222));
 
         // Empty session name is dropped entirely.
-        assert!(TmuxDriver::parse_managed_pane_row("\tzsh\t1").is_none());
+        assert!(TmuxDriver::parse_managed_pane_row("\tzsh\t1\t%1").is_none());
     }
 
     #[test]
