@@ -41,10 +41,23 @@ dir's `.claude.json`:
   (same precedence chain as `tm register`/`tm ls`:
   `--root` > `TRUSTY_MPM_ROOT` env > `[standalone] root` in config > `~/.trusty-mpm`).
 
-This map is **user scope** — "available in all your projects." Every tm-managed
-session sees these servers, with no per-project approval dialog. There is
-deliberately **no `--scope` flag**: `tm mcp` is inherently user scope. (Stock
-`claude mcp add` cannot target this relocated dir, which is why `tm mcp` exists.)
+This map is **user scope**. There is deliberately **no `--scope` flag**:
+`tm mcp` is inherently user scope. (Stock `claude mcp add` cannot target this
+relocated dir, which is why `tm mcp` exists.)
+
+**Where these servers actually reach (issue #2739):**
+
+- The **standalone `tm run` driver** reads this user-scope map directly, so it
+  sees **every** server you add here.
+- **Daemon-managed / fleet sessions** (`tm session new`) launch
+  `claude --setting-sources project,local`, which does NOT read the user tier.
+  For them, only **native trusty MCP servers** are bridged into each session's
+  workspace `.mcp.json` at spawn — currently the allowlist
+  `slack-mcp`, `telegram-mcp`, `gworkspace-mcp`, `trusty-analyze`
+  (plus the always-provisioned `trusty-memory` / `trusty-search`, which have
+  their own dedicated injectors). Non-native/third-party or HTTP servers you add
+  (e.g. `github`, remote endpoints) apply to the standalone driver only and are
+  **not** injected into fleet sessions.
 
 ### The 3 auto-provisioned framework built-ins
 
