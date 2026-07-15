@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::slack::api::client::BaseClient;
+use crate::slack::api::error::SlackError;
 use trusty_common::mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
 
 /// Shared state passed to every dispatcher invocation.
@@ -38,47 +39,58 @@ pub struct AppState {
 /// `tools_call_unknown_tool_returns_method_not_found`.
 #[derive(Debug, Error)]
 pub enum ToolCallError {
-    /// A planned tool whose live handler has not been implemented yet.
-    #[error("tool '{0}' is not yet implemented: live Slack API calls are deferred pending the token decision (see ADR-0014)")]
+    /// A planned tool whose live handler has not been implemented yet
+    /// (currently the search + reaction tools — those land in #2640).
+    #[error("tool '{0}' is not yet implemented (search + reactions land in #2640)")]
     NotImplemented(String),
     /// A tool name that is not part of the planned surface at all.
     #[error("unknown tool: {0}")]
     UnknownTool(String),
+    /// A required argument was missing or the wrong JSON type.
+    #[error("invalid arguments: {0}")]
+    InvalidArgs(String),
+    /// The live Slack Web API call failed (auth, rate-limit, `ok:false`, …).
+    #[error(transparent)]
+    Slack(#[from] SlackError),
 }
 
 impl ToolCallError {
     /// JSON-RPC error code for this failure.
     ///
     /// Why: `handle_message` needs a numeric code for the wire response.
-    /// What: Unknown tools map to `METHOD_NOT_FOUND`; unimplemented (but
-    /// planned) tools map to `INTERNAL_ERROR`.
-    /// Test: Covered by the dispatcher tests.
+    /// What: Unknown tools map to `METHOD_NOT_FOUND`; bad arguments map to
+    /// `INVALID_PARAMS`; unimplemented (but planned) tools and live Slack API
+    /// failures map to `INTERNAL_ERROR`.
+    /// Test: Covered by the dispatcher tests and `tests/tools_http.rs`.
     pub fn code(&self) -> i32 {
         match self {
             ToolCallError::NotImplemented(_) => error_codes::INTERNAL_ERROR,
             ToolCallError::UnknownTool(_) => error_codes::METHOD_NOT_FOUND,
+            ToolCallError::InvalidArgs(_) => error_codes::INVALID_PARAMS,
+            ToolCallError::Slack(_) => error_codes::INTERNAL_ERROR,
         }
     }
 }
 
 /// Dispatch a single tool call by name.
 ///
-/// Why: One routing table keeps the tool surface greppable; live handlers land
-/// on the matching arm here as each Slack method is implemented.
-/// What: Every planned tool currently routes to a `NotImplemented` stub;
-/// anything else is `UnknownTool`. The `_state`/`_args` are accepted now so the
-/// signature is stable when real handlers replace the stubs.
-/// Test: `tools_call_returns_not_implemented`.
+/// Why: One routing table keeps the tool surface greppable; the send/read/list
+/// handlers (#2639) run live Slack calls here, while the still-planned search +
+/// reaction tools remain `NotImplemented` until #2640.
+/// What: rejects an unknown name with `UnknownTool`, then delegates every known
+/// name to [`crate::slack::handlers::dispatch`], which runs the implemented
+/// handlers and returns `NotImplemented` for the deferred ones.
+/// Test: `tools_call_returns_not_implemented`,
+/// `tools_call_unknown_tool_returns_method_not_found`, `tests/tools_http.rs`.
 pub async fn handle_tool_call(
-    _state: &AppState,
+    state: &AppState,
     name: &str,
-    _args: Value,
+    args: Value,
 ) -> Result<Value, ToolCallError> {
-    if crate::slack::tools::is_known_tool(name) {
-        // Stub: schema is authoritative, live call deferred (see ADR-0014).
-        return Err(ToolCallError::NotImplemented(name.to_string()));
+    if !crate::slack::tools::is_known_tool(name) {
+        return Err(ToolCallError::UnknownTool(name.to_string()));
     }
-    Err(ToolCallError::UnknownTool(name.to_string()))
+    crate::slack::handlers::dispatch(&state.client, name, args).await
 }
 
 /// Translate a parsed JSON-RPC request into a JSON-RPC response payload.
@@ -189,12 +201,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn tools_call_returns_not_implemented() {
+        // `slack_add_reaction` is a known tool whose handler is deferred to
+        // #2640, so it must still surface the `NotImplemented` error.
         let state = make_state();
         let req = json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": { "name": "slack_send_message", "arguments": { "channel": "C1", "text": "hi" } }
+            "params": { "name": "slack_add_reaction", "arguments": { "channel": "C1", "timestamp": "1.2", "name": "eyes" } }
         });
         let resp = handle_message(state, req).await;
         assert_eq!(resp["error"]["code"], error_codes::INTERNAL_ERROR);
@@ -202,6 +216,21 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not yet implemented"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tools_call_missing_required_arg_is_invalid_params() {
+        // `slack_send_message` requires `text`; omitting it must be an
+        // INVALID_PARAMS error *before* any network call is attempted.
+        let state = make_state();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": { "name": "slack_send_message", "arguments": { "channel": "C1" } }
+        });
+        let resp = handle_message(state, req).await;
+        assert_eq!(resp["error"]["code"], error_codes::INVALID_PARAMS);
     }
 
     #[tokio::test(flavor = "current_thread")]
