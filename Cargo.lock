@@ -6284,7 +6284,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10825,6 +10825,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-channels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "trusty-common",
+ "wiremock",
+]
+
+[[package]]
 name = "trusty-code"
 version = "0.1.0"
 dependencies = [
@@ -10855,7 +10871,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.22.6"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11077,7 +11093,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.19.13"
+version = "0.19.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11278,20 +11294,6 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 6.0.3",
-]
-
-[[package]]
-name = "trusty-slack"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "trusty-common",
 ]
 
 [[package]]

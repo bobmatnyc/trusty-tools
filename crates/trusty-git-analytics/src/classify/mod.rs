@@ -15,6 +15,7 @@ pub mod classifier;
 pub mod errors;
 pub mod pipeline;
 pub(super) mod pipeline_db;
+pub(super) mod pipeline_external;
 pub mod rules;
 pub mod sources;
 pub mod taxonomy;

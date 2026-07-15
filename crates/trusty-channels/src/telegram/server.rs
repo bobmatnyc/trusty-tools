@@ -1,8 +1,8 @@
-//! MCP JSON-RPC dispatch + stdio loop for `slack-mcp`.
+//! MCP JSON-RPC dispatch + stdio loop for `telegram-mcp`.
 //!
 //! Why: Every trusty-* MCP server shares the same shape — `initialize`,
 //! `tools/list`, `tools/call`, with notifications suppressed. Centralising it
-//! here means future Slack tool handlers focus on Slack Web API specifics.
+//! here means future Telegram tool handlers focus on Bot API specifics.
 //! What: `AppState` holds an `Arc<BaseClient>`; `handle_message` is the pure
 //! JSON-RPC dispatcher; `handle_tool_call` is the (currently all-stub) tool
 //! router; `run_stdio` wires it into `trusty_common::mcp::run_stdio_loop`.
@@ -15,12 +15,12 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::api::client::BaseClient;
+use crate::telegram::api::client::BaseClient;
 use trusty_common::mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
 
 /// Shared state passed to every dispatcher invocation.
 ///
-/// Why: Tool handlers will need the Slack client; nothing else is shared yet.
+/// Why: Tool handlers will need the Telegram client; nothing else is shared yet.
 /// What: `Clone`-able via `Arc<BaseClient>`.
 /// Test: Smoke-constructed in `mod tests`.
 #[derive(Clone)]
@@ -39,7 +39,9 @@ pub struct AppState {
 #[derive(Debug, Error)]
 pub enum ToolCallError {
     /// A planned tool whose live handler has not been implemented yet.
-    #[error("tool '{0}' is not yet implemented: live Slack API calls are deferred pending the token decision (see ADR-0014)")]
+    #[error(
+        "tool '{0}' is not yet implemented: live Telegram Bot API calls are deferred (see issue #2641)"
+    )]
     NotImplemented(String),
     /// A tool name that is not part of the planned surface at all.
     #[error("unknown tool: {0}")]
@@ -64,7 +66,7 @@ impl ToolCallError {
 /// Dispatch a single tool call by name.
 ///
 /// Why: One routing table keeps the tool surface greppable; live handlers land
-/// on the matching arm here as each Slack method is implemented.
+/// on the matching arm here as each Bot API method is implemented.
 /// What: Every planned tool currently routes to a `NotImplemented` stub;
 /// anything else is `UnknownTool`. The `_state`/`_args` are accepted now so the
 /// signature is stable when real handlers replace the stubs.
@@ -74,8 +76,8 @@ pub async fn handle_tool_call(
     name: &str,
     _args: Value,
 ) -> Result<Value, ToolCallError> {
-    if crate::tools::is_known_tool(name) {
-        // Stub: schema is authoritative, live call deferred (see ADR-0014).
+    if crate::telegram::tools::is_known_tool(name) {
+        // Stub: schema is authoritative, live call deferred (see issue #2641).
         return Err(ToolCallError::NotImplemented(name.to_string()));
     }
     Err(ToolCallError::UnknownTool(name.to_string()))
@@ -93,10 +95,10 @@ pub async fn handle_tool_call(
 pub async fn handle_message(state: AppState, req: Value) -> Value {
     let method = req["method"].as_str().unwrap_or("");
     match method {
-        "initialize" => initialize_response("slack-mcp", env!("CARGO_PKG_VERSION"), None),
+        "initialize" => initialize_response("telegram-mcp", env!("CARGO_PKG_VERSION"), None),
         "notifications/initialized" | "notifications/cancelled" => Value::Null,
         "ping" => json!({}),
-        "tools/list" => crate::tools::tool_list_response(),
+        "tools/list" => crate::telegram::tools::tool_list_response(),
         "tools/call" => {
             let params = &req["params"];
             let name = params["name"].as_str().unwrap_or("");
@@ -123,7 +125,7 @@ pub async fn handle_message(state: AppState, req: Value) -> Value {
 
 /// Run the stdio MCP loop wired to this server.
 ///
-/// Why: Single entry point for `bin/slack-mcp.rs`.
+/// Why: Single entry point for `bin/telegram-mcp.rs`.
 /// What: Forwards every parsed `Request` to `handle_message` and wraps the
 /// JSON result back into a `Response` (or a JSON-RPC error / suppressed reply).
 /// Test: Manual — driven from Claude Code; the stdio loop itself is tested in
@@ -162,7 +164,7 @@ mod tests {
 
     fn make_state() -> AppState {
         // BaseClient::new() reads no required env vars and returns Ok, so this
-        // works in CI without any Slack credentials.
+        // works in CI without any Telegram credentials.
         let client = BaseClient::new().expect("construct base client");
         AppState {
             client: Arc::new(client),
@@ -174,7 +176,7 @@ mod tests {
         let state = make_state();
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
         let resp = handle_message(state, req).await;
-        assert_eq!(resp["serverInfo"]["name"], "slack-mcp");
+        assert_eq!(resp["serverInfo"]["name"], "telegram-mcp");
         assert!(resp["capabilities"]["tools"].is_object());
     }
 
@@ -184,7 +186,7 @@ mod tests {
         let req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle_message(state, req).await;
         let tools = resp["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), crate::tools::TOOL_NAMES.len());
+        assert_eq!(tools.len(), crate::telegram::tools::TOOL_NAMES.len());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -194,7 +196,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": { "name": "slack_send_message", "arguments": { "channel": "C1", "text": "hi" } }
+            "params": { "name": "telegram_send_message", "arguments": { "chat_id": "123", "text": "hi" } }
         });
         let resp = handle_message(state, req).await;
         assert_eq!(resp["error"]["code"], error_codes::INTERNAL_ERROR);
@@ -211,7 +213,7 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 4,
             "method": "tools/call",
-            "params": { "name": "slack_not_a_tool", "arguments": {} }
+            "params": { "name": "telegram_not_a_tool", "arguments": {} }
         });
         let resp = handle_message(state, req).await;
         assert_eq!(resp["error"]["code"], error_codes::METHOD_NOT_FOUND);

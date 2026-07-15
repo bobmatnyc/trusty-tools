@@ -33,9 +33,12 @@ use super::memory_store::MemoryKeyStore;
 /// re-deriving `{PROVIDER}_API_KEY` ad hoc (which breaks for providers whose
 /// canonical env var doesn't follow that shape).
 /// What: case-insensitive match on `provider`; extend this list as new
-/// providers are added in later Wave 1/2 tickets. `None` for an unknown
-/// provider — callers treat that as "env tier does not apply", not an
-/// error.
+/// providers are added in later Wave 1/2 tickets. Not limited to inference
+/// providers — any consumer that needs the same env → `.env.local` → store
+/// precedence for a token registers its provider→env-var name here (e.g.
+/// `slack` → `SLACK_BOT_TOKEN` for the native Slack MCP server, issue #2638).
+/// `None` for an unknown provider — callers treat that as "env tier does not
+/// apply", not an error.
 /// Test: `resolver_tests::env_var_for_known_providers`,
 /// `resolver_tests::env_var_for_unknown_provider_is_none`.
 pub fn env_var_for(provider: &str) -> Option<&'static str> {
@@ -46,6 +49,14 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         "openai" => Some("OPENAI_API_KEY"),
         "together" => Some("TOGETHER_API_KEY"),
         "atlascloud" => Some("ATLASCLOUD_API_KEY"),
+        "slack" => Some("SLACK_BOT_TOKEN"),
+        // Second Slack token: `search.messages` (and other user-scope-only
+        // methods) require a Slack *user* token, which a bot token cannot
+        // substitute for. Kept as a distinct provider so bot-token tools and
+        // user-token tools resolve independently (issue #2640, epic #2636).
+        "slack-user" => Some("SLACK_USER_TOKEN"),
+        // Non-inference token: the native Telegram MCP server (issue #2641).
+        "telegram" => Some("TELEGRAM_BOT_TOKEN"),
         _ => None,
     }
 }
@@ -138,6 +149,14 @@ mod tests {
         assert_eq!(env_var_for("OPENAI"), Some("OPENAI_API_KEY"));
         assert_eq!(env_var_for("together"), Some("TOGETHER_API_KEY"));
         assert_eq!(env_var_for("atlascloud"), Some("ATLASCLOUD_API_KEY"));
+        // Non-inference token: the native Slack MCP server (issue #2638).
+        assert_eq!(env_var_for("slack"), Some("SLACK_BOT_TOKEN"));
+        assert_eq!(env_var_for("Slack"), Some("SLACK_BOT_TOKEN"));
+        // Second Slack token for user-scope search methods (issue #2640).
+        assert_eq!(env_var_for("slack-user"), Some("SLACK_USER_TOKEN"));
+        assert_eq!(env_var_for("Slack-User"), Some("SLACK_USER_TOKEN"));
+        // Non-inference token: the native Telegram MCP server (issue #2641).
+        assert_eq!(env_var_for("telegram"), Some("TELEGRAM_BOT_TOKEN"));
     }
 
     /// Why: an unmapped provider must not panic or synthesise a guess.

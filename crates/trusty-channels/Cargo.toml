@@ -1,9 +1,9 @@
 [package]
-name = "trusty-slack"
+name = "trusty-channels"
 version = "0.1.0"
 publish = false
 edition = "2021"
-description = "Native Slack MCP server (chat-as-tools) for the Trusty suite — scaffold"
+description = "Native chat-channel MCP servers (Slack, …) for the Trusty suite — chat-as-tools"
 license.workspace = true
 
 [lib]
@@ -13,8 +13,12 @@ crate-type = ["rlib"]
 name = "slack-mcp"
 path = "src/bin/slack-mcp.rs"
 
+[[bin]]
+name = "telegram-mcp"
+path = "src/bin/telegram-mcp.rs"
+
 [dependencies]
-trusty-common = { workspace = true, features = ["mcp"] }
+trusty-common = { workspace = true, features = ["mcp", "credentials"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -22,3 +26,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+serial_test = { workspace = true }
