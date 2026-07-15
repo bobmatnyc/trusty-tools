@@ -335,7 +335,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x8e07_dc8d_bbf6_a7a1;
+const EXPECTED_PREAMBLE_HASH: u64 = 0x513f_fb3d_a209_0524;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///

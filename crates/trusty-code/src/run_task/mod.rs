@@ -38,8 +38,8 @@ use crate::provider::{
 };
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::tools::{
-    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
-    ReadFileTool, RunContext, ToolRegistry, WriteFileTool,
+    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool, GlobTool,
+    GrepTool, ListDirTool, ReadFileTool, RunContext, ToolRegistry, WriteFileTool, WriteFilesTool,
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
@@ -314,11 +314,12 @@ fn build_engineer_runner(
 /// Why: The engineer needs real file and shell tools that cannot escape the
 /// project root, plus (#2072) `finish_task` so it can signal completion with a
 /// structured report. This factory constructs `read_file`, `write_file`,
-/// `edit`, and `bash` all scoped to `self.project`, so the engineer operates
-/// only inside the project working tree; `finish_task` has no filesystem
-/// footprint and needs no scoping.
+/// `write_files` (#2681 batch write), `edit`, the `glob`/`grep`/`list_dir`
+/// exploration tools (#1027), and `bash` all scoped to `self.project`, so the
+/// engineer operates only inside the project working tree; `finish_task` has no
+/// filesystem footprint and needs no scoping.
 /// What: Implements `RegistryFactory::build`, returning an `Arc<ToolRegistry>`
-/// with all five tools; the runner then gates them by the engineer's
+/// with every tool; the runner then gates them by the engineer's
 /// `tools.allowed`.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer` (the engineer's
 /// `write_file` actually writes into the project).
@@ -336,9 +337,16 @@ impl RegistryFactory for ProjectToolFactory {
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(ReadFileTool::new(&self.project)));
         reg.register(Arc::new(WriteFileTool::new(&self.project)));
+        // #2681: batch-write decouples turn-count from file-count.
+        reg.register(Arc::new(WriteFilesTool::new(&self.project)));
         reg.register(Arc::new(
             EditTool::new(&self.project).with_model_slug(model_slug),
         ));
+        // #1027: native file discovery so the engineer stops shelling out to
+        // find/grep/ls (the dominant bake-off agent-turn sink).
+        reg.register(Arc::new(GlobTool::new(&self.project)));
+        reg.register(Arc::new(GrepTool::new(&self.project)));
+        reg.register(Arc::new(ListDirTool::new(&self.project)));
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),

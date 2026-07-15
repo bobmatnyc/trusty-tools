@@ -10834,6 +10834,8 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "globset",
+ "ignore",
  "libc",
  "regex",
  "reqwest 0.12.28",
