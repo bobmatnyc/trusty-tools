@@ -74,14 +74,26 @@ pub async fn run(storage: &TokenStorage) -> Result<()> {
     println!("Per-profile refresh-token health:");
     match &creds {
         Some(creds) => {
-            let http = reqwest::Client::builder()
-                .timeout(PROBE_TIMEOUT)
-                .build()
-                .unwrap_or_default();
-            for (name, email, _is_default) in &accounts {
-                let result = probe_profile(&http, storage, creds, name).await;
-                for line in health_lines(name, email.as_deref(), &result) {
-                    println!("{line}");
+            // Never fall back to `Client::default()` on builder failure: that
+            // client has no request timeout, so a hung endpoint would stall
+            // doctor indefinitely. If the bounded client can't be built, report
+            // every profile as Unknown rather than probe without a timeout.
+            match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
+                Ok(http) => {
+                    for (name, email, _is_default) in &accounts {
+                        let result = probe_profile(&http, storage, creds, name).await;
+                        for line in health_lines(name, email.as_deref(), &result) {
+                            println!("{line}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("      Could not build a bounded HTTP client: {e}");
+                    for (name, email, _is_default) in &accounts {
+                        for line in health_lines(name, email.as_deref(), &ProbeResult::Unknown) {
+                            println!("{line}");
+                        }
+                    }
                 }
             }
         }

@@ -18,7 +18,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 
 use super::models::{OAuthToken, StoredToken};
-use super::oauth::errors::refresh_failure_message;
+use super::oauth::errors::{redact_token_response, refresh_failure_message};
 use super::storage::TokenStorage;
 use crate::api::constants::OAUTH_TOKEN_URL;
 
@@ -106,8 +106,11 @@ impl OAuthManager {
                 refresh_failure_message(status, &body, profile)
             ));
         }
-        let parsed: GoogleTokenResponse =
-            serde_json::from_str(&body).with_context(|| format!("parse token response: {body}"))?;
+        // NB: `body` here is a 2xx token response containing access/refresh
+        // tokens; on the (practically unreachable) parse failure it must be
+        // redacted, never embedded verbatim, before entering the error chain.
+        let parsed: GoogleTokenResponse = serde_json::from_str(&body)
+            .with_context(|| format!("parse token response: {}", redact_token_response(&body)))?;
 
         let expires_in = parsed.expires_in.unwrap_or(3600);
         let new_token = OAuthToken {
