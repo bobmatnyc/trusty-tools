@@ -300,6 +300,8 @@ async fn global_search_nested_hierarchy_dedup_count_present() {
             routing: None,
             routing_n: None,
             routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
         }),
     )
     .await
@@ -378,6 +380,8 @@ async fn global_search_sub_index_boost_applied() {
             routing: None,
             routing_n: None,
             routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
         }),
     )
     .await
@@ -410,6 +414,127 @@ async fn global_search_sub_index_boost_applied() {
     assert!(
         has_child_result,
         "sub-index (boost-child) must contribute results to the fan-out"
+    );
+}
+
+/// Issue #2845: `serial: true` bounds the fan-out to concurrency 1 and still
+/// returns merged results from every index.
+///
+/// Why: a `--serial` (or per-request `serial`) fan-out must not lose results —
+/// it only changes *how many* per-index searches run at once, never *whether*
+/// they run. Regression guard that the `buffer_unordered(1)` path fuses all
+/// lanes exactly like the concurrent path.
+/// What: registers two indexes each with the query term, runs a serial global
+/// search, and asserts both indexes are searched, results are returned, and
+/// the response echoes `fanout_concurrency == 1`.
+/// Test: this test.
+#[tokio::test]
+async fn global_search_serial_returns_all_results() {
+    use crate::core::{
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId, IndexRegistry},
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    for name in ["serial-a", "serial-b"] {
+        let root = format!("/nonexistent_serial/{name}");
+        let indexer = CodeIndexer::new(name, &root);
+        indexer
+            .index_file("src/lib.rs", "fn delta_function() { println!(\"delta\"); }")
+            .await
+            .expect("index_file");
+        registry.register(IndexHandle::bare(
+            IndexId::new(name),
+            Arc::new(RwLock::new(indexer)),
+            root.into(),
+        ));
+    }
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let Json(value) = global_search_handler(
+        State(state),
+        Json(GlobalSearchRequest {
+            query: "delta_function".into(),
+            top_k: 10,
+            full_content: false,
+            indexes: None,
+            routing: None,
+            routing_n: None,
+            routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: true,
+        }),
+    )
+    .await
+    .expect("handler ok");
+
+    assert_eq!(
+        value["fanout_concurrency"].as_u64(),
+        Some(1),
+        "serial fan-out must report concurrency 1: {value:?}"
+    );
+    let searched = value["indexes_searched"].as_array().unwrap();
+    assert_eq!(searched.len(), 2, "both indexes must be searched serially");
+    let results = value["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "serial fan-out must still return merged results"
+    );
+}
+
+/// Issue #2845: an explicit per-request `max_fanout_concurrency` is echoed in
+/// the response so operators can confirm the cap took hold.
+///
+/// Why: the response field is the observability hook for the bounding fix;
+/// without a test it could silently regress to reporting the env/default.
+/// What: runs a global search with `max_fanout_concurrency: Some(4)` over a
+/// single index and asserts the response echoes `fanout_concurrency == 4`.
+/// Test: this test.
+#[tokio::test]
+async fn global_search_request_override_echoed() {
+    use crate::core::{
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId, IndexRegistry},
+    };
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let indexer = CodeIndexer::new("cap-one", "/nonexistent_cap/one");
+    indexer
+        .index_file("src/lib.rs", "fn epsilon_function() {}")
+        .await
+        .expect("index_file");
+    registry.register(IndexHandle::bare(
+        IndexId::new("cap-one"),
+        Arc::new(RwLock::new(indexer)),
+        "/nonexistent_cap/one".into(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let Json(value) = global_search_handler(
+        State(state),
+        Json(GlobalSearchRequest {
+            query: "epsilon_function".into(),
+            top_k: 5,
+            full_content: false,
+            indexes: None,
+            routing: None,
+            routing_n: None,
+            routing_threshold: None,
+            max_fanout_concurrency: Some(4),
+            serial: false,
+        }),
+    )
+    .await
+    .expect("handler ok");
+
+    assert_eq!(
+        value["fanout_concurrency"].as_u64(),
+        Some(4),
+        "per-request cap must be echoed: {value:?}"
     );
 }
 

@@ -394,6 +394,8 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
             routing: None,
             routing_n: None,
             routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
         }),
     )
     .await;

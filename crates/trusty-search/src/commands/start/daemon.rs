@@ -41,6 +41,7 @@ use crate::commands::prior_index_count::load_prior_index_count;
 /// "another daemon is already running" message. Run with `--data-dir /tmp/ts-x`
 /// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`. Unit coverage:
 /// `spawn_args_include_data_dir_when_preset_env` in `tests/data_dir_forward.rs`.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_start(
     port: u16,
     foreground: bool,
@@ -48,6 +49,8 @@ pub async fn handle_start(
     data_dir: Option<&std::path::Path>,
     verbose: bool,
     no_auto_discover: bool,
+    fanout_concurrency: Option<usize>,
+    serial: bool,
 ) -> Result<()> {
     // Apply the --data-dir override as early as possible so the foreground path
     // sees the correct root in TRUSTY_DATA_DIR.  The background self-spawn path
@@ -117,6 +120,14 @@ pub async fn handle_start(
         if no_auto_discover {
             cmd.arg("--no-auto-discover");
         }
+        // Issue #2845: forward the fan-out bounding flags to the foreground
+        // child so the detached daemon honours them (mirrors --device).
+        if serial {
+            cmd.arg("--serial");
+        }
+        if let Some(n) = fanout_concurrency {
+            cmd.arg("--fanout-concurrency").arg(n.to_string());
+        }
         // Issue #1182: pass --data-dir explicitly so the CLI flag wins even
         // when TRUSTY_DATA_DIR was already set in the parent environment.
         // Relying solely on env inheritance loses the explicit flag when the
@@ -159,6 +170,26 @@ pub async fn handle_start(
             other => {
                 anyhow::bail!("invalid --device value '{other}'; expected one of: auto, cpu, gpu")
             }
+        }
+    }
+
+    // Issue #2845: translate the fan-out bounding flags into the
+    // `TRUSTY_SEARCH_FANOUT_CONCURRENCY` env var the daemon reads per request.
+    // `--serial` == concurrency 1 and wins over `--fanout-concurrency`.
+    // An explicit env var set in the shell always wins (matches --device).
+    //
+    // SAFETY: invoked on the main thread before tokio spawns any workers.
+    if std::env::var_os("TRUSTY_SEARCH_FANOUT_CONCURRENCY").is_none() {
+        let resolved = if serial {
+            Some(1_usize)
+        } else {
+            fanout_concurrency.map(|n| n.max(1))
+        };
+        if let Some(n) = resolved {
+            unsafe {
+                std::env::set_var("TRUSTY_SEARCH_FANOUT_CONCURRENCY", n.to_string());
+            }
+            tracing::info!("fan-out concurrency cap set to {n} (serial={serial})");
         }
     }
 

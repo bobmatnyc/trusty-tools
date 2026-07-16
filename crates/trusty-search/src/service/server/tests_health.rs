@@ -231,6 +231,8 @@ async fn global_search_fans_out_and_merges() {
             routing: None,
             routing_n: None,
             routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
         }),
     )
     .await
@@ -289,6 +291,8 @@ async fn global_search_empty_registry_returns_empty_results() {
             routing: None,
             routing_n: None,
             routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
         }),
     )
     .await
@@ -338,6 +342,8 @@ async fn global_search_restricts_to_named_indexes() {
             routing: None,
             routing_n: None,
             routing_threshold: None,
+            max_fanout_concurrency: None,
+            serial: false,
         }),
     )
     .await
@@ -466,6 +472,8 @@ fn routing_mode_from_request_resolves_strategy() {
             routing: routing.map(|s| s.to_string()),
             routing_n: n,
             routing_threshold: t,
+            max_fanout_concurrency: None,
+            serial: false,
         }
     };
     assert!(matches!(

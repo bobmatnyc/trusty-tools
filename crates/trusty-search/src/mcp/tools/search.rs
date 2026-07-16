@@ -60,11 +60,20 @@ pub(super) async fn dispatch_search_tool(
                 .get("full_content")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "query": query,
                 "top_k": top_k,
                 "full_content": full_content,
             });
+            // Issue #2845: forward the optional fan-out bounding overrides so
+            // a caller can request serial / a custom cap per call without
+            // restarting the daemon.
+            if let Some(serial) = args.get("serial").and_then(Value::as_bool) {
+                body["serial"] = Value::Bool(serial);
+            }
+            if let Some(n) = args.get("max_fanout_concurrency").and_then(Value::as_u64) {
+                body["max_fanout_concurrency"] = Value::from(n);
+            }
             Some(server.post("/search", &body).await)
         }
         "search" => {
