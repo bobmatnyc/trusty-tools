@@ -231,10 +231,13 @@ sizing the wait to its real duration.
 - **Prefer the blocking watch.** `gh pr checks <pr> --watch --fail-fast` blocks
   silently until checks settle and prints once. It is the correct primitive —
   it neither parks nor spams. Re-issue it verbatim after a 10-min ceiling.
-- **If you must sleep-poll a status command** (no `--watch` available), size the
-  interval to the KNOWN wait, not to impatience: a 5-minute-plus sleep for a
-  ~15-minute CI run, not 30 seconds. A tight loop tells the reader nothing they
-  didn't know 30 seconds ago.
+- **If you must repoll a status command** (no `--watch` available), use a
+  blocking wait sized to the KNOWN wall-clock, not to impatience — a
+  Monitor/until-loop where the harness provides one, or a minutes-scale sleep
+  where it doesn't (some harnesses block a raw foreground `sleep`; use whatever
+  blocking primitive is actually available). Size it to a 5-minute-plus interval
+  for a ~15-minute CI run, not 30 seconds. A tight loop tells the reader nothing
+  they didn't know 30 seconds ago.
 - **Message only on state change.** Emit a line when the observed state actually
   changes (pending→running, a check flips, count drops), not on every poll. "No
   change" is not worth a message.
