@@ -332,6 +332,26 @@ PM skills loaded from `.claude/skills/` when relevant context detected:
 
 `tm-git-file-tracking` | `tm-pr-workflow` | `tm-delegation-patterns` | `tm-verification-protocols` | `tm-bug-reporting` | `tm-teaching-templates` | `tm-agent-architecture` | `tm-tool-usage-guide` | `tm-session-management` | `tm-circuit-breaker` | `tm-workflow` | `tm-adr` | `tm-postmortem` | `tm-ticketing` | `tm-doctor`
 
+Skills deploy into each project's own `.claude/skills/`, so Claude Code
+discovers them per-project. Beyond the bundled `/tm-*` portfolio, two custom
+tiers are supported (see **Skill Deployment**).
+
+## Skill Deployment
+
+Deployed per-project into `<project>/.claude/skills/<name>/SKILL.md`.
+Precedence on name collision: **project-custom > user-custom > bundled**.
+
+- **project-custom** — a skill you hand-place in `<project>/.claude/skills/`.
+  It is absent from `.trusty-mpm-skills-manifest.json`, so the deployer treats
+  it as user-owned and NEVER overwrites it on redeploy. Highest precedence.
+- **user-custom** — a skill authored once in `~/.trusty-mpm/skills/`; deployed
+  into every project, overriding a same-named bundled skill.
+- **bundled** — the shipped `/tm-*` portfolio (source `~/.trusty-mpm/framework/skills/`).
+
+Lower-tier copies of a colliding name are skipped and logged. A skill whose
+name (slug) contains `mcp` is never deployed (it would shadow Claude Code's
+built-in `/mcp`).
+
 ## Agent Deployment
 
 Cache: `~/.trusty-mpm/framework/agents/`.

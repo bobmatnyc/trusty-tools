@@ -27,6 +27,25 @@ Skills are Markdown documents that provide reusable, invokable knowledge to agen
   templates, ticketing, PR workflow, delegation patterns, session
   management, bug reporting, and `tm-doctor`)
 
+### Skill Tiers & Precedence (issue #2816)
+Skills deploy per-project into `<project>/.claude/skills/<name>/SKILL.md`.
+On a name collision, precedence is **project-custom > user-custom > bundled**:
+
+1. **project-custom** — hand-placed in `<project>/.claude/skills/`. Absent from
+   the deploy manifest (`.trusty-mpm-skills-manifest.json`), so it is treated as
+   user-owned and NEVER overwritten on redeploy. This is the intended way to
+   add a project-only skill.
+2. **user-custom** — authored in `~/.trusty-mpm/skills/` (NOT under
+   `framework/`, which is trusty-mpm-owned). Deployed into every project;
+   overrides a same-named bundled skill. Deployed in full — not filtered by a
+   harness manifest's bundled include/exclude.
+3. **bundled** — the shipped `/tm-*` portfolio from `~/.trusty-mpm/framework/skills/`.
+
+Precedence and shadow logging live in `core::skill_tiers` (pure planner
+`plan_skill_tiers` + orchestrator `deploy_all_skill_tiers`); per-file ownership
+is enforced by the `core::skill_deployer` manifest model. This mirrors the
+user-level agent source and the agent-precedence work in #387 / #2786.
+
 ### Skill Structure
 A valid skill file must have:
 ```markdown

@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_deployer::{DeployStats, deploy_skills_filtered};
+use crate::core::skill_deployer::DeployStats;
+use crate::core::skill_tiers::deploy_all_skill_tiers;
 use native_mcp::inject_native_trusty_mcps;
 use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
@@ -394,26 +395,34 @@ fn prepare_session_inner(
     }
 
     // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
-    // Skills carry no inheritance, so this is a manifest-tracked content copy;
-    // the manifest's skill-set selection restricts WHICH source skills deploy.
+    // Skills carry no inheritance, so this is a manifest-tracked content copy.
+    // Three tiers merge here with precedence project-custom > user-custom >
+    // bundled (#2816): the manifest's skill-set selection restricts WHICH
+    // BUNDLED source skills deploy; the user-custom tier
+    // (`~/.trusty-mpm/skills/`) is deployed in full and overrides a same-named
+    // bundled skill; a skill the user hand-placed in the project's
+    // `.claude/skills/` (absent from the deploy manifest) outranks both and is
+    // never overwritten. See `core::skill_tiers`.
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
     );
-    let skill_deploy =
-        match deploy_skills_filtered(&plan.skill_source, &fw.claude_skills_dir(), |name| {
-            plan.skill_selected(name)
-        }) {
-            Ok(result) => result,
-            Err(err) => {
-                tracing::error!(
-                    project_dir = %project_dir.display(),
-                    "skill deploy FAILED — session will launch WITHOUT the tm/mpm skill \
-                     set: {err}. Identity/output-style provisioning continues regardless."
-                );
-                roster_errors.push(format!("skill deploy failed: {err}"));
-                DeployStats::default()
-            }
-        };
+    let skill_deploy = match deploy_all_skill_tiers(
+        &plan.skill_source,
+        &fw.user_skill_source_dir(),
+        &fw.claude_skills_dir(),
+        |name| plan.skill_selected(name),
+    ) {
+        Ok(result) => result.stats,
+        Err(err) => {
+            tracing::error!(
+                project_dir = %project_dir.display(),
+                "skill deploy FAILED — session will launch WITHOUT the tm/mpm skill \
+                 set: {err}. Identity/output-style provisioning continues regardless."
+            );
+            roster_errors.push(format!("skill deploy failed: {err}"));
+            DeployStats::default()
+        }
+    };
 
     // Compose the effective launch instructions (framework + delegation
     // authority + project CLAUDE.md); this loads or creates the project
