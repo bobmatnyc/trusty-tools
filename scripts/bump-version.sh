@@ -214,8 +214,12 @@ main() {
   if [[ "${unreleased_count}" -gt 1 ]]; then
     echo "ERROR: ${changelog} now has ${unreleased_count} '## [Unreleased]' headings." >&2
     echo "       generate-changelog.sh prepended a fresh section without an existing" >&2
-    echo "       hand-written draft being cleared first (see issue #2793). Manually" >&2
-    echo "       merge/dedupe the sections in ${changelog}, then re-run this script." >&2
+    echo "       hand-written draft being cleared first (see issue #2793)." >&2
+    echo "       crates/${crate_dir}/Cargo.toml has ALREADY been bumped to ${next} by" >&2
+    echo "       this run — after manually merging/dedupe-ing the sections in" >&2
+    echo "       ${changelog}, do NOT re-run this script (it would double-bump); commit" >&2
+    echo "       directly, or \`git checkout crates/${crate_dir}/Cargo.toml\` first if" >&2
+    echo "       you want to start over." >&2
     exit 1
   fi
 
