@@ -55,6 +55,16 @@ copies already deployed into projects — orphaning is by design (mirrors how a
 bundled skill removed from the portfolio also stays deployed until an explicit
 `tm catalog apply --prune`), not a bug to fix.
 
+**The tm-global roster deploys the user tier too.** `managed_config::ensure_managed_config_dir`
+(daemon-managed sessions) and `standalone::global_config::ensure_global_config_dir`
+(`tm run`/`tm load`/`tm login`) both bootstrap the shared `CLAUDE_CONFIG_DIR`
+via `deploy_all_skill_tiers` with `fw.user_skill_source_dir()` as the user
+tier — a skill authored in `~/.trusty-mpm/skills/` reaches every session, not
+just per-project deploys, per the stated intent that user-custom skills apply
+everywhere. The project-custom tier is naturally empty at this destination
+(nothing hand-places a skill directly into the config dir's `skills/`), so no
+special-casing was needed there.
+
 ### Skill Structure
 A valid skill file must have:
 ```markdown

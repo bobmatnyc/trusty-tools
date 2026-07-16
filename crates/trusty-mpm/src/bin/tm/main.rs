@@ -63,6 +63,10 @@ mod tests_behavior_e;
 mod tests_behavior_reset_agents;
 
 #[cfg(test)]
+#[path = "tests_behavior_skill_tiers_tests.rs"]
+mod tests_behavior_skill_tiers;
+
+#[cfg(test)]
 #[path = "tests_projects.rs"]
 mod tests_projects;
 

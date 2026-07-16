@@ -360,6 +360,12 @@ since there's no competing source to name. Removing a skill's source from
 project — orphaned copies are left in place by design, matching how a removed
 bundled skill also stays deployed until pruned.
 
+The **tm-global roster** (the shared `CLAUDE_CONFIG_DIR` every daemon-managed
+and standalone `tm run` session points at) deploys the user-custom tier too —
+a skill in `~/.trusty-mpm/skills/` reaches every session, not just per-project
+ones. The project-custom tier is naturally absent there (nothing hand-places a
+skill directly into the config dir).
+
 ## Agent Deployment
 
 Cache: `~/.trusty-mpm/framework/agents/`.

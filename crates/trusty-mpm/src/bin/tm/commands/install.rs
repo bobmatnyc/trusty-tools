@@ -134,20 +134,32 @@ pub(crate) async fn install(
         }
     }
 
-    // Deploy bundled skills into `~/.claude/skills/`. The bundle install above
-    // (`install_to`) already wrote the skill sources under the framework root,
-    // so the source dir is populated before this copy runs — mirroring the
-    // agent ordering. Without this step a fresh `tm install` left the skills
-    // directory empty and `tm doctor` reported `skills: Fail` (#386); skills
-    // only deployed lazily on `tm session start` (see `prepare_session`).
+    // Deploy bundled + user-custom skills into `~/.claude/skills/`. The bundle
+    // install above (`install_to`) already wrote the skill sources under the
+    // framework root, so the source dir is populated before this copy runs —
+    // mirroring the agent ordering. Without this step a fresh `tm install`
+    // left the skills directory empty and `tm doctor` reported `skills: Fail`
+    // (#386); skills only deployed lazily on `tm session start` (see
+    // `prepare_session`). Routes through the SAME multi-tier orchestrator
+    // `session_launch`/`apply_catalog` use (PR #2818 review round 3): `tm
+    // install`'s destination (`paths.claude_skills_dir()`, home-rooted) is the
+    // IDENTICAL directory the ordinary non-managed `tm session start`/`tm
+    // launch` path deploys user-tier overrides into. A raw `deploy_skills`
+    // call here would see a previously user-tier-deployed skill as "managed,
+    // checksum matches" and silently refresh it back to bundled content on
+    // every routine `tm install` — the same clobber bug fixed for `tm catalog
+    // apply` in the prior review round, at a third, independent call site.
     println!(
         "Deploying skills into {}",
         paths.claude_skills_dir().display()
     );
-    let skill_deploy = trusty_mpm::core::skill_deployer::deploy_skills(
+    let skill_deploy = trusty_mpm::core::skill_tiers::deploy_all_skill_tiers(
         &paths.skill_source_dir(),
+        &paths.user_skill_source_dir(),
         &paths.claude_skills_dir(),
-    )?;
+        |_| true,
+    )?
+    .stats;
     for line in skill_report_lines(&skill_deploy) {
         println!("  {line}");
     }

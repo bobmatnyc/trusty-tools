@@ -161,16 +161,35 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
     if !agents_missing {
         // Nit 2: layout contract — deploy_agents writes each flat <name>.md source
         // as <agents_dest>/<name>.md plus a .trusty-mpm-manifest.json side-car
-        // (see core::agent_deployer). deploy_skills writes each flat <name>.md
-        // source as <skills_dest>/<name>/SKILL.md (see core::skill_deployer).
+        // (see core::agent_deployer). deploy_all_skill_tiers writes each flat
+        // <name>.md source as <skills_dest>/<name>/SKILL.md (see
+        // core::skill_deployer).
         crate::core::agent_deployer::deploy_agents(&agents_src, &agents_dest)
             .map_err(|e| anyhow::anyhow!("failed to deploy agents into managed config dir: {e}"))?;
     }
 
-    if !skills_missing {
-        crate::core::skill_deployer::deploy_skills(&skills_src, &skills_dest)
-            .map_err(|e| anyhow::anyhow!("failed to deploy skills into managed config dir: {e}"))?;
-    }
+    // PR #2818 review (round 3, MEDIUM decision): route through the multi-tier
+    // orchestrator rather than raw `deploy_skills`, so a user-custom skill
+    // (`~/.trusty-mpm/skills/`, i.e. `<managed_root>/skills`) reaches the
+    // tm-global roster too — Bob's stated intent is that user-custom skills
+    // apply to every session, and this config dir is load-bearing for the
+    // flag-less standalone `tm run` driver (see the module doc: the daemon
+    // managed-spawn path reads the roster from the PROJECT layer instead, so
+    // this dir is belt-and-suspenders there, but load-bearing here). The
+    // project-custom tier is naturally empty at this dir — nothing hand-places
+    // a skill directly into `<claude_config_dir>/skills/`, so
+    // `deploy_all_skill_tiers`'s project-stem scan simply finds none, exactly
+    // matching "N/A" without any special-casing. Unlike the old guard, this
+    // call is NOT skipped when `skills_missing` — a user-tier skill must still
+    // deploy even if the bundled framework skills haven't been installed yet;
+    // the orchestrator already treats a missing source dir as an empty tier.
+    crate::core::skill_tiers::deploy_all_skill_tiers(
+        &skills_src,
+        &managed_root.join("skills"),
+        &skills_dest,
+        |_| true,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to deploy skills into managed config dir: {e}"))?;
 
     // WI-2 follow-up (#1553): deploy bundled output styles from compile-time
     // constants — no framework installation required.  These are always
@@ -735,6 +754,36 @@ mod tests {
                 .join(".trusty-mpm-manifest.json")
                 .exists(),
             "agent manifest must exist after deploy"
+        );
+    }
+
+    #[test]
+    fn test_deploy_agents_and_skills_includes_user_tier_skill() {
+        // PR #2818 review (round 3, MEDIUM decision): a user-custom skill
+        // (`<managed_root>/skills/`) must reach the tm-global roster deployed
+        // by this function, not just per-project deploys.
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let claude_config = managed_root.join("claude-config");
+
+        // No bundled framework/skills source — proves the user tier deploys
+        // even when the bundled portfolio hasn't been installed yet.
+        let user_skills_src = managed_root.join("skills");
+        std::fs::create_dir_all(&user_skills_src).unwrap();
+        std::fs::write(
+            user_skills_src.join("my-custom-skill.md"),
+            "---\nname: my-custom-skill\n---\n\nUSER CUSTOM.\n",
+        )
+        .unwrap();
+
+        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
+
+        assert!(
+            claude_config
+                .join("skills/my-custom-skill/SKILL.md")
+                .exists(),
+            "user-custom skill must be deployed to the tm-global config dir \
+             even with no bundled framework skill source present"
         );
     }
 
