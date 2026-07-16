@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "0.19.18"
+version = "0.19.19"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
