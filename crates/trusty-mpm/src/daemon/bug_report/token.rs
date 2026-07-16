@@ -875,18 +875,12 @@ mod tests {
         let claims = AppJwtClaims::new(999, now);
         let jwt_str = encode_jwt_rs256(&pem, &claims).expect("encode should succeed");
 
-        // Decode without verification to inspect claims.
-        let decoded = jsonwebtoken::decode::<AppJwtClaims>(
-            &jwt_str,
-            &jsonwebtoken::DecodingKey::from_secret(b""),
-            &{
-                let mut v = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-                v.insecure_disable_signature_validation();
-                v.validate_exp = false;
-                v
-            },
-        )
-        .expect("decode should succeed with disabled validation");
+        // Decode without verification to inspect claims. jsonwebtoken 10
+        // deprecated `Validation::insecure_disable_signature_validation` in
+        // favour of the explicit `dangerous::insecure_decode`, which performs no
+        // signature or expiry checks (safe here: test-only claim inspection).
+        let decoded = jsonwebtoken::dangerous::insecure_decode::<AppJwtClaims>(&jwt_str)
+            .expect("decode should succeed with disabled validation");
 
         assert_eq!(decoded.claims.iss, "999");
         assert_eq!(decoded.claims.iat, now);

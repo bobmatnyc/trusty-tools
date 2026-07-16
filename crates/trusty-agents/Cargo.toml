@@ -121,7 +121,7 @@ rand = "0.8"
 similar = { version = "2", features = ["text"] }
 petgraph = { version = "0.8", features = ["serde-1"] }
 libc = "0.2"
-lru = "0.12"
+lru = "0.16"
 
 # Stable plugin surface shared with external agent crates. Defined in its own
 # crate (rather than in trusty-agents/lib.rs) to break the trusty-agents ↔ agent-plugin
