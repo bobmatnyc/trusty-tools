@@ -458,7 +458,19 @@ tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
 # lifts tga's PR→ticket regexes so neither gate pulls tga's git2/rusqlite stack.
 # Pulls in `regex` and `thiserror`. The non-consumer trusty-common dependents
 # pay nothing (feature off by default).
-intent-source = ["tickets", "dep:regex", "dep:thiserror"]
+intent-source = ["tickets", "sld", "dep:regex", "dep:thiserror"]
+# Enables the `sld` module: the language-agnostic Spec-Linked Documentation
+# (DOC-38) reference grammar — the generalized, implementation-neutral form of
+# the SLD linkage the `intent_source` resolver already reads for Rust. Provides
+# the canonical `SPEC-{SUBSYSTEM}-{NN}~{rev}` id grammar, `revision_of`/`base_id`
+# (the single source both this module and `intent_source::spec_resolve` share),
+# the per-extension comment-syntax table, fenced-code-aware inline
+# `# Spec References` block parsing, `spec_refs:` YAML-frontmatter parsing, and
+# `{#SPEC-…}` heading-anchor scanning. Deliberately LIGHTWEIGHT (regex +
+# serde_yaml + thiserror only) so a documentation linter (`trusty-sld-lint`,
+# DOC-38 §10 F1) can reuse the grammar WITHOUT pulling the heavy `tickets`
+# (git2/rusqlite) stack that `intent-source` drags in. Off by default.
+sld = ["dep:regex", "dep:serde_yaml", "dep:thiserror"]
 # Enables the `help` module: declarative CLI help loader (`HelpConfig` parsed
 # from a per-binary `help.yaml` bundled via `include_str!`), the canonical
 # `render_help` formatter, and a Jaro-Winkler-based `suggest("did you mean?")`

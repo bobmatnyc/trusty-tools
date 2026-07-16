@@ -36,6 +36,13 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use super::types::{Method, MethodKind, SpecRef};
+// DOC-38 one-grammar consolidation: the revision helpers live once in the
+// generalized `sld` grammar module (the `intent-source` feature enables `sld`),
+// so this Rust-idiom reader and any SLD linter split `SPEC-…~rev` ids the same
+// way. `revision_of` is re-exported to preserve the `intent_source::revision_of`
+// public path.
+use crate::sld::base_id;
+pub use crate::sld::revision_of;
 
 /// The outcome of resolving one SLD anchor to its governing spec section.
 ///
@@ -253,31 +260,6 @@ pub fn resolve_spec_section(spec_markdown: &str, anchor: &str) -> Option<SpecSec
         section_revision,
         revision_drift,
     })
-}
-
-/// Split a `SPEC-…~rev` id/anchor into its base id and revision.
-///
-/// Why: revision-drift detection (§6.4) and revision-tolerant section matching
-/// both need to compare the *base* id (`SPEC-X-01`) independently of the
-/// revision suffix (`draft`, `v1`, `v2`).
-/// What: returns the substring after the last `~` as the revision, or `None`
-/// when the id carries no `~` suffix.
-/// Test: `super::tests::spec_resolve_revision_of`.
-#[must_use]
-pub fn revision_of(spec_id: &str) -> Option<String> {
-    spec_id.rsplit_once('~').map(|(_, rev)| rev.to_string())
-}
-
-/// The revision-insensitive base of a `SPEC-…~rev` id/anchor.
-///
-/// Why: matching a referencing anchor (`SPEC-X-01~v1`) to a section heading
-/// (`SPEC-X-01~v2`) must key on the stable base id, not the revision (§6.4
-/// revision awareness).
-/// What: returns the substring before the last `~`, or the whole id when there
-/// is no `~`.
-/// Test: covered by `super::tests::spec_resolve_drift_*`.
-fn base_id(spec_id: &str) -> &str {
-    spec_id.rsplit_once('~').map_or(spec_id, |(base, _)| base)
 }
 
 /// Return the body + actual anchor of the spec section matching `anchor`'s base.

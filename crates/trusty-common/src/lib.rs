@@ -272,6 +272,28 @@ pub mod tickets;
 #[cfg(feature = "intent-source")]
 pub mod intent_source;
 
+/// Language-agnostic Spec-Linked Documentation (SLD) reference grammar (DOC-38).
+///
+/// Why: DOC-38 promotes SLD from an incidental, Rust-only rustdoc convention to
+/// a first-class, implementation-neutral standard usable in any language or
+/// repository. The `intent_source` resolver already reads the Rust form; the
+/// generalized grammar (frontmatter `spec_refs:`, per-language comment idioms,
+/// fenced-code exclusion, the open `~<rev>` token) needs a shared, reusable home
+/// so a documentation linter (`trusty-sld-lint`, DOC-38 §10 F1) and the resolver
+/// parse ONE grammar, not two.
+/// What: gated behind the lightweight `sld` feature (regex + serde_yaml +
+/// thiserror only — no `tickets`/git2/rusqlite). Exposes the canonical
+/// `SPEC-{SUBSYSTEM}-{NN}~{rev}` id grammar (`is_valid_spec_id`, `revision_of`,
+/// `base_id`, `reference_regex`), the per-extension `CommentSyntax` table,
+/// `parse_inline_refs` (fenced-code-aware `# Spec References` block parsing),
+/// `parse_frontmatter_refs` (`spec_refs:` YAML), and `spec_anchors` /
+/// `anchor_resolves` (heading-anchor scanning + revision-tolerant resolution).
+/// `intent_source::spec_resolve` reuses this module's `revision_of`/`base_id`.
+/// Test: `cargo test -p trusty-common --features sld` runs the module's unit
+/// tests (grammar, inline, frontmatter, anchor) with no I/O.
+#[cfg(feature = "sld")]
+pub mod sld;
+
 /// Declarative CLI help system with "did you mean?" suggestions (issue #216).
 ///
 /// Why: every standalone trusty-* binary used to render its `--help` and
