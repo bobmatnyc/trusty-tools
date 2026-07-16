@@ -391,7 +391,14 @@ impl InProcessAgentRunner {
             // sub-agent loop (both `run_task` and `task::executor` delegate
             // through this runner), so wiring it here covers both entry
             // points without duplicating the attachment at each call site.
-            .with_finish_gate(crate::verify_gate::default_finish_gate());
+            .with_finish_gate(crate::verify_gate::default_finish_gate())
+            // #2682: the complement to the verify gate above — suppress a
+            // redundant full-suite re-run once the suite has passed and nothing
+            // has changed since, so the engineer stops burning turns on
+            // repeated "one final run to confirm" passes. Same single
+            // construction site, so both `run_task` and `task::executor`
+            // delegations get it.
+            .with_redundant_run_suppression();
         if let Some(sink) = &self.sink {
             agent_loop = agent_loop.with_tool_event_sink(Arc::clone(sink));
         }

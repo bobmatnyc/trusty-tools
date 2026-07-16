@@ -286,6 +286,19 @@ pub mod run_task;
 /// Test: `verify_gate::tests::*`.
 pub mod verify_gate;
 
+/// Redundant full-suite test re-run suppression (#2682): the complement to
+/// [`verify_gate`] — it stops the suite running MORE than it needs to.
+///
+/// Why: (bake-off L1 diagnosis) The engineer re-runs the full suite 7-14x per
+/// run as repeated "one final run to confirm" passes, even when no code has
+/// changed since the last clean pass, inflating tcode's turn count far above
+/// claude-code's on the same challenge.
+/// What: The pure `is_redundant_test_rerun` predicate the agent loop consults
+/// (when suppression is enabled) to short-circuit a redundant test re-run with
+/// [`redundant_run::REDUNDANT_RERUN_MESSAGE`] instead of spawning the suite.
+/// Test: `redundant_run::tests::*`.
+pub mod redundant_run;
+
 /// DOC-28 catch-up context injection for the PM prompt (#1762, PR2).
 ///
 /// Why: The PM agent needs recent project-activity context (paused sessions,

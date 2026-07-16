@@ -207,6 +207,14 @@ pub struct AgentLoop {
     cancel: Option<Arc<AtomicBool>>,
     stop_signal: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     finish_gate: Option<FinishGate>,
+    /// (#2682) When `true`, a `bash` test invocation that
+    /// `crate::redundant_run::is_redundant_test_rerun` judges redundant (an
+    /// identical suite already passed and nothing changed since) is
+    /// short-circuited with `crate::redundant_run::REDUNDANT_RERUN_MESSAGE`
+    /// instead of being spawned. Default `false` (a pure no-op for every call
+    /// site that never opts in); attached at the delegated-engineer
+    /// construction site via [`Self::with_redundant_run_suppression`].
+    suppress_redundant_reruns: bool,
 }
 
 impl AgentLoop {
@@ -236,6 +244,7 @@ impl AgentLoop {
             cancel: None,
             stop_signal: None,
             finish_gate: None,
+            suppress_redundant_reruns: false,
         }
     }
 
@@ -303,6 +312,25 @@ impl AgentLoop {
     /// `agent_loop::tests::finish_gate_inert_without_named_test_command`.
     pub fn with_finish_gate(mut self, gate: FinishGate) -> Self {
         self.finish_gate = Some(gate);
+        self
+    }
+
+    /// Enable redundant full-suite test re-run suppression (#2682).
+    ///
+    /// Why: The complement to [`Self::with_finish_gate`]'s verify gate — where
+    /// that guarantees the suite runs at least once, this stops it running more
+    /// than needed. Opt-in (default `false`) and attached at the same single
+    /// delegated-engineer construction site (`runner::in_process`) so both
+    /// gates bracket the same loop; call sites that never opt in are a pure
+    /// no-op.
+    /// What: Builder-style setter; returns `self` for chaining. When set,
+    /// [`Self::dispatch_all`] consults
+    /// [`crate::redundant_run::is_redundant_test_rerun`] before spawning a
+    /// `bash` test command and short-circuits a redundant one.
+    /// Test: `agent_loop::tests::redundant_test_rerun_is_suppressed`,
+    /// `agent_loop::tests::test_rerun_after_edit_is_not_suppressed`.
+    pub fn with_redundant_run_suppression(mut self) -> Self {
+        self.suppress_redundant_reruns = true;
         self
     }
 
@@ -558,7 +586,23 @@ impl AgentLoop {
                 sink.tool_started(&call.id, tool, &args.to_string()).await;
             }
 
-            let mut result = self.registry.dispatch_gated(tool, args.clone(), None).await;
+            // #2682: short-circuit a redundant full-suite re-run BEFORE
+            // spawning it — an identical test command already passed earlier
+            // and nothing has changed since (see `redundant_run`). The prior
+            // pass still stands, so re-running only burns a turn's wall-clock;
+            // returning a normal (non-error) sentinel result keeps the loop
+            // calm and nudges the model to finish rather than re-confirm. Only
+            // ever fires when explicitly enabled via
+            // `with_redundant_run_suppression`, so no other call site is
+            // affected.
+            let mut result = if self.suppress_redundant_reruns
+                && crate::redundant_run::is_test_bash_call(call)
+                && crate::redundant_run::is_redundant_test_rerun(&transcript.messages(), &call.id)
+            {
+                ToolResult::ok(crate::redundant_run::REDUNDANT_RERUN_MESSAGE.to_string())
+            } else {
+                self.registry.dispatch_gated(tool, args.clone(), None).await
+            };
 
             // #2279: a `finish_task` call that otherwise SUCCEEDED is still
             // subject to the verify-before-finish gate, if one is attached.

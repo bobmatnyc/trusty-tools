@@ -1508,6 +1508,10 @@ async fn finish_task_full_shape_propagates_into_output() {
 // live in a focused child module to keep this file under its SLOC cap.
 mod gate_intercept;
 
+// #2682 redundant full-suite re-run suppression wiring tests live in a focused
+// child module to keep this file under its SLOC cap.
+mod redundant_rerun;
+
 // Batched multi-tool-per-turn regression guards (round-trip reduction) live in
 // a focused child module to keep this file under its SLOC cap.
 mod batched_multi_tool;

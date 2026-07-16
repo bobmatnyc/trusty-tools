@@ -221,6 +221,34 @@ fn base_preamble_requires_running_project_test_suite_before_finishing() {
     );
 }
 
+/// `BASE_PREAMBLE` tells the model that ONE clean run after the last code
+/// change is sufficient and to NOT repeat identical confirmation runs over
+/// unchanged code (#2682 bake-off L1 diagnosis: the engineer re-ran the full
+/// suite 7-14x per run as repeated "one final run to confirm" passes,
+/// inflating turn counts far above claude-code's).
+///
+/// Why: This is the prompt-side half of #2682 (the structural half is
+/// `redundant_run`) — a general turn-efficiency nudge that applies to every
+/// agent's assembled prompt, so it belongs in the model-agnostic BASE preamble
+/// beside the neighbouring verification instructions.
+/// What: Asserts the preamble states one clean run is sufficient and forbids a
+/// redundant re-run over unchanged code.
+/// Test: this test.
+#[test]
+fn base_preamble_discourages_redundant_test_reruns() {
+    assert!(
+        BASE_PREAMBLE.contains(
+            "ONE clean run of the suite after your LAST code change is \
+sufficient"
+        ),
+        "must state one clean post-change run is sufficient verification"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("do NOT re-run the same suite again"),
+        "must forbid repeating an identical confirmation run over unchanged code"
+    );
+}
+
 /// `BASE_PREAMBLE` nudges toward pure, unit-testable core functions with I/O
 /// kept in thin wrappers (#2279 improvement 2, bake-off L2 diagnosis: tcode
 /// fused `git` invocation directly into `parse_git_log`, making it untestable
@@ -335,7 +363,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x513f_fb3d_a209_0524;
+const EXPECTED_PREAMBLE_HASH: u64 = 0x1f38_9491_3735_48ff;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///
