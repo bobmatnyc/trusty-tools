@@ -149,21 +149,63 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             }
         }
 
-        // Session-name-only match: the operator is in a DIFFERENT pane/window of
-        // the SAME tmux session (not the record's own pane), so a switch-client
-        // reconnect to the managed session is legitimate — not a self no-op.
-        // Preserve the pre-existing refuse+reconnect behavior for that case.
-        // Terminal entry point (not a loop) — the `AttachOutcome` only matters to
-        // a looping caller like `run_tty_picker` (#2678); here, the hand-off (or
-        // fail-closed skip) is this call's whole job, so discard it.
-        eprintln!(
-            "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
-            record.name,
-            record.state,
-            nested_guard_notice(&record.name)
-        );
-        super::guided_resume::resume_guided_session(client, url, &record).await?;
-        return Ok(());
+        // Session-name-only match: the operator is in the SAME tmux session but
+        // NOT (provably) the record's own pane. #2777: split on liveness.
+        match nested_fallback_action(&record.state) {
+            // Dead session (decommissioned/stopped/errored): a switch-client
+            // reconnect to the session the operator is already inside is a
+            // guaranteed no-op dead-end (the reported bug). Relaunch the agent in
+            // THIS pane via the same daemon-authorized primitive the
+            // pane-confirmed branch above uses. Safe WITHOUT pane-identity
+            // confirmation precisely because a dead session has no live runtime
+            // anywhere to hijack (the whole point of that gate) — and the
+            // daemon's `reactivate` round-trip remains the sole authority: a
+            // refusal folds into `FallThrough` → an honest self-relaunch hint,
+            // never an unconditional exec.
+            NestedFallbackAction::RelaunchInPlace => {
+                let current_pane_id = super::tmux_attach::current_tmux_pane_id();
+                match super::guided_inplace::run_inplace_relaunch(
+                    client,
+                    url,
+                    &record.id,
+                    record.clone(),
+                    current_pane_id.as_deref(),
+                )
+                .await
+                {
+                    super::guided_inplace::InPlaceOutcome::Result(Ok(())) => return Ok(()),
+                    super::guided_inplace::InPlaceOutcome::Result(Err(e)) => {
+                        eprintln!("tm: in-place relaunch failed ({e})");
+                        eprintln!("{}", inplace_self_relaunch_hint(&record));
+                        return Ok(());
+                    }
+                    super::guided_inplace::InPlaceOutcome::FallThrough => {
+                        eprintln!(
+                            "tm: in-place relaunch unavailable for '{}' (state={})",
+                            record.name, record.state
+                        );
+                        eprintln!("{}", inplace_self_relaunch_hint(&record));
+                        return Ok(());
+                    }
+                }
+            }
+            // Live session: a sibling window may hold the live runtime, so a
+            // switch-client reconnect legitimately brings it forward — not a self
+            // no-op. Preserve the pre-existing refuse+reconnect behavior.
+            // Terminal entry point (not a loop) — the `AttachOutcome` only matters
+            // to a looping caller like `run_tty_picker` (#2678); here, the
+            // hand-off (or fail-closed skip) is this call's whole job, so discard it.
+            NestedFallbackAction::Reconnect => {
+                eprintln!(
+                    "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
+                    record.name,
+                    record.state,
+                    nested_guard_notice(&record.name)
+                );
+                super::guided_resume::resume_guided_session(client, url, &record).await?;
+                return Ok(());
+            }
+        }
     }
 
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
@@ -352,24 +394,52 @@ async fn nested_session_guard(
 /// Why: isolating the match rule from the daemon round-trip and the tmux
 /// shell-out makes the actual guard DECISION exhaustively unit-testable
 /// without a live daemon or tmux server.
-/// What: returns the first record whose `name` (tmux session name) equals
-/// `current_session_name`, OR whose `id` equals `env_session_id` — either
-/// match is sufficient (the env id is belt-and-suspenders for the rare case
-/// where the session was renamed after spawn). `None` when both inputs are
-/// `None`/non-matching, which includes the "not inside tmux" case (callers
-/// pass `current_session_name: None` then).
+///
+/// #2790 code-critic HIGH: tmux SESSION NAMES ARE RECYCLED after a session is
+/// decommissioned (`session_manager::manager`'s name-reuse policy) — a plain
+/// `.find()` over ALL candidates (including tombstones) can therefore return a
+/// STALE `Decommissioned` record for a name that a genuinely LIVE session now
+/// also owns, which would drive `RelaunchInPlace` against the wrong (dead)
+/// record while a live session sharing that name sits in a sibling pane — the
+/// exact hijack class #2456/#2680 fixed elsewhere.
+/// [`SessionManager::capture_pane_by_tmux_name`] (`session_manager/manager.rs`)
+/// already carries the identical guard for the same reason (idle-reaper pane
+/// capture) — this mirrors it.
+/// What: collects every record matching `current_session_name` OR
+/// `env_session_id`, then prefers the most-recently-created (`created_at`,
+/// RFC3339 — lexicographically sortable) NON-`Decommissioned` match. Only when
+/// NO candidate is non-`Decommissioned` does it fall back to the
+/// most-recently-created `Decommissioned` candidate — the legitimate #2777
+/// repro case (a decommissioned session's OWN, not-yet-recycled name). `None`
+/// when both inputs are `None`/non-matching, which includes the "not inside
+/// tmux" case (callers pass `current_session_name: None` then).
 /// Test: `nested_managed_match_by_session_name`,
 /// `nested_managed_match_by_env_id`, `nested_managed_match_none_when_no_match`,
-/// `nested_managed_match_none_when_both_inputs_absent`.
+/// `nested_managed_match_none_when_both_inputs_absent`,
+/// `nested_managed_match_prefers_live_over_recycled_decommissioned_name`,
+/// `nested_managed_match_falls_back_to_decommissioned_when_no_live_candidate`,
+/// `nested_managed_match_prefers_most_recent_live_among_multiple`.
 pub(crate) fn nested_managed_match<'a>(
     current_session_name: Option<&str>,
     env_session_id: Option<&str>,
     records: &'a [trusty_mpm::client::ManagedSessionSummary],
 ) -> Option<&'a trusty_mpm::client::ManagedSessionSummary> {
-    records.iter().find(|r| {
+    let is_candidate = move |r: &&trusty_mpm::client::ManagedSessionSummary| {
         current_session_name.is_some_and(|n| n == r.name)
             || env_session_id.is_some_and(|id| id == r.id)
-    })
+    };
+
+    records
+        .iter()
+        .filter(is_candidate)
+        .filter(|r| r.state != "decommissioned")
+        .max_by_key(|r| r.created_at.clone().unwrap_or_default())
+        .or_else(|| {
+            records
+                .iter()
+                .filter(is_candidate)
+                .max_by_key(|r| r.created_at.clone().unwrap_or_default())
+        })
 }
 
 /// Pure predicate (#2456 review finding 1, ROUND 2 — the round-1 env-var
@@ -415,6 +485,50 @@ pub(crate) fn pane_identity_confirmed(
     match (current_pane_id, record_pane_id) {
         (Some(cur), Some(rec)) => cur == rec,
         _ => false,
+    }
+}
+
+/// The action the nested-session guard takes when it matched a record by tmux
+/// SESSION name but could NOT confirm pane-level identity
+/// ([`pane_identity_confirmed`] was `false`).
+///
+/// Why: the pre-#2777 fallback ALWAYS reconnected (switch-client) to the matched
+/// session. That is correct when the session has a live runtime in a sibling
+/// window — the switch brings it forward. But when the session is DEAD
+/// (decommissioned/stopped/errored), there is no live runtime anywhere in that
+/// tmux session, so a switch-client to the session the operator is already
+/// inside is a guaranteed no-op dead-end (the reported bug: bare `tm` inside a
+/// `decommissioned` `tm-apex-01` printed "switching client to session
+/// 'tm-apex-01'" and stranded the operator in the bare shell). Splitting the two
+/// cases lets the dead case relaunch the agent in place instead.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NestedFallbackAction {
+    /// The matched session has no live runtime — relaunch the agent in the
+    /// current pane (a reconnect would be a self no-op).
+    RelaunchInPlace,
+    /// The matched session may have a live runtime in a sibling window —
+    /// switch-client reconnect brings it forward.
+    Reconnect,
+}
+
+/// Pure decision for the nested-guard fallback: relaunch-in-place vs reconnect,
+/// derived solely from the matched record's `state`.
+///
+/// Why: isolating the classification from the daemon/tmux I/O makes the
+/// dead-vs-live decision exhaustively unit-testable (#2777), mirroring the
+/// `switch_decision`-style pure seam pattern (#2680).
+/// What: dead/tombstone states with no live runtime
+/// (`decommissioned`/`stopped`/`errored`) →
+/// [`NestedFallbackAction::RelaunchInPlace`]; every other state
+/// (`active`/`provisioning`/`running`/unknown) → the safe default
+/// [`NestedFallbackAction::Reconnect`], preserving the pre-#2777 behavior for a
+/// possibly-live sibling window.
+/// Test: `nested_fallback_action_relaunches_dead_states`,
+/// `nested_fallback_action_reconnects_live_states` in `tests_behavior_c_tests.rs`.
+pub(crate) fn nested_fallback_action(state: &str) -> NestedFallbackAction {
+    match state {
+        "decommissioned" | "stopped" | "errored" => NestedFallbackAction::RelaunchInPlace,
+        _ => NestedFallbackAction::Reconnect,
     }
 }
 

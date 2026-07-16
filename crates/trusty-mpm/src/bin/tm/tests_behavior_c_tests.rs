@@ -26,10 +26,11 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    CwdProject, classify_cwd_project, cwd_owns_git_entry, derive_project, fallback_protected,
-    github_host, inplace_self_relaunch_hint, is_github_remote, ls_tree_reports_tracked_dir,
-    nested_guard_notice, nested_managed_match, non_github_refusal_message, pane_identity_confirmed,
-    print_non_tty_hint, print_project_context, tty_gate, untracked_ancestor_message,
+    CwdProject, NestedFallbackAction, classify_cwd_project, cwd_owns_git_entry, derive_project,
+    fallback_protected, github_host, inplace_self_relaunch_hint, is_github_remote,
+    ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice, nested_managed_match,
+    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
+    tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -1737,6 +1738,75 @@ fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
     );
 }
 
+/// Build a [`make_session`] summary with an explicit `created_at` (RFC3339),
+/// for tests that need to control recency ordering.
+fn make_session_at(
+    name: &str,
+    state: &str,
+    created_at: &str,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = make_session(name, state, None);
+    s.created_at = Some(created_at.to_string());
+    s
+}
+
+#[test]
+fn nested_managed_match_prefers_live_over_recycled_decommissioned_name() {
+    // #2790 code-critic HIGH: tmux session names are RECYCLED after
+    // decommission. A stale Decommissioned tombstone sharing a name with a
+    // genuinely LIVE session must never win the match — liveness takes STRICT
+    // precedence over recency (not just "usually more recent"). Proven here by
+    // giving the tombstone a LATER created_at than the live record — an
+    // adversarial ordering the pre-#2790 plain `.find()` would have been
+    // vulnerable to depending on iteration/list order.
+    let mut decommissioned =
+        make_session_at("tm-proj-01", "decommissioned", "2026-03-01T00:00:00Z");
+    decommissioned.id = "old-id".to_string();
+    let mut live = make_session_at("tm-proj-01", "active", "2026-01-01T00:00:00Z");
+    live.id = "new-id".to_string();
+    let sessions = vec![decommissioned, live];
+
+    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
+    assert_eq!(
+        matched.map(|s| s.id.as_str()),
+        Some("new-id"),
+        "a live record must win over a decommissioned one sharing the same \
+         recycled name, even when the tombstone's created_at is later"
+    );
+}
+
+#[test]
+fn nested_managed_match_falls_back_to_decommissioned_when_no_live_candidate() {
+    // The legitimate #2777 repro: the ONLY record sharing this tmux session
+    // name IS the decommissioned session itself (its name has not yet been
+    // recycled by a new session) — the guard must still match it so the
+    // in-place revive path can run.
+    let sessions = vec![make_session("tm-apex-01", "decommissioned", None)];
+    let matched = nested_managed_match(Some("tm-apex-01"), None, &sessions);
+    assert_eq!(
+        matched.map(|s| s.name.as_str()),
+        Some("tm-apex-01"),
+        "must fall back to the decommissioned record when no live candidate \
+         shares its name"
+    );
+}
+
+#[test]
+fn nested_managed_match_prefers_most_recent_live_among_multiple() {
+    // Belt-and-suspenders: when MULTIPLE non-decommissioned candidates somehow
+    // share a name (should not normally happen, but the guard must still be
+    // deterministic), the most recently created one wins — mirroring
+    // `capture_pane_by_tmux_name`'s `max_by_key(created_at)` convention.
+    let mut older = make_session_at("tm-proj-02", "active", "2026-01-01T00:00:00Z");
+    older.id = "older-id".to_string();
+    let mut newer = make_session_at("tm-proj-02", "active", "2026-02-01T00:00:00Z");
+    newer.id = "newer-id".to_string();
+    let sessions = vec![older, newer];
+
+    let matched = nested_managed_match(Some("tm-proj-02"), None, &sessions);
+    assert_eq!(matched.map(|s| s.id.as_str()), Some("newer-id"));
+}
+
 // ── pane_identity_confirmed (#2456 review finding 1, ROUND 2) ────────────────
 // The cross-pane-hijack guard: `nested_managed_match` alone only proves the
 // tmux SESSION matches (every window/pane in that session shares the same
@@ -1801,6 +1871,43 @@ fn pane_identity_confirmed_false_when_inherited_env_but_different_pane_id() {
         sibling_window_current_pane_id,
         healed_record_pane_id
     ));
+}
+
+// ── nested_fallback_action (#2777 decommissioned-relaunch dead-end fix) ──────
+// When the nested-session guard matched by tmux SESSION name but could NOT
+// confirm pane identity, the pre-#2777 fallback ALWAYS reconnected
+// (switch-client) — a no-op dead-end when the session is DEAD (the operator is
+// already inside the session being "reconnected" to, and nothing live is there).
+// `nested_fallback_action` splits dead states (relaunch in place) from
+// possibly-live states (reconnect a sibling window).
+
+#[test]
+fn nested_fallback_action_relaunches_dead_states() {
+    // The reported bug: bare `tm` inside a `decommissioned` session must NOT
+    // switch-client to itself. Stopped/errored share the "no live runtime" trait
+    // and must relaunch in place too rather than take the destructive daemon
+    // /resume path a plain reconnect would reach.
+    for state in ["decommissioned", "stopped", "errored"] {
+        assert_eq!(
+            nested_fallback_action(state),
+            NestedFallbackAction::RelaunchInPlace,
+            "dead state {state:?} must relaunch in place, not switch-client to self"
+        );
+    }
+}
+
+#[test]
+fn nested_fallback_action_reconnects_live_states() {
+    // A possibly-live session (its runtime may be in a genuinely different
+    // sibling window of the same tmux session) must keep the switch-client
+    // reconnect — that is NOT a self no-op, it brings the live pane forward.
+    for state in ["active", "provisioning", "running", "some-future-state"] {
+        assert_eq!(
+            nested_fallback_action(state),
+            NestedFallbackAction::Reconnect,
+            "possibly-live state {state:?} must reconnect (default), not relaunch"
+        );
+    }
 }
 
 // ── nested_guard_notice (sibling-window hijack fix, follow-up to #2456) ─────
