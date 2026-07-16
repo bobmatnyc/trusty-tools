@@ -297,10 +297,39 @@ impl CodeIndexer {
         if idle_threshold.is_zero() {
             return 0;
         }
-        if self.corpus.is_none() {
+        if self.idle_duration() < idle_threshold {
             return 0;
         }
-        if self.idle_duration() < idle_threshold {
+        let evicted = self.clear_in_memory_chunks().await;
+        if evicted > 0 {
+            tracing::info!(
+                "index '{}': evicted {} in-memory chunks after {}s idle \
+                 (durable corpus retained; lazily rehydrates on next access)",
+                self.index_id,
+                evicted,
+                idle_threshold.as_secs(),
+            );
+        }
+        evicted
+    }
+
+    /// Unconditionally drop the in-memory `chunks` map (no idle guard, no
+    /// logging). Shared by the idle-evict path ([`Self::evict_chunks_if_idle`])
+    /// and the memory-pressure reclaim path ([`Self::reclaim_memory_now`],
+    /// issue #2846).
+    ///
+    /// Why: both callers need the identical clear-and-mark logic but differ on
+    /// *when* to run it — idle-evict gates on the idle window, pressure reclaim
+    /// runs immediately regardless. Factoring the mechanics here keeps them in
+    /// exactly one place so the two paths can never drift.
+    /// What: a no-op returning 0 when no durable corpus is wired (nothing to
+    /// rehydrate from) or the map is already empty. Otherwise clears + shrinks
+    /// the map, marks `chunks_evicted` so the next reader rehydrates from redb,
+    /// and returns the reclaimed chunk count. Callers own any logging.
+    /// Test: exercised by `idle_eviction_drops_and_lazily_rehydrates_chunks`
+    /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure path).
+    async fn clear_in_memory_chunks(&self) -> usize {
+        if self.corpus.is_none() {
             return 0;
         }
         let mut chunks = self.chunks.write().await;
@@ -312,13 +341,6 @@ impl CodeIndexer {
         chunks.shrink_to_fit();
         drop(chunks);
         self.chunks_evicted.store(true, Ordering::Relaxed);
-        tracing::info!(
-            "index '{}': evicted {} in-memory chunks after {}s idle \
-             (durable corpus retained; lazily rehydrates on next access)",
-            self.index_id,
-            evicted,
-            idle_threshold.as_secs(),
-        );
         evicted
     }
 

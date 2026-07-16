@@ -493,3 +493,125 @@ async fn hnsw_idle_demotion_skips_when_disabled_via_env() {
     );
     assert!(usearch.in_view_mode());
 }
+
+/// `reclaim_memory_now` force-clears chunks + BM25 + entities **regardless of
+/// idle state**, and every reader lazily rehydrates from the durable corpus.
+///
+/// Why: this is the steady-state memory-limit enforcement primitive (issue
+/// #2846). Unlike the idle-evict path, it must reclaim an index that was
+/// active microseconds ago — a daemon under real memory pressure cannot wait
+/// for the idle window. The reclaim must nonetheless be non-destructive:
+/// search results after reclaim must match results before.
+/// What: index two files, snapshot BM25/entity/chunk state, call
+/// `reclaim_memory_now()` with the index freshly active (no idle wait), assert
+/// every in-memory structure is emptied and the reclaim count covers the BM25
+/// docs, then confirm a search rehydrates and returns the same hit.
+/// Test: this test.
+#[tokio::test]
+async fn memory_pressure_reclaim_now_clears_caches() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+    let idx = make_indexer_with_corpus(&redb_path);
+
+    idx.index_files_batch(&[
+        (
+            "src/auth.rs".into(),
+            "pub struct MyType { x: u32 }\nfn authenticate() {}".into(),
+        ),
+        ("src/token.rs".into(), "fn verify_token() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+
+    let bm25_docs_before = idx.bm25.read().await.len();
+    assert!(bm25_docs_before >= 2, "expected >= 2 BM25 documents");
+    assert!(
+        !idx.entities.read().await.is_empty(),
+        "expected entity-map entries before reclaim"
+    );
+
+    // The index is active RIGHT NOW (ingest just called touch_activity), so an
+    // idle-evict would be a no-op — but pressure reclaim must fire regardless.
+    assert_eq!(
+        idx.evict_bm25_entities_if_idle(Duration::from_secs(3600))
+            .await,
+        0,
+        "idle-evict must NOT fire on an active index"
+    );
+
+    let reclaimed = idx.reclaim_memory_now().await;
+    assert!(
+        reclaimed >= bm25_docs_before,
+        "reclaim count ({reclaimed}) should cover the {bm25_docs_before} BM25 documents"
+    );
+    assert_eq!(
+        idx.bm25.read().await.len(),
+        0,
+        "BM25 must be empty after reclaim"
+    );
+    assert_eq!(
+        idx.entities.read().await.len(),
+        0,
+        "entities map must be empty after reclaim"
+    );
+    assert_eq!(
+        idx.in_memory_chunk_count().await,
+        0,
+        "in-memory chunk map must be empty after reclaim"
+    );
+    assert!(
+        idx.bm25_entities_evicted.load(Ordering::Relaxed),
+        "bm25_entities_evicted flag must be set after reclaim"
+    );
+
+    // Non-destructive: a search after reclaim rehydrates from redb and still
+    // returns the hit.
+    let q = SearchQuery {
+        text: "authenticate".to_string(),
+        top_k: 5,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results_after = idx.search(&q).await.expect("search after reclaim");
+    assert!(
+        !results_after.is_empty(),
+        "expected a BM25 hit after reclaim + lazy rehydration"
+    );
+    assert!(
+        idx.bm25.read().await.len() >= 2,
+        "BM25 must be rehydrated after the post-reclaim search"
+    );
+}
+
+/// `reclaim_memory_now` is a safe no-op on an index with no durable corpus —
+/// it has nothing to rehydrate from, so it must not drop unrecoverable data.
+///
+/// Why: BM25-only / test indexes hold their only copy in memory. Reclaiming
+/// them would be data loss, not a cache eviction. Both `clear_*` helpers guard
+/// on `corpus.is_none()`, so reclaim must return 0 and leave state intact.
+/// What: build a corpus-less indexer, populate BM25 directly, call
+/// `reclaim_memory_now()`, assert it returns 0 and BM25 is untouched.
+/// Test: this test.
+#[tokio::test]
+async fn memory_pressure_reclaim_now_is_noop_without_corpus() {
+    let idx = make_indexer(); // no CorpusStore wired
+    {
+        let mut bm25 = idx.bm25.write().await;
+        bm25.upsert_document("a:1:1", "fn authenticate");
+        bm25.upsert_document("b:1:1", "fn verify_token");
+    }
+    let before = idx.bm25.read().await.len();
+    assert!(before >= 2);
+
+    let reclaimed = idx.reclaim_memory_now().await;
+    assert_eq!(
+        reclaimed, 0,
+        "reclaim must be a no-op without a durable corpus (would be data loss)"
+    );
+    assert_eq!(
+        idx.bm25.read().await.len(),
+        before,
+        "BM25 must be untouched when there is no corpus to rehydrate from"
+    );
+}

@@ -67,10 +67,39 @@ impl CodeIndexer {
         if idle_threshold.is_zero() {
             return 0;
         }
-        if self.corpus.is_none() {
+        if self.idle_duration() < idle_threshold {
             return 0;
         }
-        if self.idle_duration() < idle_threshold {
+        let evicted = self.clear_bm25_entities().await;
+        if evicted > 0 {
+            tracing::info!(
+                "index '{}': evicted {} in-memory BM25 documents + entities after {}s idle \
+                 (durable corpus retained; lazily rehydrates on next access)",
+                self.index_id,
+                evicted,
+                idle_threshold.as_secs(),
+            );
+        }
+        evicted
+    }
+
+    /// Unconditionally drop the in-memory BM25 corpus + per-file entity map (no
+    /// idle guard, no logging). Shared by the idle-evict path
+    /// ([`Self::evict_bm25_entities_if_idle`]) and the memory-pressure reclaim
+    /// path ([`Self::reclaim_memory_now`], issue #2846).
+    ///
+    /// Why: `BM25Index::doc_terms` is a full tokenized second copy of every
+    /// chunk's text and, with the entity map, one of the largest anonymous-heap
+    /// consumers a warm-booted index carries. Both callers need the identical
+    /// clear-and-mark; factoring it here keeps the two paths from drifting.
+    /// What: a no-op returning 0 when no durable corpus is wired or BM25 is
+    /// already empty. Otherwise replaces `self.bm25` with a fresh empty index,
+    /// clears `self.entities`, marks `bm25_entities_evicted`, and returns the
+    /// reclaimed BM25 document count. Callers own any logging.
+    /// Test: exercised by `bm25_entities_idle_eviction_drops_and_lazily_rehydrates`
+    /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure path).
+    async fn clear_bm25_entities(&self) -> usize {
+        if self.corpus.is_none() {
             return 0;
         }
         let mut bm25 = self.bm25.write().await;
@@ -87,14 +116,45 @@ impl CodeIndexer {
         drop(entities);
 
         self.bm25_entities_evicted.store(true, Ordering::Relaxed);
-        tracing::info!(
-            "index '{}': evicted {} in-memory BM25 documents + entities after {}s idle \
-             (durable corpus retained; lazily rehydrates on next access)",
-            self.index_id,
-            evicted,
-            idle_threshold.as_secs(),
-        );
         evicted
+    }
+
+    /// Force-reclaim this index's evictable in-memory heap **regardless of idle
+    /// state** — the steady-state memory-limit enforcement path (issue #2846).
+    ///
+    /// Why: the idle-evict ticker only reclaims indexes that have been quiet
+    /// past the idle window, so a daemon under genuine memory pressure whose
+    /// indexes are all "recently active" keeps growing until the OS OOM-killer
+    /// intervenes — exactly the production failure #2846 reports (RSS reached
+    /// 2.2× the configured 12 GB soft ceiling). When the pressure ticker sees
+    /// RSS cross the high-water mark it calls this on every resident index to
+    /// shed the largest anonymous-heap consumers immediately. Every structure
+    /// cleared here is 100% recoverable from the durable redb corpus and lazily
+    /// rehydrates on next access, so a pressure reclaim is non-destructive —
+    /// the worst case is a re-load latency spike on the next query to a reclaimed
+    /// index, which is strictly preferable to an OOM-kill.
+    /// What: unconditionally clears the in-memory chunk map, the BM25 corpus,
+    /// and the per-file entity map, then demotes the HNSW vector store back to
+    /// its mmap view (best-effort — a demote failure is logged at debug and
+    /// never fatal). Returns the total in-memory entry count reclaimed (the sum
+    /// of cleared chunks and BM25 documents). An index without a durable corpus
+    /// (BM25-only / test) reclaims nothing (returns 0) — it has no source to
+    /// rehydrate from, so clearing it would be data loss, not cache eviction.
+    /// Test: `memory_pressure_reclaim_now_clears_caches` and
+    /// `memory_pressure_reclaim_now_is_noop_without_corpus` in `indexer::tests`.
+    pub async fn reclaim_memory_now(&self) -> usize {
+        let mut reclaimed = self.clear_in_memory_chunks().await;
+        reclaimed += self.clear_bm25_entities().await;
+        if let Some(store) = &self.store {
+            if let Err(e) = store.demote_to_view().await {
+                tracing::debug!(
+                    "index '{}': memory-pressure HNSW demote-to-view failed ({e}); \
+                     leaving heap-resident",
+                    self.index_id
+                );
+            }
+        }
+        reclaimed
     }
 
     /// Repopulate the BM25 corpus and per-file entity map from the durable

@@ -7,6 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- steady-state memory-limit enforcement — the configured `rss_limit_mb` /
+  `TRUSTY_MEMORY_LIMIT_MB` soft ceiling was previously accepted but only ever
+  enforced inside the reindex pipeline, so a long-lived serving daemon that
+  rarely reindexes grew its resident heap without bound until the OS OOM-killer
+  intervened (production: ~26.6 GB RSS, 2.2× the 12 GB stated limit, over ~20
+  days). A new `spawn_memory_pressure_ticker` samples process RSS every
+  `TRUSTY_MEMORY_ENFORCE_SECS` (default 30 s; `0` disables) and, once RSS
+  crosses `TRUSTY_MEMORY_HIGH_WATER_PCT`% of the ceiling (default 90 %), calls
+  `CodeIndexer::reclaim_memory_now` on every resident index to shed the largest
+  evictable anonymous-heap consumers — raw chunk text, the tokenized BM25
+  corpus, per-file entities, and the promoted HNSW heap copy — all of which are
+  durable-corpus-backed and rehydrate lazily, so the reclaim is
+  non-destructive. As an opt-in last resort for un-evictable growth (allocator
+  fragmentation / native arenas / a true leak), setting
+  `TRUSTY_MEMORY_RESTART_ON_LIMIT=1` lets the daemon gracefully drain-and-exit
+  when RSS is still over the hard limit after a reclaim sweep, for a supervisor
+  (launchd/systemd) to respawn; it defaults OFF so an unsupervised daemon never
+  self-terminates. `/health` already surfaced `rss_mb` vs `rss_limit_mb`; the
+  ticker now also refreshes that telemetry between health polls
+  ([#2846](https://github.com/bobmatnyc/trusty-tools/issues/2846))
+
 ### Fixed
 
 - graceful stop no longer intermittently hangs for `TimeoutStopSec` (300 s) before a SIGKILL: `UsearchStore::save` now runs the blocking usearch `Index::save` FFI call via `tokio::task::spawn_blocking` instead of inline on an async worker, so a stalled save occupies a blocking-pool thread instead of starving the runtime's workers; the shutdown flush loop additionally runs each index's snapshot on its own detached task and enforces the per-index deadline on the `JoinHandle` as defense-in-depth. The daemon also hard-exits via `std::process::exit(0)` once `run_daemon` returns, so a worker stuck in blocking FFI or a CUDA/embedder teardown deadlock cannot block tokio's runtime teardown at process exit (the embedder sidecar is still reaped via its stdin-EOF exit path, not `kill_on_drop`, on this path). No data-loss behaviour changes — the #1711 empty-snapshot guard is untouched ([#1746](https://github.com/bobmatnyc/trusty-tools/issues/1746))
