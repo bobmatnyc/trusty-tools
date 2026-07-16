@@ -156,6 +156,37 @@ fn bogus_dot_git_file_is_not_a_repo() {
     assert!(!is_git_repo(&dir));
 }
 
+/// A large `.git` FILE that is not a real pointer must not earn a badge, and
+/// the bounded 64-byte read must not choke on (or need to read) the rest of it.
+#[test]
+fn large_dot_git_file_is_not_a_repo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("not-a-repo");
+    std::fs::create_dir(&dir).expect("mkdir");
+    // Well over the 64-byte read bound, and not a `gitdir:` pointer.
+    std::fs::write(dir.join(".git"), "x".repeat(10_000)).expect("write");
+
+    assert!(!is_git_repo(&dir));
+}
+
+/// A `gitdir:` pointer whose content sits right at (and just past) the 64-byte
+/// read bound is still detected — the bound must not truncate a real pointer.
+#[test]
+fn gitdir_pointer_at_exactly_the_read_bound() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("worktree-at-bound");
+    std::fs::create_dir(&dir).expect("mkdir");
+    // "gitdir: " (8 bytes) + a path long enough to push the whole line past
+    // 64 bytes — the prefix itself must still land within the first 64 bytes.
+    let long_path = format!("/very/long/path/to/main/.git/worktrees/{}", "x".repeat(40));
+    std::fs::write(dir.join(".git"), format!("gitdir: {long_path}\n")).expect("write");
+
+    assert!(
+        is_git_repo(&dir),
+        "a gitdir: pointer must be detected even when the full line exceeds the read bound"
+    );
+}
+
 /// A plain directory with no `.git` is a first-class NON-GIT entry (7a's
 /// `scratch  —` row) — reported, never an error (#2728).
 #[test]

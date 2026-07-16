@@ -44,6 +44,7 @@
 
 pub mod protocol;
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -197,28 +198,44 @@ fn collapse_home(path: &Path) -> String {
 ///
 /// What: `.git` as a directory → repo. `.git` as a file → repo only if it
 /// actually carries git's documented `gitdir:` pointer, so a coincidental file
-/// named `.git` does not earn a badge. Anything else (including a metadata
-/// error, e.g. a permission refusal on the probe) → `false`.
+/// named `.git` does not earn a badge. The pointer check reads only the first
+/// 64 bytes of the file rather than the whole thing — `gitdir: <path>\n` is
+/// always well under that, and this runs on the picker's hot path across every
+/// entry, so an unbounded `read_to_string` on a `.git` that happens to be a
+/// large coincidental file (not a real pointer) would be an avoidable stall.
+/// Anything else (including a metadata error, e.g. a permission refusal on the
+/// probe) → `false`.
 ///
 /// **Why not shell out to `git rev-parse`** (as `run_task::diff::is_git_repo`
 /// does): that costs one subprocess PER ENTRY, and this runs across every entry
 /// of a directory on an interactive picker's hot path — a 200-entry `~/code` at
 /// ~5ms a spawn is a second of latency for a badge. Two `stat`s and, only for
-/// the rare `.git`-as-file, one small read gets the same answer. `rev-parse`
-/// stays the right tool in `diff.rs`, which asks once per run about one root.
+/// the rare `.git`-as-file, one small bounded read gets the same answer.
+/// `rev-parse` stays the right tool in `diff.rs`, which asks once per run about
+/// one root.
 ///
 /// Note this deliberately answers "is `dir` a repo ROOT", not "is `dir` inside a
 /// work tree" — the picker badges repos, and a plain subdirectory of a repo is
 /// not itself one to bind to.
 /// Test: `tests::git_dir_is_detected`, `tests::linked_worktree_gitfile_is_detected`,
-/// `tests::bogus_dot_git_file_is_not_a_repo`, `tests::non_git_dir_is_reported_as_non_git`.
+/// `tests::bogus_dot_git_file_is_not_a_repo`, `tests::non_git_dir_is_reported_as_non_git`,
+/// `tests::large_dot_git_file_is_not_a_repo`, `tests::gitdir_pointer_at_exactly_the_read_bound`.
 fn is_git_repo(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
     // `metadata` follows symlinks, matching how git itself resolves `.git`.
     match std::fs::metadata(&dot_git) {
         Ok(m) if m.is_dir() => true,
-        Ok(m) if m.is_file() => std::fs::read_to_string(&dot_git)
-            .map(|s| s.trim_start().starts_with("gitdir:"))
+        // Bounded read: `gitdir: <path>` is always well under 64 bytes, and this
+        // runs per-entry on the picker's hot path — never read a coincidental
+        // large file in full just to check its first few bytes.
+        Ok(m) if m.is_file() => std::fs::File::open(&dot_git)
+            .and_then(|mut f| {
+                let mut buf = [0u8; 64];
+                let n = f.read(&mut buf)?;
+                Ok(String::from_utf8_lossy(&buf[..n])
+                    .trim_start()
+                    .starts_with("gitdir:"))
+            })
             .unwrap_or(false),
         _ => false,
     }
@@ -257,7 +274,17 @@ fn classify_io(err: std::io::Error, path: &str) -> ListDirError {
 /// picker's order is stable and does not depend on the OS's readdir order.
 /// An entry whose metadata cannot be read is included with `is_dir: false`
 /// rather than dropped — a listing that silently omits rows is worse than one
-/// that shows an unbadged entry.
+/// that shows an unbadged entry. Likewise, an entry that `read_dir`'s iterator
+/// itself fails to produce (a per-entry OS fault mid-enumeration) is skipped
+/// with a `tracing::warn!` rather than failing the whole listing — the same
+/// best-effort philosophy, just one layer up. This skip path has no dedicated
+/// test: triggering a per-entry `read_dir` iteration error deterministically
+/// requires a TOCTOU race (e.g. another process removing an entry between
+/// `readdir` returning its name and the kernel stat'ing it) that cannot be
+/// reproduced portably in a unit test without faking the OS boundary; the
+/// existing coverage for `list_dir`'s other per-entry fallback (metadata read
+/// failure → `is_dir: false`, see `tests::*` above) exercises the same
+/// best-effort code shape.
 /// Test: `tests::*`.
 pub fn list_dir(path: &str, include_hidden: bool) -> Result<DirListing, ListDirError> {
     let expanded = expand_tilde(path)?;
@@ -273,7 +300,21 @@ pub fn list_dir(path: &str, include_hidden: bool) -> Result<DirListing, ListDirE
 
     let mut entries = Vec::new();
     for entry in read {
-        let entry = entry.map_err(|e| classify_io(e, &resolved_str))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                // A per-entry enumeration fault (e.g. a file vanishing mid-scan) is
+                // best-effort: skip that row rather than failing the whole listing,
+                // matching the "an unbadged entry beats a missing one" philosophy
+                // above.
+                tracing::warn!(
+                    dir = %resolved_str,
+                    error = %e,
+                    "skipping unreadable directory entry"
+                );
+                continue;
+            }
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         if !include_hidden && name.starts_with('.') {
             continue;
