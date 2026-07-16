@@ -1,0 +1,112 @@
+//! `sld-lint` — CLI front end for the Spec-Linked Documentation (DOC-38) linter.
+//!
+//! Why: a thin `anyhow`/clap wrapper keeps all logic in the unit-testable
+//! library ([`trusty_sld_lint`]); this binary just parses flags, runs the
+//! engine, prints diagnostics, and maps the result to an exit code.
+//! What: parses `--root`/`--strict`/`--allowlist`, runs [`trusty_sld_lint::run`],
+//! prints each `path:line: [severity check] message`, prints a one-line summary,
+//! and exits non-zero when any error-severity finding survives the allowlist.
+//! Test: exercised end-to-end by the wrapper `scripts/check_sld.sh` and the
+//! library's `tests/lint_real_tree.rs`.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::Result;
+use clap::Parser;
+
+use trusty_sld_lint::{run, LintOptions, ALLOWLIST_FILE};
+
+/// Lint a repository for Spec-Linked Documentation (DOC-38) conformance.
+#[derive(Parser, Debug)]
+#[command(
+    name = "sld-lint",
+    version,
+    about = "Lint Spec-Linked Documentation (SLD / DOC-38) references and spec-doc conventions.",
+    long_about = "\
+sld-lint enforces the DOC-38 Spec-Linked Documentation standard.
+
+CHECKS
+  Reference resolution (ALWAYS, everywhere in scope):
+    - ref-anchor-mismatch  a reference's anchor must equal its id (§2.1 self-check)
+    - ref-traversal        a reference path must not contain `..`
+    - ref-path-missing     the repo-root-relative target file must exist
+    - ref-anchor-missing   the target must carry a matching {#SPEC-…} heading
+                           (revision-tolerant: a ~v1 ref resolves a ~v2 section;
+                            drift is not enforced — DOC-38 §1.3)
+    - frontmatter-schema   `spec_refs:` YAML must be schema-valid (§2.5)
+  Spec-document conventions (opted-in specs by default; ALL specs under --strict):
+    - spec-header          the bold-field header block is present (§4.2)
+    - spec-catalog         the self-labeled DOC-N has a catalog row (§4.5)
+    - spec-id-grammar      every {#SPEC-…} anchor is a valid id (§2.1)
+    - anchor-id-mismatch   an anchor equals its section's **ID:** (§4.3)
+
+STRICTNESS / GRANDFATHERING
+  Existing specs do not yet carry `spec_refs:` frontmatter (retrofit is DOC-38
+  §10 F5/F6), so by DEFAULT the full spec-document checks run only on files that
+  have OPTED IN (they declare `spec_refs:` frontmatter). Reference resolution runs
+  everywhere regardless. Pass --strict to apply the full spec-document checks to
+  EVERY spec — the eventual post-retrofit mode.
+
+  Documented pre-existing exceptions (the DOC-28 self-label collision, the DOC-34
+  catalog gap) are grandfathered via the allowlist TSV (default
+  .sld-lint-allowlist.tsv), a ratchet that can only shrink.
+
+SCOPE
+  docs/specs/**/*.md  (frontmatter references + spec-document checks)
+  crates/**           (inline `# Spec References` blocks; test/benchmark files
+                       are excluded — they carry synthetic fixture references)
+
+Exits non-zero when any error-severity finding survives the allowlist."
+)]
+struct Cli {
+    /// Repository root to lint (contains `docs/specs/` and `crates/`).
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+
+    /// Apply the full spec-document checks to every spec, not only opted-in ones.
+    #[arg(long)]
+    strict: bool,
+
+    /// Grandfather-allowlist TSV path (default: <root>/.sld-lint-allowlist.tsv).
+    #[arg(long)]
+    allowlist: Option<PathBuf>,
+}
+
+/// Parse flags, run the linter, print findings, and return an exit code.
+///
+/// Why: keeps `main` a thin adapter — no check logic, just I/O and exit mapping.
+/// What: builds [`LintOptions`], runs [`run`], prints each diagnostic and a
+/// summary line, and returns `FAILURE` when the report is not clean.
+/// Test: covered end-to-end by `tests/lint_real_tree.rs` + `scripts/check_sld.sh`.
+fn main() -> Result<ExitCode> {
+    let cli = Cli::parse();
+    let strict = cli.strict;
+    let allowlist_path = cli
+        .allowlist
+        .unwrap_or_else(|| cli.root.join(ALLOWLIST_FILE));
+    let opts = LintOptions {
+        root: cli.root,
+        strict,
+        allowlist_path,
+    };
+
+    let report = run(&opts)?;
+    for diag in &report.diagnostics {
+        println!("{diag}");
+    }
+    let errors = report.error_count();
+    let warnings = report.diagnostics.len() - errors;
+    println!(
+        "sld-lint: scanned {} spec doc(s) + {} code file(s); {errors} error(s), {warnings} warning(s){}",
+        report.spec_docs,
+        report.code_files,
+        if strict { " [strict]" } else { "" }
+    );
+
+    if report.is_clean() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
+}

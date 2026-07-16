@@ -1,0 +1,27 @@
+# SLD-lint grandfather allowlist (ratchet — can only shrink).
+#
+# Format: <repo-relative-path><TAB><check-id>   (one grandfathered pair per row)
+# Blank lines and lines beginning with `#` are ignored.
+#
+# Why this exists: DOC-38 §10 F5/F6 track the incremental retrofit of existing
+# specs (frontmatter, header blocks, `{#SPEC-…~rev}` anchors) and §4.1/§9 the
+# documented DOC-28 collision + DOC-34/DOC-37 catalog gaps. Those pre-existing
+# specs are NOT failed by `sld-lint --strict`; each is grandfathered here for the
+# specific check it currently violates. As F3/F5/F6 land, remove the matching row
+# (the ratchet only shrinks). DEFAULT mode does not consult these — it already
+# passes on the whole tree; the allowlist only relaxes `--strict`.
+#
+# spec-header  — spec predates the DOC-38 §4.2 bold-field header block (F6).
+# spec-id-grammar — section anchors use pre-DOC-38 slug form (…-layers) or omit
+#                   the ~rev suffix; retrofitting to SPEC-…~rev is F6.
+# spec-catalog — assigned but uncataloged DOC-N (DOC-34/DOC-37; catalog-row is F3-adjacent).
+docs/specs/SPEC-INSTALLER-01.md	spec-header
+docs/specs/chat-core.md	spec-id-grammar
+docs/specs/learned-autonomy-auto-answer.md	spec-id-grammar
+docs/specs/managed-session-config-dir.md	spec-catalog
+docs/specs/mpm-cutover-resume-native-optimization.md	spec-header
+docs/specs/multi-repo-session-routing.md	spec-id-grammar
+docs/specs/tm-meta-harness-logging.md	spec-header
+docs/specs/tool-output-interception-seam.md	spec-header
+docs/specs/trusty-memory-chat-session-manager.md	spec-header
+docs/specs/trusty-search-managed-repo-awareness.md	spec-catalog
