@@ -235,7 +235,7 @@ marked **NEW** rather than invented as green-field:
 | `memory` | Palace/Segment scope | **Partial** — `TrustyBackedMemoryStore` exists; declarative binding is NEW (§2.3.3, §7) |
 | `checkpoints` | Phase-boundary durability | **NEW** end to end (§2.3.5, §3) |
 | `channels` | Chat-platform tools + inbound routing | **Partial** — `trusty-channels` (tools) and the inbound gateways exist; per-agent binding is NEW (§2.3.7) |
-| `events` | Trigger-driven wake (subscribe/schedule) | **NEW** end to end — the bus is emit-only today (§2.3.6) |
+| `events` | Trigger-driven wake (subscribe/schedule/webhook/mqtt) | **NEW** end to end — the bus is emit-only today; `webhook` builds on already-workspace `hmac`/`sha2`, `mqtt` needs a new crate and is `~draft` (§2.3.6) |
 
 ### 2.3 Manifest schema (NEW)
 
@@ -275,6 +275,13 @@ checkpoints:                           # binds §3 (SPEC-AGENTFW-02)
 events:                                 # NEW — §2.3.6
   subscribe: [PhaseDone, ToolResult]     # must name a real `Event` enum variant
   schedule: "15m"                        # NEW minimal interval syntax, §2.3.6
+  webhook:                                # NEW — generic inbound-HTTP trigger, §2.3.6
+    path: ticket-created                   # mounted at POST /api/hooks/<agent-name>/<path>
+    secret_ref: github-webhook-secret       # REQUIRED — resolved via resolve_key (§4.2), never optional
+    signature_header: X-Hub-Signature-256    # which header carries the HMAC-SHA256 signature
+  mqtt:                                    # NEW, ~draft — gated in §10 item 10, §2.3.6
+    broker: "mqtt://homeassistant.local:1883"
+    topics: ["home/sensors/+/motion"]
 
 channels:                               # NEW — §2.3.7
   tools: [slack, telegram]               # binds trusty-channels MCP tools (zero new platform code)
@@ -345,7 +352,11 @@ unchanged by the declarative-only decision.
 
 #### 2.3.6 `events` — NEW platform infrastructure, explicitly scoped
 
-Two independent triggers, both **NEW**:
+Four trigger types, all **NEW**. All four converge on the same dispatch
+call — `AgentRunner::run_with_context(agent_name, task, ctx)` (§5) — with
+whatever triggered the wake carried in `ctx.handoff: HandoffContext` (§5.2),
+reusing that struct's existing size cap and serialization rather than
+inventing a fourth ad hoc payload shape per trigger type.
 
 - **`subscribe: Vec<String>`** — each entry MUST name a real `Event` enum
   variant (validated at load time against the variant list in `events.rs:56-`,
@@ -355,23 +366,101 @@ Two independent triggers, both **NEW**:
   (daemon-side): calls `events::subscribe()` (the existing
   `broadcast::Receiver<Event>` constructor, `events.rs:305`), filters for
   variants named in any loaded agent's `events.subscribe`, and invokes that
-  agent via `AgentRunner::run_with_context` (§5) when a match fires. This is
-  the one genuinely new consumer of the event bus — today it has zero
-  consumers beyond telemetry sinks.
+  agent when a match fires, with the matched `Event`'s fields serialized into
+  `HandoffContext.relevant_state`. This is the one genuinely new consumer of
+  the event bus — today it has zero consumers beyond telemetry sinks.
 - **`schedule: Option<String>`** — a minimal interval syntax (`"<N><unit>"`,
   unit ∈ `{m,h,d}`, e.g. `"15m"`, `"1h"`) — **not** cron-expression syntax; no
   cron-parsing crate exists in this workspace today (confirmed —
   `Cargo.toml` has no `cron`/`tokio-cron-scheduler` entry) and adding one is
-  out of scope for the MVP (flagged in §10 if full cron syntax is wanted
-  later). Requires a **NEW** `AgentScheduler`, structurally mirroring
-  `crate::tm::monitor::TmMonitor` (`tm/monitor.rs:24-40`: owns a
-  `tokio::time::interval`-driven `JoinHandle`, `start`/`stop`/`Drop`
-  lifecycle) but firing `AgentRunner::run_with_context` on tick instead of
-  `TmManager::poll_sessions`.
+  out of scope for the MVP (flagged in §10 item 8 if full cron syntax is
+  wanted later — e.g. a wall-clock/day-of-week schedule such as "every
+  weekday at 9am", which the gallery validation (§12) surfaced as a real
+  agent need this minimal syntax cannot express). Requires a **NEW**
+  `AgentScheduler`, structurally mirroring `crate::tm::monitor::TmMonitor`
+  (`tm/monitor.rs:24-40`: owns a `tokio::time::interval`-driven `JoinHandle`,
+  `start`/`stop`/`Drop` lifecycle) but firing `AgentRunner::run_with_context`
+  on tick instead of `TmManager::poll_sessions`.
+- **`webhook: Option<WebhookTrigger>`** (**NEW** — gallery-motivated, §12).
+  Fills a real gap the first two triggers don't cover: third-party SaaS push
+  events (ticket-created, payment received, CI/CD deploy) have no home —
+  `channels.inbound` (§2.3.7) is chat-platform-only, and `subscribe` is
+  scoped to *internal* `Event` variants, not arbitrary external payloads.
+  Structurally parallel to `schedule`:
 
-Both dispatchers are genuinely new platform infrastructure — the largest net
-new investment in this spec — which is why they are sequenced as their own
-roadmap phase (§8 Phase 4), not bundled into the core manifest phase.
+  ```yaml
+  webhook:
+    path: ticket-created            # mounted at POST /api/hooks/<agent-name>/<path>
+    secret_ref: github-webhook-secret # REQUIRED — see below, never optional
+    signature_header: X-Hub-Signature-256
+  ```
+
+  - **Manifest keys:** `path: String` (required — the route suffix, unique
+    per agent); `secret_ref: String` (**required, not optional** — a
+    `webhook:` block with no `secret_ref` is a **load error**, not a warning;
+    an unauthenticated public-ish POST route is a foot-gun this spec refuses
+    to make easy to configure); `signature_header: String` (required — the
+    HTTP header carrying the HMAC signature; no default, since third-party
+    conventions vary — GitHub uses `X-Hub-Signature-256`, Stripe uses
+    `Stripe-Signature`, etc., and guessing wrong silently disables auth).
+  - **Daemon HTTP surface (NEW):** `POST /api/hooks/<agent-name>/<path>`,
+    added as a new route on the **existing** axum `Router`
+    (`crates/trusty-agents/src/api/server/routes.rs::build_router_with_config`
+    — the same router `events_sse.rs`'s `/api/events` and `handlers.rs`'s
+    `/api/tasks` already register on). **Explicitly exempted** from the
+    existing bearer-token `auth_middleware` (`api/server/auth.rs`) — a
+    third-party webhook sender cannot supply that token — and gated instead
+    by its own signature-verification check (below), mirroring how
+    `GET /api/health` is already exempted from `auth_middleware` for a
+    different reason (`auth.rs`'s doc comment).
+  - **Auth/secret validation:** HMAC-SHA256 over the raw request body,
+    verified against the signature in `signature_header`. **No new crate** —
+    `hmac = "0.12"` and `sha2 = "0.10"` are **already** workspace
+    dependencies (`Cargo.toml:105,216`), and this workspace already has a
+    proven, near-identical implementation to mirror:
+    `crates/trusty-review/src/integrations/github/webhook.rs::
+    verify_webhook_signature(secret: &str, body: &[u8], signature_header:
+    &str) -> bool` (computes `HMAC-SHA256(secret, body)`, hex-compares
+    against the header, constant-time via `Mac::verify_slice`). trusty-agents
+    gets its **own** analogous function (no cross-crate dependency on
+    trusty-review — a different product) built on the same two crates. The
+    secret itself resolves via **the same** `resolve_key`/`KeyStore`
+    mechanism as §4.2's `credential_ref` — `secret_ref`'s value is the
+    `provider` argument to `resolve_key`, just a distinct manifest-key name
+    because it authenticates an *inbound* caller rather than authorizing an
+    *outbound* MCP call.
+  - **Payload delivery:** on a signature match, the request body — parsed as
+    JSON when `Content-Type: application/json`, else kept as raw text — is
+    placed into `HandoffContext.relevant_state["webhook_payload"]` (§5.2),
+    then dispatched via `AgentRunner::run_with_context`. The existing 4 KiB
+    `HandoffContext` cap (§5.2) applies unchanged — a webhook payload
+    exceeding it is rejected with `413 Payload Too Large` at the HTTP layer,
+    before ever reaching the agent.
+  - On signature mismatch: `401 Unauthorized`, no dispatch, no agent
+    invocation — never a silent pass-through.
+- **`mqtt: Option<MqttTrigger>`** (**NEW, ~draft** — gated in §10 item 10;
+  lower priority, device/IoT push subscription, e.g. Home Assistant sensor
+  events). Two designs were considered: (a) widen `subscribe` beyond the
+  internal `Event` enum with a source discriminator (e.g. `subscribe:
+  ["internal:PhaseDone", "mqtt:home/sensors/+/motion"]`), or (b) a **distinct**
+  `events.mqtt: { broker: String, topics: Vec<String>, credential_ref:
+  Option<String> }` key. **This spec recommends (b)** — keeping `subscribe`
+  strictly internal-only preserves its simple "must name a real `Event`
+  variant" validation rule (option (a) would require `subscribe` to validate
+  against two entirely different namespaces depending on a string prefix,
+  a messier contract for a marginal DX win). `credential_ref`, when present,
+  resolves broker auth via the same §4.2 mechanism. Confirmed **no MQTT
+  client crate exists in this workspace today** (`grep -in "mqtt"
+  Cargo.toml crates/trusty-agents/Cargo.toml` — no hits) — adopting this
+  primitive means a **NEW** dependency (e.g. `rumqttc`), the only trigger
+  type in this section that isn't buildable from already-workspace crates.
+  Marked `~draft` pending Bob's confirmation of the distinct-key design
+  (§10 item 10), not implementation-ready like the other three.
+
+All four dispatchers/surfaces are genuinely new platform infrastructure —
+the largest net new investment in this spec — which is why they are
+sequenced as their own roadmap phase (§8 Phase 4), not bundled into the
+core manifest phase.
 
 #### 2.3.7 `channels` — extend two real existing systems, invent no third
 
@@ -407,6 +496,18 @@ in exactly what exists:
   trait over the existing gateway, not a parallel gateway), not trusty-mpm's
   code itself (different crate, different daemon). Scoped precisely as a
   gated roadmap item (§8 Phase 4, §10).
+
+**Connector completeness (gallery-motivated, §12):** only `slack-mcp` and
+`telegram-mcp` are named above because those are the two `trusty-channels`
+binaries that exist today (`crates/trusty-channels/src/bin/`). Discord and
+WhatsApp connectors — surfaced as real gaps by the gallery validation (§12)
+— are **future connectors behind the identical `channels.tools` shape**: a
+new `discord-mcp`/`whatsapp-mcp` binary in `trusty-channels` plus an
+`McpService` entry, exactly like Slack/Telegram today. **No schema change**
+is required in this spec to add them later — `channels.tools: [discord]`
+already parses and binds correctly the day a `discord-mcp` binary exists;
+this is a `trusty-channels` crate scope question, not a trusty-agents
+manifest-schema question.
 
 ### 2.4 Form factor
 
@@ -577,6 +678,17 @@ channels:
   in its effective `ToolsConfig.allowed` when the operator has configured
   the corresponding `McpService` — no trusty-agents code change required
   for this half of the binding.
+- An agent declaring `events.webhook` **without** `secret_ref` fails to load
+  — never silently starts an unauthenticated route.
+- `POST /api/hooks/<agent-name>/<path>` with a body whose HMAC-SHA256 (using
+  the `secret_ref`-resolved secret) matches the `signature_header` value
+  dispatches the agent with the body in `HandoffContext.relevant_state
+  ["webhook_payload"]`; a mismatched or missing signature returns `401` and
+  never invokes the agent; a body serializing past the 4 KiB `HandoffContext`
+  cap returns `413` before dispatch.
+- An agent declaring `events.mqtt` loads successfully but is documented as
+  `~draft` — not yet dispatched by any running platform component — until
+  §10 item 10 is resolved and the corresponding `AgentRunner` wiring ships.
 
 ---
 
@@ -1099,6 +1211,10 @@ Every new/extended config key introduced by §2–§5, following the existing
 | Agent manifest, `events` (**NEW**, §2.3.6) | `schedule` | `Option<String>` (`"<N><m\|h\|d>"`) | `None` | n/a (per-file) |
 | Agent manifest, `channels` (**NEW**, §2.3.7) | `tools` | `Option<Vec<String>>` | `None` | n/a (per-file) |
 | Agent manifest, `channels` (**NEW**, §2.3.7) | `inbound` | `Option<Vec<String>>` | `None` | n/a (per-file) |
+| Agent manifest, `events.webhook` (**NEW**, §2.3.6) | `path` | `String` (required when `webhook` present) | n/a | n/a (per-file) |
+| Agent manifest, `events.webhook` (**NEW**, §2.3.6) | `secret_ref` | `String` (**required** — load error if absent) | n/a | n/a (per-file) |
+| Agent manifest, `events.webhook` (**NEW**, §2.3.6) | `signature_header` | `String` (required) | n/a | n/a (per-file) |
+| Agent manifest, `events.mqtt` (**NEW, ~draft**, §2.3.6, gated §10 item 10) | `broker` / `topics` / `credential_ref` | `String` / `Vec<String>` / `Option<String>` | n/a | n/a (per-file) |
 | `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing `McpService`, extended, §4.2) | `credential_ref` | `Option<String>` (a `provider` name resolved via `resolve_key`, §4.2 item 3) | `None` | n/a |
 | `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing, extended, §4.2) | `timeout_secs` | `u64` | `30` | n/a |
 | `~/.trusty-agents/config.toml` (**NEW** `[model]` table, §2.3.4) | `default` | `Option<String>` (`"provider/model-id"`) | `None` | n/a — sits between `TAGENT_DEFAULT_MODEL` and `FALLBACK_MODEL` in precedence (§2.3.4) |
@@ -1127,6 +1243,9 @@ Every new/extended config key introduced by §2–§5, following the existing
 - No config key or env var disables the §2.6 no-code enforcement — attempting
   to configure around it (e.g. an env var to skip manifest validation) is
   explicitly rejected as a design goal, not merely undocumented.
+- An `events.webhook` block missing `secret_ref` or `signature_header` fails
+  to load — there is no valid config state that stands up an unauthenticated
+  hook route.
 
 ---
 
@@ -1281,7 +1400,8 @@ out (#2791) — not a single mega-PR.
 - **No true mid-phase (sub-turn) checkpointing, ever — not just "in the
   MVP."** **DECIDED (Bob, 2026-07-16):** phase-level granularity (§3.3) is
   approved as the permanent design, not a placeholder pending a harder
-  requirement — §10 item 1 is closed, not merely deferred.
+  requirement — fully closed, removed from §10 entirely (it is not a
+  numbered item there anymore).
 - **No wholesale replacement of the `.toml`/`.md`+frontmatter or
   directory-package (#482) agent formats.** §2.4's additions
   (`agent.yaml`/`instructions.md`) are additive, back-compat-preserving
@@ -1310,7 +1430,15 @@ out (#2791) — not a single mega-PR.
   migration, not re-scoped by this spec.
 - **No cron-expression scheduling in the MVP.** `events.schedule` (§2.3.6)
   is a minimal interval string, not a cron grammar — no cron-parsing crate
-  exists in this workspace today and adding one is deferred (§10).
+  exists in this workspace today and adding one is deferred (§10 item 8).
+- **No unauthenticated webhook mode, ever.** `events.webhook` (§2.3.6)
+  requires `secret_ref`/`signature_header` at load time — there is no
+  "trust any POST" configuration this spec permits, by design, not merely
+  by default.
+- **No embedded MQTT broker.** `events.mqtt` (§2.3.6, `~draft`) is a client
+  connecting to an operator-run broker (e.g. an existing Home Assistant
+  Mosquitto instance) — trusty-agents never hosts broker infrastructure
+  itself.
 
 ---
 
@@ -1364,11 +1492,32 @@ granularity) and in §13's change log. What remains:
    MVP's minimal interval string (`"15m"`) is a firm non-goal boundary for
    full cron syntax (§9) — confirm this is acceptable long-term, or flag
    that cron-expression support (and its new crate dependency) should be
-   pulled forward.
+   pulled forward. **Gallery evidence (§12, PR #2814):** the agent-gallery
+   validation found a real agent need for wall-clock/day-of-week scheduling
+   ("every weekday at 9am") that the minimal interval syntax cannot express
+   — this is no longer a hypothetical future want, it's a confirmed gap
+   against real gallery agents; weighs toward pulling cron support forward.
 9. **Static-asset allowlist exact extension set (gates SPEC-AGENTFW-01
    §2.6).** `.md`/`.yaml`/`.yml`/`.json`/`.txt` is proposed — confirm or
    amend before the no-code enforcement ships (this list, once shipped, is a
    breaking change to loosen but a safe one to tighten).
+10. **`events.mqtt` design confirmation (gates SPEC-AGENTFW-01 §2.3.6,
+    gallery-motivated, §12, PR #2814).** This spec recommends a distinct
+    `events.mqtt: { broker, topics, credential_ref }` key over widening
+    `subscribe` with a source discriminator (§2.3.6 states the rationale:
+    keeps `subscribe`'s validation contract single-namespace). Confirm this
+    design, or specify the widened-`subscribe` alternative instead. Lower
+    priority than items 1–9 — device/IoT integration, not a core-manifest
+    blocker — and requires a **new** MQTT client crate dependency either way
+    (none exists in this workspace today).
+11. **`events.webhook` public-reachability story (gates SPEC-AGENTFW-01
+    §2.3.6).** The daemon binds locally/LAN-first; third-party SaaS webhook
+    senders need the hook route reachable from the public internet. Does
+    trusty-agents document/recommend a tunnel pattern (ngrok, Cloudflare
+    Tunnel, a reverse proxy the operator manages), or is public reachability
+    explicitly the operator's own concern, entirely out of this spec's
+    scope? HMAC signature verification (§2.3.6) is the auth story regardless
+    of the answer — this item is about reachability, not authentication.
 
 ---
 
@@ -1436,6 +1585,22 @@ package that a non-engineer persona can safely author or share.
 | Multi-channel deployment | Two real, separate systems: `trusty-channels` (MCP tool servers) and trusty-agents' own inbound `telegram`/`slack` gateways (project-scoped, not agent-scoped) | Closed by SPEC-AGENTFW-01 §2.3.7 — extends both, invents neither |
 | Code-first agent authoring (`agent.ts` + `tools/*.ts`) | N/A — never had this, and per Bob's 2026-07-16 decision never will | **Deliberate non-parity** — declaration-first is the differentiator, not a gap (§2.0, §11) |
 | OpenTelemetry / hosted observability integrations | Full `Event` enum + SSE stream, local-only | **Deliberate non-parity** — DECIDED no OTel, ever (§9) |
+| Third-party SaaS inbound push (webhooks), device/IoT push (MQTT) | No home for either — `channels.inbound` is chat-platform-only, `events.subscribe` is internal-`Event`-only | Closed by SPEC-AGENTFW-01 §2.3.6 (`events.webhook`, implementation-ready; `events.mqtt`, `~draft`) |
+
+### 12.1 Gallery validation (2026-07-16)
+
+The primitive-binding design in §2 was validated against a real-world agent
+gallery — [docs/research/agent-gallery-validation-20260716.md][gallery-doc]
+(PR #2814, re-baselined against this spec's v3): **11 of 14 surveyed
+OpenClaw/Hermes-style gallery agents are fully covered by v3's manifest
+primitives, and zero require agent-authored code** — direct evidence the
+declarative-only design (§2.0) is not merely a policy stance but actually
+sufficient for the personal-productivity agent shapes it targets. The
+validation surfaced exactly the two gaps §2.3.6 now closes (generic
+inbound-HTTP webhooks; device/IoT push) plus the connector-completeness note
+in §2.3.7 (Discord/WhatsApp) and the cron-syntax evidence folded into §10
+item 8 — this revision (v3.1) is the direct result of that validation pass,
+not a speculative extension.
 
 ---
 
@@ -1490,7 +1655,27 @@ package that a non-engineer persona can safely author or share.
   alongside the untouched originals (`HandoffContext` size cap, checkpoint
   env-var naming, `code_dir` resume integrity, the `tools/call` proxy
   research task).
+- **2026-07-16 (v3.1)** — Gallery-validation follow-up (PR #2814,
+  [docs/research/agent-gallery-validation-20260716.md][gallery-doc]):
+  11/14 surveyed gallery agents fully covered by v3, zero need code — direct
+  evidence for §2.0's declarative-only design — but two spec gaps surfaced,
+  now closed: **`events.webhook`** (§2.3.6, implementation-ready), a generic
+  inbound-HTTP trigger for third-party SaaS push events, built on
+  already-workspace `hmac`/`sha2` crates and mirroring
+  `trusty-review`'s existing `verify_webhook_signature` pattern, with
+  `secret_ref` mandatory (never an unauthenticated hook route) and payload
+  delivery folded into the existing `HandoffContext` mechanism (§5.2) rather
+  than a new payload shape; **`events.mqtt`** (§2.3.6, `~draft`, gated §10
+  item 10), device/IoT topic-filtered push, specified as a distinct manifest
+  key rather than widening `subscribe`, pending Bob's confirmation and a new
+  MQTT client crate dependency. Also added: a connector-completeness note to
+  §2.3.7 (Discord/WhatsApp are future `channels.tools` connectors, no schema
+  change), gallery evidence appended to §10 item 8 (wall-clock/day-of-week
+  scheduling is a confirmed real gap, not hypothetical), and a new §10 item
+  11 (webhook public-reachability story — a tunnel/reverse-proxy question
+  distinct from the already-specified HMAC auth).
 
+[gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
 [eve-docs]: https://vercel.com/docs/eve
 [eve-repo]: https://github.com/vercel/eve
