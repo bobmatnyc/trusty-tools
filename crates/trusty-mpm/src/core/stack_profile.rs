@@ -19,7 +19,8 @@
 //! block that forbids defaulting and requires a Research pass. [`resolve_pm_prompt`]
 //! ([`crate::core::instruction_overrides`]) slots the section into the prompt.
 //! Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
-//! `undetected_is_neutral_no_default`, `heading_present_in_both_modes`.
+//! `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`,
+//! `heading_present_in_both_modes`.
 
 use std::path::Path;
 
@@ -50,7 +51,7 @@ pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived
 /// Research pass to detect it before routing. Pure and side-effect-free apart
 /// from the filesystem `exists()` probes performed by [`detected_engineers`].
 /// Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
-/// `undetected_is_neutral_no_default`.
+/// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`.
 pub fn stack_profile_section(project_dir: &Path) -> String {
     let engineers = detected_engineers(project_dir);
 
@@ -183,6 +184,38 @@ mod tests {
         assert!(
             !section.contains("rust-engineer") && !section.contains("python-engineer"),
             "the neutral block must not name any language engineer"
+        );
+    }
+
+    /// A polyglot project (Rust + JS/TS) names both families, dropping neither.
+    ///
+    /// Why: mirrors `project_lang::polyglot_project_keeps_both` at the rendering
+    /// layer — a repo with markers for two ecosystems must route to engineers
+    /// from BOTH, not silently pick one, since a wrong exclusive pick is exactly
+    /// the class of bug #1971 is about.
+    /// What: writes both `Cargo.toml` and `package.json`, asserts the rendered
+    /// section names `rust-engineer` AND a JS-family engineer stem
+    /// (`javascript-engineer`), and does not emit the neutral "do NOT assume"
+    /// block.
+    /// Test: this function IS the test.
+    #[test]
+    fn detected_polyglot_lists_both_families() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "Cargo.toml");
+        touch(tmp.path(), "package.json");
+
+        let section = stack_profile_section(tmp.path());
+        assert!(
+            section.contains("`rust-engineer`"),
+            "polyglot project must still route to rust-engineer"
+        );
+        assert!(
+            section.contains("`javascript-engineer`"),
+            "polyglot project must also route to the JS/TS family"
+        );
+        assert!(
+            !section.contains("Do NOT assume any stack"),
+            "a detected polyglot project must not emit the neutral block"
         );
     }
 
