@@ -108,6 +108,11 @@ cargo build --release -p <crate>         # long build: run it, wait for exit
 - If an invocation hits the 10-min tool ceiling, RE-ISSUE the same blocking
   command in the SAME turn and loop until it completes.
 - On failure, capture the output and report it — do not retry-by-waiting.
+- Re-issuing is NOT tight blind polling. Don't loop a status check every ~30s
+  emitting "still building"/"still pending" — that is the opposite failure, spam
+  (#2833). Prefer the blocking form (`--watch`, or the build itself); if you must
+  sleep-poll, size the sleep to the real wall-clock (minutes) and print only when
+  the observed state changes.
 
 ## GitHub Account Management
 
