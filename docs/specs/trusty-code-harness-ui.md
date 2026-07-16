@@ -4,13 +4,15 @@
 **Subsystem:** trusty-code — API surface (JSON-RPC + events) primarily; SPA (web/Tauri) client downstream
 **Owner:** Engineering (trusty-code)
 **Last-updated:** 2026-07-16
-**Spec ID:** `SPEC-TCUI-01~draft` … `SPEC-TCUI-08~draft` (DOC-39)
+**Spec ID:** `SPEC-TCUI-01~draft` … `SPEC-TCUI-09~draft` (DOC-39)
 **Epic:** trusty-code interactive harness UI (umbrella issue to be linked by the PM)
 **Builds on:**
 - [`docs/trusty-code/vision-and-architecture-spec.md`](../trusty-code/vision-and-architecture-spec.md)
   — Axiom 3 (§, line 84): **layer priority API → CLI → TUI → Web**; "UIs are deferred
   thin clients … contain NO logic of their own". This spec is that axiom applied: its
-  normative core is the **API delta**, not the pixels.
+  normative core is the **API delta**, not the pixels. §2.1 restates that axiom as an
+  **architectural constraint** rather than a build order, and is binding over every
+  other section of this document.
 - [`docs/trusty-code/parity-spec.md`](../trusty-code/parity-spec.md) — normative for
   cross-model *comparison runs* only; the bake-off is how a harness is **scored**, not
   what one **is** (§1.2).
@@ -74,13 +76,17 @@ The parity/bake-off harness is **how you score a harness, not what one is**. Com
 runs remain normative under the parity spec and are unaffected by this document.
 
 **Platform: an SPA (web/Tauri) driving our API.** Not a TUI, not a terminal renderer.
+"Driving our API" is the whole of it: **web and Tauri are two shells over one daemon, and
+differ in packaging only** (§2.1). The slash in "web/Tauri" is not a fork.
 
 ### 1.3 Non-goals
 
 The proposal has no non-goals. A spec must. **Out of scope for this document:**
 
 1. **Not a general-purpose IDE.** The Project/IDE half (10a) is scope-flagged, not
-   scope-committed (§7, Q4). trusty-code does not compete with VS Code.
+   scope-committed (§7, Q4). trusty-code does not compete with VS Code. If it ships, its
+   file reads are **daemon-served** like everything else (§2.1) — an IDE half is not a
+   licence for the UI to touch the disk.
 2. **Not a replacement for `trusty-mpm`.** No tmux, no multi-project daemon, no
    worktree orchestration. One tcode instance per project (vision spec §1).
 3. **Not multi-user / not collaborative.** Single-operator. Auth and tenancy are
@@ -107,6 +113,55 @@ is **always present** and renders either an *empty* state (no project, tabs lock
 muted status) or a *hydrated* one. **Cold start is the empty state of the same shell,
 not a different screen** (principle 4). Screen 7a is that empty state; it is a designed
 state, not an error screen (PDF §7).
+
+### 2.1 Foundational constraint — the UI communicates with the daemon {#SPEC-TCUI-09~draft}
+
+**ID:** SPEC-TCUI-09~draft
+**Status:** Draft
+**Owner directive (Bob).** Binding over every other section of this document.
+
+> **The UI communicates with the daemon. All UI services talk to the daemon; the daemon
+> provides all functionality.**
+
+This is **stronger than the layer-priority rule** it derives from. Axiom 3
+(API → CLI → TUI → Web) reads as a **process** — an ordering, a thing you do *first*.
+Stated as **architecture**, it is not about sequence at all: it is a statement about
+**where functionality is permitted to live**. Ordering is a consequence; the constraint
+is the point.
+
+**C-1 — The UI is a THIN CLIENT.** No business logic, no local capability, no direct
+filesystem, process, or git access **in any UI target**. The UI renders daemon state and
+issues daemon calls. That is its entire job.
+
+**C-2 — The daemon is the single source of functionality.** Anything the UI needs MUST
+exist as a daemon API — a JSON-RPC method, an event, or both. **If a screen needs
+something the daemon cannot answer, that is an API gap to specify — never a UI-side
+workaround.** This spec's §5 is that rule applied: every UI need is resolved to an API
+delta, and a need with no API is recorded as MISSING rather than absorbed by the client.
+
+**C-3 — Corollary: no capability divergence between targets.** A feature MUST NOT exist
+in one UI target and not another. This makes **"web vs Tauri" moot at the functional
+level**: both are shells over the same daemon API and MUST be behaviorally identical.
+Any difference between them is a packaging difference, never a capability one.
+
+**C-4 — Corollary: Tauri MUST NOT use native fs/dialog APIs, even though it can.**
+Reaching for `@tauri-apps/plugin-fs` or a native folder dialog is **not permitted as a
+functional path**. It is not a shortcut — it places functionality in the UI layer and
+manufactures exactly the divergence C-3 forbids: the web target would then be missing a
+capability that no daemon API provides, and the gap would be invisible until someone
+opened the app in a browser. A native dialog MAY be used **only as a cosmetic shell over
+the same daemon-provided data** — the picker's contents, git-ness, and paths still come
+from `project.list_dir` (§5.8). The moment it sources its own data it is a violation.
+
+**AC-19.1** No UI target reads the filesystem, spawns a process, or shells out to `git`
+directly. Every such fact arrives from a daemon call or event.
+**AC-19.2** A capability matrix of web vs Tauri is **empty by construction** — any row
+in it is a spec violation, not a platform note.
+**AC-19.3** Client-side derivation of a value the daemon owns is a violation, not an
+optimization (see §5.6 AC-17.1's "not recomputed", which is this rule applied early).
+
+> **This constraint resolves §7's Q2 (web vs Tauri) rather than answering it** — the fork
+> dissolves instead of being decided. See §7 Q2, now **RESOLVED**.
 
 ---
 
@@ -230,6 +285,45 @@ header switcher and status bar (7b).
 These MUST converge on **one** typed project binding owned by the workstream. A label
 that cannot be indexed and a path that cannot be omitted are two halves of one missing
 object. See §5.5.
+
+#### 4.2.1 Directory inspection — the 7a picker is a daemon capability
+
+**The 7a local-folder picker renders a directory tree. Under §2.1 that tree MUST come
+from the daemon** (`project.list_dir`, §5.8) — not from Tauri's native fs, not from a
+browser file-input, not from a native folder dialog (§2.1 C-4).
+
+> **The daemon is already local.** This was previously treated as a platform question —
+> *"a browser cannot walk `~/code/`, so does web lose project-open?"* (the old §7 Q2). The
+> question dissolves once the constraint is applied: **directory inspection is an API
+> concern, not a platform capability.** The daemon runs on the operator's machine and can
+> already read the disk. Serve it from the daemon and **both targets get it identically**
+> — which is C-3, and which is why 7a is no longer at risk of being a Tauri-only screen.
+
+**Requirement.** The picker MUST render, per entry: the entry **name**, whether it is a
+**directory**, and its **git-ness** — plus a **breadcrumb** of the current path
+(7a: `~/code / acme-api /`). A git entry renders the `git` badge; a non-git entry renders
+`—` (7a's `scratch` row).
+
+**The leverage — one endpoint serves two jobs.** Git-ness is not picker decoration: it
+**feeds §4.2's three-state binding model directly**. The same field that draws the badge
+decides the binding:
+
+| `list_dir` entry | Badge (7a) | Binding on select (§4.2) |
+|---|---|---|
+| `git: true` | `git` | **Bound · git repo** — full git affordances |
+| `git: false`, `is_dir: true` | `—` | **Bound · non-git** — indexed, git affordances hidden |
+| *(nothing selected)* | — | **Projectless** |
+
+So the picker and the binding decision are **one API call**, not two subsystems that
+must agree. This is also why the git-only rule the proposal states (and §4.2 corrects) is
+not merely wrong in principle — it is contradicted by the very screen that would have to
+implement it: 7a renders `scratch` as a **selectable** non-git entry.
+
+**AC-2.5** The picker's entries, git-ness, and breadcrumb are **daemon-served**
+(`project.list_dir`). No UI target enumerates the filesystem itself.
+**AC-2.6** Selecting a `git: false` directory binds **Bound · non-git** and MUST NOT
+error — non-git binding already ships (#2728/#2747, `run_task/mod.rs:100-107`).
+**AC-2.7** The picker behaves **identically** in web and Tauri (§2.1 C-3).
 
 ### 4.3 Index readiness is first-class {#SPEC-TCUI-04~draft}
 
@@ -397,6 +491,10 @@ the banner is the cheapest way to hold it.
 **AC-7.2** Every row shows lane badge, query, hit count, latency, **requesting agent**,
 and age (10d). This requires §5.2 + §5.3.
 **AC-7.3** ⌘K find is scoped to the bound project and is unavailable when projectless.
+**AC-7.4** ⌘K find is a **daemon query** (§2.1 C-1). It MUST NOT be backed by a
+client-side file list or a shadow index — "jump to a file/symbol/memory" is a question
+about the indexed project, which is daemon-owned state. The UI sends the term and renders
+the answer.
 
 ### 4.8 Attribution everywhere
 
@@ -476,6 +574,18 @@ record. The seam MUST NOT surface as a gap, an error, or a silent truncation.
 **AC-11.3** The SSE ring replay MUST be used for the **live tail only**, never presented
 as complete history.
 
+> **§2.1 names the tempting shortcut here.** trusty-memory is a *separate service* with
+> its own reachable surface, so "page history straight from trusty-memory" looks like a
+> free win. **It is a C-2 violation:** it makes the UI a client of two backends, teaches it
+> which store answers which turn range, and puts the ring-vs-durable retention seam —
+> genuine domain logic (AC-11.6) — inside the client. **The client talks to the tcode
+> daemon and nothing else**; tcode owns the dual-store read and hands back one coherent
+> history. The two backing stores are an implementation fact of the daemon, not a fact the
+> UI is allowed to know.
+
+**AC-11.8** History paging is served by a **tcode daemon** method. No UI target queries
+trusty-memory (or any other service) directly — one daemon, one client (§2.1 C-2).
+
 **Requirement — the compaction boundary is a visible, honest object.**
 
 When cadence compression fires (N=8, `agent_loop/cadence.rs::maybe_cadence_compress`),
@@ -539,6 +649,11 @@ name, from a **snapshot RPC** — not by folding events.
 every deterministic feature lands in the HTTP API BEFORE any UI surfaces it. This
 section is therefore the normative core of the spec; the pixels are downstream.**
 
+**And per §2.1, "before" understates it: the API is not merely first, it is the _only_
+place functionality may live.** Every MISSING row in §5.1 is therefore a hard blocker on
+its screen — never an invitation for the client to cover the gap itself. A UI need with no
+API is an unbuilt feature, not a UI problem.
+
 ### 5.0 Today's surface (verified at `origin/main`)
 
 **The API is 3 HTTP routes** (`serve/http.rs:96-98`):
@@ -567,8 +682,9 @@ JSON-RPC method or a new/extended `Event` variant.
 | 8 | Agent roster (10b, 11a) | `session.get_agents` snapshot + `model` field | **PARTIAL** | Event-folding is an acceptable stopgap |
 | 9 | Workstream list/resume (7a/7b switcher) | Workstream domain object + persistence + `workstream.list` | **MISSING** | Domain + storage (§4B) |
 | 10 | Workflow lanes (10e) | Branch/PR/dirty-tree subsystem | **MISSING** | New subsystem, nothing to build on |
-| 11 | Clone-from-URL (7a) | `project.clone_from_url` | **MISSING** | Not present anywhere |
-| 12 | Streaming cost (header `$0.31`) | Per-turn cost event | **PARTIAL** | Tokens stream; cost only aggregates at run-end |
+| 11 | Clone-from-URL (7a) | `project.clone_from_url` | **MISSING** | Not present anywhere. Daemon capability when it lands (§5.8) |
+| 12 | Streaming cost (header `$0.31`) | Per-turn cost event | **PARTIAL** | Tokens stream; cost only aggregates at run-end. **Must be a daemon event** — §2.1 forbids client-side pricing (§7 Q6) |
+| 13 | Local-folder picker + binding (7a, §4.2.1) | `project.list_dir{path}` → entries `{name,path,display_path,is_dir,git}` | **MISSING** | New RPC on the existing `/rpc` route (§5.8). **Phase 1** |
 
 ### 5.2 Tool attribution — one schema change unlocks the rest
 
@@ -653,6 +769,16 @@ session.get_agents() -> { agents: [{ agent_id, name, model, state, task, todos, 
 acceptable Phase-1 substitute** (§6.3) — the ring replay makes it correct-enough for a
 single-operator client, which is why this is not a Phase-1 blocker.
 
+> **§2.1 tension — acknowledged, time-boxed, and now on the clock.** Event-folding is the
+> one place this spec knowingly leaves derivation in the client: "who is running?" is
+> daemon-owned state that the UI reconstructs. It survives Phase 1 on a **bounded
+> rationale** — the fold is over a ring the daemon replays, is small, and has exactly one
+> consumer. But it is **the shape C-1 forbids**, and it degrades precisely when the ring
+> evicts (§4A) — the roster silently loses agents the daemon still knows about. Two targets
+> folding independently is also two chances to fold differently (C-3).
+> **`session.get_agents` (§5.4) is the principled endpoint; the fold is a Phase-1 loan,
+> not a design.** Recorded so the deferral in §6.3 is read as debt, not as approval.
+
 ### 5.5 Project binding (PARTIAL — the two surfaces must converge)
 
 ```rust
@@ -691,6 +817,85 @@ No branch, PR, dirty-tree, or unpushed concept exists. `Phase*` events are inter
 harness phases; `verify_gate.rs` gates `finish_task` on a test command only. 10e needs a
 git+forge integration subsystem built from zero. **Deferred (§6.3).**
 
+### 5.8 Directory inspection — `project.list_dir` (NEW, Phase 1)
+
+Serves the 7a picker (§4.2.1) and, with the same response, the §4.2 binding decision.
+Namespaced `project.*` to match the `session.*` / `task.*` convention already registered
+in `session/protocol.rs:45-81`; it is a new method on the existing `POST /rpc` route —
+**no new HTTP route** (§5.0's 3-route surface is unchanged).
+
+```rust
+// Request
+project.list_dir({
+    path: Option<String>,   // absolute path; None => daemon's default root(s)
+})
+
+// Response
+{
+    path: String,            // canonical absolute path listed, e.g. "/Users/bob/code"
+    display_path: String,    // home-abbreviated, e.g. "~/code"  — powers the breadcrumb
+    parent: Option<String>,  // absolute parent path; None at a root (disables "up")
+    entries: [
+        {
+            name: String,          // "acme-api"
+            path: String,          // "/Users/bob/code/acme-api"
+            display_path: String,  // "~/code/acme-api"
+            is_dir: bool,          // true => expandable (7a's ▸ arrow)
+            git: bool,             // true => `git` badge; false => `—`
+        }
+    ]
+}
+```
+
+**Field notes (normative):**
+
+- **`git`** is "is this entry itself a git working tree" (a `.git` entry directly
+  inside it) — **not** "is it inside one". 7a's `acme-api`/`marketing-site`/`data-pipeline`
+  are `true`; `scratch` is `false`. This is the field §4.2.1's binding table keys on.
+- **`display_path` is daemon-owned, not a client string-trim.** The UI **cannot** know
+  `$HOME` — it has no environment (§2.1 C-1). Abbreviating `/Users/bob/code` → `~/code`
+  is daemon knowledge, so the daemon serves it. Sorting/filtering entries is pure
+  presentation and stays in the client; deriving `~` is not.
+- **`path: None`** returns the daemon's default root(s) rather than erroring, so the
+  picker has a defined cold-start entry point without the client inventing one.
+- **`entries: []` simply means the directory is empty.** There is no result-state enum:
+  unreadable or nonexistent paths are **ordinary JSON-RPC errors**, exactly as a local app
+  surfaces a failed `ls`. See the guard note below for why nothing more elaborate is
+  specified here.
+
+**AC-20.1** `project.list_dir` returns entry name, path, `is_dir`, and `git` for every
+entry — the minimum 7a renders.
+**AC-20.2** `git` distinguishes a git working tree from a plain directory, and that same
+value drives §4.2's binding state. One call, both jobs.
+**AC-20.3** The breadcrumb renders from `display_path` / `parent`, not from client-side
+`$HOME` inference.
+
+> **No path-guard layer — deliberate, do not "fix" this** (owner directive, Bob).
+> **tcode is a local app; the daemon runs as the operator with the operator's own
+> entitlements.** A directory listing exposes nothing the operator cannot already `ls`.
+> Decisively: **the daemon already exposes `task.run`, which executes arbitrary code as
+> the operator.** `project.list_dir` is **strictly less powerful than what the API already
+> permits** — bolting a denylist onto browse while `task.run` sits beside it is ceremony,
+> not security: it does not move the threat boundary.
+>
+> **The #2747 / trusty-search `allow_sensitive_path` precedent does NOT transfer here.**
+> That denylist guards **indexing** — file *contents* leaving the machine for an embedder
+> — which is a categorically different act from *listing paths*. Do not cite it as
+> precedent for this method.
+>
+> **macOS TCC:** the app inherits whatever entitlements it is granted, as any local app
+> does. **No bespoke permission-state machine and no designed "permission needed" state**
+> — those are not in this spec's empty/degraded-state inventory. (Index readiness, §4.3,
+> **stays** in that inventory: it is a real degraded state and is Phase 1.)
+
+**Clone-from-URL stays deferred (§6.3) — but it is a DAEMON capability when it lands.**
+7a's second card ("GitHub URL → Clone & attach") is out of Phase 1 for the reason already
+recorded: it exists nowhere, is purely additive, and local-folder binding already covers
+the mandated projectless→bound path. That deferral is unchanged by §2.1. What §2.1 *does*
+settle is **where it lands when it lands**: cloning a repo is filesystem-and-process work,
+so it is `project.clone_from_url` on the daemon (§5.1 #11) — **never** a UI-side git
+operation, and never Tauri-native. Deferring it therefore costs nothing architecturally.
+
 ---
 
 ## 6. Phased delivery
@@ -702,11 +907,13 @@ that ships pixels ahead of its events is not a phase; it is a mock.
 
 ### 6.2 **Phase 1 cut line** — the smallest surface that unlocks the differentiated core
 
-**Phase 1 is five event/RPC changes and almost no UI.** It is chosen to unlock exactly
+**Phase 1 is six event/RPC changes and almost no UI.** It is chosen to unlock exactly
 what makes this harness different from a linear stream — **provenance, the search audit
-trail, memory injected-vs-held, readiness, and the context budget** — and nothing else.
-Every item is already computed in the runtime and discarded at a boundary; Phase 1 is
-mostly **un-discarding values we already have**.
+trail, memory injected-vs-held, readiness, and the context budget** — plus the one call
+that makes the entry screen reachable at all. Items 1–5 are already computed in the
+runtime and discarded at a boundary; that part of Phase 1 is mostly **un-discarding
+values we already have**. Item 6 is the exception and is new code — small, and load-bearing
+for 7a (§6.2.1).
 
 | # | Item | Why in Phase 1 | Size |
 |---|---|---|---|
@@ -715,11 +922,12 @@ mostly **un-discarding values we already have**.
 | **3** | `Event::MemoryRecalled { query, results:[{score, injected}], agent_id }` (§5.3) | Injected-vs-held is the most literal form of the core bet; scores already exist internally. | S |
 | **4** | Surface `IndexReadiness` as event + RPC (§5.6) | Pure wiring — already computed, stderr-only. Without it, search results are untrustworthy by construction. | S |
 | **5** | Stop discarding `CadenceOutcome` → emit working-context ratio (§5.6) | One return value. Makes "it never ends" falsifiable. | S |
+| **6** | `project.list_dir` — daemon-served directory inspection (§5.8) | **7a's picker has no other legal source** (§2.1 C-4 bars Tauri-native fs). Ships with projectless (§6.2.1): that pair is what makes the entry screen reachable. Its `git` field also drives §4.2's binding, so it is not picker-only. | S |
 
 **Phase 1 UI:** the status bar (readiness + budget), the 8b inline monitor card, the
-10d Search tab, and the **goal-slot panel** (§6.2.1). These are the surfaces that
-require **no** new domain object — they render Phase 1's events against today's
-non-durable registry.
+10d Search tab, the **goal-slot panel** (§6.2.1), and the **7a local-folder picker**
+(§4.2.1). These are the surfaces that require **no** new domain object — they render
+Phase 1's events against today's non-durable registry.
 
 #### 6.2.1 Projectless — **Bob mandated it; here is where it lands and why**
 
@@ -733,6 +941,11 @@ non-durable registry.
   unreachable**, because `task.run` cannot be called without a project. Screen 7a is
   literally unimplementable. Every other Phase-1 surface renders inside a shell whose
   entry state does not exist.
+- **7a is blocked twice, and `project.list_dir` (§5.8) clears the second block.**
+  Projectless makes the screen *reachable*; the picker makes it *actionable* — a 7a you
+  can enter but whose folder list has no legal data source is still not a screen. Under
+  §2.1 C-4 the Tauri-native shortcut that would have unblocked it is barred, so the two
+  ship together or 7a ships in neither target.
 - It **de-risks the binding model early**: the three states (§4.2) are the correction
   this spec makes to the proposal, and the cost of discovering that reconciliation is
   wrong is far lower now than after the workstream object is built on top of it.
@@ -749,8 +962,8 @@ the Workflow tab, the IDE half, or clone-from-URL.
 | **Workstream persistence** (§4B) | Real **domain + storage** work — deciding what a workstream *is*, not adding an endpoint. The largest item in the spec. Phase 1 ships value on the existing registry without it. |
 | **Per-line diff attribution UI** (10a gutter) | **Depends on §5.2** (`agent_id`). Ship the schema first; the gutter is a downstream consumer. |
 | **Workflow / delivery pipeline** (10e) | **New subsystem, nothing to build on** — no branch/PR/dirty-tree concept exists anywhere (§5.7). Also git-only, so it needs §4.2 settled first. |
-| **Agent roster snapshot** (10b) | **Event-folding is an acceptable substitute** — the SSE ring replay renders a correct roster for a single-operator client. Real cost, low marginal value now. |
-| **Clone-from-URL** (7a) | Does not exist anywhere; pure additive scope with no dependents. Local-folder binding covers the mandated projectless→bound path. |
+| **Agent roster snapshot** (10b) | **Event-folding is an acceptable substitute** — the SSE ring replay renders a correct roster for a single-operator client. Real cost, low marginal value now. **Carries a §2.1 tension: the fold is a loan, not a design** (§5.4). |
+| **Clone-from-URL** (7a) | Does not exist anywhere; pure additive scope with no dependents. Local-folder binding (`project.list_dir`, §5.8) covers the mandated projectless→bound path. **When it lands it is `project.clone_from_url` on the daemon — never a UI-side git op** (§5.8). |
 | **Monitor columns** (9b) | Demoted to transient trace mode (§4.6.1); the 8b inline card delivers the same trace at full width. |
 
 ### 6.4 Phase 2+
@@ -770,13 +983,38 @@ holds the **rationale for the 8a/8b and 9a/9b options** this spec had to reconst
 from pixels (§4.6). If it exists, it should be committed alongside the PDF and this
 spec's §4.6/§4.6.1 conclusions re-checked against it. **Owner: design.**
 
-**Q2 — Platform split: web vs Tauri — what actually differs?** "SPA (web/Tauri)" is
-settled as the platform, but the two are not the same product. Undecided: local
-filesystem access for the IDE half (10a) and the 7a local-folder browser — a browser
-cannot walk `~/code/`; does web lose project-open entirely, or proxy it through the
-daemon? Also: OS keychain vs browser storage for tokens, and whether the daemon is
-assumed local (`localhost`) or remote. **This gates §4.2's local-folder picker.**
-**Owner: Bob.**
+**Q2 — Platform split: web vs Tauri — what actually differs? — RESOLVED.**
+*Resolution (Bob): "Tauri can walk a local directory? But we should be able to provide an
+API to inspect directories."*
+
+**The fork dissolves; it was not decided.** The question assumed directory access was a
+**platform capability**, so the two targets had to differ. It is an **API concern**: the
+daemon is **already local** and already reads the disk. Serve directory inspection from
+the daemon (`project.list_dir`, §5.8) and **both targets get it identically**.
+
+What follows:
+
+- **Nothing differs functionally.** Per §2.1 C-3, a capability in one target and not the
+  other is a spec violation. Web and Tauri are shells over one daemon API and MUST be
+  behaviorally identical; the difference is packaging, not capability.
+- **No Phase-1 surface is invalidated.** The prior draft flagged that 7a's picker might
+  not survive the web target. It survives in both — the picker is `project.list_dir`, and
+  the same `git` field also drives §4.2's binding (§4.2.1).
+- **Tauri-native fs/dialog is barred, not merely unnecessary** (§2.1 C-4). An earlier
+  framing called a native picker "optional polish"; that was **wrong** under §2.1 — it
+  would relocate functionality into the UI layer and create the very divergence C-3
+  forbids. A native dialog is permitted only as a **cosmetic shell over daemon-provided
+  data**.
+- **The IDE half (10a)** is unaffected by platform and remains scoped by **Q4** — if it
+  ships, its file reads are daemon-served like everything else. Q2 never gated it; Q4 does.
+- **The daemon is assumed local.** tcode is a local app (§5.8): one instance per project
+  (§1.3 non-goal 2), running as the operator with the operator's own entitlements. Remote
+  daemons are out of scope for this spec.
+- **Still open, and belongs to Q3, not here:** token storage (OS keychain vs browser
+  storage) is an *auth* question. It is the one place a real web-vs-desktop difference may
+  surface — and it surfaces as an **identity-model** question (Q3), not a capability split.
+
+**Owner: Bob. → RESOLVED 2026-07-16.**
 
 **Q3 — Auth / multi-user.** Wholly unaddressed by the proposal. 7a's header renders
 "**OAuth login**" and 7a's GitHub-URL card says private repos "use your **connected
@@ -800,11 +1038,20 @@ version/CAS (`session/protocol_goals.rs`). A model write can silently clobber an
 operator edit mid-turn. Acceptable, or does the operator source win until cleared?
 **Owner: engineering.**
 
-**Q6 — Streaming cost.** The header renders live cost (`$0.02 → $1.42` across screens),
-but dollar cost only aggregates at run-end (`aggregate_usage_per_role` →
-`registry.set_run_outcome`). Tokens stream live (`LlmRequested{prompt_tokens}`,
-`LlmResponded{completion_tokens, latency_ms}`). Compute cost client-side from streaming
-tokens, or add a streaming cost event? **Owner: engineering.**
+**Q6 — Streaming cost — NARROWED by §2.1.** The header renders live cost
+(`$0.02 → $1.42` across screens), but dollar cost only aggregates at run-end
+(`aggregate_usage_per_role` → `registry.set_run_outcome`). Tokens stream live
+(`LlmRequested{prompt_tokens}`, `LlmResponded{completion_tokens, latency_ms}`).
+
+> **§2.1 eliminates one of the two options.** This was posed as "compute cost client-side
+> from streaming tokens, **or** add a streaming cost event?" **The first option is now a
+> violation** — token→dollar conversion needs a per-model pricing table, which is business
+> logic and daemon-owned state; putting it in the client is exactly C-1, and would drift
+> per target the moment one shell updated its table (C-3). **A streaming cost event is
+> therefore the only conforming answer.**
+
+The remaining question is scope, not architecture: emit cost per `LlmResponded`, or a
+periodic `Event::CostUpdated` aggregate? **Owner: engineering.**
 
 **Q7 — Non-PM context budget.** Cadence is PM-only by construction
 (`AgentLoopConfig.cadence` defaults `None`; only `task/executor.rs:327` sets `Some`).
@@ -852,9 +1099,28 @@ This is carried forward verbatim because it is the one piece of the visual syste
 | **F1** | Add the DOC-39 catalog row to `docs/specs/README.md` and refresh its stale "next free `DOC-N`" note to **DOC-40**. | this spec |
 | **F2** | Commit the missing interactive wireframe doc (§7 Q1); re-check §4.6/§4.6.1 against it. | design |
 | **F3** | File the Phase-1 issues (§6.2) under the UI epic, sequenced with §5.2 first. | this spec |
-| **F4** | Resolve Q2/Q3/Q4 (platform, auth, IDE scope) before Phase 2 planning. | Bob |
+| **F4** | Resolve ~~Q2~~/Q3/Q4 (~~platform~~, auth, IDE scope) before Phase 2 planning. **Q2 is RESOLVED** (§7); Q3/Q4 remain. | Bob |
+| **F6** | File the `project.list_dir` Phase-1 issue (§5.8), paired with projectless (§6.2.1) — 7a needs both to be a screen. | this spec |
+| **F7** | Q6's client-side-cost option is now a §2.1 violation; scope the streaming cost **event** instead. | engineering |
 | **F5** | Note for DOC-38 §10 F3 (DOC-28 renumber): DOC-39 is now **claimed by this spec**; that follow-up must re-scan and take **DOC-40**. | DOC-38 |
 
 ## Changelog
 
 - **2026-07-16** — Initial draft (DOC-39, `SPEC-TCUI-01~draft` … `SPEC-TCUI-08~draft`).
+- **2026-07-16** — **Daemon-is-everything amendment** (owner directive, Bob). Adds §2.1
+  `SPEC-TCUI-09~draft` — *"The UI communicates with the daemon; the daemon provides all
+  functionality"* — as a foundational **architectural** constraint (C-1 thin client, C-2
+  daemon-as-sole-source, C-3 no capability divergence, C-4 no Tauri-native fs/dialog), and
+  propagates it: **Q2 RESOLVED** (the web/Tauri fork dissolves — directory inspection is an
+  API concern, not a platform capability); new **§4.2.1** (the 7a picker is daemon-served,
+  and its `git` field drives §4.2's binding — one call, two jobs); new **§5.8**
+  `project.list_dir` **added to the Phase-1 cut line** (now six items), paired with
+  projectless because 7a is blocked twice; **Q6 narrowed** (client-side cost computation is
+  now a violation → streaming cost event is the only conforming answer); **AC-11.8** (no
+  direct trusty-memory access from the client); **AC-7.4** (⌘K find is a daemon query);
+  **§5.4** roster event-folding recorded as a time-boxed §2.1 loan rather than a design.
+  Records why `project.list_dir` carries **no path-guard layer**: tcode is a local app and
+  the daemon already exposes `task.run` (arbitrary code as the operator), so a listing is
+  strictly less powerful — and #2747's `allow_sensitive_path` guards *indexing*, not path
+  listing, so it is not precedent here. No TCC permission-state machine; index readiness
+  (§4.3) remains the empty/degraded-state inventory's real member.
