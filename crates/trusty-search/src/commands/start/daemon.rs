@@ -427,9 +427,16 @@ pub async fn handle_start(
         });
     }
 
-    // The auto-spawned trusty-embedderd subprocess uses `kill_on_drop(true)`,
-    // so it is terminated automatically when the supervisor task drops on
-    // daemon exit. No explicit shutdown hook is needed.
+    // The auto-spawned trusty-embedderd subprocess needs no explicit shutdown
+    // hook: on the ordinary `run_daemon` `Err`/`bail!` paths below the
+    // supervisor task's `kill_on_drop(true)` Child reaps it when dropped.
+    // Issue #1746: the graceful-exit path below this match instead calls
+    // `std::process::exit(0)`, which bypasses `Drop` (and `kill_on_drop`)
+    // entirely — on that path the sidecar is reaped by the stdin-EOF path in
+    // `trusty-embedderd`'s own stdio loop (`stdio_server::run_stdio_server`,
+    // `crates/trusty-embedderd/src/stdio_server.rs:57-60`): when this process
+    // dies, the OS closes its end of the sidecar's stdin pipe, `read_line`
+    // returns `Ok(0)`, and the sidecar exits cleanly on its own.
     match crate::service::run_daemon(state, port).await {
         Ok(()) => {}
         Err(crate::service::DaemonError::AlreadyRunning(p)) => {
@@ -444,5 +451,14 @@ pub async fn handle_start(
         }
         Err(e) => anyhow::bail!("daemon failed: {e}"),
     }
-    Ok(())
+    // Issue #1746: by the time `run_daemon` returns `Ok`, the graceful drain,
+    // best-effort per-index flush, and PID-lockfile release have all completed.
+    // Exit the process immediately instead of returning up through `main` and
+    // dropping the tokio runtime: a worker left stuck in a blocking HNSW
+    // `Index::save` FFI call, or a CUDA/embedder teardown that deadlocks at
+    // exit, would otherwise wedge runtime teardown until systemd's
+    // `TimeoutStopSec` (300 s) fired a SIGKILL. See the comment above this
+    // match for how the embedder sidecar is still reaped on this path despite
+    // `exit(0)` bypassing `Drop`.
+    std::process::exit(0)
 }

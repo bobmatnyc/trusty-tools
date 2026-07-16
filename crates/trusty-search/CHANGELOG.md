@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- graceful stop no longer intermittently hangs for `TimeoutStopSec` (300 s) before a SIGKILL: `UsearchStore::save` now runs the blocking usearch `Index::save` FFI call via `tokio::task::spawn_blocking` instead of inline on an async worker, so a stalled save occupies a blocking-pool thread instead of starving the runtime's workers; the shutdown flush loop additionally runs each index's snapshot on its own detached task and enforces the per-index deadline on the `JoinHandle` as defense-in-depth. The daemon also hard-exits via `std::process::exit(0)` once `run_daemon` returns, so a worker stuck in blocking FFI or a CUDA/embedder teardown deadlock cannot block tokio's runtime teardown at process exit (the embedder sidecar is still reaped via its stdin-EOF exit path, not `kill_on_drop`, on this path). No data-loss behaviour changes — the #1711 empty-snapshot guard is untouched ([#1746](https://github.com/bobmatnyc/trusty-tools/issues/1746))
 - bump `lru` 0.12 → 0.16, fixing RUSTSEC-2026-0002 (`IterMut` violates Stacked Borrows, GHSA-rhfx-m35p-ff5j); no call-site changes needed ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
 
 ## [0.32.4] — 2026-07-13

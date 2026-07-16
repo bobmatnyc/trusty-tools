@@ -306,29 +306,55 @@ impl UsearchStore {
         let tmp_hnsw = hnsw_path.with_extension("usearch.tmp");
         let tmp_hnsw_str = tmp_hnsw
             .to_str()
-            .ok_or_else(|| anyhow!("non-utf8 path: {}", tmp_hnsw.display()))?;
+            .ok_or_else(|| anyhow!("non-utf8 path: {}", tmp_hnsw.display()))?
+            .to_string();
         {
-            let index = self.index.write().await;
-            // Guard: check size under the write lock so there is no window
-            // between the check and the save call.
-            if index.size() == 0 {
-                if let Ok(meta) = std::fs::metadata(hnsw_path) {
-                    if meta.len() > POPULATED_SNAPSHOT_THRESHOLD_BYTES {
-                        tracing::error!(
-                            "usearch: REFUSING to overwrite populated snapshot {} \
-                             ({} bytes on disk) with an empty in-memory index \
-                             (issue #1711 — data-loss guard). \
-                             On-disk snapshot is preserved.",
-                            hnsw_path.display(),
-                            meta.len()
-                        );
-                        return Ok(());
+            // Issue #1746: usearch's `Index::save` is a blocking C++ FFI call
+            // that never yields to the async runtime. Running it inline on a
+            // tokio worker thread meant a stalled save (large HNSW graph,
+            // slow/stalled disk) pinned that worker for the call's entire
+            // duration; if enough concurrent saves stalled simultaneously
+            // (>= the runtime's worker count) no worker was left free to
+            // drive any `tokio::time::timeout` waiting on the flush, so the
+            // deadline in `service::shutdown_flush` could never fire. Move
+            // the write-lock acquisition, the #1711 size guard, and the save
+            // call itself onto the blocking thread pool via `spawn_blocking`
+            // — the same idiom already used for the chunk-JSON build in
+            // `indexer::persist_hnsw`'s incremental-persist path — so a
+            // stalled save only ever occupies a blocking-pool thread and
+            // never starves the async runtime's workers. `write_owned` (not
+            // `write`) is required so the guard can move into the `'static`
+            // closure `spawn_blocking` demands.
+            let index_guard = self.index.clone().write_owned().await;
+            let hnsw_path_owned = hnsw_path.to_path_buf();
+            let saved = tokio::task::spawn_blocking(move || -> Result<bool> {
+                // Guard: check size under the write lock so there is no
+                // window between the check and the save call.
+                if index_guard.size() == 0 {
+                    if let Ok(meta) = std::fs::metadata(&hnsw_path_owned) {
+                        if meta.len() > POPULATED_SNAPSHOT_THRESHOLD_BYTES {
+                            tracing::error!(
+                                "usearch: REFUSING to overwrite populated snapshot {} \
+                                 ({} bytes on disk) with an empty in-memory index \
+                                 (issue #1711 — data-loss guard). \
+                                 On-disk snapshot is preserved.",
+                                hnsw_path_owned.display(),
+                                meta.len()
+                            );
+                            return Ok(false);
+                        }
                     }
                 }
+                index_guard
+                    .save(&tmp_hnsw_str)
+                    .map_err(|e| anyhow!("usearch save failed: {e}"))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|e| anyhow!("usearch save task panicked: {e}"))??;
+            if !saved {
+                return Ok(());
             }
-            index
-                .save(tmp_hnsw_str)
-                .map_err(|e| anyhow!("usearch save failed: {e}"))?;
         }
         std::fs::rename(&tmp_hnsw, hnsw_path).map_err(|e| anyhow!("rename hnsw snapshot: {e}"))?;
 
