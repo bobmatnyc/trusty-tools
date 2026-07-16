@@ -116,6 +116,13 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// replaceable, preserving the framework-floor guarantee `BASE_PM.md` itself
 /// states. Sections are joined with [`SECTION_SEPARATOR`].
 ///
+/// Per-project stack profile: in **both** branches an auto-derived
+/// [`crate::core::stack_profile::stack_profile_section`] block is folded in right
+/// after the PM body. It states the project's detected stack (or a neutral
+/// detect-first profile when nothing is detected) so the PM is primed from the
+/// project's real stack, never a hardcoded default (#1971). It is framework
+/// context, not a user override, so it is not replaceable.
+///
 /// Robustness: a missing `.trusty-mpm/` directory, missing files, empty files,
 /// and unreadable files all fall back to the bundled defaults without failing.
 ///
@@ -128,16 +135,24 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// Test: `no_overrides_uses_bundled`, `instructions_appended`,
 /// `workflow_override_replaces`, `agent_delegation_override_replaces`,
 /// `pm_deployed_replaces_body_but_keeps_base_floor`,
-/// `memory_override_is_slotted_after_pm_instructions`, and the robustness tests.
+/// `memory_override_is_slotted_after_pm_instructions`,
+/// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
+/// and the robustness tests.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     let dir = project_dir.join(OVERRIDE_DIR_NAME);
 
     // Floor is always appended last and never replaceable.
     let floor = BASE_PM;
 
+    // Per-project stack profile derived from detected marker files (#1971). This
+    // is auto-derived framework context, not a user override, so it is folded in
+    // regardless of which assembly branch runs — every project's PM priming is
+    // configured from that project's detected stack, never a hardcoded default.
+    let stack = crate::core::stack_profile::stack_profile_section(project_dir);
+
     // Branch 1: full replacement short-circuit. BASE_PM still floors it.
     if let Some(body) = read_override(&dir, FILE_PM_DEPLOYED) {
-        let mut sections: Vec<String> = vec![body];
+        let mut sections: Vec<String> = vec![body, stack];
         if let Some(extra) = read_override(&dir, FILE_INSTRUCTIONS) {
             sections.push(extra);
         }
@@ -151,7 +166,7 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     let delegation = read_override(&dir, FILE_AGENT_DELEGATION)
         .unwrap_or_else(|| AGENT_DELEGATION.trim().to_string());
 
-    let mut sections: Vec<String> = vec![PM_INSTRUCTIONS.trim().to_string()];
+    let mut sections: Vec<String> = vec![PM_INSTRUCTIONS.trim().to_string(), stack];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.
     if let Some(memory) = read_override(&dir, FILE_MEMORY) {
@@ -404,5 +419,36 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let prompt = resolve_pm_prompt(tmp.path());
         assert!(prompt.contains(SECTION_SEPARATOR));
+    }
+
+    #[test]
+    fn stack_profile_present_when_detected() {
+        // A detected project (Cargo.toml) folds in the auto-derived stack profile
+        // right after PM_INSTRUCTIONS and before the BASE_PM floor, routing to the
+        // detected engineer — never a hardcoded default (#1971).
+        use crate::core::stack_profile::STACK_PROFILE_HEADING;
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+
+        let prompt = resolve_pm_prompt(tmp.path());
+        assert!(prompt.contains(STACK_PROFILE_HEADING));
+        assert!(prompt.contains("`rust-engineer`"));
+
+        let pm = prompt.find("# PM Agent -- Trusty MPM").expect("pm");
+        let stack = prompt.find(STACK_PROFILE_HEADING).expect("stack");
+        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+        assert!(pm < stack, "stack profile follows PM_INSTRUCTIONS");
+        assert!(stack < base, "stack profile precedes the BASE_PM floor");
+    }
+
+    #[test]
+    fn stack_profile_neutral_when_undetected() {
+        // An unknown project type yields a neutral, detect-first profile — the PM
+        // is told NOT to assume any stack rather than inheriting a default.
+        use crate::core::stack_profile::STACK_PROFILE_HEADING;
+        let tmp = TempDir::new().unwrap();
+        let prompt = resolve_pm_prompt(tmp.path());
+        assert!(prompt.contains(STACK_PROFILE_HEADING));
+        assert!(prompt.contains("Do NOT assume any stack"));
     }
 }

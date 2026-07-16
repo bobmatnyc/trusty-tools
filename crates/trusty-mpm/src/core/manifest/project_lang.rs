@@ -135,7 +135,7 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
 /// marker file exists directly under `project_dir`. Sorted/de-duplicated via the
 /// `BTreeSet`.
 /// Test: `rust_workspace_scopes_to_rust_engineer`, `polyglot_project_keeps_both`.
-fn detected_engineers(project_dir: &Path) -> BTreeSet<&'static str> {
+pub(crate) fn detected_engineers(project_dir: &Path) -> BTreeSet<&'static str> {
     LANGUAGE_ENGINEERS
         .iter()
         .filter(|le| le.markers.iter().any(|m| project_dir.join(m).exists()))
