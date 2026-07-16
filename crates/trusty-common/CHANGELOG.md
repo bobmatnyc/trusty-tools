@@ -20,7 +20,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - harden mid-task incremental index-file updates against transient send failures under sustained load: reuse one pooled HTTP client per write batch (connection keep-alive) and retry transport-level `send()` failures with bounded exponential backoff ([#2785](https://github.com/bobmatnyc/trusty-tools/issues/2785))
 - bump `lru` 0.12 → 0.16, fixing RUSTSEC-2026-0002 (`IterMut` violates Stacked Borrows, GHSA-rhfx-m35p-ff5j); no call-site changes needed ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
 - framework workflow conventions — per-session session log, issue/PR assignee+label defaults, trusty-mpm attribution footer ([#2737](https://github.com/bobmatnyc/trusty-tools/pull/2737)) ([`3089600`](https://github.com/bobmatnyc/trusty-tools/commit/3089600b475cc464329132e5f7523536bb730797))
-## [Unreleased]
 
 ### Added
 
@@ -31,7 +30,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
-## [Unreleased]
 
 ### Added
 
@@ -43,7 +41,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - credential hardening + registry default-model errors (closes #2474, #2475, #2510) ([#2539](https://github.com/bobmatnyc/trusty-tools/pull/2539)) ([`58f36ca`](https://github.com/bobmatnyc/trusty-tools/commit/58f36cadef0fa1d38e0f15ed1984a956b21131c5))
-## [Unreleased]
 
 ### Added
 
@@ -63,17 +60,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - mount config command on all 10 primary binaries ([#2528](https://github.com/bobmatnyc/trusty-tools/pull/2528)) ([`a58ea52`](https://github.com/bobmatnyc/trusty-tools/commit/a58ea5223167553f0d90fb5258d582d510dca316))
-## [Unreleased]
 
 ### Fixed
 
 - idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
-## [Unreleased]
 
 ### Added
 
 - capture tmux window id at session pause and reattach on resume ([#2269](https://github.com/bobmatnyc/trusty-tools/pull/2269)) ([`1959738`](https://github.com/bobmatnyc/trusty-tools/commit/1959738450d9a1b7adaf707d9d5980d6365fe4a7))
-## [Unreleased]
 
 ### Added
 
@@ -90,12 +84,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - re-cut common 0.22.1 / embedderd 0.3.6 / search 0.32.2 to escape #2209 crates.io version collision ([#2236](https://github.com/bobmatnyc/trusty-tools/pull/2236)) ([`805a458`](https://github.com/bobmatnyc/trusty-tools/commit/805a458a67a69983b84ec4012436dc00b0e22e35))
-## [Unreleased]
 
 ### Added
 
 - manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
 
+
+### Added
+
+- extract managed-session naming to trusty-common; trusty-agents adopts it (DOC-33 Phase 1, SPEC-ONESM-01) ([#1989](https://github.com/bobmatnyc/trusty-tools/pull/1989)) ([`025941d`](https://github.com/bobmatnyc/trusty-tools/commit/025941dfe68b7806f1f7f6b82bc06923d1cd5b9e))
 ## [0.22.1] — 2026-07-08
 
 ### Changed
@@ -107,11 +104,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - auto-fall back to CPU when CoreML embedder init hangs; stop leaking blocked ORT threads ([#2127](https://github.com/bobmatnyc/trusty-tools/pull/2127)) ([`f7dc2dd`](https://github.com/bobmatnyc/trusty-tools/commit/f7dc2dd20524ee9d1a9c6146245aaacc5d1e7b2b))
 - reach trusty-memory over discovered JSON-RPC, never a hardcoded port ([#2040](https://github.com/bobmatnyc/trusty-tools/pull/2040)) ([`e0f41c5`](https://github.com/bobmatnyc/trusty-tools/commit/e0f41c51f1baa7ddf0e427cb5c7e86cbe9bba5fa))
 - verify_installed_binary checks ~/.local/bin and $CARGO_HOME ([#2042](https://github.com/bobmatnyc/trusty-tools/pull/2042)) ([`e0d2c7b`](https://github.com/bobmatnyc/trusty-tools/commit/e0d2c7bc8dc2c06cd6a004b777454dd129dc7b5b))
-## [Unreleased]
-
-### Added
-
-- extract managed-session naming to trusty-common; trusty-agents adopts it (DOC-33 Phase 1, SPEC-ONESM-01) ([#1989](https://github.com/bobmatnyc/trusty-tools/pull/1989)) ([`025941d`](https://github.com/bobmatnyc/trusty-tools/commit/025941dfe68b7806f1f7f6b82bc06923d1cd5b9e))
 ## [0.19.0] — 2026-07-03
 
 ### Added

@@ -9,23 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- require a per-PR CHANGELOG.md entry in the default workflow (bundled `tm-pr-workflow` skill, `PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `BASE-AGENT.md`); PM treats a missing entry as a review-gate failure and the precedence rule vs. `scripts/generate-changelog.sh`/git-cliff is documented in `.trusty-mpm/INSTRUCTIONS.md` ([#2790](https://github.com/bobmatnyc/trusty-tools/pull/2790))
-- opt-in auto-nudge for idle-parked managed sessions: daemon injects a foreground-block instruction when a parked agent has no live children, with per-session cap and cooldown (#2621) ([#2781](https://github.com/bobmatnyc/trusty-tools/pull/2781))
-
-### Fixed
-
-- bare `tm` inside a zombie-`Active` managed session (agent exited but the record still reads `Active`) now reconciles-and-relaunches in place via the caller's pane-identity proof-of-death instead of dead-ending on a 409; the fallback hint no longer suggests a bare `claude` (which loses the managed config) and points at `tm sessions resume <id>` (closes #2794)
-- bare `tm` inside a decommissioned managed tmux session now relaunches in place instead of reconnecting to itself (closes #2777) ([#2780](https://github.com/bobmatnyc/trusty-tools/pull/2780))
-- bump `jsonwebtoken` 9 → 10 (`aws_lc_rs` backend), fixing GHSA-h395-gr6q-cpjc; migrated the test-only JWT decode-without-verification call site to `jsonwebtoken::dangerous::insecure_decode` (closes #2765) ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
-- resolve managed MCP registry from real home in fleet-session injector ([#2761](https://github.com/bobmatnyc/trusty-tools/pull/2761)) ([`7c04f1f`](https://github.com/bobmatnyc/trusty-tools/commit/7c04f1f845432edd6b1fb488103a1aba9939fb3c))
-- never traverse $HOME/TCC-protected folders (closes #2759) ([#2760](https://github.com/bobmatnyc/trusty-tools/pull/2760)) ([`74fe7f3`](https://github.com/bobmatnyc/trusty-tools/commit/74fe7f3c682cb5b0c648b63585c44ee47aa6d652))
-- positive stdio field allowlist for fleet native-MCP injection ([#2739](https://github.com/bobmatnyc/trusty-tools/pull/2739)) ([#2755](https://github.com/bobmatnyc/trusty-tools/pull/2755)) ([`e3a5c68`](https://github.com/bobmatnyc/trusty-tools/commit/e3a5c684cc25028202f6ece1a262f515fa3b43da))
-## [Unreleased]
-
-### Added
-
 - propagate native trusty MCP servers to fleet sessions ([#2739](https://github.com/bobmatnyc/trusty-tools/pull/2739)) ([#2748](https://github.com/bobmatnyc/trusty-tools/pull/2748)) ([`0a87f1d`](https://github.com/bobmatnyc/trusty-tools/commit/0a87f1d70e97fd630bd997db8f17a98d64ca00d4))
-## [Unreleased]
 
 ### Added
 
@@ -36,7 +20,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - reconcile zombie-active sessions on in-place relaunch (closes #2743) ([#2744](https://github.com/bobmatnyc/trusty-tools/pull/2744)) ([`f1552c7`](https://github.com/bobmatnyc/trusty-tools/commit/f1552c72e4f20afda74466f97865845660d18a30))
 - pm_guard recognizes git global flags and stops scanning quoted content ([#2741](https://github.com/bobmatnyc/trusty-tools/pull/2741)) ([`6e29e25`](https://github.com/bobmatnyc/trusty-tools/commit/6e29e253c073cb889bdbfce5e99d05d16e6d1fe2))
 - framework workflow conventions — per-session session log, issue/PR assignee+label defaults, trusty-mpm attribution footer ([#2737](https://github.com/bobmatnyc/trusty-tools/pull/2737)) ([`3089600`](https://github.com/bobmatnyc/trusty-tools/commit/3089600b475cc464329132e5f7523536bb730797))
-## [Unreleased]
 
 ### Added
 
@@ -46,13 +29,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - DispositionReason enum replaces stringly-typed disposition reasons ([#2705](https://github.com/bobmatnyc/trusty-tools/pull/2705)) ([`e7970c8`](https://github.com/bobmatnyc/trusty-tools/commit/e7970c87541d774aa25c315f27da7fee656be492))
 - convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
-## [Unreleased]
 
 ### Fixed
 
 - picker launch-new switches client safely and exits instead of hanging ([#2680](https://github.com/bobmatnyc/trusty-tools/pull/2680)) ([`3de0647`](https://github.com/bobmatnyc/trusty-tools/commit/3de0647452f0e77a67aa20c52c8d9610474b8de8))
 - pm_guard allows read-only sed/awk pipe segments ([#2677](https://github.com/bobmatnyc/trusty-tools/pull/2677)) ([`3881639`](https://github.com/bobmatnyc/trusty-tools/commit/38816393f9d836b79e08c8efd4642fd21f3a6e5f))
-## [Unreleased]
 
 ### Fixed
 
@@ -64,7 +45,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - split bin/tm/cli.rs into cli/ modules ([#2650](https://github.com/bobmatnyc/trusty-tools/pull/2650)) ([`53eb4a6`](https://github.com/bobmatnyc/trusty-tools/commit/53eb4a67f3cec9ba4f9d23ddf65243d20974d5ec))
-## [Unreleased]
 
 ### Added
 
@@ -73,7 +53,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - harden agents against idle parking — never end a turn to wait (closes #2610) ([#2620](https://github.com/bobmatnyc/trusty-tools/pull/2620)) ([`cbcfd17`](https://github.com/bobmatnyc/trusty-tools/commit/cbcfd17e797c6db80074e1254dfefb5f1f8fb3c1))
-## [Unreleased]
 
 ### Added
 
@@ -84,7 +63,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - pm_guard permits PM single-file writes to non-source paths ([#2606](https://github.com/bobmatnyc/trusty-tools/pull/2606)) ([`3c6f9f7`](https://github.com/bobmatnyc/trusty-tools/commit/3c6f9f705760f1e94a37f6b9d966b45bf483c2ed))
-## [Unreleased]
 
 ### Added
 
@@ -93,7 +71,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - session restart returns 500 for stopped session whose workspace is gone (closes #2577) ([#2594](https://github.com/bobmatnyc/trusty-tools/pull/2594)) ([`f2270f1`](https://github.com/bobmatnyc/trusty-tools/commit/f2270f1f2effb417aaf460f21b56c311d3403b34))
-## [Unreleased]
 
 ### Added
 
@@ -104,18 +81,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - retire duplicate Bedrock ports onto trusty-common::inference ([#2567](https://github.com/bobmatnyc/trusty-tools/pull/2567)) ([`31c9fc0`](https://github.com/bobmatnyc/trusty-tools/commit/31c9fc0467adfda65b702c7433ceded01e0cf884))
-## [Unreleased]
 
 ### Fixed
 
 - reconcile agent roster drift across deploy destinations ([#2547](https://github.com/bobmatnyc/trusty-tools/pull/2547)) ([`8d8b042`](https://github.com/bobmatnyc/trusty-tools/commit/8d8b04230a646f8c7941754c7cd4684f57d32089))
 - pane-scope session capture reads to the recorded harness pane ([#2545](https://github.com/bobmatnyc/trusty-tools/pull/2545)) ([`18bf5b2`](https://github.com/bobmatnyc/trusty-tools/commit/18bf5b28f8ee47491c3660593195b5ca02ec8883))
-## [Unreleased]
 
 ### Fixed
 
 - guided-default cwd's own repo wins over an ancestor ([#2542](https://github.com/bobmatnyc/trusty-tools/pull/2542)) ([#2543](https://github.com/bobmatnyc/trusty-tools/pull/2543)) ([`51f5041`](https://github.com/bobmatnyc/trusty-tools/commit/51f50417e23c76a4bea4beabc854c4e75cacd526))
-## [Unreleased]
 
 ### Added
 
@@ -177,18 +151,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - add trusty-mpm package metadata + repoint trusty-search CI badge to monorepo ([#2292](https://github.com/bobmatnyc/trusty-tools/pull/2292)) ([`cba43a5`](https://github.com/bobmatnyc/trusty-tools/commit/cba43a5698c03ea611f731b6a5bef0809547a93f))
 
-## [0.19.4] — 2026-07-09
-
-### Changed
-
-- Add crates.io package metadata (keywords/categories/homepage/readme).
-
-## [Unreleased]
 
 ### Fixed
 
 - probe live tmux/process for session liveness, not the stored state field ([#2275](https://github.com/bobmatnyc/trusty-tools/pull/2275)) ([`b5f8b6b`](https://github.com/bobmatnyc/trusty-tools/commit/b5f8b6b7b941b5f8939918f592374e0b4bd76d28))
-## [Unreleased]
 
 ### Added
 
@@ -198,8 +164,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - correct banner two_panel right-column no-inner-border rendering ([#2258](https://github.com/bobmatnyc/trusty-tools/pull/2258)) ([`6b9ae4a`](https://github.com/bobmatnyc/trusty-tools/commit/6b9ae4ab17ce0a07b2f69bfb14d3b477c8db6fbe))
 - keep resumed panes rooted at the workspace, not $HOME ([#2254](https://github.com/bobmatnyc/trusty-tools/pull/2254)) ([`d2c1edf`](https://github.com/bobmatnyc/trusty-tools/commit/d2c1edf4431b0cba3e94f558fc13fc9c40786307))
-## [Unreleased]
-## [Unreleased]
 
 ### Added
 
@@ -215,12 +179,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - re-cut as 0.19.1: depends on trusty-common 0.22.2 (0.19.0 was git-tagged but
   never published to crates.io, so republishing the same content under a new
   patch version rather than moving an existing tag). Ships #2214/#2229/#2230/#2231.
-## [Unreleased]
 
 ### Added
 
 - seed outputStyle/statusLine into tm-owned config dir ([#2215](https://github.com/bobmatnyc/trusty-tools/pull/2215)) ([`2ebb6e1`](https://github.com/bobmatnyc/trusty-tools/commit/2ebb6e19993524aae4df038041c4c1d1cdc64dd0))
-## [Unreleased]
 
 ### Added
 
@@ -245,27 +207,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Documentation
 
 - bundled architecture doc for memory-MCP, session/worktree, search-index ([#2096](https://github.com/bobmatnyc/trusty-tools/pull/2096)) ([`d82e15a`](https://github.com/bobmatnyc/trusty-tools/commit/d82e15ae9367a4c17cdd8fb714e053eb6da9cab7))
-## [Unreleased]
 
 ### Added
 
-- statusline renders context >50% in red ([#2099](https://github.com/bobmatnyc/trusty-tools/pull/2099)) ([`a821b9d`](https://github.com/bobmatnyc/trusty-tools/commit/a821b9da89d7c076dfb4557094f632859b53642e))
-- manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
-- project config stores preferred gh user; default gh ops to it ([#2087](https://github.com/bobmatnyc/trusty-tools/pull/2087)) ([`d49e385`](https://github.com/bobmatnyc/trusty-tools/commit/d49e385826c0befb0d4cece01a032c71e67e1aa3))
-- name managed-session worktrees by tmux session name, not UUID ([#2076](https://github.com/bobmatnyc/trusty-tools/pull/2076)) ([`39abd2e`](https://github.com/bobmatnyc/trusty-tools/commit/39abd2e02b47e5b4e739ad30de57c33cfdf4dc54))
 
 ### Fixed
 
-- guarantee PM delegation persona loads (CLAUDE.md carrier + project-tier output-style + daemon-adapter system-prompt injection) ([#2129](https://github.com/bobmatnyc/trusty-tools/pull/2129)) ([`3a071a0`](https://github.com/bobmatnyc/trusty-tools/commit/3a071a0a2897911279433522d2564cb532f310be))
-- pm_guard exempts native delegated sub-agent edits; retire global UNRESTRICTED bypass ([#2107](https://github.com/bobmatnyc/trusty-tools/pull/2107)) ([`0f413d0`](https://github.com/bobmatnyc/trusty-tools/commit/0f413d0c5d611178dbd5344475ae61ba5fa21213))
-- PM summarizes orchestration in prose instead of raw pm_summary JSON ([#2045](https://github.com/bobmatnyc/trusty-tools/pull/2045)) ([`53731f4`](https://github.com/bobmatnyc/trusty-tools/commit/53731f4849436607cdef55237680a230c798d94f))
-- statusline shows tmux session name instead of worktree UUID branch ([#2035](https://github.com/bobmatnyc/trusty-tools/pull/2035)) ([`bbafad1`](https://github.com/bobmatnyc/trusty-tools/commit/bbafad11063accc2631be4fd97cb610c13152faa))
-- reach trusty-memory over discovered JSON-RPC, never a hardcoded port ([#2040](https://github.com/bobmatnyc/trusty-tools/pull/2040)) ([`e0f41c5`](https://github.com/bobmatnyc/trusty-tools/commit/e0f41c51f1baa7ddf0e427cb5c7e86cbe9bba5fa))
 
 ### Documentation
 
-- bundled architecture doc for memory-MCP, session/worktree, search-index ([#2096](https://github.com/bobmatnyc/trusty-tools/pull/2096)) ([`d82e15a`](https://github.com/bobmatnyc/trusty-tools/commit/d82e15ae9367a4c17cdd8fb714e053eb6da9cab7))
-## [Unreleased]
 
 ### Added
 
@@ -291,7 +241,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - auto-reconcile zombie sessions on guided resume instead of erroring (closes #2001) ([#2004](https://github.com/bobmatnyc/trusty-tools/pull/2004)) ([`f635216`](https://github.com/bobmatnyc/trusty-tools/commit/f635216c4b1e6edf7463b2202283c2b39e0e180e))
 - statusline shows user/repo, drops duplicate session-id branch ([#1991](https://github.com/bobmatnyc/trusty-tools/pull/1991)) ([`58f5b1f`](https://github.com/bobmatnyc/trusty-tools/commit/58f5b1f9df62dfae183389f5e279d8579f07de13))
 - graceful CLI session termination + managed-session delegation gating ([#1979](https://github.com/bobmatnyc/trusty-tools/pull/1979)) ([`139bde2`](https://github.com/bobmatnyc/trusty-tools/commit/139bde2938f8edf33cd71df1d0a2b2a09ef1580c))
-## [Unreleased]
 
 ### Added
 
@@ -336,6 +285,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - hoist compress::tool_output from trusty-agents ([#1959](https://github.com/bobmatnyc/trusty-tools/pull/1959)) ([#1968](https://github.com/bobmatnyc/trusty-tools/pull/1968)) ([`7cf93b9`](https://github.com/bobmatnyc/trusty-tools/commit/7cf93b9ab3918aff316238bdfe540a4053aa971d))
 - split inproject.rs to satisfy 500-SLOC production cap ([#1898](https://github.com/bobmatnyc/trusty-tools/pull/1898)) ([`43066c2`](https://github.com/bobmatnyc/trusty-tools/commit/43066c2a30cd9bdc6513554caff9ad2da54defd2))
+
+### Changed: CLI command group `session` → `sessions` (issue #1394)
+
+The top-level CLI command group was renamed from the singular `session` to the
+plural **`sessions`** to match the `/api/v1/sessions/*` HTTP API surface. Every
+subcommand is now invoked under the plural name, e.g. `tm sessions tui`,
+`tm sessions ls`, `tm sessions new`.
+
+- The singular `session` spelling is **removed entirely** — it is not retained
+  as an alias. Invoking `tm session …` now fails with an
+  unrecognized-subcommand error. Update any scripts or muscle memory to
+  `tm sessions …`.
+- This is a CLI-only change; the HTTP API (already `/api/v1/sessions/*`) and the
+  separate `session-manager` / `sm` coordinator command are unaffected.
+
+### Deprecated: verbose managed session-lifecycle verbs (issue #1205)
+
+The managed session-lifecycle CLI verbs were renamed to the cleaner, symmetric
+`stop` / `resume` / `decommission` family. The old verbose verbs still work but
+now emit a one-line deprecation notice to **stderr** on every invocation and
+will be removed in a future release.
+
+| Deprecated verb | Use instead | Behavior |
+|-----------------|-------------|----------|
+| `tm sessions runtime-stop <id>` | `tm sessions stop <id>` | Stop the runtime, keep the workspace (resumable) |
+| `tm sessions managed-stop <id>` | `tm sessions stop <id>` | Same as `runtime-stop` |
+| `tm sessions managed-resume <id>` | `tm sessions resume <id>` | Re-spawn the runtime in the existing workspace |
+
+- The deprecated verbs are hidden from `tm sessions --help` but continue to parse
+  for backward compatibility.
+- Each deprecated invocation prints `warning: '<old>' is deprecated; use '<new>'`
+  to stderr; stdout stays clean for scripts.
+- `tm sessions decommission <id>` (terminal teardown: remove workspace from disk)
+  is unchanged.
+
+## [0.19.4] — 2026-07-09
+
+### Changed
+
+- Add crates.io package metadata (keywords/categories/homepage/readme).
+
 ## [0.14.0] — 2026-07-01
 
 ### Added
@@ -558,42 +548,6 @@ that its instructions never loaded ([#1855](https://github.com/bobmatnyc/trusty-
   `tm` and `trusty-mpm` only. Install the console with
   `cargo install trusty-console`. This is part of the single-owner-per-binary
   fix for the cargo binary-ownership collisions (#1262).
-
-## [Unreleased]
-
-### Changed: CLI command group `session` → `sessions` (issue #1394)
-
-The top-level CLI command group was renamed from the singular `session` to the
-plural **`sessions`** to match the `/api/v1/sessions/*` HTTP API surface. Every
-subcommand is now invoked under the plural name, e.g. `tm sessions tui`,
-`tm sessions ls`, `tm sessions new`.
-
-- The singular `session` spelling is **removed entirely** — it is not retained
-  as an alias. Invoking `tm session …` now fails with an
-  unrecognized-subcommand error. Update any scripts or muscle memory to
-  `tm sessions …`.
-- This is a CLI-only change; the HTTP API (already `/api/v1/sessions/*`) and the
-  separate `session-manager` / `sm` coordinator command are unaffected.
-
-### Deprecated: verbose managed session-lifecycle verbs (issue #1205)
-
-The managed session-lifecycle CLI verbs were renamed to the cleaner, symmetric
-`stop` / `resume` / `decommission` family. The old verbose verbs still work but
-now emit a one-line deprecation notice to **stderr** on every invocation and
-will be removed in a future release.
-
-| Deprecated verb | Use instead | Behavior |
-|-----------------|-------------|----------|
-| `tm sessions runtime-stop <id>` | `tm sessions stop <id>` | Stop the runtime, keep the workspace (resumable) |
-| `tm sessions managed-stop <id>` | `tm sessions stop <id>` | Same as `runtime-stop` |
-| `tm sessions managed-resume <id>` | `tm sessions resume <id>` | Re-spawn the runtime in the existing workspace |
-
-- The deprecated verbs are hidden from `tm sessions --help` but continue to parse
-  for backward compatibility.
-- Each deprecated invocation prints `warning: '<old>' is deprecated; use '<new>'`
-  to stderr; stdout stays clean for scripts.
-- `tm sessions decommission <id>` (terminal teardown: remove workspace from disk)
-  is unchanged.
 
 ## [0.5.0] — 2026-05-28
 
