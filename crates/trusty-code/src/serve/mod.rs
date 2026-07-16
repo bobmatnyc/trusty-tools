@@ -37,14 +37,13 @@ pub mod http;
 pub mod methods;
 pub mod transport;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tracing::info;
 
-use crate::agents::locate_agents_dir;
+use crate::binding::ProjectBinding;
 use crate::jsonrpc::Router;
 use crate::session::SessionRegistry;
 
@@ -86,15 +85,24 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// What: builds an empty `Router` + a fresh `SessionRegistry`, calls
 /// `methods::register`, `crate::session::protocol::register`, and
 /// `crate::task::protocol::register` on them, and returns both.
+///
+/// `binding` is the daemon's project binding. Its `None` (projectless) state is
+/// what makes the shell's entry screen implementable: previously `build_router`
+/// took a required `PathBuf`, so a daemon could not even START without a
+/// project, and `task.run` could not be called without one. `agents_dir` now
+/// resolves via `ProjectBinding::agents_dir`, which falls back to the
+/// user-level `~/.claude/agents` when projectless rather than to the process
+/// CWD (which would silently bind a directory nobody chose).
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
-/// `build_router_wires_session_methods`, `build_router_wires_task_run`.
-pub fn build_router(project: PathBuf) -> (Router, Arc<SessionRegistry>) {
+/// `build_router_wires_session_methods`, `build_router_wires_task_run`,
+/// `build_router_is_projectless_without_a_project`.
+pub fn build_router(binding: ProjectBinding) -> (Router, Arc<SessionRegistry>) {
     let sessions = Arc::new(SessionRegistry::new());
-    let agents_dir = locate_agents_dir(&project);
+    let agents_dir = binding.agents_dir();
     let mut router = Router::new();
     methods::register(&mut router);
     crate::session::protocol::register(&mut router, sessions.clone());
-    crate::task::protocol::register(&mut router, sessions.clone(), project, agents_dir);
+    crate::task::protocol::register(&mut router, sessions.clone(), binding, agents_dir);
     (router, sessions)
 }
 
@@ -110,9 +118,13 @@ pub fn build_router(project: PathBuf) -> (Router, Arc<SessionRegistry>) {
 /// Test: `run_stdio_router_recognises_proof_of_life_methods` covers the
 /// router assembly; the transport loop itself is covered by
 /// `transport::tests`.
-pub async fn run_stdio(project: PathBuf) -> Result<()> {
-    info!(project = %project.display(), "tcode serve --stdio: starting");
-    let (router, sessions) = build_router(project);
+pub async fn run_stdio(binding: ProjectBinding) -> Result<()> {
+    info!(
+        binding = binding.state(),
+        project = binding.label().unwrap_or_else(|| "<projectless>".into()),
+        "tcode serve --stdio: starting"
+    );
+    let (router, sessions) = build_router(binding);
     transport::run_stdio_loop(router).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --stdio: stopped");
@@ -130,9 +142,14 @@ pub async fn run_stdio(project: PathBuf) -> Result<()> {
 /// [`SHUTDOWN_GRACE`]) — see [`run_stdio`]'s docs for why.
 /// Test: `run_stdio_router_recognises_proof_of_life_methods` covers the
 /// shared router assembly; `http::tests` cover the routing/dispatch logic.
-pub async fn run_http(project: PathBuf, port: u16) -> Result<()> {
-    info!(project = %project.display(), port, "tcode serve --http: starting");
-    let (router, sessions) = build_router(project);
+pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
+    info!(
+        binding = binding.state(),
+        project = binding.label().unwrap_or_else(|| "<projectless>".into()),
+        port,
+        "tcode serve --http: starting"
+    );
+    let (router, sessions) = build_router(binding);
     http::run_http(router, sessions.clone(), port).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --http: stopped");
@@ -154,7 +171,9 @@ mod tests {
     #[tokio::test]
     async fn run_stdio_router_recognises_proof_of_life_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
-        let (router, _sessions) = build_router(project.path().to_path_buf());
+        let (router, _sessions) = build_router(
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        );
         for method in ["ping", "health"] {
             let req = Request {
                 jsonrpc: Some("2.0".to_string()),
@@ -176,8 +195,10 @@ mod tests {
     #[tokio::test]
     async fn build_router_wires_session_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
-        let (router, sessions) = build_router(project.path().to_path_buf());
-        let session = sessions.create("t".to_string(), None, None);
+        let (router, sessions) = build_router(
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        );
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let req = Request {
             jsonrpc: Some("2.0".to_string()),
@@ -202,7 +223,34 @@ mod tests {
         assert_eq!(DEFAULT_HTTP_PORT, 7881);
     }
 
-    /// `build_router` must also wire `task.run` (#2056).
+    /// The daemon must ASSEMBLE with no project bound — `build_router` took a
+    /// required `PathBuf` before, so a projectless daemon could not exist and
+    /// the shell had no entry state to render. `task.run` must be wired just
+    /// the same in that state.
+    #[tokio::test]
+    async fn build_router_is_projectless_without_a_project() {
+        let (router, _sessions) = build_router(ProjectBinding::None);
+        for method in ["task.run", "session.create", "session.list"] {
+            let req = Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: Some(json!({})),
+            };
+            let resp = router.dispatch(req, &test_ctx()).await;
+            // Params are deliberately empty, so an `invalid_params`/
+            // `invalid_argument` is fine and expected — the ONE thing that must
+            // not happen is `-32601 Method not found`, which would mean a
+            // projectless daemon serves a different method surface.
+            if let Some(err) = resp.error {
+                assert_ne!(
+                    err.code, -32601,
+                    "{method} must be wired on a projectless daemon, got method-not-found"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn build_router_wires_task_run() {
         let project = tempfile::tempdir().expect("project tempdir");
@@ -234,7 +282,9 @@ mod tests {
                 crate::task::mock_llm::MOCK_LLM_ECHO,
             );
         }
-        let (router, sessions) = build_router(project.path().to_path_buf());
+        let (router, sessions) = build_router(
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        );
         let req = Request {
             jsonrpc: Some("2.0".to_string()),
             id: Some(json!(1)),

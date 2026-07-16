@@ -70,8 +70,16 @@ enum Command {
     /// simultaneous — see `trusty_code::serve` module docs).
     Serve {
         /// Path to the project root (must contain a `.claude/` directory).
+        ///
+        /// OPTIONAL: omit it to serve PROJECTLESS — a first-class state for
+        /// chat/planning before a project is chosen, and the state the shell's
+        /// entry screen renders. A projectless daemon indexes nothing, has no
+        /// diff target, and scopes no memory palace; agents resolve from the
+        /// user-level `~/.claude/agents`. The path must be an existing
+        /// directory when given; it need NOT be a git repo (a plain directory
+        /// binds and indexes just like a repo, minus git affordances).
         #[arg(long, short, value_name = "PATH")]
-        project: PathBuf,
+        project: Option<PathBuf>,
 
         /// Serve JSON-RPC 2.0 over stdio (NDJSON on stdin/stdout), matching
         /// the trusty-memory/trusty-search MCP stdio convention.
@@ -414,14 +422,34 @@ async fn run_thin_client(
 /// (SIGTERM/SIGINT, or stdin EOF for `--stdio`), logging to stderr only.
 /// Neither flag given prints actionable usage and exits 1 rather than
 /// silently doing nothing.
+/// `project` is optional: `None` serves PROJECTLESS. It is resolved into a
+/// typed `ProjectBinding` HERE, at the boundary, so an unusable `--project`
+/// (missing, or not a directory) fails fast with an actionable message rather
+/// than surfacing later as a confusing per-task error.
 /// Test: exercised manually (`tcode serve --project . --stdio` /
-/// `--http [--port N]`); `trusty_code::serve::tests`,
-/// `serve::transport::tests`, and `serve::http::tests` cover the
-/// router/transport logic this delegates to.
-async fn run_serve(project: PathBuf, stdio: bool, http: bool, port: Option<u16>) -> Result<()> {
+/// `tcode serve --stdio` projectless / `--http [--port N]`);
+/// `trusty_code::serve::tests`, `serve::transport::tests`, and
+/// `serve::http::tests` cover the router/transport logic this delegates to.
+async fn run_serve(
+    project: Option<PathBuf>,
+    stdio: bool,
+    http: bool,
+    port: Option<u16>,
+) -> Result<()> {
+    let binding = match trusty_code::binding::ProjectBinding::resolve(project) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("tcode serve: {e}");
+            eprintln!(
+                "hint: pass an existing directory to --project, or omit --project \
+                 entirely to serve projectless (chat/planning; no index, no diff)."
+            );
+            process::exit(1);
+        }
+    };
     if http {
         let port = port.unwrap_or(trusty_code::serve::DEFAULT_HTTP_PORT);
-        if let Err(e) = trusty_code::serve::run_http(project, port).await {
+        if let Err(e) = trusty_code::serve::run_http(binding, port).await {
             eprintln!("tcode serve --http: fatal error: {e:#}");
             process::exit(1);
         }
@@ -429,7 +457,7 @@ async fn run_serve(project: PathBuf, stdio: bool, http: bool, port: Option<u16>)
     }
 
     if stdio {
-        if let Err(e) = trusty_code::serve::run_stdio(project).await {
+        if let Err(e) = trusty_code::serve::run_stdio(binding).await {
             eprintln!("tcode serve --stdio: fatal error: {e:#}");
             process::exit(1);
         }
@@ -439,7 +467,7 @@ async fn run_serve(project: PathBuf, stdio: bool, http: bool, port: Option<u16>)
     eprintln!(
         "tcode serve: pick a transport — `--stdio` (NDJSON on stdin/stdout) or \
          `--http [--port N]` (POST /rpc + GET /health) [project={}]",
-        project.display()
+        binding.label().unwrap_or_else(|| "<projectless>".into())
     );
     process::exit(1);
 }

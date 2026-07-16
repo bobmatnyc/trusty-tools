@@ -117,12 +117,18 @@ impl HarnessMode {
 /// made explicit: an invalid value at ANY tier is treated exactly like an
 /// absent one, falling through to the next tier, rather than hard-erroring
 /// the whole call) is skipped.
+/// `project_root` is `Option` because a projectless workstream has no project
+/// and therefore no `.claude/settings.json` tier to consult — that tier is
+/// simply skipped, exactly as an absent file already was. Projectless is a
+/// supported state, never an error, so it still resolves a mode (env var, then
+/// the request's own `mode`, then the default).
 /// Test: `mode::tests::env_var_wins_over_everything`,
 /// `mode::tests::task_param_wins_over_settings_json`,
 /// `mode::tests::settings_json_wins_over_default`,
 /// `mode::tests::default_when_nothing_set`,
-/// `mode::tests::invalid_env_var_falls_through_to_next_tier`.
-pub fn resolve_mode(task_param: Option<&str>, project_root: &Path) -> HarnessMode {
+/// `mode::tests::invalid_env_var_falls_through_to_next_tier`,
+/// `mode::tests::projectless_skips_settings_tier_and_still_resolves`.
+pub fn resolve_mode(task_param: Option<&str>, project_root: Option<&Path>) -> HarnessMode {
     if let Some(mode) = std::env::var(MODE_ENV_VAR)
         .ok()
         .and_then(|v| HarnessMode::parse_lenient(&v))
@@ -132,7 +138,7 @@ pub fn resolve_mode(task_param: Option<&str>, project_root: &Path) -> HarnessMod
     if let Some(mode) = task_param.and_then(HarnessMode::parse_lenient) {
         return mode;
     }
-    if let Some(mode) = read_settings_json_mode(project_root) {
+    if let Some(mode) = project_root.and_then(read_settings_json_mode) {
         return mode;
     }
     HarnessMode::default()
@@ -251,7 +257,29 @@ mod tests {
     async fn default_when_nothing_set() {
         let project = project_with_settings(None);
         with_env_mode(None, || {
-            assert_eq!(resolve_mode(None, project.path()), HarnessMode::DailyDriver);
+            assert_eq!(
+                resolve_mode(None, Some(project.path())),
+                HarnessMode::DailyDriver
+            );
+        })
+        .await;
+    }
+
+    /// A projectless run has no `.claude/settings.json` tier to read; it must
+    /// still resolve a mode from the remaining tiers rather than error.
+    #[tokio::test]
+    async fn projectless_skips_settings_tier_and_still_resolves() {
+        with_env_mode(None, || {
+            assert_eq!(
+                resolve_mode(None, None),
+                HarnessMode::DailyDriver,
+                "projectless must fall through to the default, not error"
+            );
+            assert_eq!(
+                resolve_mode(Some("parity"), None),
+                HarnessMode::Parity,
+                "the request's own mode must still apply when projectless"
+            );
         })
         .await;
     }
@@ -260,7 +288,10 @@ mod tests {
     async fn settings_json_wins_over_default() {
         let project = project_with_settings(Some(r#"{"code_harness": {"mode": "parity"}}"#));
         with_env_mode(None, || {
-            assert_eq!(resolve_mode(None, project.path()), HarnessMode::Parity);
+            assert_eq!(
+                resolve_mode(None, Some(project.path())),
+                HarnessMode::Parity
+            );
         })
         .await;
     }
@@ -270,7 +301,7 @@ mod tests {
         let project = project_with_settings(Some(r#"{"code_harness": {"mode": "parity"}}"#));
         with_env_mode(None, || {
             assert_eq!(
-                resolve_mode(Some("daily-driver"), project.path()),
+                resolve_mode(Some("daily-driver"), Some(project.path())),
                 HarnessMode::DailyDriver
             );
         })
@@ -282,7 +313,7 @@ mod tests {
         let project = project_with_settings(Some(r#"{"code_harness": {"mode": "daily-driver"}}"#));
         with_env_mode(Some("parity"), || {
             assert_eq!(
-                resolve_mode(Some("daily-driver"), project.path()),
+                resolve_mode(Some("daily-driver"), Some(project.path())),
                 HarnessMode::Parity
             );
         })
@@ -294,7 +325,7 @@ mod tests {
         let project = project_with_settings(None);
         with_env_mode(Some("not-a-real-mode"), || {
             assert_eq!(
-                resolve_mode(Some("parity"), project.path()),
+                resolve_mode(Some("parity"), Some(project.path())),
                 HarnessMode::Parity
             );
         })

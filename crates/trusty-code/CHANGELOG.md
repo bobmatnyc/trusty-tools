@@ -8,7 +8,77 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — projectless mode + one typed project binding (UI Phase-1).**
+  "Project" was one concept split across two disagreeing API surfaces:
+  `task.run` took a REQUIRED `project: PathBuf` (`task/protocol.rs:48`), while
+  `session.create` took an untyped, free-form `project: Option<String>` LABEL
+  (`session/protocol.rs:157`) that was never validated, never bound, and
+  disconnected from the path `task.run` demanded — a label that could not be
+  indexed and a path that could not be omitted, i.e. two halves of one missing
+  object. Because the path was required, a **projectless** workstream was
+  inexpressible, and the shell's entry screen (spec DOC-39 §4.2/§5.5 screen 7a,
+  "Open a project" — a workstream that exists BEFORE a project is chosen) was
+  literally unimplementable. Both surfaces now converge on one typed
+  `binding::ProjectBinding` with the spec's **three** states:
+
+  | State | Indexing | Git affordances |
+  |---|---|---|
+  | `projectless` — no directory bound (chat/planning) | none | none |
+  | `directory` — bound, non-git (#2728/#2747) | **yes** | none |
+  | `git_repo` — bound git worktree | yes | full |
+
+  **Binding is NOT gated on `.git`.** The design proposal's own text ("binds the
+  moment work touches files in a git repo") is wrong and contradicts shipped
+  behaviour: it would exclude the non-git working dirs (#2728) and OS temp dirs
+  (#2747) we deliberately support. A non-git directory BINDS and INDEXES; the
+  git/non-git split decides only which git affordances are offered, never
+  whether the project binds. Git detection is now a single implementation
+  (`binding::is_git_worktree`), which `run_task::diff` delegates to, so a
+  `git_repo` binding can never disagree with the diff strategy.
+
+  What projectless does with the three things that assumed a project — each a
+  defined behaviour, never a panic: indexing is **skipped**; the project-scoped
+  memory palace is **skipped** (`memory_sink_for` takes `Option<&Path>` and
+  returns `None` — the scratch root is deliberately NOT substituted, which would
+  mint an orphaned palace per run); and the fs/bash tools are rooted at an
+  **ephemeral scratch dir**, discarded when the run ends and logged at `warn` to
+  stderr so a projectless write is observable rather than silent. `CLAUDE.md`,
+  catch-up, skills, and the `settings.json` mode tier already degraded to
+  "absent" and needed no projectless special-casing.
+
+  Breaking-change surface, and why each is safe or deliberate:
+  - **`task.run`'s JSON-RPC params are UNCHANGED** — its `project` was a
+    `register()` argument (daemon-scoped), never a request field, so no
+    JSON-RPC caller breaks. Its response gains a `binding` object.
+  - **Rust API (breaking):** `serve::{build_router, run_stdio, run_http}` and
+    `task::protocol::register` take `ProjectBinding` instead of `PathBuf`;
+    `TaskRunParams.project` → `.binding`; `SessionRegistry::create`'s third
+    param is a `ProjectBinding`; `mode::resolve_mode` takes `Option<&Path>`.
+  - **`session.create` wire (breaking, deliberate):** `project` is now a project
+    PATH, not a decorative label — a string that names no directory returns
+    `-32003 invalid_argument`. Erroring is the point: silently accepting a
+    "project" that binds and indexes nothing is the exact failure this
+    reconciliation ends. Omitting `project` remains valid and means projectless.
+  - `Session` gains a typed `binding`; its `project` field survives as a
+    display label but is now DERIVED from the binding (`ProjectBinding::label`),
+    so the two can never again disagree. `binding` is `#[serde(default)]`, so an
+    older payload without it reads back as projectless.
+
+  Being breaking at the Rust-API and `session.create`-semantics level, the next
+  release must be **0.3.0** (pre-1.0: minor = breaking), not a patch bump.
+  ([#2855](https://github.com/bobmatnyc/trusty-tools/pull/2855), spec DOC-39
+  §4.2/§5.5, ACs 2.1–2.4 / 16.1–16.3)
+
 ### Added
+
+- **`tcode serve --project` is now OPTIONAL** — omit it to serve projectless.
+  Given, it must be an existing directory (validated at the boundary with an
+  actionable hint, rather than failing later as a confusing per-task error); it
+  need NOT be a git repo. A projectless daemon resolves agents from the
+  user-level `~/.claude/agents` rather than the process CWD, which would
+  silently bind a directory the operator never chose.
 
 - **Build provenance in `--version` and `tcode_report.json`** — `tcode --version`
   now prints the git SHA and commit date alongside the semver

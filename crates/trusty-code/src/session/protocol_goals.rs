@@ -118,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn set_goal_writes_operator_goal() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         seed_pm_transcript(&registry, &session.id);
 
         let result = set_goal(
@@ -143,7 +143,7 @@ mod tests {
     #[tokio::test]
     async fn set_goal_out_of_range_slot_maps_to_invalid_argument() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         seed_pm_transcript(&registry, &session.id);
 
         let err = set_goal(
@@ -175,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn clear_goal_clears_operator_goal() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         seed_pm_transcript(&registry, &session.id);
         set_goal(
             &registry,
@@ -204,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn clear_goal_out_of_range_slot_maps_to_invalid_argument() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         seed_pm_transcript(&registry, &session.id);
 
         let err = clear_goal(
@@ -221,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn get_goals_returns_goals_key() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let result = get_goals(&registry, json!({"session_id": session.id}), test_ctx())
             .await
             .unwrap();
@@ -233,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn get_goals_on_never_run_session_is_empty() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let result = get_goals(&registry, json!({"session_id": session.id}), test_ctx())
             .await
             .unwrap();

@@ -38,7 +38,8 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
         session_id: session_id.to_string(),
         task: "do something".to_string(),
         agent_name: "pm".to_string(),
-        project: project.path().to_path_buf(),
+        binding: crate::binding::ProjectBinding::resolve(Some(project.path().to_path_buf()))
+            .expect("tempdir must bind"),
         agents_dir: agents.path().to_path_buf(),
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
@@ -51,7 +52,7 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
 #[tokio::test]
 async fn spawn_task_run_rejects_second_overlapping_run() {
     let registry = Arc::new(SessionRegistry::new());
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
     let llm: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
@@ -100,7 +101,8 @@ fn resolve_engineer_model_falls_back_when_config_missing() {
         session_id: "s".to_string(),
         task: "do something".to_string(),
         agent_name: "pm".to_string(),
-        project: empty_agents.path().to_path_buf(),
+        binding: crate::binding::ProjectBinding::resolve(Some(empty_agents.path().to_path_buf()))
+            .expect("tempdir must bind"),
         agents_dir: empty_agents.path().to_path_buf(),
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
@@ -128,7 +130,9 @@ fn daily_driver_skills_catalog_none_in_parity() {
     let mut p = params(&agents, &project, "s");
     p.mode = crate::mode::HarnessMode::Parity;
 
-    assert!(daily_driver_skills_catalog(&p).is_none());
+    assert!(
+        daily_driver_skills_catalog(&p, p.binding.root().expect("bound in this test")).is_none()
+    );
 }
 
 /// `daily_driver_skills_catalog` returns `None` when the project has no
@@ -141,7 +145,9 @@ fn daily_driver_skills_catalog_none_when_no_skills_dir() {
     let mut p = params(&agents, &project, "s");
     p.mode = crate::mode::HarnessMode::DailyDriver;
 
-    assert!(daily_driver_skills_catalog(&p).is_none());
+    assert!(
+        daily_driver_skills_catalog(&p, p.binding.root().expect("bound in this test")).is_none()
+    );
 }
 
 /// A project's `.claude/settings.json` `code_harness.cadence_turns` override
@@ -182,7 +188,9 @@ async fn settings_json_cadence_turns_override_reaches_resolver() {
         .expect("write settings.json");
 
         let p = params(&agents, &project, "s");
-        let cfg = crate::agent_loop::resolve_cadence_config(&p.project);
+        let cfg = crate::agent_loop::resolve_cadence_config(
+            p.binding.root().expect("bound in this test"),
+        );
         assert_eq!(cfg.cadence_turns, 3);
         assert_ne!(
             cfg.cadence_turns,
@@ -209,7 +217,9 @@ fn daily_driver_skills_catalog_some_when_skills_exist() {
     let mut p = params(&agents, &project, "s");
     p.mode = crate::mode::HarnessMode::DailyDriver;
 
-    let (catalog, resolver) = daily_driver_skills_catalog(&p).expect("catalog present");
+    let (catalog, resolver) =
+        daily_driver_skills_catalog(&p, p.binding.root().expect("bound in this test"))
+            .expect("catalog present");
     assert!(catalog.contains("demo: Demo skill"));
     assert_eq!(resolver.resolve("demo").as_deref(), Some("full body"));
 }
@@ -362,7 +372,7 @@ impl LlmClientTrait for DeadlineTriggerLlm {
 #[tokio::test]
 async fn spawn_task_run_deadline_exceeded_is_distinct_and_preserves_usage() {
     let registry = Arc::new(SessionRegistry::new());
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
 
@@ -464,7 +474,7 @@ async fn wait_for_terminal(registry: &SessionRegistry, id: &str) {
 #[tokio::test]
 async fn spawn_task_run_second_call_after_finish_appends_to_cumulative_transcript() {
     let registry = Arc::new(SessionRegistry::new());
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
 
@@ -572,7 +582,7 @@ impl LlmClientTrait for SchemaCapturingLlm {
 #[tokio::test]
 async fn session_path_registers_recall_session_tool() {
     let registry = Arc::new(SessionRegistry::new());
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
 

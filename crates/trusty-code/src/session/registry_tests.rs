@@ -48,13 +48,25 @@ async fn create_publishes_started_and_status_events() {
     let registry = SessionRegistry::new();
     let mut events = crate::events::subscribe();
 
-    let session = registry.create("do the thing".to_string(), None, Some("proj".to_string()));
+    let project_dir = tempfile::tempdir().expect("project tempdir");
+    let binding = crate::binding::ProjectBinding::resolve(Some(project_dir.path().to_path_buf()))
+        .expect("tempdir must bind");
+    let expected_label = binding.label().expect("a bound project has a label");
+
+    let session = registry.create("do the thing".to_string(), None, binding);
     assert_eq!(session.status, SessionStatus::Running);
 
     let first = next_event_for(&mut events, &session.id).await;
     assert_eq!(first.seq, 1);
     assert_eq!(first.kind, "session_started");
-    assert!(matches!(first.event, Event::SessionStarted { project, .. } if project == "proj"));
+    // The event's `project` label is now DERIVED from the binding rather than
+    // being an independently-supplied string, so it must equal the binding's
+    // own label exactly — that equality IS the reconciliation (AC-16.2).
+    assert!(
+        matches!(first.event, Event::SessionStarted { ref project, .. } if *project == expected_label),
+        "SessionStarted.project must be the binding-derived label {expected_label:?}, got {:?}",
+        first.event
+    );
 
     let second = next_event_for(&mut events, &session.id).await;
     assert_eq!(second.seq, 2);
@@ -67,8 +79,8 @@ async fn create_publishes_started_and_status_events() {
 #[tokio::test]
 async fn list_returns_every_created_session() {
     let registry = SessionRegistry::new();
-    registry.create("a".to_string(), None, None);
-    registry.create("b".to_string(), None, None);
+    registry.create("a".to_string(), None, crate::binding::ProjectBinding::None);
+    registry.create("b".to_string(), None, crate::binding::ProjectBinding::None);
     assert_eq!(registry.list().len(), 2);
 }
 
@@ -84,7 +96,7 @@ async fn status_returns_not_found_for_unknown_id() {
 #[tokio::test]
 async fn send_publishes_input_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry.send(&session.id, "hello").unwrap();
@@ -108,7 +120,7 @@ async fn send_unknown_session_errors() {
 #[tokio::test]
 async fn cancel_transitions_to_cancelled_and_publishes() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     let cancelled = registry.cancel(&session.id).unwrap();
@@ -149,7 +161,7 @@ async fn cancel_unknown_session_errors() {
 #[tokio::test]
 async fn attach_returns_ring_buffer_replay() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.send(&session.id, "one").unwrap();
 
     let (tx, _rx) = notify_channel();
@@ -170,7 +182,7 @@ async fn attach_returns_ring_buffer_replay() {
 #[tokio::test]
 async fn attach_forwards_live_events_until_detach() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let connection_id = Uuid::new_v4();
     let (tx, mut rx) = notify_channel();
 
@@ -217,7 +229,7 @@ async fn attach_forwards_live_events_until_detach() {
 #[tokio::test]
 async fn attach_replay_then_live_seq_is_contiguous() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.send(&session.id, "before-attach").unwrap();
 
     let (tx, mut rx) = notify_channel();
@@ -257,7 +269,7 @@ async fn attach_unknown_session_errors() {
 #[tokio::test]
 async fn detach_without_prior_attach_is_a_noop() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.detach(&session.id, Uuid::new_v4()).unwrap();
 }
 
@@ -274,7 +286,7 @@ async fn detach_unknown_session_errors() {
 #[tokio::test]
 async fn replay_returns_ring_buffer_without_attaching() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let replay = registry.replay(&session.id).unwrap();
     assert_eq!(replay.len(), 2); // SessionStarted + SessionStatusChanged(running)
 }
@@ -283,7 +295,7 @@ async fn replay_returns_ring_buffer_without_attaching() {
 #[tokio::test]
 async fn ring_buffer_drops_oldest_when_full() {
     let registry = SessionRegistry::with_capacity(2);
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     // Ring already has 2 entries (SessionStarted, StatusChanged running) at
     // capacity 2; one more push must evict the oldest (SessionStarted).
     registry.send(&session.id, "evicts-started").unwrap();
@@ -308,7 +320,7 @@ async fn ring_buffer_drops_oldest_when_full() {
 #[tokio::test]
 async fn record_tool_started_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
@@ -329,7 +341,7 @@ async fn record_tool_started_publishes_event() {
 #[tokio::test]
 async fn record_tool_finished_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
@@ -348,7 +360,7 @@ async fn record_tool_finished_publishes_event() {
 #[tokio::test]
 async fn record_tool_error_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
@@ -364,7 +376,7 @@ async fn record_tool_error_publishes_event() {
 #[tokio::test]
 async fn record_log_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
@@ -382,7 +394,7 @@ async fn record_log_publishes_event() {
 #[tokio::test]
 async fn record_progress_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
@@ -398,7 +410,7 @@ async fn record_progress_publishes_event() {
 #[tokio::test]
 async fn record_message_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry.record_message(&session.id, "hello world").unwrap();
@@ -465,7 +477,7 @@ async fn begin_execution_unknown_session_errors() {
 #[tokio::test]
 async fn begin_execution_rejects_terminal_session() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.cancel(&session.id).unwrap();
 
     let err = registry.begin_execution(&session.id).unwrap_err();
@@ -480,7 +492,7 @@ async fn begin_execution_rejects_terminal_session() {
 #[tokio::test]
 async fn begin_execution_rejects_second_overlapping_run() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let _first = registry.begin_execution(&session.id).unwrap();
     let err = registry.begin_execution(&session.id).unwrap_err();
@@ -498,7 +510,7 @@ async fn begin_execution_rejects_second_overlapping_run() {
 #[tokio::test]
 async fn request_cancel_returns_false_when_idle() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     assert!(!registry.request_cancel(&session.id).unwrap());
 }
 
@@ -507,7 +519,7 @@ async fn request_cancel_returns_false_when_idle() {
 #[tokio::test]
 async fn request_cancel_sets_flag_when_executing() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     assert!(!registry.is_executing(&session.id));
 
     let cancel = registry.begin_execution(&session.id).unwrap();
@@ -541,7 +553,7 @@ async fn request_cancel_unknown_session_errors() {
 #[tokio::test]
 async fn begin_execution_resumes_a_finished_session() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let _first = registry.begin_execution(&session.id).unwrap();
     registry.finish_execution(&session.id);
@@ -578,21 +590,21 @@ async fn begin_execution_resumes_a_finished_session() {
 async fn begin_execution_still_rejects_cancelled_failed_and_deadline_exceeded() {
     let registry = SessionRegistry::new();
 
-    let cancelled = registry.create("t".to_string(), None, None);
+    let cancelled = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.cancel(&cancelled.id).unwrap();
     assert_eq!(
         registry.begin_execution(&cancelled.id).unwrap_err().code,
         -32003
     );
 
-    let failed = registry.create("t".to_string(), None, None);
+    let failed = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry.finish(&failed.id, SessionStatus::Failed).unwrap();
     assert_eq!(
         registry.begin_execution(&failed.id).unwrap_err().code,
         -32003
     );
 
-    let deadline = registry.create("t".to_string(), None, None);
+    let deadline = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry
         .finish(&deadline.id, SessionStatus::DeadlineExceeded)
         .unwrap();
@@ -609,7 +621,7 @@ async fn begin_execution_still_rejects_cancelled_failed_and_deadline_exceeded() 
 #[tokio::test]
 async fn begin_pm_transcript_seeds_on_first_call() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let transcript = registry
         .begin_pm_transcript(&session.id, "you are the pm", "first task")
@@ -629,7 +641,7 @@ async fn begin_pm_transcript_seeds_on_first_call() {
 #[tokio::test]
 async fn begin_pm_transcript_appends_on_second_call() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let mut transcript = registry
         .begin_pm_transcript(&session.id, "you are the pm", "first task")
@@ -677,14 +689,14 @@ async fn begin_pm_transcript_unknown_session_errors() {
 #[tokio::test]
 async fn memory_sink_for_reuses_the_same_sink_across_calls() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let project_dir = tempfile::TempDir::new().unwrap();
 
     let first = registry
-        .memory_sink_for(&session.id, project_dir.path())
+        .memory_sink_for(&session.id, Some(project_dir.path()))
         .expect("first call constructs a sink");
     let second = registry
-        .memory_sink_for(&session.id, project_dir.path())
+        .memory_sink_for(&session.id, Some(project_dir.path()))
         .expect("second call reuses the sink");
 
     assert!(
@@ -701,7 +713,7 @@ async fn memory_sink_for_unknown_session_returns_none() {
     let project_dir = tempfile::TempDir::new().unwrap();
     assert!(
         registry
-            .memory_sink_for("nope", project_dir.path())
+            .memory_sink_for("nope", Some(project_dir.path()))
             .is_none()
     );
 }
@@ -711,7 +723,7 @@ async fn memory_sink_for_unknown_session_returns_none() {
 #[tokio::test]
 async fn set_run_outcome_stores_transcript_and_usage() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let turns = vec![crate::run_task::TurnRecord {
         role: "pm".to_string(),
@@ -744,7 +756,7 @@ async fn set_run_outcome_stores_transcript_and_usage() {
 #[tokio::test]
 async fn set_run_outcome_accumulates_across_two_calls() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let run_one_turn = crate::run_task::TurnRecord {
         role: "pm".to_string(),
@@ -799,7 +811,7 @@ async fn set_run_outcome_accumulates_across_two_calls() {
 #[tokio::test]
 async fn get_transcript_on_never_run_session_is_empty() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let transcript = registry.get_transcript(&session.id).unwrap();
     assert_eq!(transcript.session_id, session.id);
@@ -836,7 +848,7 @@ async fn get_transcript_unknown_session_errors() {
 #[tokio::test]
 async fn get_transcript_reports_compaction_events() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let mut transcript = registry
         .begin_pm_transcript(&session.id, "you are the pm", "first task")
@@ -855,7 +867,7 @@ async fn get_transcript_reports_compaction_events() {
 #[tokio::test]
 async fn set_mode_stores_on_session() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     assert_eq!(session.mode, None, "a fresh session has no mode yet");
 
     registry
@@ -884,7 +896,7 @@ async fn set_mode_unknown_session_errors() {
 #[tokio::test]
 async fn shutdown_executions_awaits_cancelled_tasks() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let cancel = registry.begin_execution(&session.id).unwrap();
 
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -910,7 +922,7 @@ async fn shutdown_executions_awaits_cancelled_tasks() {
 #[tokio::test]
 async fn finish_transitions_and_publishes_session_done() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     let finished = registry
@@ -935,7 +947,7 @@ async fn finish_transitions_and_publishes_session_done() {
 #[tokio::test]
 async fn finish_is_idempotent_on_terminal_session() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     registry
         .finish(&session.id, SessionStatus::Finished)
         .unwrap();
@@ -977,7 +989,7 @@ fn seed_pm_transcript(registry: &SessionRegistry, id: &str) {
 #[tokio::test]
 async fn set_goal_writes_operator_source() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&registry, &session.id);
 
     registry.set_goal(&session.id, 2, "ship it").unwrap();
@@ -995,7 +1007,7 @@ async fn set_goal_writes_operator_source() {
 #[tokio::test]
 async fn set_goal_no_transcript_yet_errors() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let err = registry.set_goal(&session.id, 1, "x").unwrap_err();
     assert_eq!(err.code, -32003);
@@ -1007,7 +1019,7 @@ async fn set_goal_no_transcript_yet_errors() {
 #[tokio::test]
 async fn set_goal_out_of_range_slot_errors() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&registry, &session.id);
 
     assert_eq!(
@@ -1031,7 +1043,7 @@ async fn set_goal_unknown_session_errors() {
 #[tokio::test]
 async fn clear_goal_clears_slot() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&registry, &session.id);
     registry.set_goal(&session.id, 3, "temp").unwrap();
 
@@ -1045,7 +1057,7 @@ async fn clear_goal_clears_slot() {
 #[tokio::test]
 async fn clear_goal_no_transcript_yet_errors() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let err = registry.clear_goal(&session.id, 1).unwrap_err();
     assert_eq!(err.code, -32003);
@@ -1056,7 +1068,7 @@ async fn clear_goal_no_transcript_yet_errors() {
 #[tokio::test]
 async fn clear_goal_out_of_range_slot_errors() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&registry, &session.id);
 
     assert_eq!(
@@ -1072,7 +1084,7 @@ async fn clear_goal_out_of_range_slot_errors() {
 #[tokio::test]
 async fn get_goals_returns_operator_and_model_sources() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&registry, &session.id);
 
     registry.set_goal(&session.id, 2, "operator goal").unwrap();
@@ -1117,7 +1129,7 @@ async fn get_goals_returns_operator_and_model_sources() {
 #[tokio::test]
 async fn get_goals_on_never_run_session_is_empty() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     assert!(registry.get_goals(&session.id).unwrap().is_empty());
 }
@@ -1135,7 +1147,7 @@ async fn get_goals_unknown_session_errors() {
 #[tokio::test]
 async fn get_transcript_round_trips_goal_state() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&registry, &session.id);
     registry
         .set_goal(&session.id, 4, "finish the migration")
@@ -1162,8 +1174,47 @@ async fn get_transcript_round_trips_goal_state() {
 #[tokio::test]
 async fn get_transcript_goals_empty_on_never_run_session() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let record = registry.get_transcript(&session.id).unwrap();
     assert!(record.goals.is_empty());
+}
+
+/// `create` must DERIVE `Session.project` from the binding rather than accept an
+/// independent label — the two can no longer disagree (AC-16.2).
+#[tokio::test]
+async fn create_derives_project_label_from_binding() {
+    let registry = SessionRegistry::new();
+    let project_dir = tempfile::tempdir().expect("project tempdir");
+    let binding = crate::binding::ProjectBinding::resolve(Some(project_dir.path().to_path_buf()))
+        .expect("tempdir must bind");
+
+    let session = registry.create("t".to_string(), None, binding.clone());
+    assert_eq!(
+        session.project,
+        binding.label(),
+        "the label must be the binding's own label, not an independent string"
+    );
+    assert_eq!(session.binding, binding);
+
+    let projectless = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    assert_eq!(
+        projectless.project, None,
+        "projectless must derive no label"
+    );
+    assert_eq!(projectless.binding, crate::binding::ProjectBinding::None);
+}
+
+/// A PROJECTLESS session must get NO memory sink: a palace is project-scoped by
+/// construction, so with no project there is nothing to scope one to. This must
+/// be a clean `None`, not a panic and not a palace derived from a scratch path.
+#[tokio::test]
+async fn memory_sink_for_projectless_session_returns_none() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    assert!(
+        registry.memory_sink_for(&session.id, None).is_none(),
+        "a projectless session must have no project-scoped memory palace"
+    );
 }

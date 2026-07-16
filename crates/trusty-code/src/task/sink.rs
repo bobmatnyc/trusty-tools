@@ -107,7 +107,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_started_finished_and_error() {
         let registry = Arc::new(SessionRegistry::new());
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
         let mut events = crate::events::subscribe();
 

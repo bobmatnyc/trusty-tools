@@ -68,6 +68,34 @@ pub fn project_with_agents() -> tempfile::TempDir {
     tmp
 }
 
+/// A fake `$HOME` containing `~/.claude/agents/{pm,python-engineer}.toml`.
+///
+/// Why: a PROJECTLESS daemon has no project root to resolve `.claude/agents`
+/// from, so `ProjectBinding::agents_dir` falls back to the USER-level
+/// `~/.claude/agents`. Pointing the child's `$HOME` at a fixture lets the
+/// projectless e2e resolve real agent configs hermetically — and exercises that
+/// user-level fallback itself, rather than depending on whatever happens to be
+/// in the developer's real home directory.
+/// What: same two agent configs `project_with_agents` writes, rooted at
+/// `<tmp>/.claude/agents` and intended to be passed as the child's `HOME`.
+/// Test: used by `task_e2e::projectless_task_runs_end_to_end`.
+pub fn home_with_user_level_agents() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("home tempdir");
+    let agents = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents).expect("mkdir user-level agents");
+    std::fs::write(
+        agents.join("pm.toml"),
+        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM. Delegate work to python-engineer.\"\n",
+    )
+    .expect("write pm.toml");
+    std::fs::write(
+        agents.join("python-engineer.toml"),
+        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
+    )
+    .expect("write python-engineer.toml");
+    tmp
+}
+
 /// A running `tcode serve --stdio` subprocess with line-buffered stdin/stdout.
 ///
 /// Why: the STDIO half of the API-driven e2e coverage — every call in
@@ -89,7 +117,7 @@ impl StdioSession {
     /// (logs aren't asserted on here), `kill_on_drop` so a panicking test
     /// still reaps the child instead of leaking a process.
     pub fn spawn() -> Self {
-        Self::spawn_inner(std::path::Path::new("."), false)
+        Self::spawn_inner(Some(std::path::Path::new(".")), false, None)
     }
 
     /// Spawn `tcode serve --stdio` rooted at `project`, with
@@ -98,15 +126,37 @@ impl StdioSession {
     /// requiring a live `OPENROUTER_API_KEY` — the mandatory offline
     /// black-box path for `tests/task_e2e.rs`.
     pub fn spawn_with_mock_llm(project: &std::path::Path) -> Self {
-        Self::spawn_inner(project, true)
+        Self::spawn_inner(Some(project), true, None)
     }
 
-    fn spawn_inner(project: &std::path::Path, mock_llm: bool) -> Self {
+    /// Spawn `tcode serve --stdio` with NO `--project` — a PROJECTLESS daemon.
+    ///
+    /// Why: this is the state screen 7a renders and the one that was previously
+    /// impossible to even start: `--project` was a required `PathBuf`. That the
+    /// daemon accepts this invocation at all is half of what the projectless
+    /// e2e proves.
+    /// What: omits `--project` entirely and points the child's `HOME` at
+    /// `home` so the user-level `~/.claude/agents` fallback resolves the
+    /// fixture's agent configs hermetically. `TCODE_MOCK_LLM=echo` as usual.
+    /// Test: `task_e2e::projectless_task_runs_end_to_end`.
+    pub fn spawn_projectless_with_mock_llm(home: &std::path::Path) -> Self {
+        Self::spawn_inner(None, true, Some(home))
+    }
+
+    fn spawn_inner(
+        project: Option<&std::path::Path>,
+        mock_llm: bool,
+        home: Option<&std::path::Path>,
+    ) -> Self {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
-        cmd.arg("serve")
-            .arg("--project")
-            .arg(project)
-            .arg("--stdio");
+        cmd.arg("serve");
+        if let Some(project) = project {
+            cmd.arg("--project").arg(project);
+        }
+        cmd.arg("--stdio");
+        if let Some(home) = home {
+            cmd.env("HOME", home);
+        }
         if mock_llm {
             cmd.env(
                 trusty_code::task::mock_llm::MOCK_LLM_ENV,

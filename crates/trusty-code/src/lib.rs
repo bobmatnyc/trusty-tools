@@ -230,6 +230,20 @@ pub mod provider;
 /// Test: `project_context::tests::*`.
 pub mod project_context;
 
+/// The typed project binding — projectless / non-git dir / git repo.
+///
+/// Why: "project" was one concept split across two disagreeing API surfaces —
+/// `task.run` demanded a path it could not omit, `session.create` accepted a
+/// label it could not index. Projectless was therefore inexpressible, which made
+/// the shell's entry state (spec DOC-39 screen 7a) unimplementable. This module
+/// is the single object both surfaces now converge on.
+/// What: `ProjectBinding` (`None` | `Directory` | `GitRepo`), `BindingError`,
+/// and `is_git_worktree` — the crate's one git-detection implementation.
+/// Binding is NOT gated on `.git`: a non-git directory is a bound, indexing
+/// state (#2728/#2747).
+/// Test: `binding::tests::*`.
+pub mod binding;
+
 // ── Phase 4 orchestration layer (per #1028) ──
 
 /// Multi-turn agent loop driving an LLM through tool calls to completion.

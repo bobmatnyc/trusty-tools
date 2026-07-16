@@ -56,6 +56,14 @@ reqwest = { workspace = true }
 # Bash tool: process-group kill on Unix (setsid / kill syscalls)
 libc = { workspace = true }
 
+# `binding::ProjectBinding::agents_dir`: a projectless daemon has no project
+# root to resolve `.claude/agents` from, so it falls back to the USER-level
+# `~/.claude/agents` (Claude Code's own user-level agents location). Falling
+# back to the process CWD instead would silently bind to a directory the
+# operator never chose — the exact implicit-binding bug `ProjectBinding` exists
+# to prevent.
+dirs = { workspace = true }
+
 # verify_gate (#2279): matches a `bash` tool call's command against the
 # finalized test-invocation patterns (`pytest\s+\S+`, `cargo test`, …).
 # Also powers the `grep` exploration tool's content regex matching (#1027).

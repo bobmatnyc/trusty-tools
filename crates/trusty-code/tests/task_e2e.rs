@@ -267,3 +267,124 @@ async fn task_run_then_get_transcript_exposes_turns_usage_and_cost() {
 
     daemon.shutdown_via_eof_and_assert_clean_exit().await;
 }
+
+// ── Projectless + the three binding states (spec DOC-39 §4.2/§5.5) ────────────
+
+/// **The Bob-mandated state, end to end.** A daemon started with NO `--project`
+/// must run a task to completion without panicking.
+///
+/// Why: this exact invocation was IMPOSSIBLE before — `tcode serve`'s
+/// `--project` was a required `PathBuf` and `task.run`'s project a required
+/// path, so the shell's entry screen (7a) had no reachable API state to render.
+/// Both halves are proven here: the daemon starts projectless, and `task.run`
+/// runs against it.
+/// What: spawns projectless with `$HOME` pointed at a user-level agents fixture
+/// (the documented projectless `agents_dir` fallback), runs a task to
+/// completion, and asserts the session reports the `projectless` binding state
+/// with a null root and finishes cleanly.
+#[tokio::test]
+async fn projectless_task_runs_end_to_end() {
+    let home = support::home_with_user_level_agents();
+    let mut daemon = StdioSession::spawn_projectless_with_mock_llm(home.path());
+
+    let session_id = run_task_to_completion(&mut daemon, "just chat, no project").await;
+
+    let status = daemon
+        .call(3, "session.status", json!({"session_id": session_id}))
+        .await;
+    assert!(status["error"].is_null(), "session.status failed: {status}");
+    let result = &status["result"];
+
+    assert_eq!(
+        result["binding"]["state"], "projectless",
+        "a daemon started without --project must report the projectless binding: {result}"
+    );
+    assert!(
+        result["binding"]["root"].is_null(),
+        "projectless must carry a null root: {result}"
+    );
+    assert!(
+        result["project"].is_null(),
+        "projectless must have no derived project label: {result}"
+    );
+    assert_eq!(
+        result["status"], "finished",
+        "a projectless run must reach `finished`, not fail: {result}"
+    );
+
+    daemon.shutdown_via_eof_and_assert_clean_exit().await;
+}
+
+/// A NON-GIT directory must BIND (state `directory`) — it must NOT be treated
+/// as projectless.
+///
+/// Why: this is the correction the spec makes to the design proposal, whose own
+/// text says binding happens "the moment work touches files in a git repo".
+/// That git-only rule would exclude the non-git working dirs (#2728) and temp
+/// dirs (#2747) we deliberately ship. `project_with_agents` returns a plain
+/// tempdir with no `.git`, so this asserts the shipped behaviour over the wire.
+#[tokio::test]
+async fn non_git_project_binds_as_directory_not_projectless() {
+    let project = project_with_agents();
+    let mut daemon = StdioSession::spawn_with_mock_llm(project.path());
+
+    let session_id = run_task_to_completion(&mut daemon, "say hi").await;
+    let status = daemon
+        .call(3, "session.status", json!({"session_id": session_id}))
+        .await;
+    let result = &status["result"];
+
+    assert_eq!(
+        result["binding"]["state"], "directory",
+        "a non-git dir MUST bind as `directory` — binding is not gated on .git: {result}"
+    );
+    assert_ne!(
+        result["binding"]["state"], "projectless",
+        "a non-git dir is NOT projectless: {result}"
+    );
+    assert!(
+        !result["binding"]["root"].is_null(),
+        "a bound non-git dir must carry its root: {result}"
+    );
+    assert!(
+        !result["project"].is_null(),
+        "a bound project must have a derived label: {result}"
+    );
+
+    daemon.shutdown_via_eof_and_assert_clean_exit().await;
+}
+
+/// A GIT repo must bind as `git_repo` — the third state, distinguished from a
+/// plain directory so git-only affordances can be offered (and, for the other
+/// two states, hidden rather than faked).
+#[tokio::test]
+async fn git_project_binds_as_git_repo() {
+    let project = project_with_agents();
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project.path())
+        .arg("init")
+        .output()
+        .expect("git init must run")
+        .status
+        .success();
+    assert!(ok, "git init must succeed");
+
+    let mut daemon = StdioSession::spawn_with_mock_llm(project.path());
+    let session_id = run_task_to_completion(&mut daemon, "say hi").await;
+    let status = daemon
+        .call(3, "session.status", json!({"session_id": session_id}))
+        .await;
+    let result = &status["result"];
+
+    assert_eq!(
+        result["binding"]["state"], "git_repo",
+        "a git worktree must bind as `git_repo`: {result}"
+    );
+    assert!(
+        !result["binding"]["root"].is_null(),
+        "a bound git repo must carry its root: {result}"
+    );
+
+    daemon.shutdown_via_eof_and_assert_clean_exit().await;
+}
