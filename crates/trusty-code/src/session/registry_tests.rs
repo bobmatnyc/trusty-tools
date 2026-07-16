@@ -1218,3 +1218,194 @@ async fn memory_sink_for_projectless_session_returns_none() {
         "a projectless session must have no project-scoped memory palace"
     );
 }
+
+// ── #2784 / epic #2343: index readiness + working-context budget ───────────────
+
+/// Build an `IndexReadiness` with the given per-lane flags.
+fn readiness(
+    lifecycle: &str,
+    chunks: u64,
+    lexical: bool,
+    semantic: bool,
+) -> trusty_common::search_readiness::IndexReadiness {
+    trusty_common::search_readiness::IndexReadiness {
+        index_id: "repo".into(),
+        lifecycle_status: lifecycle.into(),
+        chunk_count: chunks,
+        lexical_ready: lexical,
+        semantic_ready: semantic,
+        graph_ready: false,
+    }
+}
+
+/// A still-warming index must publish `state: "warming"` with the per-lane
+/// flags intact.
+#[tokio::test]
+async fn record_index_readiness_warming_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    let r = readiness("indexed_lexical", 4096, true, false);
+    registry
+        .record_index_readiness(&session.id, Some(&r), &r.summary())
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "index_readiness");
+    assert!(matches!(
+        envelope.event,
+        Event::IndexReadiness { state, lexical_ready, semantic_ready, chunk_count, .. }
+            if state == "warming" && lexical_ready && !semantic_ready && chunk_count == Some(4096)
+    ));
+}
+
+/// A fully-warm index must publish `state: "ready"`.
+#[tokio::test]
+async fn record_index_readiness_ready_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    let r = readiness("ready", 50_000, true, true);
+    registry
+        .record_index_readiness(&session.id, Some(&r), &r.summary())
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert!(matches!(
+        envelope.event,
+        Event::IndexReadiness { state, semantic_ready, .. }
+            if state == "ready" && semantic_ready
+    ));
+}
+
+/// THE acceptance criterion (#2784): a WARMING index and a READY index with
+/// zero chunks must be distinguishable — they produce identical empty search
+/// results but mean opposite things.
+///
+/// Why: this is the exact failure the daily-driver probe hit. `search_code`
+/// returned empty during semantic warm-up, the model read that as "nothing
+/// there", and hand-explored to the WRONG target. A consumer must be able to
+/// tell "I can't see it YET" from "it isn't there" — and a `chunk_count` of 0
+/// alone can't: a ready-but-empty index and a warming one both report few/no
+/// hits. The `state` discriminant is what carries the distinction, so this
+/// pins that the two cases never serialise to the same signal.
+/// What: emit a warming index and a ready-with-zero-chunks index, and assert
+/// their `state` values differ (`"warming"` vs `"ready"`) even though both
+/// would back an empty search.
+/// Test: this test.
+#[tokio::test]
+async fn warming_index_is_distinguishable_from_ready_with_zero_hits() {
+    let registry = SessionRegistry::new();
+    // Both sessions must exist BEFORE subscribing: `create` itself publishes
+    // `session_started`/`session_status_changed` on the same session_id the
+    // filter below matches on, which would otherwise be the first envelope
+    // read back instead of the readiness event under test.
+    let warming_session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let ready_session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    let warming = readiness("walking", 0, false, false);
+    registry
+        .record_index_readiness(&warming_session.id, Some(&warming), &warming.summary())
+        .unwrap();
+    let warming_ev = next_event_for(&mut events, &warming_session.id).await;
+
+    // Ready, fully warm, but the repo genuinely has nothing indexed.
+    let ready = readiness("ready", 0, true, true);
+    registry
+        .record_index_readiness(&ready_session.id, Some(&ready), &ready.summary())
+        .unwrap();
+    let ready_ev = next_event_for(&mut events, &ready_session.id).await;
+
+    let state_of = |ev: &Event| match ev {
+        Event::IndexReadiness { state, .. } => state.clone(),
+        other => panic!("expected index_readiness, got {other:?}"),
+    };
+    let warming_state = state_of(&warming_ev.event);
+    let ready_state = state_of(&ready_ev.event);
+
+    assert_eq!(warming_state, "warming");
+    assert_eq!(ready_state, "ready");
+    assert_ne!(
+        warming_state, ready_state,
+        "a cold/warming index MUST NOT look like a ready index with zero hits — \
+         they mean opposite things"
+    );
+}
+
+/// A `None` probe (fail-open: no daemon / no derivable id) must publish
+/// `state: "unavailable"` rather than being swallowed — an unqueryable index
+/// is also not evidence of absence.
+#[tokio::test]
+async fn record_index_readiness_unavailable_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_index_readiness(&session.id, None, "no daemon")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "index_readiness");
+    assert!(matches!(
+        envelope.event,
+        Event::IndexReadiness { state, index_id, chunk_count, semantic_ready, .. }
+            if state == "unavailable"
+                && index_id.is_none()
+                && chunk_count.is_none()
+                && !semantic_ready
+    ));
+}
+
+/// Recording readiness against an unknown session must error, not panic.
+#[tokio::test]
+async fn record_index_readiness_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    assert!(registry.record_index_readiness("nope", None, "x").is_err());
+}
+
+/// `record_context_budget` must publish a `ContextBudget` event mapping the
+/// snapshot field-for-field.
+#[tokio::test]
+async fn record_context_budget_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    let snapshot = crate::agent_loop::ContextBudgetSnapshot {
+        context_window: 200_000,
+        overhead_tokens: 50_000,
+        overhead_cap_tokens: 80_000,
+        working_context_pct: 75,
+        overhead_pct: 25,
+        within_budget: true,
+        fired: true,
+        rounds: 2,
+    };
+    registry
+        .record_context_budget(&session.id, &snapshot)
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "context_budget");
+    assert!(matches!(
+        envelope.event,
+        Event::ContextBudget {
+            context_window_tokens,
+            overhead_tokens,
+            working_context_pct,
+            within_budget,
+            compaction_fired,
+            compaction_rounds,
+            ..
+        } if context_window_tokens == 200_000
+            && overhead_tokens == 50_000
+            && working_context_pct == 75
+            && within_budget
+            && compaction_fired
+            && compaction_rounds == 2
+    ));
+}

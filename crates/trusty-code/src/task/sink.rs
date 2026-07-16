@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::agent_loop::ToolEventSink;
+use crate::agent_loop::{ContextBudgetSnapshot, ToolEventSink};
 use crate::session::SessionRegistry;
 
 /// Forwards `AgentLoop` tool-dispatch hooks to a specific session's
@@ -74,6 +74,19 @@ impl ToolEventSink for SessionToolEventSink {
             .record_tool_error(&self.session_id, tool, call_id, error)
         {
             tracing::warn!(session_id = %self.session_id, tool, call_id, "record_tool_error failed: {e}");
+        }
+    }
+
+    /// Forward the per-turn working-context measurement to this session's
+    /// event stream (epic #2343). Same log-and-swallow contract as the tool
+    /// hooks above: a vanished session must never fault the PM's turn
+    /// boundary — telemetry is not worth failing the work it observes.
+    async fn context_budget(&self, snapshot: &ContextBudgetSnapshot) {
+        if let Err(e) = self
+            .registry
+            .record_context_budget(&self.session_id, snapshot)
+        {
+            tracing::warn!(session_id = %self.session_id, "record_context_budget failed: {e}");
         }
     }
 }
@@ -133,5 +146,44 @@ mod tests {
         sink.tool_started("c", "bash", "x").await;
         sink.tool_finished("c", "bash", true, "x").await;
         sink.tool_error("c", "bash", "x").await;
+        sink.context_budget(&budget_snapshot()).await;
+    }
+
+    /// A representative budget snapshot for the sink tests.
+    fn budget_snapshot() -> ContextBudgetSnapshot {
+        ContextBudgetSnapshot {
+            context_window: 200_000,
+            overhead_tokens: 50_000,
+            overhead_cap_tokens: 80_000,
+            working_context_pct: 75,
+            overhead_pct: 25,
+            within_budget: true,
+            fired: false,
+            rounds: 1,
+        }
+    }
+
+    /// The `context_budget` hook must reach the session's event stream as a
+    /// `context_budget` event carrying the measured figures (epic #2343).
+    ///
+    /// Why: this is the last link in the chain that makes the Infinite
+    /// Sessions guarantee renderable — `agent_loop` measures it, this sink is
+    /// what binds it to a session and publishes it.
+    #[tokio::test]
+    async fn forwards_context_budget() {
+        let registry = Arc::new(SessionRegistry::new());
+        let session = registry.create("t".to_string(), None, None);
+        let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
+        let mut events = crate::events::subscribe();
+
+        sink.context_budget(&budget_snapshot()).await;
+
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "context_budget");
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::ContextBudget { working_context_pct, overhead_tokens, .. }
+                if working_context_pct == 75 && overhead_tokens == 50_000
+        ));
     }
 }

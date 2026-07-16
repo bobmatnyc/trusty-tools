@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{
-    AgentLoop, AgentLoopConfig, AgentLoopError, CadenceConfig, CompactionConfig, ToolEventSink,
-    Transcript,
+    AgentLoop, AgentLoopConfig, AgentLoopError, CadenceConfig, CompactionConfig,
+    ContextBudgetSnapshot, ToolEventSink, Transcript,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
@@ -2048,3 +2048,6 @@ async fn run_with_transcript_does_not_clobber_finish_task_summary() {
         out.content
     );
 }
+
+#[path = "budget_tests.rs"]
+mod budget_tests;

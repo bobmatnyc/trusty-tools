@@ -393,3 +393,115 @@ fn assert_view_pairing_intact(view: &[ChatMessage]) {
         );
     }
 }
+
+// ── Epic #2343: measured overhead + the ratio helpers a UI renders ─────────────
+
+/// `CadenceOutcome.overhead_tokens` must be the REAL post-enforcement
+/// measurement of the model-facing transcript, not a projection.
+///
+/// Why: this is the number a UI's working-context indicator renders. If it
+/// drifted from what `estimate_total_tokens` actually reports for the
+/// transcript the loop is about to send, the indicator would lie about the
+/// Infinite Sessions guarantee it exists to make visible.
+/// What: build a transcript, run one cadence turn well under budget, and
+/// assert the reported `overhead_tokens` equals an INDEPENDENT
+/// `estimate_total_tokens` of the same transcript afterwards.
+/// Test: this test.
+#[test]
+fn outcome_reports_measured_overhead_tokens() {
+    let mut t = Transcript::seed("system", "task");
+    for i in 0..4 {
+        push_sized_turn(&mut t, i, 50);
+    }
+    let cfg = CadenceConfig::default();
+    let outcome = maybe_cadence_compress(
+        &mut t,
+        &cfg,
+        CompactionConfig::default().keep_last_messages,
+        200_000,
+    );
+
+    assert!(outcome.within_budget, "well under a 80K cap");
+    assert_eq!(
+        outcome.overhead_tokens,
+        estimate_total_tokens(&t.to_messages()),
+        "reported overhead must match an independent measurement of the same transcript"
+    );
+    assert!(
+        outcome.overhead_tokens > 0,
+        "a seeded transcript costs tokens"
+    );
+}
+
+/// `overhead_pct` is the overhead's share of the window; `working_context_pct`
+/// is its complement.
+///
+/// Why: the epic states the guarantee as a ratio ("overhead <= 40%, working
+/// context >= 60%"); these helpers are the one place that arithmetic lives, so
+/// every consumer's meter agrees.
+/// What: a synthetic outcome at exactly 25% of the window.
+/// Test: this test.
+#[test]
+fn overhead_pct_is_ratio_of_window() {
+    let o = CadenceOutcome {
+        fired: false,
+        rounds: 0,
+        within_budget: true,
+        overhead_tokens: 50_000,
+    };
+    assert_eq!(o.overhead_pct(200_000), 25);
+    assert_eq!(o.working_context_pct(200_000), 75);
+}
+
+/// The two percentages must always sum to 100, at any measurement.
+#[test]
+fn working_and_overhead_pct_sum_to_100() {
+    for overhead_tokens in [0, 1, 7_919, 80_000, 199_999, 200_000] {
+        let o = CadenceOutcome {
+            fired: false,
+            rounds: 0,
+            within_budget: true,
+            overhead_tokens,
+        };
+        assert_eq!(
+            o.overhead_pct(200_000) as usize + o.working_context_pct(200_000) as usize,
+            100,
+            "percentages must sum to 100 at overhead_tokens={overhead_tokens}"
+        );
+    }
+}
+
+/// The ratio helpers must saturate rather than overflow, and must never
+/// divide by zero.
+///
+/// Why: `overhead_tokens` can legitimately exceed the window on cadence's
+/// documented floor (pinned content alone over budget), and a context window
+/// of 0 is what an unresolved model would yield — a panicking budget helper
+/// would take down the PM's turn boundary to report telemetry.
+/// What: an over-window measurement clamps to 100/0; a zero window reads as
+/// fully consumed (the conservative interpretation) instead of panicking.
+/// Test: this test.
+#[test]
+fn pct_helpers_saturate_and_never_divide_by_zero() {
+    let over = CadenceOutcome {
+        fired: false,
+        rounds: 0,
+        within_budget: false,
+        overhead_tokens: 500_000,
+    };
+    assert_eq!(over.overhead_pct(200_000), 100, "clamps, never wraps");
+    assert_eq!(over.working_context_pct(200_000), 0);
+
+    let unknown_window = CadenceOutcome {
+        fired: false,
+        rounds: 0,
+        within_budget: true,
+        overhead_tokens: 10,
+    };
+    assert_eq!(
+        unknown_window.overhead_pct(0),
+        100,
+        "zero window must not panic"
+    );
+    assert_eq!(unknown_window.working_context_pct(0), 0);
+}

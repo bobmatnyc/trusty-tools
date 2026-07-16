@@ -70,7 +70,7 @@ pub use compaction::CompactionConfig;
 pub(crate) use compaction::estimate_tokens;
 pub use error::AgentLoopError;
 pub use goals::{GOAL_SLOT_COUNT, GoalSlot, GoalSlotError, GoalSlots, GoalSource};
-pub use sink::ToolEventSink;
+pub use sink::{ContextBudgetSnapshot, ToolEventSink};
 pub use transcript::Transcript;
 
 /// Verify-before-finish gate hook (#2279): inspects the run's own
@@ -467,7 +467,7 @@ impl AgentLoop {
             // that keeps working context under budget so #2070's threshold
             // compactor below becomes a backstop rather than the primary
             // token-efficiency path.
-            self.maybe_cadence_compress(transcript);
+            self.maybe_cadence_compress(transcript).await;
 
             // #2070: compaction check, same turn boundary as the cancellation
             // check above — never mid-tool-call. Runs AFTER cadence so it
@@ -756,12 +756,20 @@ impl AgentLoop {
     /// transcript ended within budget — a notable-but-normal event (routine
     /// scheduled compression), not a failure, hence `info` rather than
     /// `warn`. The budget-floor-exceeded case is already `warn!`-logged
-    /// inside `cadence::enforce_budget` itself.
+    /// inside `cadence::enforce_budget` itself. The SAME outcome is also
+    /// forwarded to `self.sink` (when one is attached) as a
+    /// [`ContextBudgetSnapshot`], so a `session.attach`ed UI can render a live
+    /// budget indicator. Emission sits AFTER both guards above, which is what
+    /// keeps it PM-only for free: only `task::executor::run_and_record`'s
+    /// persistent-session PM loop sets `cadence: Some(_)`, so a delegated
+    /// engineer loop never emits.
     /// Test: `agent_loop::tests::cadence_disabled_by_default`,
     /// `agent_loop::tests::cadence_never_fires_in_parity_mode`,
     /// `agent_loop::tests::cadence_fires_in_daily_driver_when_configured`,
-    /// `agent_loop::tests::cadence_fire_logs_info`.
-    fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
+    /// `agent_loop::tests::cadence_fire_logs_info`,
+    /// `agent_loop::tests::cadence_emits_context_budget_snapshot`,
+    /// `agent_loop::tests::no_context_budget_event_when_cadence_disabled`.
+    async fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
         if self.config.mode != HarnessMode::DailyDriver {
             return;
         }
@@ -782,6 +790,21 @@ impl AgentLoop {
                 "agent_loop: cadence compression fired (#2346)"
             );
         }
+
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        sink.context_budget(&ContextBudgetSnapshot {
+            context_window,
+            overhead_tokens: outcome.overhead_tokens,
+            overhead_cap_tokens: cadence_cfg.overhead_cap_tokens(context_window),
+            working_context_pct: outcome.working_context_pct(context_window),
+            overhead_pct: outcome.overhead_pct(context_window),
+            within_budget: outcome.within_budget,
+            fired: outcome.fired,
+            rounds: outcome.rounds,
+        })
+        .await;
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.

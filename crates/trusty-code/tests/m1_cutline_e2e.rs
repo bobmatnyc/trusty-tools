@@ -69,16 +69,51 @@ use support::{
 /// precedes the engineer's, and the engineer's `tool_finished` necessarily
 /// precedes the PM's own — followed by the terminal status transition and
 /// `session_done`.
+///
+/// `context_budget` (epic #2343) is equally deterministic: the PM's loop
+/// measures its working-context budget at EVERY turn boundary, before that
+/// turn's LLM call, so one lands ahead of each of the PM's two turns. That
+/// there are exactly TWO of them — and not one per engineer turn as well —
+/// is this baseline's end-to-end proof of cadence's PM-only gating: the
+/// delegated engineer's loop shares this very same event sink but keeps
+/// `AgentLoopConfig.cadence: None`, so it never emits.
+///
+/// `index_readiness` is deliberately NOT in this sequence: it is produced by
+/// the detached, fail-open index-warming thread, which races the run by
+/// construction (that is the whole point — a slow trusty-search daemon must
+/// never block a task). Its arrival point is therefore genuinely
+/// nondeterministic, and pinning it into an ordered baseline would encode a
+/// race as a contract. The readiness event's own content/state mapping is
+/// pinned by `session::registry::registry_tests::record_index_readiness_*`
+/// instead; see `filter_async_kinds`.
 const BASELINE_EVENT_KINDS: &[&str] = &[
     "session_started",
     "session_status_changed",
-    "tool_started",  // PM: delegate_to_agent
-    "tool_started",  // engineer: bash
-    "tool_finished", // engineer: bash
-    "tool_finished", // PM: delegate_to_agent
+    "context_budget", // PM turn 1 boundary (cadence measures before the call)
+    "tool_started",   // PM: delegate_to_agent
+    "tool_started",   // engineer: bash
+    "tool_finished",  // engineer: bash
+    "tool_finished",  // PM: delegate_to_agent
+    "context_budget", // PM turn 2 boundary
     "session_status_changed",
     "session_done",
 ];
+
+/// Drop event kinds that are asynchronous BY CONSTRUCTION and therefore have
+/// no deterministic position in the stream.
+///
+/// Why: `index_readiness` comes from the detached index-warming thread, so it
+/// can legitimately land anywhere relative to the run — including after
+/// `session_done`. Asserting an exact ordered sequence that included it would
+/// be flaky by design. Filtering it here keeps the baseline a statement about
+/// the run's DETERMINISTIC lifecycle spine while letting the async event exist.
+/// What: returns `kinds` minus every async kind.
+fn filter_async_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    kinds
+        .into_iter()
+        .filter(|k| *k != "index_readiness")
+        .collect()
+}
 
 /// The exact transcript role sequence the standard mock script produces —
 /// part of the regression baseline.
@@ -187,7 +222,8 @@ async fn m1_cutline_full_scenario_over_stdio() {
 
     // ── REGRESSION BASELINE: exact ordered event-kind sequence ──────────
     assert_eq!(
-        kinds, BASELINE_EVENT_KINDS,
+        filter_async_kinds(kinds.iter().map(String::as_str)),
+        BASELINE_EVENT_KINDS,
         "event-kind sequence regressed from the pinned baseline"
     );
 
@@ -328,8 +364,16 @@ async fn m1_cutline_full_scenario_over_http() {
     let frames = parse_sse_frames(&String::from_utf8_lossy(&buffer));
     let (first_seq, last_seq) = assert_envelopes_contiguous(&frames);
     assert_eq!(first_seq, 1);
-    assert_eq!(last_seq, BASELINE_EVENT_KINDS.len() as u64);
-    let kinds: Vec<&str> = frames.iter().map(|f| f["kind"].as_str().unwrap()).collect();
+    // `seq` is assigned to EVERY recorded event, including any async
+    // `index_readiness` that happened to land inside this window — so pin
+    // contiguity against what was actually streamed rather than against the
+    // deterministic baseline's length (see `filter_async_kinds`).
+    assert_eq!(
+        last_seq as usize,
+        frames.len(),
+        "per-session seq must run contiguously 1..=N over every streamed envelope"
+    );
+    let kinds = filter_async_kinds(frames.iter().map(|f| f["kind"].as_str().unwrap()));
     assert_eq!(
         kinds, BASELINE_EVENT_KINDS,
         "HTTP transport's event-kind sequence must match the SAME baseline as STDIO"

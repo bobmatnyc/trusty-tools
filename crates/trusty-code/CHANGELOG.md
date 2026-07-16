@@ -119,6 +119,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     ordinary typed error. Recorded as a module doc comment so it is not later
     "fixed".
 
+- **`index_readiness` event — a warming index is no longer indistinguishable from
+  "ready, zero hits" (UI Phase-1, follows [#2784](https://github.com/bobmatnyc/trusty-tools/issues/2784)).**
+  The per-lane index readiness `trusty_common::search_readiness` already computed
+  at task start was stderr-only, so no API consumer — including tcode's own SPA —
+  could reach it. The daemon path now publishes it as `Event::IndexReadiness`
+  (replayable through the session ring buffer, streamed over
+  `GET /sessions/{id}/events`). Its `state` field (`"ready"` | `"warming"` |
+  `"unavailable"`) is the fix for the concrete failure this addresses: during
+  semantic warm-up a search returns EMPTY, which looks identical to a fully-ready
+  index that genuinely has no match — opposite meanings that led a model to
+  conclude "nothing there" and hand-explore to the wrong target. A UI must not
+  render "no results" unless `state == "ready"`. Per-lane
+  `lexical_ready`/`semantic_ready`/`graph_ready` flags, `lifecycle_status`, and
+  `chunk_count` ship alongside. The CLI (`run-task`) path is unchanged and stays
+  log-only; `probe_index_readiness`'s fail-open contract is preserved — a `None`
+  probe reports `state: "unavailable"` (also not evidence of absence) rather than
+  going silent.
+- **`context_budget` event — the Infinite Sessions guarantee is now renderable
+  (epic [#2343](https://github.com/bobmatnyc/trusty-tools/issues/2343)).**
+  `agent_loop::cadence` enforces "working context >= 60%, session overhead <= 40%"
+  every single turn and returned a `CadenceOutcome` documented as existing "for
+  observability/tests" — which the sole call site then discarded, so nothing could
+  observe the guarantee it enforces. The outcome now carries the REAL measured
+  `overhead_tokens` (`enforce_budget` returns the `estimate_total_tokens` value it
+  already had to compute, rather than dropping it) and is published as
+  `Event::ContextBudget`: context window, measured overhead, cap, and the derived
+  `working_context_pct`/`overhead_pct` a live budget meter renders, plus
+  `compaction_fired`/`compaction_rounds` to make a compaction legible as *removed
+  from context, not from the record*. Emitted only by the PM's persistent-session
+  loop — cadence's PM-only gating (`AgentLoopConfig.cadence` defaults `None`) is
+  unchanged, so a delegated engineer loop never emits.
 - **Build provenance in `--version` and `tcode_report.json`** — `tcode --version`
   now prints the git SHA and commit date alongside the semver
   (`tcode 0.2.0 (b20adfca 2026-07-16)`), and `tcode_report.json` carries a

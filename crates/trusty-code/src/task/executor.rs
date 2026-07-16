@@ -236,14 +236,43 @@ async fn run_and_record(
     // non-blocking, and git-optional (git is a nice-to-have, not required) —
     // reuses the ONE shared helper (see
     // `run_task::ensure_project_indexed_in_background`) so the daemon and CLI
-    // paths can never diverge. Gated on `should_index` so a projectless run
-    // never indexes its throwaway scratch root — note the gate is
-    // `should_index`, i.e. "is a project bound", NOT "is it git": a non-git
-    // directory DOES index (#2728/#2747).
+    // paths can never diverge.
+    //
+    // Unlike the CLI path, this daemon path OWNS a session, so it also
+    // publishes the resulting readiness as an `Event::IndexReadiness` (#2784
+    // UI Phase-1): the UI is a thin client over this daemon, so a warming
+    // index is only renderable if it arrives as an event. Without it a
+    // mid-warm-up empty search is indistinguishable from a ready index with
+    // genuinely zero hits — opposite meanings, identical wire shape.
+    //
+    // Gated on `should_index` so a projectless run never indexes its
+    // throwaway scratch root — note the gate is `should_index`, i.e. "is a
+    // project bound", NOT "is it git": a non-git directory DOES index
+    // (#2728/#2747).
     if params.binding.should_index() {
-        crate::run_task::ensure_project_indexed_in_background(work_root.clone());
+        let registry = Arc::clone(&registry);
+        let session_id = session_id.clone();
+        crate::run_task::ensure_project_indexed_in_background(
+            work_root.clone(),
+            Some(Box::new(move |readiness| {
+                let summary = match &readiness {
+                    Some(r) => r.summary(),
+                    None => "trusty-search index readiness unknown: no reachable daemon — \
+                             search results may be incomplete and an empty result is not \
+                             evidence of absence"
+                        .to_string(),
+                };
+                if let Err(e) =
+                    registry.record_index_readiness(&session_id, readiness.as_ref(), &summary)
+                {
+                    // The session finishing before this detached probe lands is
+                    // an ordinary race, not a fault — log and drop, exactly as
+                    // the tool-event sink does.
+                    tracing::debug!(session_id = %session_id, "record_index_readiness skipped: {e}");
+                }
+            })),
+        );
     }
-
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
     let sink: Arc<dyn ToolEventSink> = Arc::new(SessionToolEventSink::new(
         Arc::clone(&registry),
