@@ -285,6 +285,24 @@ pub struct Finding {
     /// deserialising unchanged (backward-compatible `None` default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_citation: Option<String>,
+    /// Whether this finding is a core algorithmic-correctness bug provable from
+    /// the diff itself — as opposed to speculation about external
+    /// framework/library/platform behavior (#PR84 grading-calibration fix).
+    ///
+    /// Why: RULE 1 of the #PR84 fix — a finding may carry `high`/`critical`
+    /// effort (i.e. drive the deterministic BLOCK floor) ONLY if it is either
+    /// backed by a `source_citation` OR is a core algorithmic-correctness issue
+    /// argued from the code under review (a logic/data/security bug provable from
+    /// the diff).  This flag carries the latter signal from the LLM JSON to
+    /// `grade::correctness_floor`.  It defaults to `false` (FAIL-CLOSED): an
+    /// un-flagged, un-cited High finding is treated as advisory (capped at the
+    /// Medium tier) and can never force BLOCK — closing the PR #84 hole where a
+    /// single FALSE, non-citable framework claim self-tagged `effort: high` and
+    /// hard-clamped the verdict to BLOCK.  `#[serde(default)]` keeps every
+    /// pre-#PR84 serialised finding — and any model/provider that omits it —
+    /// deserialising as `false`.
+    #[serde(default)]
+    pub code_provable: bool,
     // ── Transient pipeline state ──────────────────────────────────────────
     /// Verification outcome; `None` before the verification round.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +339,7 @@ impl Finding {
             effort,
             category: FindingCategory::Correctness,
             source_citation: None,
+            code_provable: false,
             verified: None,
             issue_eligible: false,
         }

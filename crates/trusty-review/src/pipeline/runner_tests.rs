@@ -1433,7 +1433,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
     let llm_response = r#"Review with confirmed critical finding.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 10","severity":"high","confidence":0.95,"file":"src/auth.rs","line":10}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 10","severity":"high","confidence":0.95,"file":"src/auth.rs","line":10,"code_provable":true}]}
 ```"#;
     let (source, _tmp) = local_diff_source("+fn auth(t: &str) {}\n");
     let config = default_config();

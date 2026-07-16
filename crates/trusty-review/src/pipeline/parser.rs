@@ -107,6 +107,13 @@ struct LlmFinding {
     /// fixture — still parse.
     #[serde(default)]
     source_citation: Option<String>,
+    /// Core-algorithmic-correctness flag (#PR84): `true` when the model asserts
+    /// this is a logic/data/security bug provable from the diff itself (not
+    /// external framework/platform speculation).  `#[serde(default)]` → `false`
+    /// (fail-closed) so models that omit it — and every pre-#PR84 fixture — still
+    /// parse and are treated as non-escalation-eligible unless cited.
+    #[serde(default)]
+    code_provable: bool,
 }
 
 // ─── Parsed output ────────────────────────────────────────────────────────────
@@ -353,6 +360,10 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     // Carry the spec/ticket source citation through (#1419); normalise
     // empty/whitespace-only strings to None.
     finding.source_citation = f.source_citation.filter(|s| !s.trim().is_empty());
+    // Carry the core-algorithmic-correctness flag through (#PR84); the verdict
+    // floor uses it (OR a source_citation) to decide whether a High finding may
+    // drive the BLOCK floor.
+    finding.code_provable = f.code_provable;
     finding
 }
 

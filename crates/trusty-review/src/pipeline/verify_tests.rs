@@ -94,6 +94,11 @@ impl LlmProvider for FailingVerifier {
 fn finding(effort: Effort, confidence: f32) -> Finding {
     let mut f = Finding::new("src/a.rs", "logic", "a bug", "fix it", confidence, effort);
     f.line = Some(10);
+    // #PR84: a genuine High finding must be escalation-eligible (cited or
+    // diff-provable) to drive the BLOCK floor.  These verification tests model
+    // real, diff-provable correctness bugs, so mark them `code_provable` to
+    // preserve their pre-#PR84 BLOCK-floor behaviour.
+    f.code_provable = true;
     f
 }
 
@@ -224,6 +229,36 @@ fn rederive_keeps_confirmed_block() {
         verdict,
         Verdict::Block,
         "a confirmed High finding must keep the BLOCK floor (path a)"
+    );
+}
+
+/// #PR84 adversarial-review follow-up (item 6): a CONFIRMED High finding that
+/// FAILS the citability gate (uncited, non-diff-provable — the exact PR #84
+/// shape post-verification: `verified: Confirmed`, no `source_citation`, not
+/// `code_provable`) must NOT pin `primary_verdict` as a hard BLOCK floor via
+/// path (a) — `any_confirmed_high` now requires `drives_block_floor`, so this
+/// routes to path (a2) instead, which independently re-derives via
+/// `derive_verdict` rather than treating the disqualified confirmation as an
+/// unconditional floor.
+///
+/// Why: previously `any_confirmed_high` used a bare `f.effort == Effort::High`
+/// check, so this exact scenario selected path (a) and pinned `primary_verdict`
+/// (here, a self-reported BLOCK) regardless of citability.  `derive_verdict`'s
+/// own #PR84 RULE 2 gate provides a downstream safety net that already prevents
+/// an outright ungated BLOCK from this path, but the path (a) vs (a2) baseline
+/// selection should independently agree with the citability rule rather than
+/// relying solely on that downstream net.
+#[test]
+fn rederive_confirmed_but_disqualified_high_does_not_pin_block() {
+    let mut f = finding(Effort::High, 0.95);
+    f.code_provable = false; // disqualify: no citation, not diff-provable
+    apply_outcome(&mut f, VerifyOutcome::Confirmed);
+    let verdict = rederive_verdict(Verdict::Block, true, false, &[f]);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84: a confirmed-but-disqualified (uncited, non-diff-provable) High \
+         finding must not pin primary_verdict as a hard BLOCK floor via path (a)"
     );
 }
 

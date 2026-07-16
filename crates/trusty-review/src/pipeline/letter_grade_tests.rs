@@ -221,6 +221,82 @@ fn clamp_grade_to_verdict_stricter_grade_kept() {
     assert_eq!(clamped, Grade::DMinus);
 }
 
+// ── reconcile_grade_with_verdict (#PR84 RULE 2 adversarial-review MEDIUM fix) ──
+
+/// The reproduction: grade `F` (implies BLOCK) alongside an actual verdict of
+/// REQUEST_CHANGES (RULE 2 downgraded a self-reported BLOCK) must be capped
+/// DOWN to the strictest grade still consistent with REQUEST_CHANGES (D-) —
+/// NOT left at F.  `clamp_grade_to_verdict` alone leaves it at F (verified: the
+/// bare `clamp_grade_to_verdict(F, RequestChanges)` call below still returns F,
+/// confirming this is genuinely a new code path, not a redundant assertion).
+#[test]
+fn reconcile_grade_caps_too_strict_grade_down() {
+    // Confirms clamp_grade_to_verdict alone does NOT fix this (the bug this
+    // test guards against).
+    assert_eq!(
+        clamp_grade_to_verdict(Grade::F, &Verdict::RequestChanges),
+        Grade::F,
+        "sanity: clamp_grade_to_verdict alone leaves an over-severe grade unchanged"
+    );
+
+    let reconciled = reconcile_grade_with_verdict(Grade::F, &Verdict::RequestChanges);
+    assert_eq!(
+        reconciled,
+        Grade::DMinus,
+        "an over-severe grade F must be raised to D- (the floor of the \
+         REQUEST_CHANGES band) when the actual verdict is only REQUEST_CHANGES"
+    );
+    assert_eq!(verdict_for_grade(reconciled), Verdict::RequestChanges);
+}
+
+/// Every band's floor grade, for completeness.
+#[test]
+fn reconcile_grade_caps_too_strict_grade_down_every_band() {
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::F, &Verdict::Approve),
+        Grade::BMinus
+    );
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::F, &Verdict::ApproveWithReservations),
+        Grade::CMinus
+    );
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::F, &Verdict::RequestChanges),
+        Grade::DMinus
+    );
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::F, &Verdict::Block),
+        Grade::F
+    );
+}
+
+/// The "too optimistic" direction still delegates to `clamp_grade_to_verdict`
+/// unchanged — this fix must not alter existing behaviour for that direction.
+#[test]
+fn reconcile_grade_delegates_when_too_optimistic() {
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::A, &Verdict::Block),
+        clamp_grade_to_verdict(Grade::A, &Verdict::Block),
+    );
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::A, &Verdict::Block),
+        Grade::F
+    );
+}
+
+/// A grade already consistent with the actual verdict is returned unchanged.
+#[test]
+fn reconcile_grade_noop_when_consistent() {
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::BMinus, &Verdict::Approve),
+        Grade::BMinus
+    );
+    assert_eq!(
+        reconcile_grade_with_verdict(Grade::F, &Verdict::Block),
+        Grade::F
+    );
+}
+
 // ── is_shallow_clean_review (#1877) ───────────────────────────────────────────
 
 /// A large diff (well above the min-diff-len floor) approved with zero

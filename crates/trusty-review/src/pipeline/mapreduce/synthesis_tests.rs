@@ -96,7 +96,23 @@ fn stats_one_reviewed() -> MapReduceStats {
     }
 }
 
+/// A finding that is escalation-eligible by default (`code_provable = true`).
+///
+/// Why: (#PR84 adversarial-review follow-up) `apply_synthesis_floor`'s Tier 1
+/// now requires a High-effort finding to be escalation-eligible (cited or
+/// diff-provable — `grade::drives_block_floor`) to drive BLOCK.  These tests
+/// model GENUINE, diff-provable bugs, so the shared helper marks them
+/// `code_provable` to preserve each test's original intent.  The dedicated
+/// #PR84-shape regression tests below use `speculative_finding` instead.
 fn finding(kind: &str, desc: &str, effort: Effort, conf: f32) -> Finding {
+    let mut f = Finding::new("src/a.rs", kind, desc, "", conf, effort);
+    f.code_provable = true;
+    f
+}
+
+/// A finding with NO escalation grounding — external framework/library/platform
+/// speculation, the PR #84 failure mode (adversarial-review follow-up).
+fn speculative_finding(kind: &str, desc: &str, effort: Effort, conf: f32) -> Finding {
     Finding::new("src/a.rs", kind, desc, "", conf, effort)
 }
 
@@ -212,6 +228,79 @@ async fn synthesis_high_severity_still_floors() {
         result.verdict,
         Verdict::Block,
         "High-severity safety floor must prevent synthesis from softening to APPROVE"
+    );
+}
+
+/// #PR84 adversarial-review follow-up (item 1, CRITICAL): the map-reduce
+/// synthesis floor is a live path for large diffs (`runner.rs` →
+/// `run_mapreduce_branch` → `synthesize_review`) that does NOT call
+/// `derive_verdict` at all — it is a hand-rolled floor.  An adversarial review
+/// found the original bare `f.effort == Effort::High` test here left the exact
+/// PR #84 mis-grade fully reproducible on this path even after
+/// `grade::correctness_floor` was fixed.  Reproduces the PR #84 shape (a single
+/// uncited, non-diff-provable High finding) through `apply_synthesis_floor` and
+/// asserts it does NOT force BLOCK.
+#[tokio::test]
+async fn synthesis_pr84_uncited_high_does_not_block() {
+    let findings = vec![speculative_finding(
+        "framework-claim",
+        "unsupported framework routing claim",
+        Effort::High,
+        0.95,
+    )];
+    let reduced = reduced_with_findings(Verdict::Block, findings);
+
+    // Synthesis tries to soften to APPROVE.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"A","summary":"Looks fine overall."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_ne!(
+        result.verdict,
+        Verdict::Block,
+        "#PR84: an uncited, non-diff-provable High finding must NOT force BLOCK \
+         through the map-reduce synthesis floor"
+    );
+}
+
+/// #PR84 adversarial-review follow-up (item 1) companion: a CONFIDENT
+/// (`> floor_min_confidence()`) uncited High finding demotes to at least
+/// REQUEST_CHANGES through the synthesis floor's Tier 1.5 — mirroring
+/// `correctness_floor` Tier 2's demoted-High treatment — never BLOCK, and never
+/// silently dropped either.
+#[tokio::test]
+async fn synthesis_confident_uncited_high_floors_to_request_changes() {
+    let findings = vec![speculative_finding(
+        "framework-claim",
+        "unsupported framework routing claim",
+        Effort::High,
+        0.95,
+    )];
+    let reduced = reduced_with_findings(Verdict::Approve, findings);
+
+    // Synthesis tries to soften all the way to APPROVE.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"A","summary":"Looks fine overall."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "#PR84: a confident uncited High finding must floor to REQUEST_CHANGES \
+         (Tier 1.5) through the synthesis path, never BLOCK and never silently \
+         dropped to APPROVE"
     );
 }
 

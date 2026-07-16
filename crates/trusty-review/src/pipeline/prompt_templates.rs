@@ -64,9 +64,13 @@ mod tests {
         assert!(!SYSTEM_PROMPT_STOCK.ends_with('\n'));
         assert!(!SYSTEM_PROMPT_COVERAGE_GATING.ends_with('\n'));
 
-        // Frozen byte lengths of the original inline literals.
-        assert_eq!(SYSTEM_PROMPT_STOCK.len(), 8811);
-        assert_eq!(SYSTEM_PROMPT_COVERAGE_GATING.len(), 9127);
+        // Frozen byte lengths (updated in #PR84: both prompts gained the
+        // citable-findings gate + author-gated rule + the `code_provable` field
+        // docs; then the daemon-native inline citation grammar — Gap #1 of the
+        // #PR84 follow-up; then the `code_provable` worked examples —
+        // adversarial-review item 4).
+        assert_eq!(SYSTEM_PROMPT_STOCK.len(), 14104);
+        assert_eq!(SYSTEM_PROMPT_COVERAGE_GATING.len(), 14420);
 
         // The coverage-gating variant is distinguished by its coverage-floor note.
         assert!(SYSTEM_PROMPT_COVERAGE_GATING.contains("deterministic\ncoverage floor"));
