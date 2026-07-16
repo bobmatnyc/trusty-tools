@@ -946,9 +946,11 @@ fn inject_native_resolves_managed_registry_from_real_home() {
     // `<workspace>/.trusty-tools/trusty-mpm/claude-config/.claude.json` (never
     // present in a fresh clone) and silently injected nothing — invisible in CI
     // because the older tests only drove the hermetic `_from` core against a
-    // tempdir. This test drives the ACTUAL `for_managed_workspace` construction
-    // + real-home resolution end-to-end: it FAILS against the old (fw-relative)
-    // code and PASSES after the fix.
+    // tempdir. This test builds `fw` via `for_managed_workspace` only to assert
+    // (as a precondition below) that the fw-relative path the OLD code read is
+    // empty, then drives the real-`$HOME` resolution the PRODUCTION injector
+    // actually uses: it FAILS against the old (fw-relative) code and PASSES
+    // after the fix.
     let home = tempdir().unwrap();
     let ws_root = tempdir().unwrap();
     // A realistic managed workspace path: <root>/<owner>/<repo>/<session-id>.
