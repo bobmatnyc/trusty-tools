@@ -36,8 +36,12 @@
 //!
 //! Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
 //! `ensure_project_indexed_none_for_root`, the `index_is_fresh_*` predicate
-//! tests, and the `index_files_inner_*` / `relative_index_path_*` /
-//! `index_file_request_body_*` tests in the `tests` module below.
+//! tests, the `index_files_inner_*` / `relative_index_path_*` /
+//! `index_file_request_body_*` tests, and the incremental-hardening tests
+//! `retry_backoff_is_bounded_and_increasing` /
+//! `post_index_file_retries_transient_send_failure` /
+//! `post_index_file_exhausts_retries_and_returns_send_failed` in the `tests`
+//! module below.
 
 use std::path::Path;
 
@@ -148,10 +152,13 @@ pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]
 /// What: derives `(root, index_id)` via [`crate::resolve_project_root`] /
 /// [`crate::derive_index_id`]; returns early (logged at debug) when the id is
 /// empty or [`crate::resolve_daemon_base_url`] finds no running daemon;
-/// otherwise, for each path, resolves it against `root`, reads its current
-/// content from disk (an unreadable file — e.g. deleted since the write —
-/// is logged at debug and skipped, not fatal to the batch), and POSTs it via
-/// [`best_effort_index_one_file`]. Every step fails open.
+/// otherwise builds ONE pooled HTTP client for the whole batch (issue #2785:
+/// so multiple files in a `write_files` batch reuse keep-alive connections
+/// instead of a fresh TCP connect per file) and, for each path, resolves it
+/// against `root`, reads its current content from disk (an unreadable file —
+/// e.g. deleted since the write — is logged at debug and skipped, not fatal to
+/// the batch), and POSTs it via [`best_effort_index_one_file`] (which itself
+/// retries transient send failures with backoff). Every step fails open.
 /// Test: `index_files_inner_is_noop_for_empty_paths`,
 /// `index_files_inner_skips_when_index_id_empty`,
 /// `index_files_inner_skips_gracefully_when_daemon_down`.
@@ -177,6 +184,18 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
         return;
     };
 
+    // One client per batch (#2785): reqwest keeps a connection pool per client,
+    // so reusing it across the batch's files lets rapid successive writes ride
+    // existing keep-alive connections instead of paying a fresh TCP connect
+    // (and its transient-failure risk) per file. Fail open if it cannot build.
+    let client = match build_index_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("skipping incremental index update: could not build HTTP client: {e}");
+            return;
+        }
+    };
+
     for path in paths {
         let abs = if path.is_absolute() {
             path.clone()
@@ -194,7 +213,7 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
                 continue;
             }
         };
-        best_effort_index_one_file(&base, &index_id, &rel, &content);
+        best_effort_index_one_file(&client, &base, &index_id, &rel, &content);
     }
 }
 
@@ -218,48 +237,165 @@ fn relative_index_path(root: &Path, abs: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// Build the pooled blocking HTTP client used for incremental index updates.
+///
+/// Why: extracted so [`index_files_inner`] builds exactly ONE client per batch
+/// (issue #2785 connection reuse) and so the retry test can construct an
+/// identically-configured client.
+/// What: a `reqwest::blocking::Client` with a 2s overall / 750ms connect
+/// timeout — tight caps because this runs on a mid-task detached thread and
+/// must never stall a long task when the daemon is slow. reqwest maintains an
+/// idle-connection pool per client, so reusing the returned client across a
+/// batch's files amortises TCP/handshake setup.
+/// Test: covered indirectly by `post_index_file_retries_transient_send_failure`
+/// (which builds and drives one), and by the daemon-down fail-open path in
+/// `index_files_inner_skips_gracefully_when_daemon_down`.
+fn build_index_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_millis(750))
+        .build()
+}
+
+/// Max attempts (initial try + retries) for a single per-file index POST.
+///
+/// Why: issue #2785 — under sustained mid-task load the per-file HTTP call sees
+/// transient send failures (connection resets / connect races under rapid
+/// repeated writes). A tiny bounded retry recovers the vast majority of them.
+/// What: 3 total attempts.
+/// Latency note: the SLEEP this adds beyond a single attempt is only
+/// [`retry_backoff`]'s sum (~200ms across 3 attempts) — cheap when failures
+/// are the fast connect-refused/reset kind this fix targets. But that is NOT
+/// the worst-case TOTAL latency: each attempt still carries
+/// [`build_index_client`]'s own per-call timeout (2s overall / 750ms connect),
+/// and a *slow-but-reachable* daemon can consume the full 2s on every attempt
+/// before erroring or hanging up. Worst case against such a daemon is
+/// therefore ~3 × 2s + ~200ms backoff ≈ **6.2s for a single file**, on the
+/// batch's detached thread — never on the tool-executor's return path, but
+/// worth knowing before shrinking timeouts or raising `MAX_INDEX_ATTEMPTS`.
+/// Test: `retry_backoff_is_bounded_and_increasing`.
+const MAX_INDEX_ATTEMPTS: u32 = 3;
+
+/// Backoff to sleep BEFORE retry `attempt` (1-based) of a per-file index POST.
+///
+/// Why: a transient send failure under load often clears within tens of
+/// milliseconds once the daemon drains the burst; a short exponential backoff
+/// spaces retries without materially slowing the task. Kept as a pure function
+/// so the schedule is unit-testable without any I/O.
+/// What: `50ms * 3^(attempt-1)`, capped at 1s — i.e. 50ms before the 2nd try,
+/// 150ms before the 3rd. Saturating arithmetic keeps it panic-free for any
+/// `attempt`.
+/// Test: `retry_backoff_is_bounded_and_increasing`.
+fn retry_backoff(attempt: u32) -> std::time::Duration {
+    let factor = 3u64.saturating_pow(attempt.saturating_sub(1));
+    let millis = 50u64.saturating_mul(factor).min(1000);
+    std::time::Duration::from_millis(millis)
+}
+
+/// Outcome of a per-file index POST, surfaced so tests can assert the
+/// retry-then-succeed AND retry-exhaustion paths without scraping logs.
+///
+/// Why: [`post_index_file_with_retries`] is otherwise pure I/O; returning a
+/// small enum lets tests prove both that a transient send failure is retried
+/// and ultimately succeeds, and that persistent failure is reported (not
+/// silently hung or panicked) once attempts are exhausted.
+/// What: `Indexed` (2xx), `HttpStatus` (non-2xx — not retried; a 4xx/404 for an
+/// unknown index won't fix itself), or `SendFailed` (transport error on every
+/// attempt).
+/// Test: `post_index_file_retries_transient_send_failure`,
+/// `post_index_file_exhausts_retries_and_returns_send_failed`.
+#[derive(Debug, PartialEq, Eq)]
+enum IndexOutcome {
+    Indexed,
+    HttpStatus(u16),
+    SendFailed,
+}
+
+/// POST a single file's `{path, content}` to `url`, retrying transient send
+/// failures with [`retry_backoff`] up to [`MAX_INDEX_ATTEMPTS`] times.
+///
+/// Why: issue #2785 — a single transport-level `send()` failure (connection
+/// reset/connect race under rapid concurrent writes) previously dropped the
+/// update entirely. Retrying transport errors (but NOT HTTP non-2xx, which
+/// will not self-heal) recovers those transient failures.
+/// What: reuses the caller-supplied pooled `client`; on a transport `Err` it
+/// sleeps [`retry_backoff`] and retries (until attempts are exhausted → returns
+/// `SendFailed`); a 2xx returns `Indexed` immediately; any other status returns
+/// `HttpStatus` immediately (no retry). Never panics, never propagates. See
+/// [`MAX_INDEX_ATTEMPTS`]'s doc comment for the latency distinction between
+/// the ~200ms of added backoff SLEEP and the much larger (~6.2s) worst-case
+/// TOTAL wall time this function can spend against a slow-but-up daemon,
+/// since each of the 3 attempts carries its own 2s/750ms client timeout.
+/// Test: `post_index_file_retries_transient_send_failure`,
+/// `post_index_file_exhausts_retries_and_returns_send_failed`.
+fn post_index_file_with_retries(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    body: &serde_json::Value,
+) -> IndexOutcome {
+    let mut last_err: Option<reqwest::Error> = None;
+    for attempt in 0..MAX_INDEX_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(retry_backoff(attempt));
+        }
+        match client.post(url).json(body).send() {
+            Ok(resp) if resp.status().is_success() => return IndexOutcome::Indexed,
+            Ok(resp) => return IndexOutcome::HttpStatus(resp.status().as_u16()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if let Some(e) = &last_err {
+        tracing::debug!(
+            "per-file index POST to {url} failed after {MAX_INDEX_ATTEMPTS} attempts: {e}"
+        );
+    }
+    IndexOutcome::SendFailed
+}
+
 /// POST `/indexes/{id}/index-file` for a single file; failures are logged,
 /// never propagated.
 ///
 /// Why: mirrors [`best_effort_create_index`]'s fail-open contract for the
-/// per-file endpoint.
-/// What: issues a short-timeout blocking `POST
-/// {base}/indexes/{index_id}/index-file` with body `{path, content}` (built
-/// by [`index_file_request_body`]). Unlike [`best_effort_create_index`],
-/// this does NOT spawn-and-join its own nested OS thread: it is only ever
-/// reached from inside [`index_files_inner`]'s own detached thread (spawned
-/// by [`index_files_best_effort`]), which is already off any tokio runtime,
-/// so a direct blocking call here cannot trigger the "cannot drop a runtime
-/// in a context where blocking is not allowed" panic — nesting another
-/// spawn+join per file would only double the thread count for no benefit. A
-/// non-2xx response (including 404 for an unregistered/unknown index — e.g.
-/// the daemon restarted since task start) or transport error is logged at
-/// warn and swallowed.
+/// per-file endpoint, hardened for issue #2785 (retry + connection reuse).
+/// What: delegates to [`post_index_file_with_retries`] using the pooled
+/// `client` [`index_files_inner`] built once for the batch (so rapid writes
+/// reuse keep-alive connections). Unlike [`best_effort_create_index`], this
+/// does NOT spawn-and-join its own nested OS thread: it is only ever reached
+/// from inside [`index_files_inner`]'s own detached thread (spawned by
+/// [`index_files_best_effort`]), which is already off any tokio runtime, so a
+/// direct blocking call here cannot trigger the "cannot drop a runtime in a
+/// context where blocking is not allowed" panic. A non-2xx response (including
+/// 404 for an unregistered/unknown index — e.g. the daemon restarted since task
+/// start) is logged at warn; a transport error surviving all retries is logged
+/// at warn. Both are swallowed.
 /// Test: exercised via `index_files_inner_skips_gracefully_when_daemon_down`
-/// (daemon-down path, never reaches this function); the live HTTP path is
-/// covered by integration use.
-fn best_effort_index_one_file(base: &str, index_id: &str, rel_path: &str, content: &str) {
+/// (daemon-down path, never reaches this function) and
+/// `post_index_file_retries_transient_send_failure` (retry path); the live HTTP
+/// success path is covered by integration use.
+fn best_effort_index_one_file(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    index_id: &str,
+    rel_path: &str,
+    content: &str,
+) {
     let url = format!("{base}/indexes/{index_id}/index-file");
     let body = index_file_request_body(rel_path, content);
 
-    let result = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .connect_timeout(std::time::Duration::from_millis(750))
-        .build()
-        .and_then(|client| client.post(&url).json(&body).send());
-
-    match result {
-        Ok(resp) if resp.status().is_success() => {
+    match post_index_file_with_retries(client, &url, &body) {
+        IndexOutcome::Indexed => {
             tracing::debug!("incrementally indexed '{rel_path}' into '{index_id}'");
         }
-        Ok(resp) => {
+        IndexOutcome::HttpStatus(status) => {
             tracing::warn!(
-                "incremental index update for '{rel_path}' in '{index_id}' returned HTTP {}",
-                resp.status()
+                "incremental index update for '{rel_path}' in '{index_id}' returned HTTP {status}"
             );
         }
-        Err(e) => {
-            tracing::warn!("incremental index update for '{rel_path}' in '{index_id}' failed: {e}");
+        IndexOutcome::SendFailed => {
+            tracing::warn!(
+                "incremental index update for '{rel_path}' in '{index_id}' failed after \
+                 {MAX_INDEX_ATTEMPTS} attempts"
+            );
         }
     }
 }
@@ -756,5 +892,144 @@ mod tests {
             "last_indexed": "not-a-timestamp",
         })));
         assert!(!index_is_fresh(&serde_json::json!({})));
+    }
+
+    /// The per-file index retry backoff schedule is bounded, capped, and
+    /// strictly increasing across the small attempt range we actually use.
+    ///
+    /// Why: issue #2785's retry loop must add only a small, predictable stall
+    /// to a mid-task write (worst case ~200ms over 3 attempts) and never
+    /// overflow for a large `attempt`. Pinning the schedule prevents a future
+    /// edit from silently turning a best-effort retry into a multi-second stall.
+    /// What: asserts the exact first three delays (50/150/450ms), that they
+    /// increase, and that a very large attempt saturates to the 1s cap rather
+    /// than panicking or overflowing.
+    /// Test: this test.
+    #[test]
+    fn retry_backoff_is_bounded_and_increasing() {
+        use std::time::Duration;
+        assert_eq!(retry_backoff(1), Duration::from_millis(50));
+        assert_eq!(retry_backoff(2), Duration::from_millis(150));
+        assert_eq!(retry_backoff(3), Duration::from_millis(450));
+        assert!(retry_backoff(2) > retry_backoff(1));
+        assert!(retry_backoff(3) > retry_backoff(2));
+        // Saturating + capped: no panic/overflow, never exceeds 1s.
+        assert_eq!(retry_backoff(100), Duration::from_millis(1000));
+    }
+
+    /// Shared driver for the two per-file-retry regression tests below: binds
+    /// an ephemeral 127.0.0.1 listener, runs `server_fn` on it in a background
+    /// thread (which reports how many connections it accepted via the given
+    /// `Sender`), then drives [`post_index_file_with_retries`] against it.
+    /// Kept as one helper (rather than duplicating the listener/client/join
+    /// boilerplate per test) so both tests stay under the file's SLOC cap and
+    /// so their setup can never silently drift apart.
+    fn drive_retry_test(
+        server_fn: impl FnOnce(std::net::TcpListener, std::sync::mpsc::Sender<usize>) + Send + 'static,
+    ) -> (IndexOutcome, usize) {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || server_fn(listener, tx));
+
+        let client = build_index_client().unwrap();
+        let url = format!("http://{addr}/indexes/test-index/index-file");
+        let body = index_file_request_body("src/main.rs", "fn main() {}\n");
+        let outcome = post_index_file_with_retries(&client, &url, &body);
+
+        let accepted = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server thread should have reported an accepted-connection count");
+        let _ = server.join();
+        (outcome, accepted)
+    }
+
+    /// A transient send failure on the per-file index POST is retried and the
+    /// update ultimately succeeds (issue #2785 regression test).
+    ///
+    /// Why: this is the exact failure #2785 reports — under rapid repeated
+    /// writes the per-file HTTP call intermittently fails at the transport
+    /// layer. Before the fix a single such failure dropped the update; the fix
+    /// retries transport errors with backoff. We reproduce a transport failure
+    /// deterministically via [`drive_retry_test`] with a server that drops the
+    /// FIRST connection (no HTTP response → reqwest `send()` returns `Err`)
+    /// then answers 200 on the SECOND.
+    /// What: asserts the outcome is `Indexed` and that exactly two connections
+    /// were made (one failed attempt + one successful retry).
+    /// Test: this test.
+    #[test]
+    fn post_index_file_retries_transient_send_failure() {
+        use std::io::{Read, Write};
+
+        let (outcome, accepted) = drive_retry_test(|listener, tx| {
+            let mut accepted = 0usize;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                accepted += 1;
+                if accepted == 1 {
+                    // Transient send failure: accept then close with no
+                    // response, so the client's send() errors at the
+                    // transport layer.
+                    drop(stream);
+                    continue;
+                }
+                // Successful retry: consume the request, answer 200.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+                let _ = stream.flush();
+                let _ = tx.send(accepted);
+                break;
+            }
+        });
+
+        // Must recover via retry: Indexed, with exactly 2 connections (1
+        // failed attempt + 1 successful retry).
+        assert_eq!(outcome, IndexOutcome::Indexed);
+        assert_eq!(accepted, 2);
+    }
+
+    /// When every attempt hits a transient send failure, `SendFailed` is
+    /// reported after exactly [`MAX_INDEX_ATTEMPTS`] attempts — the retry loop
+    /// terminates and fails open rather than retrying forever or panicking.
+    ///
+    /// Why: pins the OTHER half of the fail-open contract that
+    /// `post_index_file_retries_transient_send_failure` does not cover — that
+    /// path only proves recovery WHEN a retry succeeds. A daemon that stays
+    /// unreachable/broken for the whole attempt budget must still terminate
+    /// promptly with `SendFailed`, so callers up the stack (which log-and-swallow)
+    /// are never left hanging. Code-critic review on PR #2796 flagged this gap.
+    /// What: via [`drive_retry_test`], with a server that accepts and
+    /// immediately drops EVERY connection (no HTTP response, so `send()`
+    /// errors on every attempt); asserts the outcome is `SendFailed` and that
+    /// exactly [`MAX_INDEX_ATTEMPTS`] connections were accepted (one per
+    /// attempt, no more, no less).
+    /// Test: this test.
+    #[test]
+    fn post_index_file_exhausts_retries_and_returns_send_failed() {
+        let (outcome, accepted) = drive_retry_test(|listener, tx| {
+            let mut accepted = 0usize;
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                accepted += 1;
+                // Every connection fails transiently: accept then close with
+                // no response, so the client's send() errors every time.
+                drop(stream);
+                if accepted >= MAX_INDEX_ATTEMPTS as usize {
+                    let _ = tx.send(accepted);
+                    break;
+                }
+            }
+        });
+
+        // Must fail open with SendFailed after exactly MAX_INDEX_ATTEMPTS
+        // attempts — no more, no less.
+        assert_eq!(outcome, IndexOutcome::SendFailed);
+        assert_eq!(accepted, MAX_INDEX_ATTEMPTS as usize);
     }
 }
