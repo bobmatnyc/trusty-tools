@@ -65,7 +65,10 @@ pub struct ReactivateQuery {
 /// pane. This route gives that path a dedicated, non-destructive transition —
 /// [`crate::session_manager::SessionManager::mark_reactivated`] only flips the
 /// record's state.
-/// What: 404 when the id is unknown; on a non-`Stopped` record, tries
+/// What: 404 when the id is unknown; `mark_reactivated` accepts `Stopped` or
+/// `Decommissioned` (#2777 — reviving a decommissioned session's lingering pane
+/// in place, see `mark_reactivated`'s doc); on any OTHER non-reactivatable
+/// state, tries
 /// [`reconcile_stale_active_then_reactivate`] (#2453) before giving up — this
 /// closes the up-to-60s window where a pane's `claude` process has already
 /// exited but the periodic reap tick (or a racing `SessionEnd` hook) has not

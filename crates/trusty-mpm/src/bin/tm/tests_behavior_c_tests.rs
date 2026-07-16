@@ -26,10 +26,11 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    CwdProject, classify_cwd_project, cwd_owns_git_entry, derive_project, fallback_protected,
-    github_host, inplace_self_relaunch_hint, is_github_remote, ls_tree_reports_tracked_dir,
-    nested_guard_notice, nested_managed_match, non_github_refusal_message, pane_identity_confirmed,
-    print_non_tty_hint, print_project_context, tty_gate, untracked_ancestor_message,
+    CwdProject, NestedFallbackAction, classify_cwd_project, cwd_owns_git_entry, derive_project,
+    fallback_protected, github_host, inplace_self_relaunch_hint, is_github_remote,
+    ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice, nested_managed_match,
+    non_github_refusal_message, pane_identity_confirmed, print_non_tty_hint, print_project_context,
+    tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -1801,6 +1802,43 @@ fn pane_identity_confirmed_false_when_inherited_env_but_different_pane_id() {
         sibling_window_current_pane_id,
         healed_record_pane_id
     ));
+}
+
+// ── nested_fallback_action (#2777 decommissioned-relaunch dead-end fix) ──────
+// When the nested-session guard matched by tmux SESSION name but could NOT
+// confirm pane identity, the pre-#2777 fallback ALWAYS reconnected
+// (switch-client) — a no-op dead-end when the session is DEAD (the operator is
+// already inside the session being "reconnected" to, and nothing live is there).
+// `nested_fallback_action` splits dead states (relaunch in place) from
+// possibly-live states (reconnect a sibling window).
+
+#[test]
+fn nested_fallback_action_relaunches_dead_states() {
+    // The reported bug: bare `tm` inside a `decommissioned` session must NOT
+    // switch-client to itself. Stopped/errored share the "no live runtime" trait
+    // and must relaunch in place too rather than take the destructive daemon
+    // /resume path a plain reconnect would reach.
+    for state in ["decommissioned", "stopped", "errored"] {
+        assert_eq!(
+            nested_fallback_action(state),
+            NestedFallbackAction::RelaunchInPlace,
+            "dead state {state:?} must relaunch in place, not switch-client to self"
+        );
+    }
+}
+
+#[test]
+fn nested_fallback_action_reconnects_live_states() {
+    // A possibly-live session (its runtime may be in a genuinely different
+    // sibling window of the same tmux session) must keep the switch-client
+    // reconnect — that is NOT a self no-op, it brings the live pane forward.
+    for state in ["active", "provisioning", "running", "some-future-state"] {
+        assert_eq!(
+            nested_fallback_action(state),
+            NestedFallbackAction::Reconnect,
+            "possibly-live state {state:?} must reconnect (default), not relaunch"
+        );
+    }
 }
 
 // ── nested_guard_notice (sibling-window hijack fix, follow-up to #2456) ─────

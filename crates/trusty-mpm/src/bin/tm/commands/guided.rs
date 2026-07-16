@@ -149,21 +149,63 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             }
         }
 
-        // Session-name-only match: the operator is in a DIFFERENT pane/window of
-        // the SAME tmux session (not the record's own pane), so a switch-client
-        // reconnect to the managed session is legitimate — not a self no-op.
-        // Preserve the pre-existing refuse+reconnect behavior for that case.
-        // Terminal entry point (not a loop) — the `AttachOutcome` only matters to
-        // a looping caller like `run_tty_picker` (#2678); here, the hand-off (or
-        // fail-closed skip) is this call's whole job, so discard it.
-        eprintln!(
-            "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
-            record.name,
-            record.state,
-            nested_guard_notice(&record.name)
-        );
-        super::guided_resume::resume_guided_session(client, url, &record).await?;
-        return Ok(());
+        // Session-name-only match: the operator is in the SAME tmux session but
+        // NOT (provably) the record's own pane. #2777: split on liveness.
+        match nested_fallback_action(&record.state) {
+            // Dead session (decommissioned/stopped/errored): a switch-client
+            // reconnect to the session the operator is already inside is a
+            // guaranteed no-op dead-end (the reported bug). Relaunch the agent in
+            // THIS pane via the same daemon-authorized primitive the
+            // pane-confirmed branch above uses. Safe WITHOUT pane-identity
+            // confirmation precisely because a dead session has no live runtime
+            // anywhere to hijack (the whole point of that gate) — and the
+            // daemon's `reactivate` round-trip remains the sole authority: a
+            // refusal folds into `FallThrough` → an honest self-relaunch hint,
+            // never an unconditional exec.
+            NestedFallbackAction::RelaunchInPlace => {
+                let current_pane_id = super::tmux_attach::current_tmux_pane_id();
+                match super::guided_inplace::run_inplace_relaunch(
+                    client,
+                    url,
+                    &record.id,
+                    record.clone(),
+                    current_pane_id.as_deref(),
+                )
+                .await
+                {
+                    super::guided_inplace::InPlaceOutcome::Result(Ok(())) => return Ok(()),
+                    super::guided_inplace::InPlaceOutcome::Result(Err(e)) => {
+                        eprintln!("tm: in-place relaunch failed ({e})");
+                        eprintln!("{}", inplace_self_relaunch_hint(&record));
+                        return Ok(());
+                    }
+                    super::guided_inplace::InPlaceOutcome::FallThrough => {
+                        eprintln!(
+                            "tm: in-place relaunch unavailable for '{}' (state={})",
+                            record.name, record.state
+                        );
+                        eprintln!("{}", inplace_self_relaunch_hint(&record));
+                        return Ok(());
+                    }
+                }
+            }
+            // Live session: a sibling window may hold the live runtime, so a
+            // switch-client reconnect legitimately brings it forward — not a self
+            // no-op. Preserve the pre-existing refuse+reconnect behavior.
+            // Terminal entry point (not a loop) — the `AttachOutcome` only matters
+            // to a looping caller like `run_tty_picker` (#2678); here, the
+            // hand-off (or fail-closed skip) is this call's whole job, so discard it.
+            NestedFallbackAction::Reconnect => {
+                eprintln!(
+                    "tm: this tmux session ('{}') is already a managed session (state={}) — {}",
+                    record.name,
+                    record.state,
+                    nested_guard_notice(&record.name)
+                );
+                super::guided_resume::resume_guided_session(client, url, &record).await?;
+                return Ok(());
+            }
+        }
     }
 
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
@@ -415,6 +457,50 @@ pub(crate) fn pane_identity_confirmed(
     match (current_pane_id, record_pane_id) {
         (Some(cur), Some(rec)) => cur == rec,
         _ => false,
+    }
+}
+
+/// The action the nested-session guard takes when it matched a record by tmux
+/// SESSION name but could NOT confirm pane-level identity
+/// ([`pane_identity_confirmed`] was `false`).
+///
+/// Why: the pre-#2777 fallback ALWAYS reconnected (switch-client) to the matched
+/// session. That is correct when the session has a live runtime in a sibling
+/// window — the switch brings it forward. But when the session is DEAD
+/// (decommissioned/stopped/errored), there is no live runtime anywhere in that
+/// tmux session, so a switch-client to the session the operator is already
+/// inside is a guaranteed no-op dead-end (the reported bug: bare `tm` inside a
+/// `decommissioned` `tm-apex-01` printed "switching client to session
+/// 'tm-apex-01'" and stranded the operator in the bare shell). Splitting the two
+/// cases lets the dead case relaunch the agent in place instead.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NestedFallbackAction {
+    /// The matched session has no live runtime — relaunch the agent in the
+    /// current pane (a reconnect would be a self no-op).
+    RelaunchInPlace,
+    /// The matched session may have a live runtime in a sibling window —
+    /// switch-client reconnect brings it forward.
+    Reconnect,
+}
+
+/// Pure decision for the nested-guard fallback: relaunch-in-place vs reconnect,
+/// derived solely from the matched record's `state`.
+///
+/// Why: isolating the classification from the daemon/tmux I/O makes the
+/// dead-vs-live decision exhaustively unit-testable (#2777), mirroring the
+/// `switch_decision`-style pure seam pattern (#2680).
+/// What: dead/tombstone states with no live runtime
+/// (`decommissioned`/`stopped`/`errored`) →
+/// [`NestedFallbackAction::RelaunchInPlace`]; every other state
+/// (`active`/`provisioning`/`running`/unknown) → the safe default
+/// [`NestedFallbackAction::Reconnect`], preserving the pre-#2777 behavior for a
+/// possibly-live sibling window.
+/// Test: `nested_fallback_action_relaunches_dead_states`,
+/// `nested_fallback_action_reconnects_live_states` in `tests_behavior_c_tests.rs`.
+pub(crate) fn nested_fallback_action(state: &str) -> NestedFallbackAction {
+    match state {
+        "decommissioned" | "stopped" | "errored" => NestedFallbackAction::RelaunchInPlace,
+        _ => NestedFallbackAction::Reconnect,
     }
 }
 

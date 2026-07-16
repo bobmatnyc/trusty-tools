@@ -71,8 +71,71 @@ async fn mark_reactivated_flips_stopped_to_active() {
     assert_eq!(after.state, ManagedSessionState::Active);
 }
 
-/// `mark_reactivated` must reject any state other than `Stopped` — in
-/// particular it must not silently re-mark an already-`Active` session.
+/// `mark_reactivated` must also flip a `Decommissioned` record back to `Active`
+/// IN PLACE, with no tmux mutation (#2777).
+///
+/// Why: after a session is decommissioned, its tmux pane can linger as a bare
+/// shell printing "run `tm` to relaunch this session". When the operator does
+/// exactly that from inside that pane, a switch-client reconnect to the session
+/// they are already in is a no-op dead-end. Reviving the tombstone in place —
+/// no `create_session`/`kill_session` — is the only non-destructive way to
+/// honor that on-screen instruction (the pane survives to `exec` `claude`).
+/// What: seeds a record, forces it `Decommissioned` via `set_workspace`, then
+/// asserts `mark_reactivated` flips it to `Active` and calls neither
+/// `create_session` nor `kill_session`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn mark_reactivated_flips_decommissioned_to_active() {
+    let dir = TempDir::new().unwrap();
+    let workspace_dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(workspace_dir.path().to_owned()),
+            None,
+            Some(workspace_dir.path().to_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    mgr.set_workspace(
+        &record.id,
+        workspace_dir.path().to_owned(),
+        ManagedSessionState::Decommissioned,
+    )
+    .await
+    .expect("force Decommissioned");
+
+    let kill_calls_before = fake.kill_calls.lock().unwrap().len();
+    let create_calls_before = fake.create_cwd_calls.lock().unwrap().len();
+
+    let reactivated = mgr
+        .mark_reactivated(&record.id)
+        .await
+        .expect("reactivate decommissioned");
+    assert_eq!(
+        reactivated.state,
+        ManagedSessionState::Active,
+        "mark_reactivated must flip Decommissioned -> Active (#2777)"
+    );
+    assert_eq!(
+        fake.kill_calls.lock().unwrap().len(),
+        kill_calls_before,
+        "mark_reactivated must NEVER call kill_session"
+    );
+    assert_eq!(
+        fake.create_cwd_calls.lock().unwrap().len(),
+        create_calls_before,
+        "mark_reactivated must NEVER call create_session"
+    );
+}
+
+/// `mark_reactivated` must reject any state other than `Stopped`/`Decommissioned`
+/// — in particular it must not silently re-mark an already-`Active` session.
 ///
 /// Why: this guards against a stray/duplicate reactivate call (e.g. two
 /// bare-`tm` invocations racing in the same pane) silently succeeding twice.
