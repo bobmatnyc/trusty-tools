@@ -22,12 +22,14 @@
 //! (registry-level) and `tests/session_e2e.rs`/`tests/task_e2e.rs`
 //! (API-driven, real daemon).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 
 use super::registry::SessionRegistry;
@@ -148,13 +150,16 @@ struct SessionIdParams {
 }
 
 /// `params` shape for `session.create`.
+///
+/// `project` is now a project PATH, not the free-form label it used to be — see
+/// [`create`]'s docs for the reconciliation and its compatibility implications.
 #[derive(Deserialize)]
 struct CreateParams {
     task: String,
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
-    project: Option<String>,
+    project: Option<PathBuf>,
 }
 
 /// `params` shape for `session.send`.
@@ -174,11 +179,30 @@ fn parse<T: DeserializeOwned>(params: Value, method: &str) -> Result<T, RpcError
 ///
 /// Why: mints a brand-new daemon-owned session.
 /// What: validates `task` is non-empty (`-32003 invalid_argument`
-/// otherwise), then delegates to `SessionRegistry::create`. The returned
-/// `Session` already has `status: "running"` — see `session::model`'s docs
-/// on why M1 has no queued/created-but-not-running state.
+/// otherwise), resolves `project` into a typed [`ProjectBinding`], then
+/// delegates to `SessionRegistry::create`. The returned `Session` already has
+/// `status: "running"` — see `session::model`'s docs on why M1 has no
+/// queued/created-but-not-running state.
+///
+/// **The `project` reconciliation (spec DOC-39 §5.5, AC-16.2).** This param was
+/// an untyped, free-form `Option<String>` LABEL: never validated, never bound,
+/// not enumerable, and disconnected from the `PathBuf` `task.run` demanded. One
+/// concept lived on two surfaces that could not agree. It is now the same
+/// `ProjectBinding` `task.run` uses, resolved from a project PATH.
+///
+/// This is a deliberate BREAKING change to this method's contract: a caller that
+/// previously passed a decorative label (`"my-app"`) now receives
+/// `-32003 invalid_argument` unless that string names a real directory. Erroring
+/// is the point — silently accepting a label that binds nothing and indexes
+/// nothing is exactly the failure this reconciliation exists to end, and a
+/// caller who learns their "project" was never real is strictly better off than
+/// one who never finds out. Omitting `project` entirely remains valid and means
+/// PROJECTLESS — a supported state, never an error (AC-2.1).
 /// Test: `protocol::tests::create_rejects_empty_task`,
-/// `protocol::tests::create_returns_running_session`.
+/// `protocol::tests::create_returns_running_session`,
+/// `protocol::tests::create_without_project_is_projectless`,
+/// `protocol::tests::create_binds_a_real_directory`,
+/// `protocol::tests::create_rejects_a_label_that_is_not_a_directory`.
 async fn create(
     registry: &SessionRegistry,
     params: Value,
@@ -188,7 +212,9 @@ async fn create(
     if p.task.trim().is_empty() {
         return Err(RpcError::invalid_argument("task must not be empty"));
     }
-    let session = registry.create(p.task, p.agent, p.project);
+    let binding = ProjectBinding::resolve(p.project)
+        .map_err(|e| RpcError::invalid_argument(format!("session.create: {e}")))?;
+    let session = registry.create(p.task, p.agent, binding);
     Ok(json!(session))
 }
 
@@ -371,7 +397,7 @@ mod tests {
         let mut router = Router::new();
         register(&mut router, registry.clone());
 
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let cases: &[(&str, Value)] = &[
             ("session.list", json!({})),
@@ -425,7 +451,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let mut router = Router::new();
         register(&mut router, registry.clone());
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         for method in ["session.set_goal", "session.clear_goal"] {
             let req = Request {
@@ -468,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn list_returns_sessions_key() {
         let registry = SessionRegistry::new();
-        registry.create("a".to_string(), None, None);
+        registry.create("a".to_string(), None, crate::binding::ProjectBinding::None);
         let result = list(&registry, Value::Null, test_ctx()).await.unwrap();
         assert_eq!(result["sessions"].as_array().unwrap().len(), 1);
     }
@@ -499,7 +525,7 @@ mod tests {
     #[tokio::test]
     async fn get_transcript_on_never_run_session_is_empty() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let result = get_transcript(&registry, json!({"session_id": session.id}), test_ctx())
             .await
             .unwrap();
@@ -559,7 +585,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_executing_session_requests_cooperative_cancel() {
         let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let flag = registry.begin_execution(&session.id).unwrap();
 
         let result = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
@@ -574,5 +600,68 @@ mod tests {
             flag.load(std::sync::atomic::Ordering::Relaxed),
             "the shared cancel flag must have been set"
         );
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn ctx() -> ConnectionContext {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        ConnectionContext::new(tx)
+    }
+
+    /// Omitting `project` is VALID and means projectless — a supported state,
+    /// never an error (AC-2.1). This is the entry state screen 7a renders.
+    #[tokio::test]
+    async fn create_without_project_is_projectless() {
+        let registry = SessionRegistry::new();
+        let value = create(&registry, json!({"task": "just chat"}), ctx())
+            .await
+            .expect("omitting project must be valid");
+
+        assert_eq!(value["binding"]["state"], "projectless");
+        assert!(value["binding"]["root"].is_null());
+        assert!(
+            value["project"].is_null(),
+            "projectless must derive no label"
+        );
+    }
+
+    /// A real directory binds, and the derived label matches the binding — the
+    /// reconciliation in one assertion (AC-16.2).
+    #[tokio::test]
+    async fn create_binds_a_real_directory() {
+        let registry = SessionRegistry::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let value = create(
+            &registry,
+            json!({"task": "t", "project": dir.path().to_string_lossy()}),
+            ctx(),
+        )
+        .await
+        .expect("a real directory must bind");
+
+        // A non-git tempdir binds as `directory` — NOT projectless (#2728).
+        assert_eq!(value["binding"]["state"], "directory");
+        assert_eq!(
+            value["project"], value["binding"]["root"],
+            "the label must be derived from the binding root, not independent of it"
+        );
+    }
+
+    /// The old free-form label is now rejected: `"my-app"` names no directory,
+    /// so it can bind nothing and index nothing. Erroring is the point — see
+    /// `create`'s docs. This is the deliberate breaking change.
+    #[tokio::test]
+    async fn create_rejects_a_label_that_is_not_a_directory() {
+        let registry = SessionRegistry::new();
+        let err = create(&registry, json!({"task": "t", "project": "my-app"}), ctx())
+            .await
+            .expect_err("a decorative label must no longer be silently accepted");
+
+        assert_eq!(err.code, -32003, "expected invalid_argument, got {err:?}");
     }
 }

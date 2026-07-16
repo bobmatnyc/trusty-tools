@@ -30,7 +30,7 @@
 //! Test: `task::executor::tests::*`; the full flow end-to-end (a real
 //! subprocess) in `tests/task_e2e.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +41,7 @@ use crate::agent_loop::{
     AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink, resolve_cadence_config,
 };
 use crate::agents::AgentConfig;
+use crate::binding::ProjectBinding;
 use crate::jsonrpc::RpcError;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
@@ -80,19 +81,23 @@ pub const ENGINEER_AGENT_NAME: &str = "python-engineer";
 /// handler stays a thin params-parsing shim.
 /// What: `session_id` must already exist in the registry (created by the
 /// caller — see `task::protocol::task_run`); `agent_name` is the top-level
-/// (PM) agent, `task` is the free-form request text, `project`/`agents_dir`
-/// mirror `run_task::RunTaskParams`, and `model_override` pins the
+/// (PM) agent, `task` is the free-form request text, `agents_dir` mirrors
+/// `run_task::RunTaskParams`, and `model_override` pins the
 /// DELEGATED ENGINEER's model for this run only (mirrors `run_task`'s
 /// `--engineer-model`). `mode` (#2059) is the ALREADY-RESOLVED `HarnessMode`
 /// (`task::protocol::task_run` resolves it via `crate::mode::resolve_mode`
 /// before constructing this — resolution is a request-parsing concern, not
-/// an execution one).
+/// an execution one). `binding` replaces what was a required `project:
+/// PathBuf`; see [`run_and_record`]'s docs for what each of its three states
+/// does to indexing, the memory palace, and the tools' working root.
 #[derive(Debug, Clone)]
 pub struct TaskRunParams {
     pub session_id: String,
     pub task: String,
     pub agent_name: String,
-    pub project: PathBuf,
+    /// This run's project binding — projectless, a non-git directory, or a git
+    /// repo. `ProjectBinding::None` is a fully supported state, not an error.
+    pub binding: ProjectBinding,
     pub agents_dir: PathBuf,
     pub model_override: Option<String>,
     pub mode: HarnessMode,
@@ -162,22 +167,83 @@ pub fn spawn_task_run(
 /// write to trusty-memory (`chat_turn_append` + `memory_remember`); see
 /// `session::memory_sink` module docs for the fail-open contract and the
 /// per-run (not yet per-turn) enqueue granularity this ticket settles for.
+///
+/// **Projectless (`ProjectBinding::None`).** Three things assume a project, and
+/// each gets a DEFINED behaviour rather than a panic: indexing is **skipped**
+/// (nothing to index); the project-scoped memory palace is **skipped** (no
+/// project to scope one to — `memory_sink_for` takes `Option<&Path>` and returns
+/// `None`); and the fs/bash tools, which need a real directory to be
+/// constructible at all, are rooted at an **ephemeral scratch dir** discarded
+/// when the run ends. The scratch root is the deliberate choice over dropping
+/// the tools entirely: an engineer with no file tools fails in confusing ways,
+/// whereas a throwaway root keeps chat/planning coherent while guaranteeing
+/// nothing lands in a project the operator never chose. It is logged at `warn`
+/// (stderr) so a projectless write is observable, never silent. `CLAUDE.md`,
+/// catch-up, skills, and the settings.json mode tier all already degrade to
+/// "absent" for a directory that has none, so they need no projectless
+/// special-casing — they simply find nothing in the scratch root.
 async fn run_and_record(
     registry: Arc<SessionRegistry>,
     llm: Arc<dyn LlmClientTrait>,
     params: TaskRunParams,
     cancel: Arc<AtomicBool>,
 ) {
+    let session_id = params.session_id.clone();
+
+    // Resolve the working root BEFORE anything else: every step below needs a
+    // real directory, and projectless has none. `_scratch` must stay alive for
+    // the whole run — dropping a `TempDir` deletes it — so it is bound here,
+    // not inside the `else` arm.
+    let _scratch = match params.binding.root() {
+        Some(_) => None,
+        None => match tempfile::tempdir() {
+            Ok(dir) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    scratch_root = %dir.path().display(),
+                    "projectless run: no project bound — file tools are rooted at an \
+                     ephemeral scratch dir that is DISCARDED when this run ends, and \
+                     nothing is indexed. Bind a project to persist work."
+                );
+                Some(dir)
+            }
+            Err(e) => {
+                finish_with_failure(
+                    &registry,
+                    &session_id,
+                    &format!("projectless scratch root error: {e}"),
+                )
+                .await;
+                return;
+            }
+        },
+    };
+    let work_root: PathBuf = match (params.binding.root(), &_scratch) {
+        (Some(root), _) => root.to_path_buf(),
+        (None, Some(dir)) => dir.path().to_path_buf(),
+        // Unreachable: the match above binds `_scratch` to `Some` for exactly
+        // the `None` root case, returning early on failure. Handled rather than
+        // `unwrap`ped per the crate's no-panic-in-library rule.
+        (None, None) => {
+            finish_with_failure(&registry, &session_id, "projectless scratch root missing").await;
+            return;
+        }
+    };
+
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so the delegated engineer's
     // `search`/`grep` tools are useful while this run proceeds. Fail-open,
     // non-blocking, and git-optional (git is a nice-to-have, not required) —
     // reuses the ONE shared helper (see
     // `run_task::ensure_project_indexed_in_background`) so the daemon and CLI
-    // paths can never diverge.
-    crate::run_task::ensure_project_indexed_in_background(params.project.clone());
+    // paths can never diverge. Gated on `should_index` so a projectless run
+    // never indexes its throwaway scratch root — note the gate is
+    // `should_index`, i.e. "is a project bound", NOT "is it git": a non-git
+    // directory DOES index (#2728/#2747).
+    if params.binding.should_index() {
+        crate::run_task::ensure_project_indexed_in_background(work_root.clone());
+    }
 
-    let session_id = params.session_id.clone();
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
     let sink: Arc<dyn ToolEventSink> = Arc::new(SessionToolEventSink::new(
         Arc::clone(&registry),
@@ -201,7 +267,7 @@ async fn run_and_record(
         }
     };
 
-    let project_context = load_project_context(&params.project);
+    let project_context = load_project_context(&work_root);
     let pm_model = resolve_model(&pm_config, None);
     let engineer_model = resolve_engineer_model(&params);
 
@@ -214,19 +280,25 @@ async fn run_and_record(
     // DailyDriver mode only, register `use_skill` so the PM can lazily fetch
     // a skill's full body on demand. Parity never sees the catalog or the
     // tool — see `assemble_system_prompt_for_mode`'s docs.
-    let skills_catalog = daily_driver_skills_catalog(&params);
+    let skills_catalog = daily_driver_skills_catalog(&params, &work_root);
 
     let engineer_runner = build_engineer_runner(
         wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
-        project_context.clone(),
-        skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
+        &work_root,
+        EngineerPromptContext {
+            project_context: project_context.clone(),
+            skills_catalog: skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
+        },
         Arc::clone(&transcript),
         Arc::clone(&sink),
         Arc::clone(&cancel),
     );
 
-    let catchup_ctx = crate::catchup::pm_catchup_context(&params.project).await;
+    // Catch-up is already git-optional and fail-open (it degrades to `None` for
+    // a directory with no history), so the projectless scratch root needs no
+    // special-casing here — it simply yields no digest.
+    let catchup_ctx = crate::catchup::pm_catchup_context(&work_root).await;
     let pm_system = assemble_system_prompt_for_mode(
         params.mode,
         &pm_config,
@@ -267,7 +339,11 @@ async fn run_and_record(
     // calling it twice in one run just returns the same `Arc` both times.
     // Independent of the `pm_transcript`/`goals` fetch above (#2347) — the
     // two features don't touch each other's state, so either order works.
-    let memory_sink = registry.memory_sink_for(&session_id, &params.project);
+    // Projectless has no project to scope a memory palace to, so this yields
+    // `None` — see `memory_sink_for`'s `Option<&Path>` contract. The scratch
+    // root is deliberately NOT passed: deriving a palace id from a throwaway
+    // temp path would mint a fresh, orphaned palace on every projectless run.
+    let memory_sink = registry.memory_sink_for(&session_id, params.binding.root());
 
     // #2072: `finish_task` gives the PM a structured, schema-validated way to
     // signal completion alongside the delegate tool. (#2347) `set_goal`/
@@ -324,7 +400,7 @@ async fn run_and_record(
             // loop (`build_engineer_runner` below) and `run_task`'s legacy
             // one-shot/bake-off path both keep the default `None` — zero
             // behaviour change there, per #2346's explicit scope.
-            cadence: Some(resolve_cadence_config(&params.project)),
+            cadence: Some(resolve_cadence_config(&work_root)),
             ..AgentLoopConfig::default()
         },
         pm_llm,
@@ -423,15 +499,27 @@ async fn run_and_record(
 /// this function's arity under clippy's `too_many_arguments` gate; the
 /// resolver is pure given the same `params.deadline_secs`/env state, so a
 /// second call is not a correctness risk.
+///
+/// `work_root` is the directory the engineer's fs/bash tools are scoped to: the
+/// bound project root, or — when projectless — the run's ephemeral scratch dir
+/// (see [`run_and_record`]). It is passed explicitly rather than read off
+/// `params` because the scratch root does not exist until the run begins.
+/// [`EngineerPromptContext`] bundles the two prompt strings that already
+/// travelled together, keeping this function's arity under clippy's
+/// `too_many_arguments` gate now that `work_root` is threaded in.
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
     params: &TaskRunParams,
-    project_context: Option<String>,
-    skills_catalog: Option<String>,
+    work_root: &Path,
+    prompt: EngineerPromptContext,
     transcript: SharedTranscript,
     sink: Arc<dyn ToolEventSink>,
     cancel: Arc<AtomicBool>,
 ) -> Arc<dyn AgentRunner> {
+    let EngineerPromptContext {
+        project_context,
+        skills_catalog,
+    } = prompt;
     let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
         llm,
         ENGINEER_AGENT_NAME,
@@ -439,7 +527,7 @@ fn build_engineer_runner(
     ));
 
     let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
-        project: params.project.clone(),
+        project: work_root.to_path_buf(),
         mode: params.mode,
     });
 
@@ -457,7 +545,25 @@ fn build_engineer_runner(
     apply_engineer_model_override(Arc::new(runner), params)
 }
 
-/// Discover the (cheap, metadata-only) skill catalog for `params.project` and
+/// The two prompt-context strings the delegated engineer's system prompt is
+/// assembled from.
+///
+/// Why: both are `Option<String>`, are always produced and consumed together,
+/// and are positionally adjacent — bundling them removes a real
+/// easy-to-transpose-the-arguments hazard and keeps
+/// [`build_engineer_runner`]'s arity under clippy's `too_many_arguments` gate
+/// now that `work_root` must also be threaded through for projectless runs.
+/// What: `project_context` is the project's `CLAUDE.md` (`None` when absent —
+/// always the case projectless, since the scratch root has none);
+/// `skills_catalog` is the rendered `.claude/skills/` metadata catalog
+/// (`None` in `Parity` mode or when empty).
+/// Test: exercised via `task::executor::tests::*`'s engineer-runner paths.
+struct EngineerPromptContext {
+    project_context: Option<String>,
+    skills_catalog: Option<String>,
+}
+
+/// Discover the (cheap, metadata-only) skill catalog under `work_root` and
 /// build a resolver over it — but only in `HarnessMode::DailyDriver`.
 ///
 /// Why: #2069's scope note is explicit — "Parity mode should NOT
@@ -466,13 +572,18 @@ fn build_engineer_runner(
 /// inject the catalog into the prompt.
 /// What: Returns `None` for `HarnessMode::Parity` or when the project has no
 /// (or an empty) skill catalog; otherwise `Some((rendered_catalog,
-/// resolver))` — the resolver backs the `use_skill` tool registration.
+/// resolver))` — the resolver backs the `use_skill` tool registration. A
+/// projectless run passes its scratch root, which has no `.claude/skills/`, so
+/// this naturally yields `None` without a projectless special case.
 /// Test: `task::executor::tests::daily_driver_skills_catalog_*`.
-fn daily_driver_skills_catalog(params: &TaskRunParams) -> Option<(String, Arc<dyn SkillResolver>)> {
+fn daily_driver_skills_catalog(
+    params: &TaskRunParams,
+    work_root: &Path,
+) -> Option<(String, Arc<dyn SkillResolver>)> {
     if params.mode != HarnessMode::DailyDriver {
         return None;
     }
-    let skills_dir = locate_skills_dir(&params.project);
+    let skills_dir = locate_skills_dir(work_root);
     let resolver: Arc<dyn SkillResolver> = Arc::new(FsSkillResolver::new(skills_dir));
     let catalog = format_skill_catalog(&resolver.metadata());
     if catalog.is_empty() {

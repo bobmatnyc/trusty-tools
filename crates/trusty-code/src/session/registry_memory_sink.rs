@@ -48,9 +48,23 @@ impl SessionRegistry {
     /// binding is fixed for its lifetime, mirroring
     /// `Self::begin_pm_transcript`'s analogous "the system prompt is fixed
     /// after the first call" rule.
+    /// `project_dir` is `None` for a PROJECTLESS session, which returns `None`:
+    /// a memory palace is project-scoped by construction, so with no project
+    /// there is nothing to scope one to. This is a deliberate skip, not a
+    /// degradation — the caller must NOT substitute the run's scratch root,
+    /// since deriving a palace id from a throwaway temp path would mint a fresh,
+    /// orphaned palace on every projectless run. The whole sink is already
+    /// fail-open and fire-and-forget, so its absence costs a projectless run
+    /// nothing but the durable turn record it has no home for anyway.
     /// Test: `registry_tests::memory_sink_for_reuses_the_same_sink_across_calls`,
-    /// `registry_tests::memory_sink_for_unknown_session_returns_none`.
-    pub fn memory_sink_for(&self, id: &str, project_dir: &Path) -> Option<Arc<TurnMemorySink>> {
+    /// `registry_tests::memory_sink_for_unknown_session_returns_none`,
+    /// `registry_tests::memory_sink_for_projectless_session_returns_none`.
+    pub fn memory_sink_for(
+        &self,
+        id: &str,
+        project_dir: Option<&Path>,
+    ) -> Option<Arc<TurnMemorySink>> {
+        let project_dir = project_dir?;
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
         if entry.memory_sink.is_none() {

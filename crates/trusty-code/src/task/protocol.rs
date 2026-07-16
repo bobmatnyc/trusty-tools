@@ -29,6 +29,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 use crate::session::SessionRegistry;
 
@@ -39,20 +40,25 @@ use super::mock_llm::build_llm_client;
 ///
 /// Why: the one place that wires the method, mirroring
 /// `session::protocol::register`'s role for `session.*`.
-/// What: closes over `registry`, `project`, and `agents_dir` — all shared,
-/// cheap to clone (`Arc`/`PathBuf`) per call.
-/// Test: `task::protocol::tests::register_wires_task_run`.
+/// What: closes over `registry`, `binding`, and `agents_dir` — all shared,
+/// cheap to clone (`Arc`/`PathBuf`) per call. `binding` replaces what was a
+/// REQUIRED `project: PathBuf`: a `PathBuf` cannot express "no project", so the
+/// projectless state the shell's entry screen renders was unreachable — the
+/// daemon could not be started, let alone run a task, without one. It is now a
+/// [`ProjectBinding`], whose `None` variant is that state.
+/// Test: `task::protocol::tests::register_wires_task_run`,
+/// `task::protocol::tests::register_wires_task_run_projectless`.
 pub fn register(
     router: &mut Router,
     registry: Arc<SessionRegistry>,
-    project: PathBuf,
+    binding: ProjectBinding,
     agents_dir: PathBuf,
 ) {
     router.register("task.run", move |params: Value, _ctx: ConnectionContext| {
         let registry = Arc::clone(&registry);
-        let project = project.clone();
+        let binding = binding.clone();
         let agents_dir = agents_dir.clone();
-        async move { task_run(registry, params, project, agents_dir).await }
+        async move { task_run(registry, params, binding, agents_dir).await }
     });
 }
 
@@ -119,7 +125,7 @@ struct TaskRunRequestParams {
 async fn task_run(
     registry: Arc<SessionRegistry>,
     params: Value,
-    project: PathBuf,
+    binding: ProjectBinding,
     agents_dir: PathBuf,
 ) -> Result<Value, RpcError> {
     let p: TaskRunRequestParams = serde_json::from_value(params)
@@ -140,13 +146,13 @@ async fn task_run(
             let session = registry.create(
                 p.task_description.clone(),
                 Some(agent_name.clone()),
-                Some(project.display().to_string()),
+                binding.clone(),
             );
             session.id
         }
     };
 
-    let mode = crate::mode::resolve_mode(p.mode.as_deref(), &project);
+    let mode = crate::mode::resolve_mode(p.mode.as_deref(), binding.root());
     registry.set_mode(&session_id, mode)?;
 
     let llm = build_llm_client()?;
@@ -154,7 +160,7 @@ async fn task_run(
         session_id: session_id.clone(),
         task: p.task_description,
         agent_name,
-        project,
+        binding: binding.clone(),
         agents_dir,
         model_override: p.model_override,
         mode,
@@ -162,7 +168,12 @@ async fn task_run(
     };
     spawn_task_run(registry, llm, task_params)?;
 
-    Ok(json!({ "session_id": session_id, "status": "running", "mode": mode.as_str() }))
+    Ok(json!({
+        "session_id": session_id,
+        "status": "running",
+        "mode": mode.as_str(),
+        "binding": binding.to_json(),
+    }))
 }
 
 #[cfg(test)]
@@ -209,7 +220,7 @@ mod tests {
         register(
             &mut router,
             registry,
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         );
 
@@ -231,6 +242,52 @@ mod tests {
         assert_eq!(resp.result.unwrap()["status"], "running");
     }
 
+    /// `task.run` must be callable with NO project bound at all (AC-16.1) —
+    /// the change that makes the shell's entry screen (7a) implementable. This
+    /// call was impossible before: `register` took a required `PathBuf`.
+    #[tokio::test]
+    async fn register_wires_task_run_projectless() {
+        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by the lock above.
+        unsafe {
+            std::env::set_var(
+                super::super::mock_llm::MOCK_LLM_ENV,
+                super::super::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        let registry = Arc::new(SessionRegistry::new());
+        let agents = agents_dir();
+        let mut router = Router::new();
+        register(
+            &mut router,
+            registry,
+            ProjectBinding::None,
+            agents.path().to_path_buf(),
+        );
+
+        let req = Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "task.run".to_string(),
+            params: Some(json!({"task_description": "just chat"})),
+        };
+        let resp = router.dispatch(req, &test_ctx()).await;
+        unsafe {
+            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+        }
+        assert!(
+            resp.error.is_none(),
+            "projectless task.run must succeed, got {:?}",
+            resp.error
+        );
+        let result = resp.result.expect("a result");
+        assert_eq!(result["status"], "running");
+        assert_eq!(
+            result["binding"]["state"], "projectless",
+            "task.run must report the projectless binding back to the caller: {result}"
+        );
+    }
+
     /// An empty `task_description` must map to `-32003 invalid_argument`.
     #[tokio::test]
     async fn task_run_rejects_empty_task_description() {
@@ -240,7 +297,7 @@ mod tests {
         let err = task_run(
             registry,
             json!({"task_description": "   "}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -265,7 +322,7 @@ mod tests {
         let result = task_run(
             Arc::clone(&registry),
             json!({"task_description": "say hi"}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await;
@@ -314,7 +371,7 @@ mod tests {
         let value = task_run(
             Arc::clone(&registry),
             json!({"task_description": "say hi"}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -338,7 +395,8 @@ mod tests {
         let value2 = task_run(
             Arc::clone(&registry2),
             json!({"task_description": "say hi"}),
-            project2.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project2.path().to_path_buf()))
+                .expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -351,7 +409,8 @@ mod tests {
         let value3 = task_run(
             Arc::clone(&registry3),
             json!({"task_description": "say hi", "mode": "daily-driver"}),
-            project2.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project2.path().to_path_buf()))
+                .expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -369,7 +428,8 @@ mod tests {
         let value4 = task_run(
             Arc::clone(&registry4),
             json!({"task_description": "say hi", "mode": "daily-driver"}),
-            project2.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project2.path().to_path_buf()))
+                .expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -395,7 +455,7 @@ mod tests {
         let err = task_run(
             registry,
             json!({"task_description": "say hi", "session_id": "does-not-exist"}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -415,14 +475,18 @@ mod tests {
             );
         }
         let registry = Arc::new(SessionRegistry::new());
-        let existing = registry.create("say hi".to_string(), None, None);
+        let existing = registry.create(
+            "say hi".to_string(),
+            None,
+            crate::binding::ProjectBinding::None,
+        );
         let agents = agents_dir();
         let project = tempfile::tempdir().expect("project tempdir");
 
         let result = task_run(
             Arc::clone(&registry),
             json!({"task_description": "say hi", "session_id": existing.id}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await;
@@ -458,7 +522,7 @@ mod tests {
         let first = task_run(
             Arc::clone(&registry),
             json!({"task_description": "say hi"}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await
@@ -481,7 +545,7 @@ mod tests {
         let second = task_run(
             Arc::clone(&registry),
             json!({"task_description": "say hi again", "session_id": session_id}),
-            project.path().to_path_buf(),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
         )
         .await;

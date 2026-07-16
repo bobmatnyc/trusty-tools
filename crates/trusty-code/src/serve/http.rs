@@ -370,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn http_session_events_sse_streams_replay() {
         let (router, sessions) = router_and_sessions();
-        let session = sessions.create("t".to_string(), None, None);
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let app = build_axum_router(router, sessions);
 
         let resp = app

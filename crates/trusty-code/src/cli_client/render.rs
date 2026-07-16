@@ -183,6 +183,7 @@ mod tests {
             task: "do the thing".to_string(),
             agent: Some("pm".to_string()),
             project: None,
+            binding: crate::binding::ProjectBinding::None,
             status,
             created_at: Utc::now(),
             mode: None,

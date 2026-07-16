@@ -108,18 +108,16 @@ pub fn diff_snapshots(before: &Snapshot, after: &Snapshot) -> String {
 
 /// Whether `root` is inside a git work tree.
 ///
-/// Why: Chooses the snapshot strategy; a git repo gets a real tree-diff.
-/// What: Runs `git rev-parse --is-inside-work-tree` and checks for a `true`
-/// stdout. Any failure (git absent, not a repo) yields `false`.
-/// Test: Indirect via snapshot tests.
+/// Why: Chooses the snapshot strategy; a git repo gets a real tree-diff. This
+/// is a thin alias for [`crate::binding::is_git_worktree`] rather than a second
+/// implementation: `ProjectBinding` classifies `GitRepo` vs `Directory` on that
+/// exact probe, and two independent git checks could disagree — producing a
+/// `GitRepo` binding whose diff silently took the non-git file-map path.
+/// What: delegates; fails open to `false` (git absent, not a repo).
+/// Test: Indirect via snapshot tests; the probe itself in
+/// `binding::tests::is_git_worktree_fails_open_for_missing_path`.
 fn is_git_repo(root: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false)
+    crate::binding::is_git_worktree(root)
 }
 
 /// Capture the FULL on-disk working-tree state (tracked changes + untracked

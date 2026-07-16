@@ -96,17 +96,33 @@ impl SessionStatus {
 /// that has never run a task has no mode, mirroring the same "`None` means
 /// not yet run" convention `session::transcript::TranscriptRecord` already
 /// uses for `cost_usd`.
-/// Test: `model::tests::session_round_trips_through_json`.
+///
+/// `binding` is the session's TYPED project binding (spec DOC-39 §5.5) — the
+/// single object `task.run` and `session.create` now converge on. `project`
+/// survives as the human display label but is no longer an independent source
+/// of truth: it is DERIVED from `binding` (`ProjectBinding::label`) and so can
+/// never again disagree with it. That derivation is the whole reconciliation —
+/// previously `session.create` took a free-form label that was never validated
+/// and never bound, while `task.run` took a path the label knew nothing about.
+/// Test: `model::tests::session_round_trips_through_json`,
+/// `model::tests::projectless_session_round_trips`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub task: String,
     pub agent: Option<String>,
+    /// Display label, derived from `binding` — see the struct docs. Kept for
+    /// wire compatibility with existing `session.list`/`session.status`
+    /// consumers that read a project name.
     pub project: Option<String>,
     pub status: SessionStatus,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub mode: Option<crate::mode::HarnessMode>,
+    /// The typed three-state project binding. Defaults to projectless so an
+    /// older persisted/serialized `Session` without the field still reads back.
+    #[serde(default)]
+    pub binding: crate::binding::ProjectBinding,
 }
 
 #[cfg(test)]
@@ -180,6 +196,7 @@ mod tests {
             task: "do the thing".to_string(),
             agent: Some("engineer".to_string()),
             project: None,
+            binding: crate::binding::ProjectBinding::None,
             status: SessionStatus::Running,
             created_at: Utc::now(),
             mode: Some(crate::mode::HarnessMode::DailyDriver),
@@ -195,5 +212,44 @@ mod tests {
         assert_eq!(back.id, session.id);
         assert_eq!(back.status, session.status);
         assert_eq!(back.mode, session.mode);
+    }
+}
+
+#[cfg(test)]
+mod binding_model_tests {
+    use super::*;
+
+    /// A projectless `Session` must round-trip, and a payload with NO `binding`
+    /// field at all must read back as projectless rather than failing.
+    #[test]
+    fn projectless_session_round_trips() {
+        let session = Session {
+            id: "s-1".to_string(),
+            task: "t".to_string(),
+            agent: None,
+            project: None,
+            binding: crate::binding::ProjectBinding::None,
+            status: SessionStatus::Running,
+            created_at: Utc::now(),
+            mode: None,
+        };
+        let value = serde_json::to_value(&session).expect("serialize");
+        assert_eq!(value["binding"]["state"], "projectless");
+
+        let back: Session = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.binding, crate::binding::ProjectBinding::None);
+
+        // An older payload predating the `binding` field must still read back.
+        let legacy = serde_json::json!({
+            "id": "s-2", "task": "t", "agent": null, "project": null,
+            "status": "running", "created_at": Utc::now(),
+        });
+        let back: Session =
+            serde_json::from_value(legacy).expect("legacy payload must deserialize");
+        assert_eq!(
+            back.binding,
+            crate::binding::ProjectBinding::None,
+            "a missing binding field must default to projectless"
+        );
     }
 }

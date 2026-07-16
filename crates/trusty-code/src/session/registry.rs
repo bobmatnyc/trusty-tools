@@ -39,6 +39,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent_loop::Transcript;
+use crate::binding::ProjectBinding;
 use crate::events::{Event, SessionEventEnvelope};
 use crate::jsonrpc::{NotifySender, RpcError};
 use crate::mode::HarnessMode;
@@ -170,14 +171,21 @@ impl SessionRegistry {
     /// `Event::SessionStatusChanged` (`seq = 2`). Returns the
     /// post-transition snapshot (so the caller sees `status: "running"`,
     /// not the momentary `"created"`).
-    /// Test: `registry_tests::create_publishes_started_and_status_events`.
-    pub fn create(&self, task: String, agent: Option<String>, project: Option<String>) -> Session {
+    /// `binding` replaces what was an untyped `project: Option<String>` label.
+    /// The label still exists on the wire (`Session.project`) but is now DERIVED
+    /// from the binding via `ProjectBinding::label`, so the two can never
+    /// disagree — see `Session`'s docs. `ProjectBinding::None` (projectless) is
+    /// a fully supported binding, not a missing one.
+    /// Test: `registry_tests::create_publishes_started_and_status_events`,
+    /// `registry_tests::create_derives_project_label_from_binding`.
+    pub fn create(&self, task: String, agent: Option<String>, binding: ProjectBinding) -> Session {
         let id = Uuid::new_v4().to_string();
         let session = Session {
             id: id.clone(),
             task,
             agent,
-            project: project.clone(),
+            project: binding.label(),
+            binding,
             status: SessionStatus::Created,
             created_at: Utc::now(),
             mode: None,
@@ -204,7 +212,10 @@ impl SessionRegistry {
             &id,
             Event::SessionStarted {
                 session_id: id.clone(),
-                project: project.unwrap_or_default(),
+                // The binding-derived label. Projectless yields `""`, exactly
+                // as an absent `project` label already did before the binding
+                // existed — no wire change for this event.
+                project: session.project.clone().unwrap_or_default(),
             },
         );
         self.transition(&id, SessionStatus::Running);

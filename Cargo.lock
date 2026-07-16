@@ -10871,6 +10871,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "dirs 5.0.1",
  "futures-util",
  "globset",
  "ignore",
