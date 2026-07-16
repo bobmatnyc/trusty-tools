@@ -304,19 +304,25 @@ pub fn resolve_tmux_binary_or_bare() -> String {
 /// re-resolving on every call) so callers that already cache a resolved path
 /// — like `TmuxDriver`, which resolves once in `discover()` for its
 /// fail-fast-if-absent contract — do not pay repeated resolution cost.
-/// What: renders `cmd` via [`tmux_argv`] and runs
-/// `Command::new(tmux_bin).args(argv).output()`. Callers own interpreting the
-/// exit status / stderr — this function does not classify failures.
-/// Test: exercised transitively by every call site; a live `tmux` binary is
-/// required to observe real output, so this is covered by the `#[ignore]`
-/// integration tests rather than a hermetic unit test.
+/// What: renders `cmd` via [`tmux_argv`] and spawns `tmux` through
+/// [`crate::core::spawn_disclaim::disclaimed_output`], which on macOS disclaims
+/// TCC responsibility so the forked tmux server (and every `claude`/agent
+/// descendant) is its own responsible process rather than rolling attribution up
+/// to the signed `trusty-mpm` binary (issue #2819). On non-macOS it is a plain
+/// `Command::output`. Every session-creating call site routes through here, so
+/// the disclaim covers the one spawn that forks the shared server regardless of
+/// which tmux sub-command triggers the fork. Callers own interpreting the exit
+/// status / stderr — this function does not classify failures.
+/// Test: `disclaimed_output_captures_stdout` (and the sibling
+/// `disclaimed_output_*` tests) in `crate::core::spawn_disclaim` cover the
+/// disclaim/capture behaviour; this thin adapter is exercised transitively by
+/// every call site (a live `tmux` binary is required to observe real output —
+/// see the `#[ignore]` integration tests).
 pub fn run_tmux_with_bin(
     tmux_bin: &str,
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
-    std::process::Command::new(tmux_bin)
-        .args(tmux_argv(cmd))
-        .output()
+    crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
 }
 
 /// [`run_tmux_with_bin`], resolving the tmux binary via

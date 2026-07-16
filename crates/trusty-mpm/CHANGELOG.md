@@ -16,6 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- stop triggering repeated macOS TCC consent prompts attributed to `trusty-mpm` — both the Apple Music / media-library class (`kTCCServiceMediaLibrary`) and the "access data from other apps" App-Data class (`kTCCServiceSystemPolicyAppData`): disclaim macOS TCC responsibility (`responsibility_spawnattrs_setdisclaim`) when spawning `tmux`/`claude` children so each managed agent (and the forked tmux server) is its OWN responsible process instead of rolling attribution up to the signed `trusty-mpm` binary. The disclaim is service-agnostic, so it covers every child-initiated prompt class at once (closes #2819)
 - reconcile zombie-Active sessions on in-place relaunch instead of 409 dead-end ([#2795](https://github.com/bobmatnyc/trusty-tools/pull/2795)) ([`5ef199a`](https://github.com/bobmatnyc/trusty-tools/commit/5ef199a920374ab6ac3e97b3aac8b08374915b1d))
 - bump `jsonwebtoken` 9 → 10 (`aws_lc_rs` backend), fixing GHSA-h395-gr6q-cpjc; migrated the test-only JWT decode-without-verification call site to `jsonwebtoken::dangerous::insecure_decode` (closes #2765) ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
 - relaunch decommissioned managed session on bare tm instead of reconnect-to-self ([#2780](https://github.com/bobmatnyc/trusty-tools/pull/2780)) ([`b6f1783`](https://github.com/bobmatnyc/trusty-tools/commit/b6f1783a6e7ad78fb42c332f50ed86e2fb8e2bfd))
