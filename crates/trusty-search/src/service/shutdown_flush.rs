@@ -297,8 +297,13 @@ mod tests {
     /// flush performs blocking synchronous work — usearch's `Index::save` is a
     /// C++ FFI call that never yields, and wrapping it in `tokio::time::timeout`
     /// inline does NOT bound it (the same task can't be re-polled while stuck in
-    /// the blocking call). Running it on a detached task does. This is the
-    /// regression guard for the graceful-stop hang.
+    /// the blocking call). Running it on a detached task does, *provided a
+    /// runtime worker is free to drive the timeout's timer* — this test covers
+    /// exactly that "spare worker available" case (2 workers, 1 stalled flush).
+    /// The harder case — stalls reaching the worker count, e.g. a 1-worker
+    /// runtime — needs the blocking work itself off the worker pool; see
+    /// `flush_bounded_survives_single_worker_when_blocking_work_is_offloaded`
+    /// and `UsearchStore::save`'s `spawn_blocking` use for that half of the fix.
     /// What: call `flush_index_bounded` with a 200 ms deadline around a future
     /// that blocks its worker thread for 1.5 s (simulating the save FFI); assert
     /// the helper returns in well under the blocking duration. Requires a
@@ -318,6 +323,45 @@ mod tests {
             start.elapsed() < std::time::Duration::from_millis(1200),
             "bounded flush must return on its deadline even when the flush blocks \
              its worker; elapsed: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Why (issue #1746 review — MEDIUM): a bare `tokio::spawn` around the
+    /// flush future only stays effective if at least one runtime worker
+    /// remains free to drive the `timeout`'s timer. Once the number of
+    /// concurrently stalled flushes reaches the worker count, no worker is
+    /// free and `flush_bounded_returns_on_blocking_work`'s guarantee breaks
+    /// down — the loop re-wedges exactly as it did pre-fix. The actual fix for
+    /// that case is moving the blocking usearch FFI call itself onto the
+    /// blocking thread pool via `spawn_blocking` inside `UsearchStore::save`,
+    /// so stalled saves never occupy an async worker at all. This test proves
+    /// that combination is sufficient under the worst case: a single-worker
+    /// runtime (the stall count already equals the worker count).
+    /// What: on a `worker_threads = 1` runtime, run `flush_index_bounded` with
+    /// a 200 ms deadline around a future that offloads its blocking work via
+    /// `spawn_blocking` (mirroring `UsearchStore::save`'s real shape) for
+    /// 1.5 s; assert it still returns well under the blocking duration —
+    /// something a future that blocks the worker thread directly (see
+    /// `flush_bounded_returns_on_blocking_work`) cannot do on a single worker.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn flush_bounded_survives_single_worker_when_blocking_work_is_offloaded() {
+        let start = std::time::Instant::now();
+        flush_index_bounded("offloaded", std::time::Duration::from_millis(200), async {
+            // Mirrors `UsearchStore::save`: the actual blocking work runs
+            // on the blocking thread pool, not the sole async worker, so
+            // that worker stays free to drive the outer timeout's timer.
+            let _ = tokio::task::spawn_blocking(|| {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            })
+            .await;
+        })
+        .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(1200),
+            "a flush that offloads blocking work to spawn_blocking must stay bounded \
+             even on a single-worker runtime; elapsed: {:?}",
             start.elapsed()
         );
     }
