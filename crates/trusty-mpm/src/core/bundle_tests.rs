@@ -824,4 +824,24 @@ fn pm_authority_doctrine_survives_composition() {
         composed.contains("When the PM relays operator authorization to merge directly"),
         "composed version-control is missing its PR-workflow authority text"
     );
+
+    // (c) The OBJECTIVE-safety-gate half of the doctrine must survive
+    // composition too — authority never buys a bypass of red/pending CI, from
+    // both the inherited BASE-AGENT rule and version-control's own rule.
+    assert!(
+        composed.contains("never merge red or pending CI (`--admin`"),
+        "composed version-control is missing the inherited BASE-AGENT \
+         objective-safety-gate (red/pending CI) text"
+    );
+    assert!(
+        composed.contains("never a failing check"),
+        "composed version-control is missing the 'never a failing check' \
+         qualifier on the CI safety gate"
+    );
+    let composed_normalized = composed.replace('\n', " ");
+    assert!(
+        composed_normalized.contains("never merge red or pending CI"),
+        "composed version-control is missing its own PR-workflow \
+         objective-safety-gate (red/pending CI) text"
+    );
 }
