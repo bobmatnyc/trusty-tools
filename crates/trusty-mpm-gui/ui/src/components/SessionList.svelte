@@ -68,6 +68,27 @@
   }
 
   /**
+   * Why: The session row is a `div[role=button]` (a real `<button>` can't
+   * nest the inner Pause/Stop buttons — Svelte 5 rejects that as invalid
+   * HTML). `div[role=button]` doesn't get the browser's native button
+   * behavior for free, so keyboard activation has to be reimplemented:
+   * Space must not scroll the page, and keydown events bubbling up from the
+   * inner Pause/Stop buttons must not also select the row.
+   * What: Activates the row on Enter/Space, but only when the event
+   * originated on the row itself (`target === currentTarget`), not on a
+   * nested interactive child.
+   * Test: Tab to the Pause button and press Space → only pause/resume fires,
+   * the row is not also selected. Tab to the row itself and press Space →
+   * the row is selected and the page does not scroll.
+   */
+  function handleRowKeydown(id: string, ev: KeyboardEvent): void {
+    if (ev.target !== ev.currentTarget) return;
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    select(id);
+  }
+
+  /**
    * Why: Pause/resume buttons must reach the daemon and then reflect the new
    * state without a full reload.
    * What: Invokes the matching command for the session's current status, then
@@ -238,7 +259,7 @@
             role="button"
             tabindex="0"
             on:click={() => select(session.id)}
-            on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && select(session.id)}
+            on:keydown={(e) => handleRowKeydown(session.id, e)}
             class={`flex flex-col gap-1 border-t border-trusty-border-light pl-6 pr-3 py-2 text-left dark:border-trusty-border ${
               $activeSessionId === session.id
                 ? 'bg-trusty-primary/10'
