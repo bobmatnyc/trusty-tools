@@ -27,8 +27,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   when RSS is still over the hard limit after a reclaim sweep, for a supervisor
   (launchd/systemd) to respawn; it defaults OFF so an unsupervised daemon never
   self-terminates. `/health` already surfaced `rss_mb` vs `rss_limit_mb`; the
-  ticker now also refreshes that telemetry between health polls
-  ([#2846](https://github.com/bobmatnyc/trusty-tools/issues/2846))
+  ticker now also refreshes that telemetry between health polls. The sweep is
+  hysteresis-gated (`should_reclaim_now`): a sweep only reclaims again once RSS
+  has risen past the RSS observed right after the previous sweep, so a host
+  whose steady-state RSS simply sits at/above the high-water mark does not
+  force a full-fleet cache clear on every 30s tick forever (reclaim/rehydrate
+  thrash) — the baseline resets whenever RSS drops back under the mark, so the
+  next pressure episode always reclaims on its first crossing. Because the
+  reclaim fires under active load by design (unlike idle-evict, which only
+  raced after 60s of quiet), `bm25_search` and `grep_fallback_search` each
+  detect a reclaim landing between their own rehydrate-check and read-lock
+  acquisition (via the `bm25_entities_evicted` / `chunks_evicted` flags) and
+  retry in place, so a racing query never silently loses its lexical or
+  grep-fallback lane — worst case is a redb rehydrate latency spike, not lost
+  recall ([#2846](https://github.com/bobmatnyc/trusty-tools/issues/2846))
 
 ### Fixed
 
