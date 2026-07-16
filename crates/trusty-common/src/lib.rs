@@ -426,6 +426,23 @@ pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
 #[cfg(feature = "search-index")]
 pub mod search_index;
 
+/// Shared trusty-search index READINESS probe (issue #2784), gated behind the
+/// `search-index` feature alongside the warming helper it complements.
+///
+/// Why: [`search_index::ensure_project_indexed`] *warms* a project's index at
+/// task start but never told the session whether it was actually ready — so a
+/// daily-driver session could silently query during the semantic warm-up
+/// window and get lexical-only results with no signal. This module adds the
+/// missing *surfacing* half so both crates that warm (trusty-code, trusty-mpm)
+/// can also report readiness from the ONE shared implementation.
+/// What: exposes [`search_readiness::probe_index_readiness`] (fail-open probe),
+/// the pure [`search_readiness::parse_readiness`] mapper, and
+/// [`search_readiness::log_index_readiness`] (one stderr line surfacing lane
+/// readiness to the session).
+/// Test: `cargo test -p trusty-common --features search-index -- search_readiness::tests`.
+#[cfg(feature = "search-index")]
+pub mod search_readiness;
+
 /// Canonical tmux-session naming shared by both session managers (SPEC-ONESM-01).
 ///
 /// Why: trusty-mpm's `SessionManager` and trusty-agents' `TmManager` both create
