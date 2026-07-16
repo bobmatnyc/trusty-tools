@@ -447,11 +447,13 @@ mod tests {
 
         // Prove it round-trips through the real orchestrator: the planned
         // stem must actually be what gets deployed, not silently dropped.
-        let out =
-            deploy_all_skill_tiers(bundled.path(), Path::new("/nonexistent"), dest.path(), |_| {
-                true
-            })
-            .unwrap();
+        let out = deploy_all_skill_tiers(
+            bundled.path(),
+            Path::new("/nonexistent"),
+            dest.path(),
+            |_| true,
+        )
+        .unwrap();
         assert!(
             out.stats.deployed.contains(&"foo.md".to_string()),
             "the double-extension skill must actually deploy: {out:?}"
