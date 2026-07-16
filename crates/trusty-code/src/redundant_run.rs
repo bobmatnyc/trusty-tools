@@ -11,11 +11,15 @@
 //! clean full-suite pass after the last code change, no more and no less.
 //! What: [`is_redundant_test_rerun`] is a pure predicate over a loop's
 //! transcript. A proposed `bash` test invocation is redundant iff the most
-//! recent prior test invocation already PASSED and nothing that could have
-//! changed the tree (a `write_file`/`write_files`/`edit`, or any non-test
-//! `bash` command) has run since. The predicate reuses `verify_gate`'s
-//! `is_test_command` / `bash_command_from_call` so the two gates can never
-//! drift on what counts as a test invocation. `agent_loop::AgentLoop`'s
+//! recent prior test invocation ran the BYTE-IDENTICAL command, already PASSED,
+//! and nothing that could have changed the tree (a `write_file`/`write_files`/
+//! `edit`, or any non-test `bash` command) has run since. Command identity is
+//! load-bearing (#2804 review): a narrow run passing (`cargo test -p a`) must
+//! never suppress a broader/different one (`cargo test --workspace`,
+//! `cargo test -p b`) that never actually ran, nor may a compile-only
+//! `cargo test --no-run` suppress the real subsequent run. The predicate reuses
+//! `verify_gate`'s `is_test_command` / `bash_command_from_call` so the two
+//! gates can never drift on what counts as a test invocation. `agent_loop::AgentLoop`'s
 //! dispatch loop consults it (when suppression is enabled via
 //! `AgentLoop::with_redundant_run_suppression`) and, on a match, short-circuits
 //! the dispatch with [`REDUNDANT_RERUN_MESSAGE`] instead of actually spawning
@@ -36,12 +40,16 @@ use crate::verify_gate::{bash_command_from_call, is_test_command};
 /// invite another confirmation run. Phrasing it as a normal (non-error)
 /// result keeps the loop calm: nothing failed, the prior pass still stands.
 /// What: A fixed, model-facing sentence explaining the suppression and the
-/// invariant it relies on (last pass still valid, no code changed since).
+/// invariant it relies on — the SAME command already passed and no code has
+/// changed since. It is only ever emitted for a byte-identical re-run (see
+/// [`is_redundant_test_rerun`]), so "this exact command" is always accurate.
 /// Test: `redundant_run::tests::suppression_message_is_informative`.
-pub const REDUNDANT_RERUN_MESSAGE: &str = "skipped: this test suite already passed earlier in \
-this session and no code has changed since (no write_file/edit and no other shell command ran \
-between that passing run and this one). Re-running it would produce the same result and cost a \
-turn. The prior clean pass still stands — proceed to finish the task rather than re-confirming.";
+pub const REDUNDANT_RERUN_MESSAGE: &str = "skipped: this exact test command already passed \
+earlier in this session and no code has changed since (no write_file/edit and no other shell \
+command ran between that passing run and this one). Re-running the identical command would \
+produce the same result and cost a turn. The prior clean pass still stands — proceed to finish \
+the task, or run a DIFFERENT (e.g. broader) command if you need to verify something the passing \
+run did not cover.";
 
 /// Tool names that are pure read-only discovery and therefore CANNOT
 /// invalidate a passing test baseline.
@@ -107,53 +115,83 @@ fn call_result_passed(messages: &[ChatMessage], call_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Fold one completed tool `call` into the running "is the last test pass still
-/// valid" baseline.
+/// Fold one completed tool `call` into the running baseline: the exact command
+/// string of the most recent test run that PASSED with nothing state-changing
+/// since, or `None`.
 ///
 /// Why: Centralises the single rule that decides, per tool call, whether a
-/// prior clean test pass survives it — so the scan in
-/// [`is_redundant_test_rerun`] stays a thin ordered fold.
-/// What: A `bash` test command SETS the baseline to whether that run passed
-/// (`call_result_passed`); any other `bash` command CLEARS it (a shell command
-/// may have mutated the tree); a [`READ_ONLY_TOOLS`] call leaves it unchanged;
-/// every other tool CLEARS it (conservative — treat unknown effects as
-/// state-changing).
+/// prior clean test pass survives it — and, critically (#2804 review),
+/// remembers WHICH command passed so a later re-run is only suppressed when it
+/// is byte-identical. A bare `bool` would wrongly suppress a broader/different
+/// command (`cargo test --workspace`) just because a narrower one
+/// (`cargo test -- foo`) passed.
+/// What: A passing `bash` test command SETS the baseline to `Some(command)`; a
+/// FAILING test command CLEARS it (`None`); any other `bash` command CLEARS it
+/// (a shell command may have mutated the tree); a [`READ_ONLY_TOOLS`] call
+/// leaves it unchanged; every other tool CLEARS it (conservative — treat
+/// unknown effects as state-changing).
 /// Test: exercised via `is_redundant_test_rerun` across
 /// `redundant_run::tests::*`.
-fn fold_call(baseline_passing: &mut bool, call: &ToolCall, messages: &[ChatMessage]) {
+fn fold_call(baseline: &mut Option<String>, call: &ToolCall, messages: &[ChatMessage]) {
     if let Some(command) = bash_command_from_call(call) {
-        *baseline_passing = is_test_command(&command) && call_result_passed(messages, &call.id);
+        *baseline = (is_test_command(&command) && call_result_passed(messages, &call.id))
+            .then_some(command);
         return;
     }
     if READ_ONLY_TOOLS.contains(&call.function.name.as_str()) {
         return;
     }
-    *baseline_passing = false;
+    *baseline = None;
+}
+
+/// Whether two shell command strings are the "same" test invocation for
+/// suppression purposes.
+///
+/// Why: Suppression must require command IDENTITY (#2804 review): re-running a
+/// DIFFERENT command — a broader scope, a different package, a previously
+/// compile-only `--no-run` now actually executing — is a genuinely-needed run,
+/// never redundant. Defaulting to exact match (not a fuzzy/normalized one)
+/// keeps the gate conservative: a false "same" verdict would suppress a real
+/// run, so anything short of certainty must read as "different".
+/// What: Exact string equality after trimming leading/trailing whitespace only
+/// — the sole normalization, so a stray surrounding space cannot force an
+/// otherwise-identical re-run to execute. Internal differences (flags, paths,
+/// package selectors, `--no-run`) are all preserved and therefore all count as
+/// a different command.
+/// Test: `redundant_run::tests::different_test_command_after_pass_is_not_redundant`,
+/// `redundant_run::tests::passing_prior_run_makes_rerun_redundant`.
+fn same_test_command(baseline: &str, pending: &str) -> bool {
+    baseline.trim() == pending.trim()
 }
 
 /// Whether the pending `bash` test call `current_call_id` would be a redundant
-/// re-run of a suite that already passed with nothing changed since.
+/// re-run: the SAME command already passed with nothing changed since.
 ///
 /// Why: This is the gate `agent_loop::AgentLoop::dispatch_all` consults before
 /// spawning a test suite — the whole point of #2682. It must be conservative:
 /// a `true` result suppresses a real execution, so a false positive would hide
 /// a genuinely-needed run. The predicate therefore only returns `true` when a
-/// prior run demonstrably PASSED and every tool call since is demonstrably
-/// non-mutating.
+/// prior run demonstrably PASSED, every tool call since is demonstrably
+/// non-mutating, AND (#2804 review) the pending command is byte-identical to
+/// that passing command — a broader or otherwise-different command is never
+/// suppressed.
 /// What: Folds every assistant tool call in `messages`, in order, up to (but
 /// excluding) the call identified by `current_call_id` — the proposed re-run
-/// itself, and anything after it, is irrelevant — tracking whether the most
-/// recent test run left a still-valid passing baseline. Returns that final
-/// baseline. Because the proposed call's own (not-yet-recorded) result is
-/// never consulted, and any same-turn write/edit BEFORE it clears the baseline,
-/// the answer reflects tree state exactly as of just before the re-run.
+/// itself, and anything after it, is irrelevant — tracking the exact command
+/// of the most recent still-valid passing test run (or `None`). On reaching
+/// the pending call, extracts ITS command and returns `true` only when a
+/// baseline command exists and [`same_test_command`] holds. Because the
+/// proposed call's own (not-yet-recorded) result is never consulted, and any
+/// same-turn write/edit BEFORE it clears the baseline, the answer reflects tree
+/// state exactly as of just before the re-run.
 /// Test: `redundant_run::tests::passing_prior_run_makes_rerun_redundant`,
+/// `redundant_run::tests::different_test_command_after_pass_is_not_redundant`,
 /// `redundant_run::tests::failing_prior_run_is_not_redundant`,
 /// `redundant_run::tests::edit_between_runs_defeats_suppression`,
 /// `redundant_run::tests::no_prior_run_is_not_redundant`,
 /// `redundant_run::tests::same_turn_edit_before_rerun_defeats_suppression`.
 pub fn is_redundant_test_rerun(messages: &[ChatMessage], current_call_id: &str) -> bool {
-    let mut baseline_passing = false;
+    let mut baseline: Option<String> = None;
     for message in messages {
         if message.role != "assistant" {
             continue;
@@ -163,12 +201,18 @@ pub fn is_redundant_test_rerun(messages: &[ChatMessage], current_call_id: &str) 
         };
         for call in calls {
             if call.id == current_call_id {
-                return baseline_passing;
+                return match (baseline.as_deref(), bash_command_from_call(call)) {
+                    (Some(passed), Some(pending)) => same_test_command(passed, &pending),
+                    _ => false,
+                };
             }
-            fold_call(&mut baseline_passing, call, messages);
+            fold_call(&mut baseline, call, messages);
         }
     }
-    baseline_passing
+    // The pending call was not found in the transcript — fail safe (never
+    // suppress a call we cannot locate). In practice `dispatch_all` always
+    // passes a `call.id` present in the just-pushed assistant turn.
+    false
 }
 
 /// Whether `call` is a `bash` invocation of a test command — the cheap
@@ -277,6 +321,66 @@ mod tests {
             assistant(vec![bash_call("t1", "cargo test -p trusty-code")]),
             bash_result("t1", 0),
             assistant(vec![bash_call("t2", "cargo test -p trusty-code")]),
+        ];
+        assert!(is_redundant_test_rerun(&messages, "t2"));
+    }
+
+    /// A DIFFERENT test command after a pass is NOT redundant — suppression
+    /// requires command IDENTITY (#2804 review).
+    ///
+    /// Why: A narrow run passing (`cargo test -p a`) must never suppress a
+    /// broader/different run (`cargo test -p b`, `cargo test --workspace`) that
+    /// was never actually executed — that would silently skip real coverage.
+    /// What: Turn 1 runs `cargo test -p a` and passes; turn 2 proposes
+    /// `cargo test -p b`; assert NOT redundant. The reverse (same command) is
+    /// covered by `passing_prior_run_makes_rerun_redundant`.
+    /// Test: this test.
+    #[test]
+    fn different_test_command_after_pass_is_not_redundant() {
+        let messages = vec![
+            assistant(vec![bash_call("t1", "cargo test -p a")]),
+            bash_result("t1", 0),
+            assistant(vec![bash_call("t2", "cargo test -p b")]),
+        ];
+        assert!(!is_redundant_test_rerun(&messages, "t2"));
+    }
+
+    /// A `--no-run` compile-only pass does NOT suppress a subsequent REAL run
+    /// of the same suite — because the real run's command string differs
+    /// (#2804 review, secondary concern).
+    ///
+    /// Why: `cargo test --no-run` compiles but executes zero tests, then exits
+    /// 0. Command-identity matching already prevents it suppressing a genuine
+    /// `cargo test` run: the two command strings are not equal, so the gate
+    /// treats them as different runs — no special-casing of `--no-run` needed.
+    /// What: Turn 1 runs `cargo test --no-run` (exit 0); turn 2 proposes the
+    /// real `cargo test`; assert NOT redundant.
+    /// Test: this test.
+    #[test]
+    fn compile_only_pass_does_not_suppress_real_run() {
+        let messages = vec![
+            assistant(vec![bash_call("t1", "cargo test --no-run")]),
+            bash_result("t1", 0),
+            assistant(vec![bash_call("t2", "cargo test")]),
+        ];
+        assert!(!is_redundant_test_rerun(&messages, "t2"));
+    }
+
+    /// Surrounding whitespace does not defeat identity — a re-run of the SAME
+    /// command with a stray leading/trailing space is still redundant.
+    ///
+    /// Why: `same_test_command` trims outer whitespace only, so a trivially
+    /// re-emitted command is still recognised while every internal difference
+    /// (flags, scope) is preserved.
+    /// What: Turn 1 `cargo test` passes; turn 2 proposes `  cargo test ` (outer
+    /// spaces); assert redundant.
+    /// Test: this test.
+    #[test]
+    fn outer_whitespace_does_not_defeat_identity() {
+        let messages = vec![
+            assistant(vec![bash_call("t1", "cargo test")]),
+            bash_result("t1", 0),
+            assistant(vec![bash_call("t2", "  cargo test ")]),
         ];
         assert!(is_redundant_test_rerun(&messages, "t2"));
     }

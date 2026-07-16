@@ -156,6 +156,51 @@ async fn test_rerun_after_edit_is_not_suppressed() {
     );
 }
 
+/// A DIFFERENTLY-SCOPED second run is NOT suppressed — suppression requires
+/// command IDENTITY, so a broader command that never actually ran still
+/// executes (#2804 review).
+///
+/// Why: The stale-green bug the review caught — a narrow run passing must never
+/// suppress a broader run. This is the end-to-end wiring proof that the
+/// identity check reaches the dispatch loop.
+/// What: Script [bash `echo cargo test` (passes), bash `echo cargo test
+/// --workspace` (broader, different string), finish_task] with suppression
+/// attached; assert the second run produced a REAL `exit_code: 0` result and
+/// NOT the sentinel.
+/// Test: this test.
+#[tokio::test]
+async fn differently_scoped_rerun_is_not_suppressed() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        bash_call_response("b1", "echo cargo test"),
+        bash_call_response("b2", "echo cargo test --workspace"),
+        finish_task_call_response("f1", r#"{"status": "completed", "summary": "done"}"#),
+    ]));
+    let registry = registry_with_finish_task_and_bash();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
+        .with_redundant_run_suppression();
+
+    let out = agent
+        .run("system prompt", "run the tests, then finish")
+        .await
+        .expect("loop terminates on finish_task");
+
+    assert_eq!(llm.calls(), 3, "both bash turns plus the finish turn run");
+    assert_eq!(out.summary.as_deref(), Some("done"));
+
+    let requests = llm.requests();
+    // The broader second run must have actually executed — a real exit_code
+    // line, never the suppression sentinel.
+    assert!(
+        tool_result_matches(&requests, "b2", |c| c.contains("exit_code: 0")),
+        "a differently-scoped run must actually execute"
+    );
+    assert!(
+        !tool_result_matches(&requests, "b2", |c| c
+            == crate::redundant_run::REDUNDANT_RERUN_MESSAGE),
+        "a differently-scoped run must NOT be suppressed"
+    );
+}
+
 /// With suppression DISABLED (the default), an identical re-run is NOT
 /// short-circuited — the opt-in flag is the only thing that activates the
 /// behaviour.
