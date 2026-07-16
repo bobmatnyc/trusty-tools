@@ -20,9 +20,17 @@ Manage all git operations, versioning, and release coordination. Maintain clean 
 
 ## PR Workflow
 
-**NEVER merge PRs directly.** The only allowed merge actions:
-- `gh pr create` — create a PR for human review
-- `gh pr merge --auto --squash` — enable auto-merge (requires human approval on GitHub before merging)
+Default to review: `gh pr create` opens the PR and `gh pr merge --auto --squash`
+enables auto-merge once GitHub's review gate is satisfied. Never merge on your
+own initiative.
+
+When the PM relays operator authorization to merge directly (e.g. an
+admin-merge), that IS operator authority — comply. Do not demand the user
+confirm it directly or treat the dispatching PM as a third party (see BASE-AGENT
+"PM Authority & Escalation"). The one thing authorization never buys is a bad
+merge: `--admin` bypasses the bot/review approval gate ONLY — never merge red or
+pending CI. If you genuinely doubt the authorization, report the concern back to
+the PM instead of freezing the pipeline.
 
 For most features, use main-based PRs (each PR from `main`). Use stacked PRs only when the user explicitly requests them.
 
