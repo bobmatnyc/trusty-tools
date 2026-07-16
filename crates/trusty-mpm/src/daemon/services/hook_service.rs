@@ -7,12 +7,15 @@
 //! `overseer_context` functions that lived in `api.rs`.
 //! What: [`HookDecision`] is the daemon-facing verdict; [`HookService`] builds
 //! the [`OverseerContext`] from a raw payload, consults the configured
-//! overseer, audits the verdict, applies output optimization, and records the
-//! event in the ring buffer. [`FileChanged`](HookEvent::FileChanged) events are
-//! pre-filtered by [`is_coding_file`] so OS / browser noise never enters the
-//! ring buffer.
+//! overseer, audits the verdict, applies output optimization, dispatches the
+//! idle-park auto-nudge (`daemon::idle_nudge::spawn_if_parked`, #2621), and
+//! records the event in the ring buffer. [`FileChanged`](HookEvent::FileChanged)
+//! events are pre-filtered by [`is_coding_file`] so OS / browser noise never
+//! enters the ring buffer.
 //! Test: `cargo test -p trusty-mpm-daemon services::hook` covers the
 //! disabled-overseer fast path, the decision conversion, and the file filter.
+
+use std::sync::Arc;
 
 use crate::core::hook::{HookEvent, HookEventRecord};
 use crate::core::overseer::{OverseerContext, OverseerDecision};
@@ -179,18 +182,22 @@ impl HookDecision {
 
 /// Hook event processing over the shared daemon state.
 ///
-/// Why: a borrowed facade — the handler builds one per request and delegates
-/// the whole relay pipeline to it, so `ingest_hook` shrinks to a few lines.
-/// What: holds a borrow of [`DaemonState`]; [`process`](Self::process) runs the
-/// overseer-audit-optimize-record pipeline for one event.
+/// Why: the handler builds one per request and delegates the whole relay
+/// pipeline to it, so `ingest_hook` shrinks to a few lines. Owns an `Arc`
+/// (rather than borrowing `&DaemonState`, as it did before #2621) because
+/// [`process`](Self::process) dispatches the idle-park auto-nudge
+/// (`daemon::idle_nudge::spawn_if_parked`) onto a detached `tokio::spawn` task,
+/// which needs an owned, 'static handle to outlive the request.
+/// What: holds an [`Arc<DaemonState>`]; [`process`](Self::process) runs the
+/// overseer-audit-optimize-nudge-record pipeline for one event.
 /// Test: the module's `#[cfg(test)]` suite.
-pub struct HookService<'s> {
-    state: &'s DaemonState,
+pub struct HookService {
+    state: Arc<DaemonState>,
 }
 
-impl<'s> HookService<'s> {
+impl HookService {
     /// Build a service bound to `state`.
-    pub fn new(state: &'s DaemonState) -> Self {
+    pub fn new(state: Arc<DaemonState>) -> Self {
         Self { state }
     }
 
@@ -198,8 +205,9 @@ impl<'s> HookService<'s> {
     ///
     /// Why: this is the daemon's full hook pipeline — consult the overseer on
     /// tool-use events (auditing every verdict), compress `PostToolUse` output,
-    /// then append the event to the ring buffer. Keeping it in one method makes
-    /// the order of those steps explicit and testable.
+    /// trigger the idle-park auto-nudge, then append the event to the ring
+    /// buffer. Keeping it in one method makes the order of those steps explicit
+    /// and testable.
     /// What: builds an [`OverseerContext`], runs the overseer when it is
     /// enabled, records the event (unless blocked), and returns the verdict. A
     /// `Block` short-circuits before the event is recorded.
@@ -225,6 +233,20 @@ impl<'s> HookService<'s> {
                 tracing::info!("overseer auto-response for {session:?}: {text}");
             }
         }
+
+        // 1b (#2621, code-critic MEDIUM): surface + auto-nudge a turn-end
+        // flagged as idle-parking. Lives here (not the already-oversized,
+        // grandfathered `api.rs::ingest_hook`) because this is the daemon's one
+        // hook-processing pipeline and already has the event/session/payload
+        // this needs; `spawn_if_parked` itself no-ops for any event other than
+        // `Stop`/`SubagentStop` with `payload.idle_parking == true`, spawning a
+        // detached task off this synchronous method.
+        crate::daemon::idle_nudge::spawn_if_parked(
+            &self.state,
+            event,
+            &session.0.to_string(),
+            &payload,
+        );
 
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
         if event == HookEvent::PostToolUse {
@@ -339,13 +361,13 @@ mod tests {
     fn process_records_event_with_disabled_overseer() {
         // With the overseer disabled (the default), a known event must be
         // recorded and the verdict is Allow.
-        let state = DaemonState::new();
+        let state = Arc::new(DaemonState::new());
         let id = SessionId::new();
         let mut s = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
         s.status = SessionStatus::Active;
         state.register_session(s);
 
-        let svc = HookService::new(&state);
+        let svc = HookService::new(Arc::clone(&state));
         let decision = svc.process(
             id,
             HookEvent::PreToolUse,
@@ -431,13 +453,13 @@ mod tests {
     fn file_changed_noise_is_not_recorded() {
         // A Chrome temp-file `FileChanged` event must be silently dropped and
         // must not appear in the ring buffer.
-        let state = DaemonState::new();
+        let state = Arc::new(DaemonState::new());
         let id = SessionId::new();
         let mut s = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
         s.status = SessionStatus::Active;
         state.register_session(s);
 
-        let svc = HookService::new(&state);
+        let svc = HookService::new(Arc::clone(&state));
         let decision = svc.process(
             id,
             HookEvent::FileChanged,
@@ -454,13 +476,13 @@ mod tests {
     fn file_changed_source_file_is_recorded() {
         // A Rust source file must pass through the filter and enter the ring
         // buffer unchanged.
-        let state = DaemonState::new();
+        let state = Arc::new(DaemonState::new());
         let id = SessionId::new();
         let mut s = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
         s.status = SessionStatus::Active;
         state.register_session(s);
 
-        let svc = HookService::new(&state);
+        let svc = HookService::new(Arc::clone(&state));
         let decision = svc.process(
             id,
             HookEvent::FileChanged,
@@ -476,13 +498,13 @@ mod tests {
     fn non_file_changed_events_bypass_filter() {
         // Non-FileChanged events must always be recorded regardless of any
         // payload content — the filter is FileChanged-only.
-        let state = DaemonState::new();
+        let state = Arc::new(DaemonState::new());
         let id = SessionId::new();
         let mut s = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
         s.status = SessionStatus::Active;
         state.register_session(s);
 
-        let svc = HookService::new(&state);
+        let svc = HookService::new(Arc::clone(&state));
         let decision = svc.process(id, HookEvent::SessionStart, serde_json::json!({}));
         assert_eq!(decision, HookDecision::Allow);
         assert_eq!(state.recent_hook_events().len(), 1);

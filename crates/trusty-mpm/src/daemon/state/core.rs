@@ -320,6 +320,27 @@ pub struct DaemonState {
     /// Test: `crate::daemon::managed_routes::provision_status` tests exercise
     /// the async state machine through the router.
     pub provisioning: crate::daemon::provisioning::ProvisioningRegistry,
+    /// Per-session idle-park auto-nudge ledger (#2621).
+    ///
+    /// Why: the auto-nudge spam guards — a per-session cap and a cooldown — need
+    /// history that survives across hook receipts but not across a daemon
+    /// restart. Owning it here (behind a `parking_lot::Mutex`, like `optimizer`'s
+    /// lock) lets the `ingest_hook` nudge path read a session's
+    /// [`crate::core::idle_nudge::NudgeRecord`] and record deliveries without a
+    /// new subsystem. In-memory only — a restart resetting the counters only
+    /// re-arms the already-conservative nudge, never spams. Growth is bounded:
+    /// `daemon::idle_nudge::run_nudge` prunes entries for any session no longer
+    /// known to the session store on every nudge attempt (#2621 code-critic
+    /// HIGH 2), so this never accumulates permanent per-session entries for the
+    /// daemon's lifetime.
+    /// What: a [`crate::core::idle_nudge::NudgeLedger`] keyed by the managed
+    /// session's [`crate::session_manager::ManagedSessionId`] inner UUID — NOT
+    /// this daemon's own [`SessionId`] (the two are distinct id spaces; the
+    /// nudge always targets a tmux-managed session, correlated via
+    /// `claude_session_id`).
+    /// Test: `daemon::idle_nudge` unit tests exercise the decide→record→prune
+    /// path; the ledger's own semantics are covered by `core::idle_nudge` tests.
+    pub(super) nudge_ledger: parking_lot::Mutex<crate::core::idle_nudge::NudgeLedger>,
 }
 
 impl Default for DaemonState {
@@ -412,6 +433,7 @@ impl DaemonState {
             supervised: std::sync::atomic::AtomicBool::new(true),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
+            nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
         }
     }
 
@@ -479,6 +501,7 @@ impl DaemonState {
             supervised: std::sync::atomic::AtomicBool::new(true),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
+            nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
         }
     }
 
@@ -494,6 +517,19 @@ impl DaemonState {
     /// `with_root` a tempdir and asserts the handler reads it.
     pub fn framework_root(&self) -> &std::path::Path {
         &self.framework_root
+    }
+
+    /// The idle-park auto-nudge ledger (#2621).
+    ///
+    /// Why: the `ingest_hook` nudge path (`daemon::idle_nudge`) lives outside the
+    /// `state` module, so it needs a public handle to the `pub(super)` ledger to
+    /// read a session's [`crate::core::idle_nudge::NudgeRecord`] and record a
+    /// delivery under the same lock.
+    /// What: returns a reference to the `parking_lot::Mutex`-guarded
+    /// [`crate::core::idle_nudge::NudgeLedger`].
+    /// Test: `daemon::idle_nudge` tests lock and mutate it via this accessor.
+    pub fn nudge_ledger(&self) -> &parking_lot::Mutex<crate::core::idle_nudge::NudgeLedger> {
+        &self.nudge_ledger
     }
 
     /// Whether this daemon process is currently considered safely supervised

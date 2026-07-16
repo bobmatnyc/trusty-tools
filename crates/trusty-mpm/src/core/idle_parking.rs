@@ -69,6 +69,50 @@ const PARKING_PHRASES: &[&str] = &[
     "will resume once",
 ];
 
+/// The subset of [`PARKING_PHRASES`] that address a HUMAN, not a machine watcher.
+///
+/// Why (#2621 code-critic finding, HIGH 1): "let me know once you approve the
+/// deploy" and "I'll wait for the CI notification" both trip [`detect_idle_parking`]
+/// — and should: both are worth a passive warning/log entry. But only the second
+/// is a genuine idle-park (a stopped agent waiting on a self-spawned watcher that
+/// can never re-wake it); the first is a legitimate, in-scope wait on a HUMAN
+/// decision, which #2621 explicitly requires the auto-nudge to never interrupt.
+/// These four phrases are the ones that name a person as the addressee ("let me
+/// know", "notify me", "ping me") rather than a monitor/notification/CI system, so
+/// they are excluded from nudge eligibility while remaining in the passive
+/// detection/log list unchanged.
+/// What: an exact-match subset of [`PARKING_PHRASES`]; see [`is_nudge_eligible`].
+/// Test: `human_addressed_phrases_are_not_nudge_eligible`,
+/// `machine_wait_phrases_are_nudge_eligible`.
+const HUMAN_ADDRESSED_PHRASES: &[&str] = &[
+    "let me know once",
+    "let me know when the",
+    "notify me when",
+    "ping me when",
+];
+
+/// Is `phrase` eligible to trigger an auto-nudge, or only a passive warning/log?
+///
+/// Why: #2621's auto-nudge must "never nudge a legitimate user-wait". Detection
+/// (this module) stays high-recall and advisory for every [`PARKING_PHRASES`]
+/// entry — a false positive there costs only a spurious warning. Auto-injection
+/// is a real action taken on a human's behalf, so it needs a STRICTER subset:
+/// machine-wait phrases only, excluding [`HUMAN_ADDRESSED_PHRASES`]. Callers that
+/// only log/warn (the `tm hook` stderr line, the daemon's surfacing log) should
+/// use [`detect_idle_parking`]/[`detect_idle_parking_in_transcript`] directly and
+/// ignore this gate; callers that actually inject text into a pane (the #2621
+/// auto-nudge) must additionally require `is_nudge_eligible(phrase)`.
+/// What: `true` for any phrase NOT in [`HUMAN_ADDRESSED_PHRASES`]. A phrase that
+/// never matched [`PARKING_PHRASES`] at all is nonsensical input for this
+/// function but still returns `true` (fail-open on the "is this human-addressed"
+/// question) — callers only ever pass a phrase that `detect_idle_parking` itself
+/// returned, so this case does not arise in practice.
+/// Test: `human_addressed_phrases_are_not_nudge_eligible`,
+/// `machine_wait_phrases_are_nudge_eligible`.
+pub fn is_nudge_eligible(phrase: &str) -> bool {
+    !HUMAN_ADDRESSED_PHRASES.contains(&phrase)
+}
+
 /// Scan an agent's final assistant text for idle-parking language.
 ///
 /// Why: a delegated agent that ends its turn with "monitoring the checks" or
@@ -203,6 +247,51 @@ mod tests {
             assert!(
                 detect_idle_parking(s).is_some(),
                 "incident message must be flagged: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn human_addressed_phrases_are_not_nudge_eligible() {
+        // A wait on a HUMAN decision must still be detected (for the passive
+        // warning/log) but must NEVER qualify for auto-nudge injection (#2621
+        // code-critic HIGH 1: "never nudge a legitimate user-wait").
+        let msg =
+            "Deploy config is ready. Let me know once you approve the deploy and I'll ship it.";
+        let phrase = detect_idle_parking(msg).expect("must still be flagged for logging");
+        assert_eq!(phrase, "let me know once");
+        assert!(
+            !is_nudge_eligible(phrase),
+            "a human-addressed phrase must not be nudge-eligible"
+        );
+
+        for phrase in HUMAN_ADDRESSED_PHRASES {
+            assert!(
+                !is_nudge_eligible(phrase),
+                "{phrase:?} must be excluded from nudge eligibility"
+            );
+        }
+    }
+
+    #[test]
+    fn machine_wait_phrases_are_nudge_eligible() {
+        // A genuine machine/monitor wait — the actual idle-park anti-pattern —
+        // must remain nudge-eligible.
+        let msg = "I'll wait for the CI notification before continuing.";
+        let phrase = detect_idle_parking(msg).expect("must be flagged");
+        assert_eq!(phrase, "i'll wait for the");
+        assert!(
+            is_nudge_eligible(phrase),
+            "a machine-wait phrase must remain nudge-eligible"
+        );
+
+        for phrase in PARKING_PHRASES {
+            if HUMAN_ADDRESSED_PHRASES.contains(phrase) {
+                continue;
+            }
+            assert!(
+                is_nudge_eligible(phrase),
+                "{phrase:?} is not human-addressed and must be nudge-eligible"
             );
         }
     }

@@ -18,6 +18,7 @@ pub mod discover;
 pub mod discovery;
 pub mod doctor;
 pub mod error;
+pub mod idle_nudge;
 pub mod idle_reaper;
 pub mod llm_overseer;
 pub mod lock;

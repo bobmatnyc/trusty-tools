@@ -43,6 +43,7 @@ pub mod gh_identity;
 pub mod git_identity;
 pub mod home_trust_seed;
 pub mod hook;
+pub mod idle_nudge;
 pub mod idle_parking;
 pub mod instruction_overrides;
 pub mod instruction_pipeline;
