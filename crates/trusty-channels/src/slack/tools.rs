@@ -91,7 +91,8 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_read_channel",
-            "Read recent messages from a Slack channel.",
+            "Read recent messages from a Slack channel. Returns a single page \
+             (no cursor pagination); a busy channel may truncate at `limit`.",
             json!({
                 "channel": channel_prop(),
                 "limit": {
@@ -103,7 +104,8 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_read_thread",
-            "Read all replies in a Slack thread.",
+            "Read replies in a Slack thread. Returns a single page (no cursor \
+             pagination); a very long thread may truncate.",
             json!({
                 "channel": channel_prop(),
                 "thread_ts": {
@@ -143,7 +145,9 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_search_channels",
-            "Search channels by name or topic.",
+            "Search channels by name or topic. Scans a single page of up to 200 \
+             channels client-side (no cursor pagination); a large workspace may \
+             truncate.",
             json!({
                 "query": { "type": "string", "description": "Channel search query string." },
             }),
