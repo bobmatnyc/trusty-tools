@@ -13,6 +13,7 @@
 
 mod admin;
 mod contrib_graph;
+mod fanout;
 mod files;
 mod health;
 mod helpers;

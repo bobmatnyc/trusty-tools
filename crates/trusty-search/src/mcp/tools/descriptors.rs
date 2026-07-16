@@ -103,11 +103,14 @@ pub fn tool_descriptors() -> Value {
                     "full_content":     { "type": "boolean", "default": false, "description": "Legacy fan-out only: include full chunk content in each hit" },
                     "branch_files":     { "type": "array", "items": { "type": "string" } },
                     "branch_boost":     { "type": "number" },
-                    "branch":           { "type": "string" }
+                    "branch":           { "type": "string" },
+                    "serial":           { "type": "boolean", "default": false, "description": "Legacy fan-out only (issue #2845): force per-index searches to run one at a time instead of the bounded-concurrency default. Safety valve for memory/CPU-constrained hosts." },
+                    "max_fanout_concurrency": { "type": "integer", "description": "Legacy fan-out only (issue #2845): cap how many per-index searches run concurrently for this call, overriding the daemon default. Ignored when `serial` is true." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "AuthValidator that handles refresh tokens" },
-                    { "query": "global cross-project fan-out without index_id" }
+                    { "query": "global cross-project fan-out without index_id" },
+                    { "query": "global fan-out forced serial", "serial": true }
                 ]
             }
         },

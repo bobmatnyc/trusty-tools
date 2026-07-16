@@ -58,6 +58,19 @@ pub struct GlobalSearchRequest {
     /// Cosine-similarity cutoff for `routing = "threshold"`. Default 0.3.
     #[serde(default)]
     pub routing_threshold: Option<f32>,
+
+    /// Per-request cap on how many per-index searches run concurrently within
+    /// this fan-out (issue #2845). Overrides the daemon-wide
+    /// `TRUSTY_SEARCH_FANOUT_CONCURRENCY` default for this call only. Clamped
+    /// to `>= 1`. Ignored when `serial` is `true`.
+    #[serde(default)]
+    pub max_fanout_concurrency: Option<usize>,
+    /// When `true`, execute this fan-out's per-index searches strictly one at
+    /// a time (concurrency 1) — a safety valve for memory/CPU-constrained
+    /// hosts or when the admission limiter is being tripped (issue #2845).
+    /// Takes precedence over `max_fanout_concurrency`.
+    #[serde(default)]
+    pub serial: bool,
 }
 
 fn default_global_top_k() -> usize {
@@ -68,7 +81,9 @@ fn default_global_top_k() -> usize {
 ///
 /// Why: see [`GlobalSearchRequest`] doc. This is distinct from
 /// `POST /indexes/:id/search`, which targets a single index.
-/// What: runs per-index search concurrently, tags each result with its
+/// What: runs per-index search with *bounded* concurrency (issue #2845 — at
+/// most `fanout_concurrency` in flight, or strictly serial when `serial` is
+/// set), tags each result with its
 /// `index_id`, then re-runs RRF (k=60) over the per-index ranked lists
 /// (each index treated as an equally-weighted lane) and returns the top-k
 /// merged results. Indexes that error during search are skipped (logged) so
@@ -82,6 +97,21 @@ fn default_global_top_k() -> usize {
 /// coverage should trigger per-index loads first or wait for selective warm-boot
 /// to complete. A follow-up issue should track "opt-in load-all on global
 /// search" as a deeper semantic decision.
+///
+/// Residual limitation (issue #2845): the fan-out concurrency cap is
+/// **per-request**, not process-global. It bounds how many per-index
+/// searches one `POST /search` call issues at once — it does NOT bound how
+/// many concurrent `POST /search` calls the daemon serves. N concurrent
+/// global searches can still issue up to `N × fanout_concurrency` in-process
+/// per-index searches, and more than ~40 concurrent `search_all` HTTP calls
+/// (at the default `TRUSTY_MAX_CONCURRENT_REQUESTS=8` admission limit) can
+/// still trip the HTTP-layer 503 limiter regardless of this cap. This PR
+/// fixes the single-large-fan-out incident (one request touching ~150+
+/// indexes); it does not add a process-global fan-out semaphore. If 503s
+/// recur under high *client* concurrency (many simultaneous `search_all`
+/// callers) rather than fan-out breadth, a process-global semaphore shared
+/// across all in-flight fan-outs is the natural follow-up — deliberately not
+/// built here to keep this fix scoped to the reported incident.
 ///
 /// Test: `test_global_search_fans_out_and_merges` registers two indexes,
 /// indexes a file into each, and asserts both contribute results tagged with
@@ -223,9 +253,31 @@ pub(super) async fn global_search_handler(
         refine_query: None,
     };
 
-    // Run all per-index searches concurrently. Any index that errors is
-    // skipped with a log line so a single broken index doesn't 500 the
-    // whole fan-out.
+    // Run the per-index searches with *bounded* concurrency (issue #2845).
+    // An unbounded `join_all` over ~150+ indexes issued every per-index search
+    // near-simultaneously; the resulting CPU/memory pressure and long-tail
+    // latency drove the 503 `server_busy` storm (the per-index searches here
+    // are in-process and never themselves cross the HTTP admission limiter in
+    // `service::concurrency` — see the rationale on `fanout::DEFAULT_FANOUT_CONCURRENCY`
+    // for why bounding this fan-out only *indirectly* relieves that limiter).
+    // `buffer_unordered(limit)` keeps at most `limit` searches in flight at
+    // once so a large fan-out drains in bounded waves and still returns
+    // results. `serial: true` / `--serial` collapses the cap to 1. Any index
+    // that errors is skipped with a log line so a single broken index doesn't
+    // 500 the whole fan-out.
+    //
+    // NOTE — this cap is per-request only: it does not bound how many
+    // concurrent `POST /search` calls the daemon serves at once (see the
+    // "Residual limitation" doc on `global_search_handler` above).
+    use futures::stream::StreamExt;
+    let fanout_concurrency =
+        super::fanout::resolve_fanout_concurrency(req.serial, req.max_fanout_concurrency);
+    tracing::debug!(
+        active_indexes = active_ids.len(),
+        fanout_concurrency,
+        serial = req.serial,
+        "global search: bounded fan-out"
+    );
     let registry = state.registry.clone();
     let futures = active_ids.into_iter().map(|id| {
         let registry = registry.clone();
@@ -242,12 +294,17 @@ pub(super) async fn global_search_handler(
             }
         }
     });
-    let per_index_results: Vec<(IndexId, Vec<crate::core::indexer::CodeChunk>)> =
-        futures::future::join_all(futures)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+    let mut per_index_results: Vec<(IndexId, Vec<crate::core::indexer::CodeChunk>)> =
+        futures::stream::iter(futures)
+            .buffer_unordered(fanout_concurrency)
+            .filter_map(|opt| async move { opt })
+            .collect()
+            .await;
+    // `buffer_unordered` yields in completion order; sort by index id so the
+    // fused output is deterministic regardless of which lanes finished first
+    // (RRF is a per-lane rank sum, but stable lane ordering keeps score ties
+    // and the `indexes_searched` list reproducible).
+    per_index_results.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
 
     // Build a flat lookup table from "namespaced" chunk_id
     // ({index_id}::{chunk.id}) back to the tagged CodeChunk, plus per-index
@@ -334,5 +391,8 @@ pub(super) async fn global_search_handler(
         "routing": routing_label,
         "routing_decisions": routing_decisions,
         "hierarchy_dedup_count": hierarchy_dedup_count,
+        // Issue #2845: the effective concurrency cap applied to this fan-out,
+        // so callers/operators can confirm bounding (or serial mode) took hold.
+        "fanout_concurrency": fanout_concurrency,
     })))
 }

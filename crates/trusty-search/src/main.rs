@@ -488,6 +488,32 @@ enum Commands {
         /// (auto-discover enabled).
         #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER")]
         no_auto_discover: bool,
+
+        /// Cap on how many per-index searches run concurrently within a single
+        /// cross-project (`search_all` / `POST /search`) fan-out (issue #2845).
+        ///
+        /// An unbounded fan-out over ~150+ indexes issued every per-index
+        /// query near-simultaneously and overran the daemon's admission
+        /// limiter (503 `server_busy` storm). This caps in-flight per-index
+        /// work so a large fan-out degrades gracefully instead of tripping the
+        /// limiter. Default 8. Clamped to `>= 1`.
+        ///
+        /// Implemented as the `TRUSTY_SEARCH_FANOUT_CONCURRENCY` env var, read
+        /// by the daemon per request. A per-request `max_fanout_concurrency`
+        /// body field overrides this for a single call. Ignored when
+        /// `--serial` is set.
+        #[arg(long, value_name = "N")]
+        fanout_concurrency: Option<usize>,
+
+        /// Force cross-project fan-out searches to run strictly one index at a
+        /// time (issue #2845) — equivalent to `--fanout-concurrency 1`.
+        ///
+        /// A safety valve that trades fan-out latency for guaranteed
+        /// non-overload; useful on memory/CPU-constrained hosts or when the
+        /// concurrency limiter is being tripped. Takes precedence over
+        /// `--fanout-concurrency`.
+        #[arg(long, default_value_t = false)]
+        serial: bool,
     },
 
     /// Stop the running background daemon
@@ -1322,13 +1348,9 @@ async fn run() -> Result<()> {
             }
         },
 
-        Commands::Add { file } => {
-            commands::add::handle_add(&cli.index, file).await?;
-        }
+        Commands::Add { file } => commands::add::handle_add(&cli.index, file).await?,
 
-        Commands::Remove { file } => {
-            commands::remove::handle_remove(&cli.index, file).await?;
-        }
+        Commands::Remove { file } => commands::remove::handle_remove(&cli.index, file).await?,
 
         Commands::Cleanup { yes, dry_run } => {
             commands::cleanup::handle_cleanup(yes, dry_run).await?;
@@ -1338,9 +1360,7 @@ async fn run() -> Result<()> {
             commands::reindex::handle_reindex(&cli.index, path, timeout).await?;
         }
 
-        Commands::List => {
-            commands::list::handle_list(cli.json).await?;
-        }
+        Commands::List => commands::list::handle_list(cli.json).await?,
 
         Commands::Query {
             query,
@@ -1355,9 +1375,7 @@ async fn run() -> Result<()> {
         // `health` is an alias registered on the `status` subcommand, so
         // this arm catches the bare `Commands::Health` variant which is kept
         // for backward-compat with any scripts that invoke it directly.
-        Commands::Health => {
-            commands::status::handle_status(cli.json).await?;
-        }
+        Commands::Health => commands::status::handle_status(cli.json).await?,
 
         Commands::Start {
             port,
@@ -1365,6 +1383,8 @@ async fn run() -> Result<()> {
             device,
             data_dir,
             no_auto_discover,
+            fanout_concurrency,
+            serial,
         } => {
             commands::start::handle_start(
                 port,
@@ -1373,13 +1393,13 @@ async fn run() -> Result<()> {
                 data_dir.as_deref(),
                 cli.verbose,
                 no_auto_discover,
+                fanout_concurrency,
+                serial,
             )
             .await?;
         }
 
-        Commands::Stop => {
-            commands::stop::handle_stop().await?;
-        }
+        Commands::Stop => commands::stop::handle_stop().await?,
 
         Commands::Serve {
             with_http,
