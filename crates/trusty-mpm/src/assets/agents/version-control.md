@@ -48,6 +48,11 @@ gh pr checks <pr> --watch --fail-fast    # blocks until checks settle; run it an
   retry-by-waiting.
 - Ending a turn with "monitoring the checks", "waiting for CI", "will report when
   green", or "standing by" is FORBIDDEN.
+- Do NOT replace the blocking `--watch` with a tight manual poll loop that prints
+  "still N pending" every ~30s — that is the opposite failure (spam) and just as
+  wrong (#2833). `--watch` blocks silently and prints once; keep using it. If you
+  ever must sleep-poll, size the sleep to the CI wall-clock (minutes, not
+  seconds) and only print when a check's state actually changes.
 
 ## Memory Management for Git Operations
 

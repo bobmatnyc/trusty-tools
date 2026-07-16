@@ -718,3 +718,59 @@ fn what_is_trusty_mpm_disambiguates_claude_mpm() {
         "doc must explicitly disambiguate from claude-mpm, not mention it incidentally"
     );
 }
+
+#[test]
+fn idle_park_mitigation_2833_guidance_survives_composition() {
+    // Regression for #2833's code-critic review (MEDIUM finding): the prior
+    // `base_agent_guidance_sections_survive_composition` test only asserted the
+    // pre-existing #2501/#2610 strings — none of the #2833 idle-park-mitigation
+    // content (chunked-repoll anti-spam guidance, the PM-side parked-subagent
+    // nudge protocol, the version-control anti-spam bullet) was ever exercised
+    // through the REAL bundled asset chain. This test closes that gap using the
+    // same real-composition approach as its sibling: `compose_agent` reading
+    // the actual `assets/agents` dir for the two agent-tier assertions, and
+    // `assemble_system_prompt` (the real PM_INSTRUCTIONS/WORKFLOW/
+    // AGENT_DELEGATION/BASE_PM assembly used at session launch) for the
+    // PM-tier assertion — not a hand-built fixture string.
+    use crate::core::agent_builder::compose_agent;
+    use crate::core::instruction_pipeline::assemble_system_prompt;
+    use std::path::Path;
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+
+    // (a) BASE-AGENT.md's chunked-repoll subsection must reach a composed
+    // agent that inherits BASE-AGENT (version-control extends it).
+    let composed = compose_agent("version-control", &assets_dir)
+        .expect("compose_agent(version-control) must succeed");
+    assert!(
+        composed
+            .contains("### Re-issue without spamming — the chunked-repoll pattern (issue #2833)"),
+        "composed version-control is missing the BASE-AGENT chunked-repoll subsection (#2833)"
+    );
+
+    // (c) version-control's own anti-spam bullet (distinct from the inherited
+    // BASE-AGENT section) must also survive composition.
+    assert!(
+        composed.contains("that is the opposite failure (spam) and just as"),
+        "composed version-control is missing its persona-level anti-spam bullet (#2833)"
+    );
+
+    // (b) PM_INSTRUCTIONS.md's new Parked-Subagent Detection & Nudge section
+    // must survive the real PM system-prompt assembly (not just exist in the
+    // source .md file).
+    let pm_prompt = assemble_system_prompt();
+    assert!(
+        pm_prompt.contains("## Parked-Subagent Detection & Nudge (issue #2833)"),
+        "assembled PM system prompt is missing the Parked-Subagent Detection & \
+         Nudge section (#2833)"
+    );
+    assert!(
+        pm_prompt
+            .contains("never a 30-second blind poll (that is the spam counter-failure, #2833)"),
+        "assembled PM system prompt is missing the PM-side anti-spam-monitoring \
+         guidance (#2833)"
+    );
+}
