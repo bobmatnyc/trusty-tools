@@ -1738,6 +1738,75 @@ fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
     );
 }
 
+/// Build a [`make_session`] summary with an explicit `created_at` (RFC3339),
+/// for tests that need to control recency ordering.
+fn make_session_at(
+    name: &str,
+    state: &str,
+    created_at: &str,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = make_session(name, state, None);
+    s.created_at = Some(created_at.to_string());
+    s
+}
+
+#[test]
+fn nested_managed_match_prefers_live_over_recycled_decommissioned_name() {
+    // #2790 code-critic HIGH: tmux session names are RECYCLED after
+    // decommission. A stale Decommissioned tombstone sharing a name with a
+    // genuinely LIVE session must never win the match — liveness takes STRICT
+    // precedence over recency (not just "usually more recent"). Proven here by
+    // giving the tombstone a LATER created_at than the live record — an
+    // adversarial ordering the pre-#2790 plain `.find()` would have been
+    // vulnerable to depending on iteration/list order.
+    let mut decommissioned =
+        make_session_at("tm-proj-01", "decommissioned", "2026-03-01T00:00:00Z");
+    decommissioned.id = "old-id".to_string();
+    let mut live = make_session_at("tm-proj-01", "active", "2026-01-01T00:00:00Z");
+    live.id = "new-id".to_string();
+    let sessions = vec![decommissioned, live];
+
+    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
+    assert_eq!(
+        matched.map(|s| s.id.as_str()),
+        Some("new-id"),
+        "a live record must win over a decommissioned one sharing the same \
+         recycled name, even when the tombstone's created_at is later"
+    );
+}
+
+#[test]
+fn nested_managed_match_falls_back_to_decommissioned_when_no_live_candidate() {
+    // The legitimate #2777 repro: the ONLY record sharing this tmux session
+    // name IS the decommissioned session itself (its name has not yet been
+    // recycled by a new session) — the guard must still match it so the
+    // in-place revive path can run.
+    let sessions = vec![make_session("tm-apex-01", "decommissioned", None)];
+    let matched = nested_managed_match(Some("tm-apex-01"), None, &sessions);
+    assert_eq!(
+        matched.map(|s| s.name.as_str()),
+        Some("tm-apex-01"),
+        "must fall back to the decommissioned record when no live candidate \
+         shares its name"
+    );
+}
+
+#[test]
+fn nested_managed_match_prefers_most_recent_live_among_multiple() {
+    // Belt-and-suspenders: when MULTIPLE non-decommissioned candidates somehow
+    // share a name (should not normally happen, but the guard must still be
+    // deterministic), the most recently created one wins — mirroring
+    // `capture_pane_by_tmux_name`'s `max_by_key(created_at)` convention.
+    let mut older = make_session_at("tm-proj-02", "active", "2026-01-01T00:00:00Z");
+    older.id = "older-id".to_string();
+    let mut newer = make_session_at("tm-proj-02", "active", "2026-02-01T00:00:00Z");
+    newer.id = "newer-id".to_string();
+    let sessions = vec![older, newer];
+
+    let matched = nested_managed_match(Some("tm-proj-02"), None, &sessions);
+    assert_eq!(matched.map(|s| s.id.as_str()), Some("newer-id"));
+}
+
 // ── pane_identity_confirmed (#2456 review finding 1, ROUND 2) ────────────────
 // The cross-pane-hijack guard: `nested_managed_match` alone only proves the
 // tmux SESSION matches (every window/pane in that session shares the same

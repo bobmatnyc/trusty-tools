@@ -394,24 +394,52 @@ async fn nested_session_guard(
 /// Why: isolating the match rule from the daemon round-trip and the tmux
 /// shell-out makes the actual guard DECISION exhaustively unit-testable
 /// without a live daemon or tmux server.
-/// What: returns the first record whose `name` (tmux session name) equals
-/// `current_session_name`, OR whose `id` equals `env_session_id` — either
-/// match is sufficient (the env id is belt-and-suspenders for the rare case
-/// where the session was renamed after spawn). `None` when both inputs are
-/// `None`/non-matching, which includes the "not inside tmux" case (callers
-/// pass `current_session_name: None` then).
+///
+/// #2790 code-critic HIGH: tmux SESSION NAMES ARE RECYCLED after a session is
+/// decommissioned (`session_manager::manager`'s name-reuse policy) — a plain
+/// `.find()` over ALL candidates (including tombstones) can therefore return a
+/// STALE `Decommissioned` record for a name that a genuinely LIVE session now
+/// also owns, which would drive `RelaunchInPlace` against the wrong (dead)
+/// record while a live session sharing that name sits in a sibling pane — the
+/// exact hijack class #2456/#2680 fixed elsewhere.
+/// [`SessionManager::capture_pane_by_tmux_name`] (`session_manager/manager.rs`)
+/// already carries the identical guard for the same reason (idle-reaper pane
+/// capture) — this mirrors it.
+/// What: collects every record matching `current_session_name` OR
+/// `env_session_id`, then prefers the most-recently-created (`created_at`,
+/// RFC3339 — lexicographically sortable) NON-`Decommissioned` match. Only when
+/// NO candidate is non-`Decommissioned` does it fall back to the
+/// most-recently-created `Decommissioned` candidate — the legitimate #2777
+/// repro case (a decommissioned session's OWN, not-yet-recycled name). `None`
+/// when both inputs are `None`/non-matching, which includes the "not inside
+/// tmux" case (callers pass `current_session_name: None` then).
 /// Test: `nested_managed_match_by_session_name`,
 /// `nested_managed_match_by_env_id`, `nested_managed_match_none_when_no_match`,
-/// `nested_managed_match_none_when_both_inputs_absent`.
+/// `nested_managed_match_none_when_both_inputs_absent`,
+/// `nested_managed_match_prefers_live_over_recycled_decommissioned_name`,
+/// `nested_managed_match_falls_back_to_decommissioned_when_no_live_candidate`,
+/// `nested_managed_match_prefers_most_recent_live_among_multiple`.
 pub(crate) fn nested_managed_match<'a>(
     current_session_name: Option<&str>,
     env_session_id: Option<&str>,
     records: &'a [trusty_mpm::client::ManagedSessionSummary],
 ) -> Option<&'a trusty_mpm::client::ManagedSessionSummary> {
-    records.iter().find(|r| {
+    let is_candidate = move |r: &&trusty_mpm::client::ManagedSessionSummary| {
         current_session_name.is_some_and(|n| n == r.name)
             || env_session_id.is_some_and(|id| id == r.id)
-    })
+    };
+
+    records
+        .iter()
+        .filter(is_candidate)
+        .filter(|r| r.state != "decommissioned")
+        .max_by_key(|r| r.created_at.clone().unwrap_or_default())
+        .or_else(|| {
+            records
+                .iter()
+                .filter(is_candidate)
+                .max_by_key(|r| r.created_at.clone().unwrap_or_default())
+        })
 }
 
 /// Pure predicate (#2456 review finding 1, ROUND 2 — the round-1 env-var

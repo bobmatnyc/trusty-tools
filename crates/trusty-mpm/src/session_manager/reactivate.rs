@@ -46,11 +46,27 @@ impl SessionManager {
     /// operator's current pane survives to `exec` `claude` into it — is the only
     /// non-destructive way to honor that on-screen instruction. The revive is an
     /// explicit, in-pane operator action, never automatic; if decommission had
-    /// removed the workspace, the subsequent in-place `exec`'s `cd` fails and the
-    /// caller falls back to an actionable hint (`bin/tm`'s `guided_inplace`).
+    /// removed the workspace, the resolved directory fails the on-disk
+    /// existence guard below and the state is never flipped — the caller falls
+    /// back to an actionable hint (`bin/tm`'s `guided_inplace`).
+    ///
+    /// Defense-in-depth (#2790 code-critic CRITICAL/MEDIUM): `decommission()`
+    /// unconditionally clears `workspace_path` to `None` on tombstone — even
+    /// for the unowned/#1840 skip-deletion case where the directory was NEVER
+    /// actually removed — so `workspace_path` alone cannot distinguish
+    /// "physically gone" from "never tracked separately". The field that is
+    /// NEVER cleared, and the one the in-place relaunch actually resumes into
+    /// (`workspace_path.or(cwd)` in `bin/tm`'s
+    /// `guided_inplace::run_inplace_relaunch`), is the original spawn `cwd`.
+    /// This method independently refuses the state flip — the daemon-side
+    /// authority, regardless of what any CLI-side pre-check does or omits —
+    /// when that resolved directory no longer exists on disk, so a corrupted
+    /// `Active` ghost record (workspace gone, state says running) can never be
+    /// committed to the store.
     /// Test: `mark_reactivated_flips_stopped_to_active`,
     /// `mark_reactivated_flips_decommissioned_to_active`,
-    /// `mark_reactivated_rejects_non_stopped`.
+    /// `mark_reactivated_rejects_non_stopped`,
+    /// `mark_reactivated_refuses_when_workspace_removed_by_decommission`.
     pub async fn mark_reactivated(
         &self,
         id: &ManagedSessionId,
@@ -69,6 +85,21 @@ impl SessionManager {
                 ),
             ));
         }
+
+        let resume_dir = record
+            .workspace_path
+            .as_deref()
+            .unwrap_or(record.cwd.as_path());
+        if !resume_dir.is_dir() {
+            return Err(ManagedError::InvalidState(
+                id.to_string(),
+                format!(
+                    "cannot reactivate session '{id}': workspace '{}' no longer exists on disk",
+                    resume_dir.display()
+                ),
+            ));
+        }
+
         record.state = ManagedSessionState::Active;
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record.clone()).await?;

@@ -425,18 +425,30 @@ pub(crate) enum InPlaceOutcome {
 /// (cwd/binary resolution) or post-reactivate (`exec` itself failing) alike
 /// — as a fall-back-to-reconnect condition, matching that call site's
 /// pre-#2453 behavior of never hard-failing.
-/// What, IN ORDER (#2027 exec-ordering fix): (1) prints a one-line notice;
-/// (2) resolves the workdir and builds the resume argv via
+/// What, IN ORDER (#2027 exec-ordering fix, extended by #2790): (1) prints a
+/// one-line notice; (2) resolves the workdir; (2a) #2790 CRITICAL:
+/// verifies the resolved workdir EXISTS ON DISK — a Decommissioned record's
+/// workspace may have been removed by `decommission()` while the record's
+/// `workspace_path`/`cwd` still names it; a missing directory returns
+/// [`InPlaceOutcome::FallThrough`] here, BEFORE any daemon call, so a
+/// known-gone workspace can never be masked by a durably-committed `Active`
+/// record; (3) builds the resume argv via
 /// [`trusty_mpm::runtime::build_inplace_resume_command`] (the SAME
 /// `--resume`-existence-check → `--continue`/fresh-spawn fallback logic the
 /// tmux-pane resume path uses, #2013) — this is PURE/local (resolving the
 /// `claude` binary can fail with `BinaryNotFound`) and runs BEFORE any daemon
 /// mutation, so a missing binary never flips the record to a false `Active`;
-/// (3) reactivates the record on the daemon (step 3 of #2023 C — see
+/// (4) reactivates the record on the daemon (step 3 of #2023 C — see
 /// [`reactivate_managed_session`]), immediately before exec — on a
 /// refused/failed reactivate this returns [`InPlaceOutcome::FallThrough`]
-/// rather than proceeding; (4) execs `claude` in place.
+/// rather than proceeding; (5) execs `claude` in place.
 /// Test: I/O path; not unit-tested (requires a live daemon + real `claude`).
+/// The workdir-existence gate (2a) is exercised via `run_inplace_relaunch`'s
+/// I/O surface only (needs the daemon + tmux + `claude`); the FSM invariant it
+/// protects is separately proven at the daemon layer (defense-in-depth, so the
+/// guard holds even for a future caller that skips this CLI-side check) by
+/// `mark_reactivated_refuses_when_workspace_removed_by_decommission` in
+/// `session_manager::reactivate_tests`.
 pub(crate) async fn run_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
@@ -456,6 +468,26 @@ pub(crate) async fn run_inplace_relaunch(
         Ok(cwd) => cwd,
         Err(e) => return InPlaceOutcome::Result(Err(e)),
     };
+
+    // #2790 code-critic CRITICAL: a Decommissioned record's workspace may have
+    // been deleted from disk by `decommission()` (the FSM invariant in
+    // `session_manager::record` — only Decommissioned means the workspace is
+    // gone) while `workspace_path`/`cwd` on the record still names the
+    // now-removed path. Confirm the resolved directory ACTUALLY EXISTS before
+    // any daemon mutation: reactivating (which durably flips the record to
+    // `Active`) then discovering the `cd`/exec target is gone would commit a
+    // ghost `Active` record that can never be attached to again. Folding a
+    // missing workspace into `FallThrough` here — zero daemon calls made —
+    // keeps the invariant intact and routes the operator to the same honest
+    // self-relaunch hint a refused reactivate would.
+    if !cwd.is_dir() {
+        eprintln!(
+            "tm: workspace for session {id} no longer exists on disk ({}) — cannot relaunch in \
+             place",
+            cwd.display()
+        );
+        return InPlaceOutcome::FallThrough;
+    }
 
     let resume = match trusty_mpm::runtime::build_inplace_resume_command(
         &cwd,
