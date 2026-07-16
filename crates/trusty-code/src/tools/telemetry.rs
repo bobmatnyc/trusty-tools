@@ -50,7 +50,7 @@ pub enum ToolTelemetry {
 /// What: `lane` is the lane that served the results; `hit_count` is `None`
 /// when the result shape could not be counted (never a misleading `0`);
 /// `latency_ms` covers the whole call including any retry.
-/// Test: `tools::trusty_search_tests::telemetry_reports_lexical_fallback_lane`.
+/// Test: `tools::trusty_search_tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchTelemetry {
     /// The trusty-search lane that actually served this query.

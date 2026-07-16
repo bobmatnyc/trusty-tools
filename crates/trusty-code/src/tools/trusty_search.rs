@@ -345,7 +345,7 @@ async fn lexical_fallback(
 /// `Event::SearchPerformed.lane`. `Lexical` is only ever reached via the
 /// stage-not-ready retry — it is not a mode the model can request.
 /// Test: `tests::lane_labels_are_stable`,
-/// `tests::telemetry_reports_lexical_fallback_lane`.
+/// `tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchLane {
     /// `search_semantic` — embedding similarity.

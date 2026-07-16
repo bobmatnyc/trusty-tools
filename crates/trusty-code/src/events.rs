@@ -223,7 +223,7 @@ pub enum Event {
     /// crate could not count (never a silent zero, which would read as "no
     /// hits"). `latency_ms` measures the whole tool call, retry included.
     /// Test: `session::registry::registry_tests::record_search_performed_publishes_event`,
-    /// `tools::trusty_search_tests::telemetry_reports_lexical_fallback_lane`.
+    /// `tools::trusty_search_tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
     SearchPerformed {
         session_id: String,
         agent: String,
