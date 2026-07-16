@@ -13,9 +13,11 @@ says *what the code must do*.
 Each spec carries a `DOC-N` document number and one or more stable spec IDs in
 the `SPEC-{SUBSYSTEM}-{NN}~{rev}` grammar (e.g. `SPEC-CONFORMANCE-01~draft`).
 Every governed section anchors its ID with a `{#SPEC-…}` heading marker so that
-source code can link to it via the [Spec-Linked Documentation (SLD)][sld]
-`# Spec References` rustdoc convention, and tooling (the intent-source resolver)
-can resolve a changed file back to the section that governs it.
+any source artifact — code in any language, config, or a Markdown document — can
+link to it via the [Spec-Linked Documentation (SLD)][sld] standard (canonical:
+[DOC-38](./spec-linked-documentation.md)), and a conforming resolver (e.g.
+trusty-common's `intent_source`) can resolve a changed file back to the section
+that governs it.
 
 ## Spec catalog
 
@@ -44,6 +46,7 @@ can resolve a changed file back to the section that governs it.
 | DOC-33 | `SPEC-METALOG-01~draft` … `-04~draft` | [tm Meta-Harness Logging — Per-Delegation Observability, Verbosity CLI, and Log Pruning](./tm-meta-harness-logging.md) | trusty-mpm — observability / CLI / log retention |
 | DOC-35 | `SPEC-PROJCTL-01~draft` … `-08~draft` | [`tm project`: Deterministic Project/Session Control Plane (CLI + Multipane TUI)](./tm-project-control-plane.md) | trusty-mpm — control plane / CLI / TUI / daemon API |
 | DOC-36 | `SPEC-TMMGR-01~approved` … `-06~approved` | [`tm manager`: Layer-3 Chat-Based Portfolio Project Manager](./tm-manager-vision.md) | trusty-mpm — daemon / inference layer / external channels |
+| DOC-38 | `SPEC-SLD-01~draft` … `-03~draft` | [Spec-Linked Documentation (SLD): A Language-Agnostic Source↔Spec Reference Standard](./spec-linked-documentation.md) | documentation standard — repository/language-agnostic (informative reference: trusty-common `intent_source`) |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -56,10 +59,17 @@ can resolve a changed file back to the section that governs it.
 > ([trusty-mpm Self-Awareness](./trusty-mpm-self-awareness.md), the entry above). That
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
-> untouched); a follow-up should assign it the next free `DOC-N` (currently **DOC-34**
-> — DOC-32 was claimed by [`tool-output-interception-seam.md`](./tool-output-interception-seam.md), issue #1953,
-> and DOC-33 by [`tm-meta-harness-logging.md`](./tm-meta-harness-logging.md), issue #1965)
-> and add a catalog row.
+> untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
+> **Next free `DOC-N` = `DOC-39`** (scan of the whole `docs/` tree, 2026-07-16): the
+> highest claimed number is **DOC-38** ([Spec-Linked Documentation](./spec-linked-documentation.md),
+> the entry above). DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
+> #1999 — still a catalog gap), DOC-35/36/38 are cataloged, and **DOC-37** is
+> self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
+> (`SPEC-SEARCHREPO-01~draft`…, uncataloged). The DOC-N assignment rule (scan-before-claim)
+> and collision handling are now normative in [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft)
+> (note: `{#SPEC-…}` cross-links are best-effort on github.com — GitHub does not
+> honor explicit heading IDs, DOC-38 §4.3 — so this link lands on the file; scan
+> for §4.1 from there).
 
 ## Status lifecycle
 
@@ -72,9 +82,21 @@ implementation PR.
 
 ## Spec-Linked Documentation (SLD)
 
-Source code declares which spec section governs it using a module-level
-`//! # Spec References` (or function-level `/// # Spec References`) rustdoc block
-linking the spec ID to its anchor, e.g.:
+**Canonical spec: [DOC-38 — Spec-Linked Documentation](./spec-linked-documentation.md).**
+SLD is a **pure, implementation-neutral documentation standard** — usable in any
+repository, in any language — by which a **source artifact declares which spec
+section governs it**, so a *conforming resolver* (any tool that reads the
+declaration) can trace a changed file back to that section. DOC-38 defines the
+standard itself: the grammar, not a resolver implementation. As of DOC-38, SLD is
+**language-agnostic**: Rust, Python, TypeScript/JavaScript, shell, and TOML/YAML
+declare linkage inline via a `# Spec References` comment/docstring block in their
+native idiom, using one canonical `(spec-ID, relative-path, anchor)` reference
+grammar; **Markdown documents declare linkage canonically in `spec_refs:` YAML
+frontmatter** (DOC-38 §2.5, §3.6), with an optional visible section retained for
+human readability only.
+
+The Rust form is unchanged — a module-level `//! # Spec References` (or function-level
+`/// # Spec References`) rustdoc block linking the spec ID to its anchor:
 
 ```rust
 //! # Spec References
@@ -82,10 +104,24 @@ linking the spec ID to its anchor, e.g.:
 //! - [`SPEC-CONFORMANCE-03~draft`](docs/specs/intent-conformance.md#SPEC-CONFORMANCE-03~draft)
 ```
 
-The intent-source resolver (`trusty_common::intent_source`) reads these blocks
-to resolve a changed file back to the spec section that governs it. It is a
-*reader* of declared links only — it never invents linkage where none is
-declared, and it does **not** enforce a four-status traceability model (that is
-an explicit non-goal, DOC-15 §1.3).
+A Markdown document declares the same triple canonically in frontmatter:
+
+```markdown
+---
+spec_refs:
+  - id: SPEC-CONFORMANCE-03~draft
+    path: docs/specs/intent-conformance.md
+    anchor: SPEC-CONFORMANCE-03~draft
+---
+```
+
+A conforming resolver is a *reader* of declared links only — it never invents
+linkage where none is declared, and it does **not** enforce a four-status
+traceability model (an explicit non-goal, DOC-15 §1.3 / DOC-38 §1.3). trusty-common's
+`intent_source` (DOC-15 §6) is one *illustrative* resolver, documented as an
+informative annex in DOC-38 (Annex A), not as part of the standard itself; extending
+it to read SLD references is tracked as a follow-up (DOC-38 §10, F1), not implemented
+by this catalog change. See DOC-38 for the normative reference grammar, the
+frontmatter schema, and the per-language idioms.
 
 [sld]: #spec-linked-documentation-sld
