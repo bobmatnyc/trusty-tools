@@ -328,11 +328,18 @@ pub struct DaemonState {
     /// lock) lets the `ingest_hook` nudge path read a session's
     /// [`crate::core::idle_nudge::NudgeRecord`] and record deliveries without a
     /// new subsystem. In-memory only — a restart resetting the counters only
-    /// re-arms the already-conservative nudge, never spams.
-    /// What: a [`crate::core::idle_nudge::NudgeLedger`] keyed by the daemon
-    /// [`SessionId`]'s UUID.
-    /// Test: `daemon::idle_nudge` unit tests exercise the decide→record path; the
-    /// ledger's own semantics are covered by `core::idle_nudge` tests.
+    /// re-arms the already-conservative nudge, never spams. Growth is bounded:
+    /// `daemon::idle_nudge::run_nudge` prunes entries for any session no longer
+    /// known to the session store on every nudge attempt (#2621 code-critic
+    /// HIGH 2), so this never accumulates permanent per-session entries for the
+    /// daemon's lifetime.
+    /// What: a [`crate::core::idle_nudge::NudgeLedger`] keyed by the managed
+    /// session's [`crate::session_manager::ManagedSessionId`] inner UUID — NOT
+    /// this daemon's own [`SessionId`] (the two are distinct id spaces; the
+    /// nudge always targets a tmux-managed session, correlated via
+    /// `claude_session_id`).
+    /// Test: `daemon::idle_nudge` unit tests exercise the decide→record→prune
+    /// path; the ledger's own semantics are covered by `core::idle_nudge` tests.
     pub(super) nudge_ledger: parking_lot::Mutex<crate::core::idle_nudge::NudgeLedger>,
 }
 

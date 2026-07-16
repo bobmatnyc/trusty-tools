@@ -141,14 +141,19 @@ pub struct NudgeRecord {
 /// daemon's structured logging and the unit tests aligned on one vocabulary
 /// instead of stringly-typed reasons.
 /// What: one variant per safety rail, in the order [`decide_nudge`] checks them.
-/// Test: `disabled_skips`, `not_parking_skips`, `live_children_skips`,
-/// `cap_blocks_after_max`, `cooldown_blocks_within_window`.
+/// Test: `disabled_skips`, `not_parking_skips`, `human_wait_skips`,
+/// `live_children_skips`, `cap_blocks_after_max`, `cooldown_blocks_within_window`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     /// The `[idle_nudge]` feature is disabled (`enabled = false`).
     Disabled,
     /// The turn-end did not actually park (no parking phrase was detected).
     NotParking,
+    /// The parking phrase addresses a HUMAN ("let me know once…", "ping me
+    /// when…"), not a monitor/notification — a legitimate user-wait that #2621
+    /// requires the auto-nudge to never interrupt (code-critic HIGH 1). See
+    /// [`crate::core::idle_parking::is_nudge_eligible`].
+    HumanWait,
     /// The session still has live tracked children — it is not truly stalled.
     HasLiveChildren,
     /// The per-session nudge cap (`max_nudges_per_session`) is exhausted.
@@ -168,6 +173,7 @@ impl SkipReason {
         match self {
             SkipReason::Disabled => "disabled",
             SkipReason::NotParking => "not_parking",
+            SkipReason::HumanWait => "human_wait",
             SkipReason::HasLiveChildren => "has_live_children",
             SkipReason::CapExhausted => "cap_exhausted",
             SkipReason::WithinCooldown => "within_cooldown",
@@ -206,23 +212,26 @@ impl NudgeDecision {
 ///
 /// Why: concentrating the gate in one side-effect-free function makes the
 /// conservative posture the issue demands — disable-able, cap-bounded,
-/// cooldown-bounded, never-nudge-a-busy-session — auditable and unit-testable
-/// without any daemon plumbing. The daemon layer computes the three runtime
-/// inputs (`parking`, `has_live_children`, and the session's [`NudgeRecord`])
-/// and defers the decision entirely to this function.
+/// cooldown-bounded, never-nudge-a-busy-session, never-nudge-a-human-wait —
+/// auditable and unit-testable without any daemon plumbing. The daemon layer
+/// computes the three runtime inputs (`phrase`, `has_live_children`, and the
+/// session's [`NudgeRecord`]) and defers the decision entirely to this function.
 /// What: returns [`NudgeDecision::Nudge`] iff, in order: the feature is
-/// `enabled`; the turn actually `parking`ed; the session has NO live tracked
-/// children (`!has_live_children`); the prior nudge `count` is `<`
-/// `max_nudges_per_session`; and either no nudge has fired yet OR at least
-/// `cooldown_secs` have elapsed since `last_nudge_at` at `now`. The first failing
-/// rail yields the matching [`NudgeDecision::Skip`]. A `max_nudges_per_session`
-/// of `0` disables nudging as firmly as `enabled = false`.
-/// Test: `disabled_skips`, `not_parking_skips`, `live_children_skips`,
-/// `cap_blocks_after_max`, `cooldown_blocks_within_window`,
+/// `enabled`; `phrase` is `Some` (the turn actually parked) AND
+/// [`crate::core::idle_parking::is_nudge_eligible`] accepts it (excludes a
+/// human-addressed wait like "let me know once…" — #2621 code-critic HIGH 1);
+/// the session has NO live tracked children (`!has_live_children`); the prior
+/// nudge `count` is `<` `max_nudges_per_session`; and either no nudge has fired
+/// yet OR at least `cooldown_secs` have elapsed since `last_nudge_at` at `now`.
+/// The first failing rail yields the matching [`NudgeDecision::Skip`]. A
+/// `max_nudges_per_session` of `0` disables nudging as firmly as
+/// `enabled = false`.
+/// Test: `disabled_skips`, `not_parking_skips`, `human_wait_skips`,
+/// `live_children_skips`, `cap_blocks_after_max`, `cooldown_blocks_within_window`,
 /// `enabled_and_parking_and_idle_nudges`, `nudge_allowed_after_cooldown`.
 pub fn decide_nudge(
     cfg: &IdleNudgeConfig,
-    parking: bool,
+    phrase: Option<&str>,
     has_live_children: bool,
     record: &NudgeRecord,
     now: DateTime<Utc>,
@@ -230,8 +239,11 @@ pub fn decide_nudge(
     if !cfg.enabled {
         return NudgeDecision::Skip(SkipReason::Disabled);
     }
-    if !parking {
+    let Some(phrase) = phrase else {
         return NudgeDecision::Skip(SkipReason::NotParking);
+    };
+    if !crate::core::idle_parking::is_nudge_eligible(phrase) {
+        return NudgeDecision::Skip(SkipReason::HumanWait);
     }
     if has_live_children {
         return NudgeDecision::Skip(SkipReason::HasLiveChildren);
@@ -257,9 +269,14 @@ pub fn decide_nudge(
 /// What: wraps `HashMap<Uuid, NudgeRecord>`. [`snapshot`](Self::snapshot) reads a
 /// session's current record (default when unseen); [`record_nudge`](Self::record_nudge)
 /// bumps the count and stamps the time; [`prune`](Self::prune) drops entries for
-/// sessions no longer live so the map cannot grow without bound.
+/// sessions no longer live so the map cannot grow without bound. Production
+/// callers MUST call [`prune`](Self::prune) periodically — it is not automatic —
+/// which `daemon::idle_nudge::run_nudge` does on every nudge attempt, keyed off
+/// the same `SessionManager::list()` call it already makes to correlate the
+/// hook's Claude session id.
 /// Test: `ledger_snapshot_defaults_when_unseen`, `ledger_record_bumps_count`,
-/// `ledger_prune_drops_stale`.
+/// `ledger_prune_drops_stale`; `daemon::idle_nudge::run_nudge_prunes_stale_entries`
+/// exercises the production wiring end to end.
 #[derive(Debug, Default)]
 pub struct NudgeLedger {
     records: HashMap<Uuid, NudgeRecord>,
@@ -330,10 +347,17 @@ mod tests {
         assert!(m.contains("#2621"), "must be attributable to the feature");
     }
 
+    /// A machine-wait phrase (nudge-eligible per `core::idle_parking`), used as
+    /// the standard "genuinely parked" input across these tests.
+    const MACHINE_PHRASE: &str = "i'll wait for the";
+    /// A human-addressed phrase (NOT nudge-eligible), used by `human_wait_skips`.
+    const HUMAN_PHRASE: &str = "let me know once";
+
     #[test]
     fn skip_reason_tags_are_stable() {
         assert_eq!(SkipReason::Disabled.tag(), "disabled");
         assert_eq!(SkipReason::NotParking.tag(), "not_parking");
+        assert_eq!(SkipReason::HumanWait.tag(), "human_wait");
         assert_eq!(SkipReason::HasLiveChildren.tag(), "has_live_children");
         assert_eq!(SkipReason::CapExhausted.tag(), "cap_exhausted");
         assert_eq!(SkipReason::WithinCooldown.tag(), "within_cooldown");
@@ -345,17 +369,39 @@ mod tests {
         // would nudge.
         let mut cfg = enabled_cfg();
         cfg.enabled = false;
-        let d = decide_nudge(&cfg, true, false, &NudgeRecord::default(), Utc::now());
+        let d = decide_nudge(
+            &cfg,
+            Some(MACHINE_PHRASE),
+            false,
+            &NudgeRecord::default(),
+            Utc::now(),
+        );
         assert_eq!(d, NudgeDecision::Skip(SkipReason::Disabled));
         assert!(!d.should_nudge());
     }
 
     #[test]
     fn not_parking_skips() {
-        // A clean turn-end must never be nudged.
+        // A clean turn-end (no phrase at all) must never be nudged.
         let cfg = enabled_cfg();
-        let d = decide_nudge(&cfg, false, false, &NudgeRecord::default(), Utc::now());
+        let d = decide_nudge(&cfg, None, false, &NudgeRecord::default(), Utc::now());
         assert_eq!(d, NudgeDecision::Skip(SkipReason::NotParking));
+    }
+
+    #[test]
+    fn human_wait_skips() {
+        // A parking phrase that addresses a HUMAN ("let me know once…") must
+        // never be nudged — #2621 code-critic HIGH 1: never nudge a legitimate
+        // user-wait, even though it still counts as "parking" for logging.
+        let cfg = enabled_cfg();
+        let d = decide_nudge(
+            &cfg,
+            Some(HUMAN_PHRASE),
+            false,
+            &NudgeRecord::default(),
+            Utc::now(),
+        );
+        assert_eq!(d, NudgeDecision::Skip(SkipReason::HumanWait));
     }
 
     #[test]
@@ -363,15 +409,28 @@ mod tests {
         // A session that still has live tracked children is doing work — the
         // "no live children" precondition (#2621 design note) must suppress it.
         let cfg = enabled_cfg();
-        let d = decide_nudge(&cfg, true, true, &NudgeRecord::default(), Utc::now());
+        let d = decide_nudge(
+            &cfg,
+            Some(MACHINE_PHRASE),
+            true,
+            &NudgeRecord::default(),
+            Utc::now(),
+        );
         assert_eq!(d, NudgeDecision::Skip(SkipReason::HasLiveChildren));
     }
 
     #[test]
     fn enabled_and_parking_and_idle_nudges() {
-        // All rails pass on a never-nudged, parked, child-free session.
+        // All rails pass on a never-nudged, parked, child-free session with a
+        // machine-wait phrase.
         let cfg = enabled_cfg();
-        let d = decide_nudge(&cfg, true, false, &NudgeRecord::default(), Utc::now());
+        let d = decide_nudge(
+            &cfg,
+            Some(MACHINE_PHRASE),
+            false,
+            &NudgeRecord::default(),
+            Utc::now(),
+        );
         assert_eq!(d, NudgeDecision::Nudge);
         assert!(d.should_nudge());
     }
@@ -390,7 +449,7 @@ mod tests {
             last_nudge_at: Some(now - Duration::seconds(10_000)),
         };
         assert_eq!(
-            decide_nudge(&cfg, true, false, &rec, now),
+            decide_nudge(&cfg, Some(MACHINE_PHRASE), false, &rec, now),
             NudgeDecision::Skip(SkipReason::CapExhausted)
         );
         // count just under the cap → still allowed (cooldown elapsed).
@@ -399,7 +458,7 @@ mod tests {
             last_nudge_at: Some(now - Duration::seconds(10_000)),
         };
         assert_eq!(
-            decide_nudge(&cfg, true, false, &rec, now),
+            decide_nudge(&cfg, Some(MACHINE_PHRASE), false, &rec, now),
             NudgeDecision::Nudge
         );
     }
@@ -410,7 +469,13 @@ mod tests {
         let mut cfg = enabled_cfg();
         cfg.max_nudges_per_session = 0;
         assert_eq!(
-            decide_nudge(&cfg, true, false, &NudgeRecord::default(), Utc::now()),
+            decide_nudge(
+                &cfg,
+                Some(MACHINE_PHRASE),
+                false,
+                &NudgeRecord::default(),
+                Utc::now()
+            ),
             NudgeDecision::Skip(SkipReason::CapExhausted)
         );
     }
@@ -425,7 +490,7 @@ mod tests {
             last_nudge_at: Some(now - Duration::seconds(60)),
         };
         assert_eq!(
-            decide_nudge(&cfg, true, false, &rec, now),
+            decide_nudge(&cfg, Some(MACHINE_PHRASE), false, &rec, now),
             NudgeDecision::Skip(SkipReason::WithinCooldown)
         );
     }
@@ -440,7 +505,7 @@ mod tests {
             last_nudge_at: Some(now - Duration::seconds(301)),
         };
         assert_eq!(
-            decide_nudge(&cfg, true, false, &rec, now),
+            decide_nudge(&cfg, Some(MACHINE_PHRASE), false, &rec, now),
             NudgeDecision::Nudge
         );
     }
@@ -489,40 +554,41 @@ mod tests {
     }
 
     /// End-to-end rail ordering: the full happy path then each rail's override,
-    /// proving `decide_nudge` short-circuits at the first failing rail.
+    /// proving `decide_nudge` short-circuits at the first failing rail —
+    /// Disabled > NotParking > HumanWait > HasLiveChildren > cap/cooldown.
     #[test]
     fn rails_short_circuit_in_order() {
         let cfg = enabled_cfg();
         let now = Utc::now();
-        // Disabled beats not-parking beats live-children beats cap beats cooldown.
+        let exhausted = NudgeRecord {
+            count: 99,
+            last_nudge_at: Some(now),
+        };
+
+        // Disabled beats everything, even a human-addressed phrase.
         let mut disabled = cfg.clone();
         disabled.enabled = false;
         assert_eq!(
-            decide_nudge(
-                &disabled,
-                false,
-                true,
-                &NudgeRecord {
-                    count: 99,
-                    last_nudge_at: Some(now)
-                },
-                now
-            ),
+            decide_nudge(&disabled, Some(HUMAN_PHRASE), true, &exhausted, now),
             NudgeDecision::Skip(SkipReason::Disabled)
         );
-        // Enabled but not parking, with live children + exhausted cap → NotParking wins.
+        // Enabled but no phrase at all, with live children + exhausted cap →
+        // NotParking wins over the later rails.
         assert_eq!(
-            decide_nudge(
-                &cfg,
-                false,
-                true,
-                &NudgeRecord {
-                    count: 99,
-                    last_nudge_at: Some(now)
-                },
-                now
-            ),
+            decide_nudge(&cfg, None, true, &exhausted, now),
             NudgeDecision::Skip(SkipReason::NotParking)
+        );
+        // Enabled, a human-addressed phrase, with live children + exhausted cap
+        // → HumanWait wins over the later rails.
+        assert_eq!(
+            decide_nudge(&cfg, Some(HUMAN_PHRASE), true, &exhausted, now),
+            NudgeDecision::Skip(SkipReason::HumanWait)
+        );
+        // Enabled, machine-wait phrase, live children, exhausted cap →
+        // HasLiveChildren wins over the cap rail.
+        assert_eq!(
+            decide_nudge(&cfg, Some(MACHINE_PHRASE), true, &exhausted, now),
+            NudgeDecision::Skip(SkipReason::HasLiveChildren)
         );
     }
 }

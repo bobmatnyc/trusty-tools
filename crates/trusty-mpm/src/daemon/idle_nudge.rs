@@ -78,38 +78,56 @@ pub enum NudgeOutcome {
     InjectFailed(String),
 }
 
-/// Correlate → gate → inject → record for one parking hook (injectable core).
+/// Correlate → prune → gate → inject → record for one parking hook (injectable
+/// core).
 ///
 /// Why: keeping the effectful sequence in one function that takes its
 /// collaborators explicitly (manager, ledger, delegations, config) — rather than
 /// reaching into `DaemonState` — makes it unit-testable against a
 /// `FakeNoopTmuxDriver` exactly like `idle_reaper::run_one_sweep`, with no real
 /// tmux and no on-disk config.
-/// What: (1) finds the single Active managed session whose `claude_session_id`
-/// matches `claude_session_id` (→ [`NudgeOutcome::NoManagedSession`] when none);
-/// (2) computes [`has_live_children`] from `delegations`; (3) under the ledger
-/// lock, snapshots the session's [`crate::core::idle_nudge::NudgeRecord`] and
-/// runs [`decide_nudge`] (with `parking = true` — the caller only invokes this
-/// on a real park); (4) on [`NudgeDecision::Nudge`] records the delivery in the
-/// ledger *before* releasing the lock (so a concurrent second parking hook
-/// cannot double-nudge) and then injects `cfg.message` with [`Submit::Enter`];
-/// (5) returns the [`NudgeOutcome`]. The record-before-inject ordering means a
+/// What: (1) lists all managed sessions and immediately
+/// [`NudgeLedger::prune`]s the ledger down to that live set — this is the
+/// ONLY production call site that prunes the ledger (#2621 code-critic HIGH
+/// 2), so it must run on every attempt regardless of the outcome below, not
+/// just on a successful correlation; (2) finds the single Active managed
+/// session whose `claude_session_id` matches `claude_session_id` (→
+/// [`NudgeOutcome::NoManagedSession`] when none); (3) computes
+/// [`has_live_children`] from `delegations`; (4) under the ledger lock,
+/// snapshots the session's [`crate::core::idle_nudge::NudgeRecord`] and runs
+/// [`decide_nudge`] with `phrase` (the caller only invokes this on a real
+/// park, so `phrase` is normally `Some`; `decide_nudge` itself rejects a
+/// human-addressed phrase via [`crate::core::idle_parking::is_nudge_eligible`]);
+/// (5) on [`NudgeDecision::Nudge`] records the delivery in the ledger *before*
+/// releasing the lock (so a concurrent second parking hook cannot
+/// double-nudge) and then injects `cfg.message` with [`Submit::Enter`]; (6)
+/// returns the [`NudgeOutcome`]. The record-before-inject ordering means a
 /// failed inject still consumes one nudge budget slot — a deliberately
 /// conservative bias toward fewer nudges. Bumps `last_activity_at` via the
 /// manager's normal `inject` path.
 /// Test: `run_nudge_injects_when_idle_and_enabled`,
 /// `run_nudge_skips_when_disabled`, `run_nudge_skips_when_live_children`,
-/// `run_nudge_no_managed_session`, `run_nudge_respects_cap`.
+/// `run_nudge_skips_human_wait_phrase`, `run_nudge_no_managed_session`,
+/// `run_nudge_respects_cap`, `run_nudge_prunes_stale_ledger_entries`.
 pub async fn run_nudge(
     mgr: &SessionManager,
     ledger: &parking_lot::Mutex<NudgeLedger>,
     delegations: &[Delegation],
     cfg: &IdleNudgeConfig,
     claude_session_id: &str,
+    phrase: Option<&str>,
     now: DateTime<Utc>,
 ) -> NudgeOutcome {
-    // 1. Correlate the Claude session id to an Active managed session.
+    // 1. Correlate the Claude session id to an Active managed session, and — on
+    //    the SAME `mgr.list()` call — prune the ledger to the current live set
+    //    (#2621 code-critic HIGH 2: this is the only place `prune` is called in
+    //    production; it must run unconditionally, before the correlation
+    //    outcome is known, so the ledger never grows unbounded even for
+    //    sessions that stop correlating).
     let records = mgr.list().await;
+    let live_ids: std::collections::HashSet<uuid::Uuid> = records.iter().map(|r| r.id.0).collect();
+    ledger.lock().prune(&live_ids);
+
     let Some(record) = records.iter().find(|r| {
         matches!(r.state, ManagedSessionState::Active)
             && r.claude_session_id.as_deref() == Some(claude_session_id)
@@ -126,7 +144,7 @@ pub async fn run_nudge(
     let decision = {
         let mut guard = ledger.lock();
         let snapshot = guard.snapshot(managed_id.0);
-        let decision = decide_nudge(cfg, true, live_children, &snapshot, now);
+        let decision = decide_nudge(cfg, phrase, live_children, &snapshot, now);
         if decision == NudgeDecision::Nudge {
             guard.record_nudge(managed_id.0, now);
         }
@@ -235,6 +253,7 @@ pub async fn maybe_nudge_parked_session(
         &delegations,
         &cfg,
         claude_session_id,
+        phrase,
         Utc::now(),
     )
     .await;
@@ -273,6 +292,13 @@ mod tests {
     use crate::core::session::SessionId;
     use crate::session_manager::{FakeNoopTmuxDriver, ManagedSessionId};
     use tempfile::TempDir;
+
+    /// A machine-wait phrase (nudge-eligible), the standard "genuinely parked"
+    /// input for these tests. Must match a `core::idle_parking::PARKING_PHRASES`
+    /// entry that is NOT in `HUMAN_ADDRESSED_PHRASES`.
+    const MACHINE_PHRASE: &str = "i'll wait for the";
+    /// A human-addressed phrase (NOT nudge-eligible) for `run_nudge_skips_human_wait_phrase`.
+    const HUMAN_PHRASE: &str = "let me know once";
 
     fn enabled_cfg() -> IdleNudgeConfig {
         IdleNudgeConfig {
@@ -357,7 +383,16 @@ mod tests {
         let cfg = enabled_cfg();
         let now = Utc::now();
 
-        let outcome = run_nudge(&mgr, &ledger, &[], &cfg, &claude_id, now).await;
+        let outcome = run_nudge(
+            &mgr,
+            &ledger,
+            &[],
+            &cfg,
+            &claude_id,
+            Some(MACHINE_PHRASE),
+            now,
+        )
+        .await;
         assert_eq!(outcome, NudgeOutcome::Nudged);
         // The ledger must record exactly one delivery for the managed session.
         assert_eq!(ledger.lock().snapshot(id.0).count, 1);
@@ -372,7 +407,16 @@ mod tests {
         let mut cfg = enabled_cfg();
         cfg.enabled = false;
 
-        let outcome = run_nudge(&mgr, &ledger, &[], &cfg, &claude_id, Utc::now()).await;
+        let outcome = run_nudge(
+            &mgr,
+            &ledger,
+            &[],
+            &cfg,
+            &claude_id,
+            Some(MACHINE_PHRASE),
+            Utc::now(),
+        )
+        .await;
         assert_eq!(outcome, NudgeOutcome::Skipped(SkipReason::Disabled));
         assert_eq!(
             ledger.lock().snapshot(id.0).count,
@@ -390,8 +434,46 @@ mod tests {
         let cfg = enabled_cfg();
         let children = [delegation_with(DelegationStatus::Running)];
 
-        let outcome = run_nudge(&mgr, &ledger, &children, &cfg, &claude_id, Utc::now()).await;
+        let outcome = run_nudge(
+            &mgr,
+            &ledger,
+            &children,
+            &cfg,
+            &claude_id,
+            Some(MACHINE_PHRASE),
+            Utc::now(),
+        )
+        .await;
         assert_eq!(outcome, NudgeOutcome::Skipped(SkipReason::HasLiveChildren));
+    }
+
+    #[tokio::test]
+    async fn run_nudge_skips_human_wait_phrase() {
+        // #2621 code-critic HIGH 1: a session parked on a HUMAN-addressed wait
+        // ("let me know once…") must never be nudged end to end, even though it
+        // correlates cleanly and has no live children.
+        let dir = TempDir::new().unwrap();
+        let claude_id = uuid::Uuid::new_v4().to_string();
+        let (mgr, id) = manager_with_active_correlated(&dir, &claude_id).await;
+        let ledger = parking_lot::Mutex::new(NudgeLedger::new());
+        let cfg = enabled_cfg();
+
+        let outcome = run_nudge(
+            &mgr,
+            &ledger,
+            &[],
+            &cfg,
+            &claude_id,
+            Some(HUMAN_PHRASE),
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(outcome, NudgeOutcome::Skipped(SkipReason::HumanWait));
+        assert_eq!(
+            ledger.lock().snapshot(id.0).count,
+            0,
+            "a human-wait skip must not consume a nudge budget slot"
+        );
     }
 
     #[tokio::test]
@@ -409,6 +491,7 @@ mod tests {
             &[],
             &cfg,
             &uuid::Uuid::new_v4().to_string(),
+            Some(MACHINE_PHRASE),
             Utc::now(),
         )
         .await;
@@ -428,7 +511,16 @@ mod tests {
         // First nudge lands.
         let now = Utc::now();
         assert_eq!(
-            run_nudge(&mgr, &ledger, &[], &cfg, &claude_id, now).await,
+            run_nudge(
+                &mgr,
+                &ledger,
+                &[],
+                &cfg,
+                &claude_id,
+                Some(MACHINE_PHRASE),
+                now
+            )
+            .await,
             NudgeOutcome::Nudged
         );
         // Second (cooldown elapsed) is blocked by the per-session cap.
@@ -438,10 +530,56 @@ mod tests {
             &[],
             &cfg,
             &claude_id,
+            Some(MACHINE_PHRASE),
             now + chrono::Duration::seconds(1),
         )
         .await;
         assert_eq!(outcome, NudgeOutcome::Skipped(SkipReason::CapExhausted));
         assert_eq!(ledger.lock().snapshot(id.0).count, 1, "cap holds at 1");
+    }
+
+    #[tokio::test]
+    async fn run_nudge_prunes_stale_ledger_entries() {
+        // #2621 code-critic HIGH 2: `run_nudge` must prune the ledger against the
+        // CURRENT managed-session set on every call, not just accumulate entries
+        // for the lifetime of the daemon. Build a ledger with a stale entry (a
+        // UUID no managed session will ever correlate to) alongside a real,
+        // correlated session; after one `run_nudge` call the stale entry must be
+        // gone while the real session's own record survives.
+        let dir = TempDir::new().unwrap();
+        let claude_id = uuid::Uuid::new_v4().to_string();
+        let (mgr, id) = manager_with_active_correlated(&dir, &claude_id).await;
+        let ledger = parking_lot::Mutex::new(NudgeLedger::new());
+        let stale_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        ledger.lock().record_nudge(stale_id, now);
+        ledger
+            .lock()
+            .record_nudge(id.0, now - chrono::Duration::seconds(10_000));
+
+        let cfg = enabled_cfg();
+        let outcome = run_nudge(
+            &mgr,
+            &ledger,
+            &[],
+            &cfg,
+            &claude_id,
+            Some(MACHINE_PHRASE),
+            now,
+        )
+        .await;
+        assert_eq!(outcome, NudgeOutcome::Nudged);
+
+        let guard = ledger.lock();
+        assert_eq!(
+            guard.snapshot(stale_id),
+            crate::core::idle_nudge::NudgeRecord::default(),
+            "stale ledger entry for a non-existent session must be pruned"
+        );
+        assert_eq!(
+            guard.snapshot(id.0).count,
+            2,
+            "the real session's record survives pruning and reflects this nudge"
+        );
     }
 }
