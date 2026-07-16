@@ -10,6 +10,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `search_readiness` module (behind the `search-index` feature): a shared trusty-search index readiness probe so a daily-driver session can *surface* whether a project's index is ready per lane (lexical/semantic/graph) instead of silently querying a not-yet-warm index — `parse_readiness` (pure status→snapshot map), `probe_index_readiness` (fail-open `GET /indexes/{id}/status`), and `log_index_readiness` (one stderr line) ([#2784](https://github.com/bobmatnyc/trusty-tools/issues/2784))
+- incremental re-index of files written during a task ([#2758](https://github.com/bobmatnyc/trusty-tools/pull/2758)) ([`a68e4c4`](https://github.com/bobmatnyc/trusty-tools/commit/a68e4c45f6be1662e09380bb335d586ea45afdfd))
+
+### Fixed
+
+- harden mid-task incremental index-file updates against transient send failures ([#2796](https://github.com/bobmatnyc/trusty-tools/pull/2796)) ([`1f8b569`](https://github.com/bobmatnyc/trusty-tools/commit/1f8b56924db6534d6b67811c39d8862dc53cc606))
+- bump lru and jsonwebtoken to patched versions ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
+
+### Changed
+
+- collapse stacked Unreleased headings (trusty-mpm, trusty-common) ([`95b16c8`](https://github.com/bobmatnyc/trusty-tools/commit/95b16c8c468084ce0e2a46eac8a4acf99cfab823))
+
+### Added
+
 - telegram module (rebase) ([#2729](https://github.com/bobmatnyc/trusty-tools/pull/2729)) ([`142675f`](https://github.com/bobmatnyc/trusty-tools/commit/142675fe01cc83b63497578611581921192a850b))
 - implement Slack search + reactions with two-token model ([#2726](https://github.com/bobmatnyc/trusty-tools/pull/2726)) ([`6e4e7d9`](https://github.com/bobmatnyc/trusty-tools/commit/6e4e7d9d8b18ba602f588e700142032789018142))
 - implement Slack send + read tools; extract SlackFormatter to trusty-common ([#2722](https://github.com/bobmatnyc/trusty-tools/pull/2722)) ([`847a0c3`](https://github.com/bobmatnyc/trusty-tools/commit/847a0c334e1a8822a7d31696b48946e538aca7cc))
