@@ -87,6 +87,35 @@ Language-specific Engineer selection follows `Cargo.toml` (rust-engineer),
 section for the full table; when unknown, Research is mandatory (never
 default to a guess).
 
+## Long-Wait Delegation (chunked-repoll — issue #2833)
+
+Any delegation that ends in a wait longer than the bash tool's 10-minute
+per-invocation ceiling — `gh pr checks` (CI ~10-20 min), a release cut, or
+`cargo test --workspace` (~16 min) — is where subagents strand: they background
+the wait and end their turn (a **park**), or degenerate into a 30-second blind
+poll loop (**spam**). Both come from not sizing the wait to its real duration.
+Make the wait first-class in the delegation prompt instead of hoping the agent
+improvises it:
+
+1. **Keep the gate under the ceiling.** Ask for **crate-scoped** gates
+   (`cargo test -p <crate>`, `cargo clippy -p <crate>`), never
+   `cargo test --workspace` — the scoped run finishes inside one invocation.
+2. **Name the blocking primitive.** For CI, instruct: "wait with
+   `gh pr checks <pr> --watch --fail-fast` in the foreground; it blocks silently
+   and prints once. Re-issue it verbatim if the 10-min ceiling cuts it off. Do
+   NOT background it, do NOT sleep-poll it, do NOT end your turn to monitor it."
+3. **Forbid both failure modes explicitly.** "Parking (ending your turn to wait)
+   and spamming (a tight `still pending` poll loop) are both wrong. Block quietly
+   in the foreground; message only when state changes."
+4. **PM back-stop.** If the subagent parks anyway, `SendMessage` the SAME agent a
+   resume nudge (see PM_INSTRUCTIONS "Parked-Subagent Detection & Nudge") — never
+   a fresh delegation.
+
+This is prevention (steps 1-3, in the delegation prompt) plus a PM-side
+detect-and-nudge back-stop (step 4). The daemon idle-nudge (#2621) does NOT
+cover in-conversation subagents — they have no tmux pane — so this protocol is
+the only mitigation below the managed-session layer.
+
 ## Delegation Best Practices
 
 1. **Provide context** — background the agent needs, not just the task.
