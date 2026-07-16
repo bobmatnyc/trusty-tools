@@ -326,6 +326,95 @@ fn base_preamble_requires_persistent_store_init() {
     );
 }
 
+/// `BASE_PREAMBLE` makes the task's required-artifact SET a tracked deliverable
+/// rather than an epilogue (#2824).
+///
+/// Why: On the bake-off L4 task the engineer's completion was nondeterministic:
+/// with an identical prompt and model, run-2's engineer consumed its full
+/// 40-turn `InProcessRunnerConfig` budget (transcript turns 9..=48) and its
+/// FINAL turn opened with "Now let me create the README and ARCHITECTURE
+/// files" — so `ARCHITECTURE.md` was never written, while run-3 finished the
+/// same task in 29 turns. Both runs shipped ~130 self-authored tests; the only
+/// difference was that run-2 had less turn margin left when it reached the docs
+/// it had queued LAST. Documentation being last in the queue makes it the only
+/// deliverable exposed to turn-budget variance, so the preamble must (a) order
+/// required docs ahead of discretionary self-authored tests and (b) make the
+/// required set explicitly tracked.
+/// What: Asserts the load-bearing phrases of the deliverable-completeness block
+/// are present — the up-front checklist, the docs-are-deliverables rule, the
+/// required-before-discretionary ordering, and the final checklist sweep.
+/// Test: this test.
+#[test]
+fn base_preamble_requires_tracking_the_deliverable_set() {
+    assert!(
+        BASE_PREAMBLE.contains("## Deliverable completeness"),
+        "BASE_PREAMBLE must carry the deliverable-completeness block (#2824)"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("enumerate that set"),
+        "must instruct enumerating the required-artifact set up front"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("which items remain outstanding"),
+        "must instruct tracking the outstanding items as work proceeds"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("it is not an epilogue"),
+        "must state required documentation is not an epilogue"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("the design is settled: write the required documents THEN"),
+        "must order required docs at the point the design settles"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("Do the REQUIRED work before any discretionary work"),
+        "must order required work ahead of discretionary work"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("while a required artifact is still \nmissing from disk")
+            || BASE_PREAMBLE.contains("while a required artifact is still missing from disk"),
+        "must forbid starting discretionary work while a required artifact is missing"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("Scale the tests you author yourself to the requirements"),
+        "must scale self-authored tests to the requirements (run-2 shipped ~130)"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("walk your checklist one final time"),
+        "must require a final completeness sweep before finishing"
+    );
+}
+
+/// The deliverable-completeness block points at the batch-write tool so a
+/// multi-document tail costs one turn, not one per file (#2824).
+///
+/// Why: Run-2's engineer spent 19 of its 40 turns on single-file `write_file`
+/// calls and used the `write_files` batch tool exactly ONCE, despite the
+/// tool-use block already recommending batching. Repeating the pointer at the
+/// point of use — the doc tail, which is where the budget actually ran out —
+/// targets the specific waste the transcript shows.
+/// What: Asserts the block names `write_files` and the one-call framing.
+/// Test: this test.
+#[test]
+fn base_preamble_batches_remaining_deliverables() {
+    let block = BASE_PREAMBLE
+        .split("## Deliverable completeness")
+        .nth(1)
+        .expect("deliverable-completeness block present");
+    let block = block
+        .split("## Verification before finishing")
+        .next()
+        .expect("block is delimited by the following section");
+    assert!(
+        block.contains("ONE `write_files` call"),
+        "the deliverable block must point at the batch-write tool"
+    );
+    assert!(
+        block.contains("rather than one per turn"),
+        "must contrast batching against one-file-per-turn writes"
+    );
+}
+
 /// `BASE_PREAMBLE` carries no host- or model-specific tokens (spec §2a/§3).
 ///
 /// Why: Any model name, provider name, or host path in the BASE preamble would
@@ -363,7 +452,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x1f38_9491_3735_48ff;
+const EXPECTED_PREAMBLE_HASH: u64 = 0x7518_5b12_b59f_2f94;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///
