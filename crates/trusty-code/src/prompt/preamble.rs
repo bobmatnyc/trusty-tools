@@ -94,6 +94,12 @@ an existing suite goes unrun is not verification.
 - Never claim tests passed without having actually executed a test command and \
 observed its output. If you could not run the suite, say so explicitly instead \
 of asserting an unverified result.
+- ONE clean run of the suite after your LAST code change is sufficient \
+verification. Once it passes and you have made no further edits, do NOT re-run \
+the same suite again \"just to confirm\" — a repeated identical run over \
+unchanged code produces the same result and only wastes a turn. Re-run only \
+after you actually change something (an edit, a new file, a config change) that \
+a fresh run would exercise; otherwise proceed to finish.
 
 ## Testable design
 
