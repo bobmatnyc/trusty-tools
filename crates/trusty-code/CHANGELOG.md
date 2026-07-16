@@ -21,6 +21,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   so conceptual discovery still works during the embedding warm-up window
   (#2783).
 
+### Fixed
+
+- Bound PM re-delegation so a degenerate delegate loop cannot mislabel a
+  complete run. Once a delegated engineer reports an explicit successful
+  `finish_task` completion, the PM's `delegate_to_agent` tool refuses any
+  further re-delegation (nudging it to `finish_task` instead), and
+  `run_task`'s report assembler now reports `success`/`no_changes` — never
+  `partial`/exit-6 or `deadline_exceeded` — for a run the engineer already
+  completed, regardless of how the PM's own loop later terminated. This closes
+  the data-integrity bug where a gratuitous post-`finish_task` re-verify round
+  that ran out of turns/time corrupted run status and telemetry on a
+  fully-passing, all-tests-green run (#2683).
+
 ---
 
 ## [0.1.0] — 2026-07-09

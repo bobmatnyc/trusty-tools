@@ -38,9 +38,9 @@ use crate::provider::{
 };
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::tools::{
-    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool, GlobTool,
-    GrepTool, ListDirTool, ReadFileTool, RunContext, ToolRegistry, TrustySearchTool, WriteFileTool,
-    WriteFilesTool,
+    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, EngineerCompletionSignal,
+    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RunContext, ToolRegistry,
+    TrustySearchTool, WriteFileTool, WriteFilesTool,
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
@@ -198,6 +198,15 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // subsequently does.
     let redelegation_signal = RedelegationCapSignal::new();
 
+    // (#2683) The engineer-completion latch is shared between the PM's
+    // `DelegateToAgentTool` (which sets it when a delegation returns an explicit
+    // successful `finish_task`, and refuses any subsequent re-delegation once
+    // set) and `assemble_report` below (which reports success rather than
+    // partial for a run the engineer already completed). This is what stops a
+    // gratuitous post-finish re-verify round from mislabeling a complete,
+    // all-tests-passing run as `partial`/exit-6.
+    let completion_signal = EngineerCompletionSignal::new();
+
     // Build the engineer runner, scoped to the project working dir, sharing the
     // transcript (engineer turns are tagged "python-engineer").
     let engineer_runner = build_engineer_runner(
@@ -216,7 +225,10 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // agents dir.
     let mut pm_registry = ToolRegistry::new();
     pm_registry.register(Arc::new(
-        DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
+        DelegateToAgentTool::new(engineer_runner)
+            .with_config_dir(params.agents_dir.clone())
+            // (#2683) refuse a re-delegation once the engineer has completed.
+            .with_completion_signal(completion_signal.clone()),
     ));
     pm_registry.register(Arc::new(FinishTaskTool::new()));
 
@@ -307,6 +319,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
             pm_result,
         },
         &redelegation_signal,
+        &completion_signal,
     )
 }
 
@@ -573,20 +586,29 @@ struct RunOutcome {
 /// Why: Centralises the mapping from (PM loop result, before/after snapshots) to a
 /// `RunReport` with the correct exit code so the success / no-change / failure
 /// branches never drift.
-/// What: On a PM-loop error → `DeadlineExceeded` when the error is specifically
-/// `AgentLoopError::Timeout` (#2207 — distinct from a genuine failure so a
-/// caller can tell "timed out" from "errored"). (#2265 fix #4) Otherwise, when
-/// the error is `AgentLoopError::TurnCapExceeded` OR `redelegation_signal`
-/// reports the re-delegation cap (fix #1) was hit, the diff is computed
-/// (filesystem-based, independent of which turn/attempt produced it) and — if
-/// it is non-empty, i.e. a deliverable actually exists on disk — the outcome
-/// is `ExitCode::Partial`, NOT `RunFailure`; trusty-code cannot generically
-/// verify correctness, so this gates purely on "work was produced", leaving
-/// the downstream bake-off harness to score correctness itself. Every other
-/// PM-loop error (a hard `Llm`/`Cancelled` failure, or ANY error with an empty
-/// diff — including a cap/turn-cap hit that produced nothing) still maps to
-/// `RunFailure`, preserving that path for genuine no-output failures. On
-/// success → compute the diff; empty diff → `NoChanges`, else `Success`.
+/// What: (#2683) FIRST — before any error-variant branching — if
+/// `completion_signal` reports the delegated engineer already returned an
+/// EXPLICIT successful `finish_task` completion, the task is genuinely done:
+/// the outcome is `Success` (or `NoChanges` for an empty diff), NEVER
+/// `Partial`/`DeadlineExceeded`/`RunFailure`, regardless of how the PM's own
+/// loop later terminated. This is the data-integrity fix for the bug where a
+/// gratuitous post-finish re-delegation that then ran out of turns/time
+/// mislabeled a complete, all-tests-passing run as `partial`/exit-6. On a
+/// PM-loop error with NO such completion → `DeadlineExceeded` when the error is
+/// specifically `AgentLoopError::Timeout` (#2207 — distinct from a genuine
+/// failure so a caller can tell "timed out" from "errored"). (#2265 fix #4)
+/// Otherwise, when the error is `AgentLoopError::TurnCapExceeded` OR
+/// `redelegation_signal` reports the re-delegation cap (fix #1) was hit, the
+/// diff is computed (filesystem-based, independent of which turn/attempt
+/// produced it) and — if it is non-empty, i.e. a deliverable actually exists on
+/// disk — the outcome is `ExitCode::Partial`, NOT `RunFailure`; trusty-code
+/// cannot generically verify correctness, so this gates purely on "work was
+/// produced", leaving the downstream bake-off harness to score correctness
+/// itself. Every other PM-loop error (a hard `Llm`/`Cancelled` failure, or ANY
+/// error with an empty diff — including a cap/turn-cap hit that produced
+/// nothing) still maps to `RunFailure`, preserving that path for genuine
+/// no-output failures. On success → compute the diff; empty diff → `NoChanges`,
+/// else `Success`.
 /// Usage and cost are aggregated from the transcript and priced PER ROLE —
 /// `pm_model` for `"pm"` turns, `engineer_model` for the delegated engineer's
 /// — per the #1475 bug 1 fix (`aggregate_usage_per_role`), not blended under
@@ -603,6 +625,7 @@ fn assemble_report(
     engineer_model: &str,
     outcome: RunOutcome,
     redelegation_signal: &RedelegationCapSignal,
+    completion_signal: &EngineerCompletionSignal,
 ) -> RunReport {
     let RunOutcome {
         before,
@@ -610,6 +633,35 @@ fn assemble_report(
         pm_result,
     } = outcome;
     let turns = drain_transcript(transcript);
+
+    // #2683: the authoritative success signal. If the delegated engineer
+    // already reported an EXPLICIT successful `finish_task` completion, the
+    // task is genuinely done — a gratuitous post-finish re-delegation that
+    // subsequently ran the PM's loop out of turns/time (or hit any other
+    // terminal error) must NOT mislabel this complete, correct run as
+    // `partial`/`deadline_exceeded`/`run_failure`. The on-disk diff is the
+    // authoritative deliverable regardless of which turn produced it: a
+    // non-empty diff is `Success`, an empty one is `NoChanges`. This is checked
+    // FIRST, before any PM-error-variant branching, so it overrides every one
+    // of them.
+    if completion_signal.is_completed() {
+        let (usage, cost) = aggregate_usage_per_role(&turns, pm_model, engineer_model);
+        let rendered_diff = diff::diff_snapshots(&before, &after);
+        let exit = if rendered_diff.trim().is_empty() {
+            ExitCode::NoChanges
+        } else {
+            ExitCode::Success
+        };
+        return RunReport {
+            agent: params.agent.clone(),
+            task: params.task.clone(),
+            diff: rendered_diff,
+            transcript: turns,
+            usage,
+            cost_usd: Some(cost),
+            exit,
+        };
+    }
 
     // A PM-loop error is a runtime failure (or, #2207, a deadline; or, #2265,
     // a turn-cap/re-delegation-cap hit that still produced a deliverable);

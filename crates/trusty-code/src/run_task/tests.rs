@@ -23,7 +23,7 @@ use tempfile::TempDir;
 use super::{ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task};
 use crate::agent_loop::AgentLoopError;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
-use crate::tools::AgentOutput;
+use crate::tools::{AgentOutput, EngineerCompletionSignal};
 
 // ── Scripted offline LLM ───────────────────────────────────────────────────────
 
@@ -907,6 +907,7 @@ fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
     });
 
     let signal = RedelegationCapSignal::new();
+    let completion = EngineerCompletionSignal::new();
     let report = super::assemble_report(
         &params,
         &transcript,
@@ -918,6 +919,7 @@ fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
             pm_result,
         },
         &signal,
+        &completion,
     );
 
     assert_eq!(
@@ -968,6 +970,7 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
     });
 
     let signal = RedelegationCapSignal::new();
+    let completion = EngineerCompletionSignal::new();
     let report = super::assemble_report(
         &params,
         &transcript,
@@ -979,6 +982,7 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
             pm_result,
         },
         &signal,
+        &completion,
     );
 
     assert_eq!(
@@ -987,6 +991,194 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
         "a TurnCapExceeded PM error with NO deliverable must stay RunFailure (fix #4)"
     );
     let _ = &report;
+}
+
+// ── #2683: a completed engineer must never be mislabeled `partial`/exit-6 ──────
+
+/// (#2683) `assemble_report` maps a PM-loop `TurnCapExceeded` error to
+/// `Success` — NOT `Partial` — when the delegated engineer already reported an
+/// explicit successful `finish_task` completion AND a deliverable is on disk.
+///
+/// Why: This is the exact data-integrity bug the issue's 2026-07-15 recurrence
+/// comment reports: the engineer finished with all tests passing, then the PM
+/// fired one more gratuitous re-verify `delegate_to_agent` round that ran the
+/// PM's loop out of turns, and the complete, correct run was mislabeled
+/// `partial`/exit-6, corrupting run status/telemetry. A satisfied task must
+/// report success.
+/// What: Calls `assemble_report` directly with a `TurnCapExceeded` `pm_result`,
+/// a before/after `Snapshot` pair that differ (one new file), and a
+/// completion signal that has latched. Assert `exit == Success` and the diff is
+/// preserved.
+/// Test: this test.
+#[test]
+fn assemble_report_maps_completed_engineer_with_deliverable_to_success() {
+    let params = RunTaskParams {
+        agent: "pm".into(),
+        task: "write hello.py".into(),
+        project: PathBuf::from("/tmp/does-not-matter"),
+        agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
+        engineer_model: None,
+        deadline_secs: None,
+    };
+    let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
+
+    let before = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+    let mut after_map = std::collections::BTreeMap::new();
+    after_map.insert("hello.py".to_string(), "print('hi')".to_string());
+    let after = super::diff::Snapshot::Files(after_map);
+
+    // The PM loop ran out of turns on the gratuitous re-verify round …
+    let pm_result: Result<AgentOutput, AgentLoopError> = Err(AgentLoopError::TurnCapExceeded {
+        max_turns: 8,
+        partial: Box::new(AgentOutput::from_content("partial pm output")),
+    });
+
+    let signal = RedelegationCapSignal::new();
+    // … but the engineer already reported a successful completion.
+    let completion = EngineerCompletionSignal::new();
+    completion.mark_completed();
+
+    let report = super::assemble_report(
+        &params,
+        &transcript,
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+        super::RunOutcome {
+            before,
+            after,
+            pm_result,
+        },
+        &signal,
+        &completion,
+    );
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Success,
+        "a completed engineer with a real deliverable must report Success, never \
+         Partial, even when the PM's loop later hit its turn cap (#2683); task: {}",
+        report.task
+    );
+    assert!(
+        report.diff.contains("hello.py"),
+        "the completed deliverable's diff must still be rendered, got: {}",
+        report.diff
+    );
+}
+
+/// (#2683) A completed engineer with an EMPTY diff maps to `NoChanges`, not
+/// `RunFailure` — a satisfied, no-op task is still a success outcome.
+///
+/// Why: Guards the empty-diff arm of the completion override so a genuinely
+/// completed run that happened to change nothing is not conflated with a crash.
+/// What: Same as above but before == after (no change); assert `NoChanges`.
+/// Test: this test.
+#[test]
+fn assemble_report_maps_completed_engineer_without_deliverable_to_no_changes() {
+    let params = RunTaskParams {
+        agent: "pm".into(),
+        task: "analyze the repo".into(),
+        project: PathBuf::from("/tmp/does-not-matter"),
+        agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
+        engineer_model: None,
+        deadline_secs: None,
+    };
+    let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
+
+    let before = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+    let after = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+
+    let pm_result: Result<AgentOutput, AgentLoopError> = Err(AgentLoopError::TurnCapExceeded {
+        max_turns: 8,
+        partial: Box::new(AgentOutput::from_content("partial pm output")),
+    });
+
+    let signal = RedelegationCapSignal::new();
+    let completion = EngineerCompletionSignal::new();
+    completion.mark_completed();
+
+    let report = super::assemble_report(
+        &params,
+        &transcript,
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+        super::RunOutcome {
+            before,
+            after,
+            pm_result,
+        },
+        &signal,
+        &completion,
+    );
+
+    assert_eq!(
+        report.exit,
+        ExitCode::NoChanges,
+        "a completed engineer that changed nothing must be NoChanges, not RunFailure (#2683)"
+    );
+}
+
+/// (#2683) End-to-end: after the engineer completes via `finish_task`, a
+/// gratuitous PM re-delegation is REFUSED (the engineer is not re-invoked) and
+/// the run reports `Success` rather than `partial`.
+///
+/// Why: Proves both halves of the fix through the real `execute_run_task`
+/// wiring: (b) the `DelegateToAgentTool` refuses re-delegation once the
+/// completion signal latches, and the data-integrity half — a complete run is
+/// labeled Success even when the PM keeps trying to re-delegate.
+/// What: Script [PM delegate, engineer write_file, engineer finish_task
+/// (completed), PM delegate AGAIN (must be refused — engineer NOT re-invoked),
+/// PM finish_task]. Assert `exit == Success`, the diff names `hello.py`, the
+/// engineer was invoked exactly once (exactly two `python-engineer` turns), and
+/// no wasted engineer round was spent (exactly five total chat calls).
+/// Test: this test.
+#[tokio::test]
+async fn gratuitous_redelegation_after_finish_is_refused_and_run_succeeds() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("create hello.py"),
+        write_file_response("hello.py", "print('hi')"),
+        finish_task_response("completed", "wrote hello.py, all good"),
+        // The PM gratuitously re-delegates to "re-verify" — this must be
+        // refused by the delegate tool, so the engineer is NEVER re-invoked
+        // (the next scripted response is the PM's own finish_task, not an
+        // engineer turn).
+        delegate_response("re-verify hello.py once more"),
+        finish_task_response("completed", "confirmed complete"),
+    ]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Success,
+        "a completed run must report Success even with a gratuitous re-delegation, \
+         never partial; task: {}",
+        report.task
+    );
+    assert!(
+        report.diff.contains("hello.py"),
+        "the deliverable diff must be preserved, got: {}",
+        report.diff
+    );
+
+    let engineer_turns = report
+        .transcript
+        .iter()
+        .filter(|t| t.role == "python-engineer")
+        .count();
+    assert_eq!(
+        engineer_turns, 2,
+        "the engineer must be invoked exactly once (write_file + finish_task); a \
+         second, refused delegation must never reach it, got {engineer_turns} engineer turns"
+    );
+    assert_eq!(
+        llm.models_seen().len(),
+        5,
+        "no wasted engineer round: the refused re-delegation must not spend a chat call"
+    );
 }
 
 // ── #2265 fix #5: PM stops re-delegating once the cap latches ──────────────────

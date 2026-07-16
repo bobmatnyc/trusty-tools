@@ -38,9 +38,9 @@ pub mod trusty_search;
 #[allow(unused_imports)]
 pub use bash::{BASH_TOOL_NAME, BashTool};
 #[allow(unused_imports)]
-pub use delegate::DelegateToAgentTool;
+pub use delegate::{DelegateToAgentTool, EngineerCompletionSignal};
 pub use finish_task::{
-    FINISH_TASK_TOOL_NAME, FinishTaskArgs, FinishTaskTool, render_finish_summary,
+    FINISH_TASK_TOOL_NAME, FinishStatus, FinishTaskArgs, FinishTaskTool, render_finish_summary,
 };
 pub use fs::{
     EditTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, WRITE_FILES_TOOL_NAME, WriteFileTool,
