@@ -39,9 +39,22 @@
 //! when *tm* forks the server; if a server was already running (e.g. the user's
 //! own `tmux`), `new-session -A` attaches to it and that server's responsibility
 //! is unchanged until the next server fork (`tmux kill-server` / reboot).
+//!
+//! Scope: this fixes the **tmux-hosted managed-session path**
+//! ([`crate::core::tmux::run_tmux_with_bin`]) — the dominant fleet path where
+//! every `tm session create`/daemon-managed `claude` runs. Two other spawn
+//! shapes still call `claude` directly and bypass this disclaim, so they can
+//! still reproduce the prompt storm: `standalone::run::build_launch_command`
+//! (the interactive `tm run <alias>` driver, `Stdio::inherit()`) and
+//! `control::backend::stream_json::build_claude_command` (the alpha-1 default
+//! `StreamJsonBackend`, `tokio::process` piped I/O). Extending the disclaim to
+//! those two shapes is tracked in issue #2822 rather than folded into this
+//! module, since the interactive-inherit and tokio-piped spawn shapes need
+//! their own posix_spawn-based reimplementation (a `pre_exec` shortcut was
+//! considered and is NOT confirmed feasible — see #2822 for why).
 //! Test: `disclaimed_output_captures_stdout`,
 //! `disclaimed_output_captures_stderr_and_nonzero_exit`,
-//! `disclaimed_output_handles_large_output_without_deadlock`,
+//! `disclaimed_output_saturates_stdout_and_stderr_without_deadlock`,
 //! `disclaimed_output_reports_spawn_error_for_missing_binary`.
 
 /// Environment variable that, when set to any value, forces
@@ -52,9 +65,10 @@ pub const DISABLE_ENV: &str = "TM_DISABLE_SPAWN_DISCLAIM";
 /// Spawn `program` with `args`, capture stdout/stderr, and — on macOS —
 /// disclaim TCC responsibility so the child is its own responsible process.
 ///
-/// Why: see the module docs — this is tm's fix for the media-library consent
-/// storm (issue #2819) that arises because every managed `claude`/`tmux` child's
-/// TCC access is otherwise attributed to the signed `trusty-mpm` binary.
+/// Why: see the module docs — this is tm's fix for the media-library/App-Data
+/// consent storm (issue #2819) on the tmux-hosted managed-session path, which
+/// arises because a `claude`/`tmux` child's TCC access is otherwise attributed
+/// to the signed `trusty-mpm` binary.
 /// What: behaves like `Command::new(program).args(args).output()` (stdin from
 /// `/dev/null`, stdout+stderr captured), but on macOS spawns via `posix_spawnp`
 /// with the `responsibility_spawnattrs_setdisclaim` attribute set. There is
@@ -63,7 +77,7 @@ pub const DISABLE_ENV: &str = "TM_DISABLE_SPAWN_DISCLAIM";
 /// `Command::output`.
 /// Test: `disclaimed_output_captures_stdout`,
 /// `disclaimed_output_captures_stderr_and_nonzero_exit`,
-/// `disclaimed_output_handles_large_output_without_deadlock`,
+/// `disclaimed_output_saturates_stdout_and_stderr_without_deadlock`,
 /// `disclaimed_output_reports_spawn_error_for_missing_binary`.
 pub fn disclaimed_output(program: &str, args: &[String]) -> std::io::Result<std::process::Output> {
     #[cfg(target_os = "macos")]
@@ -173,16 +187,35 @@ mod macos {
                 // stdin ← /dev/null; stdout → out_wr (fd 1); stderr → err_wr (fd 2).
                 // The dup2 targets (0/1/2) are created without CLOEXEC (dup2
                 // clears it), so they survive exec; the CLOEXEC source pipe fds
-                // close at exec, so the child holds no extra copies.
-                libc::posix_spawn_file_actions_addopen(
+                // close at exec, so the child holds no extra copies. Each call's
+                // return code is checked: a non-zero rc means the file-actions
+                // list is malformed (e.g. an invalid fd), so `posix_spawnp` would
+                // either exec with the wrong fds wired up or fail outright — we
+                // must not proceed to spawn on any of these.
+                let rc = libc::posix_spawn_file_actions_addopen(
                     &mut file_actions,
                     0,
                     dev_null.as_ptr(),
                     libc::O_RDONLY,
                     0,
                 );
-                libc::posix_spawn_file_actions_adddup2(&mut file_actions, out_wr.0, 1);
-                libc::posix_spawn_file_actions_adddup2(&mut file_actions, err_wr.0, 2);
+                if rc != 0 {
+                    libc::posix_spawnattr_destroy(&mut attr);
+                    libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                    return Err(io::Error::from_raw_os_error(rc));
+                }
+                let rc = libc::posix_spawn_file_actions_adddup2(&mut file_actions, out_wr.0, 1);
+                if rc != 0 {
+                    libc::posix_spawnattr_destroy(&mut attr);
+                    libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                    return Err(io::Error::from_raw_os_error(rc));
+                }
+                let rc = libc::posix_spawn_file_actions_adddup2(&mut file_actions, err_wr.0, 2);
+                if rc != 0 {
+                    libc::posix_spawnattr_destroy(&mut attr);
+                    libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                    return Err(io::Error::from_raw_os_error(rc));
+                }
 
                 // Disclaim TCC responsibility when the SPI is available.
                 if let Some(disclaim) = resolve_disclaim_fn() {
@@ -235,9 +268,14 @@ mod macos {
         let err_read = err_file.read_to_end(&mut stderr_buf);
 
         let stdout_buf = reader.join().unwrap_or_default();
-        err_read?;
 
-        let status = wait_for(pid)?;
+        // Reap the child UNCONDITIONALLY before propagating any pipe-read
+        // error. `err_read?` returning early here — before the child is
+        // waited on — would leak a zombie in this long-lived daemon on every
+        // stderr-read failure, since nothing else ever reaps this pid.
+        let status = wait_for(pid);
+        err_read?;
+        let status = status?;
         Ok(Output {
             status,
             stdout: stdout_buf,
@@ -350,20 +388,29 @@ mod tests {
     }
 
     #[test]
-    fn disclaimed_output_handles_large_output_without_deadlock() {
-        // Emit ~2 MiB to stdout — far past a single pipe buffer — to prove the
-        // concurrent drain never deadlocks. `yes` would run forever, so bound it.
+    fn disclaimed_output_saturates_stdout_and_stderr_without_deadlock() {
+        // Fill BOTH stdout and stderr with ~2 MiB CONCURRENTLY (the stdout
+        // producer is backgrounded so it races the stderr producer) — this is
+        // the shape that actually stresses the concurrent-drain design.
+        // Draining stdout to completion before touching stderr (or vice versa)
+        // would deadlock as soon as the other pipe's kernel buffer fills while
+        // its producer keeps writing; a single-stream test can't catch that.
         let out = disclaimed_output(
             "/bin/sh",
             &[
                 "-c".to_string(),
-                "head -c 2097152 /dev/zero | tr '\\0' 'x'".to_string(),
+                "head -c 2097152 /dev/zero | tr '\\0' 'x' & \
+                 head -c 2097152 /dev/zero | tr '\\0' 'y' >&2; \
+                 wait"
+                    .to_string(),
             ],
         )
         .unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout.len(), 2_097_152);
         assert!(out.stdout.iter().all(|&b| b == b'x'));
+        assert_eq!(out.stderr.len(), 2_097_152);
+        assert!(out.stderr.iter().all(|&b| b == b'y'));
     }
 
     #[test]
