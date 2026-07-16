@@ -48,6 +48,7 @@ that governs it.
 | DOC-36 | `SPEC-TMMGR-01~approved` … `-06~approved` | [`tm manager`: Layer-3 Chat-Based Portfolio Project Manager](./tm-manager-vision.md) | trusty-mpm — daemon / inference layer / external channels |
 | DOC-38 | `SPEC-SLD-01~draft` … `-03~draft` | [Spec-Linked Documentation (SLD): A Language-Agnostic Source↔Spec Reference Standard](./spec-linked-documentation.md) | documentation standard — repository/language-agnostic (informative reference: trusty-common `intent_source`) |
 | DOC-39 | `SPEC-TCUI-01~draft` … `-09~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
+| DOC-40 | `SPEC-BGATTACH-01~draft` … `-07~draft` | [Durable Background Agents: Exclusive Attach/Detach Semantics](./durable-background-agents.md) | trusty-mpm — daemon / session-manager / agent delegation; trusty-code — session registry / task executor (cross-crate) |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -61,16 +62,22 @@ that governs it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-40`** (re-scan of the whole `docs/` tree, 2026-07-16): the
-> highest claimed number is now **DOC-39** ([trusty-code Harness UI](./trusty-code-harness-ui.md),
-> the entry above), which claimed the previously-free DOC-39 per the scan-before-claim
-> rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free" note is a
-> *hint, not authority*; the scan is authoritative). **DOC-38 §10 F3** (the DOC-28
-> renumber follow-up) names DOC-39 as its target — that is now stale and F3 must re-scan
-> and take **DOC-40**. DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
-> #1999 — still a catalog gap), DOC-35/36/38 are cataloged, and **DOC-37** is
+> **Next free `DOC-N` = `DOC-41`** (re-scan of the whole `docs/` tree, 2026-07-16): the
+> highest claimed number is now **DOC-40** ([Durable Background Agents](./durable-background-agents.md),
+> the entry above), which claimed the next free number after **DOC-39**
+> ([trusty-code Harness UI](./trusty-code-harness-ui.md)) merged and was cataloged, per the
+> scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
+> note is a *hint, not authority*; the scan is authoritative). **DOC-38 §10 F3** (the DOC-28
+> renumber follow-up) has previously named DOC-39, then DOC-40, as its target — both are now
+> stale and F3 must re-scan and take **DOC-41**. DOC-34 is assigned
+> ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
+> #1999 — still a catalog gap), DOC-35/36/38/39 are cataloged, and **DOC-37** is
 > self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
-> (`SPEC-SEARCHREPO-01~draft`…, uncataloged). The DOC-N assignment rule (scan-before-claim)
+> (`SPEC-SEARCHREPO-01~draft`…, uncataloged); open PR #2792 (Eve-style agent framework for
+> trusty-agents) also targets `DOC-37` for an unrelated spec — that collision predates this PR,
+> remains unmerged and unresolved, and this note does not assign `DOC-37` to either claimant.
+> Open PR #2863 (SLD policy adoption) also edits this document (a `## Policy` section above the
+> catalog) but does not claim a `DOC-N`. The DOC-N assignment rule (scan-before-claim)
 > and collision handling are now normative in [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft)
 > (note: `{#SPEC-…}` cross-links are best-effort on github.com — GitHub does not
 > honor explicit heading IDs, DOC-38 §4.3 — so this link lands on the file; scan
