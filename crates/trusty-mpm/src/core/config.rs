@@ -347,6 +347,15 @@ pub struct MpmConfig {
     /// Set `enabled = true` to activate the background idle-reaper loop.
     #[serde(default)]
     pub idle_auto_stop: IdleAutoStopConfig,
+
+    /// `[idle_nudge]` — opt-in auto-nudge for idle-parked sessions (#2621).
+    ///
+    /// Absent section → `enabled = false` (feature OFF, zero behavior change).
+    /// Set `enabled = true` to let the daemon nudge parked managed sessions. The
+    /// section type lives in [`crate::core::idle_nudge`] alongside the pure
+    /// decision logic and ledger it configures.
+    #[serde(default)]
+    pub idle_nudge: crate::core::idle_nudge::IdleNudgeConfig,
 }
 
 // ──────────────────────────────────────────────
@@ -802,6 +811,39 @@ enabled = true
         assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
         assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
         assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);
+    }
+
+    #[test]
+    fn config_idle_nudge_section_parses() {
+        // Absent → disabled defaults (#2621, zero behavior change); a full
+        // section overrides every field; a partial section (only `enabled`)
+        // keeps the caps and message at their conservative defaults.
+        let dir = tempfile::TempDir::new().unwrap();
+        let absent = load_from_str(dir.path(), "");
+        assert!(!absent.idle_nudge.enabled, "must default to disabled");
+        assert_eq!(absent.idle_nudge.max_nudges_per_session, 2);
+        assert_eq!(absent.idle_nudge.cooldown_secs, 300);
+        assert_eq!(
+            absent.idle_nudge.message,
+            crate::core::idle_nudge::DEFAULT_NUDGE_MESSAGE
+        );
+        let full = load_from_str(
+            dir.path(),
+            "[idle_nudge]\nenabled = true\nmax_nudges_per_session = 1\ncooldown_secs = 60\nmessage = \"resume now\"\n",
+        );
+        assert!(full.idle_nudge.enabled);
+        assert_eq!(full.idle_nudge.max_nudges_per_session, 1);
+        assert_eq!(full.idle_nudge.cooldown_secs, 60);
+        assert_eq!(full.idle_nudge.message, "resume now");
+
+        let partial = load_from_str(dir.path(), "[idle_nudge]\nenabled = true\n");
+        assert!(partial.idle_nudge.enabled);
+        assert_eq!(partial.idle_nudge.max_nudges_per_session, 2);
+        assert_eq!(partial.idle_nudge.cooldown_secs, 300);
+        assert_eq!(
+            partial.idle_nudge.message,
+            crate::core::idle_nudge::DEFAULT_NUDGE_MESSAGE
+        );
     }
 
     #[test]

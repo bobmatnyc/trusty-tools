@@ -1297,6 +1297,11 @@ pub async fn ingest_hook(
         handle_session_end(&state, &post.session_id).await;
     }
 
+    // #2621: surface + auto-nudge a turn-end the `tm hook` handler flagged as
+    // idle-parking (`core::idle_parking`, #2610/PR #2620). The gate and the
+    // off-hot-path `tokio::spawn` live in `idle_nudge` so this stays one line.
+    crate::daemon::idle_nudge::spawn_if_parked(&state, post.event, &post.session_id, &post.payload);
+
     match HookService::new(&state).process(session, post.event, post.payload) {
         HookDecision::Block { reason } => Err(DaemonError::OverseerBlocked { reason }),
         _ => Ok(Json(HookAcceptedResponse {
