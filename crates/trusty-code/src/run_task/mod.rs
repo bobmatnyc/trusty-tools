@@ -339,6 +339,12 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         Arc::new(pm_registry),
     )
     .with_stop_signal(Arc::new(move || stop_signal.is_cap_reached()))
+    // (UI Phase 1) Attribute the PM's tool events. Inert on this legacy
+    // one-shot/bake-off CLI path — it attaches no `ToolEventSink`, so nothing
+    // reads the attribution today. Set anyway so the identity is correct the
+    // moment a sink ever is attached here, rather than silently emitting
+    // `UNATTRIBUTED_AGENT`.
+    .with_agent("pm")
     // #2279: the PM never calls `bash` itself (its registry above is
     // `delegate_to_agent` + `finish_task` only), so its verify-before-finish
     // gate must scan the delegated engineer's transcript instead of its

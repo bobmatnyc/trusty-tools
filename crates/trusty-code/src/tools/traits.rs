@@ -16,6 +16,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::tools::telemetry::ToolTelemetry;
+
 // ── ToolResult ──────────────────────────────────────────────────────────────
 
 /// Structured result of a tool execution.
@@ -25,26 +27,76 @@ use serde_json::Value;
 /// explain the failure in its final answer). A structured error lets the caller
 /// surface failure back to the LLM as a `tool_result` with `is_error: true`
 /// while keeping the loop running.
-/// What: `Success(String)` carries a successful textual result; `Error` carries
-/// a message plus a `recoverable` flag.
+/// What: `Success` carries a successful textual result plus (UI Phase 1) an
+/// optional [`ToolTelemetry`] side-channel; `Error` carries a message plus a
+/// `recoverable` flag.
 /// Test: `ToolResult::err(...).is_error()` is true; `ok(...).content()` returns
 /// the success string. Exercised in `tools::registry` and delegate tests.
 #[derive(Debug)]
 pub enum ToolResult {
-    /// Tool executed successfully; inner string is the textual result.
-    Success(String),
+    /// Tool executed successfully.
+    ///
+    /// `text` is the textual result fed back to the model. `telemetry`
+    /// (UI Phase 1) is the structured account of what the tool actually did,
+    /// which the agent loop forwards to its `ToolEventSink` — see
+    /// `crate::tools::telemetry` for why this rides on the result rather than
+    /// each tool holding a sink. `None` for every tool that has nothing
+    /// structured to report, which is all but the retrieval tools.
+    Success {
+        text: String,
+        telemetry: Option<Box<ToolTelemetry>>,
+    },
     /// Tool failed; `message` describes why; `recoverable` advises the LLM loop.
     Error { message: String, recoverable: bool },
 }
 
 impl ToolResult {
-    /// Construct a successful result.
+    /// Construct a successful result with no telemetry.
     ///
-    /// Why: Single canonical happy-path constructor used by every tool.
-    /// What: Wraps `s` in `Success`.
+    /// Why: Single canonical happy-path constructor used by every tool. Tools
+    /// with structured telemetry chain [`Self::with_telemetry`] onto this
+    /// rather than needing a second constructor.
+    /// What: Wraps `s` in `Success` with `telemetry: None`.
     /// Test: Trivially exercised by every successful tool execute().
     pub fn ok(s: impl Into<String>) -> Self {
-        ToolResult::Success(s.into())
+        ToolResult::Success {
+            text: s.into(),
+            telemetry: None,
+        }
+    }
+
+    /// Attach structured telemetry to a successful result (UI Phase 1).
+    ///
+    /// Why: lets a tool report what it actually did (real search lane, which
+    /// memories entered context) without knowing which agent runs it or
+    /// owning an event sink — see `crate::tools::telemetry`'s module docs.
+    /// What: builder-style; a no-op on an `Error` result, because the event
+    /// shapes this feeds describe work that produced results, and an errored
+    /// tool has none to describe — its failure is already narrated by
+    /// `ToolFinished`/`ToolError`.
+    /// Test: `tests::tool_result_carries_optional_telemetry`,
+    /// `tests::with_telemetry_is_a_no_op_on_error`.
+    pub fn with_telemetry(self, telemetry: ToolTelemetry) -> Self {
+        match self {
+            ToolResult::Success { text, .. } => ToolResult::Success {
+                text,
+                telemetry: Some(Box::new(telemetry)),
+            },
+            error => error,
+        }
+    }
+
+    /// The structured telemetry this result carries, if any (UI Phase 1).
+    ///
+    /// Why: the agent loop reads this after every dispatch to decide whether
+    /// to emit a structured event alongside the generic tool events.
+    /// What: `None` for errors and for any tool that reported none.
+    /// Test: `tests::tool_result_carries_optional_telemetry`.
+    pub fn telemetry(&self) -> Option<&ToolTelemetry> {
+        match self {
+            ToolResult::Success { telemetry, .. } => telemetry.as_deref(),
+            ToolResult::Error { .. } => None,
+        }
     }
 
     /// Construct a recoverable error.
@@ -107,7 +159,7 @@ impl ToolResult {
     ///       `ToolResult::err("oops").content()` == "oops".
     pub fn content(&self) -> &str {
         match self {
-            ToolResult::Success(s) => s.as_str(),
+            ToolResult::Success { text, .. } => text.as_str(),
             ToolResult::Error { message, .. } => message.as_str(),
         }
     }
@@ -486,6 +538,54 @@ mod tests {
         assert!(fatal.is_error());
         assert!(fatal.is_fatal());
         assert_eq!(fatal.content(), "crash");
+    }
+
+    /// A successful result must carry telemetry when a tool attaches it, and
+    /// none by default (UI Phase 1).
+    ///
+    /// Why: `None` by default is what keeps every non-retrieval tool's
+    /// behaviour byte-identical to pre-ticket.
+    /// Test: this test.
+    #[test]
+    fn tool_result_carries_optional_telemetry() {
+        use crate::tools::telemetry::{SearchTelemetry, ToolTelemetry};
+
+        assert!(
+            ToolResult::ok("plain").telemetry().is_none(),
+            "tools that report nothing structured must stay unaffected"
+        );
+
+        let telemetry = ToolTelemetry::Search(SearchTelemetry {
+            lane: "semantic".to_string(),
+            query: "q".to_string(),
+            hit_count: Some(3),
+            latency_ms: 7,
+        });
+        let result = ToolResult::ok("hits").with_telemetry(telemetry.clone());
+        assert_eq!(result.telemetry(), Some(&telemetry));
+        assert_eq!(result.content(), "hits", "the text must be untouched");
+    }
+
+    /// Attaching telemetry to an error must be a no-op (UI Phase 1).
+    ///
+    /// Why: the structured events describe work that produced results; an
+    /// errored tool has none to describe, and its failure is already narrated
+    /// by `ToolFinished`/`ToolError`.
+    /// Test: this test.
+    #[test]
+    fn with_telemetry_is_a_no_op_on_error() {
+        use crate::tools::telemetry::{SearchTelemetry, ToolTelemetry};
+
+        let result =
+            ToolResult::err("boom").with_telemetry(ToolTelemetry::Search(SearchTelemetry {
+                lane: "semantic".to_string(),
+                query: "q".to_string(),
+                hit_count: None,
+                latency_ms: 1,
+            }));
+        assert!(result.is_error());
+        assert!(result.telemetry().is_none());
+        assert_eq!(result.content(), "boom");
     }
 
     /// Verify `AgentOutput::summary_or_content` fallback.

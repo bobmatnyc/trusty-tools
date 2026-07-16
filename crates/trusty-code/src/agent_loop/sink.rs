@@ -18,6 +18,8 @@
 
 use async_trait::async_trait;
 
+use crate::tools::telemetry::ToolTelemetry;
+
 /// One turn's working-context budget measurement, handed to
 /// [`ToolEventSink::context_budget`].
 ///
@@ -53,24 +55,39 @@ pub struct ContextBudgetSnapshot {
 /// Why: The only way to make an agent loop's tool activity observable to an
 /// external subscriber (a `session.attach`ed client) without forking the loop
 /// or the tool registry.
-/// What: Three hooks, one per #2055 taxonomy kind; `call_id` is the
-/// `ToolCall::id` the model assigned, correlating start/finish/error for the
-/// same invocation. All are `&self` (not `&mut self`) so a sink can be shared
-/// as `Arc<dyn ToolEventSink>` across a PM loop and every delegated sub-agent
-/// loop.
+/// What: Four hooks; `call_id` is the `ToolCall::id` the model assigned,
+/// correlating every hook for the same invocation. All are `&self` (not
+/// `&mut self`) so a sink can be shared as `Arc<dyn ToolEventSink>` across a
+/// PM loop and every delegated sub-agent loop.
+///
+/// (UI Phase 1) Every hook takes `agent` — the name of the agent whose loop
+/// is dispatching. It is a PARAMETER rather than sink state precisely BECAUSE
+/// one sink instance is shared by the PM's loop and every delegated
+/// sub-agent's loop (see `task::executor::run_and_record`, which clones one
+/// `Arc` into both): a sink that stored its own agent name could only ever
+/// report one of them. The calling `AgentLoop` is the only layer that knows
+/// which agent it is, so it passes its identity per call — see
+/// `AgentLoop::with_agent`.
 /// Test: `crate::task::sink::tests::*`.
 #[async_trait]
 pub trait ToolEventSink: Send + Sync {
     /// A tool invocation is about to run.
-    async fn tool_started(&self, call_id: &str, tool: &str, args_preview: &str);
+    async fn tool_started(&self, agent: &str, call_id: &str, tool: &str, args_preview: &str);
 
     /// A tool invocation completed (successfully or with a recoverable error —
     /// `success` distinguishes the two). Use [`Self::tool_error`] instead for an
     /// exceptional (non-recoverable) failure.
-    async fn tool_finished(&self, call_id: &str, tool: &str, success: bool, result_preview: &str);
+    async fn tool_finished(
+        &self,
+        agent: &str,
+        call_id: &str,
+        tool: &str,
+        success: bool,
+        result_preview: &str,
+    );
 
     /// A tool invocation raised an exceptional (non-recoverable) error.
-    async fn tool_error(&self, call_id: &str, tool: &str, error: &str);
+    async fn tool_error(&self, agent: &str, call_id: &str, tool: &str, error: &str);
 
     /// The working-context budget was measured at a turn boundary (epic
     /// #2343).
@@ -88,5 +105,25 @@ pub trait ToolEventSink: Send + Sync {
     /// implementation compiles and behaves exactly as before.
     async fn context_budget(&self, snapshot: &ContextBudgetSnapshot) {
         let _ = snapshot;
+    }
+
+    /// A tool reported structured telemetry about what it actually did
+    /// (UI Phase 1) — a real search lane, or which recalled memories entered
+    /// context. Fires IN ADDITION to [`Self::tool_finished`], never instead
+    /// of it, so existing consumers of the generic tool events are unaffected.
+    ///
+    /// Why: a default no-op body keeps every pre-existing sink impl (and
+    /// every test double) compiling unchanged — only sinks that actually
+    /// serve the UI need to override it.
+    /// What: `telemetry` is the tool's own account, carried on its
+    /// `ToolResult`; see `crate::tools::telemetry`.
+    /// Test: `crate::task::sink::tests::forwards_search_and_recall_telemetry`.
+    async fn tool_telemetry(
+        &self,
+        _agent: &str,
+        _call_id: &str,
+        _tool: &str,
+        _telemetry: &ToolTelemetry,
+    ) {
     }
 }

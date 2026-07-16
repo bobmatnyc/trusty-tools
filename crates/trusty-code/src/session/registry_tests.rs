@@ -315,6 +315,113 @@ async fn ring_buffer_drops_oldest_when_full() {
     assert_eq!(seqs, vec![2, 3]);
 }
 
+/// Build a `SearchTelemetry` for the UI-Phase-1 record tests.
+fn search_telemetry(lane: &str, hit_count: Option<usize>) -> crate::tools::SearchTelemetry {
+    crate::tools::SearchTelemetry {
+        lane: lane.to_string(),
+        query: "where is auth".to_string(),
+        hit_count,
+        latency_ms: 12,
+    }
+}
+
+/// Build a `RecallTelemetry` from `(score, injected)` pairs.
+fn recall_telemetry(results: &[(f64, bool)]) -> crate::tools::RecallTelemetry {
+    crate::tools::RecallTelemetry {
+        query: "pkce".to_string(),
+        results: results
+            .iter()
+            .map(|(score, injected)| crate::events::RecalledMemory {
+                score: *score,
+                injected: *injected,
+            })
+            .collect(),
+    }
+}
+
+/// `record_search_performed` must publish a `SearchPerformed` event carrying
+/// the real routed lane, hit count, latency, and agent attribution
+/// (UI Phase 1).
+///
+/// Why: this is the structured search signal the UI joins against a change to
+/// answer "what search drove this?" — it must survive the same
+/// record -> sequence -> publish path as every other event.
+#[tokio::test]
+async fn record_search_performed_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_search_performed(
+            &session.id,
+            "python-engineer",
+            &search_telemetry("grep", Some(7)),
+        )
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "search_performed");
+    assert!(matches!(
+        envelope.event,
+        Event::SearchPerformed { agent, lane, query, hit_count, latency_ms, .. }
+            if agent == "python-engineer"
+                && lane == "grep"
+                && query == "where is auth"
+                && hit_count == Some(7)
+                && latency_ms == 12
+    ));
+}
+
+/// `record_memory_recalled` must publish a `MemoryRecalled` event preserving
+/// each result's score AND its `injected` flag (UI Phase 1).
+///
+/// Why: `injected` is the differentiating surface — a UI renders held-back
+/// memories beside injected ones. Losing the flag anywhere in the emission
+/// path collapses that distinction.
+#[tokio::test]
+async fn record_memory_recalled_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_memory_recalled(
+            &session.id,
+            "pm",
+            &recall_telemetry(&[(0.9, true), (0.41, false)]),
+        )
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "memory_recalled");
+    let Event::MemoryRecalled {
+        agent,
+        query,
+        results,
+        ..
+    } = envelope.event
+    else {
+        panic!("expected MemoryRecalled");
+    };
+    assert_eq!(agent, "pm");
+    assert_eq!(query, "pkce");
+    assert_eq!(
+        results,
+        vec![
+            crate::events::RecalledMemory {
+                score: 0.9,
+                injected: true
+            },
+            crate::events::RecalledMemory {
+                score: 0.41,
+                injected: false
+            },
+        ],
+        "both the scores and the injected/held-back split must survive emission"
+    );
+}
+
 /// `record_tool_started` must publish a `ToolStarted` event with a
 /// truncated `args_preview`.
 #[tokio::test]
@@ -324,15 +431,15 @@ async fn record_tool_started_publishes_event() {
     let mut events = crate::events::subscribe();
 
     registry
-        .record_tool_started(&session.id, "bash", "call-1", "ls -la")
+        .record_tool_started(&session.id, "pm", "bash", "call-1", "ls -la")
         .unwrap();
 
     let envelope = next_event_for(&mut events, &session.id).await;
     assert_eq!(envelope.kind, "tool_started");
     assert!(matches!(
         envelope.event,
-        Event::ToolStarted { tool, call_id, args_preview, .. }
-            if tool == "bash" && call_id == "call-1" && args_preview == "ls -la"
+        Event::ToolStarted { agent, tool, call_id, args_preview, .. }
+            if agent == "pm" && tool == "bash" && call_id == "call-1" && args_preview == "ls -la"
     ));
 }
 
@@ -345,14 +452,15 @@ async fn record_tool_finished_publishes_event() {
     let mut events = crate::events::subscribe();
 
     registry
-        .record_tool_finished(&session.id, "bash", "call-1", true, "done")
+        .record_tool_finished(&session.id, "pm", "bash", "call-1", true, "done")
         .unwrap();
 
     let envelope = next_event_for(&mut events, &session.id).await;
     assert_eq!(envelope.kind, "tool_finished");
     assert!(matches!(
         envelope.event,
-        Event::ToolFinished { success, result_preview, .. } if success && result_preview == "done"
+        Event::ToolFinished { agent, success, result_preview, .. }
+            if agent == "pm" && success && result_preview == "done"
     ));
 }
 
@@ -364,12 +472,15 @@ async fn record_tool_error_publishes_event() {
     let mut events = crate::events::subscribe();
 
     registry
-        .record_tool_error(&session.id, "bash", "call-1", "timed out")
+        .record_tool_error(&session.id, "pm", "bash", "call-1", "timed out")
         .unwrap();
 
     let envelope = next_event_for(&mut events, &session.id).await;
     assert_eq!(envelope.kind, "tool_error");
-    assert!(matches!(envelope.event, Event::ToolError { error, .. } if error == "timed out"));
+    assert!(matches!(
+        envelope.event,
+        Event::ToolError { agent, error, .. } if agent == "pm" && error == "timed out"
+    ));
 }
 
 /// `record_log` must publish a `Log` event.
@@ -427,21 +538,35 @@ async fn record_plumbing_methods_reject_unknown_session() {
     let registry = SessionRegistry::new();
     assert_eq!(
         registry
-            .record_tool_started("nope", "t", "c", "a")
+            .record_tool_started("nope", "pm", "t", "c", "a")
             .unwrap_err()
             .code,
         -32007
     );
     assert_eq!(
         registry
-            .record_tool_finished("nope", "t", "c", true, "r")
+            .record_tool_finished("nope", "pm", "t", "c", true, "r")
             .unwrap_err()
             .code,
         -32007
     );
     assert_eq!(
         registry
-            .record_tool_error("nope", "t", "c", "e")
+            .record_tool_error("nope", "pm", "t", "c", "e")
+            .unwrap_err()
+            .code,
+        -32007
+    );
+    assert_eq!(
+        registry
+            .record_search_performed("nope", "pm", &search_telemetry("semantic", Some(1)))
+            .unwrap_err()
+            .code,
+        -32007
+    );
+    assert_eq!(
+        registry
+            .record_memory_recalled("nope", "pm", &recall_telemetry(&[(0.9, true)]))
             .unwrap_err()
             .code,
         -32007

@@ -436,6 +436,12 @@ async fn run_and_record(
         Arc::new(pm_registry),
     )
     .with_tool_event_sink(Arc::clone(&sink))
+    // (UI Phase 1) Attribute this loop's tool events to the PM. `sink` is the
+    // SAME `Arc` handed to `build_engineer_runner` above, so without this the
+    // PM's and the engineer's tool calls arrive on one stream indistinguishable
+    // from each other. `params.agent_name` (default `"pm"`) is the name the
+    // rest of the taxonomy already uses for this agent.
+    .with_agent(params.agent_name.clone())
     .with_cancel_flag(Arc::clone(&cancel))
     // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
     // never calls `bash` itself, so its verify-before-finish gate scans the

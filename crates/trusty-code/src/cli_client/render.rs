@@ -70,19 +70,48 @@ pub fn render_event_line(envelope: &SessionEventEnvelope) -> String {
         Event::SessionStatusChanged { status, .. } => format!("status -> {status}"),
         Event::SessionDone { status, .. } => format!("done ({status})"),
         Event::SessionCancelled { .. } => "cancelled".to_string(),
+        // (UI Phase 1) `agent` prefixes every tool line so an attached CLI
+        // shows WHO made each call — the same attribution the SPA renders.
         Event::ToolStarted {
-            tool, args_preview, ..
-        } => format!("tool_started  {tool}  {args_preview}"),
+            agent,
+            tool,
+            args_preview,
+            ..
+        } => format!("tool_started  [{agent}] {tool}  {args_preview}"),
         Event::ToolFinished {
+            agent,
             tool,
             success,
             result_preview,
             ..
         } => format!(
-            "tool_finished {tool}  {} {result_preview}",
+            "tool_finished [{agent}] {tool}  {} {result_preview}",
             if *success { "ok" } else { "error" }
         ),
-        Event::ToolError { tool, error, .. } => format!("tool_error    {tool}  {error}"),
+        Event::ToolError {
+            agent, tool, error, ..
+        } => format!("tool_error    [{agent}] {tool}  {error}"),
+        Event::SearchPerformed {
+            agent,
+            lane,
+            query,
+            hit_count,
+            latency_ms,
+            ..
+        } => format!(
+            "search        [{agent}] {lane}  \"{query}\"  {} hits  {latency_ms}ms",
+            hit_count.map_or_else(|| "?".to_string(), |c| c.to_string())
+        ),
+        Event::MemoryRecalled {
+            agent,
+            query,
+            results,
+            ..
+        } => format!(
+            "recall        [{agent}] \"{query}\"  {} injected / {} recalled",
+            results.iter().filter(|r| r.injected).count(),
+            results.len()
+        ),
         Event::Message { text, .. } => text.clone(),
         Event::Log { level, message, .. } => format!("[{level}] {message}"),
         Event::Progress {
@@ -216,6 +245,7 @@ mod tests {
     fn render_event_line_covers_key_variants() {
         let line = render_event_line(&envelope(Event::ToolStarted {
             session_id: "s-1".to_string(),
+            agent: "python-engineer".to_string(),
             tool: "bash".to_string(),
             call_id: "c1".to_string(),
             args_preview: "echo hi".to_string(),
@@ -223,6 +253,44 @@ mod tests {
         assert!(line.contains("tool_started"));
         assert!(line.contains("bash"));
         assert!(line.contains("echo hi"));
+        assert!(
+            line.contains("[python-engineer]"),
+            "an attached CLI must show WHO made the call: {line}"
+        );
+
+        // (UI Phase 1) The two structured retrieval events render their own
+        // lines rather than degrading to the generic `[kind]` fallback.
+        let line = render_event_line(&envelope(Event::SearchPerformed {
+            session_id: "s-1".to_string(),
+            agent: "python-engineer".to_string(),
+            lane: "lexical".to_string(),
+            query: "where is auth".to_string(),
+            hit_count: Some(3),
+            latency_ms: 42,
+        }));
+        assert!(line.contains("[python-engineer]"), "{line}");
+        assert!(line.contains("lexical"), "the REAL routed lane: {line}");
+        assert!(line.contains("3 hits"), "{line}");
+
+        let line = render_event_line(&envelope(Event::MemoryRecalled {
+            session_id: "s-1".to_string(),
+            agent: "pm".to_string(),
+            query: "pkce".to_string(),
+            results: vec![
+                crate::events::RecalledMemory {
+                    score: 0.9,
+                    injected: true,
+                },
+                crate::events::RecalledMemory {
+                    score: 0.41,
+                    injected: false,
+                },
+            ],
+        }));
+        assert!(
+            line.contains("1 injected / 2 recalled"),
+            "the injected/held-back split is the point: {line}"
+        );
 
         let line = render_event_line(&envelope(Event::SessionDone {
             session_id: "s-1".to_string(),

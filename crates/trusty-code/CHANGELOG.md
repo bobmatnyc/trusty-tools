@@ -150,6 +150,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   from context, not from the record*. Emitted only by the PM's persistent-session
   loop — cadence's PM-only gating (`AgentLoopConfig.cadence` defaults `None`) is
   unchanged, so a delegated engineer loop never emits.
+- **Agent attribution on every tool event (UI Phase-1 API)** — `ToolStarted`,
+  `ToolFinished`, and `ToolError` now carry an `agent` field naming the agent
+  that dispatched the call. Previously a client could only guess whether a tool
+  call came from the PM or a delegated engineer by interleaving the event stream
+  against `AgentSpawned`/`AgentDone` ordering — fragile inference that breaks as
+  soon as their calls overlap, and the reason the UI could not answer "which
+  agent drove this change?". The name is a per-call PARAMETER on
+  `agent_loop::ToolEventSink` rather than sink state, because ONE
+  `Arc<dyn ToolEventSink>` is shared by the PM's loop and every delegated
+  sub-agent's loop (`task::executor::run_and_record` clones the same handle into
+  both), so a sink carrying its own name could only ever report one of them. The
+  dispatching `AgentLoop` is the only layer that knows its own identity, so it
+  passes it per call — declared via the new `AgentLoop::with_agent`, wired at
+  both production sites (PM: `params.agent_name`, default `"pm"`; delegated
+  sub-agents: the runner's `agent_name`). `agent` is the agent NAME, matching the
+  key the rest of the taxonomy already uses (`AgentSpawned.agent`,
+  `PmDelegating.agent`, `LlmRequested.agent_name`), so the UI can join them
+  directly; loops that declare no agent emit the documented
+  `events::UNATTRIBUTED_AGENT` (`"unknown"`) sentinel rather than an empty string
+- **`search_performed` event — structured search telemetry** — a new `Event`
+  variant carrying `{agent, lane, query, hit_count, latency_ms}`, emitted by
+  `search_code` ALONGSIDE (never instead of) the generic tool events, so existing
+  consumers see an unchanged stream. `lane` is the lane trusty-search ACTUALLY
+  served, not the mode the model requested: a `semantic`/`symbol` query against a
+  still-building index transparently retries on the lexical lane
+  ([#2783](https://github.com/bobmatnyc/trusty-tools/issues/2783)) and now
+  reports `lane: "lexical"` rather than claiming a semantic search that never
+  ran. `hit_count` is `null` when the payload shape could not be counted — never
+  a misleading `0`, which would read as "no hits". The fail-open paths (absent
+  daemon, no index) attach no telemetry at all: they never reached a lane, so
+  there is no search to report
+- **`memory_recalled` event — structured recall telemetry with the `injected`
+  flag** — a new `Event` variant carrying
+  `{agent, query, results: [{score, injected}]}`, emitted by `recall_session`.
+  `injected: false` means exactly "recalled but not entered into context": the
+  tool drops WHOLE lowest-scored results to fit its token budget, and that
+  decision — plus every result's score — previously died inside the tool's
+  rendered text. This is what lets a UI show which memories reached the model and
+  which were held back
+- **`ToolResult::with_telemetry` / `ToolResult::telemetry`** — the seam that
+  carries a tool's structured account (`tools::telemetry::ToolTelemetry`) to the
+  agent loop, which forwards it to the new `ToolEventSink::tool_telemetry` hook.
+  Tools stay pure functions of their arguments — no sink, no session, no agent
+  name — so attribution keeps ONE source of truth and each tool stays unit-
+  testable without a bus. `ToolResult::Success` is now a struct variant
+  (`{text, telemetry}`); `ToolResult::ok`/`content`/`is_error` are unchanged, so
+  no tool call site moved. `tool_telemetry` has a default no-op body, leaving
+  every pre-existing sink impl compiling untouched
 - **Build provenance in `--version` and `tcode_report.json`** — `tcode --version`
   now prints the git SHA and commit date alongside the semver
   (`tcode 0.2.0 (b20adfca 2026-07-16)`), and `tcode_report.json` carries a

@@ -43,6 +43,7 @@ use tokio::sync::{Mutex, OnceCell};
 use tracing::warn;
 use trusty_common::stdio_mcp_client::StdioMcpClient;
 
+use crate::tools::telemetry::{SearchTelemetry, ToolTelemetry};
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// The tool's registered/advertised name.
@@ -333,6 +334,93 @@ async fn lexical_fallback(
     mcp_text(&result)
 }
 
+/// The trusty-search lane that ACTUALLY served a query (UI Phase 1).
+///
+/// Why: the mode the model asks for and the lane that answers are not the
+/// same thing — a `semantic`/`symbol` query against a still-building index
+/// transparently retries on the lexical lane (#2783). Reporting the
+/// requested mode would tell the UI a comfortable lie about how a change was
+/// discovered; this reports what happened.
+/// What: `label()` is the stable wire string carried by
+/// `Event::SearchPerformed.lane`. `Lexical` is only ever reached via the
+/// stage-not-ready retry — it is not a mode the model can request.
+/// Test: `tests::lane_labels_are_stable`,
+/// `tests::telemetry_reports_lexical_fallback_lane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchLane {
+    /// `search_semantic` — embedding similarity.
+    Semantic,
+    /// `search_kg` — call-graph expansion around a symbol.
+    Symbol,
+    /// `grep` — regex/literal over indexed files.
+    Grep,
+    /// `search_lexical` — the degraded lane served during index warm-up.
+    Lexical,
+}
+
+impl SearchLane {
+    /// Resolve the lane a requested `mode` routes to (before any retry).
+    ///
+    /// Why: `build_call`'s mode matching and the telemetry lane must never
+    /// drift apart; both derive from this one mapping.
+    /// What: mirrors `build_call` exactly, including its "anything unknown is
+    /// semantic" default.
+    /// Test: `tests::lane_from_mode_matches_build_call_routing`.
+    fn from_mode(mode: &str) -> Self {
+        match mode {
+            "grep" => SearchLane::Grep,
+            "symbol" => SearchLane::Symbol,
+            _ => SearchLane::Semantic,
+        }
+    }
+
+    /// Resolve the lane that ACTUALLY served a query.
+    ///
+    /// Why: the one place the "which lane really answered?" question is
+    /// decided, so the answer the telemetry reports cannot drift from what
+    /// `execute` did — and so the lexical-retry case is unit-testable without
+    /// a live trusty-search daemon and a half-built index.
+    /// What: a stage-not-ready retry means the LEXICAL lane served the
+    /// results, whatever the model asked for; otherwise the requested mode's
+    /// lane did.
+    /// Test: `tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
+    fn resolved(mode: &str, lexical_fallback_used: bool) -> Self {
+        if lexical_fallback_used {
+            SearchLane::Lexical
+        } else {
+            SearchLane::from_mode(mode)
+        }
+    }
+
+    /// The stable wire label for this lane.
+    fn label(self) -> &'static str {
+        match self {
+            SearchLane::Semantic => "semantic",
+            SearchLane::Symbol => "symbol",
+            SearchLane::Grep => "grep",
+            SearchLane::Lexical => "lexical",
+        }
+    }
+}
+
+/// Count the hits in a trusty-search result payload (UI Phase 1).
+///
+/// Why: the UI renders "N hits" beside a search, and the count is otherwise
+/// only recoverable by re-parsing the tool's rendered prose.
+/// What: every trusty-search lane wraps its payload as a JSON object with an
+/// array under `results`, `hits`, or `matches` — the three keys observed
+/// across the semantic/KG/grep/lexical lanes. Returns `None` when `text` is
+/// not JSON or carries no recognisable array, so an uncountable shape is
+/// reported honestly as "unknown" rather than as a misleading `0`.
+/// Test: `tests::count_hits_reads_each_lane_shape`,
+/// `tests::count_hits_is_none_for_unrecognised_payloads`.
+fn count_hits(text: &str) -> Option<usize> {
+    let body: Value = serde_json::from_str(text).ok()?;
+    ["results", "hits", "matches"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(Value::as_array).map(Vec::len))
+}
+
 /// Build the MCP arguments for `mode`, returning the tool name + params.
 ///
 /// Why: keeps `execute` linear — each mode maps to one trusty-search lane with
@@ -432,12 +520,17 @@ impl ToolExecutor for TrustySearchTool {
     /// naming the mode and lane, so an operator can tell from stderr that a
     /// run's discovery quality was degraded, matching this method's other
     /// two `tracing::warn!` sites for a hard call failure / in-band error.
+    /// (UI Phase 1) Every path that actually reached a lane attaches a
+    /// [`SearchTelemetry`] carrying the REAL routed lane, the hit count, and
+    /// the whole call's latency — see [`SearchLane`]. The fail-open paths
+    /// (no daemon, no index, lane error with no usable retry) attach none:
+    /// they never reached a lane, so there is no search to report; the
+    /// generic tool events still narrate them.
     /// Test: `tests::execute_fail_open_when_binary_absent`,
-    /// `tests::execute_rejects_malformed_args_recoverably`; the lexical-
-    /// fallback branch itself is exercised end-to-end only where a live
-    /// daemon is available (`lexical_fallback`'s own doc), with its decision
-    /// predicate covered by `tests::should_lexical_fallback_only_for_stage_not_ready`.
+    /// `tests::execute_rejects_malformed_args_recoverably`,
+    /// `tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
     async fn execute(&self, args: Value) -> ToolResult {
+        let started = std::time::Instant::now();
         let parsed: SearchArgs = match serde_json::from_value(args) {
             Ok(p) => p,
             Err(e) => {
@@ -449,6 +542,18 @@ impl ToolExecutor for TrustySearchTool {
         };
         let top_k = parsed.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K);
         let mode = parsed.mode.as_deref().unwrap_or("semantic");
+
+        // (UI Phase 1) Stamp the telemetry from the lane that ACTUALLY served
+        // the query, measured at the moment of return so `latency_ms` covers
+        // any transparent retry too.
+        let telemetry = |lane: SearchLane, text: &str| {
+            ToolTelemetry::Search(SearchTelemetry {
+                lane: lane.label().to_string(),
+                query: parsed.query.clone(),
+                hit_count: count_hits(text),
+                latency_ms: started.elapsed().as_millis() as u64,
+            })
+        };
 
         let Some(session) = self.session().await else {
             return ToolResult::ok(FALLBACK_HINT.to_string());
@@ -490,10 +595,13 @@ impl ToolExecutor for TrustySearchTool {
                     "search_code: {lane_label} index not ready (STAGE_NOT_READY, #2783) — \
                      serving degraded lexical results instead"
                 );
+                // The requested lane did NOT serve this — the lexical lane
+                // did. Report that, not the mode the model asked for.
                 return ToolResult::ok(format!(
                     "trusty-search's {lane_label} index is still building; \
                      showing lexical (exact-match) results instead:\n{text}"
-                ));
+                ))
+                .with_telemetry(telemetry(SearchLane::resolved(mode, true), &text));
             }
             warn!(
                 tool,
@@ -506,7 +614,8 @@ impl ToolExecutor for TrustySearchTool {
         }
 
         match mcp_text(&result) {
-            Some(text) => ToolResult::ok(format!("trusty-search ({mode}) results:\n{text}")),
+            Some(text) => ToolResult::ok(format!("trusty-search ({mode}) results:\n{text}"))
+                .with_telemetry(telemetry(SearchLane::resolved(mode, false), &text)),
             None => ToolResult::ok(format!(
                 "trusty-search returned no results. {FALLBACK_HINT}"
             )),

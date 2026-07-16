@@ -224,3 +224,95 @@ async fn execute_rejects_malformed_args_recoverably() {
     assert!(result.is_error());
     assert!(!result.is_fatal());
 }
+
+// ── UI Phase 1: lane resolution + hit counting + telemetry ──────────────────
+
+/// Why: the requested `mode` must map to the SAME lane `build_call` routes to
+/// — if these two ever disagree, the telemetry reports a lane that never ran.
+#[test]
+fn lane_from_mode_matches_build_call_routing() {
+    // The MCP tool name `build_call` picks IS the lane, so asserting the pair
+    // agree pins them together.
+    for (mode, expect_lane, expect_tool) in [
+        ("grep", SearchLane::Grep, "grep"),
+        ("symbol", SearchLane::Symbol, "search_kg"),
+        ("semantic", SearchLane::Semantic, "search_semantic"),
+        // An unknown mode defaults to semantic in BOTH.
+        ("nonsense", SearchLane::Semantic, "search_semantic"),
+    ] {
+        assert_eq!(SearchLane::from_mode(mode), expect_lane, "lane for {mode}");
+        let (tool, _params) = build_call(mode, "q", 5, Some("idx")).expect("routes");
+        assert_eq!(tool, expect_tool, "build_call tool for {mode}");
+    }
+}
+
+/// Why: the lane labels are wire values on `Event::SearchPerformed.lane`; a UI
+/// switches on them, so they must not drift.
+#[test]
+fn lane_labels_are_stable() {
+    assert_eq!(SearchLane::Semantic.label(), "semantic");
+    assert_eq!(SearchLane::Symbol.label(), "symbol");
+    assert_eq!(SearchLane::Grep.label(), "grep");
+    assert_eq!(SearchLane::Lexical.label(), "lexical");
+}
+
+/// Why: THE requirement — the event must carry the lane that ACTUALLY served
+/// the query, not the one the model asked for. When a still-building index
+/// forces the lexical retry (#2783), a `semantic` request is really answered
+/// by the lexical lane, and reporting "semantic" would tell the UI a
+/// comfortable lie about how the code was discovered.
+#[test]
+fn resolved_lane_reports_lexical_when_the_retry_served_it() {
+    // Retry fired: whatever was asked, LEXICAL answered.
+    assert_eq!(
+        SearchLane::resolved("semantic", true),
+        SearchLane::Lexical,
+        "a semantic query served by the lexical retry is a LEXICAL search"
+    );
+    assert_eq!(SearchLane::resolved("symbol", true), SearchLane::Lexical);
+
+    // No retry: the requested lane answered.
+    assert_eq!(
+        SearchLane::resolved("semantic", false),
+        SearchLane::Semantic
+    );
+    assert_eq!(SearchLane::resolved("symbol", false), SearchLane::Symbol);
+    assert_eq!(SearchLane::resolved("grep", false), SearchLane::Grep);
+}
+
+/// Why: the UI renders a hit count; each lane wraps its payload differently,
+/// so the counter must read all the observed shapes.
+#[test]
+fn count_hits_reads_each_lane_shape() {
+    assert_eq!(count_hits(r#"{"results":[{"a":1},{"a":2}]}"#), Some(2));
+    assert_eq!(count_hits(r#"{"hits":[{"a":1}]}"#), Some(1));
+    assert_eq!(count_hits(r#"{"matches":[]}"#), Some(0));
+}
+
+/// Why: an uncountable payload must report `None`, never `0` — "we could not
+/// count" and "there were no hits" are different facts, and a UI showing a
+/// confident `0 hits` for the former would be wrong.
+#[test]
+fn count_hits_is_none_for_unrecognised_payloads() {
+    assert_eq!(count_hits("not json at all"), None);
+    assert_eq!(count_hits(r#"{"unexpected":"shape"}"#), None);
+    assert_eq!(
+        count_hits(r#"{"results":"not-an-array"}"#),
+        None,
+        "a non-array under a known key is uncountable, not empty"
+    );
+}
+
+/// Why: the fail-open paths never reached a lane, so there is no search to
+/// report — a `SearchPerformed` event for them would invent a search that
+/// never happened.
+#[tokio::test]
+async fn fail_open_paths_report_no_telemetry() {
+    let tool = TrustySearchTool::new(std::env::temp_dir())
+        .with_binary("trusty-search-definitely-not-installed-xyzzy");
+    let result = tool.execute(json!({ "query": "how does auth work" })).await;
+    assert!(
+        result.telemetry().is_none(),
+        "an absent daemon is not a search with zero hits"
+    );
+}

@@ -204,6 +204,11 @@ pub struct AgentLoop {
     llm: Arc<dyn LlmClientTrait>,
     registry: Arc<ToolRegistry>,
     sink: Option<Arc<dyn ToolEventSink>>,
+    /// (UI Phase 1) The name of the agent this loop runs as, stamped on every
+    /// tool event so a UI can tell the PM's calls from a delegated
+    /// engineer's. `None` falls back to `events::UNATTRIBUTED_AGENT` — see
+    /// [`Self::with_agent`].
+    agent: Option<String>,
     cancel: Option<Arc<AtomicBool>>,
     stop_signal: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     finish_gate: Option<FinishGate>,
@@ -241,6 +246,7 @@ impl AgentLoop {
             llm,
             registry,
             sink: None,
+            agent: None,
             cancel: None,
             stop_signal: None,
             finish_gate: None,
@@ -253,10 +259,43 @@ impl AgentLoop {
     /// Why: Lets a daemon-driven run make its tool activity observable to a
     /// `session.attach`ed client without forking the dispatch loop.
     /// What: Builder-style setter; returns `self` for chaining.
-    /// Test: `agent_loop::tests::sink_receives_started_then_finished_in_order`.
+    /// Test: `agent_loop::tests::sink_events::sink_receives_started_then_finished_in_order`.
     pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
         self.sink = Some(sink);
         self
+    }
+
+    /// Declare which agent this loop runs as, for tool-event attribution
+    /// (UI Phase 1).
+    ///
+    /// Why: one `ToolEventSink` is shared by the PM's loop and every
+    /// delegated sub-agent's loop, so the sink cannot know who is calling it
+    /// — only the loop does. Without this, a UI can attribute a tool call
+    /// only by interleaving the event stream against `AgentSpawned`/
+    /// `AgentDone` ordering, which is exactly the fragile inference this
+    /// ticket removes.
+    /// What: `name` should match the name the rest of the taxonomy already
+    /// uses for this agent (`LlmRequested.agent_name`, `AgentSpawned.agent`,
+    /// `PmDelegating.agent`) so the UI can join them; the two production
+    /// delegation sites pass `params.agent_name` (PM) and the runner's
+    /// `agent_name` (sub-agent) for exactly that reason. Unset loops emit
+    /// `events::UNATTRIBUTED_AGENT`.
+    /// Test: `agent_loop::tests::sink_events::sink_events_are_attributed_to_the_agent`,
+    /// `agent_loop::tests::sink_events::unattributed_loop_emits_unknown_agent`.
+    pub fn with_agent(mut self, name: impl Into<String>) -> Self {
+        self.agent = Some(name.into());
+        self
+    }
+
+    /// This loop's attribution name, or `events::UNATTRIBUTED_AGENT`.
+    ///
+    /// Why: every sink call needs it; centralising the fallback keeps the
+    /// sentinel in one place.
+    /// Test: `agent_loop::tests::sink_events::unattributed_loop_emits_unknown_agent`.
+    fn agent_name(&self) -> &str {
+        self.agent
+            .as_deref()
+            .unwrap_or(crate::events::UNATTRIBUTED_AGENT)
     }
 
     /// Attach a cancellation flag checked once per turn boundary (#2056).
@@ -559,8 +598,8 @@ impl AgentLoop {
     /// single run's stderr.
     /// Test: `agent_loop::tests::recoverable_tool_error_continues`,
     /// `agent_loop::tests::malformed_tool_arguments_report_recoverable_error_and_loop_continues`,
-    /// `sink_receives_started_then_finished_in_order`,
-    /// `sink_receives_tool_error_for_fatal_failures`,
+    /// `tests::sink_events::sink_receives_started_then_finished_in_order`,
+    /// `tests::sink_events::sink_receives_tool_error_for_fatal_failures`,
     /// `explicit_finish_task_terminates_loop_with_structured_summary`,
     /// `malformed_finish_task_repairs_then_terminates`,
     /// `finish_task_missing_required_field_is_recoverable_not_terminal`,
@@ -590,7 +629,8 @@ impl AgentLoop {
             };
 
             if let Some(sink) = &self.sink {
-                sink.tool_started(&call.id, tool, &args.to_string()).await;
+                sink.tool_started(self.agent_name(), &call.id, tool, &args.to_string())
+                    .await;
             }
 
             // #2682: short-circuit a redundant full-suite re-run BEFORE
@@ -634,7 +674,7 @@ impl AgentLoop {
             }
 
             if let Some(sink) = &self.sink {
-                notify_result(sink.as_ref(), &call.id, tool, &result).await;
+                notify_result(sink.as_ref(), self.agent_name(), &call.id, tool, &result).await;
             }
 
             transcript.push_tool_result(&call.id, tool, result.content());
@@ -668,9 +708,10 @@ impl AgentLoop {
     ) {
         let message = error.to_string();
         if let Some(sink) = &self.sink {
-            sink.tool_started(call_id, tool, "<invalid-arguments>")
+            let agent = self.agent_name();
+            sink.tool_started(agent, call_id, tool, "<invalid-arguments>")
                 .await;
-            sink.tool_error(call_id, tool, &message).await;
+            sink.tool_error(agent, call_id, tool, &message).await;
         }
         transcript.push_tool_result(call_id, tool, &message);
     }
@@ -1045,14 +1086,30 @@ fn schema_tool_name(schema: &Value) -> &str {
 /// distinguished by `success`, matching #2055's `ToolFinished{success}`/
 /// `ToolError` taxonomy split.
 /// What: `is_fatal()` -> `tool_error`; otherwise -> `tool_finished(!is_error())`.
-/// Test: `agent_loop::tests::sink_receives_started_then_finished_in_order`,
-/// `sink_receives_tool_error_for_fatal_failures`.
-async fn notify_result(sink: &dyn ToolEventSink, call_id: &str, tool: &str, result: &ToolResult) {
+/// (UI Phase 1) Any structured telemetry the tool attached to its result is
+/// then forwarded via `tool_telemetry` — AFTER the generic hook, and never in
+/// place of it, so existing consumers see the exact same stream they always
+/// did and the structured event is purely additive. `agent` attributes every
+/// hook to the dispatching loop's agent.
+/// Test: `agent_loop::tests::sink_events::sink_receives_started_then_finished_in_order`,
+/// `tests::sink_events::sink_receives_tool_error_for_fatal_failures`,
+/// `tests::sink_events::sink_receives_tool_telemetry_with_agent`.
+async fn notify_result(
+    sink: &dyn ToolEventSink,
+    agent: &str,
+    call_id: &str,
+    tool: &str,
+    result: &ToolResult,
+) {
     if result.is_fatal() {
-        sink.tool_error(call_id, tool, result.content()).await;
-    } else {
-        sink.tool_finished(call_id, tool, !result.is_error(), result.content())
+        sink.tool_error(agent, call_id, tool, result.content())
             .await;
+    } else {
+        sink.tool_finished(agent, call_id, tool, !result.is_error(), result.content())
+            .await;
+    }
+    if let Some(telemetry) = result.telemetry() {
+        sink.tool_telemetry(agent, call_id, tool, telemetry).await;
     }
 }
 
