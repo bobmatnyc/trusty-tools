@@ -80,6 +80,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   user-level `~/.claude/agents` rather than the process CWD, which would
   silently bind a directory the operator never chose.
 
+- **Daemon-side directory inspection API (`fs.list_dir`) for the UI's project
+  picker (UI Phase-1, screen 7a)** — a new `fs.*` JSON-RPC namespace on `/rpc`,
+  alongside `session.*`/`task.*`. `fs.list_dir(path?, include_hidden?)` returns
+  `{path, display_path, parent, entries[{name, path, is_dir, is_git_repo}]}`.
+  The UI is a thin client — no UI target touches the filesystem directly,
+  **including Tauri** (which could, but must not: that would let the desktop
+  build do something the web build cannot, forking one UI into two behaviours) —
+  so browsing local disk to pick a project has to be a daemon call. One response
+  serves both jobs: `display_path`/`parent` drive the breadcrumb and
+  up-navigation, while `is_git_repo` is simultaneously 7a's `git` badge and the
+  discriminator for the three-state project binding model (projectless → non-git
+  dir → git repo). A non-git directory is a first-class success with
+  `is_git_repo: false`, never an error (#2728). `~` is expanded and paths
+  canonicalized server-side, matching the `expand_tilde` convention already used
+  in `trusty-mpm` and `trusty-agents`; `path` defaults to `~` so the projectless
+  cold start is just `fs.list_dir({})`.
+  - Git-ness handles **both** on-disk shapes: `.git` as a directory, and `.git`
+    as a FILE carrying a `gitdir:` pointer — which is what a linked worktree (and
+    a submodule) has. An `is_dir()`-only check badges every worktree as non-git;
+    that is the bug PR #2839 hit in `build.rs`, and this workspace's own
+    checkouts are linked worktrees. Detection is two `stat`s (plus one small read
+    for the rare `.git`-file) rather than a `git rev-parse` subprocess per entry,
+    because this runs across every row of a directory on an interactive picker's
+    hot path.
+  - Errors are typed and distinguishable rather than stringly, reusing the vision
+    spec's existing §13.2 taxonomy instead of inventing `fs`-specific codes:
+    `-32002 not_found` (no such path), `-32003 invalid_argument` (path is a
+    file), `-32001 permission_denied` (OS refusal), `-32603 internal` (other IO).
+    New `RpcError::not_found`/`permission_denied` constructors back the first
+    two.
+  - **No path guard, deliberately** — no denylist, sandbox root, or permission
+    layer, and no macOS TCC state machine. tcode is a local app: the daemon runs
+    as the user with the user's own entitlements, so a listing discloses nothing
+    `ls` would not. Decisively, the same API already exposes `task.run`, which
+    executes arbitrary code as the user — guarding browse while that sits one
+    method away is ceremony, not security. An OS-level refusal is reported as an
+    ordinary typed error. Recorded as a module doc comment so it is not later
+    "fixed".
+
 - **Build provenance in `--version` and `tcode_report.json`** — `tcode --version`
   now prints the git SHA and commit date alongside the semver
   (`tcode 0.2.0 (b20adfca 2026-07-16)`), and `tcode_report.json` carries a
