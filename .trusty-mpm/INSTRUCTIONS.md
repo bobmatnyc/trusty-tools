@@ -305,6 +305,52 @@ versions by version number.
 8. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
 9. Build and install: `cargo install --path crates/<dir> --locked`.
 
+### Per-PR Changelog Requirement (framework default — issue #2005-class, changelogs-stale directive)
+
+🔴 **Every PR that touches a crate's `src/**` adds a hand-written entry to that
+crate's `CHANGELOG.md`, in the same PR.** Add one bullet per user-visible
+change under the topmost `## [Unreleased]` heading (create that heading —
+directly below the `---`/header block — if the file has none yet). Match the
+existing bullet style, e.g.:
+
+```
+- fix pm_guard quoted-content scanning (closes #2741) ([#2744](https://github.com/bobmatnyc/trusty-tools/pull/2744))
+```
+
+The commit-hash link segment is optional in hand-written bullets — git-cliff
+adds it automatically when it regenerates the section at release time (see
+below). Docs-only and CI-only PRs may skip this step. A PR that changes crate
+source and lands without a changelog entry is a **review-gate failure**, the
+same tier as a failing `cargo test`/`cargo clippy` gate — the trusty-review
+gate or PM blocks merge until the entry is added, no "trivial change"
+exception.
+
+**Interaction rule with `scripts/generate-changelog.sh` / git-cliff (read, not
+guessed — see the script): do not let both mechanisms coexist unresolved.**
+`scripts/generate-changelog.sh` (invoked by `scripts/bump-version.sh` at
+release time) runs `git cliff --unreleased --prepend <crate>/CHANGELOG.md`.
+This regenerates a **fresh** `## [Unreleased]` section straight from
+conventional-commit git log and blindly **prepends** it — it never reads,
+merges, or dedupes against whatever hand-written content is already sitting
+under the file's existing `## [Unreleased]` heading. Left unresolved, this
+produces exactly the duplicate/stacked `## [Unreleased]` sections already
+visible in several crate changelogs today (e.g.
+`crates/trusty-mpm/CHANGELOG.md`, `crates/trusty-search/CHANGELOG.md`) — each
+release-time run stacks another overlapping section on top instead of
+replacing the draft.
+
+Precedence: **git-cliff-generated content is canonical at release time and
+supersedes the hand-written draft — it replaces, it does not merge.** Before
+running `scripts/bump-version.sh <crate-dir> <level>` (or
+`scripts/generate-changelog.sh` directly), delete the hand-maintained bullets
+under that crate's topmost `## [Unreleased]` heading (the heading itself may
+stay empty or be removed — `generate-changelog.sh` recreates it). git-cliff
+regenerates equivalent-or-better entries (with PR + commit-hash links) from
+the same merged commits, so nothing is lost — the hand-written section is a
+live staging area between releases, never a second permanent copy. This is a
+process rule only; `scripts/bump-version.sh` and `scripts/generate-changelog.sh`
+need no code change to honor it.
+
 🟢 **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes to
 crates.io under the short package name `tga`. The binary-release workflow
 (`.github/workflows/release.yml`) accepts **both** tag forms — `tga-v<version>`

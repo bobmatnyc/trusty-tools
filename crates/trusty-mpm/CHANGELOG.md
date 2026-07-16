@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- require a per-PR CHANGELOG.md entry in the default workflow (bundled `tm-pr-workflow` skill, `PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `BASE-AGENT.md`); PM treats a missing entry as a review-gate failure and the precedence rule vs. `scripts/generate-changelog.sh`/git-cliff is documented in `.trusty-mpm/INSTRUCTIONS.md`
+
 ### Fixed
 
 - resolve managed MCP registry from real home in fleet-session injector ([#2761](https://github.com/bobmatnyc/trusty-tools/pull/2761)) ([`7c04f1f`](https://github.com/bobmatnyc/trusty-tools/commit/7c04f1f845432edd6b1fb488103a1aba9939fb3c))
