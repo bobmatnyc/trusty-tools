@@ -28,7 +28,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # First published to crates.io at version 0.1.0.
 trusty-code = { path = "crates/trusty-code" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.1" }
-trusty-common = { path = "crates/trusty-common", version = "0.23.1" }
+trusty-common = { path = "crates/trusty-common", version = "0.23.2" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.8" }

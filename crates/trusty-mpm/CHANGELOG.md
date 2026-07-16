@@ -9,7 +9,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- auto-nudge idle-parked managed sessions ([#2781](https://github.com/bobmatnyc/trusty-tools/pull/2781)) ([`be2ec11`](https://github.com/bobmatnyc/trusty-tools/commit/be2ec1107a56bd1c25e07c9fa146717399effd23))
+- require per-PR changelog updates in the default workflow ([#2790](https://github.com/bobmatnyc/trusty-tools/pull/2790)) ([`238f07e`](https://github.com/bobmatnyc/trusty-tools/commit/238f07e8f77b2290afc1c42939e7802e5d8a5074))
 - propagate native trusty MCP servers to fleet sessions ([#2739](https://github.com/bobmatnyc/trusty-tools/pull/2739)) ([#2748](https://github.com/bobmatnyc/trusty-tools/pull/2748)) ([`0a87f1d`](https://github.com/bobmatnyc/trusty-tools/commit/0a87f1d70e97fd630bd997db8f17a98d64ca00d4))
+
+### Fixed
+
+- reconcile zombie-Active sessions on in-place relaunch instead of 409 dead-end ([#2795](https://github.com/bobmatnyc/trusty-tools/pull/2795)) ([`5ef199a`](https://github.com/bobmatnyc/trusty-tools/commit/5ef199a920374ab6ac3e97b3aac8b08374915b1d))
+- bump `jsonwebtoken` 9 → 10 (`aws_lc_rs` backend), fixing GHSA-h395-gr6q-cpjc; migrated the test-only JWT decode-without-verification call site to `jsonwebtoken::dangerous::insecure_decode` (closes #2765) ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
+- relaunch decommissioned managed session on bare tm instead of reconnect-to-self ([#2780](https://github.com/bobmatnyc/trusty-tools/pull/2780)) ([`b6f1783`](https://github.com/bobmatnyc/trusty-tools/commit/b6f1783a6e7ad78fb42c332f50ed86e2fb8e2bfd))
+- resolve managed MCP registry from real home in fleet-session injector ([#2761](https://github.com/bobmatnyc/trusty-tools/pull/2761)) ([`7c04f1f`](https://github.com/bobmatnyc/trusty-tools/commit/7c04f1f845432edd6b1fb488103a1aba9939fb3c))
+- never traverse $HOME/TCC-protected folders (closes #2759) ([#2760](https://github.com/bobmatnyc/trusty-tools/pull/2760)) ([`74fe7f3`](https://github.com/bobmatnyc/trusty-tools/commit/74fe7f3c682cb5b0c648b63585c44ee47aa6d652))
+- positive stdio field allowlist for fleet native-MCP injection ([#2739](https://github.com/bobmatnyc/trusty-tools/pull/2739)) ([#2755](https://github.com/bobmatnyc/trusty-tools/pull/2755)) ([`e3a5c68`](https://github.com/bobmatnyc/trusty-tools/commit/e3a5c684cc25028202f6ece1a262f515fa3b43da))
+
+### Changed
+
+- collapse stacked Unreleased headings (trusty-mpm, trusty-common) ([`95b16c8`](https://github.com/bobmatnyc/trusty-tools/commit/95b16c8c468084ce0e2a46eac8a4acf99cfab823))
+
+### Documentation
+
+- correct stale session_launch test comments ([#2779](https://github.com/bobmatnyc/trusty-tools/pull/2779)) ([`3371828`](https://github.com/bobmatnyc/trusty-tools/commit/33718282bc3e3da4da6f84ff6681d84cd2859a26))
+
+### Added
+
 
 ### Added
 
