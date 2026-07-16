@@ -320,7 +320,7 @@ fn plan_inplace_none_when_resolved_but_not_stopped() {
 async fn reactivate_confirms_success_on_2xx() {
     let (url, hits) = spawn_mock("HTTP/1.1 200 OK").await;
     let client = reqwest::Client::new();
-    let ok = reactivate_managed_session(&client, &url, TEST_ID, None).await;
+    let ok = reactivate_managed_session(&client, &url, TEST_ID, None, false).await;
     assert!(ok, "a 2xx response must confirm reactivation");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
@@ -332,7 +332,7 @@ async fn reactivate_aborts_on_409_conflict() {
     // rather than proceeding to exec.
     let (url, _hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
     let client = reqwest::Client::new();
-    let ok = reactivate_managed_session(&client, &url, TEST_ID, None).await;
+    let ok = reactivate_managed_session(&client, &url, TEST_ID, None, false).await;
     assert!(!ok, "409 must NOT be treated as a confirmed reactivate");
 }
 
@@ -340,7 +340,7 @@ async fn reactivate_aborts_on_409_conflict() {
 async fn reactivate_aborts_on_404_not_found() {
     let (url, _hits) = spawn_mock("HTTP/1.1 404 Not Found").await;
     let client = reqwest::Client::new();
-    let ok = reactivate_managed_session(&client, &url, TEST_ID, None).await;
+    let ok = reactivate_managed_session(&client, &url, TEST_ID, None, false).await;
     assert!(!ok, "404 must NOT be treated as a confirmed reactivate");
 }
 
@@ -350,7 +350,7 @@ async fn reactivate_aborts_on_unreachable_daemon() {
     // refused, exercising the network-error branch without waiting out
     // the full PROBE_TIMEOUT.
     let client = reqwest::Client::new();
-    let ok = reactivate_managed_session(&client, "http://127.0.0.1:1", TEST_ID, None).await;
+    let ok = reactivate_managed_session(&client, "http://127.0.0.1:1", TEST_ID, None, false).await;
     assert!(
         !ok,
         "an unreachable daemon must NOT be treated as a confirmed reactivate"
@@ -366,12 +366,36 @@ async fn reactivate_forwards_caller_pane_id_query() {
     // pane id is present.
     let (url, request_line) = spawn_capturing_mock("HTTP/1.1 200 OK").await;
     let client = reqwest::Client::new();
-    let ok = reactivate_managed_session(&client, &url, TEST_ID, Some("%3")).await;
+    let ok = reactivate_managed_session(&client, &url, TEST_ID, Some("%3"), false).await;
     assert!(ok, "a 2xx response must confirm reactivation");
     let line = request_line.lock().expect("lock").clone();
     assert!(
         line.contains("caller_pane_id=%253"),
         "the request line must carry the URL-encoded caller_pane_id (%3 -> %253); got: {line}"
+    );
+    assert!(
+        !line.contains("pane_confirmed_dead"),
+        "pane_confirmed_dead=false must not be forwarded; got: {line}"
+    );
+}
+
+#[tokio::test]
+async fn reactivate_forwards_pane_confirmed_dead_query() {
+    // #2794: when the caller has confirmed pane identity (proof-of-death), the
+    // request must carry `?pane_confirmed_dead=true` so the daemon's reconcile
+    // overrides its tmux-pane liveness probe for the caller's OWN pane.
+    let (url, request_line) = spawn_capturing_mock("HTTP/1.1 200 OK").await;
+    let client = reqwest::Client::new();
+    let ok = reactivate_managed_session(&client, &url, TEST_ID, Some("%3"), true).await;
+    assert!(ok, "a 2xx response must confirm reactivation");
+    let line = request_line.lock().expect("lock").clone();
+    assert!(
+        line.contains("pane_confirmed_dead=true"),
+        "a pane-confirmed-dead caller must forward the proof-of-death param; got: {line}"
+    );
+    assert!(
+        line.contains("caller_pane_id=%253"),
+        "the caller_pane_id must still accompany the proof-of-death param; got: {line}"
     );
 }
 
@@ -381,7 +405,7 @@ async fn reactivate_omits_caller_pane_id_query_when_absent() {
     // caller_pane_id, and the request must carry no such query param.
     let (url, request_line) = spawn_capturing_mock("HTTP/1.1 200 OK").await;
     let client = reqwest::Client::new();
-    let ok = reactivate_managed_session(&client, &url, TEST_ID, None).await;
+    let ok = reactivate_managed_session(&client, &url, TEST_ID, None, false).await;
     assert!(ok);
     let line = request_line.lock().expect("lock").clone();
     assert!(
@@ -431,7 +455,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
     };
     let client = reqwest::Client::new();
 
-    let outcome = run_inplace_relaunch(&client, &url, TEST_ID, record, None).await;
+    let outcome = run_inplace_relaunch(&client, &url, TEST_ID, record, None, false).await;
 
     assert!(
         matches!(outcome, InPlaceOutcome::Result(Err(_))),

@@ -304,19 +304,31 @@ async fn fetch_managed_session_until_stopped(
 /// When `caller_pane_id` is `Some`, it is forwarded as a `?caller_pane_id=`
 /// query param (#2789) so the daemon's stale-`Active` reconcile can treat THIS
 /// pane — whose foreground command is the requesting `tm` itself — as idle
-/// instead of counting it as a live runtime and returning 409.
+/// instead of counting it as a live runtime and returning 409. When
+/// `pane_confirmed_dead` is set (#2794), a `?pane_confirmed_dead=true` param is
+/// also forwarded: it tells the daemon the caller is asserting — matched via
+/// stable tmux `pane_id`, `guided::pane_identity_confirmed`, not independently
+/// re-verified by the daemon — that it is this record's OWN pane and the agent
+/// has exited, so the reconcile trusts that claim over its tmux-pane liveness
+/// probe for the caller's own pane (bounded by an independent sibling-pane
+/// check, #2157) — closing the residual zombie-`Active` 409 dead-end where the
+/// probe still counted the requesting `tm` (or a not-yet-reaped child) as live.
 /// Test: I/O path; not unit-tested (requires a live daemon).
 async fn reactivate_managed_session(
     client: &reqwest::Client,
     url: &str,
     id: &str,
     caller_pane_id: Option<&str>,
+    pane_confirmed_dead: bool,
 ) -> bool {
     let mut req = client
         .post(format!("{url}/api/v1/sessions/managed/{id}/reactivate"))
         .timeout(PROBE_TIMEOUT);
     if let Some(pane_id) = caller_pane_id.filter(|s| !s.is_empty()) {
         req = req.query(&[("caller_pane_id", pane_id)]);
+    }
+    if pane_confirmed_dead {
+        req = req.query(&[("pane_confirmed_dead", "true")]);
     }
     let result = req.send().await;
     match result {
@@ -455,6 +467,7 @@ pub(crate) async fn run_inplace_relaunch(
     id: &str,
     record: trusty_mpm::client::ManagedSessionSummary,
     caller_pane_id: Option<&str>,
+    pane_confirmed_dead: bool,
 ) -> InPlaceOutcome {
     eprintln!("tm: this pane belongs to managed session {id} — relaunching in place…");
 
@@ -505,7 +518,10 @@ pub(crate) async fn run_inplace_relaunch(
     // a refused/failed reactivate aborts rather than proceeding to exec.
     // #2789: forward this pane's own id so the daemon's stale-`Active`
     // reconcile does not count the requesting `tm` process as a live runtime.
-    if !reactivate_managed_session(client, url, id, caller_pane_id).await {
+    // #2794: `pane_confirmed_dead` additionally carries the caller's
+    // proof-of-death for a zombie-`Active` record whose pane the probe would
+    // otherwise still read as busy.
+    if !reactivate_managed_session(client, url, id, caller_pane_id, pane_confirmed_dead).await {
         return InPlaceOutcome::FallThrough;
     }
 
@@ -599,8 +615,19 @@ pub(crate) async fn try_inplace_relaunch(
                 );
                 return None;
             }
-            match run_inplace_relaunch(client, url, &env_id, record, current_pane_id.as_deref())
-                .await
+            // #2794: this env-var path only selects `InPlace` for a record
+            // already CONFIRMED `Stopped` (see `plan_inplace`), so `mark_
+            // reactivated` succeeds directly and the proof-of-death reconcile is
+            // never reached — pass `false`.
+            match run_inplace_relaunch(
+                client,
+                url,
+                &env_id,
+                record,
+                current_pane_id.as_deref(),
+                false,
+            )
+            .await
             {
                 InPlaceOutcome::Result(r) => Some(r),
                 InPlaceOutcome::FallThrough => {

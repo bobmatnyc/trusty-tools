@@ -1943,16 +1943,19 @@ fn nested_guard_notice_mentions_reconnect_target() {
 }
 
 #[test]
-fn inplace_self_relaunch_hint_uses_resume_when_session_id_present() {
-    // #2789: when the record carries a claude_session_id, the honest
-    // self-relaunch hint must offer `claude --resume <id>` so the operator
-    // resumes the exact conversation instead of a self-switch no-op.
+fn inplace_self_relaunch_hint_suggests_managed_resume() {
+    // #2794: the honest self-relaunch hint must point at the MANAGED relaunch
+    // `tm sessions resume <managed-id>` — re-spawning the runtime with the
+    // tm-owned CLAUDE_CONFIG_DIR, roster, and persona intact — keyed on the
+    // managed session id (`record.id`), NOT the claude conversation id.
     let mut record = make_session("tm-cto-01", "active", None);
+    // A claude_session_id must NOT leak into the hint — the managed id is what
+    // `tm sessions resume` takes.
     record.claude_session_id = Some("bfc69db6-cb98-4aa7-a07d-89fd69ba710b".to_string());
     let hint = inplace_self_relaunch_hint(&record);
     assert!(
-        hint.contains("claude --resume bfc69db6-cb98-4aa7-a07d-89fd69ba710b"),
-        "hint must suggest resuming the exact claude session: {hint:?}"
+        hint.contains(&format!("tm sessions resume {}", record.id)),
+        "hint must suggest the managed `tm sessions resume <id>`: {hint:?}"
     );
     assert!(
         hint.contains("already inside this session's pane"),
@@ -1961,21 +1964,22 @@ fn inplace_self_relaunch_hint_uses_resume_when_session_id_present() {
 }
 
 #[test]
-fn inplace_self_relaunch_hint_bare_claude_when_no_session_id() {
-    // Without a claude_session_id (or a blank one) the hint falls back to a
-    // bare `claude` rather than emitting `claude --resume ` with an empty arg.
-    let mut record = make_session("tm-cto-01", "active", None);
-    record.claude_session_id = None;
-    let hint = inplace_self_relaunch_hint(&record);
-    assert!(
-        hint.contains("claude") && !hint.contains("--resume"),
-        "hint must suggest a bare `claude` when no session id is known: {hint:?}"
-    );
-
-    record.claude_session_id = Some("   ".to_string());
-    let hint_blank = inplace_self_relaunch_hint(&record);
-    assert!(
-        !hint_blank.contains("--resume"),
-        "a blank claude_session_id must not produce `claude --resume`: {hint_blank:?}"
-    );
+fn inplace_self_relaunch_hint_never_suggests_bare_claude() {
+    // #2794 regression guard: a bare `claude` (or `claude --resume <id>`)
+    // launches OUTSIDE the managed session, dropping the tm-owned config —
+    // the hint must NEVER suggest it, with or without a claude_session_id.
+    for sid in [None, Some("abc123".to_string()), Some("   ".to_string())] {
+        let mut record = make_session("tm-cto-01", "active", None);
+        record.claude_session_id = sid.clone();
+        let hint = inplace_self_relaunch_hint(&record);
+        assert!(
+            !hint.contains("claude"),
+            "hint must never mention a bare `claude` (loses managed config); \
+             sid={sid:?}: {hint:?}"
+        );
+        assert!(
+            hint.contains("tm sessions resume"),
+            "hint must always point at the managed resume; sid={sid:?}: {hint:?}"
+        );
+    }
 }

@@ -14,6 +14,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- bare `tm` inside a zombie-`Active` managed session (agent exited but the record still reads `Active`) now reconciles-and-relaunches in place via the caller's pane-identity proof-of-death instead of dead-ending on a 409; the fallback hint no longer suggests a bare `claude` (which loses the managed config) and points at `tm sessions resume <id>` (closes #2794)
 - bare `tm` inside a decommissioned managed tmux session now relaunches in place instead of reconnecting to itself (closes #2777) ([#2780](https://github.com/bobmatnyc/trusty-tools/pull/2780))
 - bump `jsonwebtoken` 9 → 10 (`aws_lc_rs` backend), fixing GHSA-h395-gr6q-cpjc; migrated the test-only JWT decode-without-verification call site to `jsonwebtoken::dangerous::insecure_decode` (closes #2765) ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
 - resolve managed MCP registry from real home in fleet-session injector ([#2761](https://github.com/bobmatnyc/trusty-tools/pull/2761)) ([`7c04f1f`](https://github.com/bobmatnyc/trusty-tools/commit/7c04f1f845432edd6b1fb488103a1aba9939fb3c))
