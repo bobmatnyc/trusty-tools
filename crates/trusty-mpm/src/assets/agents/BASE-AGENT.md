@@ -221,6 +221,32 @@ the re-invocation itself.
 This rule exists because merge/CI/release agents repeatedly parked mid-watch
 waiting for a notification that never came (issues #2501, #2610).
 
+### Re-issue without spamming — the chunked-repoll pattern (issue #2833)
+
+Re-issuing a wait must not degenerate into the OPPOSITE failure: a tight blind
+poll loop that emits a "still pending" line every ~30 seconds for 20+ minutes.
+Parking and spamming are two ends of the same mistake — both come from not
+sizing the wait to its real duration.
+
+- **Prefer the blocking watch.** `gh pr checks <pr> --watch --fail-fast` blocks
+  silently until checks settle and prints once. It is the correct primitive —
+  it neither parks nor spams. Re-issue it verbatim after a 10-min ceiling.
+- **If you must sleep-poll a status command** (no `--watch` available), size the
+  interval to the KNOWN wait, not to impatience: a 5-minute-plus sleep for a
+  ~15-minute CI run, not 30 seconds. A tight loop tells the reader nothing they
+  didn't know 30 seconds ago.
+- **Message only on state change.** Emit a line when the observed state actually
+  changes (pending→running, a check flips, count drops), not on every poll. "No
+  change" is not worth a message.
+- **Diagnose an overrun once.** If a wait runs abnormally long (well past the
+  expected wall-clock), run a ONE-SHOT diagnosis — `gh run view <run-id>` (or
+  `gh pr checks <pr>` without `--watch`) — to see WHY it's stuck, then resume the
+  blocking wait. Do not convert the overrun into faster polling.
+
+Do not end your turn while an unresolved wait is yours to watch — re-issue the
+blocking wait instead. A quiet foreground block is the goal; a poll-spam stream
+is a smell that you dropped the blocking primitive for a manual loop.
+
 ## Output Format
 
 - Lead with what you did, not what you're going to do.
