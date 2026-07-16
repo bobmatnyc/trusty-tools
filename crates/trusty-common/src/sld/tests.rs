@@ -62,9 +62,24 @@ fn grammar_reference_both_forms() {
 
 #[test]
 fn grammar_rejects_traversal() {
-    assert!(has_traversal("../etc/x.md"));
-    assert!(has_traversal("docs/../secret.md"));
-    assert!(!has_traversal("docs/specs/x.md"));
+    assert!(is_unsafe_path("../etc/x.md"));
+    assert!(is_unsafe_path("docs/../secret.md"));
+    assert!(!is_unsafe_path("docs/specs/x.md"));
+}
+
+#[test]
+fn grammar_rejects_absolute() {
+    // Unix-style absolute path: PathBuf::join would silently discard the repo
+    // root and read wherever this points — this must never be treated as a
+    // valid repo-root-relative reference path (§2.1).
+    assert!(is_unsafe_path("/etc/passwd.md"));
+    // Windows-style absolute forms, even when the linter runs on a Unix host
+    // (the string form must be rejected regardless of the host platform).
+    assert!(is_unsafe_path("C:\\Windows\\secret.md"));
+    assert!(is_unsafe_path("C:/Windows/secret.md"));
+    assert!(is_unsafe_path("\\\\server\\share\\x.md"));
+    // A well-formed repo-root-relative path is unaffected.
+    assert!(!is_unsafe_path("docs/specs/x.md"));
 }
 
 // ── comment ──────────────────────────────────────────────────────────────────
@@ -114,6 +129,28 @@ fn inline_bare_shell() {
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].id, "SPEC-SLD-03~draft");
     assert_eq!(refs[0].line, 3);
+}
+
+#[test]
+fn inline_hash_block_closes_on_prose() {
+    // HASH-only comment syntax (shell/TOML/YAML) has no nested-heading signal
+    // once the lead-in `#` is stripped, so a later plain-prose comment line in
+    // the SAME leading comment block must not be swept in as a declaration just
+    // because it happens to contain a well-formed reference triple. Only the
+    // dash-prefixed bullet (the real declaration) resolves.
+    let src = "# Spec References\n# - SPEC-SLD-03~draft docs/specs/spec-linked-documentation.md#SPEC-SLD-03~draft\n# This mentions SPEC-OTHER-01~draft docs/specs/other.md#SPEC-OTHER-01~draft in prose\n";
+    let refs = parse_inline_refs(src, &syntax_for_extension("sh").unwrap());
+    assert_eq!(refs.len(), 1, "prose line must not be swept in: {refs:?}");
+    assert_eq!(refs[0].id, "SPEC-SLD-03~draft");
+
+    // Same for TOML/YAML's identical `#`-comment idiom.
+    let toml_src = "# Spec References\n# - SPEC-SLD-03~draft docs/specs/spec-linked-documentation.md#SPEC-SLD-03~draft\n# See also SPEC-OTHER-01~draft docs/specs/other.md#SPEC-OTHER-01~draft\n\n[server]\n";
+    let toml_refs = parse_inline_refs(toml_src, &syntax_for_extension("toml").unwrap());
+    assert_eq!(
+        toml_refs.len(),
+        1,
+        "prose line must not be swept in: {toml_refs:?}"
+    );
 }
 
 #[test]

@@ -33,13 +33,25 @@ pub fn parse_catalog(readme: &str) -> HashSet<u32> {
 ///
 /// Why: the catalog-row check compares a spec's own number against the catalog;
 /// some specs (e.g. `SPEC-INSTALLER-01.md`) carry no `DOC-N` and are simply
-/// skipped by that check.
-/// What: returns the first `DOC-N` number appearing anywhere in the document
-/// (in practice its `# DOC-N — Title` heading), or `None`.
-/// Test: `super::tests::catalog_doc_number_of`.
+/// skipped by that check. The self-label is specifically the document's own
+/// `# DOC-N — Title` H1 heading (DOC-38 §4.2's title-heading convention) — NOT
+/// just any `DOC-N` mention earlier in the file. A spec's `spec_refs:`
+/// frontmatter, a superseded/redirect banner, or body prose can legitimately
+/// cross-reference a *different* DOC-N before the file's own title heading
+/// appears; scanning for the first `DOC-` occurrence anywhere would misattribute
+/// the file to that other spec's number instead of its own.
+/// What: finds the first line whose trimmed form starts with `# ` (a Markdown
+/// H1 — frontmatter lines like `---`/`spec_refs:` do not match, so a leading
+/// frontmatter block is skipped automatically) and parses the `DOC-N` number
+/// from that line only. Returns `None` when there is no H1 heading, or the H1
+/// carries no `DOC-N` label.
+/// Test: `super::tests::catalog_doc_number_of`,
+/// `super::tests::catalog_doc_number_ignores_earlier_cross_reference`.
 #[must_use]
 pub fn doc_number_of(spec: &str) -> Option<u32> {
-    spec.lines().find_map(first_doc_number)
+    spec.lines()
+        .find(|l| l.trim_start().starts_with("# "))
+        .and_then(first_doc_number)
 }
 
 /// Parse the first `DOC-<n>` number on a line.

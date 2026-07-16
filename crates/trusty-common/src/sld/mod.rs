@@ -69,5 +69,5 @@ pub use comment::{CommentSyntax, syntax_for_extension};
 pub use frontmatter::{
     FrontmatterError, FrontmatterRef, has_frontmatter_spec_refs, parse_frontmatter_refs,
 };
-pub use grammar::{base_id, has_traversal, is_valid_spec_id, reference_regex, revision_of};
+pub use grammar::{base_id, is_unsafe_path, is_valid_spec_id, reference_regex, revision_of};
 pub use inline::parse_inline_refs;

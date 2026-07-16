@@ -29,17 +29,22 @@ sld-lint enforces the DOC-38 Spec-Linked Documentation standard.
 CHECKS
   Reference resolution (ALWAYS, everywhere in scope):
     - ref-anchor-mismatch  a reference's anchor must equal its id (§2.1 self-check)
-    - ref-traversal        a reference path must not contain `..`
+    - ref-traversal        a reference path must not contain `..` or be absolute
     - ref-path-missing     the repo-root-relative target file must exist
-    - ref-anchor-missing   the target must carry a matching {#SPEC-…} heading
-                           (revision-tolerant: a ~v1 ref resolves a ~v2 section;
-                            drift is not enforced — DOC-38 §1.3)
+    - ref-anchor-missing   no anchor — exact OR base-id — matches in the target
+    - ref-revision-drift   ADVISORY (warning, never fails the lint): the target
+                           carries the same base id at a DIFFERENT revision (a
+                           ~v1 ref resolves a ~v2 section) — drift is flagged,
+                           not enforced (DOC-38 §1.3, §4.4)
     - frontmatter-schema   `spec_refs:` YAML must be schema-valid (§2.5)
   Spec-document conventions (opted-in specs by default; ALL specs under --strict):
     - spec-header          the bold-field header block is present (§4.2)
     - spec-catalog         the self-labeled DOC-N has a catalog row (§4.5)
     - spec-id-grammar      every {#SPEC-…} anchor is a valid id (§2.1)
     - anchor-id-mismatch   an anchor equals its section's **ID:** (§4.3)
+  Ratchet enforcement (--strict only, see STRICTNESS below):
+    - allowlist-stale      a grandfathered entry no longer matches any
+                           violation and must be removed
 
 STRICTNESS / GRANDFATHERING
   Existing specs do not yet carry `spec_refs:` frontmatter (retrofit is DOC-38
@@ -50,7 +55,12 @@ STRICTNESS / GRANDFATHERING
 
   Documented pre-existing exceptions (the DOC-28 self-label collision, the DOC-34
   catalog gap) are grandfathered via the allowlist TSV (default
-  .sld-lint-allowlist.tsv), a ratchet that can only shrink.
+  .sld-lint-allowlist.tsv). The ratchet is mechanically enforced under --strict:
+  an entry whose (path, check) no longer matches any real violation is flagged
+  `allowlist-stale` and fails the run until the row is removed — so the list can
+  only shrink. (There is currently no guarded generator that refuses to ADD a
+  new entry, unlike check_line_cap.sh --update; adding a row is a manual, reviewed
+  edit.)
 
 SCOPE
   docs/specs/**/*.md  (frontmatter references + spec-document checks)

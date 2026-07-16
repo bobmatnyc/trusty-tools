@@ -14,8 +14,8 @@
 use std::collections::HashSet;
 
 use trusty_common::sld::{
-    anchor_resolves, has_frontmatter_spec_refs, has_traversal, is_valid_spec_id,
-    parse_frontmatter_refs, parse_inline_refs, spec_anchors, syntax_for_extension,
+    base_id, has_frontmatter_spec_refs, is_unsafe_path, is_valid_spec_id, parse_frontmatter_refs,
+    parse_inline_refs, spec_anchors, syntax_for_extension,
 };
 
 use crate::catalog::doc_number_of;
@@ -30,12 +30,21 @@ const REQUIRED_HEADER_FIELDS: &[&str] =
 /// Why: a reference resolves only when its target file exists and carries the
 /// anchor (§2.1, §4.3); the anchor must also equal the id (§2.1 self-check).
 /// Resolution is revision-tolerant so a `~v1` reference still resolves against a
-/// `~v2` section — enforcing drift is a non-goal (§1.3).
+/// `~v2` section — but DOC-38 §4.4 says a conforming resolver MAY still flag
+/// that drift (non-blocking; enforcing it is a non-goal, §1.3), so an exact-id
+/// miss that resolves only by base id is reported as an advisory, not an error.
 /// What: emits `ref-anchor-mismatch` when `anchor != id`, `ref-traversal` when
-/// the path escapes via `..`, `ref-path-missing` when `lookup(path)` is `None`,
-/// and `ref-anchor-missing` when the target has no matching heading anchor. An
-/// empty vec means the reference resolves cleanly.
-/// Test: `super::tests::checks_reference_resolves`, `checks_reference_errors`.
+/// the path is unsafe (a `..` traversal segment or an absolute path — the
+/// latter matters because a naive `root.join(path)` reader silently discards
+/// `root` for an absolute `path`, turning a malformed reference into a
+/// filesystem-read oracle), `ref-path-missing` when `lookup(path)` is `None`,
+/// `ref-revision-drift` (a [`Diagnostic::warning`], does not fail the lint)
+/// when the target carries an anchor with the same base id but a different
+/// revision, and `ref-anchor-missing` when no anchor — exact or base-id —
+/// matches at all. An empty vec means the reference resolves cleanly with no
+/// drift.
+/// Test: `super::tests::checks_reference_resolves`, `checks_reference_errors`,
+/// `checks_reference_revision_drift`.
 pub fn check_reference(
     decl_path: &str,
     id: &str,
@@ -55,12 +64,14 @@ pub fn check_reference(
             ),
         ));
     }
-    if has_traversal(path) {
+    if is_unsafe_path(path) {
         out.push(Diagnostic::error(
             decl_path,
             line,
             "ref-traversal",
-            format!("reference path `{path}` must not contain a `..` traversal segment"),
+            format!(
+                "reference path `{path}` must be repo-root-relative (no `..` traversal, no absolute path)"
+            ),
         ));
         return out;
     }
@@ -71,13 +82,29 @@ pub fn check_reference(
             "ref-path-missing",
             format!("referenced spec file `{path}` does not exist (repo-root-relative)"),
         )),
-        Some(target) if !anchor_resolves(&target, anchor) => out.push(Diagnostic::error(
-            decl_path,
-            line,
-            "ref-anchor-missing",
-            format!("anchor `{anchor}` has no matching `{{#SPEC-…}}` heading in `{path}`"),
-        )),
-        Some(_) => {}
+        Some(target) => {
+            let anchors = spec_anchors(&target);
+            let exact = anchors.iter().any(|a| a.id == anchor);
+            if !exact {
+                match anchors.iter().find(|a| base_id(&a.id) == base_id(anchor)) {
+                    Some(current) => out.push(Diagnostic::warning(
+                        decl_path,
+                        line,
+                        "ref-revision-drift",
+                        format!(
+                            "reference `{anchor}` targets a stale revision; `{path}` now anchors `{}` (DOC-38 §4.4, advisory only)",
+                            current.id
+                        ),
+                    )),
+                    None => out.push(Diagnostic::error(
+                        decl_path,
+                        line,
+                        "ref-anchor-missing",
+                        format!("anchor `{anchor}` has no matching `{{#SPEC-…}}` heading in `{path}`"),
+                    )),
+                }
+            }
+        }
     }
     out
 }
@@ -164,15 +191,23 @@ pub fn check_spec_doc(
 ///
 /// Why: a spec's metadata block (Status/Subsystem/Owner/Last-updated/Spec ID) is
 /// the human-facing contract header; a missing field is a documentation defect.
-/// What: emits one `spec-header` diagnostic per required field absent as a
-/// `**Field:**` (or `**Field**`) line.
-/// Test: `super::tests::checks_header_block`.
+/// A `**Field:**` line quoted inside a FENCED code example (DOC-38's own body
+/// illustrates the header-block convention this way) must never count as the
+/// document's real header — searching the raw, unfenced document text is what
+/// stops a quoted example from masking an actually-missing field.
+/// What: strips fenced code-block lines (mirrors the fence-skipping
+/// `trusty_common::sld::spec_anchors`/`parse_inline_refs` already apply) and
+/// emits one `spec-header` diagnostic per required field absent from the
+/// remainder as a `**Field:**` (or `**Field**`) line.
+/// Test: `super::tests::checks_header_block`,
+/// `checks_header_block_ignores_fenced_example`.
 fn check_header_block(decl_path: &str, content: &str) -> Vec<Diagnostic> {
+    let unfenced = strip_fenced_blocks(content);
     REQUIRED_HEADER_FIELDS
         .iter()
         .filter(|field| {
-            !content.contains(&format!("**{field}:**"))
-                && !content.contains(&format!("**{field}**"))
+            !unfenced.contains(&format!("**{field}:**"))
+                && !unfenced.contains(&format!("**{field}**"))
         })
         .map(|field| {
             Diagnostic::error(
@@ -273,4 +308,55 @@ fn declared_id(line: &str) -> Option<String> {
     rest.split_whitespace()
         .next()
         .map(|tok| tok.trim_matches('`').to_string())
+}
+
+/// True when a stripped line opens or closes a Markdown code fence.
+///
+/// Why: shared by [`strip_fenced_blocks`] — mirrors the identical fence
+/// detection already applied by `trusty_common::sld::spec_anchors` and
+/// `parse_inline_refs`, so every DOC-38 check agrees on what "fenced" means.
+/// What: returns the fence character (`` ` `` or `~`) when `trimmed` begins
+/// with a run of three or more of it, else `None`.
+/// Test: covered by `super::tests::checks_header_block_ignores_fenced_example`.
+fn fence_char(trimmed: &str) -> Option<char> {
+    ['`', '~'].into_iter().find(|&ch| {
+        let run: String = std::iter::repeat_n(ch, 3).collect();
+        trimmed.starts_with(&run)
+    })
+}
+
+/// Blank out every line inside a fenced code block, preserving line numbers.
+///
+/// Why: a substring search for `**Field:**` (or any other raw-text check) must
+/// never match text that only appears inside a FENCED example — DOC-38's own
+/// body quotes its header-block convention this way, and a conforming check
+/// must not self-trigger on its own documentation (the acid-test property
+/// already required of the reference/anchor scanners).
+/// What: walks `content` line by line; every line from a ` ``` `/`~~~` fence
+/// open through its matching close (inclusive) is replaced with an empty line,
+/// so line numbers and total line count are unchanged but fenced text can never
+/// satisfy a `.contains(...)` search over the result.
+/// Test: `super::tests::checks_header_block_ignores_fenced_example`.
+fn strip_fenced_blocks(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_fence: Option<char> = None;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let fence = fence_char(trimmed);
+        if let Some(open) = in_fence {
+            if fence == Some(open) {
+                in_fence = None;
+            }
+            out.push('\n');
+            continue;
+        }
+        if let Some(ch) = fence {
+            in_fence = Some(ch);
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }

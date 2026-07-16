@@ -105,14 +105,37 @@ pub fn base_id(spec_id: &str) -> &str {
     spec_id.rsplit_once('~').map_or(spec_id, |(base, _)| base)
 }
 
-/// True when a captured reference path contains a `..` traversal segment.
+/// True when a captured reference path could escape the repository root.
 ///
-/// Why: a repo-root-relative reference path must never escape the repository via
-/// `..`; the `regex` crate has no look-around, so this is a post-match filter
-/// (mirrors the `intent_source` defence-in-depth guard).
-/// What: returns `true` when any `/`-split segment equals `..`.
-/// Test: `super::tests::grammar_rejects_traversal`.
+/// Why: a repo-root-relative reference path (§2.1) must never resolve outside
+/// the repository. `..` traversal is one escape vector; an **absolute** path
+/// (`/etc/passwd`, or a Windows drive-prefixed `C:\...`) is another and more
+/// dangerous one — `PathBuf::join` silently *discards* its base when the
+/// argument is absolute, so a naive `root.join(path)` reader would read
+/// wherever the declared path points, using the repository as a confused
+/// deputy (a malicious or buggy `spec_refs:`/inline reference becomes a
+/// filesystem-read oracle). The `regex` crate has no look-around, so both
+/// checks are a post-match filter (mirrors the `intent_source` defence-in-depth
+/// guard). Callers reading the filesystem MUST apply a second, independent
+/// guard at the read site (canonicalize + prefix-check) — this function is
+/// the first layer, not the only one.
+/// What: returns `true` when any `/`- or `\`-split segment equals `..`, when
+/// `path` begins with `/` or `\`, when `path` begins with a Windows drive
+/// prefix (`C:`), or when [`Path::is_absolute`] reports true for the host
+/// platform's own notion of absolute (belt-and-suspenders for native builds).
+/// Test: `super::tests::grammar_rejects_traversal`,
+/// `super::tests::grammar_rejects_absolute`.
 #[must_use]
-pub fn has_traversal(path: &str) -> bool {
-    path.split('/').any(|seg| seg == "..")
+pub fn is_unsafe_path(path: &str) -> bool {
+    if path.split(['/', '\\']).any(|seg| seg == "..") {
+        return true;
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return true;
+    }
+    std::path::Path::new(path).is_absolute()
 }

@@ -3,14 +3,22 @@
 //! Why: DOC-38 documents pre-existing exceptions — the DOC-28 self-label
 //! collision and the DOC-34 catalog gap (§4.1, §9) — that must NOT fail the
 //! lint. A ratcheted allowlist suppresses exactly those `(path, check)` pairs, so
-//! `--strict` is usable today while the retrofit follow-ups (§10 F3/F5/F6) land,
-//! and the list can only shrink as they do.
+//! `--strict` is usable today while the retrofit follow-ups (§10 F3/F5/F6) land.
+//! "Ratchet" is mechanically enforced on the READ side by [`stale_entries`]: an
+//! entry that stops matching any real violation (the file was actually fixed)
+//! fails the lint until the entry is removed, so the list can only shrink, never
+//! silently accumulate. There is currently NO write-side guard against adding a
+//! new entry (no `--update`/`--seed` generator like `check_line_cap.sh`'s); that
+//! remains a manual, reviewed edit — tracked as a follow-up
+//! (see the PR/issue history for #2854).
 //! What: [`AllowEntry`] (one `<path><TAB><check>` row), [`parse`] (read the TSV,
-//! skipping blanks and `#` comments), and [`suppresses`] (does any entry match a
-//! diagnostic?).
-//! Test: `super::tests::allowlist_suppresses`.
+//! skipping blanks and `#` comments), [`suppresses`] (does any entry match a
+//! diagnostic?), and [`stale_entries`] (which entries matched NOTHING — the
+//! ratchet-down forcing function).
+//! Test: `super::tests::allowlist_suppresses`, `allowlist_stale_entry_flagged`.
 
 use crate::report::Diagnostic;
+use crate::ALLOWLIST_FILE;
 
 /// One grandfathered exception: a `(path, check)` pair to suppress.
 ///
@@ -61,4 +69,42 @@ pub fn suppresses(allow: &[AllowEntry], diag: &Diagnostic) -> bool {
     allow
         .iter()
         .any(|e| e.check == diag.check && e.path == diag.path)
+}
+
+/// Allowlist entries that suppress nothing — the ratchet-down forcing function.
+///
+/// Why: a grandfathered exception documents a violation that exists TODAY; once
+/// the underlying file is fixed, the entry stops matching any real diagnostic
+/// and MUST be removed, or the allowlist silently accumulates dead rows and the
+/// "ratchet" claim in this module's header becomes fiction. Emitting a hard
+/// failure for a stale entry — mirroring `check_line_cap.sh`'s "now under cap,
+/// remove it" rule — is what makes the ratchet mechanical rather than aspirational.
+/// What: returns one `Diagnostic::error("allowlist-stale", …)` per entry in
+/// `allow` whose `(path, check)` matches none of `diagnostics` (the FULL,
+/// pre-suppression set — the caller must pass diagnostics from a run where the
+/// entry's check actually applies to its file; see [`crate::run`]'s `--strict`
+/// gating note).
+/// Test: `super::tests::allowlist_stale_entry_flagged`,
+/// `super::tests::allowlist_live_entry_not_flagged`.
+#[must_use]
+pub fn stale_entries(allow: &[AllowEntry], diagnostics: &[Diagnostic]) -> Vec<Diagnostic> {
+    allow
+        .iter()
+        .filter(|e| {
+            !diagnostics
+                .iter()
+                .any(|d| d.check == e.check && d.path == e.path)
+        })
+        .map(|e| {
+            Diagnostic::error(
+                ALLOWLIST_FILE,
+                0,
+                "allowlist-stale",
+                format!(
+                    "grandfathered entry `{}\t{}` no longer matches any violation — remove it from {ALLOWLIST_FILE} (ratchet can only shrink)",
+                    e.path, e.check
+                ),
+            )
+        })
+        .collect()
 }

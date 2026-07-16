@@ -55,6 +55,20 @@ fn catalog_doc_number_of() {
     assert_eq!(catalog::doc_number_of("# SPEC-INSTALLER-01\n"), None);
 }
 
+#[test]
+fn catalog_doc_number_ignores_earlier_cross_reference() {
+    // A spec_refs frontmatter block, a superseded/redirect banner, or body
+    // prose can legitimately mention a DIFFERENT DOC-N before the document's
+    // own title heading. The self-label must come from the file's own H1
+    // heading, never the first "DOC-" substring in the file.
+    let md = "---\nspec_refs:\n  - id: SPEC-CONFORMANCE-03~draft\n    path: docs/specs/intent-conformance.md\n    anchor: SPEC-CONFORMANCE-03~draft\n---\n\n# DOC-38 — Real Title\n\nSee DOC-15 for background.\n";
+    assert_eq!(catalog::doc_number_of(md), Some(38));
+
+    // A superseded banner mentioning another DOC-N BEFORE the real title.
+    let superseded = "> Superseded by DOC-99, see that spec instead.\n\n# DOC-30 — Old Vision\n";
+    assert_eq!(catalog::doc_number_of(superseded), Some(30));
+}
+
 // ── checks: references ───────────────────────────────────────────────────────
 
 #[test]
@@ -92,6 +106,17 @@ fn checks_reference_errors() {
         &lookup,
     );
     assert!(t.iter().any(|d| d.check == "ref-traversal"));
+    // absolute path — must be rejected as unsafe, never silently escape via
+    // `root.join("/etc/passwd.md")` discarding the repo root.
+    let abs = checks::check_reference(
+        "s",
+        "SPEC-X-01~draft",
+        "/etc/passwd.md",
+        "SPEC-X-01~draft",
+        1,
+        &lookup,
+    );
+    assert!(abs.iter().any(|d| d.check == "ref-traversal"));
     // missing path
     let p = checks::check_reference(
         "s",
@@ -112,6 +137,31 @@ fn checks_reference_errors() {
         &lookup,
     );
     assert!(a.iter().any(|d| d.check == "ref-anchor-missing"));
+}
+
+#[test]
+fn checks_reference_revision_drift() {
+    // The target now anchors ~v2, but the reference still declares ~v1 — DOC-38
+    // §4.4: a conforming resolver MAY still resolve this (advisory, not an
+    // error) rather than failing outright.
+    fn drifted_lookup(path: &str) -> Option<String> {
+        (path == "docs/specs/x.md").then(|| "## S {#SPEC-X-01~v2}\n".to_string())
+    }
+    let d = checks::check_reference(
+        "s",
+        "SPEC-X-01~v1",
+        "docs/specs/x.md",
+        "SPEC-X-01~v1",
+        1,
+        &drifted_lookup,
+    );
+    assert!(
+        d.iter()
+            .any(|x| x.check == "ref-revision-drift" && x.severity == Severity::Warning),
+        "expected an advisory ref-revision-drift diagnostic: {d:?}"
+    );
+    // Drift is advisory only — must never surface as an error.
+    assert!(!d.iter().any(|x| x.severity == Severity::Error));
 }
 
 #[test]
@@ -168,6 +218,21 @@ fn checks_header_block() {
 }
 
 #[test]
+fn checks_header_block_ignores_fenced_example() {
+    // The real header block is missing **Owner:**, but a FENCED example quotes
+    // `**Owner:** eng` (illustrating the convention, exactly as DOC-38's own
+    // body does) — the fenced quote must NOT satisfy the requirement.
+    let missing_owner = CLEAN_SPEC.replace("**Owner:** eng\n", "");
+    let with_fenced_example = missing_owner.replace("body\n", "body\n\n```\n**Owner:** eng\n```\n");
+    let d = checks::check_spec_doc("x.md", &with_fenced_example, &catalog_with7(), true);
+    assert!(
+        d.iter()
+            .any(|x| x.check == "spec-header" && x.message.contains("Owner")),
+        "a fenced example must not mask a real missing header field: {d:?}"
+    );
+}
+
+#[test]
 fn checks_catalog_row() {
     // DOC-7 not in an empty catalog → spec-catalog.
     let d = checks::check_spec_doc("x.md", CLEAN_SPEC, &HashSet::new(), true);
@@ -217,6 +282,89 @@ fn allowlist_suppresses() {
     assert!(allowlist::suppresses(&allow, &hit));
     assert!(!allowlist::suppresses(&allow, &miss_check));
     assert!(!allowlist::suppresses(&allow, &miss_path));
+}
+
+#[test]
+fn allowlist_stale_entry_flagged() {
+    // An allowlist entry whose (path, check) matches NO diagnostic in the
+    // pre-suppression set is stale — the underlying violation was fixed, and
+    // the ratchet must fail until the entry is removed.
+    let allow = allowlist::parse("docs/specs/fixed.md\tspec-header\n");
+    let diagnostics: Vec<Diagnostic> = vec![]; // nothing wrong with fixed.md anymore
+    let stale = allowlist::stale_entries(&allow, &diagnostics);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].check, "allowlist-stale");
+    assert!(stale[0].message.contains("docs/specs/fixed.md"));
+    assert!(stale[0].message.contains("spec-header"));
+}
+
+#[test]
+fn allowlist_live_entry_not_flagged() {
+    // An allowlist entry that DOES still match a real diagnostic is not stale.
+    let allow = allowlist::parse("docs/specs/legacy.md\tspec-header\n");
+    let diagnostics = vec![Diagnostic::error(
+        "docs/specs/legacy.md",
+        0,
+        "spec-header",
+        "missing field",
+    )];
+    assert!(allowlist::stale_entries(&allow, &diagnostics).is_empty());
+}
+
+// ── safe_read (path-escape hardening, second independent layer) ─────────────
+
+#[test]
+fn safe_read_rejects_absolute() {
+    let dir = tempfile::tempdir().unwrap();
+    // An absolute path must never be read, even though it names a real file on
+    // disk (this crate's own Cargo.toml) — PathBuf::join silently discards
+    // `root` for an absolute argument, so an unguarded reader would read
+    // wherever the declared reference string points.
+    let abs = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("Cargo.toml")
+        .display()
+        .to_string();
+    assert_eq!(crate::safe_read(dir.path(), &abs), None);
+}
+
+#[test]
+fn safe_read_rejects_dotdot_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(crate::safe_read(dir.path(), "../../etc/passwd"), None);
+}
+
+#[test]
+fn safe_read_resolves_in_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "docs/specs/x.md", "content\n");
+    assert_eq!(
+        crate::safe_read(dir.path(), "docs/specs/x.md").as_deref(),
+        Some("content\n")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn safe_read_rejects_symlink_escape() {
+    // The genuinely independent-layer case: `is_unsafe_path` only ever sees the
+    // innocuous string "docs/specs/escape.md" and passes it — the escape is
+    // invisible until the path is actually resolved on disk. Only the
+    // canonicalize + prefix-check layer in `safe_read` catches a symlink that
+    // points outside the scanned root.
+    use std::os::unix::fs::symlink;
+
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret.md"), "TOP SECRET\n").unwrap();
+
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("docs/specs")).unwrap();
+    symlink(
+        outside.path().join("secret.md"),
+        root.path().join("docs/specs/escape.md"),
+    )
+    .unwrap();
+
+    assert_eq!(crate::safe_read(root.path(), "docs/specs/escape.md"), None);
 }
 
 // ── run (orchestration, temp tree) ───────────────────────────────────────────
@@ -284,4 +432,61 @@ fn run_missing_catalog_errors() {
     let dir = tempfile::tempdir().unwrap();
     let err = run(&LintOptions::new(dir.path())).unwrap_err();
     assert!(matches!(err, LintError::Catalog { .. }));
+}
+
+#[test]
+fn run_strict_flags_stale_allowlist_entry() {
+    // A fully clean, opted-in, cataloged spec — no real spec-header violation.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "docs/specs/README.md",
+        "| DOC | Spec ID | Title | Subsystem |\n|---|---|---|---|\n| DOC-1 | `SPEC-X-01~draft` | [Foo](./foo.md) | x |\n",
+    );
+    write(
+        root,
+        "docs/specs/foo.md",
+        "---\nspec_refs:\n  - id: SPEC-X-01~draft\n    path: docs/specs/foo.md\n    anchor: SPEC-X-01~draft\n---\n\n# DOC-1 — Foo\n\n**Status:** Draft\n**Subsystem:** x\n**Owner:** eng\n**Last-updated:** 2026-01-01\n**Spec ID:** SPEC-X-01~draft\n\n## 1. Section {#SPEC-X-01~draft}\n**ID:** SPEC-X-01~draft\nbody\n",
+    );
+    // A stale grandfather entry: foo.md has no spec-header violation, so this
+    // entry matches nothing and MUST be flagged so it gets removed.
+    write(
+        root,
+        ".sld-lint-allowlist.tsv",
+        "docs/specs/foo.md\tspec-header\n",
+    );
+
+    let strict_report = run(&LintOptions {
+        root: root.to_path_buf(),
+        strict: true,
+        allowlist_path: root.join(".sld-lint-allowlist.tsv"),
+    })
+    .expect("runs");
+    assert!(
+        !strict_report.is_clean(),
+        "a stale allowlist entry must fail --strict"
+    );
+    assert!(
+        strict_report
+            .diagnostics
+            .iter()
+            .any(|d| d.check == "allowlist-stale"),
+        "expected an allowlist-stale diagnostic: {:?}",
+        strict_report.diagnostics
+    );
+
+    // Non-strict (default) mode must NOT flag it — spec-header is only checked
+    // on opted-in files there, so absence proves nothing about staleness.
+    let default_report = run(&LintOptions {
+        root: root.to_path_buf(),
+        strict: false,
+        allowlist_path: root.join(".sld-lint-allowlist.tsv"),
+    })
+    .expect("runs");
+    assert!(
+        default_report.is_clean(),
+        "default mode must not spuriously flag stale entries: {:?}",
+        default_report.diagnostics
+    );
 }

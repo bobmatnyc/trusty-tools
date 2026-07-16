@@ -146,7 +146,17 @@ pub enum LintError {
 /// grandfathered `(path, check)` pairs. Files that cannot be read as UTF-8 are
 /// skipped (a read failure is not an SLD violation). Returns the [`LintReport`]
 /// or a [`LintError`] when the catalog is unreadable.
-/// Test: `tests::run_clean_tree`, and `tests/lint_real_tree.rs` (real tree).
+///
+/// **Ratchet enforcement is `--strict`-only.** Under `--strict`, every spec
+/// gets the full spec-document checks (§4), so an allowlist entry that matches
+/// no diagnostic there really does mean the underlying violation was fixed —
+/// [`allowlist::stale_entries`] then fails the run until the entry is removed.
+/// In DEFAULT (non-strict) mode, spec-document checks apply only to opted-in
+/// files, so an allowlisted file's *absence* from the diagnostics proves
+/// nothing (it may simply not have been checked yet) — stale-entry enforcement
+/// is skipped there to avoid a false "already fixed" failure on every entry.
+/// Test: `tests::run_clean_tree`, `tests::run_strict_flags_stale_allowlist_entry`,
+/// and `tests/lint_real_tree.rs` (real tree, both modes).
 pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
     let root = opts.root.as_path();
 
@@ -162,7 +172,7 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
         .unwrap_or_default();
 
     let discovered = discover::discover(root);
-    let lookup = |path: &str| std::fs::read_to_string(root.join(path)).ok();
+    let lookup = |path: &str| safe_read(root, path);
 
     let mut report = LintReport {
         spec_docs: discovered.spec_docs.len(),
@@ -197,16 +207,63 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
             .extend(checks::check_code_file(&path, &content, ext, &lookup));
     }
 
+    if opts.strict {
+        // Ratchet enforcement: see this function's doc comment for why this is
+        // `--strict`-only.
+        report.diagnostics.extend(allowlist::stale_entries(
+            &allow,
+            &report.diagnostics.clone(),
+        ));
+    }
+    // `allowlist-stale` diagnostics are NEVER themselves suppressible — an
+    // allowlist entry naming (ALLOWLIST_FILE, "allowlist-stale") could
+    // otherwise neutralize the ratchet's own enforcement mechanism.
     report
         .diagnostics
-        .retain(|d| !allowlist::suppresses(&allow, d));
+        .retain(|d| d.check == "allowlist-stale" || !allowlist::suppresses(&allow, d));
     Ok(report)
+}
+
+/// Read a declared reference's target file, refusing to escape `root`.
+///
+/// Why: `path` here comes from a **declared reference** (frontmatter `path:` or
+/// an inline `# Spec References` entry) — untrusted document content, not a
+/// path this crate itself discovered by walking the tree. `checks::is_unsafe_path`
+/// already rejects `..` and absolute paths at the grammar layer before a
+/// reference reaches this closure, but that guard lives in a different crate and
+/// a future caller could bypass or forget it; the actual filesystem read is the
+/// last line of defence and must be independently safe. `PathBuf::join` silently
+/// *discards* `root` when `path` is absolute, so a check that only inspects the
+/// unjoined string is not enough — the read site itself must verify the
+/// **resolved, canonical** path is still rooted under `root` before opening it
+/// (defence in depth: two independent layers, not one guard trusted twice).
+/// What: rejects `path` outright when [`trusty_common::sld::is_unsafe_path`]
+/// flags it; otherwise joins it onto `root`, canonicalizes both the join and
+/// `root` (resolving `..`/symlinks), and returns the file's contents only when
+/// the canonical join still starts with the canonical `root`. Any failure
+/// (unsafe path, missing file, symlink escape, non-UTF-8) yields `None` rather
+/// than an error — a lookup failure is `ref-path-missing`, not a crash.
+/// Test: `tests::safe_read_rejects_absolute`, `tests::safe_read_rejects_escape`,
+/// `tests::safe_read_resolves_in_tree`.
+fn safe_read(root: &Path, path: &str) -> Option<String> {
+    if trusty_common::sld::is_unsafe_path(path) {
+        return None;
+    }
+    let root_canon = root.canonicalize().ok()?;
+    let candidate_canon = root.join(path).canonicalize().ok()?;
+    if !candidate_canon.starts_with(&root_canon) {
+        return None;
+    }
+    std::fs::read_to_string(candidate_canon).ok()
 }
 
 /// Read a repo-relative file as UTF-8, or `None` on any failure.
 ///
 /// Why: a discovered source file that cannot be read (e.g. non-UTF-8) is not an
-/// SLD violation — the run skips it rather than aborting.
+/// SLD violation — the run skips it rather than aborting. Unlike [`safe_read`],
+/// `rel` here is always a path this crate's own [`discover::discover`] walk
+/// produced (never attacker-controlled document content), so no traversal guard
+/// is needed at this call site.
 /// What: `read_to_string(root/rel).ok()`.
 /// Test: covered by `tests::run_clean_tree`.
 fn read_rel(root: &Path, rel: &Path) -> Option<String> {

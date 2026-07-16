@@ -7,9 +7,22 @@
 # specs (frontmatter, header blocks, `{#SPEC-…~rev}` anchors) and §4.1/§9 the
 # documented DOC-28 collision + DOC-34/DOC-37 catalog gaps. Those pre-existing
 # specs are NOT failed by `sld-lint --strict`; each is grandfathered here for the
-# specific check it currently violates. As F3/F5/F6 land, remove the matching row
-# (the ratchet only shrinks). DEFAULT mode does not consult these — it already
-# passes on the whole tree; the allowlist only relaxes `--strict`.
+# specific check it currently violates. DEFAULT mode does not consult these for
+# staleness — it already passes on the whole tree; the allowlist only relaxes
+# `--strict`.
+#
+# RATCHET ENFORCEMENT (mechanical, read side): under `--strict`, an entry whose
+# (path, check) no longer matches any real violation — i.e. the file was
+# actually fixed — is flagged `allowlist-stale` and FAILS the run until the row
+# is removed. This is what makes "can only shrink" an enforced property, not
+# just a comment. As F3/F5/F6 land and a file is fixed, `--strict` will start
+# failing on that row; delete it.
+#
+# KNOWN GAP (write side, not yet implemented): unlike `check_line_cap.sh
+# --update/--seed/--force-add`, there is currently no guarded generator that
+# refuses to ADD a new oversized entry without an explicit flag — adding a row
+# here is a manual, reviewed edit. Tracked as a follow-up to build
+# `check_sld.sh --update` with the same seed/force-add ergonomics.
 #
 # spec-header  — spec predates the DOC-38 §4.2 bold-field header block (F6).
 # spec-id-grammar — section anchors use pre-DOC-38 slug form (…-layers) or omit
