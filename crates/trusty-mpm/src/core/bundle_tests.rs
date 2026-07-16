@@ -47,6 +47,7 @@ fn constants_are_non_empty() {
     assert!(!JAVASCRIPT_ENGINEER_AGENT.trim().is_empty());
     assert!(!PHOENIX_ENGINEER_AGENT.trim().is_empty());
     assert!(!DART_ENGINEER_AGENT.trim().is_empty());
+    assert!(!DOTNET_ENGINEER_AGENT.trim().is_empty());
     assert!(!TAURI_ENGINEER_AGENT.trim().is_empty());
     assert!(!WEB_UI_ENGINEER_AGENT.trim().is_empty());
     assert!(!REFACTORING_ENGINEER_AGENT.trim().is_empty());
@@ -297,9 +298,9 @@ fn optimizer_toml_is_parseable() {
 #[test]
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents +
+    // Count: 4 hooks/instructions + 5 base agents + 37 concrete agents +
     // 21 /tm- skills + 1 DOC-28 self-description doc + 1 issue #2034
-    // bundled architecture doc = 68
+    // bundled architecture doc = 69
     // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
     // removed — it shipped to every user with no real content. A3: the
     // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
@@ -315,6 +316,7 @@ fn bundle_table_is_complete() {
     //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
     //   code-critic, gcp-ops, vercel-ops, local-ops,
     //   memory-manager, mpm-agent-manager, mpm-skills-manager
+    // Increment 4 (1): dotnet-engineer (#2831 — C#/.NET 8+ with VB.NET awareness)
     // /tm- portfolio (tm-skills-portfolio epic + issues #2185/#2321) (21): tm-doctor,
     //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
     //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
@@ -325,11 +327,11 @@ fn bundle_table_is_complete() {
     //   tm-cli-operations (#2321: tm CLI operation incl. MCP setup/management)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
     // Issue #2034 (1): docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md
-    assert_eq!(ALL.len(), 68);
+    assert_eq!(ALL.len(), 69);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 68, "artifact paths must be unique");
+    assert_eq!(paths.len(), 69, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -399,6 +401,7 @@ fn new_concrete_agents_are_in_bundle() {
         "agents/javascript-engineer.md",
         "agents/phoenix-engineer.md",
         "agents/dart-engineer.md",
+        "agents/dotnet-engineer.md",
         "agents/tauri-engineer.md",
         "agents/web-ui-engineer.md",
         "agents/refactoring-engineer.md",
@@ -451,6 +454,7 @@ fn new_concrete_agents_have_extends_in_frontmatter() {
         ("javascript-engineer", JAVASCRIPT_ENGINEER_AGENT),
         ("phoenix-engineer", PHOENIX_ENGINEER_AGENT),
         ("dart-engineer", DART_ENGINEER_AGENT),
+        ("dotnet-engineer", DOTNET_ENGINEER_AGENT),
         ("tauri-engineer", TAURI_ENGINEER_AGENT),
         ("web-ui-engineer", WEB_UI_ENGINEER_AGENT),
         ("refactoring-engineer", REFACTORING_ENGINEER_AGENT),
@@ -516,6 +520,7 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
         "javascript-engineer",
         "phoenix-engineer",
         "dart-engineer",
+        "dotnet-engineer",
         "tauri-engineer",
         "web-ui-engineer",
         "refactoring-engineer",

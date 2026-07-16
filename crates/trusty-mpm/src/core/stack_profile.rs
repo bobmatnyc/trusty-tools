@@ -164,6 +164,30 @@ mod tests {
         );
     }
 
+    /// A .NET project (`*.csproj` glob marker) routes to dotnet-engineer.
+    ///
+    /// Why: #2831 — a C#/.NET/VB.NET project must get its specialist rather than
+    /// the general-purpose fallback, so the derived stack section must name
+    /// `dotnet-engineer` when a project/solution marker is present.
+    /// What: writes `App.csproj`, asserts the section names `dotnet-engineer` and
+    /// does not emit the neutral "Do NOT assume" block.
+    /// Test: this function IS the test.
+    #[test]
+    fn detected_dotnet_lists_dotnet_engineer() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "App.csproj");
+
+        let section = stack_profile_section(tmp.path());
+        assert!(
+            section.contains("`dotnet-engineer`"),
+            "must route to dotnet-engineer"
+        );
+        assert!(
+            !section.contains("Do NOT assume any stack"),
+            "a detected .NET project must not emit the neutral block"
+        );
+    }
+
     /// An unknown project type yields a neutral, detect-first profile.
     ///
     /// Why: Bob's requirement — undetected stack must NEVER default to any stack;

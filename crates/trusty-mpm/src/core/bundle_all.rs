@@ -220,6 +220,11 @@ pub const ALL: &[BundledArtifact] = &[
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
+        rel_path: "agents/dotnet-engineer.md",
+        contents: DOTNET_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
         rel_path: "agents/tauri-engineer.md",
         contents: TAURI_ENGINEER_AGENT,
         install: InstallPolicy::Overwrite,
