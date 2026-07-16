@@ -306,12 +306,13 @@ async fn fetch_managed_session_until_stopped(
 /// pane — whose foreground command is the requesting `tm` itself — as idle
 /// instead of counting it as a live runtime and returning 409. When
 /// `pane_confirmed_dead` is set (#2794), a `?pane_confirmed_dead=true` param is
-/// also forwarded: it tells the daemon the caller has INDEPENDENTLY confirmed
-/// (via stable tmux `pane_id`, `guided::pane_identity_confirmed`) that it is
-/// this record's OWN pane and the agent has exited, so the reconcile overrides
-/// its tmux-pane liveness probe for the caller's own pane — closing the residual
-/// zombie-`Active` 409 dead-end where the probe still counted the requesting
-/// `tm` (or a not-yet-reaped child) as live.
+/// also forwarded: it tells the daemon the caller is asserting — matched via
+/// stable tmux `pane_id`, `guided::pane_identity_confirmed`, not independently
+/// re-verified by the daemon — that it is this record's OWN pane and the agent
+/// has exited, so the reconcile trusts that claim over its tmux-pane liveness
+/// probe for the caller's own pane (bounded by an independent sibling-pane
+/// check, #2157) — closing the residual zombie-`Active` 409 dead-end where the
+/// probe still counted the requesting `tm` (or a not-yet-reaped child) as live.
 /// Test: I/O path; not unit-tested (requires a live daemon).
 async fn reactivate_managed_session(
     client: &reqwest::Client,

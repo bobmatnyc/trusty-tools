@@ -46,7 +46,8 @@ use super::{parse_id, record_to_summary};
 /// What: an optional `caller_pane_id` (tmux's `%N`). Absent for non-tmux or
 /// pre-#2789 clients, in which case reconciliation behaves exactly as before.
 /// The `pane_confirmed_dead` flag (#2790-follow-up) carries the CLI's
-/// independent proof-of-death — see its field doc and
+/// self-asserted proof-of-death claim — see its field doc for the trust-model
+/// discussion (accepted, not independently verified) — and
 /// [`should_reconcile_stale_active`].
 /// Test: `should_reconcile_stale_active_true_when_only_caller_pane_busy`,
 /// `should_reconcile_stale_active_true_when_confirmed_dead_and_pane_missing`.
@@ -56,17 +57,24 @@ pub struct ReactivateQuery {
     /// from (the pane about to `exec` `claude` in place).
     #[serde(default)]
     pub caller_pane_id: Option<String>,
-    /// Set by an in-place-relaunch client that has INDEPENDENTLY confirmed, via
-    /// tmux's stable `pane_id` (`bin/tm`'s `guided::pane_identity_confirmed`),
-    /// that it is running inside THIS record's OWN pane and observed the agent
-    /// exit. That is authoritative proof-of-death the daemon's own tmux-pane
-    /// liveness probe cannot see (the requesting `tm` is that pane's foreground
-    /// command; a just-exited agent may leave a not-yet-reaped child; a racing
-    /// `list-panes` may momentarily omit the pane). When `true`,
-    /// [`should_reconcile_stale_active`] trusts it over the probe for the
-    /// caller's OWN pane while still refusing if a genuinely live SIBLING pane
-    /// keeps the tmux session busy (#2157). Absent/false for every pre-existing
-    /// client, preserving the prior probe-only behavior.
+    /// Set by an in-place-relaunch client that has matched tmux's stable
+    /// `pane_id` (`bin/tm`'s `guided::pane_identity_confirmed`) against the
+    /// record and is asserting — a CLIENT SELF-ASSERTION, not something the
+    /// daemon independently verifies (no process/ancestry check) — that it is
+    /// running inside THIS record's OWN pane and observed the agent exit. Like
+    /// every other managed-session state transition this daemon accepts from a
+    /// caller (resume/stop/decommission included), the assertion is trusted
+    /// under the localhost/single-operator threat model this daemon runs
+    /// under, not treated as a cryptographically-verified fact. It is still
+    /// bounded, not a free pass: the pane match can be wrong in ways the
+    /// daemon's own tmux-pane liveness probe cannot see (the requesting `tm` is
+    /// that pane's foreground command; a just-exited agent may leave a
+    /// not-yet-reaped child; a racing `list-panes` may momentarily omit the
+    /// pane), so when `true`, [`should_reconcile_stale_active`] trusts it OVER
+    /// the probe only for the caller's OWN pane, while an INDEPENDENT
+    /// sibling-pane liveness check still refuses if a genuinely live SIBLING
+    /// pane keeps the tmux session busy (#2157). Absent/false for every
+    /// pre-existing client, preserving the prior probe-only behavior.
     #[serde(default)]
     pub pane_confirmed_dead: bool,
 }
@@ -150,9 +158,14 @@ pub async fn reactivate_managed_session(
 /// (a still-live pane — including a genuinely different, still-active sibling
 /// window in the SAME tmux session, #2157 — keeps the existing 409 refusal,
 /// preserving that safety boundary). `pane_confirmed_dead` forwards the CLI's
-/// proof-of-death (see [`ReactivateQuery::pane_confirmed_dead`]) so a caller
-/// provably inside the record's OWN pane reconciles even when the tmux-pane
-/// probe would false-positive on that pane. On confirmation, calls
+/// self-asserted claim (see [`ReactivateQuery::pane_confirmed_dead`] for the
+/// trust-model discussion — it is accepted, not independently re-verified,
+/// same as this daemon accepts any other client-originated state-transition
+/// request) that it is inside the record's OWN pane and observed the agent
+/// exit, so a caller matching that description reconciles even when the
+/// tmux-pane probe would false-positive on that pane — bounded by the SAME
+/// independent sibling-pane liveness check every other path here uses. On
+/// confirmation, calls
 /// [`SessionManager::mark_runtime_exited_stopped`] then
 /// [`SessionManager::mark_reactivated`]; any failure at either step (tmux
 /// discovery, pane listing, or either state transition) also yields `None` so
@@ -209,23 +222,29 @@ async fn reconcile_stale_active_then_reactivate(
 /// trust assumption — while every OTHER (sibling) pane is checked unchanged, so
 /// a genuinely live sibling window still blocks the reconcile.
 /// #2794: `caller_pane_confirmed_dead` (from
-/// [`ReactivateQuery::pane_confirmed_dead`]) is the CLI's authoritative
-/// proof-of-death. `find_runtime_exited` requires the record's tmux session to
-/// be PRESENT in `panes` AND every one of its panes to read idle — a
-/// conservative rule that is correct for the periodic reaper but leaves a
-/// residual gap for the in-place-relaunch caller: its OWN pane can read busy in
-/// ways [`neutralize_caller_pane`] cannot always repair (a racing `list-panes`
-/// omitting the pane entirely, or a not-yet-reaped agent child the probe still
-/// counts). Bob's #2794 repro (a zombie-`Active` record that only reconciled
-/// minutes later once the reaper independently caught up) is exactly that gap.
-/// When the CLI has PROVEN via stable `pane_id` that it is this record's own
-/// pane (`bin/tm`'s `guided::pane_identity_confirmed`) and observed the agent
-/// exit, that proof overrides the probe for the caller's OWN pane: reconcile as
-/// long as no genuinely different SIBLING pane keeps the session live (the
-/// #2157 boundary). This never requires the session to be "present", so the
-/// missing-pane race no longer strands the operator — and it stays SAFE because
-/// the caller could not be `pane_identity_confirmed` inside a session that had
-/// actually disappeared.
+/// [`ReactivateQuery::pane_confirmed_dead`]) is the CLI's self-asserted claim
+/// — NOT independently verified by the daemon (no process/ancestry check) —
+/// that it is this record's OWN pane and the agent has exited, accepted under
+/// the same localhost/single-operator trust model this daemon already extends
+/// to every other client-originated state transition (resume/stop/
+/// decommission), and bounded by an INDEPENDENT sibling-pane liveness check
+/// (below), not taken as a bare capability grant. `find_runtime_exited`
+/// requires the record's tmux session to be PRESENT in `panes` AND every one
+/// of its panes to read idle — a conservative rule that is correct for the
+/// periodic reaper but leaves a residual gap for the in-place-relaunch caller:
+/// its OWN pane can read busy in ways [`neutralize_caller_pane`] cannot always
+/// repair (a racing `list-panes` omitting the pane entirely, or a not-yet-reaped
+/// agent child the probe still counts). Bob's #2794 repro (a zombie-`Active`
+/// record that only reconciled minutes later once the reaper independently
+/// caught up) is exactly that gap. When the CLI asserts, via stable `pane_id`
+/// (`bin/tm`'s `guided::pane_identity_confirmed`), that it is this record's own
+/// pane and observed the agent exit, that assertion is trusted OVER the probe
+/// for the caller's OWN pane: reconcile as long as no genuinely different
+/// SIBLING pane keeps the session live (the #2157 boundary, independently
+/// re-checked here regardless of the assertion). This never requires the
+/// session to be "present", so the missing-pane race no longer strands the
+/// operator, while the sibling check keeps a stale or mistaken assertion from
+/// silently overriding a genuinely live different window.
 ///
 /// What: `true` when `record.state == Active` AND either — (a)
 /// `caller_pane_confirmed_dead` is set with a non-blank `caller_pane_id` and no
@@ -244,6 +263,7 @@ async fn reconcile_stale_active_then_reactivate(
 /// `should_reconcile_stale_active_true_when_only_caller_pane_busy`,
 /// `should_reconcile_stale_active_false_when_sibling_pane_live_despite_caller`,
 /// `should_reconcile_stale_active_true_when_confirmed_dead_and_pane_missing`,
+/// `should_reconcile_stale_active_true_when_confirmed_dead_and_caller_pane_busy`,
 /// `should_reconcile_stale_active_false_when_confirmed_dead_but_sibling_live`,
 /// `should_reconcile_stale_active_ignores_confirmed_dead_without_caller_pane`.
 pub(crate) fn should_reconcile_stale_active(
@@ -258,11 +278,13 @@ pub(crate) fn should_reconcile_stale_active(
     }
     let neutralized = neutralize_caller_pane(panes, caller_pane_id);
     if caller_pane_confirmed_dead && caller_pane_id.is_some_and(|s| !s.is_empty()) {
-        // Proof-of-death path: the caller's own pane is authoritatively idle
-        // (already neutralized above); reconcile unless a SIBLING pane keeps the
-        // session live. Deliberately does NOT gate on session presence, so a
-        // pane momentarily missing from `list-panes` cannot block a caller
-        // provably inside the record's pane.
+        // Self-asserted proof-of-death path: the caller's own pane is trusted
+        // as idle (already neutralized above) on the caller's say-so, accepted
+        // under this daemon's localhost/single-operator trust model; reconcile
+        // unless an INDEPENDENTLY checked SIBLING pane keeps the session live.
+        // Deliberately does NOT gate on session presence, so a pane momentarily
+        // missing from `list-panes` cannot block a caller asserting it is
+        // inside the record's pane.
         return !session_has_live_pane(&record.tmux_name, &neutralized, probe);
     }
     !find_runtime_exited(std::slice::from_ref(record), &neutralized, probe).is_empty()

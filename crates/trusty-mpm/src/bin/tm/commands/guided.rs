@@ -107,16 +107,21 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             // forwarded so the daemon treats it as idle). It still refuses
             // when the runtime is genuinely live in a SIBLING window.
             //
-            // #2794: we are HERE only because `pane_identity_confirmed` proved,
-            // via the stable tmux `pane_id`, that this process is inside
-            // `record`'s OWN pane — and the agent has provably exited (a live
-            // agent could not have handed this pane back to a shell for bare
-            // `tm` to run in). That is authoritative proof-of-death the daemon's
-            // tmux-pane liveness probe cannot see, so forward it
-            // (`pane_confirmed_dead = true`): it lets the daemon reconcile a
+            // #2794: we are HERE only because `pane_identity_confirmed` matched
+            // the stable tmux `pane_id`, so this process is inside `record`'s
+            // OWN pane. `pane_id` identity alone is not PROOF the agent has
+            // exited — any child process of the pane (including a live agent
+            // that shelled out to run bare `tm`) inherits the same `pane_id` —
+            // so this is the ordinary interactive-relaunch case: the operator's
+            // shell has handed this pane back to bare `tm`, which is what
+            // happens when the agent has exited. We forward that as a
+            // self-asserted claim (`pane_confirmed_dead = true`, NOT
+            // independently verified by the daemon) so it can reconcile a
             // zombie-`Active` record whose pane still reads busy (the requesting
             // `tm`, or a not-yet-reaped child) instead of 409-dead-ending — the
-            // reported bug. A genuinely live SIBLING window still blocks it.
+            // reported bug. The claim is bounded, not a bare pass: an
+            // INDEPENDENT sibling-pane liveness check on the daemon still
+            // refuses when the runtime is genuinely live in a SIBLING window.
             match super::guided_inplace::run_inplace_relaunch(
                 client,
                 url,
