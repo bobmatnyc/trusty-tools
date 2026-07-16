@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Build provenance in `--version` and `tcode_report.json`** — `tcode --version`
+  now prints the git SHA and commit date alongside the semver
+  (`tcode 0.2.0 (b20adfca 2026-07-16)`), and `tcode_report.json` carries a
+  `build` object (`{version, commit, commit_date}`); the human `run-task`
+  summary gains a matching `build:` header line. Previously a run's artifacts
+  could not be attributed to the binary that produced them — a semver alone
+  collapses every commit on a branch into one string — which during the
+  2026-07-16 L4 validation forced provenance to be reverse-inferred from
+  `cargo install`'s mtime reset and produced a WRONG "bug still recurs"
+  conclusion, retracted only after a dedicated forensic check. Provenance is
+  captured by `build.rs` from `git rev-parse --short HEAD` / `git log -1`, using
+  the COMMIT date rather than a build wall-clock so rebuilds stay reproducible,
+  and degrades to `"unknown"` (never a build failure, never `null`) outside a
+  git checkout — the crates.io-tarball path. `build.rs` now also resolves
+  `.git/HEAD` via `git rev-parse --git-path` (correct in a linked worktree,
+  where `.git` is a file) and only emits `cargo:rerun-if-changed` for paths that
+  exist, so a non-git build no longer re-runs the script on every build
+  ([#2823](https://github.com/bobmatnyc/trusty-tools/issues/2823))
+
+---
+
 ## [0.2.0] — 2026-07-16
 
 ### Added

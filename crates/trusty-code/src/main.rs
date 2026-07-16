@@ -42,7 +42,10 @@ const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
 #[derive(Parser)]
 #[command(
     name = "tcode",
-    version,
+    // Not clap's bare `version` (which prints the semver alone): a semver
+    // cannot identify WHICH build produced a run's artifacts (#2823), so
+    // `--version` carries the git SHA + commit date too.
+    version = trusty_code::build_info::LONG_VERSION,
     about = "Per-project Claude-Code-compatible MPM orchestration harness",
     long_about = None,
 )]
