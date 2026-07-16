@@ -51,7 +51,7 @@ use std::path::Path;
 
 use crate::core::agent_deployer::deploy_agents;
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_deployer::deploy_skills;
+use crate::core::skill_tiers::deploy_all_skill_tiers;
 use crate::core::standalone::global_config::ensure_global_config_dir;
 
 /// Provision (idempotently) the tm-owned managed `CLAUDE_CONFIG_DIR`.
@@ -117,10 +117,20 @@ pub fn ensure_managed_config_dir_with_root(
         anyhow::anyhow!("failed to deploy full agent roster into managed config dir: {e}")
     })?;
 
+    // PR #2818 review (round 3, MEDIUM decision): route through the multi-tier
+    // orchestrator so a user-custom skill (`fw.user_skill_source_dir()`)
+    // reaches the tm-global roster too, matching the standalone driver's
+    // `global_config::deploy_agents_and_skills` (same decision, same
+    // reasoning — see that function's doc comment for why the project-custom
+    // tier is naturally N/A at this destination).
     let skills_dest = config_dir.join("skills");
-    deploy_skills(&fw.skill_source_dir(), &skills_dest).map_err(|e| {
-        anyhow::anyhow!("failed to deploy full skill set into managed config dir: {e}")
-    })?;
+    deploy_all_skill_tiers(
+        &fw.skill_source_dir(),
+        &fw.user_skill_source_dir(),
+        &skills_dest,
+        |_| true,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to deploy full skill set into managed config dir: {e}"))?;
 
     Ok(())
 }
@@ -233,6 +243,29 @@ mod tests {
         let second = std::fs::read_to_string(config_dir.join("agents/engineer.md")).unwrap();
 
         assert_eq!(first, second, "re-provisioning must be idempotent");
+    }
+
+    #[test]
+    fn ensure_managed_config_dir_deploys_user_tier_skill() {
+        // PR #2818 review (round 3, MEDIUM decision): a user-custom skill
+        // (`fw.user_skill_source_dir()`, i.e. `<root>/skills`) must reach the
+        // tm-global roster, not just per-project deploys.
+        let tmp = TempDir::new().unwrap();
+        let fw = seed_framework(tmp.path());
+        std::fs::create_dir_all(&fw.user_skills).unwrap();
+        std::fs::write(
+            fw.user_skills.join("my-custom-skill.md"),
+            "---\nname: my-custom-skill\n---\n\nUSER CUSTOM.\n",
+        )
+        .unwrap();
+
+        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+
+        assert!(
+            config_dir.join("skills/my-custom-skill/SKILL.md").exists(),
+            "user-custom skill must be deployed to the tm-global config dir"
+        );
     }
 
     /// Static verification against the REAL bundled roster (`src/assets/agents`,

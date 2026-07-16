@@ -298,15 +298,22 @@ fn install_then_deploy_composes_agents() {
 #[test]
 fn install_then_deploy_deploys_skills() {
     // Regression for #386: a fresh install must populate `.claude/skills/`
-    // from the bundled skill sources, not leave it empty.
+    // from the bundled skill sources, not leave it empty. Calls the SAME
+    // multi-tier orchestrator `install()`'s skill step actually calls (PR
+    // #2818 review, round 3) rather than the raw single-tier
+    // `deploy_skills` — with no user-tier source present, the two are
+    // equivalent, but this keeps the test aligned with the real call site.
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
     install_to(&paths, false).unwrap();
-    let result = trusty_mpm::core::skill_deployer::deploy_skills(
+    let result = trusty_mpm::core::skill_tiers::deploy_all_skill_tiers(
         &paths.skill_source_dir(),
+        &paths.user_skill_source_dir(),
         &paths.claude_skills_dir(),
+        |_| true,
     )
-    .unwrap();
+    .unwrap()
+    .stats;
     // The full /tm- skill portfolio deploys on first install: 21 skills total
     // — 19 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
     // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,

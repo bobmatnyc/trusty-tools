@@ -332,6 +332,40 @@ PM skills loaded from `.claude/skills/` when relevant context detected:
 
 `tm-git-file-tracking` | `tm-pr-workflow` | `tm-delegation-patterns` | `tm-verification-protocols` | `tm-bug-reporting` | `tm-teaching-templates` | `tm-agent-architecture` | `tm-tool-usage-guide` | `tm-session-management` | `tm-circuit-breaker` | `tm-workflow` | `tm-adr` | `tm-postmortem` | `tm-ticketing` | `tm-doctor`
 
+Skills deploy into each project's own `.claude/skills/`, so Claude Code
+discovers them per-project. Beyond the bundled `/tm-*` portfolio, two custom
+tiers are supported (see **Skill Deployment**).
+
+## Skill Deployment
+
+Deployed per-project into `<project>/.claude/skills/<name>/SKILL.md`.
+Precedence on name collision: **project-custom > user-custom > bundled**.
+
+- **project-custom** — a skill you hand-place in `<project>/.claude/skills/`.
+  It is absent from `.trusty-mpm-skills-manifest.json`, so the deployer treats
+  it as user-owned and NEVER overwrites it on redeploy. Highest precedence.
+- **user-custom** — a skill authored once in `~/.trusty-mpm/skills/`; deployed
+  into every project, overriding a same-named bundled skill.
+- **bundled** — the shipped `/tm-*` portfolio (source `~/.trusty-mpm/framework/skills/`).
+
+Lower-tier copies of a colliding name are skipped and logged. A skill whose
+name (slug) contains `mcp` is never deployed (it would shadow Claude Code's
+built-in `/mcp`).
+
+A bundled or user-custom skill you hand-edit in place after it deploys is
+frozen going forward (checksum no longer matches, so redeploy skips it) —
+the same protection project-custom gets, just not logged as a tier collision
+since there's no competing source to name. Removing a skill's source from
+`~/.trusty-mpm/skills/` does NOT retract an already-deployed copy in any
+project — orphaned copies are left in place by design, matching how a removed
+bundled skill also stays deployed until pruned.
+
+The **tm-global roster** (the shared `CLAUDE_CONFIG_DIR` every daemon-managed
+and standalone `tm run` session points at) deploys the user-custom tier too —
+a skill in `~/.trusty-mpm/skills/` reaches every session, not just per-project
+ones. The project-custom tier is naturally absent there (nothing hand-places a
+skill directly into the config dir).
+
 ## Agent Deployment
 
 Cache: `~/.trusty-mpm/framework/agents/`.

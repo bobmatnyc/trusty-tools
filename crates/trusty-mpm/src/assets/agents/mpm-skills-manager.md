@@ -27,6 +27,44 @@ Skills are Markdown documents that provide reusable, invokable knowledge to agen
   templates, ticketing, PR workflow, delegation patterns, session
   management, bug reporting, and `tm-doctor`)
 
+### Skill Tiers & Precedence (issue #2816)
+Skills deploy per-project into `<project>/.claude/skills/<name>/SKILL.md`.
+On a name collision, precedence is **project-custom > user-custom > bundled**:
+
+1. **project-custom** — hand-placed in `<project>/.claude/skills/`. Absent from
+   the deploy manifest (`.trusty-mpm-skills-manifest.json`), so it is treated as
+   user-owned and NEVER overwritten on redeploy. This is the intended way to
+   add a project-only skill.
+2. **user-custom** — authored in `~/.trusty-mpm/skills/` (NOT under
+   `framework/`, which is trusty-mpm-owned). Deployed into every project;
+   overrides a same-named bundled skill. Deployed in full — not filtered by a
+   harness manifest's bundled include/exclude.
+3. **bundled** — the shipped `/tm-*` portfolio from `~/.trusty-mpm/framework/skills/`.
+
+Precedence and shadow logging live in `core::skill_tiers` (pure planner
+`plan_skill_tiers` + orchestrator `deploy_all_skill_tiers`); per-file ownership
+is enforced by the `core::skill_deployer` manifest model. This mirrors the
+user-level agent source and the agent-precedence work in #387 / #2786.
+
+Two edge cases worth knowing: (a) hand-editing an already-deployed bundled or
+user-custom skill in place freezes it going forward — the checksum no longer
+matches, so redeploy skips it, same protection project-custom gets, just not
+logged as a collision since there's no competing source name to blame; (b)
+deleting a skill's source file from `~/.trusty-mpm/skills/` does NOT retract
+copies already deployed into projects — orphaning is by design (mirrors how a
+bundled skill removed from the portfolio also stays deployed until an explicit
+`tm catalog apply --prune`), not a bug to fix.
+
+**The tm-global roster deploys the user tier too.** `managed_config::ensure_managed_config_dir`
+(daemon-managed sessions) and `standalone::global_config::ensure_global_config_dir`
+(`tm run`/`tm load`/`tm login`) both bootstrap the shared `CLAUDE_CONFIG_DIR`
+via `deploy_all_skill_tiers` with `fw.user_skill_source_dir()` as the user
+tier — a skill authored in `~/.trusty-mpm/skills/` reaches every session, not
+just per-project deploys, per the stated intent that user-custom skills apply
+everywhere. The project-custom tier is naturally empty at this destination
+(nothing hand-places a skill directly into the config dir's `skills/`), so no
+special-casing was needed there.
+
 ### Skill Structure
 A valid skill file must have:
 ```markdown

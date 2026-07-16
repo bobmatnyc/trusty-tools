@@ -32,6 +32,19 @@ pub struct FrameworkPaths {
     pub agents: PathBuf,
     /// `~/.trusty-mpm/framework/skills`
     pub skills: PathBuf,
+    /// `~/.trusty-mpm/skills` — the USER-level custom skill *source* directory.
+    ///
+    /// Why: users need a single place to author their own skills once and have
+    /// them deployed into every project's session, ranking above the bundled
+    /// framework skills but below a project's own hand-placed skills (issue
+    /// #2816). This is the skills sibling of the documented user-level agent
+    /// source `~/.trusty-mpm/agents/`. It sits DIRECTLY under the framework
+    /// root — deliberately NOT nested under `framework/`, which is the
+    /// trusty-mpm-owned, auto-materialized bundled tree the user must not edit.
+    /// What: `<root>/skills` (i.e. `~/.trusty-mpm/skills` for the default
+    /// home-rooted layout). Absent by default; deployment treats a missing
+    /// directory as an empty tier.
+    pub user_skills: PathBuf,
     /// `~/.trusty-mpm/framework/hooks`
     pub hooks: PathBuf,
     /// `~/.trusty-mpm/framework/instructions`
@@ -114,6 +127,7 @@ impl FrameworkPaths {
         Self {
             agents: framework.join("agents"),
             skills: framework.join("skills"),
+            user_skills: root.join("skills"),
             hooks: framework.join("hooks"),
             instructions: framework.join("instructions"),
             registry: root.join("registry"),
@@ -333,6 +347,23 @@ impl FrameworkPaths {
         self.skills.clone()
     }
 
+    /// Directory holding the USER-level custom skill *source* files
+    /// (`~/.trusty-mpm/skills`).
+    ///
+    /// Why: the skill deploy step reads this tier's `.md` files and deploys
+    /// them into each project's `.claude/skills/`, ranking above the bundled
+    /// framework skills so a user can override or extend the shipped portfolio
+    /// once, globally (issue #2816). Unlike [`skill_source_dir`](Self::skill_source_dir)
+    /// this NEVER consults the `agents/skills` submodule — the user tier is the
+    /// operator's own directory, distinct from both the bundled source and the
+    /// per-project deploy destination.
+    /// What: returns `<root>/skills` (`self.user_skills`). The directory is
+    /// optional; callers treat a non-existent path as an empty tier.
+    /// Test: `user_skill_source_dir_is_dotmpm_skills`.
+    pub fn user_skill_source_dir(&self) -> PathBuf {
+        self.user_skills.clone()
+    }
+
     /// Directory Claude Code reads composed agent files from (`~/.claude/agents`).
     ///
     /// Why: the deploy step writes inheritance-flattened agents here so Claude
@@ -466,6 +497,9 @@ mod tests {
             paths.skills,
             PathBuf::from("/base/.trusty-mpm/framework/skills")
         );
+        // The USER-level custom skill tier sits directly under the framework
+        // root, NOT nested under `framework/` (that tree is trusty-mpm-owned).
+        assert_eq!(paths.user_skills, PathBuf::from("/base/.trusty-mpm/skills"));
         assert_eq!(
             paths.hooks,
             PathBuf::from("/base/.trusty-mpm/framework/hooks")
@@ -532,6 +566,13 @@ mod tests {
         assert_eq!(managed_project.root, from_root.root);
         assert_eq!(managed_project.agents, from_root.agents);
         assert_eq!(managed_project.skills, from_root.skills);
+        // The user-level custom skill source is home-global too — a managed
+        // project must read it from the shared framework root, not the repo.
+        assert_eq!(managed_project.user_skills, from_root.user_skills);
+        assert_eq!(
+            managed_project.user_skill_source_dir(),
+            from_root.user_skill_source_dir()
+        );
         assert_eq!(managed_project.hooks, from_root.hooks);
         assert_eq!(managed_project.instructions, from_root.instructions);
         assert_eq!(managed_project.registry, from_root.registry);
@@ -666,6 +707,22 @@ mod tests {
             paths.claude_skills_dir(),
             PathBuf::from("/base/.claude/skills")
         );
+    }
+
+    #[test]
+    fn user_skill_source_dir_is_dotmpm_skills() {
+        // The user-level custom skill tier resolves to `<root>/skills`
+        // (`~/.trusty-mpm/skills`) and must NEVER be diverted to the
+        // `agents/skills` submodule the bundled `skill_source_dir()` prefers.
+        let mut paths = FrameworkPaths::under("/base");
+        paths.trusty_mpm_root = Some(PathBuf::from("/some/checkout"));
+        assert_eq!(
+            paths.user_skill_source_dir(),
+            PathBuf::from("/base/.trusty-mpm/skills")
+        );
+        // Distinct from both the bundled source and the deploy destination.
+        assert_ne!(paths.user_skill_source_dir(), paths.skills);
+        assert_ne!(paths.user_skill_source_dir(), paths.claude_skills_dir());
     }
 
     #[test]
