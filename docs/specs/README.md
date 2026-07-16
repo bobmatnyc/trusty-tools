@@ -47,7 +47,7 @@ that governs it.
 | DOC-35 | `SPEC-PROJCTL-01~draft` … `-08~draft` | [`tm project`: Deterministic Project/Session Control Plane (CLI + Multipane TUI)](./tm-project-control-plane.md) | trusty-mpm — control plane / CLI / TUI / daemon API |
 | DOC-36 | `SPEC-TMMGR-01~approved` … `-06~approved` | [`tm manager`: Layer-3 Chat-Based Portfolio Project Manager](./tm-manager-vision.md) | trusty-mpm — daemon / inference layer / external channels |
 | DOC-38 | `SPEC-SLD-01~draft` … `-03~draft` | [Spec-Linked Documentation (SLD): A Language-Agnostic Source↔Spec Reference Standard](./spec-linked-documentation.md) | documentation standard — repository/language-agnostic (informative reference: trusty-common `intent_source`) |
-| DOC-39 | `SPEC-TCUI-01~draft` … `-08~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
+| DOC-39 | `SPEC-TCUI-01~draft` … `-09~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))

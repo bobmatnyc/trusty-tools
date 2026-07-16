@@ -275,16 +275,25 @@ MUST **hide** (not fake, not error) git-only affordances.
 **AC-2.4** The project name attaches to the workstream on bind and appears in the
 header switcher and status bar (7b).
 
-**API reconciliation (the two surfaces disagree today):**
+**API reconciliation (the two surfaces disagree today) — corrected:**
 
-- `task.run` takes `project: PathBuf` — **REQUIRED** (`task/protocol.rs:48`). Projectless
-  is therefore **impossible today**. It MUST become `Option<PathBuf>`.
-- `session.create` takes `project: Option<String>` — an **untyped label**
-  (`protocol.rs:157`), disconnected from the path `task.run` demands.
+- `task.run`'s per-request params carry **no project field at all** —
+  `TaskRunRequestParams` (`task/protocol.rs:61-91`) has none. The `project: PathBuf` at
+  `task/protocol.rs:48` is a parameter to `register()`, wired **once at daemon-boot time**:
+  `serve::build_router(project: PathBuf)` (`serve/mod.rs:91`) receives it from the process's
+  own startup arguments and passes it once into
+  `task::protocol::register(&mut router, sessions.clone(), project, agents_dir)`
+  (`serve/mod.rs:97`), which closes over it for the life of the router. Projectless is
+  therefore **not a request-DTO type swap** — it is a **daemon-bootstrap / binding-lifecycle**
+  change: `build_router` (and everything it wires) MUST accept an absent binding, and every
+  session the daemon creates for the life of that process inherits it.
+- `session.create` takes `project: Option<String>` — an **untyped, per-request label**
+  (`protocol.rs:157`), disconnected from the path baked into the daemon at boot.
 
-These MUST converge on **one** typed project binding owned by the workstream. A label
-that cannot be indexed and a path that cannot be omitted are two halves of one missing
-object. See §5.5.
+These MUST converge on **one** typed project binding, resolved **once when the daemon
+starts** and carried by every session it creates for that process's lifetime. A
+per-request label that cannot be indexed and a boot-time path that cannot be omitted are
+two halves of one missing object, on two different lifecycles. See §5.5.
 
 #### 4.2.1 Directory inspection — the 7a picker is a daemon capability
 
@@ -781,19 +790,31 @@ single-operator client, which is why this is not a Phase-1 blocker.
 
 ### 5.5 Project binding (PARTIAL — the two surfaces must converge)
 
+**Corrected model** (§4.2) — this is a **daemon-bootstrap / binding-lifecycle** change,
+not a per-request DTO type swap: `task.run` never had a project field on its request
+params, so there is no request type to widen. The change is to what the daemon is
+willing to *start* without, and to what every session it creates then inherits.
+
 ```rust
-// task/protocol.rs:48 — REQUIRED today; projectless is impossible
-project: PathBuf            →  project: Option<ProjectBinding>
-// protocol.rs:157 — untyped label, disconnected from the path above
-project: Option<String>     →  project: Option<ProjectBinding>
+// task/protocol.rs:48 — register()'s parameter, bound ONCE at daemon-boot time via
+// serve/mod.rs:91 build_router(project: PathBuf) → serve/mod.rs:97
+// task::protocol::register(&mut router, sessions, project, agents_dir).
+// TaskRunRequestParams (task/protocol.rs:61-91) carries no project field to change.
+project: PathBuf            →  binding: ProjectBinding   // register()'s / build_router()'s param
+
+// protocol.rs:157 — untyped, PER-REQUEST label, disconnected from the boot-time path above
+project: Option<String>     →  project: Option<PathBuf>  // resolved into ProjectBinding per call
 
 enum ProjectBinding { None, Directory(PathBuf), GitRepo(PathBuf) }  // §4.2's three states
 ```
 
-**AC-16.1** `task.run` accepts **no project** and the daemon runs projectless.
-**AC-16.2** `session.create` and `task.run` share **one** binding type. Today one takes a
-path it cannot omit and the other a label it cannot index; that is one object split in
-half across two surfaces.
+**AC-16.1** The daemon itself MUST be startable with **no project bound** — `build_router`
+and `register` MUST accept an absent binding — since `task.run`'s own request params never
+carried one to begin with; a session created against such a daemon is projectless.
+**AC-16.2** `session.create`'s per-request binding and the daemon's boot-time binding share
+**one** typed binding. Today one is a boot-time path that cannot be omitted and the other
+is a per-request label that cannot be indexed; that is one object split in half across two
+surfaces on two different lifecycles (process-lifetime vs. per-call).
 **AC-16.3** The binding distinguishes non-git from git (§4.2) — non-git indexing already
 ships (#2728/#2747, `run_task/mod.rs:100-107`).
 
@@ -933,9 +954,15 @@ Phase 1's events against today's non-durable registry.
 
 **Projectless is Phase 1.** Rationale, stated deliberately:
 
-- It is a **type change, not a subsystem** — `project: PathBuf` → `Option<...>`
-  (`task/protocol.rs:48`) plus reconciling `session.create`'s untyped label (§5.5).
-  Small, mechanical, and testable.
+- It is a **daemon-bootstrap / binding-lifecycle change, not a request-DTO type swap**
+  (§4.2, §5.5) — `task/protocol.rs:48`'s `project: PathBuf` is `register()`'s parameter,
+  wired once at process startup via `serve::build_router` (`serve/mod.rs:91,97`), not a
+  field on `task.run`'s own request params. Making it optional touches the daemon's
+  startup path (CLI arg parsing → `build_router` → `register`) and how an absent binding
+  then propagates to every session the process creates — plus reconciling
+  `session.create`'s untyped per-request label (§5.5) onto that same typed binding. Still
+  Phase-1-sized and still mechanical, but it is a boot-time binding-lifecycle concern, not
+  a leaf-node signature edit — size and review it accordingly.
 - It is **load-bearing for the shell**: principle 4 says cold start is the empty state
   of the same shell. **Today the empty state is not merely unstyled — it is
   unreachable**, because `task.run` cannot be called without a project. Screen 7a is
@@ -1124,3 +1151,18 @@ This is carried forward verbatim because it is the one piece of the visual syste
   strictly less powerful — and #2747's `allow_sensitive_path` guards *indexing*, not path
   listing, so it is not precedent here. No TCC permission-state machine; index readiness
   (§4.3) remains the empty/degraded-state inventory's real member.
+- **2026-07-16** — **Review-fix amendment** (PR #2855 review). Corrects §4.2, §5.5, and
+  §6.2.1's claim that `task.run` "takes `project: PathBuf` — REQUIRED (`task/protocol.rs:48`)"
+  as a per-request field: `task/protocol.rs:48` is `register()`'s parameter, wired **once at
+  daemon-boot time** (`serve::build_router`, `serve/mod.rs:91,97`) — `TaskRunRequestParams`
+  (`task/protocol.rs:61-91`) never carried a project field to begin with. Projectless is
+  therefore a **daemon-bootstrap / binding-lifecycle** change, not the request-DTO
+  `project: PathBuf → Option<ProjectBinding>` type swap the spec previously described; §6.2.1's
+  "a type change, not a subsystem — small, mechanical, testable" sizing claim is corrected to
+  match. The corrected binding model matches what **PR #2860** (`feat-tcode-api-projectless`,
+  open) actually implements: a `binding::ProjectBinding` enum (`None` / `Directory(PathBuf)` /
+  `GitRepo(PathBuf)` — exactly §4.2's three states) threaded as `ProjectBinding` (not
+  `Option<ProjectBinding>`) through `build_router`/`task::protocol::register` at boot time, and
+  `session.create`'s `CreateParams.project` retyped from the untyped label to `Option<PathBuf>`
+  resolved per-call via `ProjectBinding::resolve`. Also syncs the `docs/specs/README.md`
+  DOC-39 catalog row to `SPEC-TCUI-01~draft` … `-09~draft` (it had not been bumped for §2.1).
