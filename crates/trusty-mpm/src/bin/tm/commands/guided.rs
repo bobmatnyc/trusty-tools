@@ -106,12 +106,24 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             // this pane's own foreground command (the caller's pane_id is
             // forwarded so the daemon treats it as idle). It still refuses
             // when the runtime is genuinely live in a SIBLING window.
+            //
+            // #2794: we are HERE only because `pane_identity_confirmed` proved,
+            // via the stable tmux `pane_id`, that this process is inside
+            // `record`'s OWN pane — and the agent has provably exited (a live
+            // agent could not have handed this pane back to a shell for bare
+            // `tm` to run in). That is authoritative proof-of-death the daemon's
+            // tmux-pane liveness probe cannot see, so forward it
+            // (`pane_confirmed_dead = true`): it lets the daemon reconcile a
+            // zombie-`Active` record whose pane still reads busy (the requesting
+            // `tm`, or a not-yet-reaped child) instead of 409-dead-ending — the
+            // reported bug. A genuinely live SIBLING window still blocks it.
             match super::guided_inplace::run_inplace_relaunch(
                 client,
                 url,
                 &record.id,
                 record.clone(),
                 current_pane_id.as_deref(),
+                true,
             )
             .await
             {
@@ -164,12 +176,18 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             // never an unconditional exec.
             NestedFallbackAction::RelaunchInPlace => {
                 let current_pane_id = super::tmux_attach::current_tmux_pane_id();
+                // #2794: this is a session-name-only match (pane identity NOT
+                // confirmed), so we have no proof-of-death for a specific pane —
+                // pass `false` and let the daemon's ordinary probe decide. The
+                // dead states that reach here (stopped/decommissioned) reactivate
+                // directly anyway; `errored` falls to the probe path unchanged.
                 match super::guided_inplace::run_inplace_relaunch(
                     client,
                     url,
                     &record.id,
                     record.clone(),
                     current_pane_id.as_deref(),
+                    false,
                 )
                 .await
                 {
@@ -555,32 +573,34 @@ pub(crate) fn nested_guard_notice(name: &str) -> String {
     format!("not nesting a new session here; reconnecting to '{name}' instead…")
 }
 
-/// Actionable hint (#2789) printed when bare `tm` runs inside a managed
-/// session's OWN pane (pane identity confirmed) but the in-place relaunch could
-/// not proceed.
+/// Actionable hint (#2789, corrected #2794) printed when bare `tm` runs inside
+/// a managed session's OWN pane (pane identity confirmed) but the in-place
+/// relaunch could not proceed.
 ///
 /// Why: reconnecting to the very session whose pane the operator is already
 /// inside is a `switch-client` no-op that strands them in a bare shell — the
 /// reported dead-end (`tm-cto-01` transcript). When the in-place relaunch
 /// cannot run (a genuinely live sibling window, a daemon predating the
 /// caller-pane reconcile, or a failed `exec`), the honest response is to tell
-/// the operator how to relaunch the agent in THIS pane themselves rather than
-/// pretend a reconnect happened.
-/// What: a single-line hint. When `record.claude_session_id` is present, it
-/// suggests `claude --resume <id>` (resume the exact conversation); otherwise a
-/// bare `claude`. Pure — takes an already-fetched record, returns the string.
-/// Test: `inplace_self_relaunch_hint_uses_resume_when_session_id_present`,
-/// `inplace_self_relaunch_hint_bare_claude_when_no_session_id`.
+/// the operator how to relaunch the agent themselves. #2794: the prior wording
+/// suggested a bare `claude` (or `claude --resume <id>`), which is WRONG — a
+/// raw `claude` launches OUTSIDE the managed session, dropping the tm-owned
+/// `CLAUDE_CONFIG_DIR`, the agent roster, and the persona (the DOC-34 managed
+/// config). The managed relaunch is `tm sessions resume <id>`, which re-spawns
+/// the runtime with the full managed environment intact — that is the only
+/// correct advice, so the hint always points there.
+/// What: a single-line hint suggesting `tm sessions resume <managed-id>`
+/// (`record.id`, the managed session id — NOT the claude conversation id). Pure
+/// — takes an already-fetched record, returns the string.
+/// Test: `inplace_self_relaunch_hint_suggests_managed_resume`,
+/// `inplace_self_relaunch_hint_never_suggests_bare_claude`.
 pub(crate) fn inplace_self_relaunch_hint(
     record: &trusty_mpm::client::ManagedSessionSummary,
 ) -> String {
-    let relaunch = match record.claude_session_id.as_deref() {
-        Some(sid) if !sid.trim().is_empty() => format!("claude --resume {sid}"),
-        _ => "claude".to_string(),
-    };
     format!(
         "tm: you are already inside this session's pane — its agent has exited; \
-         relaunch it here with:  {relaunch}"
+         relaunch it as a managed session with:  tm sessions resume {}",
+        record.id
     )
 }
 
