@@ -18,7 +18,10 @@
 //! a `mode` param routes to trusty-search's real lanes: `semantic`
 //! (`search_semantic`), `symbol` (`search_kg`), and `grep` (`grep`). One tool
 //! keeps the advertised schema surface minimal and mirrors trusty-search's own
-//! lane taxonomy. Any spawn/handshake/timeout/`STAGE_NOT_READY`/missing-index
+//! lane taxonomy. A `STAGE_NOT_READY` on the semantic/symbol lane (the vector
+//! stage is still building on a freshly-indexed repo) transparently retries via
+//! the always-available lexical lane and returns those degraded hits instead of
+//! empty (issue #2783). Any remaining spawn/handshake/timeout/missing-index
 //! condition is fail-open: a non-error `ToolResult` telling the model to use
 //! the local `grep`/`glob` tools instead.
 //! Test: `tests::pick_index_prefers_exact_match`,
@@ -26,7 +29,10 @@
 //! `tests::execute_fail_open_when_binary_absent`,
 //! `tests::execute_rejects_malformed_args_recoverably`,
 //! `tests::schema_advertises_mode_and_query`, `tests::mcp_text_extracts_content`,
-//! `tests::is_mcp_error_detects_error_flag`.
+//! `tests::is_mcp_error_detects_error_flag`,
+//! `tests::is_stage_not_ready_detects_meta_and_text`,
+//! `tests::should_lexical_fallback_only_for_stage_not_ready`,
+//! `tests::lexical_params_matches_search_lexical_schema`.
 
 use std::path::{Path, PathBuf};
 
@@ -255,6 +261,81 @@ fn is_mcp_error(result: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether an MCP error result specifically signals a not-yet-ready index stage.
+///
+/// Why: on a freshly-indexed large repo the semantic (Stage 2) and KG (Stage 3)
+/// lanes can stay building for many minutes while the lexical lane is already
+/// serving. That transient warm-up window is recoverable via a lexical retry,
+/// unlike a genuinely missing index or a dead daemon — so it must be told apart
+/// from other in-band errors (issue #2783).
+/// What: `true` when trusty-search's structured `_meta.error_code` is
+/// `STAGE_NOT_READY`; falls back to a literal-text probe when `_meta` is absent.
+/// Test: `tests::is_stage_not_ready_detects_meta_and_text`.
+fn is_stage_not_ready(result: &Value) -> bool {
+    let meta_code = result
+        .get("_meta")
+        .and_then(|m| m.get("error_code"))
+        .and_then(Value::as_str);
+    if meta_code == Some("STAGE_NOT_READY") {
+        return true;
+    }
+    mcp_text(result)
+        .map(|t| t.contains("STAGE_NOT_READY"))
+        .unwrap_or(false)
+}
+
+/// Whether a not-ready lane error should be retried on the lexical lane.
+///
+/// Why: only the semantic/symbol lanes gate on a warm-up stage; the `grep` lane
+/// is itself lexical, so a `grep` error is never a stage-not-ready condition to
+/// re-route. Isolating the decision keeps `execute` linear and unit-testable
+/// without a live daemon (issue #2783).
+/// What: `true` when the lane errored with STAGE_NOT_READY and `mode` is not
+/// already `grep`.
+/// Test: `tests::should_lexical_fallback_only_for_stage_not_ready`.
+fn should_lexical_fallback(mode: &str, result: &Value) -> bool {
+    mode != "grep" && is_stage_not_ready(result)
+}
+
+/// Build the `search_lexical` MCP arguments for a stage-not-ready retry.
+///
+/// Why: the lexical lane is always available on any indexed project, so it is
+/// the safe degraded path while embeddings finish building (issue #2783).
+/// What: mirrors trusty-search's `search_lexical` schema (`index_id`, `query`,
+/// `top_k`).
+/// Test: `tests::lexical_params_matches_search_lexical_schema`.
+fn lexical_params(index_id: &str, query: &str, top_k: usize) -> Value {
+    json!({ "index_id": index_id, "query": query, "top_k": top_k })
+}
+
+/// Retry a not-ready semantic/symbol query on the lexical lane.
+///
+/// Why: rather than returning empty and pushing the model back to ad-hoc grep
+/// (which a daily-driver probe showed derails discovery onto lookalike
+/// functions), transparently serve the always-available lexical results during
+/// the embedding warm-up window (issue #2783).
+/// What: calls `search_lexical`; returns the result text on success, or `None`
+/// when the call fails or itself errors (so the caller falls through to the
+/// grep/glob hint).
+/// Test: exercised end-to-end where a live daemon is available; the decision and
+/// argument shaping are covered by `should_lexical_fallback_*` /
+/// `lexical_params_*`.
+async fn lexical_fallback(
+    client: &mut StdioMcpClient,
+    index_id: &str,
+    query: &str,
+    top_k: usize,
+) -> Option<String> {
+    let result = client
+        .call_tool("search_lexical", lexical_params(index_id, query, top_k))
+        .await
+        .ok()?;
+    if is_mcp_error(&result) {
+        return None;
+    }
+    mcp_text(&result)
+}
+
 /// Build the MCP arguments for `mode`, returning the tool name + params.
 ///
 /// Why: keeps `execute` linear — each mode maps to one trusty-search lane with
@@ -384,6 +465,19 @@ impl ToolExecutor for TrustySearchTool {
 
         if is_mcp_error(&result) {
             let detail = mcp_text(&result).unwrap_or_default();
+            // Warm-up window: the semantic/KG stage isn't built yet, but the
+            // lexical lane is always available. Retry transparently and serve
+            // the (degraded) lexical hits rather than empty — so discovery still
+            // works while embeddings finish building (issue #2783).
+            if should_lexical_fallback(mode, &result)
+                && let Some(id) = session.index_id.as_deref()
+                && let Some(text) = lexical_fallback(&mut client, id, &parsed.query, top_k).await
+            {
+                return ToolResult::ok(format!(
+                    "trusty-search's semantic index is still building; \
+                     showing lexical (exact-match) results instead:\n{text}"
+                ));
+            }
             warn!(
                 tool,
                 detail, "search_code: trusty-search returned an error (fail-open)"

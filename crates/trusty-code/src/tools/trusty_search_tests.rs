@@ -90,6 +90,58 @@ fn is_mcp_error_detects_error_flag() {
     assert!(!is_mcp_error(&json!({ "content": [] })));
 }
 
+// ── stage-not-ready → lexical fallback (issue #2783) ────────────────────────
+
+/// Why: the recoverable warm-up window must be told apart from other in-band
+/// errors — via the structured `_meta.error_code` and, defensively, the text.
+#[test]
+fn is_stage_not_ready_detects_meta_and_text() {
+    let meta = json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": "index not ready" }],
+        "_meta": { "error_code": "STAGE_NOT_READY" }
+    });
+    assert!(is_stage_not_ready(&meta));
+
+    let text_only = json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": "Error: STAGE_NOT_READY (stage 2)" }]
+    });
+    assert!(is_stage_not_ready(&text_only));
+
+    // A genuinely different error must NOT be treated as stage-not-ready.
+    let other = json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": "no index covers this project" }]
+    });
+    assert!(!is_stage_not_ready(&other));
+}
+
+/// Why: only the semantic/symbol lanes gate on a warm-up stage; a `grep` error
+/// is already lexical and must not re-route (would loop on the same lane).
+#[test]
+fn should_lexical_fallback_only_for_stage_not_ready() {
+    let not_ready = json!({ "isError": true, "_meta": { "error_code": "STAGE_NOT_READY" } });
+    assert!(should_lexical_fallback("semantic", &not_ready));
+    assert!(should_lexical_fallback("symbol", &not_ready));
+    // grep is itself the lexical lane — never re-route it.
+    assert!(!should_lexical_fallback("grep", &not_ready));
+
+    // A non-stage error on the semantic lane is NOT a lexical-retry candidate.
+    let other = json!({ "isError": true, "content": [{ "type": "text", "text": "boom" }] });
+    assert!(!should_lexical_fallback("semantic", &other));
+}
+
+/// Why: the retry must hit trusty-search's `search_lexical` lane with the exact
+/// argument shape it advertises (`index_id`, `query`, `top_k`).
+#[test]
+fn lexical_params_matches_search_lexical_schema() {
+    let params = lexical_params("trusty-tools", "apply_archive_downrank", 8);
+    assert_eq!(params["index_id"], "trusty-tools");
+    assert_eq!(params["query"], "apply_archive_downrank");
+    assert_eq!(params["top_k"], 8);
+}
+
 // ── build_call ──────────────────────────────────────────────────────────────
 
 /// Why: each mode must route to trusty-search's real lane with the right
