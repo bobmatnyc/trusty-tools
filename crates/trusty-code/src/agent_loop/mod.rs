@@ -1018,10 +1018,13 @@ fn build_output(transcript: &Transcript, perf: &PerfCollector) -> AgentOutput {
 /// — if `finish_args` deserialises into a `FinishTaskArgs` (it always should,
 /// since `dispatch_all` only calls this after a successful `finish_task`
 /// dispatch, which itself required a successful deserialisation) — overwrites
-/// `content` with [`crate::tools::render_finish_summary`] and sets `summary` to
-/// the model's own one-line `summary` field. On the (should-be-unreachable)
-/// deserialisation failure, falls back to the transcript-derived content
-/// `build_output` already computed, rather than panicking.
+/// `content` with [`crate::tools::render_finish_summary`], sets `summary` to
+/// the model's own one-line `summary` field, and (#2683) records the reported
+/// `status` in `finish_status` so a delegating caller can distinguish an
+/// explicit successful completion from any other termination. On the
+/// (should-be-unreachable) deserialisation failure, falls back to the
+/// transcript-derived content `build_output` already computed, rather than
+/// panicking.
 /// Test: `agent_loop::tests::explicit_finish_task_terminates_loop_with_structured_summary`.
 fn build_finish_output(
     transcript: &Transcript,
@@ -1032,6 +1035,7 @@ fn build_finish_output(
     if let Ok(parsed) = serde_json::from_value::<FinishTaskArgs>(finish_args.clone()) {
         output.summary = Some(parsed.summary.clone());
         output.content = crate::tools::render_finish_summary(&parsed);
+        output.finish_status = Some(parsed.status);
     }
     output
 }

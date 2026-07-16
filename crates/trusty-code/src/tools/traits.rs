@@ -193,10 +193,19 @@ pub struct RunContext {
 ///
 /// Why: Downstream phases need a concise `summary` for template substitution
 /// while also needing the full `content` for file extraction. Bundling them
-/// avoids separate trait methods.
+/// avoids separate trait methods. (#2683) A delegated engineer's caller (the
+/// PM's `delegate_to_agent` tool) also needs to know whether the agent
+/// terminated by an EXPLICIT, successful `finish_task` completion — that is the
+/// authoritative "the task is genuinely done" signal used to prevent a
+/// gratuitous post-finish re-delegation from mislabeling a complete run.
 /// What: `content` is raw agent output; `summary` is the extracted `## Summary`
-/// section (or a prefix fallback).
-/// Test: Constructed from IPC result messages in integration paths.
+/// section (or a prefix fallback); `finish_status` (#2683) is `Some` only when
+/// the loop ended via an accepted `finish_task` call, carrying that call's
+/// reported status.
+/// Test: Constructed from IPC result messages in integration paths;
+/// `finish_status` propagation is covered by
+/// `agent_loop::tests::explicit_finish_task_terminates_loop_with_structured_summary`
+/// and `tools::delegate::tests::completion_signal_latches_on_completed_finish`.
 #[derive(Debug, Clone)]
 pub struct AgentOutput {
     /// Raw output from the agent.
@@ -205,19 +214,25 @@ pub struct AgentOutput {
     pub summary: Option<String>,
     /// Aggregated LLM token usage for this invocation.
     pub usage: crate::perf::TokenUsage,
+    /// The status of an explicit `finish_task` completion, if the loop ended
+    /// via one (#2683). `None` when the run ended any other way (turn cap,
+    /// timeout, a plain no-tool-call stop, or an error).
+    pub finish_status: Option<crate::tools::finish_task::FinishStatus>,
 }
 
 impl AgentOutput {
     /// Build from content alone; summary/usage will be defaults.
     ///
     /// Why: Convenience constructor for simple agent results.
-    /// What: Sets `content`, leaves `summary` None, `usage` zeroed.
+    /// What: Sets `content`, leaves `summary` None, `usage` zeroed, and
+    /// `finish_status` None (no explicit finish observed).
     /// Test: Used in mock runners throughout this crate's tests.
     pub fn from_content(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
             summary: None,
             usage: crate::perf::TokenUsage::default(),
+            finish_status: None,
         }
     }
 
@@ -484,6 +499,7 @@ mod tests {
             content: "full content".into(),
             summary: Some("short summary".into()),
             usage: TokenUsage::default(),
+            finish_status: None,
         };
         assert_eq!(with_summary.summary_or_content(), "short summary");
 

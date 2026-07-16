@@ -31,13 +31,15 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::agent_loop::AgentLoopError;
 use crate::runner::RunnerError;
-use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
+use crate::tools::finish_task::FinishStatus;
+use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor, ToolResult};
 
 /// Detect whether an `AgentRunner` failure means the sub-agent's OWN attempt
 /// may have left partial work already on disk (turn cap, timeout,
@@ -99,20 +101,87 @@ pub(crate) fn redelegation_hint(err: &anyhow::Error) -> Option<&'static str> {
     }
 }
 
+/// Run-scoped latch recording that a delegated engineer already reported an
+/// EXPLICIT successful completion (`finish_task` with `status: completed`)
+/// during this run (#2683).
+///
+/// Why: The bake-off regression this closes is a PM that, after the engineer
+/// already called `finish_task` with all tests passing, fires ONE MORE
+/// gratuitous `delegate_to_agent` "re-verify" round; when that extra round
+/// then runs out of turns / wall-clock time, the run terminated mid-round and
+/// was mislabeled `partial`/exit-6 even though a complete, correct,
+/// all-tests-passing deliverable already sat on disk — corrupting run
+/// status/telemetry (issue #2683 recurrence comment, 2026-07-15). This shared
+/// latch is the authoritative "the task is genuinely done" signal: once set,
+/// [`DelegateToAgentTool`] refuses further re-delegation (part b of the fix)
+/// and `run_task::assemble_report` reports success rather than partial (the
+/// data-integrity half). Modeled as a cheap `Arc<AtomicBool>` handle,
+/// mirroring `run_task::redelegation::RedelegationCapSignal`, so the tool (the
+/// setter) and the report assembler (the reader) observe the SAME state.
+/// What: `new()` starts un-latched; `mark_completed` latches it (set only by
+/// [`DelegateToAgentTool::execute`] when the delegated runner returns an
+/// `AgentOutput` whose `finish_status` is `Some(FinishStatus::Completed)`);
+/// `is_completed` reads it. `Clone` shares the same underlying flag.
+/// Test: `tools::delegate::tests::completion_signal_latches_on_completed_finish`,
+/// `tools::delegate::tests::completion_signal_ignores_non_completed_finish`,
+/// `tools::delegate::tests::delegate_refused_once_engineer_completed`.
+#[derive(Debug, Clone, Default)]
+pub struct EngineerCompletionSignal(Arc<AtomicBool>);
+
+impl EngineerCompletionSignal {
+    /// Build a fresh, un-latched signal for one run.
+    ///
+    /// Why: Each `execute_run_task` call needs its OWN signal — a prior run's
+    /// completion must never leak into a later run's report.
+    /// What: `Self::default()`.
+    /// Test: `completion_signal_latches_on_completed_finish`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Latch the "engineer completed successfully" flag.
+    ///
+    /// Why: Called exactly once, the first time a delegation returns an explicit
+    /// successful `finish_task` completion.
+    /// What: Stores `true` with `SeqCst` (paired with `is_completed`'s load).
+    /// Test: `completion_signal_latches_on_completed_finish`.
+    pub(crate) fn mark_completed(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a delegated engineer has already completed successfully.
+    ///
+    /// Why: [`DelegateToAgentTool::execute`] reads this to refuse a gratuitous
+    /// re-delegation, and `run_task::assemble_report` reads it to report
+    /// success instead of partial.
+    /// What: Loads the latched flag.
+    /// Test: `completion_signal_latches_on_completed_finish`.
+    pub fn is_completed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// Tool executor that delegates a task to a named sub-agent.
 ///
 /// Why: Encapsulates the `delegate_to_agent` tool so the PM loop registers a
 /// single `Arc<dyn ToolExecutor>` rather than branching on the tool name inline.
-/// What: Holds an `AgentRunner` for subprocess/in-process dispatch and an
-/// optional `config_dir` for pre-flight agent name validation.
+/// What: Holds an `AgentRunner` for subprocess/in-process dispatch, an optional
+/// `config_dir` for pre-flight agent name validation, and (#2683) an optional
+/// shared [`EngineerCompletionSignal`] used to refuse a re-delegation once the
+/// engineer has already reported a successful `finish_task` completion.
 /// Test: `unknown_agent_returns_helpful_error`, `known_agent_reaches_runner`,
-/// `no_config_dir_skips_validation`.
+/// `no_config_dir_skips_validation`, `delegate_refused_once_engineer_completed`.
 pub struct DelegateToAgentTool {
     runner: Arc<dyn AgentRunner>,
     /// Directory holding `<agent>.toml` files. When `Some`, `execute()` rejects
     /// calls whose `agent_name` does not have a matching TOML. When `None`,
     /// validation is skipped (legacy / test mode).
     config_dir: Option<PathBuf>,
+    /// Shared, run-scoped completion latch (#2683). When `Some` and already
+    /// latched, `execute()` refuses further delegation with a recoverable error
+    /// that nudges the PM to call `finish_task`. When `None` (the default /
+    /// legacy path), the refusal behaviour is disabled entirely.
+    completion_signal: Option<EngineerCompletionSignal>,
 }
 
 impl DelegateToAgentTool {
@@ -128,6 +197,7 @@ impl DelegateToAgentTool {
         Self {
             runner,
             config_dir: None,
+            completion_signal: None,
         }
     }
 
@@ -141,6 +211,25 @@ impl DelegateToAgentTool {
     /// Test: `unknown_agent_returns_helpful_error`.
     pub fn with_config_dir(mut self, dir: PathBuf) -> Self {
         self.config_dir = Some(dir);
+        self
+    }
+
+    /// Attach a shared [`EngineerCompletionSignal`] so a re-delegation after a
+    /// successful engineer completion is refused (#2683).
+    ///
+    /// Why: Once the delegated engineer has reported an explicit successful
+    /// `finish_task` completion, any further `delegate_to_agent` call is the
+    /// gratuitous post-finish re-delegation that mislabels a complete run as
+    /// `partial`; refusing it (and nudging the PM to `finish_task` instead) is
+    /// the "do not re-delegate once the finish gate is satisfied" half of the
+    /// fix. `run_task::execute_run_task` shares the SAME signal instance with
+    /// `assemble_report`.
+    /// What: Builder-style setter; returns `self` for chaining. When unset (the
+    /// default), the refusal behaviour is disabled and this tool behaves
+    /// exactly as before.
+    /// Test: `delegate_refused_once_engineer_completed`.
+    pub fn with_completion_signal(mut self, signal: EngineerCompletionSignal) -> Self {
+        self.completion_signal = Some(signal);
         self
     }
 
@@ -204,6 +293,26 @@ impl ToolExecutor for DelegateToAgentTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
+        // #2683: once the delegated engineer has already reported a successful
+        // `finish_task` completion, refuse any further delegation BEFORE
+        // parsing/validating args or invoking the runner. This is the "do not
+        // re-delegate once the finish gate is satisfied" half of the fix: the
+        // deliverable is on disk and the task is done, so a re-verify round is
+        // gratuitous — nudge the PM to `finish_task` instead of spawning
+        // another engineer loop that can only end the run mid-round and
+        // mislabel it `partial`. Recoverable (not fatal) so the PM's loop
+        // continues and can act on the guidance.
+        if let Some(signal) = &self.completion_signal
+            && signal.is_completed()
+        {
+            return ToolResult::err(
+                "delegate_to_agent refused: the delegated engineer already reported a \
+                 successful completion (finish_task with status=completed) for this run. \
+                 The deliverable is on disk and the task is done — do NOT re-delegate to \
+                 re-verify. Call finish_task now to report the result.",
+            );
+        }
+
         let Some(agent_name) = args.get("agent_name").and_then(Value::as_str) else {
             return ToolResult::err("delegate_to_agent: missing 'agent_name'");
         };
@@ -247,7 +356,16 @@ impl ToolExecutor for DelegateToAgentTool {
         }
 
         match self.runner.run(agent_name, task).await {
-            Ok(out) => ToolResult::ok(out.content),
+            Ok(out) => {
+                // #2683: latch the run-scoped completion signal when the engineer
+                // terminated via an EXPLICIT successful `finish_task` — the
+                // authoritative "task is genuinely done" signal both the refusal
+                // above and `run_task::assemble_report` key off. A `failed` /
+                // `cancelled` finish, or a plain no-tool-call stop, does NOT
+                // latch it: those leave re-delegation legitimately available.
+                self.mark_completion_if_finished(&out);
+                ToolResult::ok(out.content)
+            }
             Err(e) => {
                 let hint = redelegation_hint(&e).unwrap_or("");
                 ToolResult::err(format!("sub-agent '{agent_name}' failed: {e:#}{hint}"))
@@ -256,447 +374,27 @@ impl ToolExecutor for DelegateToAgentTool {
     }
 }
 
+impl DelegateToAgentTool {
+    /// Latch the shared completion signal iff `out` represents an explicit
+    /// successful `finish_task` completion (#2683).
+    ///
+    /// Why: Factored out of `execute` so the "what counts as a successful
+    /// completion" rule lives in one named place and is unit-testable.
+    /// What: No-op when no `completion_signal` is attached; otherwise latches it
+    /// only when `out.finish_status == Some(FinishStatus::Completed)`.
+    /// Test: `completion_signal_latches_on_completed_finish`,
+    /// `completion_signal_ignores_non_completed_finish`.
+    fn mark_completion_if_finished(&self, out: &AgentOutput) {
+        if let Some(signal) = &self.completion_signal
+            && out.finish_status == Some(FinishStatus::Completed)
+        {
+            signal.mark_completed();
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use serde_json::json;
-
-    use super::{DelegateToAgentTool, redelegation_hint};
-    use crate::agent_loop::AgentLoopError;
-    use crate::llm::LlmError;
-    use crate::runner::RunnerError;
-    use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor};
-
-    /// Recording mock runner.
-    ///
-    /// Why: Tests need to verify the runner was (or was not) invoked.
-    /// What: Records `(agent_name, task)` pairs in a Mutex-guarded Vec.
-    /// Test: `known_agent_reaches_runner`, `no_config_dir_skips_validation`.
-    struct RecordingRunner {
-        invoked: std::sync::Mutex<Vec<(String, String)>>,
-    }
-
-    #[async_trait]
-    impl AgentRunner for RecordingRunner {
-        async fn run(&self, agent_name: &str, task: &str) -> Result<AgentOutput> {
-            self.invoked
-                .lock()
-                .expect("lock poisoned")
-                .push((agent_name.to_string(), task.to_string()));
-            Ok(AgentOutput::from_content("ok"))
-        }
-    }
-
-    /// An unknown agent name returns a structured error listing available agents,
-    /// and the runner is NOT invoked.
-    ///
-    /// Why: Guards against hallucinated agent names causing confusing IO errors.
-    /// What: Calls `execute({"agent_name":"ghost",...})` with a tempdir
-    /// containing only `engineer.toml`; expects error with "ghost" and "engineer".
-    /// Test: This test.
-    #[tokio::test]
-    async fn unknown_agent_returns_helpful_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join("engineer.toml"),
-            "[agent]\nname = \"engineer\"\n",
-        )
-        .expect("write");
-        std::fs::write(
-            tmp.path().join("qa-agent.toml"),
-            "[agent]\nname = \"qa-agent\"\n",
-        )
-        .expect("write");
-
-        let runner = Arc::new(RecordingRunner {
-            invoked: std::sync::Mutex::new(Vec::new()),
-        });
-        let tool =
-            DelegateToAgentTool::new(runner.clone()).with_config_dir(tmp.path().to_path_buf());
-
-        let result = tool
-            .execute(json!({"agent_name": "ghost", "task": "do something"}))
-            .await;
-
-        assert!(result.is_error(), "must reject unknown agent");
-        let msg = result.content();
-        assert!(
-            msg.contains("Unknown agent 'ghost'"),
-            "error must name the unknown agent, got: {msg}"
-        );
-        assert!(
-            msg.contains("engineer") && msg.contains("qa-agent"),
-            "error must list available agents, got: {msg}"
-        );
-        assert!(
-            msg.contains("native tools"),
-            "error must clarify native-vs-agent, got: {msg}"
-        );
-        assert!(
-            runner.invoked.lock().expect("lock").is_empty(),
-            "runner must not be called when validation fails"
-        );
-    }
-
-    /// A valid agent name passes validation and reaches the runner.
-    ///
-    /// Why: Verify the happy-path dispatch contract.
-    /// What: Register `engineer.toml`, dispatch with `agent_name="engineer"`.
-    /// Test: This test.
-    #[tokio::test]
-    async fn known_agent_reaches_runner() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            tmp.path().join("engineer.toml"),
-            "[agent]\nname = \"engineer\"\n",
-        )
-        .expect("write");
-
-        let runner = Arc::new(RecordingRunner {
-            invoked: std::sync::Mutex::new(Vec::new()),
-        });
-        let tool =
-            DelegateToAgentTool::new(runner.clone()).with_config_dir(tmp.path().to_path_buf());
-
-        let result = tool
-            .execute(json!({"agent_name": "engineer", "task": "do the thing"}))
-            .await;
-
-        assert!(
-            !result.is_error(),
-            "valid agent should succeed: {}",
-            result.content()
-        );
-        let invoked = runner.invoked.lock().expect("lock");
-        assert_eq!(invoked.len(), 1, "runner should be called exactly once");
-        assert_eq!(invoked[0].0, "engineer");
-    }
-
-    /// Without `with_config_dir`, validation is skipped — the runner is invoked.
-    ///
-    /// Why: Preserves backward compatibility with callers that don't need
-    /// pre-flight validation (e.g. integration tests).
-    /// What: Construct tool without config_dir; any agent name reaches the runner.
-    /// Test: This test.
-    #[tokio::test]
-    async fn no_config_dir_skips_validation() {
-        let runner = Arc::new(RecordingRunner {
-            invoked: std::sync::Mutex::new(Vec::new()),
-        });
-        let tool = DelegateToAgentTool::new(runner.clone());
-
-        let result = tool
-            .execute(json!({"agent_name": "anything-goes", "task": "do it"}))
-            .await;
-
-        assert!(!result.is_error(), "legacy mode should bypass validation");
-        assert_eq!(runner.invoked.lock().expect("lock").len(), 1);
-    }
-
-    /// Missing `agent_name` field returns a structured error.
-    ///
-    /// Why: Guard against malformed LLM function call arguments.
-    /// What: `execute({})` without `agent_name` key.
-    /// Test: This test.
-    #[tokio::test]
-    async fn missing_agent_name_returns_error() {
-        let runner = Arc::new(RecordingRunner {
-            invoked: std::sync::Mutex::new(Vec::new()),
-        });
-        let tool = DelegateToAgentTool::new(runner);
-        let result = tool.execute(json!({"task": "something"})).await;
-        assert!(result.is_error());
-        assert!(result.content().contains("missing 'agent_name'"));
-    }
-
-    /// A path-traversal agent name is rejected before any filesystem access.
-    ///
-    /// Why: The LLM supplies `agent_name` which is joined into a filesystem path.
-    /// A crafted name like `../../etc/passwd` must be caught before the join to
-    /// prevent escaping the agents config directory.
-    /// What: Calls `execute` with a traversal string; asserts error and runner
-    /// not invoked.
-    /// Test: This test.
-    #[tokio::test]
-    async fn path_traversal_agent_name_is_rejected() {
-        let runner = Arc::new(RecordingRunner {
-            invoked: std::sync::Mutex::new(Vec::new()),
-        });
-        // No config_dir — traversal guard fires before config check.
-        let tool = DelegateToAgentTool::new(runner.clone());
-
-        for bad_name in &[
-            "../../etc/passwd",
-            "../sibling",
-            "agent/sub",
-            "agent name",
-            "",
-        ] {
-            let result = tool
-                .execute(json!({"agent_name": bad_name, "task": "do it"}))
-                .await;
-            assert!(
-                result.is_error(),
-                "traversal/invalid name '{bad_name}' must be rejected"
-            );
-            assert!(
-                result.content().contains("Invalid agent name"),
-                "error must describe the problem, got: {}",
-                result.content()
-            );
-        }
-        assert!(
-            runner.invoked.lock().expect("lock").is_empty(),
-            "runner must never be called for invalid names"
-        );
-    }
-
-    /// A valid agent name passes the sanitisation guard and reaches the runner.
-    ///
-    /// Why: Confirms the allowlist does not over-reject legitimate names.
-    /// What: `execute({"agent_name":"engineer",...})` without config_dir; runner
-    /// is called once.
-    /// Test: This test.
-    #[tokio::test]
-    async fn valid_agent_name_passes_sanitization() {
-        let runner = Arc::new(RecordingRunner {
-            invoked: std::sync::Mutex::new(Vec::new()),
-        });
-        let tool = DelegateToAgentTool::new(runner.clone());
-
-        for good_name in &["engineer", "qa-agent", "python_engineer", "rust-2024"] {
-            let result = tool
-                .execute(json!({"agent_name": good_name, "task": "do it"}))
-                .await;
-            assert!(
-                !result.is_error(),
-                "valid name '{good_name}' must be accepted: {}",
-                result.content()
-            );
-        }
-        assert_eq!(
-            runner.invoked.lock().expect("lock").len(),
-            4,
-            "runner must be called for each valid name"
-        );
-    }
-
-    /// Mock runner that always fails with a caller-supplied error.
-    ///
-    /// Why: `redelegation_hint` tests need to control exactly which
-    /// `RunnerError`/`AgentLoopError` shape `execute()` observes, without
-    /// driving a real `AgentLoop`.
-    /// What: `run` always returns `Err` built from the stored `anyhow::Error`
-    /// factory (a `Fn` so each call gets a fresh error, since `anyhow::Error`
-    /// is not `Clone`).
-    /// Test: `redelegation_hint_present_on_turn_cap_exceeded` and siblings.
-    struct FailingRunner<F: Fn() -> anyhow::Error + Send + Sync> {
-        make_err: F,
-    }
-
-    #[async_trait]
-    impl<F: Fn() -> anyhow::Error + Send + Sync> AgentRunner for FailingRunner<F> {
-        async fn run(&self, _agent_name: &str, _task: &str) -> Result<AgentOutput> {
-            Err((self.make_err)())
-        }
-    }
-
-    /// A `TurnCapExceeded` sub-agent failure carries the reuse/continue
-    /// directive in the tool's error text.
-    ///
-    /// Why: This is the core bake-off L1 fix — the PM must see an automatic,
-    /// structured instruction to inspect and reuse partial work instead of
-    /// relying on its own free text remembering to ask for it.
-    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
-    /// `AgentLoopError::TurnCapExceeded`; assert the rendered error mentions
-    /// both re-delegation and reading/continuing existing work.
-    /// Test: this test.
-    #[tokio::test]
-    async fn redelegation_hint_present_on_turn_cap_exceeded() {
-        let runner = Arc::new(FailingRunner {
-            make_err: || {
-                anyhow::Error::from(RunnerError::Loop {
-                    name: "engineer".to_string(),
-                    source: AgentLoopError::TurnCapExceeded {
-                        max_turns: 8,
-                        partial: Box::new(AgentOutput::from_content("partial work")),
-                    },
-                })
-            },
-        });
-        let tool = DelegateToAgentTool::new(runner);
-
-        let result = tool
-            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
-            .await;
-
-        assert!(result.is_error());
-        let msg = result.content();
-        assert!(
-            msg.contains("READ and CONTINUE"),
-            "must instruct the PM to reuse existing work, got: {msg}"
-        );
-        assert!(
-            msg.contains("already written real, partial progress"),
-            "must explain why re-delegation should not start over, got: {msg}"
-        );
-    }
-
-    /// A `Timeout` sub-agent failure gets the same reuse/continue directive.
-    ///
-    /// Why: A wall-clock timeout carries partial work exactly like a turn-cap
-    /// abort (per `AgentLoopError`'s own docs); the hint must not be
-    /// TurnCapExceeded-specific.
-    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
-    /// `AgentLoopError::Timeout`.
-    /// Test: this test.
-    #[tokio::test]
-    async fn redelegation_hint_present_on_timeout() {
-        let runner = Arc::new(FailingRunner {
-            make_err: || {
-                anyhow::Error::from(RunnerError::Loop {
-                    name: "engineer".to_string(),
-                    source: AgentLoopError::Timeout {
-                        timeout_secs: 120,
-                        partial: Box::new(AgentOutput::from_content("partial work")),
-                    },
-                })
-            },
-        });
-        let tool = DelegateToAgentTool::new(runner);
-
-        let result = tool
-            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
-            .await;
-
-        assert!(result.is_error());
-        assert!(result.content().contains("READ and CONTINUE"));
-    }
-
-    /// A `Cancelled` sub-agent failure gets the same reuse/continue directive.
-    ///
-    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
-    /// `AgentLoopError::Cancelled`.
-    /// Test: this test.
-    #[tokio::test]
-    async fn redelegation_hint_present_on_cancelled() {
-        let runner = Arc::new(FailingRunner {
-            make_err: || {
-                anyhow::Error::from(RunnerError::Loop {
-                    name: "engineer".to_string(),
-                    source: AgentLoopError::Cancelled {
-                        partial: Box::new(AgentOutput::from_content("partial work")),
-                    },
-                })
-            },
-        });
-        let tool = DelegateToAgentTool::new(runner);
-
-        let result = tool
-            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
-            .await;
-
-        assert!(result.is_error());
-        assert!(result.content().contains("READ and CONTINUE"));
-    }
-
-    /// An `UnknownAgent` runner failure gets NO reuse directive — there is no
-    /// partial work to reuse when the agent config never resolved.
-    ///
-    /// Why: The hint must not fire indiscriminately on every failure; guard
-    /// the negative case.
-    /// What: `FailingRunner` returns `RunnerError::UnknownAgent`.
-    /// Test: this test.
-    #[tokio::test]
-    async fn redelegation_hint_absent_on_unknown_agent() {
-        let runner = Arc::new(FailingRunner {
-            make_err: || {
-                anyhow::Error::from(RunnerError::UnknownAgent {
-                    name: "ghost".to_string(),
-                    dir: std::path::PathBuf::from("/agents"),
-                })
-            },
-        });
-        let tool = DelegateToAgentTool::new(runner);
-
-        let result = tool
-            .execute(json!({"agent_name": "ghost", "task": "build the package"}))
-            .await;
-
-        assert!(result.is_error());
-        assert!(
-            !result.content().contains("READ and CONTINUE"),
-            "no partial work exists for an unresolved agent config, got: {}",
-            result.content()
-        );
-    }
-
-    /// A plain LLM/transport failure gets the SAME reuse/continue directive
-    /// (#2265 fix #2: this is the dominant bake-off failure mode, previously
-    /// excluded from the hint).
-    ///
-    /// Why: A recoverable Bedrock/transport error aborting the engineer's
-    /// sub-loop is the dominant failure mode observed in the bake-off
-    /// transcripts; the reuse hint must fire here too so re-delegation checks
-    /// for and continues from files already on disk instead of restarting
-    /// exploration from scratch.
-    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
-    /// `AgentLoopError::Llm`; assert the hint is present.
-    /// Test: this test.
-    #[tokio::test]
-    async fn redelegation_hint_present_on_llm_error() {
-        let runner = Arc::new(FailingRunner {
-            make_err: || {
-                anyhow::Error::from(RunnerError::Loop {
-                    name: "engineer".to_string(),
-                    source: AgentLoopError::Llm(LlmError::ApiError {
-                        status: 500,
-                        body: "internal error".to_string(),
-                    }),
-                })
-            },
-        });
-        let tool = DelegateToAgentTool::new(runner);
-
-        let result = tool
-            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
-            .await;
-
-        assert!(result.is_error());
-        assert!(
-            result.content().contains("READ and CONTINUE"),
-            "an LLM/transport error must ALSO carry the reuse directive (#2265), got: {}",
-            result.content()
-        );
-    }
-
-    /// `redelegation_hint` itself (unit-level, not through the tool) returns
-    /// `Some` for `AgentLoopError::Llm` (#2265 fix #2).
-    ///
-    /// Why: The tool-level test above proves the end-to-end wiring; this test
-    /// pins the specific function contract directly, matching the task's
-    /// required "redelegation_hint(AgentLoopError::Llm) now returns
-    /// Some(<reuse hint>)" assertion.
-    /// What: Builds a `RunnerError::Loop` wrapping `AgentLoopError::Llm`,
-    /// calls `redelegation_hint` directly, asserts `Some`.
-    /// Test: this test.
-    #[test]
-    fn redelegation_hint_fn_returns_some_for_llm_error() {
-        let err = anyhow::Error::from(RunnerError::Loop {
-            name: "engineer".to_string(),
-            source: AgentLoopError::Llm(LlmError::ApiError {
-                status: 503,
-                body: "bedrock throttled".to_string(),
-            }),
-        });
-        assert!(
-            redelegation_hint(&err).is_some(),
-            "redelegation_hint must return Some for AgentLoopError::Llm (#2265)"
-        );
-    }
-}
+#[path = "delegate_tests.rs"]
+mod tests;
