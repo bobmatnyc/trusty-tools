@@ -46,6 +46,15 @@ Precedence and shadow logging live in `core::skill_tiers` (pure planner
 is enforced by the `core::skill_deployer` manifest model. This mirrors the
 user-level agent source and the agent-precedence work in #387 / #2786.
 
+Two edge cases worth knowing: (a) hand-editing an already-deployed bundled or
+user-custom skill in place freezes it going forward — the checksum no longer
+matches, so redeploy skips it, same protection project-custom gets, just not
+logged as a collision since there's no competing source name to blame; (b)
+deleting a skill's source file from `~/.trusty-mpm/skills/` does NOT retract
+copies already deployed into projects — orphaning is by design (mirrors how a
+bundled skill removed from the portfolio also stays deployed until an explicit
+`tm catalog apply --prune`), not a bug to fix.
+
 ### Skill Structure
 A valid skill file must have:
 ```markdown

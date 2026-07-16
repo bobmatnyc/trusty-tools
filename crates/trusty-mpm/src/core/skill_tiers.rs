@@ -162,14 +162,24 @@ pub fn plan_skill_tiers(
 /// List the deployable skill stems in a source directory.
 ///
 /// Why: the planner works over stem sets; the orchestrator must translate a
-/// source directory into that set using the SAME `.md`-file rule the deployer
-/// applies.
-/// What: returns the `.md`-stripped basenames of every non-hidden `*.md` file
-/// directly under `dir`. A missing or non-directory path yields an empty set
-/// (an absent tier is not an error). Errors reading an existing directory
-/// propagate.
+/// source directory into that set using the EXACT SAME file filter and stem
+/// derivation `deploy_skills_filtered` uses. A second, independently-written
+/// rule here previously used a repeated `trim_end_matches(".md")` strip
+/// against the deployer's single `strip_suffix(".md")` (PR #2818 review,
+/// MEDIUM): for a pathological `foo.md.md` source file the planner would
+/// derive stem `foo` while the deployer's own `select` predicate — driven by
+/// [`crate::core::skill_deployer::skill_stem`] — expects `foo.md`, so the
+/// planner would greenlight a stem the deployer then silently rejected and the
+/// skill never deployed. Reusing the deployer's own [`is_skill_file`] and
+/// [`skill_stem`] helpers makes that drift structurally impossible.
+/// What: returns the stem (per [`skill_stem`]) of every file directly under
+/// `dir` that [`is_skill_file`] accepts. A missing or non-directory path
+/// yields an empty set (an absent tier is not an error). Errors reading an
+/// existing directory propagate.
 /// Test: `list_source_stems_reads_md_files`, `list_source_stems_missing_empty`.
 pub fn list_source_stems(dir: &Path) -> Result<BTreeSet<String>, Error> {
+    use crate::core::skill_deployer::{is_skill_file, skill_stem};
+
     let mut stems = BTreeSet::new();
     if !dir.is_dir() {
         return Ok(stems);
@@ -179,8 +189,8 @@ pub fn list_source_stems(dir: &Path) -> Result<BTreeSet<String>, Error> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !name.starts_with('.') && name.ends_with(".md") && entry.file_type()?.is_file() {
-            stems.insert(name.trim_end_matches(".md").to_string());
+        if is_skill_file(&name) && entry.file_type()?.is_file() {
+            stems.insert(skill_stem(&name).to_string());
         }
     }
     Ok(stems)
@@ -410,6 +420,43 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn list_source_stems_matches_deployer_stem_for_double_extension() {
+        // Regression (PR #2818 review, MEDIUM): a pathological `foo.md.md`
+        // source file must resolve to the SAME stem the deployer's own
+        // `select` predicate uses (single-strip: `foo.md`), not a
+        // repeated-strip `foo`. Otherwise the planner greenlights a stem the
+        // deployer then silently rejects and the skill never deploys.
+        let bundled = TempDir::new().unwrap();
+        let dest = TempDir::new().unwrap();
+        fs::create_dir_all(bundled.path()).unwrap();
+        fs::write(
+            bundled.path().join("foo.md.md"),
+            "---\nname: foo.md\n---\n\nDOUBLE EXTENSION\n",
+        )
+        .unwrap();
+
+        let stems = list_source_stems(bundled.path()).unwrap();
+        assert_eq!(
+            stems,
+            set(&["foo.md"]),
+            "planner stem must match the deployer's single-strip semantics"
+        );
+
+        // Prove it round-trips through the real orchestrator: the planned
+        // stem must actually be what gets deployed, not silently dropped.
+        let out =
+            deploy_all_skill_tiers(bundled.path(), Path::new("/nonexistent"), dest.path(), |_| {
+                true
+            })
+            .unwrap();
+        assert!(
+            out.stats.deployed.contains(&"foo.md".to_string()),
+            "the double-extension skill must actually deploy: {out:?}"
+        );
+        assert!(dest.path().join("foo.md").join("SKILL.md").is_file());
     }
 
     #[test]

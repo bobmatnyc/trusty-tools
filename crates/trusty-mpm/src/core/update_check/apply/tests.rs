@@ -196,6 +196,75 @@ fn apply_prune_removes_deselected() {
 }
 
 #[test]
+fn apply_preserves_user_tier_override_deployed_via_launch_path() {
+    // Regression (PR #2818 review, CRITICAL 1): `apply_catalog` used to call
+    // the single-tier `deploy_skills_filtered` directly against the catalog
+    // source, bypassing the user-custom tier entirely. A skill the user tier
+    // had previously deployed looked "managed, checksum-matches" to the
+    // manifest (which only ever records the LAST writer, not which TIER wrote
+    // it), so a differing catalog/bundled body fell into the safe-to-refresh
+    // branch and silently clobbered the user's override on every
+    // `tm catalog apply`. This proves the fix: deploy the override via the
+    // exact multi-tier orchestrator (`deploy_all_skill_tiers`) the session
+    // launcher calls, then run `apply_catalog`, and assert the override
+    // survives byte-identical.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+    write_catalog_manifest(project.path());
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    // The catalog (this manifest's selected bundled-equivalent source) ships
+    // a DIFFERENT body for the same skill name as the user's override.
+    seed_catalog_skill(&catalog_root, "tm-doctor", "CATALOG BODY");
+
+    // The user authors their own override in the user-custom tier.
+    let user_source = fw.user_skill_source_dir();
+    fs::create_dir_all(&user_source).unwrap();
+    fs::write(
+        user_source.join("tm-doctor.md"),
+        "---\nname: tm-doctor\n---\n\nUSER OVERRIDE BODY\n",
+    )
+    .unwrap();
+
+    // 1. Deploy via the LAUNCH path: the exact multi-tier orchestrator
+    //    `session_launch::prepare_session_inner` calls, seeding the
+    //    project's `.claude/skills/` the same way a real session start would.
+    let sources =
+        crate::core::manifest::ManifestSources::resolve(project.path(), &fw.root, &catalog_root);
+    let manifest = crate::core::manifest::resolve_manifest(&sources);
+    let plan = HarnessPlan::from_manifest(&manifest, &fw, &catalog_root);
+    crate::core::skill_tiers::deploy_all_skill_tiers(
+        &plan.skill_source,
+        &fw.user_skill_source_dir(),
+        &fw.claude_skills_dir(),
+        |name| plan.skill_selected(name),
+    )
+    .unwrap();
+
+    let deployed_path = fw.claude_skills_dir().join("tm-doctor").join("SKILL.md");
+    let after_launch = fs::read_to_string(&deployed_path).unwrap();
+    assert!(
+        after_launch.contains("USER OVERRIDE BODY"),
+        "user tier must win at launch: {after_launch}"
+    );
+
+    // 2. Run `tm catalog apply` — the exact regression: this must NOT
+    //    silently refresh the skill back to catalog content.
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let after_apply = fs::read_to_string(&deployed_path).unwrap();
+    assert_eq!(
+        after_apply, after_launch,
+        "apply_catalog must preserve the user-tier override byte-identical"
+    );
+    assert!(
+        after_apply.contains("USER OVERRIDE BODY"),
+        "override must survive apply: {after_apply}"
+    );
+}
+
+#[test]
 fn apply_prune_spares_user_owned() {
     // A user-dropped file (absent from the manifest) must NEVER be pruned, even
     // when its name is not selected.

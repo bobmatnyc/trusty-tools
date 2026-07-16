@@ -20,8 +20,8 @@ use crate::core::agent_deployer::deploy_agents_filtered;
 use crate::core::agent_manifest::{AgentManifest, MANIFEST_FILE as AGENT_MANIFEST_FILE};
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_deployer::deploy_skills_filtered;
 use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
+use crate::core::skill_tiers::deploy_all_skill_tiers;
 use crate::provisioner::GitBackend;
 
 /// A failure raised while applying a catalog update.
@@ -126,13 +126,24 @@ pub fn apply_catalog<G: GitBackend>(
     report.agents_deployed = deploy.deployed;
     report.agents_skipped = deploy.skipped;
 
+    // Route through the SAME multi-tier orchestrator `session_launch` uses
+    // (issue #2818 review fix): a single-tier `deploy_skills_filtered` call
+    // here would see a previously user-tier-deployed skill as "managed,
+    // checksum matches" (the manifest only ever recorded the LAST writer, not
+    // which tier wrote it) and silently refresh it back to bundled content —
+    // clobbering the user's override on every `tm catalog apply`. Threading
+    // the user tier through `deploy_all_skill_tiers` here keeps `apply`'s
+    // precedence identical to a fresh session launch.
     let skill_target = fw.claude_skills_dir();
-    let skill_deploy = deploy_skills_filtered(&plan.skill_source, &skill_target, |name| {
-        plan.skill_selected(name)
-    })
+    let skill_deploy = deploy_all_skill_tiers(
+        &plan.skill_source,
+        &fw.user_skill_source_dir(),
+        &skill_target,
+        |name| plan.skill_selected(name),
+    )
     .map_err(|e| ApplyError::SkillDeploy(e.to_string()))?;
-    report.skills_deployed = skill_deploy.deployed;
-    report.skills_skipped = skill_deploy.skipped;
+    report.skills_deployed = skill_deploy.stats.deployed;
+    report.skills_skipped = skill_deploy.stats.skipped;
 
     // 4. Optionally prune managed artifacts the manifest no longer selects.
     if prune {

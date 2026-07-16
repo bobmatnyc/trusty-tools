@@ -42,10 +42,15 @@ pub struct DeployStats {
 /// Whether a source filename names a skill file to deploy.
 ///
 /// Why: the source directory holds `.md` files; only those should be deployed,
-/// and any manifest file or hidden file must be ignored.
+/// and any manifest file or hidden file must be ignored. Exported (PR #2818
+/// review, MEDIUM) so `core::skill_tiers::list_source_stems` enumerates
+/// exactly the same file set this deployer will act on — a second,
+/// independently-written filter here would risk drifting out of sync.
 /// What: returns `true` for `*.md` files that do not start with `.`.
-/// Test: covered indirectly by `deploy_new_skill`.
-fn is_skill_file(name: &str) -> bool {
+/// Test: covered indirectly by `deploy_new_skill`;
+/// `crate::core::skill_tiers::tests::list_source_stems_reads_md_files` exercises
+/// it via the shared helper.
+pub(crate) fn is_skill_file(name: &str) -> bool {
     !name.starts_with('.') && name.ends_with(".md")
 }
 
@@ -53,10 +58,20 @@ fn is_skill_file(name: &str) -> bool {
 /// source filename.
 ///
 /// Why: sources are flat `<name>.md` files but the deploy target is
-/// `<dest>/<name>/SKILL.md`. Stripping `.md` gives the shared name.
-/// What: returns the filename without its `.md` suffix.
-/// Test: covered indirectly by every `deploy_*` test.
-fn skill_stem(filename: &str) -> &str {
+/// `<dest>/<name>/SKILL.md`. Stripping `.md` gives the shared name. Exported
+/// (PR #2818 review, MEDIUM) so `core::skill_tiers::list_source_stems` derives
+/// stems with the IDENTICAL single-strip semantics this deployer uses — a
+/// second `trim_end_matches(".md")`-based implementation would repeat-strip a
+/// pathological `foo.md.md` filename to `foo`, while this deployer's own
+/// `deploy_skills_filtered` (via [`is_skill_file`] + this function) treats it
+/// as stem `foo.md`; the mismatch meant the tier planner would greenlight a
+/// stem the deployer's `select` predicate then rejected, so the skill silently
+/// never deployed.
+/// What: returns the filename without its `.md` suffix (single strip).
+/// Test: covered indirectly by every `deploy_*` test;
+/// `crate::core::skill_tiers::tests::list_source_stems_reads_md_files` exercises
+/// it via the shared helper.
+pub(crate) fn skill_stem(filename: &str) -> &str {
     filename.strip_suffix(".md").unwrap_or(filename)
 }
 

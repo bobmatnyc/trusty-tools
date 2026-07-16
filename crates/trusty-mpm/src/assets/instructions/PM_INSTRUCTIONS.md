@@ -352,6 +352,14 @@ Lower-tier copies of a colliding name are skipped and logged. A skill whose
 name (slug) contains `mcp` is never deployed (it would shadow Claude Code's
 built-in `/mcp`).
 
+A bundled or user-custom skill you hand-edit in place after it deploys is
+frozen going forward (checksum no longer matches, so redeploy skips it) —
+the same protection project-custom gets, just not logged as a tier collision
+since there's no competing source to name. Removing a skill's source from
+`~/.trusty-mpm/skills/` does NOT retract an already-deployed copy in any
+project — orphaned copies are left in place by design, matching how a removed
+bundled skill also stays deployed until pruned.
+
 ## Agent Deployment
 
 Cache: `~/.trusty-mpm/framework/agents/`.
