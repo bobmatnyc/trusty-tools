@@ -79,6 +79,7 @@ pub mod skill_manifest;
 pub mod skill_source;
 pub mod skill_tiers;
 pub mod sm;
+pub mod spawn_disclaim;
 pub mod stack_profile;
 pub mod stale_skills;
 pub mod standalone;

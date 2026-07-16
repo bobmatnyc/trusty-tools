@@ -202,10 +202,9 @@ pub fn version_supports_native(version: (u32, u32, u32)) -> bool {
 /// [`detect_native_support_from_output`]; this thin wrapper is side-effecting
 /// (spawns a process) and is covered by `detect_from_output_*`.
 pub fn claude_supports_native_output_style() -> bool {
-    match std::process::Command::new("claude")
-        .arg("--version")
-        .output()
-    {
+    // Spawn through the disclaim helper so this direct child of the signed
+    // daemon is its own TCC responsible process, not `trusty-mpm` (issue #2819).
+    match crate::core::spawn_disclaim::disclaimed_output("claude", &["--version".to_string()]) {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             detect_native_support_from_output(&stdout)
