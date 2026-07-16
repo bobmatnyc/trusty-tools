@@ -1,10 +1,10 @@
-# DOC-41 — Eve-Style Agent Framework for trusty-agents
+# DOC-37 — Eve-Style Agent Framework for trusty-agents
 
 **Status:** Draft
 **Subsystem:** trusty-agents — agent definition / runtime / tool-calling / memory
 **Owner:** Engineering (trusty-agents)
-**Last-updated:** 2026-07-16
-**Spec ID:** `SPEC-AGENTFW-01~draft` … `SPEC-AGENTFW-06~draft` (DOC-41)
+**Last-updated:** 2026-07-15
+**Spec ID:** `SPEC-AGENTFW-01~draft` … `SPEC-AGENTFW-06~draft` (DOC-37)
 **Builds on:** the existing `.toml` and `.md`+YAML-frontmatter agent-definition
 loaders (`crates/trusty-agents/src/agents/registry/mod.rs`,
 `crates/trusty-agents/src/agents/registry/md_agent.rs`,
@@ -12,10 +12,9 @@ loaders (`crates/trusty-agents/src/agents/registry/mod.rs`,
 (#171/#172), the ctrl-plane split (#170), the trusty-memory Palace integration
 (issue #379, `crates/trusty-agents/src/memory/trusty_backed.rs`), the
 concurrency-safe state writer (issue #198,
-`crates/trusty-agents/src/state_writer.rs`), and the existing unified
-inference-provider adapter layer (`trusty_common::inference::InferenceAdapter`,
-`crates/trusty-common/src/inference/adapter.rs:39` — `OpenAiCompatAdapter`,
-`BedrockAdapter`, `AnthropicAdapter`, `providers/fireworks.rs`; see §7.2).
+`crates/trusty-agents/src/state_writer.rs`), and the planned unified
+inference-provider adapter layer (fireworks.ai + more, landing in
+`trusty-common`).
 **Cross-ref:** `crates/trusty-agents/src/workflow/engine/executor/run.rs`,
 `crates/trusty-agents/src/workflow/engine/state.rs`,
 `crates/trusty-agents/src/workflow/config/mod.rs`,
@@ -33,19 +32,15 @@ inference-provider adapter layer (`trusty_common::inference::InferenceAdapter`,
 `crates/trusty-agents/src/events.rs`,
 `crates/trusty-agents/src/api/server/events_sse.rs`,
 `crates/trusty-agents/src/agents/config.rs`, `crates/trusty-agents/src/agents/model.rs`,
-`crates/trusty-agents/src/env_compat.rs`, `crates/trusty-agents/src/events.rs`
-(`events::bus/subscribe/publish`), `crates/trusty-agents/src/telegram/`,
-`crates/trusty-agents/src/slack/`, `crates/trusty-agents/src/tm/monitor.rs`
-(existing ticker pattern), `crates/trusty-agents/src/bus/mod.rs` (existing
-cross-project `MessageBus`).
+`crates/trusty-agents/src/env_compat.rs`.
 **Not to be confused with:** trusty-mpm's PM → sub-agent delegation model,
 which is a different product (a Claude Code harness orchestrator, not a
 standalone agent runtime). This spec is scoped entirely to **trusty-agents**
 (bin `tagent`) as a standalone, separately-installable, non-coding
 personal-productivity agent product competing with OpenClaw-class frameworks.
 
-> **Scope note (v2 rewrite).** The v1 revision of this document (the initial
-> commit on this PR) was a comparative review of Vercel's Eve agent framework plus
+> **Scope note (v2 rewrite).** The v1 revision of this document (merged as
+> PR #2792) was a comparative review of Vercel's Eve agent framework plus
 > design *directions* for a Rust equivalent — not a spec. Bob rejected it:
 > "the eve research is NOT a spec, it refers to one but doesn't actually
 > contain one." This revision makes every `SPEC-AGENTFW-NN` section
@@ -75,46 +70,13 @@ Each follows the same shape:
   spirit of [DOC-29](./mpm-behavior-conformance.md)'s per-behavior evidence
   rows.
 
-§8 is the phased roadmap, §9 explicit non-goals, §10 the owner-decision
-checklist (which SPEC sections stay `~draft` pending Bob's call), §11–§12 the
-demoted Eve review and gap-analysis background, §13 the change log.
+§9 is the phased roadmap, §10 explicit non-goals, §11 the owner-decision
+checklist (which SPEC sections stay `~draft` pending Bob's call), §12–§13 the
+demoted Eve review and gap-analysis background, §14 the change log.
 
 ---
 
-## 2. SPEC-AGENTFW-01 — Agent Definition Format & Primitive-Binding Manifest
-
-### 2.0 Foundational principle (Bob decision, 2026-07-16): agents are 100% declarative
-
-> "Do we need a coded agent? Seems like instructions should be enough with a
-> rich set of primitives (events, channels, tools, etc). Rather than allow
-> that, I would define agents entirely as instructions, and use yaml to
-> define the relationship of an agent with its primitives." — Bob
-
-This supersedes §2's v2 framing outright. **An agent is exactly two kinds of
-content, never a third:**
-
-1. **Instructions** — Markdown prose defining behavior, persona, and policy.
-   No executable semantics; the LLM reads it as a system prompt.
-2. **A manifest** — YAML declaring which platform-hosted **primitives** this
-   agent is bound to (tools, subagents, memory, model, checkpoints, events,
-   channels — §2.2). The manifest is data: names, references, and
-   scalars/lists — never a code path, a shell command, or a local script
-   reference.
-
-**All executable capability lives in the Rust platform layer
-(`trusty-agents`/`trusty-agents-common`), never in an agent's own package.**
-An agent cannot ship a tool implementation, a hook script, or any file the
-runtime would execute — it can only *reference*, by name, a primitive the
-platform already hosts. This is stricter than v2's design (which left the
-door open to per-agent `tools/*.rs`-style implementations by analogy to
-Eve); it is now a foundational, mechanically-enforced invariant, not a style
-preference — §2.6 specifies the loader-level rejection rule.
-
-This is also the **core positioning differentiator from Eve**: Eve is
-code-first (`agent.ts` + `tools/*.ts` — TypeScript the model's own
-capabilities are implemented in, shipped alongside the agent). trusty-agents
-is **declaration-first** — an agent's file tree can never contain logic, only
-prose and bindings. See §11 for the full comparison.
+## 2. SPEC-AGENTFW-01 — Agent Definition Format
 
 ### 2.1 Current state
 
@@ -193,508 +155,117 @@ doc-comment prose in `state_writer.rs` and `runner.rs`). Composition/handoff
 declaration in an agent's own file is a **genuine gap**, not a
 misunderstanding of existing code — this section defines it as **NEW**.
 
-Two further pieces of current-state grounding, needed for the primitives
-below and corrected from the v2 draft:
+### 2.2 Normative requirement
 
-- **Channels — two distinct existing systems, neither agent-scoped today.**
-  (a) `crates/trusty-agents/src/telegram/` (#264) and `src/slack/` (#418) are
-  **inbound bot gateways**: a long-poll/Socket-Mode listener that routes
-  every message to `ctrl::run_pm_task_with_history` — the top-level PM loop,
-  one bot per **project**, never a specific named agent
-  (`runtime/mode_dispatch.rs:309,326,424`). (b) **`crates/trusty-channels`**
-  (epic #2636, ADR-0014) is a *separate* crate — native MCP servers
-  (`slack-mcp`/`telegram-mcp` binaries, both registered as `[[bin]]` entries
-  in `crates/trusty-channels/Cargo.toml:12-18`, and both already implemented —
-  `crates/trusty-channels/src/lib.rs`'s module-doc, at :1-15, is stale where it
-  describes `telegram` as a "future" module not yet slotted in)
-  exposing send/read/list/react as **callable tools** over stdio JSON-RPC.
-  `trusty-agents` does **not** currently depend on `trusty-channels` (confirmed
-  by grep — no such line in `crates/trusty-agents/Cargo.toml`). §2.3.7 binds
-  the manifest's `channels:` primitive to both, precisely, without conflating
-  them.
-- **Events — the bus is emit-only today.** `crate::events::{bus, subscribe,
-  publish}` (`events.rs:282-315`) is a process-global `broadcast::Sender<Event>`
-  already carrying rich telemetry (session/PM/agent/tool/AST/phase/persona/
-  LLM-lifecycle variants, `events.rs:56-`). Nothing today **consumes** the bus
-  to invoke an agent — every existing subscriber (the SSE endpoint,
-  `api/server/events_sse.rs`) is a read-only telemetry sink. A scheduling
-  primitive has no existing equivalent either: `grep -rniE "\bcron\b"
-  crates/trusty-agents/src` is empty; the closest analog is
-  `crate::tm::monitor::TmMonitor` (`tm/monitor.rs:1-40`), a `tokio::time::interval`
-  ticker wrapping a `JoinHandle`, used today only for session-idle polling
-  (#318) — a real, citable pattern for a NEW scheduler to mirror, not an
-  existing scheduler itself.
+**NEW field 1 — `extends: Option<String>`** on both `MdAgentFrontmatter` and
+the TOML `[agent]` table (`AgentInfo`, `config.rs:287-`). Single-parent
+inheritance by agent name.
 
-### 2.2 The primitive set
+*Resolution algorithm* (applies identically inside `AgentRegistry::load` and
+`AgentConfig::by_name`/`load_agent_package`):
 
-Per Bob's decision, an agent's manifest binds it to exactly seven platform
-primitives. Each is grounded against what exists today; anything absent is
-marked **NEW** rather than invented as green-field:
+1. When `extends` is present, resolve the named base agent **first**,
+   recursing through *its* own `extends` (if any), before applying the
+   current agent's own fields as overrides.
+2. Merge rules, per field:
+   - Scalars (`model`, `description`, `role`, `runner`) — child overrides
+     when present in the child's own file; otherwise inherits the resolved
+     parent's value.
+   - `system_prompt.content` — **child replaces parent by default.** An agent
+     that wants to retain the parent's prose opts in explicitly by including
+     the literal template token `{{extends_prompt}}` in its own body, which
+     is substituted with the fully-resolved parent prompt before the
+     `AgentConfig` is handed to the workflow engine. (Silent concatenation
+     across an arbitrarily deep chain risks unbounded, un-auditable prompt
+     growth — an explicit opt-in token keeps composition visible in the
+     child's own file.)
+   - `tools.allowed` / `tools.allow` — union (child ∪ parent), de-duplicated
+     by exact string. A child may additionally narrow via **NEW**
+     `tools.deny: Option<Vec<String>>`, subtracted from the union after
+     merging.
+   - `capabilities.{languages,frameworks,roles,tags}` — union, de-duplicated.
+   - `subagents.allowed` (below) — union.
+3. Error cases (structured load errors, never a panic):
+   - **`ExtendsTargetNotFound { agent, base }`** — `extends` names an agent
+     absent from the same search path / `agents_dir()`. Message lists
+     available agent names, mirroring the existing "Unknown agent" pattern in
+     `DelegateToAgentTool::execute` (`tools/delegate.rs:150-155`).
+   - **`ExtendsCycle { chain: Vec<String> }`** — resolution walks a
+     visited-name `HashSet<String>` top-down from the requested agent;
+     re-encountering a name already in the set raises this error naming the
+     full chain.
+   - **`ExtendsTooDeep { agent, depth: 8 }`** — resolution aborts once the
+     chain exceeds **8** levels, independent of cycle detection (guards
+     against very long non-cyclic chains). Rationale: no known trusty-agents
+     persona/role hierarchy needs more than 2–3 levels; 8 is a generous
+     ceiling that still bounds worst-case load time. Not runtime-tunable
+     (compile-time constant — a safety ceiling, not an operator preference).
 
-| Primitive | Binds to | Grounding |
-|---|---|---|
-| `model` | Provider/model resolution | **Exists** — `resolve_model`/`adapter_for_model` (§2.3.4, §7) |
-| `tools` | Native + MCP-external + MCP-management tool dispatch | **Exists** — `ToolExecutor`, `ToolsConfig` (§2.3.1, §4) |
-| `subagents` | Delegation targets | **Partial** — `DelegateToAgentTool` exists; declared allowlist is NEW (§2.3.2, §5) |
-| `memory` | Palace/Segment scope | **Partial** — `TrustyBackedMemoryStore` exists; declarative binding is NEW (§2.3.3, §7) |
-| `checkpoints` | Phase-boundary durability | **NEW** end to end (§2.3.5, §3) |
-| `channels` | Chat-platform tools + inbound routing | **Partial** — `trusty-channels` (tools) and the inbound gateways exist; per-agent binding is NEW (§2.3.7) |
-| `events` | Trigger-driven wake (subscribe/schedule/webhook/mqtt) | **NEW** end to end — the bus is emit-only today; `webhook` builds on already-workspace `hmac`/`sha2`, `mqtt` needs a new crate and is `~draft` (§2.3.6) |
+**NEW field 2 — `tools: Vec<String>`** on `MdAgentFrontmatter` only (TOML
+agents already have equivalent capability via `[tools] allowed`). Populates
+`ToolsConfig.allowed` exactly as the TOML path already does, closing the
+`md_agent.rs:145` gap described above. Purely additive: absent `tools:` still
+yields `ToolsConfig::default()` (unrestricted), identical to today.
 
-### 2.3 Manifest schema (NEW)
+**NEW field 3 — `subagents: Vec<String>`** on both `MdAgentFrontmatter` and a
+**NEW** `[subagents]` TOML table (mirroring `[tools]`'s shape:
+`allowed: Option<Vec<String>>`, default `None`). Declares which agent names
+*this* agent's own `delegate_to_agent` tool call may target. Wired into
+`DelegateToAgentTool::execute` (`tools/delegate.rs:141-157`) as a **second,
+narrower** check, additive to the existing "does the file exist at all"
+validation: when the *calling* agent's own `AgentConfig.subagents.allowed` is
+`Some(list)`, pre-flight validation restricts to that list; `None` (the
+default, and the only behavior that exists today) preserves current
+unrestricted-by-declaration behavior exactly.
 
-One schema, two surfaces (§2.4): embedded as `MdAgentFrontmatter` fields for
-single-file agents, or as the top-level keys of a sibling `agent.yaml` for
-directory-package agents. Both parse via the crate's **existing** YAML
-dependency — `serde_yml` (`crates/trusty-agents/Cargo.toml:94`,
-`serde_yml::from_str`, already used by `parse_md_agent`, `md_agent.rs:84`) —
-no new YAML crate is introduced.
+**NEW field 4 — `memory:`** — see §6 (SPEC-AGENTFW-06).
 
-```yaml
-# The full key set. Every key is optional except `name`/`role`/`description`
-# (already required today via AgentInfo). Unknown top-level keys are a load
-# error (§2.6) — this is the enforcement mechanism, not just documentation.
+### 2.3 Directory-convention layout (worked example)
 
-name: billing-assistant
-role: subagent
-description: Handles billing and refund queries
-extends: engineer                    # NEW — §2.5
-
-model: anthropic/claude-opus-4-6      # existing AgentInfo.model — opaque, adapter-resolved (§7.2)
-
-tools:                                # binds ToolsConfig (existing struct, §4)
-  allowed: [search_orders, issue_refund]
-  deny: []                            # NEW field, §2.5 merge rules
-
-subagents:                            # NEW — binds DelegateToAgentTool pre-flight (§5)
-  allowed: [escalation-agent]
-
-memory:                                # binds §7 (SPEC-AGENTFW-06)
-  segment: brief
-  top_k: 5
-
-checkpoints:                           # binds §3 (SPEC-AGENTFW-02)
-  enabled: true                        # default; per-agent opt-out
-
-events:                                 # NEW — §2.3.6
-  subscribe: [PhaseDone, ToolResult]     # must name a real `Event` enum variant
-  schedule: "15m"                        # NEW minimal interval syntax, §2.3.6
-  webhook:                                # NEW — generic inbound-HTTP trigger, §2.3.6
-    path: ticket-created                   # mounted at POST /api/hooks/<agent-name>/<path>
-    secret_ref: github-webhook-secret       # REQUIRED — resolved via resolve_key (§4.2), never optional
-    signature_header: X-Hub-Signature-256    # which header carries the HMAC-SHA256 signature
-  mqtt:                                    # NEW, ~draft — gated in §10 item 10, §2.3.6
-    broker: "mqtt://homeassistant.local:1883"
-    topics: ["home/sensors/+/motion"]
-
-channels:                               # NEW — §2.3.7
-  tools: [slack, telegram]               # binds trusty-channels MCP tools (zero new platform code)
-  inbound: [slack]                       # NEW — this agent wakes on inbound channel messages
-```
-
-Every key above maps onto a field of the **existing** `AgentConfig`/`AgentInfo`
-(`config.rs`) except the ones marked NEW, which extend those same structs
-additively — no parallel config type is introduced.
-
-#### 2.3.1 `tools` — unchanged from v2, now manifest-sourced
-
-Identical semantics to v2's SPEC-AGENTFW-01 §2.2 field 2/field on
-`ToolsConfig` (`config.rs:118-172`: `allowed`, `allow`, **NEW** `deny`,
-`native`, `ast_native`, OpenRPC scopes) — the only change is the *source*:
-both the single-file frontmatter and the directory-package `agent.yaml` now
-populate the same `ToolsConfig` the TOML `[tools]` table always has. See §4
-(SPEC-AGENTFW-03) for tool dispatch/credential-brokering, which is unchanged
-by the declarative-only decision — credential resolution is a platform-config
-concern (`~/.trusty-agents/config.toml`), never an agent-manifest concern, so
-it stays out of this schema entirely.
-
-#### 2.3.2 `subagents` — unchanged from v2
-
-Identical to v2's field 3: `subagents.allowed: Option<Vec<String>>`, wired
-into `DelegateToAgentTool::execute` (`tools/delegate.rs:141-157`) as a second,
-narrower pre-flight check. See §5 (SPEC-AGENTFW-04) for `HandoffContext`.
-
-#### 2.3.3 `memory` — unchanged from v2
-
-See §7 (SPEC-AGENTFW-06) — a declarative default over the five existing
-`Segment` variants; no new storage layer.
-
-#### 2.3.4 `model` — resolution mechanism already exists; manifest key is a thin binding
-
-`model:` is **not** a new resolution mechanism — it is the existing
-`AgentInfo.model: String`, already resolved through `resolve_model`
-(`agents/model.rs:172-192`, 5-tier precedence) and `adapter_for_model`
-(`llm/adapter` module) into a concrete `trusty-common`-style adapter. Per
-Bob's decision, this is explicitly the **existing** unified
-inference-provider layer, not a planned one — `trusty_common::inference::
-InferenceAdapter` (`crates/trusty-common/src/inference/adapter.rs:39`) already
-ships `OpenAiCompatAdapter`, `BedrockAdapter`, `AnthropicAdapter`, and a
-`providers/fireworks.rs` adapter. trusty-agents' own `llm::adapter::
-ModelAdapter` (`llm/adapter/mod.rs:117-130`) is a **separate, narrower**
-trait (OpenRouter-compatible, driven by `async_openai`) that predates the
-commons layer — unifying the two is out of scope for this spec (§9) but the
-manifest key is written now in the shape that unification will not have to
-change: an opaque `provider/model-id` string.
-
-**NEW**: a system-wide default provider/model pair, `[model] default` in
-`~/.trusty-agents/config.toml` (`GlobalConfig`, §6), sitting between the
-existing `TAGENT_DEFAULT_MODEL` env var and the hardcoded `FALLBACK_MODEL`
-constant in the precedence order — formalizing today's env-var-only default
-as an explicit, visible config value:
-
-`TAGENT_MODEL_<NAME>` (env, per-agent) → agent's own `model:` (manifest) →
-`TAGENT_DEFAULT_MODEL` (env, global) → **NEW** `[model].default` (config
-file, global) → hardcoded `FALLBACK_MODEL = "anthropic/claude-sonnet-4-6"`.
-
-#### 2.3.5 `checkpoints` — thin opt-out over §3's existing design
-
-`checkpoints.enabled: bool` (default `true`). When `false`, `RunState`
-transitions still occur in memory (§3.2) but `CheckpointRecord` writes are
-skipped — for an agent whose runs are so short-lived that phase-boundary
-durability is pure overhead. Everything else in §3 (SPEC-AGENTFW-02) is
-unchanged by the declarative-only decision.
-
-#### 2.3.6 `events` — NEW platform infrastructure, explicitly scoped
-
-Four trigger types, all **NEW**. All four converge on the same dispatch
-call — `AgentRunner::run_with_context(agent_name, task, ctx)` (§5) — with
-whatever triggered the wake carried in `ctx.handoff: HandoffContext` (§5.2),
-reusing that struct's existing size cap and serialization rather than
-inventing a fourth ad hoc payload shape per trigger type.
-
-- **`subscribe: Vec<String>`** — each entry MUST name a real `Event` enum
-  variant (validated at load time against the variant list in `events.rs:56-`,
-  e.g. `PhaseDone`, `ToolResult`, `AgentFailed` — an unrecognized name is a
-  load error listing the valid variants, the same "helpful list" pattern used
-  elsewhere in this spec). Requires a **NEW** `EventTriggerDispatcher`
-  (daemon-side): calls `events::subscribe()` (the existing
-  `broadcast::Receiver<Event>` constructor, `events.rs:305`), filters for
-  variants named in any loaded agent's `events.subscribe`, and invokes that
-  agent when a match fires, with the matched `Event`'s fields serialized into
-  `HandoffContext.relevant_state`. This is the one genuinely new consumer of
-  the event bus — today it has zero consumers beyond telemetry sinks.
-- **`schedule: Option<String>`** — a minimal interval syntax (`"<N><unit>"`,
-  unit ∈ `{m,h,d}`, e.g. `"15m"`, `"1h"`) — **not** cron-expression syntax; no
-  cron-parsing crate exists in this workspace today (confirmed —
-  `Cargo.toml` has no `cron`/`tokio-cron-scheduler` entry) and adding one is
-  out of scope for the MVP (flagged in §10 item 8 if full cron syntax is
-  wanted later — e.g. a wall-clock/day-of-week schedule such as "every
-  weekday at 9am", which the gallery validation (§12) surfaced as a real
-  agent need this minimal syntax cannot express). Requires a **NEW**
-  `AgentScheduler`, structurally mirroring `crate::tm::monitor::TmMonitor`
-  (`tm/monitor.rs:24-40`: owns a `tokio::time::interval`-driven `JoinHandle`,
-  `start`/`stop`/`Drop` lifecycle) but firing `AgentRunner::run_with_context`
-  on tick instead of `TmManager::poll_sessions`.
-- **`webhook: Option<WebhookTrigger>`** (**NEW** — gallery-motivated, §12).
-  Fills a real gap the first two triggers don't cover: third-party SaaS push
-  events (ticket-created, payment received, CI/CD deploy) have no home —
-  `channels.inbound` (§2.3.7) is chat-platform-only, and `subscribe` is
-  scoped to *internal* `Event` variants, not arbitrary external payloads.
-  Structurally parallel to `schedule`:
-
-  ```yaml
-  webhook:
-    path: ticket-created            # mounted at POST /api/hooks/<agent-name>/<path>
-    secret_ref: github-webhook-secret # REQUIRED — see below, never optional
-    signature_header: X-Hub-Signature-256
-  ```
-
-  - **Manifest keys:** `path: String` (required — the route suffix, unique
-    per agent); `secret_ref: String` (**required, not optional** — a
-    `webhook:` block with no `secret_ref` is a **load error**, not a warning;
-    an unauthenticated public-ish POST route is a foot-gun this spec refuses
-    to make easy to configure); `signature_header: String` (required — the
-    HTTP header carrying the HMAC signature; no default, since third-party
-    conventions vary — GitHub uses `X-Hub-Signature-256`, Stripe uses
-    `Stripe-Signature`, etc., and guessing wrong silently disables auth).
-  - **Daemon HTTP surface (NEW):** `POST /api/hooks/<agent-name>/<path>`,
-    added as a new route on the **existing** axum `Router`
-    (`crates/trusty-agents/src/api/server/routes.rs::build_router_with_config`
-    — the same router `events_sse.rs`'s `/api/events` and `handlers.rs`'s
-    `/api/tasks` already register on). **Explicitly exempted** from the
-    existing bearer-token `auth_middleware` (`api/server/auth.rs`) — a
-    third-party webhook sender cannot supply that token — and gated instead
-    by its own signature-verification check (below), mirroring how
-    `GET /api/health` is already exempted from `auth_middleware` for a
-    different reason (`auth.rs`'s doc comment).
-  - **Auth/secret validation:** HMAC-SHA256 over the raw request body,
-    verified against the signature in `signature_header`. **No new crate** —
-    `hmac = "0.12"` and `sha2 = "0.10"` are **already** workspace
-    dependencies (`Cargo.toml:110,221`), and this workspace already has a
-    proven, near-identical implementation to mirror:
-    `crates/trusty-review/src/integrations/github/webhook.rs::
-    verify_webhook_signature(secret: &str, body: &[u8], signature_header:
-    &str) -> bool` (computes `HMAC-SHA256(secret, body)`, hex-compares
-    against the header, constant-time via `Mac::verify_slice`). trusty-agents
-    gets its **own** analogous function (no cross-crate dependency on
-    trusty-review — a different product) built on the same two crates. The
-    secret itself resolves via **the same** `resolve_key`/`KeyStore`
-    mechanism as §4.2's `credential_ref` — `secret_ref`'s value is the
-    `provider` argument to `resolve_key`, just a distinct manifest-key name
-    because it authenticates an *inbound* caller rather than authorizing an
-    *outbound* MCP call.
-  - **Payload delivery:** on a signature match, the request body — parsed as
-    JSON when `Content-Type: application/json`, else kept as raw text — is
-    placed into `HandoffContext.relevant_state["webhook_payload"]` (§5.2),
-    then dispatched via `AgentRunner::run_with_context`. The existing 4 KiB
-    `HandoffContext` cap (§5.2) applies unchanged — a webhook payload
-    exceeding it is rejected with `413 Payload Too Large` at the HTTP layer,
-    before ever reaching the agent.
-  - On signature mismatch: `401 Unauthorized`, no dispatch, no agent
-    invocation — never a silent pass-through.
-- **`mqtt: Option<MqttTrigger>`** (**NEW, ~draft** — gated in §10 item 10;
-  lower priority, device/IoT push subscription, e.g. Home Assistant sensor
-  events). Two designs were considered: (a) widen `subscribe` beyond the
-  internal `Event` enum with a source discriminator (e.g. `subscribe:
-  ["internal:PhaseDone", "mqtt:home/sensors/+/motion"]`), or (b) a **distinct**
-  `events.mqtt: { broker: String, topics: Vec<String>, credential_ref:
-  Option<String> }` key. **This spec recommends (b)** — keeping `subscribe`
-  strictly internal-only preserves its simple "must name a real `Event`
-  variant" validation rule (option (a) would require `subscribe` to validate
-  against two entirely different namespaces depending on a string prefix,
-  a messier contract for a marginal DX win). `credential_ref`, when present,
-  resolves broker auth via the same §4.2 mechanism. Confirmed **no MQTT
-  client crate exists in this workspace today** (`grep -in "mqtt"
-  Cargo.toml crates/trusty-agents/Cargo.toml` — no hits) — adopting this
-  primitive means a **NEW** dependency (e.g. `rumqttc`), the only trigger
-  type in this section that isn't buildable from already-workspace crates.
-  Marked `~draft` pending Bob's confirmation of the distinct-key design
-  (§10 item 10), not implementation-ready like the other three.
-
-All four dispatchers/surfaces are genuinely new platform infrastructure —
-the largest net new investment in this spec — which is why they are
-sequenced as their own roadmap phase (§8 Phase 4), not bundled into the
-core manifest phase.
-
-#### 2.3.7 `channels` — extend two real existing systems, invent no third
-
-Per Bob's decision: do not design a new adapter system. Ground the manifest
-in exactly what exists:
-
-- **`channels.tools: Vec<String>`** — binds this agent's `tools.allowed` set
-  (§2.3.1) to **`trusty-channels`'** MCP tools. Concretely: an operator adds
-  an `McpService` entry (existing mechanism, §4) pointing `command` at the
-  `slack-mcp`/`telegram-mcp` binary (`crates/trusty-channels/src/bin/
-  {slack,telegram}-mcp.rs`); an agent listing `channels.tools: [slack]`
-  simply means `slack_*`-prefixed tools are in its effective `tools.allowed`
-  set. **Zero new platform code** — this is a documentation/config
-  convention over the existing tools primitive (§2.3.1), not a new binding
-  mechanism. `trusty-agents` gains a **NEW** `Cargo.toml` dependency on
-  `trusty-channels` only if a call site needs its types directly (unlikely —
-  MCP tool-calling is process-boundary, per §4); wiring by `McpService`
-  config requires no new dependency at all.
-- **`channels.inbound: Vec<String>`** — **NEW.** Declares that this
-  *specific* agent (not just the project's top-level PM) should receive
-  inbound messages from the named channel. Requires extending the existing
-  gateway modules (`crates/trusty-agents/src/telegram/handlers.rs`,
-  `src/slack/handlers.rs`) with a routing step: today `handle_message`
-  dispatches unconditionally to `ctrl::run_pm_task_with_history`; a
-  channel-bound agent needs a **NEW** routing rule (e.g., a chat/channel-id
-  → agent-name mapping, or a slash-command prefix) that dispatches to
-  `AgentRunner::run_with_context(agent_name, ...)` instead. This is
-  structurally the same problem trusty-mpm's L2/L3 layering already solved
-  with the `ManagedBackend`/`SessionProxy` seam (DOC-36 §3.5: "a thin backend
-  trait implementation talking to daemon-local state... exercise this entire
-  state machine with `curl`... before ever wiring up a Telegram bot token")
-  — trusty-agents should mirror that architectural pattern (a thin routing
-  trait over the existing gateway, not a parallel gateway), not trusty-mpm's
-  code itself (different crate, different daemon). Scoped precisely as a
-  gated roadmap item (§8 Phase 4, §10).
-
-**Connector completeness (gallery-motivated, §12):** only `slack-mcp` and
-`telegram-mcp` are named above because those are the two `trusty-channels`
-binaries that exist today (`crates/trusty-channels/src/bin/`). Discord and
-WhatsApp connectors — surfaced as real gaps by the gallery validation (§12)
-— are **future connectors behind the identical `channels.tools` shape**: a
-new `discord-mcp`/`whatsapp-mcp` binary in `trusty-channels` plus an
-`McpService` entry, exactly like Slack/Telegram today. **No schema change**
-is required in this spec to add them later — `channels.tools: [discord]`
-already parses and binds correctly the day a `discord-mcp` binary exists;
-this is a `trusty-channels` crate scope question, not a trusty-agents
-manifest-schema question.
-
-### 2.4 Form factor
-
-Two surfaces, matching the **existing** dual-loader split (§2.1) — no new
-tier is invented, and both remain additive to what's on disk today:
-
-1. **Single-file** (`AgentRegistry::load`'s flat `.md` scan) — small agents
-   keep Markdown+YAML-frontmatter exactly as today: the manifest keys (§2.3)
-   live in the frontmatter block, instructions are the file body.
-2. **Directory package** (#482's format, `AgentConfig::by_name`) — richer
-   agents get a directory of:
-   - `agent.yaml` — **NEW manifest filename/format**, replacing `agent.toml`
-     as the *preferred* manifest for directory packages. Carries exactly the
-     schema in §2.3, nothing else (no `[llm]`/`system_prompt` TOML tables to
-     hand-author — those are derived from the manifest + `instructions.md`).
-   - `instructions.md` — **NEW preferred name**, replacing `persona.md`.
-     Entirely prose; the entirety of the agent's behavior/persona/policy.
-   - Optional static assets: additional `.md`/`.yaml`/`.yml`/`.json`/`.txt`
-     files (prompt fragments, templates) — **data, never code** (§2.6).
-
-**Back-compat, not a hard cutover:** `load_agent_package` tries
-`agent.yaml`/`instructions.md` first, falling back to the existing
-`agent.toml`/`persona.md` pair when the new names are absent — the same
-"prefer new, fall back to legacy" shape already established by this
-codebase's `TAGENT_*`/`OPEN_MPM_*` env convention (`env_compat.rs`) and by
-`.toml`/`.md` dual parsing in `AgentRegistry::load`. Existing packages
-(`ctrl`, `izzie`, `cto-assistant`) keep working unmodified; nothing is
-deleted. The exact deprecation timeline for `agent.toml`/`persona.md` (dual
-support indefinitely vs. a sunset date) is a product-lifecycle call gated in
-§10, not invented here.
-
-### 2.5 `extends` — aligned to trusty-mpm's proven `compose_agent` pattern
-
-Per Bob's decision: do not invent a bespoke merge algorithm — mirror the
-**existing, proven** reference implementation,
-`crates/trusty-mpm/src/core/agent_builder.rs::compose_agent`. That module
-already solves exactly this problem for trusty-mpm's `BASE-*.md` agent
-hierarchy: single-parent `extends:`, resolved **at instantiation** (agent-load
-time — trusty-mpm's `compose_agent` runs ahead of a Claude Code session
-starting; trusty-agents has no separate build/deploy pass, so its natural
-instantiation point is `AgentRegistry::load`/`AgentConfig::by_name` itself,
-which is already where §2.5 below resolves `extends` — no new pipeline
-stage is added), which Bob calls out as the more efficient shape (no runtime
-re-resolution once loaded, versus re-walking the chain on every dispatch).
-
-trusty-agents gets its **own** analogous implementation (trusty-agents does
-not depend on trusty-mpm as a library — `agent_builder.rs` is an internal
-module of a different binary crate) but mirrors it precisely:
-
-- Same constant: **`MAX_DEPTH = 8`** (`agent_builder.rs:34`) — coincidentally
-  the same ceiling this spec's v2 draft already proposed independently.
-- Same case-insensitive resolution discipline: agent names are matched via a
-  lowercased lookup key (mirroring the `SourceMap` type alias,
-  `agent_builder.rs:99`, and `build_source_map`, `agent_builder.rs:110`, whose
-  rationale is described in the module-doc comment at `agent_builder.rs:12-22`),
-  so `extends: engineer` resolves consistently on case-sensitive (Linux) and
-  case-insensitive (macOS) filesystems.
-- Same default merge semantics for prose: **`instructions.md`/persona content
-  concatenates base-first** — the parent's instructions, then the child's,
-  joined the same way `compose_agent`'s `joined.join("\n\n")` does
-  (`agent_builder.rs:515`) — **not** "child replaces parent," which v2 of
-  this spec had proposed independently before this decision. This is a
-  correction: adopt base-first concatenation unconditionally, matching the
-  proven mechanism, with no opt-in token.
-- Own error enum (structurally analogous to `AgentBuildError`, not a
-  cross-crate reuse of it):
-  - **`ExtendsNotFound { agent, base }`** — mirrors `AgentBuildError::NotFound`.
-  - **`ExtendsCycle { chain: Vec<String> }`** — mirrors `AgentBuildError::Cycle`,
-    same "walk a visited-list, push/pop around recursion" shape as
-    `agent_builder.rs`'s `resolve()` (`visiting: &mut Vec<String>`).
-  - **`ExtendsTooDeep { agent, depth: 8 }`** — mirrors `AgentBuildError::DepthExceeded`.
-
-Other merge rules (scalars child-overrides-when-present; `tools`/`capabilities`
-union; `subagents.allowed` union) are unchanged from v2's §2.2 and are
-additive to `compose_agent`'s prose-only scope — trusty-mpm's agents don't
-carry a `tools`/`subagents`/`memory` binding schema, so there is no
-precedent to diverge from there.
-
-### 2.6 No-code enforcement (NEW)
-
-The mechanical guarantee behind §2.0's principle, in two layers:
-
-1. **Closed schema, not a lenient one.** Unlike today's `MdAgentFrontmatter`
-   (which silently ignores unknown YAML keys, `md_agent.rs`, no
-   `deny_unknown_fields`), the manifest parser for **both** surfaces (§2.4)
-   uses a closed key set — any top-level key not in §2.3's schema is a load
-   error, `ManifestUnknownKey { key }`. This is the primary enforcement: a
-   coded-agent design would need a key like `hook:`/`script:`/`exec:` to
-   reference a local file, and no such key exists in the schema to add one
-   to without editing this spec.
-2. **Directory-package file allowlist.** `load_agent_package` additionally
-   validates every file in the package directory against an **allowlist** of
-   data extensions — `.md`, `.yaml`, `.yml`, `.json`, `.txt` — and the two
-   known filenames (`agent.yaml`/`agent.toml`, `instructions.md`/`persona.md`)
-   plus `skills.md`. Any other file (any other extension, or any file with
-   the Unix executable permission bit set regardless of extension —
-   `fs::metadata(path)?.permissions().mode() & 0o111 != 0`) is a load error,
-   `PackageContainsForeignFile { path }`. An allowlist rather than a denylist
-   deliberately: a denylist of script extensions (`.sh`/`.py`/`.js`/…) is
-   leaky (new interpreters, no-extension scripts); an allowlist of known-safe
-   data formats is not.
-
-**Explicit boundary, not ambiguous:** this rule governs the **agent's own
-package only**. `~/.trusty-agents/config.toml`'s `McpService.command`
-(§4) legitimately references executables (`slack-mcp`, a stdio MCP server
-binary) — that is operator-controlled platform infrastructure, a different
-trust boundary from agent-authored content, and is explicitly out of scope
-for this rule.
-
-### 2.7 Directory-convention layout (worked example)
+Extends the **real, existing** #482 package format — no new directory
+convention is invented:
 
 ```
 .trusty-agents/agents/
-  engineer.md                        # single-file format (§2.4.1) — frontmatter + instructions in one file
-  billing-assistant/                 # directory package (§2.4.2)
-    agent.yaml                       # NEW manifest — extends/tools/subagents/memory/model/checkpoints/events/channels
-    instructions.md                  # NEW name — the entirety of behavior (persona/policy prose)
+  engineer.toml                      # flat format — AgentConfig::load / AgentRegistry::load
+  billing-assistant/                 # directory-package format (#482) — AgentConfig::by_name
+    agent.toml                       # [agent] extends="engineer" (NEW) + [subagents] allowed=[...] (NEW)
+    persona.md                       # system_prompt.content (existing #482 behavior)
+    skills.md                        # optional, appended after persona.md (existing #482 behavior)
   escalation-agent/
-    agent.yaml
-    instructions.md
+    agent.toml
+    persona.md
 ```
 
-`billing-assistant/agent.yaml`:
+`billing-assistant/agent.toml`:
 
-```yaml
-name: billing-assistant
-role: subagent
-description: Handles billing and refund queries
-extends: engineer                    # base-first concatenation of instructions.md (§2.5)
+```toml
+[agent]
+name = "billing-assistant"
+role = "subagent"
+extends = "engineer"                 # NEW — inherits engineer's model/tools/capabilities
+description = "Handles billing and refund queries"
 
-tools:
-  allowed: [search_orders, issue_refund]   # unioned with engineer's own tools.allowed
+[tools]
+allowed = ["search_orders", "issue_refund"]   # unioned with engineer's own tools.allowed
 
-subagents:
-  allowed: [escalation-agent]
-
-memory:
-  segment: brief
-  top_k: 5
-
-channels:
-  tools: [slack]                       # this agent may call slack_* MCP tools
+[subagents]                                    # NEW table
+allowed = ["escalation-agent"]
 ```
 
-### 2.8 Conformance
+### 2.4 Conformance
 
-- A manifest with an unrecognized top-level key (e.g. `run: ./hook.sh`)
-  fails to load with `ManifestUnknownKey`, never silently ignored.
-- A directory package containing any file outside the §2.6 allowlist (e.g.
-  `billing-assistant/notify.py`, with or without the executable bit set)
-  fails to load with `PackageContainsForeignFile`.
-- `extends` resolves scalar override + list-union merge rules for a 2-level
-  chain, with **base-first concatenation** of `instructions.md` content
-  (§2.5) — not child-replaces; a 9-level chain is rejected with
-  `ExtendsTooDeep { depth: 8 }`.
+- `extends` resolves scalar override + list-union merge rules exactly as
+  specified in §2.2 for a 2-level chain; a 3rd-party test fixture with a
+  9-level chain is rejected with `ExtendsTooDeep`.
 - A 2-cycle (`a extends b`, `b extends a`) is rejected with `ExtendsCycle`
   naming both agent names in `chain`.
-- `agent.yaml`/`instructions.md` is preferred when both the new and legacy
-  (`agent.toml`/`persona.md`) filenames are present in the same package
-  directory; the legacy pair alone still loads unmodified (regression guard
-  for `ctrl`/`izzie`/`cto-assistant`).
-- `delegate_to_agent` from an agent whose `subagents.allowed = ["x"]` rejects
-  a call targeting agent `"y"` even when `y`'s package exists on disk; an
-  agent with no `subagents` key is unaffected (regression guard against the
-  three existing tests in `tools/delegate.rs`'s own test module).
-- An agent declaring `events.subscribe: ["PhaseDone"]` is invoked by the
-  **NEW** `EventTriggerDispatcher` when a `PhaseDone` event is published on
-  the bus (`events::publish`); an unrecognized variant name fails to load.
-- An agent declaring `channels.tools: [slack]` has `slack_*`-prefixed tools
-  in its effective `ToolsConfig.allowed` when the operator has configured
-  the corresponding `McpService` — no trusty-agents code change required
-  for this half of the binding.
-- An agent declaring `events.webhook` **without** `secret_ref` fails to load
-  — never silently starts an unauthenticated route.
-- `POST /api/hooks/<agent-name>/<path>` with a body whose HMAC-SHA256 (using
-  the `secret_ref`-resolved secret) matches the `signature_header` value
-  dispatches the agent with the body in `HandoffContext.relevant_state
-  ["webhook_payload"]`; a mismatched or missing signature returns `401` and
-  never invokes the agent; a body serializing past the 4 KiB `HandoffContext`
-  cap returns `413` before dispatch.
-- An agent declaring `events.mqtt` loads successfully but is documented as
-  `~draft` — not yet dispatched by any running platform component — until
-  §10 item 10 is resolved and the corresponding `AgentRunner` wiring ships.
+- An `.md` agent with `tools: [...]` in frontmatter produces a populated
+  `ToolsConfig.allowed` (not `ToolsConfig::default()`).
+- `delegate_to_agent` from an agent whose `subagents.allowed = Some(["x"])`
+  rejects a call targeting agent `"y"` even when `y.toml` exists on disk;
+  an agent with `subagents.allowed = None` is unaffected (regression guard
+  against the three existing tests in `tools/delegate.rs`'s own test module).
 
 ---
 
@@ -736,8 +307,8 @@ Two existing on-disk conventions must not be conflated:
 
 - `docs/performance/runs/<stamp>.json` + `runs.log`
   (`crates/trusty-agents/src/perf/mod.rs:254-263`, schema in
-  `crates/trusty-agents-common/src/perf.rs:32-171` — `TokenUsage` at :32,
-  `PhaseRecord` at :78, `PerfTotals` at :94, `PerfRecord` at :112) — a **developer-facing analytics
+  `crates/trusty-agents-common/src/perf.rs:111-171`, `PerfRecord`/
+  `PhaseRecord`/`PerfTotals`/`TokenUsage`) — a **developer-facing analytics
   artifact**, `out_dir`-relative (typically `<cwd>/docs/performance`),
   written via plain `tokio::fs::write` (not the atomic-write primitive
   below). This stays as-is; the new checkpoint journal is **not** colocated
@@ -826,9 +397,7 @@ pub struct CheckpointRecord {
 **Write timing:** exactly at the `PhaseComplete{i}` / `Failed{i}` /
 `Retrying{i,_}` transitions — once per phase boundary, **not** per LLM
 turn/tool-call within a phase. Phase-level granularity is the deliberate MVP
-boundary (see §9 non-goals) and is **APPROVED as spec'd** — Bob's decision,
-2026-07-16: sub-turn/mid-phase durability is a non-goal, not a deferred
-question (§10 item 1 closed). Write call:
+boundary (see §10 non-goals). Write call:
 `state_writer::atomic_write(&checkpoint_path, &serde_json::to_vec_pretty(&record)?)`
 — the existing primitive, unmodified.
 
@@ -866,7 +435,7 @@ matching the existing "log and continue" pattern already used throughout
 |---|---|
 | Process crash mid-phase (before the phase-boundary checkpoint write) | Checkpoint reflects the last `PhaseComplete` (or `Pending` if the crash was during phase 0). Resume re-runs the in-flight phase from scratch. At most one phase's work is lost, never more. |
 | Checkpoint file present but corrupt (unparseable JSON / schema mismatch) | `tagent resume` fails closed with `WorkflowError::CheckpointCorrupt { path, source }` — does **not** silently start a new run under the same `run_id` (risk of clobbering partial `out_dir`/`code_dir` state). Operator fixes the file or starts a fresh run (new `run_id`). |
-| Workspace (`out_dir`/`code_dir`) moved or deleted between checkpoint and resume | `resolve_dirs` re-validates both paths exactly as for a fresh run; a missing `out_dir` is recreated (existing #126/#153/#222 behavior). A missing `code_dir` with partial generated files is **not** treated as data loss by the framework — a known MVP limitation (see §10 owner-decision checklist). |
+| Workspace (`out_dir`/`code_dir`) moved or deleted between checkpoint and resume | `resolve_dirs` re-validates both paths exactly as for a fresh run; a missing `out_dir` is recreated (existing #126/#153/#222 behavior). A missing `code_dir` with partial generated files is **not** treated as data loss by the framework — a known MVP limitation (see §11 owner-decision checklist). |
 | Two `tagent resume` invocations racing on the same `run_id` | The checkpoint file is protected by the same `state_writer` advisory lock as every other `.trusty-agents/state/` file — a second resume attempting a phase-boundary write while the first holds the lock **blocks**, does not corrupt. The framework does **not** add a separate "run already resumed" mutex; concurrent resume of the same `run_id` beyond "the journal won't corrupt" is flagged as a real gap, not solved here. |
 
 ### 3.6 Conformance
@@ -964,15 +533,14 @@ is a pure discovery/metadata trait. Closing gap 2 is therefore **not** "add a
 match arm" — it requires a genuinely new dispatch layer that calls into
 `trusty-memory`'s and `trusty-search`'s own tool-execution entry points
 directly (not through `ServiceDescriptor`), which this pass could not fully
-verify the shape of. Flagged explicitly in §10 rather than asserting an
+verify the shape of. Flagged explicitly in §11 rather than asserting an
 unverified signature.
 
-No credential-brokering exists in `mcp/`/`rpc/` today: `McpServiceTool::execute`
+No credential-brokering exists anywhere: `McpServiceTool::execute`
 (lines 131-132) forwards `args` verbatim to `client.call_tool()`; there is no
 secret-reference indirection on `McpService` or `GlobalConfig` today. This
-**is** a genuine gap in the MCP-tool-calling path specifically — though, per
-Bob's decision (2026-07-16), the *storage backend* for it is not a gap: it
-already exists elsewhere in the workspace (§4.2 item 3, below).
+**is** a genuine gap, confirmed absent, and the one Eve-derived security
+property (§12) worth adding.
 
 ### 4.2 Normative requirement
 
@@ -987,7 +555,7 @@ not a parallel abstraction.
    annotation (already present on every merged method,
    `build_unified_discovery`) to a **NEW** per-service execution adapter —
    the exact call surface into `trusty-memory`'s/`trusty-search`'s own tool
-   runners is an implementation-time verification item (§10), not asserted
+   runners is an implementation-time verification item (§11), not asserted
    here. Error shape: standard JSON-RPC 2.0; unknown tool name →
    `{"code":-32602,"message":"Invalid params"}`; unknown method still
    `-32601` (existing behavior, `rpc/mod.rs:66-73`, unchanged).
@@ -997,51 +565,22 @@ not a parallel abstraction.
    `McpServiceTool::execute` needs **no changes** — only
    `ServiceClient::get_or_spawn`'s match on `transport` gains an `"http"` arm
    constructing the client from `McpService.url`.
-3. **Credential brokering — backend DECIDED (Bob, 2026-07-16): OS keyring,
-   already implemented.** `McpService` gains **NEW** `credential_ref:
-   Option<String>` (`crates/trusty-agents/src/mcp/config/types.rs`, alongside
-   the existing `command`/`args`/`url`/`transport`/`enabled` fields). The
-   value is a `provider` name resolved through the **existing**
-   `trusty_common::inference::credentials` resolver — not a new secret
-   store:
-   - `resolve_key(provider: &str) -> Option<String>`
-     (`crates/trusty-common/src/inference/credentials/resolver.rs:73-76`) —
-     tier 1 `env_tier(provider)` (process env / `.env.local`, loaded once via
-     `dotenv::load_env_local_once()`), tier 2 `default_store()` (line 123):
-     `KeyringStore` (`keyring_store.rs:44-`, wraps the **already-a-workspace-
-     dependency** `keyring = "3"` crate, `Cargo.toml:129`, features
-     `apple-native`/`windows-native`/`sync-secret-service` — i.e. macOS
-     Keychain, Windows Credential Manager, Linux Secret Service, exactly the
-     "OS keyring everywhere" shape Bob specified) when `probe_available()`
-     succeeds, else `FileKeyStore` (`file_store.rs:53-`, `0600`-permission
-     hardened, **not** the OS keychain — see the flagged tension below).
-   - **Naming convention (already established, reused verbatim):**
-     `KeyringStore`'s service name is the literal constant `"trusty-tools"`
-     (`keyring_store.rs:23`), account = the `provider` string
-     (`credential_ref`'s value) — the exact same convention every inference
-     provider credential already uses. `env_var_for(provider)`
-     (`resolver.rs:44-52`) already special-cases non-inference providers too
-     (`"slack" => "SLACK_BOT_TOKEN"`) — MCP/channel credentials are not a new
-     category to this resolver, just a new caller.
-   - **Fallback tension, flagged not silently resolved (§10):** Bob's
-     directive is "never plaintext files," but `default_store()`'s existing,
-     already-shipped fallback when the OS keychain is unavailable
-     (headless/CI/locked session) **is** `FileKeyStore` — a real file, just
-     `0600`-permission-hardened, not encrypted. This spec does not invent a
-     stricter policy unilaterally: either (a) MCP `credential_ref` resolution
-     accepts the same fallback every other credential in this codebase
-     already accepts, or (b) it hard-fails when the keychain probe is
-     negative rather than falling back — a real behavioral fork gated in
-     §10, not resolved here.
-   - **Injection point**, unchanged from v2's design: **stdio transport** —
-     an env var on the spawned subprocess (`StdioMcpClient::spawn`'s existing
-     `command`/`args` call site gains an `envs: HashMap<String, String>`
-     parameter, populated once at `get_or_spawn` time, not per-call);
-     **http transport** — an `Authorization` header per request. The secret
-     is **never** interpolated into the `args: Value` the LLM constructed —
-     the model never sees the literal value. This is the concrete,
-     code-grounded implementation of the "MCP with credential brokering"
-     property Eve markets (§11).
+3. **Credential brokering (genuinely new).** `McpService` gains **NEW**
+   `credential_ref: Option<String>`
+   (`crates/trusty-agents/src/mcp/config/types.rs`, alongside the existing
+   `command`/`args`/`url`/`transport`/`enabled` fields). When present, the
+   referenced secret is resolved from local secret storage (no existing
+   local secret store was found in this pass — see §11) and injected as:
+   - **stdio transport:** an env var on the spawned subprocess
+     (`StdioMcpClient::spawn`'s existing `command`/`args` call site gains an
+     `envs: HashMap<String, String>` parameter, populated once at
+     `get_or_spawn` time, not per-call).
+   - **http transport:** an `Authorization` header per request (HTTP auth is
+     typically per-request, not per-process env).
+   The secret is **never** interpolated into the `args: Value` the LLM
+   constructed — the model never sees the literal value. This is the
+   concrete, code-grounded implementation of the "MCP with credential
+   brokering" property Eve markets (§12.7).
 4. **RBAC on new tools.** Every `ToolExecutor` produced by (1)-(3) MUST
    implement `restricted_tiers()` consistently with how
    `mcp_tool_executors()` (`tools/mcp_tools/executor.rs`) already gates the
@@ -1064,15 +603,10 @@ consistent with `ToolResult`'s recoverable/fatal design intent
   `-32601`), and an unknown tool name returns `-32602`.
 - An `McpService` with `transport = "http"` and a reachable `url` produces a
   callable `ToolExecutor` (currently silently skipped).
-- An `McpService` with `credential_ref = "fireworks"` (or any provider
-  `env_var_for` already recognizes) spawns/calls with the value
-  `resolve_key("fireworks")` returns present in the subprocess env (stdio) or
-  request header (http), and a `tracing`/debug capture of the LLM-visible
-  `ToolResult` content never contains the literal secret value.
-- On a host where `KeyringStore::probe_available()` is `false` (headless/CI),
-  resolution falls back to `FileKeyStore` exactly as `default_store()`
-  already behaves for every other credential — or hard-fails, per whichever
-  the §10 fallback-tension item resolves to.
+- An `McpService` with `credential_ref` set spawns/calls with the resolved
+  secret present in the subprocess env (stdio) or request header (http), and
+  a `tracing`/debug capture of the LLM-visible `ToolResult` content never
+  contains the literal secret value.
 - A tool call exceeding 30s surfaces `ToolResult::Error { recoverable: true,
   .. }`, not a hang or panic.
 
@@ -1088,7 +622,7 @@ is the PM's tool for dispatching to sub-agents. Its schema
 `{"agent_name": string, "task": string}`, both required. Pre-flight
 validation (lines 141-157) checks only that
 `<config_dir>/<agent_name>.toml` **exists** — it has no concept of a
-*declared* subagent set (that's the new `subagents.allowed` field from §2.3.2,
+*declared* subagent set (that's the new `subagents.allowed` field from §2.2,
 which this section wires in as a second check). Dispatch (lines 164-169):
 
 ```rust
@@ -1209,49 +743,28 @@ Every new/extended config key introduced by §2–§5, following the existing
 
 | Section / file | Key | Type | Default | Env override |
 |---|---|---|---|---|
-| Agent manifest (`agent.yaml` or frontmatter, §2.3) | `extends` | `Option<String>` | `None` | n/a (per-file) |
-| Agent manifest, `subagents` (**NEW**, §2.3.2) | `allowed` | `Option<Vec<String>>` | `None` (unrestricted — current behavior) | n/a |
-| Agent manifest, `tools` (existing key, extended, §2.3.1) | `deny` | `Option<Vec<String>>` | `None` | n/a |
-| Agent manifest, `checkpoints` (**NEW**, §2.3.5) | `enabled` | `bool` | `true` | n/a (per-file) |
-| Agent manifest, `events` (**NEW**, §2.3.6) | `subscribe` | `Option<Vec<String>>` | `None` | n/a (per-file) |
-| Agent manifest, `events` (**NEW**, §2.3.6) | `schedule` | `Option<String>` (`"<N><m\|h\|d>"`) | `None` | n/a (per-file) |
-| Agent manifest, `channels` (**NEW**, §2.3.7) | `tools` | `Option<Vec<String>>` | `None` | n/a (per-file) |
-| Agent manifest, `channels` (**NEW**, §2.3.7) | `inbound` | `Option<Vec<String>>` | `None` | n/a (per-file) |
-| Agent manifest, `events.webhook` (**NEW**, §2.3.6) | `path` | `String` (required when `webhook` present) | n/a | n/a (per-file) |
-| Agent manifest, `events.webhook` (**NEW**, §2.3.6) | `secret_ref` | `String` (**required** — load error if absent) | n/a | n/a (per-file) |
-| Agent manifest, `events.webhook` (**NEW**, §2.3.6) | `signature_header` | `String` (required) | n/a | n/a (per-file) |
-| Agent manifest, `events.mqtt` (**NEW, ~draft**, §2.3.6, gated §10 item 10) | `broker` / `topics` / `credential_ref` | `String` / `Vec<String>` / `Option<String>` | n/a | n/a (per-file) |
-| `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing `McpService`, extended, §4.2) | `credential_ref` | `Option<String>` (a `provider` name resolved via `resolve_key`, §4.2 item 3) | `None` | n/a |
+| `[agent]` (per-agent TOML/frontmatter, §2.2) | `extends` | `Option<String>` | `None` | n/a (per-file) |
+| `[subagents]` (**NEW** TOML table, per-agent, §2.2) | `allowed` | `Option<Vec<String>>` | `None` (unrestricted — current behavior) | n/a |
+| `[tools]` (existing table, extended, §2.2) | `deny` | `Option<Vec<String>>` | `None` | n/a |
+| `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing `McpService`, extended, §4.2) | `credential_ref` | `Option<String>` | `None` | n/a |
 | `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing, extended, §4.2) | `timeout_secs` | `u64` | `30` | n/a |
-| `~/.trusty-agents/config.toml` (**NEW** `[model]` table, §2.3.4) | `default` | `Option<String>` (`"provider/model-id"`) | `None` | n/a — sits between `TAGENT_DEFAULT_MODEL` and `FALLBACK_MODEL` in precedence (§2.3.4) |
-| Workflow engine (process-level, **NEW**, §3.3) | checkpoint journal enabled | `bool` | `true` | `TAGENT_CHECKPOINT_DISABLE=1` — naming/shape gated in §10 (not grounded against a verified existing analogous flag). |
+| Workflow engine (process-level, **NEW**, §3.3) | checkpoint journal enabled | `bool` | `true` | `TAGENT_CHECKPOINT_DISABLE=1` — flagged in §11 as the one key in this table not yet grounded against a verified existing analogous flag; confirm exact naming/shape at implementation time. |
 | Workflow engine (**NEW**, §3.3) | checkpoint state root | `PathBuf` | `.trusty-agents/state/runs/` (resolved the same way `agents_dir()`/`TAGENT_CONFIG_DIR` resolves, `loader.rs`) | `TAGENT_STATE_DIR` (**NEW**, mirrors the existing `TAGENT_CONFIG_DIR` pattern exactly) |
 | `HandoffContext` (process-level constant, **NEW**, §5.2) | max size (bytes) | `usize` | `4096` | `TAGENT_HANDOFF_MAX_BYTES` (**NEW**) |
-| `extends` resolution (**NEW**, §2.5) | max chain depth | `usize` | `8` (mirrors `agent_builder.rs::MAX_DEPTH`) | n/a — compile-time constant (safety ceiling, not an operator preference) |
-| `AgentScheduler` (process-level, **NEW**, §2.3.6) | tick interval | `Duration` | `60s` | `TAGENT_SCHEDULER_TICK_SECS` (**NEW**) |
-| No-code enforcement (§2.6) | (not configurable) | — | always on | **none** — a hard invariant, deliberately not a toggle |
+| `extends` resolution (**NEW**, §2.2) | max chain depth | `usize` | `8` | n/a — compile-time constant (safety ceiling, not an operator preference) |
 
 ### 6.1 Conformance
 
-- Each new manifest key round-trips through parse/serialize exactly like the
+- Each new TOML key round-trips through parse/serialize exactly like the
   existing `tools_config_parses_allow_globs`-style tests in `config.rs`.
 - `TAGENT_STATE_DIR` overrides the checkpoint root exactly as
   `TAGENT_CONFIG_DIR` overrides `agents_dir()` — same resolution order, same
   fallback-with-warn-log behavior.
-- `[model].default` in `~/.trusty-agents/config.toml` is consulted only when
-  both `TAGENT_MODEL_<NAME>` and `TAGENT_DEFAULT_MODEL` are absent, and only
-  before `FALLBACK_MODEL` — the precedence order in §2.3.4, exactly.
 - Every env var in this table is read through `env_compat::env_var(new,
   legacy)` if a legacy `OPEN_MPM_*` name is later requested for
   back-compat — none of the **NEW** keys need a legacy alias at
   introduction (they don't exist yet under any name), but the helper is the
   established pattern should one be needed.
-- No config key or env var disables the §2.6 no-code enforcement — attempting
-  to configure around it (e.g. an env var to skip manifest validation) is
-  explicitly rejected as a design goal, not merely undocumented.
-- An `events.webhook` block missing `secret_ref` or `signature_header` fails
-  to load — there is no valid config state that stands up an unauthenticated
-  hook route.
 
 ---
 
@@ -1305,31 +818,21 @@ memory:
 ```
 
 Validation: an unrecognized `segment` value is a load-time error listing the
-five valid variants — the same "helpful list" pattern as the `extends`
-errors in §2.5 and the `delegate_to_agent` errors in §5.
+five valid variants — the same "helpful list" pattern as the `extends`/
+`delegate_to_agent` errors in §2.2/§5.
 
-**Model/provider resolution — DECIDED (Bob, 2026-07-16): the adapter layer
-already exists; use it, don't invent one.** `trusty_common::inference::
-InferenceAdapter` (`crates/trusty-common/src/inference/adapter.rs:39`) is
-**not** a planned future layer — it already ships `OpenAiCompatAdapter`,
-`BedrockAdapter`, `AnthropicAdapter`, and `providers/fireworks.rs`
-(epic #2400). trusty-agents' own `resolve_model`/`adapter_for_model` (§2.3.4)
-is the correct manifest-facing choke point today; unifying it with
-`InferenceAdapter` directly is a separate, already-tracked migration (not
-re-scoped by this spec) — the **normative requirement** here is narrower:
-**no new call site** introduced by §2–§6 (the resume CLI re-resolving a
-phase's model, the credential-brokering HTTP client selecting a provider,
-etc.) may bypass `resolve_model`/`adapter_for_model` to hand-roll its own
-provider special-case, so that whenever the two adapter layers are unified,
-it is a one-file change, not a multi-call-site migration.
-
-Per Bob's decision, the manifest's `model:` key (§2.3.4) is the per-agent
-override; the **NEW** `[model].default` key in `~/.trusty-agents/
-config.toml` (§6) is the system-wide default provider/model pair, both
-expressed in the adapter layer's existing routing-prefix shape
-(`"provider/model-id"`, e.g. `"anthropic/claude-opus-4-6"`,
-`"bedrock/..."`, `"ollama/..."` — already-established prefixes, `ctrl/
-config.rs:82-83,100-101`) — not a new key shape invented for this spec.
+**Model/provider resolution — no redesign, one forward-looking constraint.**
+This spec does **not** redesign `resolve_model`/`adapter_for_model`'s
+internals — that work is gated on the planned unified inference-provider
+adapter landing in `trusty-common` (fireworks.ai + more), which is out of
+scope here. The **normative requirement** is narrower: **no new call site**
+introduced by §2–§6 (the resume CLI re-resolving a phase's model, the
+credential-brokering HTTP client selecting a provider, etc.) may bypass
+`resolve_model`/`adapter_for_model` to hand-roll its own provider
+special-case. When the commons adapter lands, `adapter_for_model` becomes a
+thin call-through to it; every consumer added by this spec must already be
+routed through that single choke point so the eventual swap is a one-file
+change, not a multi-call-site migration.
 
 ### 7.3 Conformance
 
@@ -1351,38 +854,27 @@ config.rs:82-83,100-101`) — not a new key shape invented for this spec.
 `RunState`, `CheckpointRecord`, phase-boundary `atomic_write` calls,
 `tagent resume`. No agent-definition-format changes yet. Ships as its own
 issue/PR, API-first (an RPC/CLI method the `tagent resume` subcommand calls,
-per the API→CLI→TUI layering). **APPROVED as spec'd** (§10 item 1 closed).
+per the API→CLI→TUI layering).
 
-**Phase 1 — Core manifest & no-code enforcement (SPEC-AGENTFW-01 core).**
-The `agent.yaml`/`instructions.md` form factor (§2.4), the closed-schema
-parser + directory-package file allowlist (§2.6), `extends` resolution
-aligned to `compose_agent` (§2.5), and the `tools`/`subagents`/`memory`/
-`checkpoints`/`model` primitive bindings (§2.3.1–.3.5) — everything that is
-either already-existing-struct-extension or a load-time validation change,
-no new daemon-side dispatcher. Ships independent of Phase 0.
+**Phase 1 — Agent definition extensions (SPEC-AGENTFW-01).** `extends`
+resolution + error cases, `tools`/`subagents` frontmatter fields, `[tools]
+deny`/`[subagents] allowed` TOML tables. Ships independent of Phase 0.
 
 **Phase 2 — Tool-calling gaps (SPEC-AGENTFW-03).** In priority order: (a)
 `rpc/mod.rs` `tools/call` proxying — blocked on the implementation-time
 verification of `trusty-memory`/`trusty-search`'s own execution entry
-points (§10 item 3); (b) HTTP-transport MCP client; (c) credential
-brokering via the **already-implemented** `trusty_common::inference::
-credentials` keyring/file-store resolver (§4.2 item 3) — the fallback-tension
-nuance is the only open piece (§10).
+points (§11); (b) HTTP-transport MCP client; (c) credential brokering —
+blocked on an owner decision for the secret-storage backend (§11).
 
 **Phase 3 — Structured handoffs (SPEC-AGENTFW-04).** `HandoffContext`,
 `RunContext.handoff`, `run_with_context` wiring, clean-context conformance
 test. Depends on nothing else in this roadmap; can land in parallel with
 Phase 2.
 
-**Phase 4 — Events & channels primitives (SPEC-AGENTFW-01 §2.3.6–.3.7).**
-The largest **genuinely new** platform-infrastructure investment in this
-spec, deliberately sequenced last: the `EventTriggerDispatcher` (a new
-consumer of the existing, currently emit-only `events::bus`), the
-`AgentScheduler` (mirroring `TmMonitor`'s ticker pattern), and per-agent
-`channels.inbound` routing extending the existing `telegram`/`slack` gateway
-handlers (with `channels.tools` needing **zero** new platform code, since it
-is just an `McpService` binding to the already-existing `trusty-channels`
-crate — that half can land any time after Phase 2, not gated on this phase).
+**Phase 4 — Memory/model declaration (SPEC-AGENTFW-06).** `memory:`
+frontmatter block. Independent of every other phase; the model-resolution
+choke-point constraint applies retroactively to whichever phases have
+already landed.
 
 **Phase 5 — Config surface (SPEC-AGENTFW-05).** Not a standalone phase —
 each key ships alongside the phase that introduces it; this entry exists
@@ -1396,134 +888,75 @@ out (#2791) — not a single mega-PR.
 
 ## 9. Explicit Non-Goals
 
-- **No coded agents, ever.** §2.0/§2.6 are not a soft preference — an agent
-  package containing anything beyond instructions + manifest + static data
-  assets is a load-time rejection, mechanically enforced, not a lint.
 - **No serverless/Vercel-Workflows-equivalent hosted durability engine.**
   trusty-agents remains a local-first tokio daemon; durability is
   phase-level on-disk checkpointing (§3), not a general-purpose
   durable-workflow platform.
-- **No true mid-phase (sub-turn) checkpointing, ever — not just "in the
-  MVP."** **DECIDED (Bob, 2026-07-16):** phase-level granularity (§3.3) is
-  approved as the permanent design, not a placeholder pending a harder
-  requirement — fully closed, removed from §10 entirely (it is not a
-  numbered item there anymore).
+- **No true mid-phase (sub-turn) checkpointing in the MVP.** Phase-level
+  granularity only (§3.3) — a phase's LLM/tool-call sequence is the atomic
+  unit of durability until there's evidence that's insufficient.
 - **No wholesale replacement of the `.toml`/`.md`+frontmatter or
-  directory-package (#482) agent formats.** §2.4's additions
-  (`agent.yaml`/`instructions.md`) are additive, back-compat-preserving
-  extensions of both existing loaders, not a replacement.
+  directory-package (#482) agent formats.** §2's additions are strictly
+  additive to both existing loaders.
 - **No new `ToolInvoker` abstraction.** `ToolExecutor` (already unifying
   native, MCP-management, and MCP-external tools today) is retained; §4
   closes concrete gaps within it.
-- **No new channel-adapter system.** **DECIDED (Bob, 2026-07-16):** channels
-  are explicitly in scope as a primitive (§2.3.7) — but the non-goal is
-  building a *new* adapter layer. `channels:` extends the two real existing
-  systems (`trusty-channels`' MCP tools, trusty-agents' own inbound gateway
-  modules) rather than inventing a third.
-- **No OpenTelemetry, full stop.** **DECIDED (Bob, 2026-07-16):**
-  trusty-agents is a personal-productivity agent framework, not a
-  hosted-platform product — local telemetry only (`tracing` to stderr, the
-  existing in-process `Event` bus/SSE stream, `events.rs`/`events_sse.rs`)
-  is the permanent design, not a placeholder pending an OTel decision. This
-  is a stated **design principle**: no external trace/span exporter is ever
-  wired in, matching the framework's local-first, no-hosted-telemetry-vendor
-  positioning (see §11).
-- **No redesign of `resolve_model`/`adapter_for_model` internals.**
-  **DECIDED (Bob, 2026-07-16):** use the existing
-  `trusty_common::inference::InferenceAdapter` layer's routing-prefix shape
-  (§2.3.4, §7.2) rather than inventing a new one; unifying trusty-agents'
-  own narrower adapter trait with it is a separate, already-tracked
-  migration, not re-scoped by this spec.
-- **No cron-expression scheduling in the MVP.** `events.schedule` (§2.3.6)
-  is a minimal interval string, not a cron grammar — no cron-parsing crate
-  exists in this workspace today and adding one is deferred (§10 item 8).
-- **No unauthenticated webhook mode, ever.** `events.webhook` (§2.3.6)
-  requires `secret_ref`/`signature_header` at load time — there is no
-  "trust any POST" configuration this spec permits, by design, not merely
-  by default.
-- **No embedded MQTT broker.** `events.mqtt` (§2.3.6, `~draft`) is a client
-  connecting to an operator-run broker (e.g. an existing Home Assistant
-  Mosquitto instance) — trusty-agents never hosts broker infrastructure
-  itself.
+- **No commitment to multi-channel adapters (Slack/Discord/Telegram/etc.)
+  in this spec.** Out of scope for trusty-agents vs. trusty-mpm's existing
+  TELUI surface — a product-scope question, not designed here (see §11).
+- **No OpenTelemetry adoption decision.** The existing `Event`
+  enum/SSE stream (`events.rs`, `events_sse.rs`) already covers Eve's
+  streaming use case functionally; OTel export is a separate,
+  undecided question.
+- **No redesign of `resolve_model`/`adapter_for_model` internals** — gated
+  on the planned commons inference-provider adapter landing (§7.2).
 
 ---
 
 ## 10. Owner-Decision Checklist
 
-Each item names the `SPEC-AGENTFW-NN` section(s) it gates. Six items from
-the previous revision were resolved by Bob on 2026-07-16 and are removed
-from this list entirely (not just marked resolved) per his instruction to
-shrink this to genuinely-open items; their resolutions are recorded inline
-in the sections they gated (§2.3.4/§7.2 model resolution, §2.5 `extends`
-composition, §2.3.7/§9 channels scope, §9 OTel/telemetry, §3.3/§9 checkpoint
-granularity) and in §13's change log. What remains:
+Each item names the `SPEC-AGENTFW-NN` section(s) it gates. Until Bob
+resolves an item, the gated section(s) stay `~draft` with the open question
+inline (already noted in the relevant section above); this list is the
+single place to track resolution status.
 
-1. **Credential-backend fallback tension (narrows the old "storage backend"
-   item — gates SPEC-AGENTFW-03 §4.2 item 3).** Bob's directive is "never
-   plaintext files"; the **existing, already-shipped** `default_store()`
-   (`trusty-common/src/inference/credentials/resolver.rs:123-`) falls back to
-   `FileKeyStore` (`0600`-permission-hardened, but literally plaintext
-   content) when the OS keychain probe fails. Confirm: (a) MCP
-   `credential_ref` resolution accepts the same fallback every other
-   credential in this codebase already accepts, or (b) it hard-fails when
-   the keychain is unavailable rather than falling back, diverging from
-   `resolve_key`'s existing behavior for this one caller.
-2. **`tools/call` proxy dispatch surface (gates SPEC-AGENTFW-03 item 1).**
+1. **Checkpoint granularity (gates SPEC-AGENTFW-02).** Confirm phase-level
+   checkpointing — losing at most one in-flight phase on crash/restart — is
+   sufficient, or specify a harder sub-turn requirement.
+   - **RESOLVED:** _pending._
+2. **Credential storage backend (gates SPEC-AGENTFW-03 item 3).** No
+   existing local secret store was found in this pass. Is there a
+   preferred trusty-tools-ecosystem secret store to build on, or does
+   `credential_ref` resolution need a fresh design?
+   - **RESOLVED:** _pending._
+3. **`tools/call` proxy dispatch surface (gates SPEC-AGENTFW-03 item 1).**
    `ServiceDescriptor` has no execute method — confirmed this pass. Needs a
    research pass into `trusty-memory`'s/`trusty-search`'s actual
    tool-execution entry points before implementation; flagged here rather
-   than asserting an unverified signature. (Research task, not strictly an
-   owner decision, but tracked here so it isn't lost.)
-3. **`HandoffContext` size cap (gates SPEC-AGENTFW-04 §5.2).** Confirm 4 KiB,
+   than asserting an unverified signature.
+   - **RESOLVED:** _pending — research task, not strictly an owner
+     decision, but tracked here so it isn't lost._
+4. **Multi-channel scope.** Should trusty-agents grow its own channel
+   adapters (Slack/Discord/etc.), or stay exclusively out of scope per §9?
+   Not gating any SPEC-AGENTFW section directly — flagged in case the
+   answer changes §9's non-goal.
+   - **RESOLVED:** _pending._
+5. **`extends` prompt-composition default (gates SPEC-AGENTFW-01 §2.2).**
+   Confirm "child replaces, opt-in `{{extends_prompt}}` token" as the
+   default `system_prompt.content` merge rule, or specify append-by-default
+   instead.
+   - **RESOLVED:** _pending._
+6. **`HandoffContext` size cap (gates SPEC-AGENTFW-04 §5.2).** Confirm 4 KiB,
    or specify a different number.
-4. **Checkpoint-disable env var naming (gates SPEC-AGENTFW-05 §6).**
+   - **RESOLVED:** _pending._
+7. **Checkpoint-disable env var naming (gates SPEC-AGENTFW-05 §6).**
    `TAGENT_CHECKPOINT_DISABLE` is proposed but not grounded against a
    verified existing analogous flag in this pass — confirm naming/shape.
-5. **`code_dir` integrity on resume (gates SPEC-AGENTFW-02 §3.5).** Confirm
+   - **RESOLVED:** _pending._
+8. **`code_dir` integrity on resume (gates SPEC-AGENTFW-02 §3.5).** Confirm
    no integrity check is needed for partial generated files in the MVP, or
    specify one.
-6. **`agent.yaml`/`agent.toml` and `instructions.md`/`persona.md` deprecation
-   timeline (gates SPEC-AGENTFW-01 §2.4).** The spec establishes "prefer new,
-   fall back to legacy, indefinitely" — confirm indefinite dual support, or
-   specify a sunset date/version after which `agent.toml`/`persona.md`
-   packages must be migrated.
-7. **`channels.inbound` routing design (gates SPEC-AGENTFW-01 §2.3.7).**
-   Confirmed in scope and grounded in the existing `telegram`/`slack` gateway
-   modules (§2.3.7) — the specific routing mechanism is not yet chosen:
-   a dedicated bot/token per channel-bound agent, a slash-command prefix
-   within the existing single bot, or a chat/channel-id → agent-name mapping
-   table. All three are consistent with the spec as written; pick one before
-   implementation.
-8. **`events.schedule` syntax ceiling (gates SPEC-AGENTFW-01 §2.3.6).** The
-   MVP's minimal interval string (`"15m"`) is a firm non-goal boundary for
-   full cron syntax (§9) — confirm this is acceptable long-term, or flag
-   that cron-expression support (and its new crate dependency) should be
-   pulled forward. **Gallery evidence (§12, PR #2814):** the agent-gallery
-   validation found a real agent need for wall-clock/day-of-week scheduling
-   ("every weekday at 9am") that the minimal interval syntax cannot express
-   — this is no longer a hypothetical future want, it's a confirmed gap
-   against real gallery agents; weighs toward pulling cron support forward.
-9. **Static-asset allowlist exact extension set (gates SPEC-AGENTFW-01
-   §2.6).** `.md`/`.yaml`/`.yml`/`.json`/`.txt` is proposed — confirm or
-   amend before the no-code enforcement ships (this list, once shipped, is a
-   breaking change to loosen but a safe one to tighten).
-10. **`events.mqtt` design confirmation (gates SPEC-AGENTFW-01 §2.3.6,
-    gallery-motivated, §12, PR #2814).** This spec recommends a distinct
-    `events.mqtt: { broker, topics, credential_ref }` key over widening
-    `subscribe` with a source discriminator (§2.3.6 states the rationale:
-    keeps `subscribe`'s validation contract single-namespace). Confirm this
-    design, or specify the widened-`subscribe` alternative instead. Lower
-    priority than items 1–9 — device/IoT integration, not a core-manifest
-    blocker — and requires a **new** MQTT client crate dependency either way
-    (none exists in this workspace today).
-11. **`events.webhook` public-reachability story (gates SPEC-AGENTFW-01
-    §2.3.6).** The daemon binds locally/LAN-first; third-party SaaS webhook
-    senders need the hook route reachable from the public internet. Does
-    trusty-agents document/recommend a tunnel pattern (ngrok, Cloudflare
-    Tunnel, a reverse proxy the operator manages), or is public reachability
-    explicitly the operator's own concern, entirely out of this spec's
-    scope? HMAC signature verification (§2.3.6) is the auth story regardless
-    of the answer — this item is about reachability, not authentication.
+   - **RESOLVED:** _pending._
 
 ---
 
@@ -1555,25 +988,7 @@ narrower, phase-level equivalent instead); the stateless request/session
 HTTP shape (a resident daemon doesn't need it for intra-process durability,
 only for surviving its own restarts, which §3 addresses directly);
 zero-cost indefinite pause (a serverless billing property with no local
-analog — removes an objection, not a design requirement); OpenTelemetry
-export (Eve's Braintrust/Datadog/Honeycomb/Jaeger story is a hosted-platform
-observability integration trusty-agents deliberately does not adopt, per
-§9 — a personal-productivity, local-first tool has no fleet to observe
-centrally).
-
-**The core positioning differentiator (§2.0), stated explicitly rather than
-left implicit:** Eve is **code-first** — `agent.ts` + `tools/*.ts` are
-TypeScript, and an agent ships its own tool *implementations* alongside its
-definition. trusty-agents, per Bob's 2026-07-16 decision, is
-**declaration-first, mechanically enforced**: an agent's own package can
-never contain logic — only Markdown instructions and a YAML manifest
-referencing platform-hosted primitives by name (§2.6's load-time rejection
-of any foreign/executable content is the concrete guarantee, not a style
-convention). Where Eve's model is "bring your own tool code, we'll run it,"
-trusty-agents' model is "reference a tool the platform already hosts, or
-don't." This is a narrower agent-authoring surface by design — trading
-Eve's code-level flexibility for an auditable, injection-resistant agent
-package that a non-engineer persona can safely author or share.
+analog — removes an objection, not a design requirement).
 
 ---
 
@@ -1588,34 +1003,16 @@ package that a non-engineer persona can safely author or share.
 | NDJSON/OTel streaming | Full `Event` enum + SSE stream already in place, arguably richer (AST-operation, persona-detection, LLM-lifecycle events) | Not a gap — already present |
 | State persistence delegated to platform | `TrustyBackedMemoryStore`/Palace integration (#379) is deeper than Eve's story, but not declaratively surfaced in the agent's own file | Closed by SPEC-AGENTFW-06 |
 | Deploy-safe versioning of in-flight sessions | No equivalent — same root cause as the durability gap | Addressed indirectly by SPEC-AGENTFW-02's checkpoint/resume |
-| Multi-channel deployment | Two real, separate systems: `trusty-channels` (MCP tool servers) and trusty-agents' own inbound `telegram`/`slack` gateways (project-scoped, not agent-scoped) | Closed by SPEC-AGENTFW-01 §2.3.7 — extends both, invents neither |
-| Code-first agent authoring (`agent.ts` + `tools/*.ts`) | N/A — never had this, and per Bob's 2026-07-16 decision never will | **Deliberate non-parity** — declaration-first is the differentiator, not a gap (§2.0, §11) |
-| OpenTelemetry / hosted observability integrations | Full `Event` enum + SSE stream, local-only | **Deliberate non-parity** — DECIDED no OTel, ever (§9) |
-| Third-party SaaS inbound push (webhooks), device/IoT push (MQTT) | No home for either — `channels.inbound` is chat-platform-only, `events.subscribe` is internal-`Event`-only | Closed by SPEC-AGENTFW-01 §2.3.6 (`events.webhook`, implementation-ready; `events.mqtt`, `~draft`) |
-
-### 12.1 Gallery validation (2026-07-16)
-
-The primitive-binding design in §2 was validated against a real-world agent
-gallery — [docs/research/agent-gallery-validation-20260716.md][gallery-doc]
-(PR #2814, re-baselined against this spec's v3): **11 of 14 surveyed
-OpenClaw/Hermes-style gallery agents are fully covered by v3's manifest
-primitives, and zero require agent-authored code** — direct evidence the
-declarative-only design (§2.0) is not merely a policy stance but actually
-sufficient for the personal-productivity agent shapes it targets. The
-validation surfaced exactly the two gaps §2.3.6 now closes (generic
-inbound-HTTP webhooks; device/IoT push) plus the connector-completeness note
-in §2.3.7 (Discord/WhatsApp) and the cron-syntax evidence folded into §10
-item 8 — this revision (v3.1) is the direct result of that validation pass,
-not a speculative extension.
+| Multi-channel deployment | No trusty-agents-owned channel adapters (trusty-mpm has a separate Telegram/TELUI surface) | Explicit non-goal (§9), flagged as an open question (§10 item 4) |
 
 ---
 
 ## 13. Change Log
 
-- **2026-07-15 (v1)** — Initial draft (the initial commit on this PR).
-  Comparative review of Vercel's Eve spec plus design *directions* for a Rust
-  equivalent — no normative content. **Rejected by Bob:** "the eve research is
-  NOT a spec, it refers to one but doesn't actually contain one."
+- **2026-07-15 (v1)** — Initial draft merged as PR #2792. Comparative review
+  of Vercel's Eve spec plus design *directions* for a Rust equivalent — no
+  normative content. **Rejected by Bob:** "the eve research is NOT a spec,
+  it refers to one but doesn't actually contain one."
 - **2026-07-15 (v2)** — Full rewrite. Every `SPEC-AGENTFW-01..06` section
   made normative: exact frontmatter schema + `extends` resolution algorithm
   and error cases (§2), an explicit `RunState` machine + `CheckpointRecord`
@@ -1628,86 +1025,7 @@ not a speculative extension.
   **NEW**. Eve review and gap analysis demoted to background appendices
   (§11–§12). Owner-decision checklist (§10) added, gating specific SPEC
   sections rather than floating as generic open questions.
-- **2026-07-16 (v3)** — Two rounds of owner input, both folded in:
-  (1) **Bob's foundational decision: agents are declarative-only, ever.**
-  §2 reframed as a primitive-binding manifest (tools, subagents, memory,
-  model, checkpoints, **NEW** events, **NEW** channels — §2.2), with a
-  mechanically-enforced no-code invariant (§2.6: closed-schema parsing +
-  directory-package file allowlist) and a form factor decision
-  (`agent.yaml`/`instructions.md`, back-compat with `agent.toml`/`persona.md`,
-  §2.4). (2) **Bob resolved all six originally-open questions**, each
-  grounded against real code discovered this pass rather than accepted at
-  face value: checkpoint granularity APPROVED as permanent (not MVP-only,
-  §9); channels grounded in the **real** `trusty-channels` crate (epic #2636)
-  plus trusty-agents' own existing (but project-scoped) `telegram`/`slack`
-  gateways — no new adapter system (§2.3.7); credential brokering resolved
-  to the **already-implemented** OS-keyring resolver
-  (`trusty_common::inference::credentials`, `keyring = "3"` already a
-  workspace dependency) with one narrowed fallback-tension question
-  surfaced, not invented (§4.2, §10); OpenTelemetry explicitly and
-  permanently rejected — local-only telemetry is a design principle, not an
-  open question (§9); `extends` composition realigned from an invented
-  "child-replaces + opt-in token" rule to **base-first concatenation**,
-  mirroring the real, proven `crates/trusty-mpm/src/core/agent_builder.rs::
-  compose_agent` (`MAX_DEPTH=8`, cycle/depth error shapes) rather than a
-  bespoke algorithm (§2.5); model/provider resolution confirmed to route
-  through the **already-existing** `trusty_common::inference::
-  InferenceAdapter` layer, with a new `[model].default` config key
-  formalizing today's env-var-only global default (§2.3.4, §7.2, §6).
-  §10 shrank from 8 items to 9 narrower ones — six fully resolved items
-  removed outright per Bob's instruction; three new items surfaced by the
-  declarative-only rework (form-factor deprecation timeline, channel-inbound
-  routing mechanism, static-asset allowlist confirmation) took their place
-  alongside the untouched originals (`HandoffContext` size cap, checkpoint
-  env-var naming, `code_dir` resume integrity, the `tools/call` proxy
-  research task).
-- **2026-07-16 (v3.1)** — Gallery-validation follow-up (PR #2814,
-  [docs/research/agent-gallery-validation-20260716.md][gallery-doc]):
-  11/14 surveyed gallery agents fully covered by v3, zero need code — direct
-  evidence for §2.0's declarative-only design — but two spec gaps surfaced,
-  now closed: **`events.webhook`** (§2.3.6, implementation-ready), a generic
-  inbound-HTTP trigger for third-party SaaS push events, built on
-  already-workspace `hmac`/`sha2` crates and mirroring
-  `trusty-review`'s existing `verify_webhook_signature` pattern, with
-  `secret_ref` mandatory (never an unauthenticated hook route) and payload
-  delivery folded into the existing `HandoffContext` mechanism (§5.2) rather
-  than a new payload shape; **`events.mqtt`** (§2.3.6, `~draft`, gated §10
-  item 10), device/IoT topic-filtered push, specified as a distinct manifest
-  key rather than widening `subscribe`, pending Bob's confirmation and a new
-  MQTT client crate dependency. Also added: a connector-completeness note to
-  §2.3.7 (Discord/WhatsApp are future `channels.tools` connectors, no schema
-  change), gallery evidence appended to §10 item 8 (wall-clock/day-of-week
-  scheduling is a confirmed real gap, not hypothetical), and a new §10 item
-  11 (webhook public-reachability story — a tunnel/reverse-proxy question
-  distinct from the already-specified HMAC auth).
-- **2026-07-16 (v3.2)** — Review-fix pass (code-critic BLOCK on this PR) +
-  rebase onto `origin/main`. **Renumbered `DOC-37` → `DOC-41` everywhere**
-  (H1, `Spec ID:` line, `docs/specs/README.md` catalog row) — `DOC-37` was
-  already self-claimed by `trusty-search-managed-repo-awareness.md` on
-  `main`; scan-before-claim (DOC-38 §4.1) confirms `DOC-41` is now unique
-  across the `docs/` tree. Rebased onto `origin/main` @ `580c9a7d`, resolving
-  a `docs/specs/README.md` catalog conflict from DOC-38/DOC-39/DOC-40 landing
-  concurrently; updated the catalog's "next free `DOC-N`" note from `DOC-41`
-  to `DOC-42`. Header **"Builds on"** corrected: the unified inference-provider
-  adapter layer is **existing**, not planned (matches §7.2, which already had
-  this right). Reworded the two "v1 … merged as PR #2792" references (§ scope
-  note, §13) — PR #2792 never merged; v1/v2/v3/v3.1 are commits on this same
-  open PR, not separate merges. Re-verified every §2.5 `agent_builder.rs`
-  citation against post-rebase `origin/main`: `MAX_DEPTH = 8` is at line 34
-  (not 31); `SourceMap`/`build_source_map` cited precisely at lines 99/110
-  (the prior 16-22 citation was the module-doc prose describing them, now
-  labeled as such); the base-first join call is `joined.join("\n\n")` at
-  line 515 (not `bodies.join` at 519). Also refreshed three drifted citations:
-  §2.3.6's `sha2`/`hmac` workspace-dependency lines (`Cargo.toml:110,221`,
-  drifted via PR #2782); §2.1's stale `trusty-channels/src/lib.rs:1-18`
-  doc-comment citation (which still described `telegram` as a future module)
-  augmented with the `[[bin]]` entries in `trusty-channels/Cargo.toml:12-18`
-  proving both `slack-mcp` and `telegram-mcp` already exist; §3.1's
-  `perf.rs` citation widened from `111-171` (which only covered `PerfRecord`)
-  to `32-171` with each struct's line cited individually (`TokenUsage`:32,
-  `PhaseRecord`:78, `PerfTotals`:94, `PerfRecord`:112).
 
-[gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
 [eve-docs]: https://vercel.com/docs/eve
 [eve-repo]: https://github.com/vercel/eve
