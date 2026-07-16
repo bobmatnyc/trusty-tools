@@ -58,7 +58,11 @@ pub async fn handle_start(
     // CLI flag wins over any pre-set TRUSTY_DATA_DIR.  Precedence for the
     // foreground path: TRUSTY_DATA_DIR (env) > --data-dir (flag).
     //
-    // SAFETY: invoked on the main thread before tokio spawns any workers.
+    // SAFETY: `set_var` is sound here because nothing else reads/writes
+    // process env concurrently yet — this runs before the daemon starts
+    // accepting requests (the tokio runtime and its worker threads already
+    // exist at this point, since `handle_start` is itself async; the
+    // soundness argument is "no concurrent env access", not "no workers").
     if std::env::var_os("TRUSTY_DATA_DIR").is_none() {
         if let Some(dir) = data_dir {
             let dir = dir.to_path_buf();
@@ -178,7 +182,11 @@ pub async fn handle_start(
     // `--serial` == concurrency 1 and wins over `--fanout-concurrency`.
     // An explicit env var set in the shell always wins (matches --device).
     //
-    // SAFETY: invoked on the main thread before tokio spawns any workers.
+    // SAFETY: `set_var` is sound here because nothing else reads/writes
+    // process env concurrently yet — this runs before the daemon starts
+    // accepting requests (the tokio runtime and its worker threads already
+    // exist at this point, since `handle_start` is itself async; the
+    // soundness argument is "no concurrent env access", not "no workers").
     if std::env::var_os("TRUSTY_SEARCH_FANOUT_CONCURRENCY").is_none() {
         let resolved = if serial {
             Some(1_usize)

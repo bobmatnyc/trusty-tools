@@ -98,6 +98,21 @@ fn default_global_top_k() -> usize {
 /// to complete. A follow-up issue should track "opt-in load-all on global
 /// search" as a deeper semantic decision.
 ///
+/// Residual limitation (issue #2845): the fan-out concurrency cap is
+/// **per-request**, not process-global. It bounds how many per-index
+/// searches one `POST /search` call issues at once — it does NOT bound how
+/// many concurrent `POST /search` calls the daemon serves. N concurrent
+/// global searches can still issue up to `N × fanout_concurrency` in-process
+/// per-index searches, and more than ~40 concurrent `search_all` HTTP calls
+/// (at the default `TRUSTY_MAX_CONCURRENT_REQUESTS=8` admission limit) can
+/// still trip the HTTP-layer 503 limiter regardless of this cap. This PR
+/// fixes the single-large-fan-out incident (one request touching ~150+
+/// indexes); it does not add a process-global fan-out semaphore. If 503s
+/// recur under high *client* concurrency (many simultaneous `search_all`
+/// callers) rather than fan-out breadth, a process-global semaphore shared
+/// across all in-flight fan-outs is the natural follow-up — deliberately not
+/// built here to keep this fix scoped to the reported incident.
+///
 /// Test: `test_global_search_fans_out_and_merges` registers two indexes,
 /// indexes a file into each, and asserts both contribute results tagged with
 /// the right `index_id`. `test_global_search_surfaces_cold_indexes_skipped`
@@ -240,12 +255,20 @@ pub(super) async fn global_search_handler(
 
     // Run the per-index searches with *bounded* concurrency (issue #2845).
     // An unbounded `join_all` over ~150+ indexes issued every per-index search
-    // near-simultaneously and overran the daemon's admission limiter (503
-    // `server_busy` storm). `buffer_unordered(limit)` keeps at most `limit`
-    // searches in flight at once so a large fan-out drains in bounded waves
-    // and still returns results. `serial: true` / `--serial` collapses the
-    // cap to 1. Any index that errors is skipped with a log line so a single
-    // broken index doesn't 500 the whole fan-out.
+    // near-simultaneously; the resulting CPU/memory pressure and long-tail
+    // latency drove the 503 `server_busy` storm (the per-index searches here
+    // are in-process and never themselves cross the HTTP admission limiter in
+    // `service::concurrency` — see the rationale on `fanout::DEFAULT_FANOUT_CONCURRENCY`
+    // for why bounding this fan-out only *indirectly* relieves that limiter).
+    // `buffer_unordered(limit)` keeps at most `limit` searches in flight at
+    // once so a large fan-out drains in bounded waves and still returns
+    // results. `serial: true` / `--serial` collapses the cap to 1. Any index
+    // that errors is skipped with a log line so a single broken index doesn't
+    // 500 the whole fan-out.
+    //
+    // NOTE — this cap is per-request only: it does not bound how many
+    // concurrent `POST /search` calls the daemon serves at once (see the
+    // "Residual limitation" doc on `global_search_handler` above).
     use futures::stream::StreamExt;
     let fanout_concurrency =
         super::fanout::resolve_fanout_concurrency(req.serial, req.max_fanout_concurrency);

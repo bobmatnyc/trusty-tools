@@ -3,12 +3,19 @@
 //!
 //! Why: a single global search fans out one per-index query per registered
 //! index. With `join_all` that fan-out was *unbounded* — a request touching
-//! ~150+ repo indexes issued ~150 per-index searches near-simultaneously,
-//! overrunning the daemon's admission/concurrency limiter and 503-ing the
-//! whole request (`server_busy` storm observed in production 2026-07-16).
-//! Bounding the fan-out with a small semaphore-style cap lets a large fan-out
-//! degrade gracefully — results are still returned, just in bounded waves —
-//! instead of tripping the limiter.
+//! ~150+ repo indexes issued ~150 per-index searches near-simultaneously, each
+//! one CPU/memory work competing for the same runtime, which produced the
+//! long-tail latency and resource pressure behind the `server_busy` storm
+//! observed in production 2026-07-16 (see `apply_limiter` in
+//! `service::concurrency` for the HTTP-layer admission limiter itself — the
+//! per-index searches bounded here are in-process and never traverse it
+//! directly). Bounding the fan-out with a small semaphore-style cap lets a
+//! large fan-out degrade gracefully — results are still returned, just in
+//! bounded waves — and shortens per-request latency, which indirectly
+//! relieves pressure on the admission limiter by shrinking the window in
+//! which new inbound requests can pile up. This is a single-large-fan-out
+//! fix, not a process-global concurrency bound — see the residual-limitation
+//! note on `global_search_handler` in `search_global.rs`.
 //! What: pure resolution of the effective per-fan-out concurrency cap from
 //! (1) a per-request override, (2) the `TRUSTY_SEARCH_FANOUT_CONCURRENCY` env
 //! var, or (3) a conservative built-in default. `--serial` (or a request
@@ -30,13 +37,20 @@ pub(super) const FANOUT_CONCURRENCY_ENV: &str = "TRUSTY_SEARCH_FANOUT_CONCURRENC
 /// Conservative default cap on concurrently-executing per-index searches
 /// within a single fan-out (issue #2845).
 ///
-/// Why: 8 mirrors the daemon's own `TRUSTY_MAX_CONCURRENT_REQUESTS` default
-/// (see `service::concurrency`) — a fan-out never issues more in-flight
-/// per-index work than the daemon is provisioned to admit, so a single large
-/// fan-out can no longer saturate its own admission budget. It is high enough
-/// that small/medium fan-outs run effectively in parallel, and low enough that
-/// a 150-index fan-out drains in ~19 bounded waves instead of one thundering
-/// herd.
+/// Why: 8 is a conservative resource-saturation cap borrowed from the
+/// daemon's own `TRUSTY_MAX_CONCURRENT_REQUESTS` default (see
+/// `service::concurrency`) as a reasonable starting point — NOT a
+/// by-construction admission bound. Per-index `indexer.search()` calls inside
+/// a fan-out are in-process futures; they never traverse the HTTP layer and
+/// so never pass through `apply_limiter` / the admission semaphore. The two
+/// "8"s govern uncoupled resources (in-process fan-out breadth vs. inbound
+/// HTTP request admission). Bounding the fan-out relieves limiter pressure
+/// only *indirectly*: fewer concurrent per-index searches means each holds
+/// CPU/memory for less overlapping time, which shortens per-request latency
+/// and so shrinks the window in which new inbound HTTP requests pile up
+/// against the admission queue. It is high enough that small/medium fan-outs
+/// run effectively in parallel, and low enough that a 150-index fan-out
+/// drains in ~19 bounded waves instead of one thundering herd.
 /// What: used when neither a per-request override nor the env var is present.
 /// Test: `parse_fanout_env` (unset path), `resolve_precedence`.
 pub(super) const DEFAULT_FANOUT_CONCURRENCY: usize = 8;
