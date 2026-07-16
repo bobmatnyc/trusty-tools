@@ -92,29 +92,31 @@ fn is_mcp_error_detects_error_flag() {
 
 // ── stage-not-ready → lexical fallback (issue #2783) ────────────────────────
 
-/// Why: the recoverable warm-up window must be told apart from other in-band
-/// errors — via the structured `_meta.error_code` and, defensively, the text.
+/// Why: the recoverable warm-up window is signalled ONLY by the structured
+/// `_meta.error_code` (issue #138) — the human-readable text never carries the
+/// literal code — so detection must key off `_meta` and nothing else.
 #[test]
-fn is_stage_not_ready_detects_meta_and_text() {
+fn is_stage_not_ready_detects_meta_code() {
     let meta = json!({
         "isError": true,
-        "content": [{ "type": "text", "text": "index not ready" }],
+        "content": [{ "type": "text", "text": "requires Stage 2 (embeddings), not yet ready" }],
         "_meta": { "error_code": "STAGE_NOT_READY" }
     });
     assert!(is_stage_not_ready(&meta));
 
-    let text_only = json!({
+    // A different structured error code must NOT be treated as stage-not-ready.
+    let other_code = json!({
         "isError": true,
-        "content": [{ "type": "text", "text": "Error: STAGE_NOT_READY (stage 2)" }]
+        "_meta": { "error_code": "INDEX_NOT_FOUND" }
     });
-    assert!(is_stage_not_ready(&text_only));
+    assert!(!is_stage_not_ready(&other_code));
 
-    // A genuinely different error must NOT be treated as stage-not-ready.
-    let other = json!({
+    // No `_meta` at all → not a stage-not-ready condition (fail open normally).
+    let no_meta = json!({
         "isError": true,
         "content": [{ "type": "text", "text": "no index covers this project" }]
     });
-    assert!(!is_stage_not_ready(&other));
+    assert!(!is_stage_not_ready(&no_meta));
 }
 
 /// Why: only the semantic/symbol lanes gate on a warm-up stage; a `grep` error

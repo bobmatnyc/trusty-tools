@@ -30,7 +30,7 @@
 //! `tests::execute_rejects_malformed_args_recoverably`,
 //! `tests::schema_advertises_mode_and_query`, `tests::mcp_text_extracts_content`,
 //! `tests::is_mcp_error_detects_error_flag`,
-//! `tests::is_stage_not_ready_detects_meta_and_text`,
+//! `tests::is_stage_not_ready_detects_meta_code`,
 //! `tests::should_lexical_fallback_only_for_stage_not_ready`,
 //! `tests::lexical_params_matches_search_lexical_schema`.
 
@@ -269,19 +269,16 @@ fn is_mcp_error(result: &Value) -> bool {
 /// unlike a genuinely missing index or a dead daemon — so it must be told apart
 /// from other in-band errors (issue #2783).
 /// What: `true` when trusty-search's structured `_meta.error_code` is
-/// `STAGE_NOT_READY`; falls back to a literal-text probe when `_meta` is absent.
-/// Test: `tests::is_stage_not_ready_detects_meta_and_text`.
+/// `STAGE_NOT_READY` — the machine-readable contract from issue #138. (The
+/// human-readable text never carries the literal code, so `_meta` is the only
+/// reliable signal.)
+/// Test: `tests::is_stage_not_ready_detects_meta_code`.
 fn is_stage_not_ready(result: &Value) -> bool {
-    let meta_code = result
+    result
         .get("_meta")
         .and_then(|m| m.get("error_code"))
-        .and_then(Value::as_str);
-    if meta_code == Some("STAGE_NOT_READY") {
-        return true;
-    }
-    mcp_text(result)
-        .map(|t| t.contains("STAGE_NOT_READY"))
-        .unwrap_or(false)
+        .and_then(Value::as_str)
+        == Some("STAGE_NOT_READY")
 }
 
 /// Whether a not-ready lane error should be retried on the lexical lane.
@@ -473,8 +470,13 @@ impl ToolExecutor for TrustySearchTool {
                 && let Some(id) = session.index_id.as_deref()
                 && let Some(text) = lexical_fallback(&mut client, id, &parsed.query, top_k).await
             {
+                let lane_label = if mode == "symbol" {
+                    "symbol graph"
+                } else {
+                    "semantic"
+                };
                 return ToolResult::ok(format!(
-                    "trusty-search's semantic index is still building; \
+                    "trusty-search's {lane_label} index is still building; \
                      showing lexical (exact-match) results instead:\n{text}"
                 ));
             }
