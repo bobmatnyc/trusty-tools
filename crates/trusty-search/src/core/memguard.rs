@@ -332,6 +332,114 @@ pub fn over_memory_limit() -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Steady-state memory-limit ENFORCEMENT (issue #2846)
+//
+// The helpers above (`over_memory_limit`, `over_index_memory_limit`) are only
+// consulted by the reindex pipeline. A daemon that never reindexes still grows
+// its resident heap without bound (BM25 corpora, chunk text, entity maps, HNSW
+// arenas) until the OS OOM-killer intervenes — the configured `memory_limit_mb`
+// soft ceiling was accepted but never enforced in the serving path. The
+// `service::server::tickers::spawn_memory_pressure_ticker` background task now
+// samples RSS on a fixed cadence and, when it crosses the soft ceiling, sheds
+// evictable caches (and, opt-in, self-restarts under a supervisor). These are
+// the config readers + the pure threshold decision it uses.
+// ---------------------------------------------------------------------------
+
+/// Default cadence (seconds) between memory-pressure enforcement samples.
+const DEFAULT_ENFORCE_SECS: u64 = 30;
+/// Default high-water mark, as a percentage of `memory_limit_mb`, at which the
+/// enforcement sweep starts reclaiming evictable caches.
+const DEFAULT_HIGH_WATER_PCT: u8 = 90;
+/// Lower bound on the configurable high-water percentage — reclaiming below
+/// half the soft ceiling would thrash caches for no benefit.
+const MIN_HIGH_WATER_PCT: u8 = 50;
+
+/// How often the memory-pressure enforcement ticker samples RSS.
+///
+/// Why: enforcement is a background cost (one RSS sample per tick, plus a
+/// registry walk only when over the high-water mark); operators may want a
+/// tighter cadence on OOM-prone hosts or to disable it where an external
+/// cgroup already caps the process.
+/// What: reads `TRUSTY_MEMORY_ENFORCE_SECS` as `u64` seconds. `0` disables the
+/// ticker outright (it never spawns). Unset / unparseable falls back to
+/// [`DEFAULT_ENFORCE_SECS`].
+/// Test: `tests::test_enforce_interval_default`.
+pub fn enforce_interval_secs() -> u64 {
+    match std::env::var("TRUSTY_MEMORY_ENFORCE_SECS") {
+        Ok(v) if !v.is_empty() => match v.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    "TRUSTY_MEMORY_ENFORCE_SECS={v:?} is not a valid u64; \
+                     using default ({DEFAULT_ENFORCE_SECS}s)"
+                );
+                DEFAULT_ENFORCE_SECS
+            }
+        },
+        _ => DEFAULT_ENFORCE_SECS,
+    }
+}
+
+/// High-water mark (percent of the soft ceiling) at which reclaim kicks in.
+///
+/// Why: reclaiming exactly at the limit leaves no headroom for the RSS to keep
+/// climbing between sample ticks before eviction lands; starting at 90% gives
+/// the sweep a margin to act. Kept configurable so tight-RAM hosts can react
+/// earlier.
+/// What: reads `TRUSTY_MEMORY_HIGH_WATER_PCT` as `u8`, clamped to
+/// `[MIN_HIGH_WATER_PCT, 100]`. Unset / unparseable falls back to
+/// [`DEFAULT_HIGH_WATER_PCT`].
+/// Test: `tests::test_high_water_pct_default_and_clamp`.
+pub fn high_water_pct() -> u8 {
+    let raw = match std::env::var("TRUSTY_MEMORY_HIGH_WATER_PCT") {
+        Ok(v) if !v.is_empty() => v.trim().parse::<u8>().unwrap_or(DEFAULT_HIGH_WATER_PCT),
+        _ => DEFAULT_HIGH_WATER_PCT,
+    };
+    raw.clamp(MIN_HIGH_WATER_PCT, 100)
+}
+
+/// Whether the enforcement ticker may self-restart the daemon as a last resort.
+///
+/// Why: cache eviction cannot reclaim un-evictable growth (allocator
+/// fragmentation, native ONNX/usearch arenas, a true leak). The only reliable
+/// self-cap for that is a graceful restart — but that is only safe when a
+/// supervisor (launchd/systemd) will respawn the process, so it is strictly
+/// opt-in and defaults OFF. An unsupervised daemon must never self-terminate.
+/// What: reads `TRUSTY_MEMORY_RESTART_ON_LIMIT`; `1`/`true`/`yes`/`on`
+/// (case-insensitive) enable it. Anything else (including unset) → `false`.
+/// Test: `tests::test_restart_on_limit_default_off`.
+pub fn restart_on_limit_enabled() -> bool {
+    matches!(
+        std::env::var("TRUSTY_MEMORY_RESTART_ON_LIMIT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Pure threshold decision: is `rss_mb` at or above the reclaim high-water
+/// mark derived from `limit_mb` and `pct`?
+///
+/// Why: extracted from the enforcement ticker so the threshold arithmetic is
+/// unit-testable with synthetic RSS values — moving a process's *real* RSS
+/// across a multi-GB ceiling in a test would mean allocating gigabytes (and
+/// risking the very OOM this guards against). The ticker stays a thin sampler
+/// that calls this and acts on the boolean.
+/// What: returns `false` when `limit_mb == 0` (no ceiling configured);
+/// otherwise `rss_mb >= floor(limit_mb * pct / 100)`. Pass `pct = 100` to test
+/// the hard-limit boundary (the post-reclaim self-restart gate uses this).
+/// Test: `tests::test_over_high_water`.
+pub fn over_high_water(rss_mb: u64, limit_mb: u64, pct: u8) -> bool {
+    if limit_mb == 0 {
+        return false;
+    }
+    let high_water = limit_mb.saturating_mul(pct as u64) / 100;
+    rss_mb >= high_water
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +546,50 @@ mod tests {
         // The function must return None without panicking.
         let _ = current_rss_mb_for_pid(u32::MAX);
         // No assertion — the only requirement is "no panic".
+    }
+
+    #[test]
+    fn test_enforce_interval_default() {
+        // Unset env → compiled-in default. The test binary does not set the
+        // var, so this must resolve to DEFAULT_ENFORCE_SECS.
+        if std::env::var("TRUSTY_MEMORY_ENFORCE_SECS").is_err() {
+            assert_eq!(enforce_interval_secs(), DEFAULT_ENFORCE_SECS);
+        }
+    }
+
+    #[test]
+    fn test_high_water_pct_default_and_clamp() {
+        if std::env::var("TRUSTY_MEMORY_HIGH_WATER_PCT").is_err() {
+            let pct = high_water_pct();
+            assert_eq!(pct, DEFAULT_HIGH_WATER_PCT);
+            // Resolved value always lands inside the enforced clamp window.
+            assert!((MIN_HIGH_WATER_PCT..=100).contains(&pct));
+        }
+    }
+
+    #[test]
+    fn test_restart_on_limit_default_off() {
+        if std::env::var("TRUSTY_MEMORY_RESTART_ON_LIMIT").is_err() {
+            assert!(
+                !restart_on_limit_enabled(),
+                "self-restart must default OFF so an unsupervised daemon never self-terminates"
+            );
+        }
+    }
+
+    #[test]
+    fn test_over_high_water() {
+        // No ceiling configured → never over, whatever the RSS.
+        assert!(!over_high_water(999_999, 0, 90));
+        // 90% of 10_000 = 9_000: below, at, above.
+        assert!(!over_high_water(8_999, 10_000, 90));
+        assert!(over_high_water(9_000, 10_000, 90));
+        assert!(over_high_water(9_500, 10_000, 90));
+        // Hard-limit boundary (pct = 100) — the self-restart gate's usage.
+        assert!(!over_high_water(9_999, 10_000, 100));
+        assert!(over_high_water(10_000, 10_000, 100));
+        // saturating_mul must not panic on a huge limit.
+        assert!(over_high_water(u64::MAX, u64::MAX, 100));
     }
 
     #[test]

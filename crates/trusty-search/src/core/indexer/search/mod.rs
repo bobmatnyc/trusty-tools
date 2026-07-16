@@ -15,6 +15,10 @@ pub(crate) mod kg;
 pub(crate) mod lanes;
 pub(crate) mod materialize;
 
+#[cfg(test)]
+#[path = "lanes_tests.rs"]
+mod lanes_tests;
+
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;

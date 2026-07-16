@@ -348,6 +348,29 @@ pub struct SearchAppState {
     /// `0` only on the very first health poll before any sample has ever landed.
     /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
     pub last_rss_mb: Arc<std::sync::atomic::AtomicU64>,
+    /// RSS (MB) observed immediately after the most recent memory-pressure
+    /// reclaim sweep; `0` = no reclaim has happened in the current pressure
+    /// episode (issue #2846 review — MEDIUM: reclaim/rehydrate thrash).
+    ///
+    /// Why: without hysteresis, steady-state RSS sitting at/above the
+    /// high-water mark (e.g. a host whose genuine baseline usage is near the
+    /// ceiling, independent of evictable caches) makes
+    /// `run_memory_pressure_tick` force a full-fleet cache clear on EVERY
+    /// tick (default every 30s) forever — each one forcing every query lane
+    /// to re-rehydrate BM25/chunks/entities from redb, which is pure churn
+    /// with no memory benefit once nothing new has accumulated to reclaim.
+    /// This atomic is the hysteresis baseline: a sweep only runs when current
+    /// RSS has risen past the RSS observed right after the previous sweep,
+    /// meaning caches have measurably repopulated and there is something new
+    /// to reclaim. Dropping back under the high-water mark resets it to `0`
+    /// so the next pressure episode always reclaims on its first crossing.
+    /// What: an `AtomicU64` written by `run_memory_pressure_tick`: reset to
+    /// `0` whenever RSS is observed below the high-water mark, and set to the
+    /// post-reclaim RSS after every sweep.
+    /// Test: `tickers::memory_pressure_tests::hysteresis_skips_when_rss_has_not_risen`
+    /// (pure decision) and `restart_branch_signals_shutdown_tx_when_still_over_hard_limit`
+    /// (end-to-end orchestration) in `service/server/memory_pressure_tests.rs`.
+    pub last_reclaim_rss_mb: Arc<std::sync::atomic::AtomicU64>,
     /// Cached CPU percentage (f32 bits) from the last successful sample.
     ///
     /// Why (issue #1016): same rationale as `last_rss_mb` — avoids returning

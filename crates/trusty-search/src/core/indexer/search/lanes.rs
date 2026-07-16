@@ -10,12 +10,25 @@
 //! Test: covered by every `test_search_*` and `test_kg_*` integration test
 //! in `indexer::tests`.
 
+use std::sync::atomic::Ordering;
+
 use anyhow::{Context, Result};
 
 use crate::core::classifier::QueryIntent;
 use crate::core::entity::EdgeKind;
 
 use super::super::{hash_query, CodeIndexer};
+
+/// Bound on the ensure-then-read retry loop in [`CodeIndexer::bm25_search`] /
+/// [`CodeIndexer::grep_fallback_search`] (issue #2846 review).
+///
+/// Why: the memory-pressure ticker's high-water cadence is bounded well below
+/// 1 Hz (`TRUSTY_MEMORY_ENFORCE_SECS`, default 30s), so a query lane racing
+/// against a reclaim on every one of 3 consecutive attempts is not a real
+/// steady-state scenario — this cap exists purely to convert a
+/// theoretically-possible adversarial cadence into a graceful empty-result
+/// degradation instead of an unbounded retry loop.
+const REHYDRATE_RACE_RETRIES: u32 = 3;
 
 impl CodeIndexer {
     /// Batch-fetch the `RawChunk`s for a set of chunk ids, reading from the
@@ -141,16 +154,52 @@ impl CodeIndexer {
     /// Why: the previous implementation rebuilt the entire posting list on
     /// every search (~9.5s on a 115k-chunk index). The index is now maintained
     /// incrementally so the search hot path is just a read lock + posting walk.
-    /// What: rehydrates an idle-evicted BM25 corpus (issue #2162), then
-    /// acquires the BM25 read lock and runs `score_query_all`.
-    /// Test: BM25 results are covered by every search integration test.
+    ///
+    /// Why the retry loop (issue #2846 review — MEDIUM): `ensure_bm25_entities_loaded`
+    /// and the `bm25.read()` below are two SEPARATE lock acquisitions, so a
+    /// memory-pressure reclaim (`reclaim_memory_now`, which fires under active
+    /// load by design — unlike idle-evict, which only ever raced this window
+    /// after 60s of quiet) can land in between: the ensure-check observes BM25
+    /// populated, then the reclaim clears it before this function's own read
+    /// lock is acquired, and the query would silently lose its entire lexical
+    /// lane. `clear_bm25_entities` only sets `bm25_entities_evicted` when it
+    /// actually cleared a non-empty index, so observing `bm25.is_empty()` AND
+    /// the flag set (under the SAME read guard that saw the empty state) is an
+    /// unambiguous signal that a reclaim raced us since `ensure()` returned —
+    /// as opposed to a genuinely-empty corpus, where the flag stays false and
+    /// we return immediately. That case rehydrates and retries rather than
+    /// silently degrading recall.
+    /// What: rehydrates an idle-evicted or race-evicted BM25 corpus (issue
+    /// #2162 / #2846), then acquires the BM25 read lock and runs
+    /// `score_query_all`. Retries up to [`REHYDRATE_RACE_RETRIES`] times only
+    /// when the race is detected; a genuinely empty BM25 index returns `Ok(vec![])`
+    /// on the first pass with no retry.
+    /// Test: BM25 results are covered by every search integration test;
+    /// `bm25_search_survives_reclaim_race_between_ensure_and_read` in
+    /// `indexer::tests_idle_evict` pins the race-detection retry itself.
     pub(super) async fn bm25_search(&self, query: &str, want: usize) -> Result<Vec<(String, f32)>> {
-        self.ensure_bm25_entities_loaded().await;
-        let bm25 = self.bm25.read().await;
-        if bm25.is_empty() {
-            return Ok(Vec::new());
+        for _ in 0..REHYDRATE_RACE_RETRIES {
+            self.ensure_bm25_entities_loaded().await;
+            let bm25 = self.bm25.read().await;
+            if !bm25.is_empty() {
+                return Ok(bm25.score_query_all(query, want));
+            }
+            if !self.bm25_entities_evicted.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
+            // A reclaim raced us since `ensure()` returned — drop the read
+            // guard and loop back to rehydrate again.
         }
-        Ok(bm25.score_query_all(query, want))
+        // Exhausted retries: a reclaim landed on every attempt, which is not
+        // reachable at the configured (>=30s) enforcement cadence. Degrade to
+        // an empty lexical lane rather than loop forever; the next query
+        // succeeds once the sweep settles.
+        tracing::warn!(
+            "index '{}': BM25 rehydrate raced by memory-pressure reclaim {REHYDRATE_RACE_RETRIES} \
+             times in a row — returning empty lexical lane for this query",
+            self.index_id
+        );
+        Ok(Vec::new())
     }
 
     /// Grep-fallback lane: scan in-memory chunk contents for a literal match
@@ -159,10 +208,22 @@ impl CodeIndexer {
     /// Why: when the primary BM25 + vector lanes both return no rows (rare but
     /// real on small / unusual indexes), we want at least an exact-substring
     /// fallback before telling the caller "no results".
-    /// What: builds a `regex::escape(query)` pattern, walks the in-memory chunk
-    /// corpus, and collects up to `want` hits scored at `GREP_FALLBACK_SCORE`.
-    /// Empty / regex-build failure short-circuits to `Vec::new()`.
-    /// Test: `test_grep_fallback_returns_substring_hits` in `indexer::tests`.
+    ///
+    /// Why the retry loop (issue #2846 review — MEDIUM): same race as
+    /// [`Self::bm25_search`], applied to the `chunks` map / `chunks_evicted`
+    /// flag instead of BM25 — `ensure_chunks_loaded` and `chunks.read()` below
+    /// are separate lock acquisitions, so a memory-pressure reclaim can clear
+    /// the map in between and this lane would silently scan zero chunks.
+    /// What: builds a `regex::escape(query)` pattern, rehydrates an
+    /// idle-evicted or race-evicted in-memory chunk map, and walks it
+    /// collecting up to `want` hits scored at `GREP_FALLBACK_SCORE`. Empty
+    /// query / `want` / regex-build failure short-circuits to `Vec::new()`.
+    /// Retries up to [`REHYDRATE_RACE_RETRIES`] times only when the race is
+    /// detected (mirrors `bm25_search`'s flag-under-guard check); a
+    /// genuinely-empty map returns immediately.
+    /// Test: `test_grep_fallback_returns_substring_hits` in `indexer::tests`;
+    /// `grep_fallback_survives_reclaim_race_between_ensure_and_read` in
+    /// `indexer::tests_idle_evict` pins the race-detection retry.
     // pub(crate): also called from tests.rs (a sibling of `search/` in `indexer`).
     pub(crate) async fn grep_fallback_search(
         &self,
@@ -175,19 +236,33 @@ impl CodeIndexer {
         let Ok(re) = regex::Regex::new(&regex::escape(query)) else {
             return Vec::new();
         };
-        // Rehydrate the in-memory corpus if it was evicted while idle.
-        self.ensure_chunks_loaded().await;
-        let chunks = self.chunks.read().await;
-        let mut out: Vec<(String, f32)> = Vec::new();
-        for raw in chunks.values() {
-            if re.is_match(&raw.content) {
-                out.push((raw.id.clone(), super::GREP_FALLBACK_SCORE));
-                if out.len() >= want {
-                    break;
+        for _ in 0..REHYDRATE_RACE_RETRIES {
+            self.ensure_chunks_loaded().await;
+            let chunks = self.chunks.read().await;
+            if chunks.is_empty() && self.chunks_evicted.load(Ordering::Relaxed) {
+                // A reclaim raced us since `ensure()` returned — drop the read
+                // guard and loop back to rehydrate again.
+                continue;
+            }
+            let mut out: Vec<(String, f32)> = Vec::new();
+            for raw in chunks.values() {
+                if re.is_match(&raw.content) {
+                    out.push((raw.id.clone(), super::GREP_FALLBACK_SCORE));
+                    if out.len() >= want {
+                        break;
+                    }
                 }
             }
+            return out;
         }
-        out
+        // Exhausted retries: see `bm25_search`'s identical tail comment — not
+        // reachable at the configured enforcement cadence.
+        tracing::warn!(
+            "index '{}': chunk rehydrate raced by memory-pressure reclaim {REHYDRATE_RACE_RETRIES} \
+             times in a row — returning empty grep-fallback lane for this query",
+            self.index_id
+        );
+        Vec::new()
     }
 
     /// Run the HNSW lane. Returns `(chunk_id, score)` in "higher = better"

@@ -6,7 +6,9 @@
 //! What: `pub(super) spawn_*_ticker` functions, each detached as a
 //! `tokio::spawn` task holding a `Weak<SearchAppState>`.
 //! Test: covered indirectly via handler tests that observe side-effects, plus
-//! `residency_sweep_tests` for the issue #2161 sweep's per-tick logic.
+//! `residency_sweep_tests` for the issue #2161 sweep's per-tick logic and
+//! `memory_pressure_tests` for the issue #2846 pressure sweep's hysteresis
+//! and opt-in self-restart branch.
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -351,6 +353,194 @@ pub(super) fn spawn_residency_sweep_ticker(state: Arc<SearchAppState>) {
     });
 }
 
+/// Spawn the steady-state memory-limit enforcement ticker (issue #2846).
+///
+/// Why: the daemon accepts a `memory_limit_mb` soft ceiling (auto-tuned to
+/// ~25% of host RAM, or `TRUSTY_MEMORY_LIMIT_MB`) but, before this ticker,
+/// only ever *enforced* it inside the reindex pipeline. A long-lived serving
+/// instance that rarely reindexes grew its resident heap without bound — a
+/// production daemon reached ~26.6 GB, 2.2× its own 12 GB stated limit, over
+/// ~20 days and was ultimately OOM-killed. This ticker closes that gap: it
+/// samples process RSS on a fixed cadence and, once RSS crosses the configured
+/// high-water mark, sheds every index's evictable in-memory caches (raw chunk
+/// text, the tokenized BM25 corpus, per-file entities, and the promoted HNSW
+/// heap copy) via [`CodeIndexer::reclaim_memory_now`]. All of those are
+/// durable-corpus-backed and rehydrate lazily, so reclaim is non-destructive.
+/// As an opt-in last resort for un-evictable growth (allocator fragmentation /
+/// native arenas / a true leak), if RSS is *still* over the hard limit after a
+/// reclaim sweep and `TRUSTY_MEMORY_RESTART_ON_LIMIT` is enabled, it triggers a
+/// graceful drain-and-exit for the supervisor (launchd/systemd) to respawn —
+/// mirroring the ops workaround (a sibling instance restarted daily never
+/// accumulates the growth). The restart tier defaults OFF so an unsupervised
+/// daemon never self-terminates.
+/// What: mirrors every other `spawn_*_ticker` — a detached task holding a
+/// `Weak<SearchAppState>` so it stops when the daemon drops its last `Arc`.
+/// The cadence is resolved once via `memguard::enforce_interval_secs()`; `0`
+/// disables the ticker entirely (it never spawns). Each tick delegates to
+/// [`run_memory_pressure_tick`].
+/// Test: the threshold decision is covered by `memguard::tests::test_over_high_water`;
+/// the reclaim mechanics by `indexer::tests::memory_pressure_reclaim_now_clears_caches`;
+/// this function is a thin scheduling wrapper.
+pub(super) fn spawn_memory_pressure_ticker(state: Arc<SearchAppState>) {
+    let secs = crate::core::memguard::enforce_interval_secs();
+    if secs == 0 {
+        tracing::info!("memory-pressure enforcement: disabled via TRUSTY_MEMORY_ENFORCE_SECS=0");
+        return;
+    }
+    let weak = Arc::downgrade(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(secs));
+        // Skip the immediate first tick so a freshly-started daemon isn't
+        // reclaiming before it has served (or even warm-booted) anything.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(state) = weak.upgrade() else {
+                break;
+            };
+            run_memory_pressure_tick(&state).await;
+        }
+    });
+}
+
+/// One memory-pressure enforcement tick: sample RSS, reclaim evictable caches
+/// when over the high-water mark (subject to hysteresis), and (opt-in)
+/// self-restart if still over the hard limit afterwards. Extracted from
+/// [`spawn_memory_pressure_ticker`] so the orchestration is separable from
+/// the `tokio::spawn` scaffolding.
+///
+/// Why (ordering): the reclaim sweep only touches durable-corpus-backed
+/// structures, so it is safe to run under any concurrent read/write load — an
+/// index being queried concurrently simply rehydrates on its next access. The
+/// self-restart gate re-samples RSS *after* reclaim so a sweep that successfully
+/// brought the daemon back under the ceiling never triggers an unnecessary
+/// restart; only genuinely un-evictable growth reaches that branch.
+///
+/// Why hysteresis (issue #2846 review — MEDIUM): without it, a host whose
+/// steady-state RSS simply sits at/above the high-water mark (independent of
+/// evictable caches — e.g. baseline usage genuinely close to the ceiling)
+/// would force a full-fleet cache clear on EVERY tick forever, each one
+/// making every subsequent query lane pay a redb-rehydrate cost for no
+/// memory benefit (nothing new had accumulated to reclaim). `state.last_reclaim_rss_mb`
+/// is the hysteresis baseline (see its doc comment on `SearchAppState`): a
+/// sweep only runs when current RSS has risen past the RSS observed right
+/// after the previous sweep — i.e. caches have measurably repopulated since
+/// then. Falling back under the high-water mark resets the baseline so the
+/// next pressure episode always reclaims on its first crossing. This is a
+/// "rising-edge" gate, not a fixed cooldown timer, so it naturally adapts to
+/// how fast the host's workload repopulates caches instead of an arbitrary
+/// wait.
+/// Pure hysteresis decision: given the current RSS and the RSS observed right
+/// after the last reclaim sweep this pressure episode (`0` = no sweep yet),
+/// should [`run_memory_pressure_tick`] reclaim again this tick?
+///
+/// Why: extracted so the rising-edge gate is unit-testable with synthetic
+/// values — mirrors [`crate::core::memguard::over_high_water`]'s extraction
+/// for the identical reason (a real process's RSS cannot be driven to
+/// specific values on demand in a test, and forcing it across a multi-GB
+/// ceiling would mean allocating gigabytes). See
+/// [`run_memory_pressure_tick`]'s doc comment for the full "why hysteresis"
+/// rationale.
+/// What: `true` when `last_reclaim_rss_mb == 0` (first crossing of a fresh
+/// pressure episode — always reclaim) OR `rss_mb > last_reclaim_rss_mb`
+/// (caches have measurably repopulated since the last sweep). `false`
+/// (skip this tick) when RSS is flat or has fallen relative to the last
+/// sweep's outcome.
+/// Test: `tickers::memory_pressure_tests::{hysteresis_first_crossing_always_reclaims,
+/// hysteresis_skips_when_rss_has_not_risen, hysteresis_reclaims_again_once_rss_has_risen}`.
+fn should_reclaim_now(rss_mb: u64, last_reclaim_rss_mb: u64) -> bool {
+    last_reclaim_rss_mb == 0 || rss_mb > last_reclaim_rss_mb
+}
+
+async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
+    use crate::core::memguard;
+    use std::sync::atomic::Ordering;
+
+    // No soft ceiling configured (operator set the limit to 0 / "off") → the
+    // enforcement contract is "unlimited"; nothing to do.
+    let Some(limit) = memguard::memory_limit_mb() else {
+        return;
+    };
+    let Some(rss) = memguard::current_rss_mb() else {
+        return; // Could not sample RSS this tick (rare); try again next tick.
+    };
+    // Keep /health's RSS telemetry fresh even when no query has triggered a
+    // sys-metrics sample recently, so operators see approaching-limit RSS.
+    state.last_rss_mb.store(rss, Ordering::Relaxed);
+
+    let pct = memguard::high_water_pct();
+    if !memguard::over_high_water(rss, limit, pct) {
+        // Below the high-water mark: reset the hysteresis baseline so the
+        // NEXT pressure episode always reclaims on its first crossing rather
+        // than inheriting a stale baseline from a prior episode.
+        state.last_reclaim_rss_mb.store(0, Ordering::Relaxed);
+        return;
+    }
+
+    // Hysteresis gate — see `should_reclaim_now`'s doc comment for the design
+    // rationale (issue #2846 review — MEDIUM: reclaim/rehydrate thrash).
+    let last_reclaim_rss = state.last_reclaim_rss_mb.load(Ordering::Relaxed);
+    if !should_reclaim_now(rss, last_reclaim_rss) {
+        tracing::debug!(
+            rss_mb = rss,
+            last_reclaim_rss_mb = last_reclaim_rss,
+            limit_mb = limit,
+            high_water_pct = pct,
+            "memory-pressure: RSS at/over high-water but not risen since last reclaim — \
+             skipping sweep (hysteresis)"
+        );
+        return;
+    }
+
+    tracing::warn!(
+        rss_mb = rss,
+        limit_mb = limit,
+        high_water_pct = pct,
+        "memory-pressure: RSS at/over soft high-water mark — reclaiming evictable caches"
+    );
+
+    let mut reclaimed = 0usize;
+    for id in state.registry.list() {
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        reclaimed += handle.indexer.read().await.reclaim_memory_now().await;
+    }
+
+    // Re-sample so the log (and /health) reflect the post-reclaim footprint and
+    // the self-restart gate decides on current reality, not the pre-reclaim RSS.
+    let after = memguard::current_rss_mb().unwrap_or(rss);
+    state.last_rss_mb.store(after, Ordering::Relaxed);
+    // Record the hysteresis baseline for the NEXT tick, regardless of whether
+    // `after` is still over the high-water mark — a sweep that didn't fully
+    // clear the pressure still shouldn't re-fire until RSS rises further.
+    state.last_reclaim_rss_mb.store(after, Ordering::Relaxed);
+    tracing::warn!(
+        reclaimed_entries = reclaimed,
+        rss_before_mb = rss,
+        rss_after_mb = after,
+        limit_mb = limit,
+        "memory-pressure: reclaim sweep complete"
+    );
+
+    // Last resort (opt-in, default OFF): still over the HARD limit after
+    // reclaiming everything evictable means the growth is un-evictable
+    // (fragmentation / native arenas / a true leak). Under a supervisor a
+    // graceful restart is the only reliable self-cap; warm-boot reloads every
+    // index from disk, so no data is lost.
+    if memguard::over_high_water(after, limit, 100) && memguard::restart_on_limit_enabled() {
+        tracing::error!(
+            rss_mb = after,
+            limit_mb = limit,
+            "memory-pressure: RSS still over hard limit after reclaim — triggering graceful \
+             self-restart (TRUSTY_MEMORY_RESTART_ON_LIMIT enabled) for supervisor respawn"
+        );
+        // watch::Sender::send only errs if all receivers dropped (daemon already
+        // shutting down); ignoring it is correct — the shutdown is already underway.
+        let _ = state.shutdown_tx.send(true);
+    }
+}
+
 /// One residency-sweep tick: rank resident indexes, cold-park everything
 /// beyond the cap. Extracted from `spawn_residency_sweep_ticker` so the
 /// per-tick logic can be reasoned about (and, via the pure helpers it calls,
@@ -448,3 +638,7 @@ async fn run_residency_sweep_tick(state: &Arc<SearchAppState>) {
 #[cfg(test)]
 #[path = "residency_sweep_tests.rs"]
 mod residency_sweep_tests;
+
+#[cfg(test)]
+#[path = "memory_pressure_tests.rs"]
+mod memory_pressure_tests;
