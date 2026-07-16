@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `search_readiness` module (behind the `search-index` feature): a shared trusty-search index readiness probe so a daily-driver session can *surface* whether a project's index is ready per lane (lexical/semantic/graph) instead of silently querying a not-yet-warm index — `parse_readiness` (pure status→snapshot map), `probe_index_readiness` (fail-open `GET /indexes/{id}/status`), and `log_index_readiness` (one stderr line) ([#2784](https://github.com/bobmatnyc/trusty-tools/issues/2784))
 - telegram module (rebase) ([#2729](https://github.com/bobmatnyc/trusty-tools/pull/2729)) ([`142675f`](https://github.com/bobmatnyc/trusty-tools/commit/142675fe01cc83b63497578611581921192a850b))
 - implement Slack search + reactions with two-token model ([#2726](https://github.com/bobmatnyc/trusty-tools/pull/2726)) ([`6e4e7d9`](https://github.com/bobmatnyc/trusty-tools/commit/6e4e7d9d8b18ba602f588e700142032789018142))
 - implement Slack send + read tools; extract SlackFormatter to trusty-common ([#2722](https://github.com/bobmatnyc/trusty-tools/pull/2722)) ([`847a0c3`](https://github.com/bobmatnyc/trusty-tools/commit/847a0c334e1a8822a7d31696b48946e538aca7cc))

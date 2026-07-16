@@ -80,14 +80,29 @@ const ENGINEER_AGENT_NAME: &str = "python-engineer";
 /// Spawns a detached OS thread that calls the shared helper (which itself runs
 /// the blocking HTTP on its own short-timeout threads) and returns immediately,
 /// so the caller never waits on the network.
+/// After warming, this also SURFACES the resulting index readiness to the
+/// session (issue #2784): a cold-indexed large repo has a real semantic
+/// warm-up window (lexical ready in seconds, semantic embedding `InProgress`
+/// for minutes), so a daily-driver `tcode` session that starts querying
+/// immediately would otherwise get lexical-only results with no signal. The
+/// detached thread probes `GET /indexes/{id}/status` right after triggering the
+/// warm and emits ONE `tracing` line (via the shared
+/// [`trusty_common::search_readiness::log_index_readiness`]) describing which
+/// lanes are ready — `warn` while semantic is still warming, `info` once it is
+/// ready. Same fail-open contract: no daemon ⇒ no log, never a block.
+///
 /// Test: the promoted helper's fail-open + no-daemon + non-git-root behaviour is
-/// unit-tested in `trusty_common::search_index::tests`. This thin spawn wrapper
-/// is side-effect-only (detached thread) and has no return to assert; see
+/// unit-tested in `trusty_common::search_index::tests`; the readiness probe/parse
+/// in `trusty_common::search_readiness::tests`. This thin spawn wrapper is
+/// side-effect-only (detached thread) and has no return to assert; see
 /// `spawns_indexing_thread_for_non_git_project_path` for the one thing it IS
 /// mechanically checked for here — that it never short-circuits before spawning.
 pub(crate) fn ensure_project_indexed_in_background(project: PathBuf) {
     std::thread::spawn(move || {
+        // Warm first, then surface the readiness the warm produced so the
+        // session knows whether a semantic search is trustworthy yet (#2784).
         let _ = trusty_common::search_index::ensure_project_indexed(&project);
+        trusty_common::search_readiness::log_index_readiness(&project);
     });
 }
 
