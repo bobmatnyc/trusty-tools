@@ -47,6 +47,7 @@ that governs it.
 | DOC-35 | `SPEC-PROJCTL-01~draft` … `-08~draft` | [`tm project`: Deterministic Project/Session Control Plane (CLI + Multipane TUI)](./tm-project-control-plane.md) | trusty-mpm — control plane / CLI / TUI / daemon API |
 | DOC-36 | `SPEC-TMMGR-01~approved` … `-06~approved` | [`tm manager`: Layer-3 Chat-Based Portfolio Project Manager](./tm-manager-vision.md) | trusty-mpm — daemon / inference layer / external channels |
 | DOC-38 | `SPEC-SLD-01~draft` … `-03~draft` | [Spec-Linked Documentation (SLD): A Language-Agnostic Source↔Spec Reference Standard](./spec-linked-documentation.md) | documentation standard — repository/language-agnostic (informative reference: trusty-common `intent_source`) |
+| DOC-39 | `SPEC-TCUI-01~draft` … `-08~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -60,9 +61,13 @@ that governs it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-39`** (scan of the whole `docs/` tree, 2026-07-16): the
-> highest claimed number is **DOC-38** ([Spec-Linked Documentation](./spec-linked-documentation.md),
-> the entry above). DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
+> **Next free `DOC-N` = `DOC-40`** (re-scan of the whole `docs/` tree, 2026-07-16): the
+> highest claimed number is now **DOC-39** ([trusty-code Harness UI](./trusty-code-harness-ui.md),
+> the entry above), which claimed the previously-free DOC-39 per the scan-before-claim
+> rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free" note is a
+> *hint, not authority*; the scan is authoritative). **DOC-38 §10 F3** (the DOC-28
+> renumber follow-up) names DOC-39 as its target — that is now stale and F3 must re-scan
+> and take **DOC-40**. DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
 > #1999 — still a catalog gap), DOC-35/36/38 are cataloged, and **DOC-37** is
 > self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
 > (`SPEC-SEARCHREPO-01~draft`…, uncataloged). The DOC-N assignment rule (scan-before-claim)
