@@ -234,9 +234,11 @@
 
         {#if !collapsed}
           {#each group as session (session.id)}
-          <button
-            type="button"
+          <div
+            role="button"
+            tabindex="0"
             on:click={() => select(session.id)}
+            on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && select(session.id)}
             class={`flex flex-col gap-1 border-t border-trusty-border-light pl-6 pr-3 py-2 text-left dark:border-trusty-border ${
               $activeSessionId === session.id
                 ? 'bg-trusty-primary/10'
@@ -280,7 +282,7 @@
                 <Square size={13} />
               </button>
             </div>
-          </button>
+          </div>
           {/each}
         {/if}
       </div>
