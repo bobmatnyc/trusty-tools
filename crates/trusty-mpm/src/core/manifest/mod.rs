@@ -17,7 +17,7 @@
 
 mod apply;
 mod default;
-mod project_lang;
+pub(crate) mod project_lang;
 mod resolve;
 mod schema;
 
