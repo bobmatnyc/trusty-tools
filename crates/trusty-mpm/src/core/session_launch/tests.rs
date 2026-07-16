@@ -1418,9 +1418,11 @@ fn prepare_session_preseeds_enabled_mcp_servers() {
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    // prepare_session seeds the operator's real ~/.claude.json via
-    // preseed_workspace_trust_home, so re-derive the per-workspace approval list
-    // by reading .mcp.json directly and asserting both injected servers landed.
+    // prepare_session seeds `tmp_home/.claude.json` (the temp home, via the
+    // `$HOME` override above) via preseed_workspace_trust_home — NOT the
+    // operator's real `~/.claude.json` — so re-derive the per-workspace
+    // approval list by reading .mcp.json directly and asserting both injected
+    // servers landed.
     let mcp: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
     let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
