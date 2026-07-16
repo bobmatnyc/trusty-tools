@@ -104,12 +104,20 @@ impl RunReport {
     /// Why: `--json` mode requires clean, parseable stdout; this is the only thing
     /// printed in that mode.
     /// What: Serialises all fields into a stable JSON object, including a `status`
-    /// string derived from `exit` and a `cost_usd` that is `null` when pricing is
-    /// unavailable. Pretty-printed for readability without affecting parseability.
-    /// Test: `run_task::tests::report_renders_json`.
+    /// string derived from `exit`, a `cost_usd` that is `null` when pricing is
+    /// unavailable, and (#2823) a `build` object naming the binary that produced
+    /// the run. Pretty-printed for readability without affecting parseability.
+    /// Test: `run_task::tests::report_renders_json`,
+    /// `report::tests::report_json_carries_build_provenance`.
     pub fn render_json(&self) -> String {
         let value = json!({
             "status": self.status_str(),
+            // Build provenance is read from compile-time constants rather than
+            // carried on `RunReport`: the binary rendering the report is by
+            // construction the binary that produced the run, so threading a
+            // constant through every construction site could only introduce
+            // drift.
+            "build": crate::build_info::provenance_json(),
             "exit_code": self.exit.code(),
             "agent": self.agent,
             "task": self.task,
@@ -131,16 +139,24 @@ impl RunReport {
     /// Why: On a normal terminal the operator wants a scannable summary, not raw
     /// JSON. The diff is shown verbatim; the transcript is condensed to one line
     /// per turn; usage and cost are a footer.
-    /// What: Builds a multi-section string: a header, the transcript (role, model,
-    /// truncated text, tool calls), the diff (or "no changes"), and a usage/cost
-    /// footer.
-    /// Test: `run_task::tests::report_renders_human`.
+    /// What: Builds a multi-section string: a header (including the #2823 build
+    /// stamp, so a pasted terminal summary is as attributable as the JSON form),
+    /// the transcript (role, model, truncated text, tool calls), the diff (or
+    /// "no changes"), and a usage/cost footer.
+    /// Test: `run_task::tests::report_renders_human`,
+    /// `report::tests::report_human_carries_build_provenance`.
     pub fn render_human(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
             "tcode run-task: agent={} status={}\n",
             self.agent,
             self.status_str()
+        ));
+        out.push_str(&format!(
+            "build: {} ({} {})\n",
+            crate::build_info::VERSION,
+            crate::build_info::GIT_HASH,
+            crate::build_info::COMMIT_DATE,
         ));
         out.push_str(&format!("task: {}\n\n", self.task));
 
@@ -350,6 +366,55 @@ mod tests {
         assert_eq!(parsed["cost_usd"], 0.001);
         // The engineer turn must carry its own model slug for #1035 assertions.
         assert_eq!(parsed["transcript"][1]["model"], "deepseek/deepseek-chat");
+    }
+
+    /// The JSON report carries build provenance identifying the binary (#2823).
+    ///
+    /// Why: This is the acceptance criterion for #2823 — a run's artifacts must
+    /// be attributable to the build that produced them without resorting to
+    /// install-timestamp archaeology (which yielded a WRONG conclusion during
+    /// the 2026-07-16 L4 validation). The bake-off harness reads these exact
+    /// keys, so they are a wire contract.
+    /// What: Render a report; assert `build.version` matches the crate semver
+    /// and that `build.commit` / `build.commit_date` are present, non-null
+    /// strings (either real values or the `"unknown"` fallback).
+    /// Test: this test.
+    #[test]
+    fn report_json_carries_build_provenance() {
+        let report = sample_report(ExitCode::Success, "+++ added: x.py\n");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.render_json()).expect("valid JSON");
+
+        assert_eq!(parsed["build"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(parsed["build"]["commit"], crate::build_info::GIT_HASH);
+        assert_eq!(
+            parsed["build"]["commit_date"],
+            crate::build_info::COMMIT_DATE
+        );
+        assert!(
+            parsed["build"]["commit"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "build.commit must be a non-empty string"
+        );
+    }
+
+    /// The human report header carries the same build stamp (#2823).
+    ///
+    /// Why: Operators paste terminal summaries into issues; that summary should
+    /// be exactly as attributable as the JSON form, or the provenance gap just
+    /// moves rather than closes.
+    /// What: Assert the header contains a `build:` line naming the semver and
+    /// the commit SHA.
+    /// Test: this test.
+    #[test]
+    fn report_human_carries_build_provenance() {
+        let text = sample_report(ExitCode::Success, "+++ added: x.py\n").render_human();
+        assert!(
+            text.contains(&format!("build: {}", env!("CARGO_PKG_VERSION"))),
+            "missing build stamp, got: {text}"
+        );
+        assert!(text.contains(crate::build_info::GIT_HASH), "got: {text}");
     }
 
     /// Human render summarises transcript, diff, and usage.

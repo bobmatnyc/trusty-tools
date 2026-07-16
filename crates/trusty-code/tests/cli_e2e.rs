@@ -298,3 +298,43 @@ fn cancel_unknown_session_errors_cleanly() {
         "expected a clear session_not_found error on stderr: {stderr}"
     );
 }
+
+/// `tcode --version` must print the semver AND the git provenance (#2823).
+///
+/// Why: This is #2823's headline acceptance criterion, and the unit tests can
+/// only assert on constants — they cannot prove the constants are actually
+/// WIRED into clap's `--version`. Before this ticket the binary printed a bare
+/// `tcode 0.2.0`, which is exactly what a `version` (no `= …`) clap attribute
+/// still produces, so a regression here would be invisible to
+/// `build_info`'s tests. Only spawning the real binary catches it.
+/// What: Spawn the compiled binary with `--version`; assert exit 0 and that
+/// stdout carries the semver plus a parenthesised `(<commit> <date>)` stamp
+/// matching the compiled-in constants.
+#[test]
+fn version_flag_reports_build_provenance() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .arg("--version")
+        .output()
+        .expect("spawn tcode --version");
+
+    assert!(output.status.success(), "--version must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "expected the semver in --version output: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "({} {})",
+            trusty_code::build_info::GIT_HASH,
+            trusty_code::build_info::COMMIT_DATE
+        )),
+        "expected a `(<commit> <date>)` provenance stamp: {stdout}"
+    );
+    // Guards the pre-#2823 regression shape: a bare `tcode <semver>` line.
+    assert!(
+        stdout.trim() != format!("tcode {}", env!("CARGO_PKG_VERSION")),
+        "--version regressed to a bare semver with no provenance: {stdout}"
+    );
+}

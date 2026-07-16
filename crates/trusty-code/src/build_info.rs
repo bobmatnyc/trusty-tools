@@ -47,13 +47,65 @@ pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 /// Test: `version_string_contains_version` confirms both fields render.
 pub const GIT_HASH: &str = env!("GIT_COMMIT_HASH");
 
-/// Human-readable banner used by the CTRL REPL and `--version` output.
+/// Date of the git commit this binary was built from (`YYYY-MM-DD`).
+///
+/// Why: The SHA alone is opaque to a human scanning a run report; the date
+/// makes "is this artifact from before or after the fix?" answerable at a
+/// glance — the exact question that had to be settled by timestamp archaeology
+/// during the 2026-07-16 L4 validation (#2823).
+/// What: Populated from `git log -1 --date=short --format=%cd` during
+/// compilation; falls back to `"unknown"` when git is unavailable. Deliberately
+/// the COMMIT date, not the build wall-clock, so rebuilds stay reproducible.
+/// Test: `provenance_constants_are_well_formed`.
+pub const COMMIT_DATE: &str = env!("GIT_COMMIT_DATE");
+
+/// Full version string for `tcode --version`, e.g. `0.2.0 (b20adfca 2026-07-16)`.
+///
+/// Why: `--version` is the first thing anyone runs to identify a binary, and it
+/// is the ONLY provenance channel available for an already-installed `tcode`
+/// whose source tree is long gone. It must carry the SHA, not just the semver
+/// (#2823).
+/// What: A compile-time `concat!` of the semver, git SHA, and commit date —
+/// const rather than a function so clap's `version = …` attribute can take it
+/// directly. Degrades to `0.2.0 (unknown unknown)` outside a git checkout.
+/// Test: `long_version_carries_semver_and_provenance`, plus the
+/// `tests/cli_e2e.rs` binary-level `--version` assertion.
+pub const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("GIT_COMMIT_HASH"),
+    " ",
+    env!("GIT_COMMIT_DATE"),
+    ")"
+);
+
+/// Human-readable banner used by the CTRL REPL and startup logs.
 ///
 /// Why: One canonical format keeps log grep and support reports consistent.
 /// What: Returns `<pkg-name> vX.Y.Z (<git-hash>)`.
 /// Test: `version_string_contains_version` checks both substrings render.
 pub fn version_string() -> String {
     format!("{PKG_NAME} v{VERSION} ({GIT_HASH})")
+}
+
+/// Build provenance as a JSON object for embedding in machine-readable reports.
+///
+/// Why: `tcode_report.json` must state which binary produced it. Without this,
+/// a run's artifacts cannot be attributed to a build and provenance has to be
+/// reverse-inferred from install mtimes — which produced a false "bug still
+/// recurs" conclusion during the 2026-07-16 L4 validation (#2823).
+/// What: Returns `{"version", "commit", "commit_date"}` sourced from the
+/// compile-time constants. `commit`/`commit_date` are the literal `"unknown"`
+/// for a non-git build rather than `null`, so the field is always present and
+/// consumers need no absent-key branch.
+/// Test: `provenance_json_carries_version_and_commit`,
+/// `run_task::report::tests::report_json_carries_build_provenance`.
+pub fn provenance_json() -> serde_json::Value {
+    serde_json::json!({
+        "version": VERSION,
+        "commit": GIT_HASH,
+        "commit_date": COMMIT_DATE,
+    })
 }
 
 /// On-disk shape of `build.json`.
@@ -243,6 +295,196 @@ mod tests {
         assert!(s.contains(VERSION));
         // GIT_HASH is either a short hash or "unknown"; rendered in parens.
         assert!(s.contains(GIT_HASH));
+    }
+
+    /// Both provenance constants are populated and well-formed (#2823).
+    ///
+    /// Why: An empty or whitespace-only value would render a report field that
+    /// looks present but identifies nothing — worse than an explicit
+    /// `"unknown"`, because a consumer cannot tell it apart from a real value.
+    /// What: Assert each constant is non-empty, and that it is EITHER the
+    /// literal `"unknown"` fallback OR a well-formed real value (a lowercase
+    /// hex short SHA / a `YYYY-MM-DD` date). Deliberately accepts both so the
+    /// test passes in a git checkout AND in a crates.io tarball build, which is
+    /// exactly the fallback contract.
+    /// Test: this test.
+    #[test]
+    fn provenance_constants_are_well_formed() {
+        assert!(!GIT_HASH.is_empty(), "GIT_HASH must never be empty");
+        assert!(!COMMIT_DATE.is_empty(), "COMMIT_DATE must never be empty");
+
+        if GIT_HASH != "unknown" {
+            assert!(
+                GIT_HASH.len() >= 7 && GIT_HASH.chars().all(|c| c.is_ascii_hexdigit()),
+                "expected a short hex SHA or \"unknown\", got: {GIT_HASH}"
+            );
+        }
+        if COMMIT_DATE != "unknown" {
+            let parts: Vec<&str> = COMMIT_DATE.split('-').collect();
+            assert!(
+                parts.len() == 3 && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())),
+                "expected YYYY-MM-DD or \"unknown\", got: {COMMIT_DATE}"
+            );
+        }
+    }
+
+    /// `LONG_VERSION` carries the semver AND the provenance (#2823).
+    ///
+    /// Why: This exact string is what `tcode --version` prints. Regressing it
+    /// back to a bare semver would silently reopen the run→binary attribution
+    /// gap that caused the 2026-07-16 false conclusion.
+    /// What: Assert the rendered form is `<semver> (<sha> <date>)`.
+    /// Test: this test.
+    #[test]
+    fn long_version_carries_semver_and_provenance() {
+        assert_eq!(
+            LONG_VERSION,
+            format!("{VERSION} ({GIT_HASH} {COMMIT_DATE})")
+        );
+        assert!(LONG_VERSION.starts_with(VERSION));
+        assert!(LONG_VERSION.contains(GIT_HASH));
+    }
+
+    /// `provenance_json` emits the three always-present provenance fields.
+    ///
+    /// Why: `tcode_report.json` consumers (the bake-off harness) read these key
+    /// names; they are a wire contract.
+    /// What: Assert the object shape and that no field is null even when the
+    /// build had no git available.
+    /// Test: this test.
+    #[test]
+    fn provenance_json_carries_version_and_commit() {
+        let v = provenance_json();
+        assert_eq!(v["version"], VERSION);
+        assert_eq!(v["commit"], GIT_HASH);
+        assert_eq!(v["commit_date"], COMMIT_DATE);
+        // Always a string — never null — so consumers need no absent-key branch.
+        assert!(v["commit"].is_string(), "commit must be a string, not null");
+    }
+
+    /// The no-git fallback premise holds: outside a checkout, the probes
+    /// `build.rs` runs fail rather than returning a bogus value (#2823).
+    ///
+    /// Why: The `"unknown"` fallback exists for the crates.io-tarball build
+    /// (trusty-code IS published, so this path WILL be taken). That fallback is
+    /// only correct if the underlying git probe genuinely FAILS outside a
+    /// checkout — if it instead succeeded against some ambient parent repo, a
+    /// published build would stamp reports with a SHA that never produced it,
+    /// which is worse than `"unknown"`. This pins the premise the compile-time
+    /// constants rest on. (It cannot assert on `GIT_HASH` itself, which is
+    /// baked in at compile time; `provenance_constants_are_well_formed` covers
+    /// the value.)
+    /// What: Runs `git rev-parse --short HEAD` in a temp dir with
+    /// `GIT_CEILING_DIRECTORIES` set so the search cannot escape upward into a
+    /// real repo, and asserts it does not succeed.
+    /// Test: this test.
+    #[test]
+    fn git_probe_fails_outside_a_checkout_so_fallback_engages() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(dir.path())
+            // Stop the repo discovery walking up into any ambient checkout.
+            .env("GIT_CEILING_DIRECTORIES", dir.path())
+            .env("GIT_DIR", dir.path().join("definitely-not-a-git-dir"))
+            .output();
+
+        // An `Err` means git isn't installed at all — also a fallback path
+        // `build.rs` handles, so only the "git ran" case has anything to assert.
+        if let Ok(o) = output {
+            assert!(
+                !o.status.success(),
+                "git must not resolve a SHA outside a checkout; got: {}",
+                String::from_utf8_lossy(&o.stdout)
+            );
+        }
+    }
+
+    /// With the branch ref PACKED, only the reflog witnesses a new commit —
+    /// the premise `build.rs`'s `logs/HEAD` watch rests on (#2823).
+    ///
+    /// Why: Emitting any `rerun-if-changed` opts `build.rs` out of Cargo's
+    /// default "re-run when any package file changes" heuristic, so ONLY
+    /// declared paths are watched. If the branch ref is packed (`git gc --auto`)
+    /// there is no loose ref file to watch, and a later commit rewrites neither
+    /// `HEAD` nor any other watched path — so the script would not re-run and
+    /// the embedded SHA would go SILENTLY STALE. A binary reporting a stale SHA
+    /// is precisely the failure this ticket exists to eliminate. This pins the
+    /// two facts that make watching `logs/HEAD` the right fix, so a future
+    /// "the reflog watch looks redundant" cleanup fails loudly here.
+    /// What: In a throwaway repo (never the real one), pack the refs, then
+    /// assert (a) the loose ref really is gone — so `rerun_if_exists` would skip
+    /// it — while `logs/HEAD` exists, and (b) a commit on the packed branch
+    /// leaves `HEAD`'s content untouched but appends to the reflog. Compares
+    /// CONTENT rather than mtime to stay fast and granularity-independent.
+    /// Test: this test.
+    #[test]
+    fn packed_branch_ref_leaves_only_the_reflog_witnessing_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // A git older than this, or none at all, simply skips the test.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        run(&["init", "-q", "-b", "main", "."]);
+        std::fs::write(root.join("f"), "a").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "one"]);
+        run(&["pack-refs", "--all"]);
+
+        // `--git-path` yields a CWD-relative path in a plain checkout (and an
+        // absolute one in a linked worktree), so resolve against the repo root
+        // rather than this test process's CWD. `join` keeps an absolute path
+        // as-is, so this is correct for both shapes.
+        let git_path = |spec: &str| root.join(run(&["rev-parse", "--git-path", spec]));
+        let loose = git_path("refs/heads/main");
+        let head = git_path("HEAD");
+        let reflog = git_path("logs/HEAD");
+
+        assert!(
+            !loose.exists(),
+            "expected the branch ref to be packed away; if git stopped packing \
+             here the premise for watching logs/HEAD needs rechecking"
+        );
+        assert!(reflog.exists(), "reflog must exist to be watchable");
+
+        let head_before = std::fs::read_to_string(&head).unwrap();
+        let reflog_before = std::fs::read_to_string(&reflog).unwrap();
+
+        std::fs::write(root.join("f"), "b").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "two"]);
+
+        assert_eq!(
+            head_before,
+            std::fs::read_to_string(&head).unwrap(),
+            "HEAD still just says `ref: refs/heads/main` — watching it alone \
+             cannot catch a commit on a packed branch"
+        );
+        assert_ne!(
+            reflog_before,
+            std::fs::read_to_string(&reflog).unwrap(),
+            "the reflog must record the new commit — this is what makes \
+             logs/HEAD a sufficient watch when the ref is packed"
+        );
     }
 
     #[tokio::test]
