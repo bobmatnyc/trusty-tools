@@ -369,7 +369,7 @@ pub enum Event {
     /// exactly when `state == "unavailable"` (nothing was probed). `summary` is
     /// the same human-readable line the stderr log carries.
     /// Test: `session::registry::registry_tests::record_index_readiness_*`,
-    /// `task::sink::tests::index_readiness_warming_is_distinct_from_ready`.
+    /// `session::registry::registry_tests::warming_index_is_distinguishable_from_ready_with_zero_hits`.
     IndexReadiness {
         session_id: String,
         /// `"ready"` | `"warming"` | `"unavailable"` — see the variant docs.
