@@ -203,6 +203,22 @@ main() {
   echo "Staging unreleased CHANGELOG section via generate-changelog.sh ..." >&2
   "${changelog_script}" "${crate_dir}" "${prefix}"
 
+  # Stopgap guard (issue #2793 tracks the real fix): generate-changelog.sh's
+  # `git cliff --prepend` blindly inserts a fresh "## [Unreleased]" section
+  # without checking whether one is already there (e.g. a hand-written
+  # per-PR draft that was never cleared first). Fail loudly here rather than
+  # silently shipping a duplicated changelog.
+  local changelog="${crate_path}/CHANGELOG.md"
+  local unreleased_count
+  unreleased_count=$(grep -c '^## \[Unreleased\]' "${changelog}") || true
+  if [[ "${unreleased_count}" -gt 1 ]]; then
+    echo "ERROR: ${changelog} now has ${unreleased_count} '## [Unreleased]' headings." >&2
+    echo "       generate-changelog.sh prepended a fresh section without an existing" >&2
+    echo "       hand-written draft being cleared first (see issue #2793). Manually" >&2
+    echo "       merge/dedupe the sections in ${changelog}, then re-run this script." >&2
+    exit 1
+  fi
+
   # Print — but DO NOT RUN — the manual tag/push commands (human stays in loop).
   local tag="${prefix}-v${next}"
   echo "" >&2

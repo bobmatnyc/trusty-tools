@@ -337,19 +337,38 @@ produces exactly the duplicate/stacked `## [Unreleased]` sections already
 visible in several crate changelogs today (e.g.
 `crates/trusty-mpm/CHANGELOG.md`, `crates/trusty-search/CHANGELOG.md`) — each
 release-time run stacks another overlapping section on top instead of
-replacing the draft.
+replacing the draft. **Until #2793 lands** (tracks teaching
+`generate-changelog.sh` to replace/dedupe the `[Unreleased]` section instead
+of blindly prepending), `scripts/bump-version.sh` fails loudly with a fix hint
+if it detects more than one `## [Unreleased]` heading after the prepend, as a
+stopgap against silently shipping a duplicated changelog.
 
 Precedence: **git-cliff-generated content is canonical at release time and
 supersedes the hand-written draft — it replaces, it does not merge.** Before
 running `scripts/bump-version.sh <crate-dir> <level>` (or
-`scripts/generate-changelog.sh` directly), delete the hand-maintained bullets
-under that crate's topmost `## [Unreleased]` heading (the heading itself may
-stay empty or be removed — `generate-changelog.sh` recreates it). git-cliff
-regenerates equivalent-or-better entries (with PR + commit-hash links) from
-the same merged commits, so nothing is lost — the hand-written section is a
-live staging area between releases, never a second permanent copy. This is a
-process rule only; `scripts/bump-version.sh` and `scripts/generate-changelog.sh`
-need no code change to honor it.
+`scripts/generate-changelog.sh` directly):
+
+1. **Diff first, don't just delete.** `cliff.toml`'s `commit_preprocessors`
+   only linkify `(#NNN)` references in the commit **subject** line — commit
+   bodies are dropped (`split_commits = false`, subject-only template; see
+   `cliff.toml`'s own KNOWN LIMITATION note). git-cliff regenerates from the
+   squash-commit **subject only**, so it does **not** reliably reproduce
+   hand-written nuance that lived in a PR description or commit body but never
+   made it into the squash subject (a GHSA id, a specific config value, an
+   edge case called out by hand). **Do not assume "nothing is lost."** Run
+   `scripts/generate-changelog.sh <crate-dir> <tag-prefix> --stdout` and diff
+   it against the hand-written draft; any bullet/nuance the generated output
+   doesn't cover must be manually re-added to `CHANGELOG.md` *after*
+   generation, not assumed to be redundant.
+2. Fold whatever nuance you can into the squash-commit subject itself before
+   merging (so git-cliff captures it for future runs), and only then delete
+   the hand-maintained bullets under the crate's topmost `## [Unreleased]`
+   heading (the heading itself may stay empty or be removed —
+   `generate-changelog.sh` recreates it).
+
+This is a process rule; `scripts/generate-changelog.sh` needs no code change
+to honor it, but `scripts/bump-version.sh` now includes the stopgap duplicate-
+heading guard described above (see #2793 for the real fix).
 
 🟢 **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes to
 crates.io under the short package name `tga`. The binary-release workflow
