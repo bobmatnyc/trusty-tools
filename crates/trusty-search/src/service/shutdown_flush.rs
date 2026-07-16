@@ -173,18 +173,56 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
             }
         };
 
-        let timeout_secs = flush_deadline.as_secs();
-        match tokio::time::timeout(flush_deadline, flush_future).await {
-            Ok(()) => {}
-            Err(_elapsed) => {
-                tracing::warn!(
-                    "shutdown: flush TIMED OUT for '{}' after {}s — skipping \
-                     (on-disk state from last incremental persist, issue #874). \
-                     Increase TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS to allow more time.",
-                    id.0,
-                    timeout_secs,
-                );
-            }
+        // Issue #1746: run the flush on its own task so the deadline is
+        // genuinely enforced even when the flush blocks its worker in
+        // synchronous FFI (see `flush_index_bounded`).
+        flush_index_bounded(&id.0, flush_deadline, flush_future).await;
+    }
+}
+
+/// Run a single index's flush future to completion under a hard deadline,
+/// detaching it if it stalls.
+///
+/// Why (issue #1746): the earlier implementation wrapped the flush future
+/// directly in `tokio::time::timeout`. That does **not** bound a flush that
+/// performs blocking synchronous work — usearch's `Index::save` is a C++ FFI
+/// call that never yields to the async runtime, so once a poll enters it the
+/// same task cannot be re-polled and the timeout's timer branch never fires.
+/// A single stalled ~500 MB HNSW save (or an index write-lock never released
+/// by an in-flight background reindex, issue #1717) therefore wedged the whole
+/// sequential shutdown loop until systemd's `TimeoutStopSec` fired a SIGKILL
+/// (~300 s). Spawning the flush on its own task makes the `JoinHandle` an
+/// honest yield point, so the deadline is enforced no matter what the flush
+/// does internally.
+/// What: spawns `flush` as a detached task and awaits its `JoinHandle` under
+/// `tokio::time::timeout(deadline)`. On timeout it aborts the handle (best
+/// effort — `abort` cannot interrupt in-progress blocking FFI, but the loop no
+/// longer waits for it) and logs a `warn!`; on a task panic it logs a `warn!`.
+/// A task left running after a timeout is harmless: `handle_start` calls
+/// `std::process::exit(0)` once `run_daemon` returns, terminating any lingering
+/// worker without depending on tokio's runtime teardown.
+/// Test: `flush_bounded_returns_on_blocking_work` and
+/// `flush_bounded_completes_fast_path` in the `tests` submodule.
+async fn flush_index_bounded<F>(index_id: &str, deadline: std::time::Duration, flush: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let task = tokio::spawn(flush);
+    let abort = task.abort_handle();
+    match tokio::time::timeout(deadline, task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(join_err)) => {
+            tracing::warn!("shutdown: flush task for '{index_id}' failed to join: {join_err}");
+        }
+        Err(_elapsed) => {
+            abort.abort();
+            tracing::warn!(
+                "shutdown: flush TIMED OUT for '{}' after {}s — detaching \
+                 (on-disk state from last incremental persist, issues #874/#1746). \
+                 Increase TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS to allow more time.",
+                index_id,
+                deadline.as_secs(),
+            );
         }
     }
 }
@@ -251,6 +289,51 @@ mod tests {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(2),
             "flush on empty registry must complete immediately; elapsed: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Why (issue #1746): the shutdown flush must stay bounded even when the
+    /// flush performs blocking synchronous work — usearch's `Index::save` is a
+    /// C++ FFI call that never yields, and wrapping it in `tokio::time::timeout`
+    /// inline does NOT bound it (the same task can't be re-polled while stuck in
+    /// the blocking call). Running it on a detached task does. This is the
+    /// regression guard for the graceful-stop hang.
+    /// What: call `flush_index_bounded` with a 200 ms deadline around a future
+    /// that blocks its worker thread for 1.5 s (simulating the save FFI); assert
+    /// the helper returns in well under the blocking duration. Requires a
+    /// multi-thread runtime so the timeout timer can fire on another worker
+    /// while one worker is blocked.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_bounded_returns_on_blocking_work() {
+        let start = std::time::Instant::now();
+        flush_index_bounded("blocking", std::time::Duration::from_millis(200), async {
+            // Simulate usearch's synchronous save FFI: blocks the worker
+            // thread and ignores async cancellation.
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        })
+        .await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(1200),
+            "bounded flush must return on its deadline even when the flush blocks \
+             its worker; elapsed: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Why: the fast path (a flush that finishes well within the deadline) must
+    /// return promptly and never wait out the deadline.
+    /// What: call `flush_index_bounded` with a 10 s deadline around an
+    /// already-ready future; assert it returns in < 1 s.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_bounded_completes_fast_path() {
+        let start = std::time::Instant::now();
+        flush_index_bounded("fast", std::time::Duration::from_secs(10), async {}).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "a completed flush must return immediately; elapsed: {:?}",
             start.elapsed()
         );
     }

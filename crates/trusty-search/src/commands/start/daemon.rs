@@ -444,5 +444,14 @@ pub async fn handle_start(
         }
         Err(e) => anyhow::bail!("daemon failed: {e}"),
     }
-    Ok(())
+    // Issue #1746: by the time `run_daemon` returns `Ok`, the graceful drain,
+    // best-effort per-index flush, and PID-lockfile release have all completed.
+    // Exit the process immediately instead of returning up through `main` and
+    // dropping the tokio runtime: a worker left stuck in a blocking HNSW
+    // `Index::save` FFI call, or a CUDA/embedder teardown that deadlocks at
+    // exit, would otherwise wedge runtime teardown until systemd's
+    // `TimeoutStopSec` (300 s) fired a SIGKILL. The stdio `trusty-embedderd`
+    // sidecar exits on stdin EOF when this process dies, so no child is
+    // orphaned.
+    std::process::exit(0)
 }
