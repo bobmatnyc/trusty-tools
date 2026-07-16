@@ -124,6 +124,9 @@ pub const PHOENIX_ENGINEER_AGENT: &str = include_str!("../assets/agents/phoenix-
 /// Concrete dart-engineer agent — Flutter/Dart (`extends: base-engineer`).
 pub const DART_ENGINEER_AGENT: &str = include_str!("../assets/agents/dart-engineer.md");
 
+/// Concrete dotnet-engineer agent — C#/.NET 8+ with VB.NET awareness (`extends: base-engineer`).
+pub const DOTNET_ENGINEER_AGENT: &str = include_str!("../assets/agents/dotnet-engineer.md");
+
 /// Concrete tauri-engineer agent (`extends: base-engineer`).
 pub const TAURI_ENGINEER_AGENT: &str = include_str!("../assets/agents/tauri-engineer.md");
 

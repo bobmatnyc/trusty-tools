@@ -2,7 +2,7 @@
 //!
 //! Why: the compiled-in default manifest deploys the FULL polyglot agent roster
 //! (every `*-engineer` — javascript/typescript/python/php/java/golang/dart/ruby/
-//! svelte/react/nextjs/tauri/phoenix + rust) to every project regardless of
+//! svelte/react/nextjs/tauri/phoenix/dotnet + rust) to every project regardless of
 //! language. In a pure-Rust workspace that is pure noise in the delegation
 //! surface and a contributor to the catalog-drift false positives (#1940). This
 //! module auto-detects a project's language(s) from well-known marker files and
@@ -97,6 +97,19 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
         markers: &["mix.exs"],
     },
     LangEngineer {
+        stem: "dotnet-engineer",
+        // C#/.NET and legacy VB.NET: project/solution files are extension globs
+        // (`*.csproj`/`*.sln`/`*.vbproj`), matched by `marker_present`'s `*.<ext>`
+        // support; `global.json` and `Directory.Build.props` are exact filenames.
+        markers: &[
+            "*.sln",
+            "*.csproj",
+            "*.vbproj",
+            "global.json",
+            "Directory.Build.props",
+        ],
+    },
+    LangEngineer {
         stem: "javascript-engineer",
         markers: &["package.json"],
     },
@@ -127,6 +140,32 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
     },
 ];
 
+/// Whether a single marker (exact path or `*.<ext>` glob) is present in `project_dir`.
+///
+/// Why: most language markers are fixed filenames, but .NET projects are
+/// identified by extension globs — `*.csproj`, `*.sln`, `*.vbproj` — that no
+/// single fixed name captures, so marker matching must support a leading `*.`
+/// extension glob in addition to exact-path probes.
+/// What: for a marker of the form `*.<ext>` returns `true` when any direct child
+/// file of `project_dir` ends with `.<ext>`; otherwise tests `project_dir.join(marker)`
+/// for existence. A failed directory read (missing/unreadable dir) yields `false`.
+/// Test: `dotnet_csproj_scopes_to_dotnet_engineer` (glob branch); every other
+/// scope test exercises the exact-path branch.
+fn marker_present(project_dir: &Path, marker: &str) -> bool {
+    if let Some(ext) = marker.strip_prefix("*.") {
+        let suffix = format!(".{ext}");
+        std::fs::read_dir(project_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)))
+            })
+            .unwrap_or(false)
+    } else {
+        project_dir.join(marker).exists()
+    }
+}
+
 /// The set of language-engineer stems whose markers are present in `project_dir`.
 ///
 /// Why: both the public scope function and its tests need the "which language
@@ -138,7 +177,7 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
 pub(crate) fn detected_engineers(project_dir: &Path) -> BTreeSet<&'static str> {
     LANGUAGE_ENGINEERS
         .iter()
-        .filter(|le| le.markers.iter().any(|m| project_dir.join(m).exists()))
+        .filter(|le| le.markers.iter().any(|m| marker_present(project_dir, m)))
         .map(|le| le.stem)
         .collect()
 }
@@ -226,6 +265,7 @@ mod tests {
             "nextjs-engineer",
             "svelte-engineer",
             "tauri-engineer",
+            "dotnet-engineer",
         ] {
             assert!(
                 scope.exclude.contains(&foreign.to_string()),
@@ -283,6 +323,39 @@ mod tests {
         assert!(!scope.exclude.contains(&"rust-engineer".to_string()));
         assert!(!scope.exclude.contains(&"python-engineer".to_string()));
         assert!(scope.exclude.contains(&"golang-engineer".to_string()));
+    }
+
+    #[test]
+    fn dotnet_csproj_scopes_to_dotnet_engineer() {
+        // A .NET project is identified by an extension-glob marker (`*.csproj`),
+        // exercising `marker_present`'s glob branch. It must keep dotnet-engineer
+        // and drop the non-.NET language engineers.
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "MyApp.csproj");
+
+        let scope = language_agent_scope(tmp.path()).expect("dotnet project is scoped");
+        assert!(
+            !scope.exclude.contains(&"dotnet-engineer".to_string()),
+            "dotnet-engineer must be kept for a *.csproj project"
+        );
+        assert!(scope.exclude.contains(&"rust-engineer".to_string()));
+        assert!(scope.exclude.contains(&"golang-engineer".to_string()));
+    }
+
+    #[test]
+    fn dotnet_vbproj_and_exact_markers_scope_to_dotnet_engineer() {
+        // Legacy VB.NET (`*.vbproj` glob) and the exact-filename markers
+        // (`global.json`, `Directory.Build.props`) all select dotnet-engineer.
+        for marker in ["Legacy.vbproj", "global.json", "Directory.Build.props"] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            let scope =
+                language_agent_scope(tmp.path()).unwrap_or_else(|| panic!("{marker} is scoped"));
+            assert!(
+                !scope.exclude.contains(&"dotnet-engineer".to_string()),
+                "dotnet-engineer must be kept for a {marker} project"
+            );
+        }
     }
 
     #[test]

@@ -39,7 +39,8 @@ really bundled.
 
 **Language engineers**: `rust-engineer`, `python-engineer`,
 `typescript-engineer`, `javascript-engineer`, `golang-engineer`,
-`java-engineer`, `php-engineer`, `ruby-engineer`, `dart-engineer`
+`java-engineer`, `php-engineer`, `ruby-engineer`, `dart-engineer`,
+`dotnet-engineer`
 
 **Framework specialists**: `react-engineer`, `nextjs-engineer`,
 `svelte-engineer`, `tauri-engineer`, `phoenix-engineer`, `web-ui-engineer`
