@@ -42,8 +42,8 @@ use uuid::Uuid;
 /// (`0` disables as firmly as `enabled = false`); `cooldown_secs` is the minimum
 /// gap between two nudges to the SAME session; `message` is the literal text
 /// injected (defaults to [`DEFAULT_NUDGE_MESSAGE`]).
-/// Test: `config_idle_nudge_defaults`, `config_idle_nudge_section_parses` in
-/// `core::config`; the field semantics via every `decide_nudge` test below.
+/// Test: `config_idle_nudge_section_parses` in `core::config`; the field
+/// semantics via every `decide_nudge` test below.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdleNudgeConfig {
     /// Whether the daemon auto-nudges idle-parked managed sessions.
@@ -109,8 +109,9 @@ impl Default for IdleNudgeConfig {
 /// open, which is the behavior the bundled agent guidance already prescribes.
 /// What: a `'static` instruction string citing #2621 so an operator reading the
 /// pane knows the message was machine-injected, not typed by a human.
-/// Test: `config_idle_nudge_defaults` (in `core::config`) asserts the config
-/// default equals this constant; `default_message_mentions_foreground` below.
+/// Test: `config_idle_nudge_section_parses` (in `core::config`) asserts the
+/// config default equals this constant; `default_message_mentions_foreground`
+/// below.
 pub const DEFAULT_NUDGE_MESSAGE: &str = "[trusty-mpm auto-nudge #2621] Your last turn ended with \
 language that parks the task waiting on a background monitor/notification, but a stopped agent \
 cannot be re-woken by the thing it is waiting on. Resume NOW: block in the FOREGROUND (re-run the \
@@ -275,8 +276,9 @@ pub fn decide_nudge(
 /// the same `SessionManager::list()` call it already makes to correlate the
 /// hook's Claude session id.
 /// Test: `ledger_snapshot_defaults_when_unseen`, `ledger_record_bumps_count`,
-/// `ledger_prune_drops_stale`; `daemon::idle_nudge::run_nudge_prunes_stale_entries`
-/// exercises the production wiring end to end.
+/// `ledger_prune_drops_stale`;
+/// `daemon::idle_nudge::run_nudge_prunes_stale_ledger_entries` exercises the
+/// production wiring end to end.
 #[derive(Debug, Default)]
 pub struct NudgeLedger {
     records: HashMap<Uuid, NudgeRecord>,
