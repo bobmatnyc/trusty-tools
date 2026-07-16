@@ -9,8 +9,9 @@
 them, and for PMs to re-attach or attach to new ones (but only one attachment at a time for a
 sub-agent)."*
 **Builds on:**
-- [DOC-39 — trusty-code Harness UI](./trusty-code-harness-ui.md) (PR #2855, **unmerged** — claims
-  DOC-39; this spec claims the next free number, **DOC-40**, per its own scan-before-claim note).
+- [DOC-39 — trusty-code Harness UI](./trusty-code-harness-ui.md) (PR #2855, **merged** — claims
+  DOC-39; this spec claims the next free number, **DOC-40**, per its own scan-before-claim note,
+  confirmed against `docs/specs/README.md`'s post-merge "next free `DOC-N`" note).
   §2.1 `SPEC-TCUI-09~draft` — **"the UI communicates with the daemon; the daemon provides all
   functionality"** — is the architectural frame this spec applies one layer down: the daemon is
   the sole durable home for a background agent, and *attach* is a client operation over the daemon
@@ -54,10 +55,14 @@ this spec's requirements (no exclusivity, no durability, no lease). tmux's nativ
   background agent: receiving its event/output stream and being able to steer it (send input,
   interrupt, cancel).
 - **Detach** — a client voluntarily releasing that channel. The background agent keeps running.
-- **Take-over** — a client acquiring the attach slot while another client currently holds it,
-  explicitly evicting the prior holder.
-- **Lease** — the time-bounded record of who currently holds the attach slot, renewed by heartbeat,
-  that expires if its holder goes silent.
+- **Take-over** — a client explicitly acquiring the attach slot over an existing lease record,
+  whether that record is currently **live** (evicting the current holder) or **stale** (superseding
+  an expired one nobody currently holds). Always an explicit, distinct call — never automatic
+  (§5.3, §10 Q4).
+- **Lease** — the record of who holds (or last held) the attach slot, renewed by heartbeat. It goes
+  **stale**, not away, when `lease_expires_at` passes with no renewal: the record is retained (§5.4,
+  AC-5.1), and a plain `acquire` still conflicts against it — only an explicit `take-over` clears
+  it.
 
 ---
 
@@ -97,14 +102,15 @@ not**, because that durability machinery was built one level up from where Bob i
 
 ### 1.3 Root cause — trusty-code: sub-agent delegation is nested, synchronous, and shares the PM's cancel flag
 
-`task::executor::spawn_task_run` (`executor.rs:118-132`) reserves the session's single execution
+`task::executor::spawn_task_run` (`executor.rs:124-138`) reserves the session's single execution
 slot and `tokio::spawn`s **exactly one** task for the whole PM run (`run_and_record`,
-`executor.rs:164`). Inside that one task, `delegate_to_agent` (`tools/delegate.rs:206-256`)
-directly `.await`s `InProcessAgentRunner::run` (`runner/in_process.rs:437`) — the sub-agent's
-`AgentLoop` runs **nested inside the PM's own task**, sharing the same `Arc<AtomicBool>` cancel
-flag (`executor.rs:216`) and the same `Execution.handle` (`registry.rs:120-123`). If the PM's
+`executor.rs:185`). Inside that one task, `delegate_to_agent`'s `execute()` (`tools/delegate.rs:295-370`)
+directly `.await`s `InProcessAgentRunner::run` (`runner/in_process.rs:444`) at `delegate.rs:358` —
+the sub-agent's `AgentLoop` runs **nested inside the PM's own task**, sharing the same
+`Arc<AtomicBool>` cancel flag (`executor.rs:295`, `Arc::clone(&cancel)` passed into
+`build_engineer_runner`) and the same `Execution.handle` (`registry.rs:120-123`). If the PM's
 execution is cancelled or the session's `SessionRegistry` entry is dropped (daemon restart —
-`registry.rs:8` states persistence is "Phase 2+, out of scope"; `serve/mod.rs:92` constructs a
+`registry.rs:8` states persistence is "Phase 2+, out of scope"; `serve/mod.rs:99-100` constructs a
 fresh, empty registry on every boot), the sub-agent is cancelled or lost **with no independent
 existence of its own**. There is no `AgentId` type in the crate at all (grep confirms zero hits) —
 only a `String` agent-config name, not unique per invocation, and no durable record of "sub-agent X
@@ -128,19 +134,30 @@ background agents.
 
 ## 2. Alignment with DOC-39's daemon-is-everything constraint
 
-DOC-39 §2.1 (`SPEC-TCUI-09~draft`) states four corollaries (C-1..C-4) that this spec adopts
-verbatim, substituting "background agent" for "UI":
+DOC-39 §2.1 (`SPEC-TCUI-09~draft`) states four corollaries — **C-1** (the UI is a thin client),
+**C-2** (the daemon is the single source of functionality), **C-3** (no capability divergence
+between targets), and **C-4** (Tauri MUST NOT use native fs/dialog APIs even though it can, a
+Tauri-specific corollary of C-3). This spec adopts **three of DOC-39's four corollaries**
+(C-1, C-2, C-3), substituting "background agent" for "UI":
 
 - **A background agent's durable state lives in exactly one place: the daemon.** Not the spawning
   PM's process memory, not a client's local state, not (for trusty-mpm) an in-process Claude Code
-  Task-tool invocation the daemon cannot see.
+  Task-tool invocation the daemon cannot see. [C-1: the client is a thin renderer of daemon-owned
+  state, never a holder of its own]
 - **Attach is a daemon API call**, never a side-channel (e.g., "just re-run the same tmux
   attach-session command and hope the pane is still there" is not attach — see §8.1 on why tmux's
-  own multi-client model is insufficient).
+  own multi-client model is insufficient). [C-2: the capability exists as a daemon API, not a
+  client-local workaround]
 - **No capability divergence**: a CLI, a TUI, and (for trusty-mpm) a Telegram/TELUI client must all
-  be able to attach identically, because they all call the same daemon endpoint (§6).
+  be able to attach identically, because they all call the same daemon endpoint (§6). [C-3]
 - **A UI/CLI need with no API is an unbuilt feature, not a client-side workaround** — this governs
-  §6: every verb in §5 must exist as a daemon endpoint before any client surfaces it.
+  §6: every verb in §5 must exist as a daemon endpoint before any client surfaces it. This bullet
+  does not introduce a fifth corollary; it restates C-2 as a build-order rule.
+
+**C-4 has no background-agent analog.** C-4 forbids Tauri from using native fs/dialog APIs so the
+web and Tauri UI targets never diverge in capability — it is specific to *UI packaging* (a
+browser-vs-native-shell split this spec's daemon-side clients do not have). Nothing in this spec's
+domain corresponds to it, so it is deliberately not adopted, not silently dropped.
 
 Where this spec **extends** DOC-39 rather than merely restating it: DOC-39 is scoped to
 trusty-code's SPA. This spec is cross-crate — it applies the same constraint to trusty-mpm's
@@ -192,9 +209,9 @@ MUST NOT be owned by, or nested inside, the spawning PM's own execution unit.
   sharing its cancel flag and handle. **Required change**: promote sub-agent execution to its own
   `Execution`-shaped record (own `JoinHandle`, own cancel flag), held by the `SessionRegistry` (or
   a new daemon-global `AgentRegistry`) keyed by `AgentId`, not nested inside the PM's `Execution`.
-  Cancelling/losing the PM's execution MUST NOT cancel a `BackgroundAgent` that has been marked
-  durable (§4.4 distinguishes "durable" from "attached-only, ephemeral" agents — not every
-  delegation needs to survive its parent; see §9 open question on default policy).
+  Cancelling/losing the PM's execution MUST NOT cancel a `BackgroundAgent` unless it was explicitly
+  marked `ephemeral: true` (§4.4 distinguishes durable-by-default agents from the opt-out
+  "attached-only, ephemeral" case — Q1, §10, resolved).
 - **trusty-mpm today** (§1.2): delegated work runs invisibly inside the PM's own Claude Code
   process via the Task tool — the daemon has no handle to it at all. **Required change**:
   `agent_delegate` must provision something the daemon *itself* owns and can keep alive — in
@@ -242,11 +259,16 @@ state-based, not task-based — for trusty-code).
 
 ### 4.4 Not every delegation needs to be durable
 
-**Design decision.** Making *all* delegations durable is unnecessary overhead for short-lived,
-synchronous sub-agent calls (e.g., a one-shot lookup that returns in seconds). This spec's
-durability guarantee applies to delegations explicitly marked **background** — the caller (PM)
-opts in per-delegation (§6.1's `durable: bool` parameter), matching how `agent_delegate` already
-distinguishes tiers via the circuit breaker. Default value is an open question (§10, Q1).
+**Design decision — durable by default (Q1 resolved, §10).** Making *all* delegations durable is
+unnecessary overhead for genuinely short-lived, synchronous sub-agent calls (e.g., a one-shot
+lookup that returns in seconds), so this spec still allows a delegation to skip the durability
+machinery. But the default direction is **durable**: every background delegation survives PM
+pause/death unless the caller **explicitly opts out** per-delegation via an `ephemeral: bool`
+flag (default `false`) — not the reverse. This directly prevents recurrences of §1.1's failure by
+construction: a PM that does nothing gets durability, not silent data loss. It also reverses
+epic #2343's "ephemeral by default" posture (§1.4) — a deliberate amendment, not an oversight —
+while still letting a caller mark a delegation `ephemeral: true` when the short-lived case applies,
+matching how `agent_delegate` already distinguishes tiers via the circuit breaker.
 
 ---
 
@@ -281,23 +303,36 @@ client norm despite reusing tmux as a transport for trusty-mpm's background agen
 
 | Verb | Effect |
 |---|---|
-| `acquire` | Attempts to take the attach slot for `agent_id`. Succeeds immediately if unattached. If attached, fails with `ALREADY_ATTACHED{holder_kind, acquired_at}` **unless** the caller passes `force: true` (→ `take-over`, see below). Success returns a `connection_token` and the current lease's `lease_expires_at`. |
+| `acquire` | Attempts to take the attach slot for `agent_id`. Succeeds immediately only if `agent_id` has **no lease record at all**. If any lease record exists — live **or stale** — fails with `ALREADY_ATTACHED{holder_kind, acquired_at, stale: bool}` **unless** the caller passes `force: true` (→ `take-over`, see below); the sole exception is **AC-4.3**'s same-caller renewal on a still-live lease. Success returns a `connection_token` and the current lease's `lease_expires_at`. |
 | `heartbeat` | Renews an existing lease. Must be called by the holder before `lease_expires_at`, or the lease is considered abandoned (§5.4). |
 | `release` | Voluntary detach. Frees the slot immediately; the background agent keeps running. |
 | `take-over` | `acquire{force: true}`. Explicitly evicts the current holder (closes their event stream / sends them a `LeaseRevoked` notification if they are still connected) and installs the caller as the new holder. **Never silent** — see AC-4.4. |
 
 ### 5.3 Exclusivity enforcement
 
-**AC-4.1** At most one **live** `AttachmentLease` exists per `BackgroundAgent` at any instant.
-**AC-4.2** `acquire` without `force` on an already-attached agent returns a typed error, never
-silently multiplexes the caller alongside the existing holder (this is the literal requirement
-Bob stated: *"attach must fail or take-over explicitly, never silently multiplex"*).
-**AC-4.3** A caller's own repeated `acquire` for a lease they already hold is idempotent (renews
-rather than erroring) — this is what makes PM re-attach (§7.1) cheap to call defensively.
+**AC-4.1** At most one **live** `AttachmentLease` exists per `BackgroundAgent` at any instant. An
+expired lease is **retained as a stale record**, not deleted, until it is explicitly superseded by
+a `take-over` (§5.4, AC-5.1) — a `BackgroundAgent` is never silently returned to the "no lease
+record" state by the mere passage of time.
+**AC-4.2** `acquire` without `force` on an agent that has **any** existing lease record — live or
+stale — returns a typed conflict error, never silently multiplexes the caller alongside the
+existing holder and never silently reclaims a stale record on the caller's behalf (this is the
+literal requirement Bob stated: *"attach must fail or take-over explicitly, never silently
+multiplex"*). **Q4 (§10, resolved) extends this baseline rather than carving an exception into
+it**: the conflict is **always** surfaced — live holder or stale record, third party or the
+agent's own original holder — and `take-over` is **always** a distinct, explicit second call.
+There is no automatic-take-over path anywhere in this spec.
+**AC-4.3** A caller's own repeated `acquire` for a lease **they currently hold live** is idempotent
+(renews rather than erroring) — this is what makes a tight-loop re-attach (§7.1) cheap to call
+defensively. This is the **only** exception to AC-4.2's conflict rule, and it does not extend to a
+caller's own **stale** lease: once a lease has expired, even its original holder gets the same
+`ALREADY_ATTACHED{stale: true}` conflict as any other caller and must explicitly `take-over` it
+(§7.1 step 3).
 **AC-4.4** A `take-over` MUST deliver a `LeaseRevoked{new_holder_kind}` notification to the evicted
 holder's still-open channel before closing it, if that channel is still live. If the prior holder
-is already gone (dead lease, §5.4), there is nothing to notify — this is the expected common case
-for PM re-attach after a session pause.
+is already gone (stale lease, §5.4), there is nothing to notify — this is the expected common case
+for PM re-attach after a session pause, and the `take-over` still proceeds (it is never blocked or
+made conditional by the absence of anyone to notify).
 
 ### 5.4 Heartbeat / lease timeout — a dead client must not hold the lock forever
 
@@ -309,8 +344,12 @@ hold the lock forever."*
   keep-alive, e.g. SSE's existing connection liveness, so most clients never need an explicit
   heartbeat call).
 - **AC-5.1** A lease whose `lease_expires_at` has passed with no renewal is **not** a live lease for
-  the purposes of AC-4.1/4.2 — a subsequent plain `acquire` (no `force` needed) succeeds and treats
-  the expired lease as vacated.
+  the purposes of AC-4.1 (it no longer counts toward "at most one live lease"), but it is **not**
+  silently vacated either: the record persists as **stale**. A subsequent plain `acquire` (no
+  `force`) still returns `ALREADY_ATTACHED{stale: true}` (Q4, §10, resolved) — the caller, even if
+  it was the original holder, must call `take-over` (`force: true`) to claim it. A `take-over`
+  against a stale lease always succeeds and skips AC-4.4's notification step (there is no live
+  channel to notify).
 - **AC-5.2** Lease expiry does NOT affect the background agent's own execution state — an
   unattended, unleased agent keeps running exactly as it would while attached (this is the
   "durable" half of durable-attach: attachment is observation/steering, not a keep-alive for the
@@ -320,6 +359,15 @@ hold the lock forever."*
   should not force a take-over storm, but should also not require waiting the full TTL if the
   disconnect is unambiguous (e.g., a clean SSE close). Exact grace-period behavior is
   implementation detail, not normative here.
+
+A `heartbeat` renewal, a `take-over`, and a background TTL-expiry check are all evaluated under the
+same daemon-side single-writer ordering as `acquire` (§8's "two clients race `acquire`
+simultaneously" row) — there is no separate, unsynchronized expiry sweep that can race a live
+`take-over`. Concretely, a lease is only ever read-then-mutated inside that single serialization
+point, so "the lease expires **during** a take-over" is not a distinct race to reason about: either
+the expiry check or the `take-over` observes the lease first under the same lock/ordering, and
+whichever wins proceeds exactly as AC-5.1 or AC-4.4 already specifies — never both, and never a
+torn intermediate state.
 
 ### 5.5 Lease holder identity
 
@@ -346,8 +394,8 @@ Concretely:
 
 **AC-6.1** Every verb in §5.2 MUST be exercisable via plain HTTP (`curl`) or the daemon's local
 JSON-RPC transport, with no dependency on tmux, Telegram, a TUI, or any other live channel.
-**AC-6.2** A local integration test exercising the full sequence — `spawn (durable) → acquire →
-heartbeat → take-over → release` — against a real daemon instance MUST exist and pass **before**
+**AC-6.2** A local integration test exercising the full sequence — `spawn (default: durable) →
+acquire → heartbeat → take-over → release` — against a real daemon instance MUST exist and pass **before**
 any channel-specific wiring (tmux attach, Telegram bot, TUI pane) lands for this feature. This is
 the acceptance gate for Phase 1 (§9).
 
@@ -360,7 +408,7 @@ control surface, DOC-14) and the MCP tool surface (`mcp/tools/session.rs`,
 
 | Endpoint / MCP tool | Purpose |
 |---|---|
-| `POST /api/v1/agents` (or `agent_delegate` extended with `durable: bool`) | Spawns a `BackgroundAgent`; returns `agent_id`. Supersedes bookkeeping-only `agent_delegate` per §4.2 AC-2.1. |
+| `POST /api/v1/agents` (or `agent_delegate` extended with `ephemeral: bool`, default `false`) | Spawns a `BackgroundAgent`, durable unless `ephemeral: true`; returns `agent_id`. Supersedes bookkeeping-only `agent_delegate` per §4.2 AC-2.1. |
 | `GET /api/v1/agents` / `agent_list` | Lists `BackgroundAgent`s, filterable by `parent_session_id`, state, orphaned-only. |
 | `GET /api/v1/agents/{id}` / `agent_status` | Current `BackgroundAgent` state + current lease holder (if any). |
 | `POST /api/v1/agents/{id}/acquire` / `agent_attach{agent_id, force}` | §5.2 `acquire`/`take-over`. |
@@ -377,7 +425,7 @@ Extends `session/protocol.rs` (which already registers `session.attach`/`session
 
 | Method | Purpose |
 |---|---|
-| `agent.spawn(session_id, agent_name, task, durable: bool)` → `AgentId` | Promotes `delegate_to_agent` from a nested synchronous call (§1.3) to an independent `Execution`-shaped record when `durable: true`. |
+| `agent.spawn(session_id, agent_name, task, ephemeral: bool = false)` → `AgentId` | Promotes `delegate_to_agent` from a nested synchronous call (§1.3) to an independent `Execution`-shaped record unless `ephemeral: true`. |
 | `agent.list(session_id?)` | Lists background agents, optionally scoped to a session. |
 | `agent.status(agent_id)` | Current state + lease holder. |
 | `agent.acquire(agent_id, force?)` | §5.2. |
@@ -420,24 +468,32 @@ parent/orphaned, with an `a` keybinding for attach and a visible "held by: <kind
    `session_id` changed across the pause — see §9 open question on session-id stability across
    pause/resume) to discover background agents it previously spawned that are still `Running` or
    reached a terminal state while it was away.
-3. For each, it calls `acquire` (no `force`) to resume observing/steering. Per **AC-4.3**, if no
-   other client attached in the interim, this succeeds immediately and cheaply — the PM does not
-   need to know in advance whether anyone else is attached.
-4. If a **user** attached in the interim (`ALREADY_ATTACHED{holder_kind: User}`), the PM does
-   **not** silently take over — see §10 Q4 for whether the PM should ever auto-force here. Default
-   behavior: surface the conflict to the operator rather than resolve it unilaterally, consistent
-   with §5.1's rationale (a PM re-attach is exactly the kind of "stray nudge mid-thought" the
-   exclusivity model exists to prevent).
+3. For each, it calls `acquire` (no `force`) to resume observing/steering. If the agent has **no**
+   lease record at all, this succeeds immediately. If the PM's own previous lease is still **live**
+   (the pause was shorter than the lease TTL), **AC-4.3**'s same-caller renewal exception applies
+   and this also succeeds immediately — the PM does not need to know in advance whether it is still
+   the live holder. In every other case — a live **user** lease, or (the single most common outcome
+   of this flow) the PM's **own** lease having gone **stale** during the pause — `acquire` returns
+   `ALREADY_ATTACHED{holder_kind, stale}`.
+4. **The PM never auto-forces in response** (Q4, §10, resolved — this is not a case-by-case
+   judgment call, it is unconditional: `take-over` is always a distinct, explicit second call, with
+   no automatic path, whether the conflict is a live **user** holder or the PM's own now-stale
+   lease). The PM surfaces the conflict — holder identity, `stale` flag, and lease age — to the
+   operator, who explicitly decides whether to issue `take-over`, consistent with §5.1's rationale
+   (a PM re-attach is exactly the kind of "stray nudge mid-thought" the exclusivity model exists to
+   prevent, and that risk does not go away just because the prior holder was the PM itself).
 
 ### 7.2 User attach flow
 
 1. User lists background agents (`tm agent list`, or the equivalent TUI/CLI surface) — including
    ones spawned by a PM session that has since paused or exited (**AC-2.3**: orphaning, not
    deletion, is what makes this possible at all).
-2. User calls `attach <agent-id>`. If unattached, succeeds immediately. If a PM (or another user
-   session) currently holds the lease, the user sees who holds it and its lease's remaining TTL,
-   and may pass `--force` to take over (**AC-4.4**: the evicted holder, if still live, is notified,
-   never silently dropped).
+2. User calls `attach <agent-id>`. If there is no lease record at all, this succeeds immediately.
+   If a lease record exists — a PM or another user session currently **live**, or a **stale**
+   record left over from a prior holder — the user sees who last held it, its `stale` status, and
+   (if live) its lease's remaining TTL, and must pass `--force` to take over in either case
+   (**AC-4.4**: the evicted holder, if still live, is notified, never silently dropped; a stale
+   record has no one left to notify and `take-over` proceeds regardless).
 3. While attached, the user has the exclusive channel: sees the live event stream and can send
    input, exactly as if this were the PM's own conversation, with the guarantee that no second
    controller (including the spawning PM re-attaching without `force`) is concurrently steering the
@@ -457,7 +513,7 @@ parent/orphaned, with an `a` keybinding for attach and a visible "held by: <kind
 | Attaching client crashes without releasing | Lease expires per TTL (§5.4); no permanent lock. |
 | Two clients race `acquire` simultaneously | Daemon-side single-writer ordering (the existing `Mutex`/`RwLock` around the registry, e.g. `session/registry.rs`'s pattern) makes exactly one the winner; the loser gets `ALREADY_ATTACHED`, never a torn/partial lease. |
 | Background agent itself crashes while attached | State transitions to `Failed`; the attached client's event stream receives a terminal event (reusing the existing `AgentFailed` event, wired per §6.3) rather than silently hanging; lease is released automatically since there is nothing left to steer. |
-| Daemon restarts while an agent is attached | Lease is not durable across restart (in-memory by design — a lease is a live-connection concept, not a durable-state concept); the agent's own durable state **is** restored per §4.3, and the previously-attached client must re-`acquire` on reconnect — this is expected, not a bug, and matches AC-5.1's "expired lease vacates" semantics applied to the degenerate case of "the whole daemon, and therefore every lease, restarted." |
+| Daemon restarts while an agent is attached | Lease is not durable across restart (in-memory by design — a lease is a live-connection concept, not a durable-state concept, unlike the stale-but-retained record AC-5.1 describes for a same-process TTL expiry); the agent's own durable state **is** restored per §4.3, but the lease record itself is gone entirely, not merely stale. The previously-attached client's next `acquire` therefore succeeds immediately, the same as any never-attached agent — this is the one case where re-attach does NOT go through the AC-4.2/Q4 conflict-then-take-over path, because there is no record left for `acquire` to conflict with. |
 | `take-over` on an agent with no prior lease at all | Behaves identically to plain `acquire` — `force: true` is a no-op when there is nothing to evict, never an error. |
 | Orphaned agent (parent session deleted) never gets attached by anyone | Runs to completion or its own terminal state per its own logic; §4 does not introduce a TTL on the agent itself, only on leases — agent-level idle-expiry is explicitly deferred (mirrors the sibling vision-and-architecture-spec §12's own "Phase 2+" idle-expiry note for sessions). |
 
@@ -481,7 +537,8 @@ parent/orphaned, with an `a` keybinding for attach and a visible "held by: <kind
 **Explicitly NOT Phase 1:** CLI (`tm agent ...`), TUI surface (§6.5), tmux-backed realization of
 `BackgroundAgent` for trusty-mpm (Phase 1 can validate the protocol against an in-process/HTTP-only
 background agent before committing to a tmux-pane-per-agent implementation), Telegram/TELUI
-attach, auto-force policy for PM re-attach (§10 Q4).
+attach. (Auto-force policy for PM re-attach, formerly §10 Q4, is now resolved — never auto-force —
+so there is no such policy left to design or defer.)
 
 **Phase 2+:** CLI, TUI, tmux realization, channel wiring, cross-crate protocol unification (§10
 Q5).
@@ -490,10 +547,18 @@ Q5).
 
 ## 10. Open questions
 
-**Q1 — Default durability.** Should `durable: bool` on a delegation default to `true` (every
-background agent is durable unless opted out) or `false` (opt-in, matching #2343's existing
-"ephemeral by default" posture)? Defaulting to `true` directly prevents recurrences of §1.1's
-failure but changes the resource/persistence cost of every delegation. **Owner: Bob.**
+**Q1 — Default durability — RESOLVED.**
+*Resolution (Bob, 2026-07-16): durable by default.* Every background delegation survives PM
+pause/death unless explicitly marked ephemeral — the flag flips from opt-in to **opt-out**
+(`ephemeral: bool`, default `false`, §4.4/§6.2/§6.3), reversing #2343's "ephemeral by default"
+posture rather than merely offering durability alongside it. This directly prevents recurrences of
+§1.1's failure by construction: a PM that calls `agent_delegate`/`agent.spawn` with no extra
+argument gets a durable, re-attachable agent, not a silently disposable one. The resource/
+persistence cost this trades away (every delegation now persists a `BackgroundAgent` record by
+default, §4.2 AC-2.1) is accepted as the right default given §1.1's failure mode; a caller with a
+genuinely short-lived, synchronous need opts out explicitly instead.
+
+**Owner: Bob. → RESOLVED 2026-07-16.**
 
 **Q2 — Lease TTL value and heartbeat cadence.** §5.4 proposes a 60s default riding on transport
 keep-alive. Is an explicit heartbeat call needed at all, or is "connection is still open" a
@@ -504,10 +569,23 @@ sufficient liveness signal for every transport this spec targets (HTTP/SSE, tmux
 distinguishable but does not specify how (mirrors DOC-39 §7 Q3, unresolved there too). Single-
 operator assumption inherited, not re-litigated. **Owner: Bob.**
 
-**Q4 — Should a PM re-attach ever auto-force?** §7.1 defaults to "surface the conflict, never
-auto-force." Is there a case (e.g., the PM detects the user's session has been idle past some
-threshold) where auto-take-over is desirable, or does that reintroduce the interleaving hazard
-§5.1 exists to prevent? **Owner: Bob.**
+**Q4 — Should a PM re-attach ever auto-force? — RESOLVED.**
+*Resolution (Bob, 2026-07-16): always surface the conflict; take-over is always an explicit second
+call, never automatic.* This was previously framed as an open case-by-case judgment (e.g., "would
+an idle-threshold heuristic justify auto-take-over?") sitting awkwardly next to AC-4.2's baseline,
+which already stated the conflict is never silently resolved — that tension is what created the
+LOW-flagged ambiguity between "baseline stated" and "resolved." It is now closed in one direction:
+**no** heuristic, idle-threshold or otherwise, ever authorizes an automatic `take-over`, and this
+holds identically whether the party being evicted is a user, another PM instance, or — the case
+that actually motivated this question — **the same PM re-attaching to an agent it spawned itself**.
+A PM's own lease going **stale** across a pause does not grant it any special reclaim path: per
+AC-4.2/AC-5.1 it gets the same `ALREADY_ATTACHED{stale: true}` conflict as any other caller and
+must issue `take-over` as its own explicit, deliberate call. This directly closes §1.1's failure
+mode without reopening the interleaving hazard §5.1 exists to prevent: a PM resuming after a pause
+is exactly the "stray nudge mid-thought" scenario, so it gets the same explicit-take-over gate as
+every other caller, not an exemption.
+
+**Owner: Bob. → RESOLVED 2026-07-16.**
 
 **Q5 — Cross-crate protocol unification.** trusty-mpm and trusty-code each get their own
 implementation of §5's verbs (§6.2/§6.3) rather than a single shared daemon. Should these converge
@@ -528,9 +606,9 @@ Phase 1. **Owner: engineering / Bob.**
 
 | ID | Item | Depends on |
 |---|---|---|
-| **F1** | Add the DOC-40 catalog row to `docs/specs/README.md`, and re-scan for next-free `DOC-N` once PR #2855 (DOC-39) merges (its own note already anticipates this collision). | this spec |
+| **F1** | ~~Add the DOC-40 catalog row to `docs/specs/README.md`, and re-scan for next-free `DOC-N`~~ — **DONE.** PR #2855 (DOC-39) merged first; this spec's catalog row and the "next free `DOC-N` = `DOC-41`" note were added in this PR's rebase onto `origin/main` (2026-07-16). | this spec |
 | **F2** | File the Phase-1 issues (§9) — domain object + persistence + lease protocol + local integration test — sequenced ahead of any CLI/TUI/channel work. | this spec |
-| **F3** | Resolve Q1 (default durability) and Q4 (auto-force policy) before Phase 1 implementation starts — both are behavior-affecting, not deferrable to Phase 2. | Bob |
+| **F3** | ~~Resolve Q1 (default durability) and Q4 (auto-force policy) before Phase 1 implementation starts~~ — **DONE, 2026-07-16.** Both resolved in §10: Q1 is durable-by-default (opt-out via `ephemeral: true`); Q4 is always-explicit-take-over, never auto-force. | Bob |
 | **F4** | Evaluate Q5 (shared protocol crate) once both crates have independent Phase 1 implementations to compare. | engineering |
 
 ---
@@ -544,3 +622,20 @@ Phase 1. **Owner: engineering / Bob.**
   objects; specifies the acquire/heartbeat/release/take-over protocol with mandatory exclusivity
   and lease-timeout semantics; aligns with DOC-39 §2.1's daemon-is-everything constraint and amends
   epic #2343's "sub-agent loops stay ephemeral" scope decision.
+- **2026-07-16** — **Review-fix + owner-decision amendment** (PR #2865 review + Bob). Re-cites §1.3's
+  code references against `origin/main` post-rebase (DOC-39/PR #2860 landed first and shifted
+  `task/executor.rs`'s line numbers): `delegate.rs:295-370`/`:358` for the sub-agent await,
+  `executor.rs:295` for the shared cancel flag, `runner/in_process.rs:444` for `AgentRunner::run`'s
+  signature, plus the adjacent `spawn_task_run`/`run_and_record`/`serve/mod.rs` citations in the
+  same paragraph. Corrects §2's DOC-39-corollary claim from "adopts all four verbatim" to "adopts
+  three of four (C-1, C-2, C-3); C-4 (Tauri native-API prohibition) has no background-agent analog"
+  and explains why. Adds a §5.4 note that heartbeat/take-over/TTL-expiry checks share `acquire`'s
+  daemon-side single-writer ordering, closing the "lease expires mid-take-over" ambiguity. Resolves
+  **Q1** (durable by default — every background delegation survives unless explicitly marked
+  `ephemeral: true`, reversing the flag from opt-in to opt-out) and **Q4** (a PM re-attach never
+  auto-forces, unconditionally, including onto its own now-stale lease); propagates both into §4.1,
+  §4.4, §5.2–§5.4, §6.2, §6.3, §7.1, §7.2, and §11 F1/F3. Reconciles the `docs/specs/README.md`
+  catalog note against `origin/main` post-rebase: DOC-39 is now merged/cataloged (no longer
+  "reserved by open PR"), this spec claims DOC-40, next free is DOC-41; notes open PRs #2792
+  (DOC-37, unrelated pre-existing collision) and #2863 (SLD policy, no `DOC-N` claim) without
+  assigning either a number.
