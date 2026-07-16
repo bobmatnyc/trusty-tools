@@ -44,6 +44,13 @@ const DEFAULT_SEARCH_COUNT: i64 = 20;
 /// `conversations.list` locally, so bound how many the API returns).
 const DEFAULT_CHANNEL_SCAN_LIMIT: i64 = 200;
 
+/// Lower bound on a caller-supplied page size (`limit`/`count`).
+const MIN_PAGE_SIZE: i64 = 1;
+
+/// Upper bound on a caller-supplied page size (`limit`/`count`); matches the
+/// widest window Slack's paged read/search methods accept.
+const MAX_PAGE_SIZE: i64 = 1000;
+
 // Slack Web API method paths. Appended to the client's base URL.
 const CHAT_POST_MESSAGE: &str = "chat.postMessage";
 const CONVERSATIONS_HISTORY: &str = "conversations.history";
@@ -115,12 +122,14 @@ async fn send_message(client: &BaseClient, args: Value) -> Result<Value, ToolCal
 ///
 /// Why: the primary inbound read tool. Message text is untrusted, so it is
 /// markup-escaped before it reaches the model.
-/// What: requires `channel`; honours `limit` (default [`DEFAULT_READ_LIMIT`]);
-/// returns `{channel, count, messages:[{user, ts, text}]}` with escaped text.
+/// What: requires `channel`; honours `limit` (default [`DEFAULT_READ_LIMIT`],
+/// clamped to `MIN_PAGE_SIZE..=MAX_PAGE_SIZE`); returns
+/// `{channel, count, messages:[{user, ts, text}]}` with escaped text. Results
+/// are a single page (`conversations.history` is not cursor-followed here).
 /// Test: `tests/tools_http.rs::read_channel_escapes_message_text`.
 async fn read_channel(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
     let channel = require_str(&args, "channel")?;
-    let limit = opt_i64(&args, "limit").unwrap_or(DEFAULT_READ_LIMIT);
+    let limit = clamp_page_size(opt_i64(&args, "limit").unwrap_or(DEFAULT_READ_LIMIT));
     let body = json!({ "channel": channel.as_str(), "limit": limit });
     let resp = client.call_method(CONVERSATIONS_HISTORY, &body).await?;
     let messages = clean_messages(&resp);
@@ -133,6 +142,8 @@ async fn read_channel(client: &BaseClient, args: Value) -> Result<Value, ToolCal
 /// selects the thread. Reply text is untrusted → escaped.
 /// What: requires `channel` + `thread_ts`; returns
 /// `{channel, thread_ts, count, messages:[{user, ts, text}]}` with escaped text.
+/// Results are a single page (`conversations.replies` is not cursor-followed
+/// here), so a very long thread may truncate.
 /// Test: `tests/tools_http.rs::read_thread_returns_replies`.
 async fn read_thread(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
     let channel = require_str(&args, "channel")?;
@@ -208,15 +219,17 @@ async fn get_user(client: &BaseClient, args: Value) -> Result<Value, ToolCallErr
 /// [`crate::slack::api::error::SlackError::MissingUserToken`] *before* any
 /// network call, which surfaces here as a clear typed tool error rather than a
 /// confusing Slack rejection or a silent bot-token fallback.
-/// What: requires `query`; honours `count` (default [`DEFAULT_SEARCH_COUNT`]);
-/// returns `{query, count, matches:[{channel_id, channel_name, user, ts, text,
-/// permalink}]}`. Result `text`, `channel_name`, and `username` are untrusted
-/// (authored by arbitrary workspace members) → markup-escaped.
+/// What: requires `query`; honours `count` (default [`DEFAULT_SEARCH_COUNT`],
+/// clamped to `MIN_PAGE_SIZE..=MAX_PAGE_SIZE`); returns
+/// `{query, count, matches:[{channel_id, channel_name, user, ts, text,
+/// permalink}]}`. Result `text` and `channel_name` are untrusted (authored by
+/// arbitrary workspace members) → markup-escaped; `user` is a platform-controlled
+/// Slack user ID, forwarded verbatim.
 /// Test: `tests/tools_http.rs::search_messages_with_user_token_returns_matches`,
 /// `::search_messages_without_user_token_errors`.
 async fn search_messages(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
     let query = require_str(&args, "query")?;
-    let count = opt_i64(&args, "count").unwrap_or(DEFAULT_SEARCH_COUNT);
+    let count = clamp_page_size(opt_i64(&args, "count").unwrap_or(DEFAULT_SEARCH_COUNT));
     let body = json!({ "query": query.as_str(), "count": count });
     let resp = client.call_method_user(SEARCH_MESSAGES, &body).await?;
     let matches = clean_search_matches(&resp);
@@ -288,6 +301,18 @@ fn opt_str(args: &Value, key: &str) -> Option<String> {
 /// Read an optional integer argument (absent or wrong-typed → `None`).
 fn opt_i64(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(Value::as_i64)
+}
+
+/// Clamp a caller-supplied page size into Slack's accepted range.
+///
+/// Why: Slack validates page size server-side, but forwarding an out-of-range
+/// value (a negative, zero, or absurdly large `limit`/`count`) is sloppy —
+/// clamp it to `[MIN_PAGE_SIZE, MAX_PAGE_SIZE]` as defense-in-depth so the body
+/// we build is always well-formed before it ever reaches the network.
+/// What: returns `n` clamped to `MIN_PAGE_SIZE..=MAX_PAGE_SIZE`.
+/// Test: `clamp_page_size_bounds_hostile_values`.
+fn clamp_page_size(n: i64) -> i64 {
+    n.clamp(MIN_PAGE_SIZE, MAX_PAGE_SIZE)
 }
 
 // ── Response cleaning (untrusted text is escaped here) ─────────────────────
@@ -478,6 +503,34 @@ mod tests {
         assert_eq!(opt_str(&args, "missing"), None);
         assert_eq!(opt_i64(&args, "limit"), Some(7));
         assert_eq!(opt_i64(&args, "missing"), None);
+    }
+
+    #[test]
+    fn clamp_page_size_bounds_hostile_values() {
+        // Hostile / degenerate inputs are pulled into the valid window before a
+        // request body is ever built.
+        assert_eq!(clamp_page_size(i64::MIN), MIN_PAGE_SIZE);
+        assert_eq!(clamp_page_size(-100), MIN_PAGE_SIZE);
+        assert_eq!(clamp_page_size(0), MIN_PAGE_SIZE);
+        // In-range values pass through untouched.
+        assert_eq!(clamp_page_size(1), 1);
+        assert_eq!(clamp_page_size(DEFAULT_READ_LIMIT), DEFAULT_READ_LIMIT);
+        assert_eq!(clamp_page_size(MAX_PAGE_SIZE), MAX_PAGE_SIZE);
+        // Absurdly large values collapse to the upper bound.
+        assert_eq!(clamp_page_size(1_000_000), MAX_PAGE_SIZE);
+        assert_eq!(clamp_page_size(i64::MAX), MAX_PAGE_SIZE);
+    }
+
+    #[test]
+    fn read_channel_clamps_limit_into_body() {
+        // A hostile `limit` is clamped before it reaches the request body.
+        let huge = clamp_page_size(opt_i64(&json!({ "limit": 9_999_999 }), "limit").unwrap());
+        assert_eq!(huge, MAX_PAGE_SIZE);
+        let negative = clamp_page_size(opt_i64(&json!({ "limit": -5 }), "limit").unwrap());
+        assert_eq!(negative, MIN_PAGE_SIZE);
+        // Absent `limit` falls back to the default (itself in range).
+        let default = clamp_page_size(opt_i64(&json!({}), "limit").unwrap_or(DEFAULT_READ_LIMIT));
+        assert_eq!(default, DEFAULT_READ_LIMIT);
     }
 
     #[test]
