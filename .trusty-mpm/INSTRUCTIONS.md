@@ -663,6 +663,7 @@ Full-length reference materials for less-frequent lookups:
 - **Environment variables (full table):** [docs/reference/environment-variables.md](docs/reference/environment-variables.md)
 - **IDE setup (detailed):** [docs/reference/ide-setup.md](docs/reference/ide-setup.md)
 - **Running MCP servers (examples & wiring):** [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md)
+- **Spec-Linked Documentation (SLD) policy:** [DOC-38](docs/specs/spec-linked-documentation.md) — the standard for declaring source↔spec references; enforced by `scripts/check_sld.sh`.
 
 ## Domain Consolidation Audit
 

@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- bundled `documentation` agent persona now carries a **Spec-Linked Documentation (SLD / DOC-38)** section: where a repo adopts DOC-38, doc-writing agents declare Markdown→spec links in `spec_refs:` frontmatter, carry the bold-field spec header block + `{#SPEC-…}` anchors, avoid restating the grammar, and run the `sld-lint` gate (`scripts/check_sld.sh`) before handoff ([#2853](https://github.com/bobmatnyc/trusty-tools/issues/2853))
 - add dotnet-engineer bundled agent + .NET stack detection ([#2832](https://github.com/bobmatnyc/trusty-tools/pull/2832)) ([`7f69a1c`](https://github.com/bobmatnyc/trusty-tools/commit/7f69a1c543518dbb40a1cb5cad8b1e037e7a965c))
 
 ### Fixed

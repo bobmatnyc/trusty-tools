@@ -34,3 +34,13 @@ conventions. **See `docs/trusty-search/` as the authoritative worked example.**
 For **cross-release performance tracking**, see GitHub issue
 [#129](https://github.com/bobmatnyc/trusty-tools/issues/129): it accumulates
 benchmark deltas across all measured versions.
+
+## Specs and Spec-Linked Documentation (SLD)
+
+Workspace-wide engineering **specs** live under [`docs/specs/`](../specs/README.md)
+(a separate, catalog-indexed namespace from the per-crate docs above). All new
+documentation follows **[DOC-38 — Spec-Linked Documentation (SLD)](../specs/spec-linked-documentation.md)**,
+the repository's policy for declaring machine-and-human-readable links from source
+artifacts (code, config, Markdown) to the spec sections that govern them. The
+`sld-lint` gate (`scripts/check_sld.sh`) enforces it; see the
+[specs README "Policy" note](../specs/README.md#policy).
