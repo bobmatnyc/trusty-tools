@@ -69,6 +69,64 @@ fn catalog_doc_number_ignores_earlier_cross_reference() {
     assert_eq!(catalog::doc_number_of(superseded), Some(30));
 }
 
+#[test]
+fn catalog_doc_number_bold_self_label_convention() {
+    // DOC-32 (tool-output-interception-seam.md) and DOC-33
+    // (tm-meta-harness-logging.md) give the H1 a plain title with no DOC-N and
+    // instead self-label on a `**DOC-N** | Status: ...` lead line just below
+    // it (verbatim structure of both real files). The H1-only fix regressed
+    // this: doc_number_of returned None for both, silently turning off the
+    // catalog-row check for them. The fallback must resolve both correctly.
+    let doc33 = "# tm Meta-Harness Logging — Per-Delegation Observability, Verbosity CLI, and Log Pruning\n\n**DOC-33** | Status: `Draft` | Date: 2026-07-03\n\n**Status:** Draft\n";
+    assert_eq!(catalog::doc_number_of(doc33), Some(33));
+
+    let doc32 = "# Live Tool-Output Interception Seam for Native `tm` Sessions\n\n**DOC-32** | Status: `Draft` | Date: 2026-07-03\n\n**Status:** Draft\n";
+    assert_eq!(catalog::doc_number_of(doc32), Some(32));
+}
+
+#[test]
+fn catalog_doc_number_bold_label_ignores_bare_cross_reference() {
+    // A bold MENTION of another DOC-N (no trailing `| Status:` marker) ahead
+    // of the real self-label line must never win — only the `**DOC-N** | ...`
+    // shape counts as a self-label.
+    let md = "# Some Title\n\n**DOC-15** is related background reading.\n\n**DOC-33** | Status: `Draft` | Date: 2026-07-03\n";
+    assert_eq!(catalog::doc_number_of(md), Some(33));
+
+    // Also: a mid-line bold mention (not at the start of the line) must not
+    // match at all, regardless of position.
+    let mid_line = "# Some Title\n\nSee **DOC-15** for context.\n\n**DOC-33** | Status: `Draft`\n";
+    assert_eq!(catalog::doc_number_of(mid_line), Some(33));
+}
+
+#[test]
+fn catalog_doc_number_none_when_truly_unlabeled() {
+    // SPEC-INSTALLER-01.md: self-labels via `**Specification ID:**`, never
+    // `DOC-N` in any form, anywhere near the top.
+    let spec_installer = "# SPEC-INSTALLER-01: trusty-installer Rename & Interactive Installer/Upgrader\n\n**Specification ID:** SPEC-INSTALLER-01  \n**Status:** Draft  \n";
+    assert_eq!(catalog::doc_number_of(spec_installer), None);
+
+    // trusty-memory-chat-session-manager.md: uses a non-DOC-N `Spec ID`.
+    let chat_mgr = "# trusty-memory as a Dedicated Chat Session Manager\n\n**Status**: DRAFT / Proposed  \n**Spec ID**: `spec-001-chat-session-manager`  \n";
+    assert_eq!(catalog::doc_number_of(chat_mgr), None);
+}
+
+#[test]
+fn catalog_doc_number_detects_doc28_self_label_despite_collision_note() {
+    // mpm-cutover-resume-native-optimization.md is NOT actually unlabeled —
+    // on disk it carries the identical `**DOC-28** | Status: ...` lead line
+    // as DOC-32/DOC-33 (verified against the real file). It self-labels DOC-28,
+    // which COLLIDES with the canonical DOC-28 (trusty-mpm-self-awareness.md) —
+    // a pre-existing, documented condition (docs/specs/README.md's "DOC-28
+    // self-label collision" catalog note; DOC-38 §4.1 follow-up F3), not an
+    // "unlabeled" file. Resolving Some(28) here is the textually honest
+    // self-label read and is inert for check_catalog_row: 28 IS in the
+    // catalog set (the row just points at a different file), so no new
+    // diagnostic fires — verified by `bash scripts/check_sld.sh --strict`
+    // staying 0/0 with this change in place.
+    let mpm_cutover = "# trusty-mpm Cutover: Resume Bridge + Native Optimization\n\n**DOC-28** | Status: `Draft` | Date: 2026-06-26\n\n## Summary\n";
+    assert_eq!(catalog::doc_number_of(mpm_cutover), Some(28));
+}
+
 // ── checks: references ───────────────────────────────────────────────────────
 
 #[test]
