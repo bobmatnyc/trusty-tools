@@ -50,6 +50,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   closing the gap without reverting to an unconditional re-run
   ([#2823](https://github.com/bobmatnyc/trusty-tools/issues/2823))
 
+### Changed
+
+- **Deliverable-completeness guidance in the `BASE` preamble (bumped to
+  `1.8.0`)** — makes completion of a task's full required-artifact SET robust to
+  turn-budget variance on large tasks. On the bake-off L4 task, completion was
+  nondeterministic across identical runs: run-2's engineer consumed its entire
+  40-turn budget (transcript turns 9..=48) and opened its FINAL turn with "Now
+  let me create the README and ARCHITECTURE files", so `ARCHITECTURE.md` was
+  never written — while run-3 finished the same task in 29 turns. The provided
+  suite passed 9/9 in both, so the code was never the problem: documentation was
+  queued LAST, behind ~130 self-authored tests, which made it the only
+  deliverable exposed to turn-budget variance. The preamble now tells the model
+  to enumerate the required-artifact set as a checklist up front and track what
+  remains, treats task-named documentation as a deliverable rather than an
+  epilogue, orders required documents at the point the design settles (once the
+  code exists and the project's own suite passes) and ahead of any discretionary
+  work, forbids starting discretionary work while a required artifact is still
+  missing, scales self-authored tests to the stated requirements, points the
+  multi-document tail at the `write_files` batch tool (run-2 spent 19 of 40
+  turns on one-file-per-turn writes), and requires a final checklist sweep
+  before finishing. No turn-budget change: run-2 spent MORE turns than the runs
+  that completed, so the budget was not the binding constraint. (#2824)
+
 ---
 
 ## [0.2.0] — 2026-07-16
