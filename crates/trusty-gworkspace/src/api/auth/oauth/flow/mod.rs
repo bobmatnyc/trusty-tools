@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 use super::callback;
-use super::errors::sanitize_oauth_error;
+use super::errors::{redact_token_response, sanitize_oauth_error};
 use super::pkce::{self, Pkce};
 use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
 use crate::api::auth::storage::TokenStorage;
@@ -404,7 +404,11 @@ async fn exchange_code(
             sanitize_oauth_error(status, &body)
         ));
     }
-    serde_json::from_str(&body).with_context(|| format!("parse token response: {body}"))
+    // NB: `body` here is a 2xx token response containing access/refresh tokens;
+    // on the (practically unreachable) parse failure it must be redacted, never
+    // embedded verbatim, before entering the error chain.
+    serde_json::from_str(&body)
+        .with_context(|| format!("parse token response: {}", redact_token_response(&body)))
 }
 
 /// Resolve the account email: `id_token` claim first, then userinfo endpoint.

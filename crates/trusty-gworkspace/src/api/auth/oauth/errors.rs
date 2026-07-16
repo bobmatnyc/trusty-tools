@@ -37,6 +37,91 @@ struct OAuthErrorBody {
 /// Maximum characters of an unparseable error body to surface.
 const MAX_ERROR_BODY_CHARS: usize = 200;
 
+/// JSON key fragments whose values may be bearer credentials and must never be
+/// echoed into an error string.
+///
+/// Why: A *token* response body (from the `authorization_code` / `refresh_token`
+/// exchanges) carries `access_token`, `refresh_token`, and `id_token`. If such a
+/// body ever fails to deserialize into the typed struct it would otherwise be
+/// embedded verbatim in a `parse token response: {body}` error — leaking the
+/// live credential into logs or crash reports. Any key containing one of these
+/// fragments (case-insensitive) has its value replaced before surfacing.
+/// What: Substrings matched against lower-cased JSON object keys.
+/// Test: `redacts_token_values_in_json_body`.
+const SENSITIVE_KEY_FRAGMENTS: [&str; 4] = ["token", "secret", "password", "assertion"];
+
+/// Truncate `s` to at most `max` characters, appending an ellipsis when cut.
+///
+/// Why: Both the unparseable-body fallback and a well-formed but arbitrarily
+/// long `error_description` must be length-bounded so a single error cannot
+/// balloon a log line unbounded.
+/// What: Returns `s` unchanged when within `max` chars, otherwise the first
+/// `max` chars followed by `...`.
+/// Test: `caps_long_error_description`, `truncates_unparseable_body`.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}...")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Recursively replace the value of any credential-named key with `<redacted>`.
+///
+/// Why: A token-response body is JSON whose credential fields must not survive
+/// into an error string; walking the whole tree covers nested objects/arrays.
+/// What: For every object entry whose (lower-cased) key contains a
+/// [`SENSITIVE_KEY_FRAGMENTS`] substring, replaces its value with the string
+/// `<redacted>`; otherwise recurses into the value.
+/// Test: `redacts_token_values_in_json_body`.
+fn redact_sensitive_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                let lower = key.to_ascii_lowercase();
+                if SENSITIVE_KEY_FRAGMENTS
+                    .iter()
+                    .any(|frag| lower.contains(frag))
+                {
+                    *val = serde_json::Value::String("<redacted>".to_string());
+                } else {
+                    redact_sensitive_values(val);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_sensitive_values(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Produce a safe, bounded diagnostic for a *token-response* body that failed to
+/// parse, guaranteeing no bearer credential is embedded verbatim.
+///
+/// Why: On the 2xx success path the token endpoint returns a body containing
+/// `access_token`/`refresh_token`. Deserializing it into the typed struct is
+/// practically always successful, but if it ever fails the raw body must NOT be
+/// echoed into the `parse token response` error — that would surface a live
+/// token. This routes every such body through key-based redaction (for JSON) or
+/// full suppression (for non-JSON, which could itself be a raw token).
+/// What: Parses `body` as JSON and scrubs credential-named values via
+/// [`redact_sensitive_values`], returning the bounded scrubbed shape; when the
+/// body is not JSON, returns only its byte length (never its content).
+/// Test: `redacts_token_values_in_json_body`, `redacts_non_json_token_body`.
+pub(crate) fn redact_token_response(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(mut value) => {
+            redact_sensitive_values(&mut value);
+            truncate_chars(&value.to_string(), MAX_ERROR_BODY_CHARS)
+        }
+        Err(_) => format!("<non-JSON body redacted, {} bytes>", body.len()),
+    }
+}
+
 /// Extract a safe, bounded error message from a Google OAuth error response.
 ///
 /// Why: The raw response body can be arbitrary third-party text (an HTML
@@ -44,23 +129,30 @@ const MAX_ERROR_BODY_CHARS: usize = 200;
 /// error chain and may be printed to the terminal or captured in crash
 /// reports. Surfacing only the structured `error`/`error_description` (or a
 /// short truncated fallback) keeps that surface bounded and predictable.
-/// What: Parses `body` as `{"error": "...", "error_description": "..."}`;
-/// falls back to a message truncated to [`MAX_ERROR_BODY_CHARS`] characters
-/// when the body isn't that shape.
-/// Test: `sanitizes_oauth_error_json`, `truncates_unparseable_body`.
+/// What: Parses `body` as `{"error": "...", "error_description": "..."}` and
+/// caps `error_description` at [`MAX_ERROR_BODY_CHARS`] characters (a well-formed
+/// but arbitrarily long description must not surface in full); falls back to a
+/// message truncated to the same bound when the body isn't that shape.
+/// Test: `sanitizes_oauth_error_json`, `caps_long_error_description`,
+/// `truncates_unparseable_body`.
 pub(crate) fn sanitize_oauth_error(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<OAuthErrorBody>(body) {
         return match parsed.error_description {
-            Some(desc) => format!("{status} {}: {desc}", parsed.error),
+            Some(desc) => format!(
+                "{status} {}: {}",
+                parsed.error,
+                truncate_chars(&desc, MAX_ERROR_BODY_CHARS)
+            ),
             None => format!("{status} {}", parsed.error),
         };
     }
-    let char_count = body.chars().count();
-    let truncated: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-    if char_count > MAX_ERROR_BODY_CHARS {
-        format!("{status} (unparseable error body, truncated): {truncated}...")
+    if body.chars().count() > MAX_ERROR_BODY_CHARS {
+        format!(
+            "{status} (unparseable error body, truncated): {}",
+            truncate_chars(body, MAX_ERROR_BODY_CHARS)
+        )
     } else {
-        format!("{status} (unparseable error body): {truncated}")
+        format!("{status} (unparseable error body): {body}")
     }
 }
 
@@ -130,6 +222,67 @@ mod tests {
             r#"{"error":"invalid_grant"}"#,
         );
         assert!(msg.contains("invalid_grant"));
+    }
+
+    #[test]
+    fn caps_long_error_description() {
+        let long_desc = "e".repeat(500);
+        let body = format!(r#"{{"error":"invalid_request","error_description":"{long_desc}"}}"#);
+        let msg = sanitize_oauth_error(reqwest::StatusCode::BAD_REQUEST, &body);
+        assert!(msg.contains("invalid_request"));
+        assert!(
+            msg.chars().count() < long_desc.len(),
+            "error_description must be bounded, got {} chars",
+            msg.chars().count()
+        );
+        assert!(
+            msg.contains("..."),
+            "truncated description must be marked: {msg}"
+        );
+    }
+
+    #[test]
+    fn redacts_token_values_in_json_body() {
+        // A synthetic 2xx token body that fails typed parsing (expires_in is a
+        // string, not a number) yet carries live-looking credentials.
+        let body = r#"{"access_token":"ya29.SUPER_SECRET_ACCESS","refresh_token":"1//SUPER_SECRET_REFRESH","id_token":"eyJ.SECRET_ID","token_type":"Bearer","expires_in":"not-a-number"}"#;
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("SUPER_SECRET_ACCESS"),
+            "access_token value must not survive: {redacted}"
+        );
+        assert!(
+            !redacted.contains("SUPER_SECRET_REFRESH"),
+            "refresh_token value must not survive: {redacted}"
+        );
+        assert!(
+            !redacted.contains("SECRET_ID"),
+            "id_token value must not survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("<redacted>"),
+            "credential values must be replaced with a redaction marker: {redacted}"
+        );
+        // Non-sensitive structure is retained for diagnostics.
+        assert!(
+            redacted.contains("expires_in"),
+            "shape retained: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_non_json_token_body() {
+        // A non-JSON body could itself be a raw token; never echo its content.
+        let body = "ya29.RAW_TOKEN_STRING_NOT_JSON";
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("RAW_TOKEN_STRING_NOT_JSON"),
+            "non-JSON body content must not survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("bytes"),
+            "reports only length: {redacted}"
+        );
     }
 
     #[test]
