@@ -15,7 +15,11 @@
 //! Test: `sanitizes_oauth_error_json`, `sanitizes_oauth_error_json_without_description`,
 //! `truncates_unparseable_body`, `detects_invalid_grant`, `ignores_non_invalid_grant`,
 //! `refresh_failure_message_names_profile_and_setup_command`,
-//! `refresh_failure_message_non_invalid_grant_has_no_hint`.
+//! `refresh_failure_message_non_invalid_grant_has_no_hint`,
+//! `redacts_token_values_in_json_body`, `redacts_non_json_token_body`,
+//! `redacts_nested_token_value`, `redacts_token_in_array`,
+//! `redacts_token_under_non_sensitive_key`, `redacts_root_level_token_string`,
+//! `redacts_root_level_token_array`.
 
 use serde::Deserialize;
 
@@ -37,18 +41,8 @@ struct OAuthErrorBody {
 /// Maximum characters of an unparseable error body to surface.
 const MAX_ERROR_BODY_CHARS: usize = 200;
 
-/// JSON key fragments whose values may be bearer credentials and must never be
-/// echoed into an error string.
-///
-/// Why: A *token* response body (from the `authorization_code` / `refresh_token`
-/// exchanges) carries `access_token`, `refresh_token`, and `id_token`. If such a
-/// body ever fails to deserialize into the typed struct it would otherwise be
-/// embedded verbatim in a `parse token response: {body}` error — leaking the
-/// live credential into logs or crash reports. Any key containing one of these
-/// fragments (case-insensitive) has its value replaced before surfacing.
-/// What: Substrings matched against lower-cased JSON object keys.
-/// Test: `redacts_token_values_in_json_body`.
-const SENSITIVE_KEY_FRAGMENTS: [&str; 4] = ["token", "secret", "password", "assertion"];
+/// Sentinel substituted for every JSON string leaf during redaction.
+const REDACTED_PLACEHOLDER: &str = "<redacted>";
 
 /// Truncate `s` to at most `max` characters, appending an ellipsis when cut.
 ///
@@ -67,27 +61,33 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// Recursively replace the value of any credential-named key with `<redacted>`.
+/// Recursively replace every JSON *string* value with [`REDACTED_PLACEHOLDER`],
+/// at any depth, regardless of its key or position.
 ///
-/// Why: A token-response body is JSON whose credential fields must not survive
-/// into an error string; walking the whole tree covers nested objects/arrays.
-/// What: For every object entry whose (lower-cased) key contains a
-/// [`SENSITIVE_KEY_FRAGMENTS`] substring, replaces its value with the string
-/// `<redacted>`; otherwise recurses into the value.
-/// Test: `redacts_token_values_in_json_body`.
+/// Why: Key-name matching (e.g. "redact only keys containing `token`") is not a
+/// safe invariant — a token can appear as a root-level JSON string
+/// (`"ya29.xxx"`, no key at all), inside an array, or under an innocuously
+/// named key. The only value-shape that is safe to assert is "no string leaf
+/// survives": numbers/bools/null carry no credential risk, and preserving
+/// object keys + overall structure keeps the diagnostic useful without ever
+/// risking a token. Object *keys* are left intact (they're a fixed vocabulary
+/// like `access_token`, `expires_in`, not attacker/credential data); only
+/// *values* are scrubbed.
+/// What: Object values and array elements are redacted recursively; a
+/// `Value::String` becomes `REDACTED_PLACEHOLDER`; numbers/bools/null/objects/
+/// arrays are otherwise preserved (structurally) so the shape stays useful for
+/// diagnostics.
+/// Test: `redacts_token_values_in_json_body`, `redacts_nested_token_value`,
+/// `redacts_token_in_array`, `redacts_token_under_non_sensitive_key`,
+/// `redacts_root_level_token_string`, `redacts_root_level_token_array`.
 fn redact_sensitive_values(value: &mut serde_json::Value) {
     match value {
+        serde_json::Value::String(_) => {
+            *value = serde_json::Value::String(REDACTED_PLACEHOLDER.to_string());
+        }
         serde_json::Value::Object(map) => {
-            for (key, val) in map.iter_mut() {
-                let lower = key.to_ascii_lowercase();
-                if SENSITIVE_KEY_FRAGMENTS
-                    .iter()
-                    .any(|frag| lower.contains(frag))
-                {
-                    *val = serde_json::Value::String("<redacted>".to_string());
-                } else {
-                    redact_sensitive_values(val);
-                }
+            for val in map.values_mut() {
+                redact_sensitive_values(val);
             }
         }
         serde_json::Value::Array(items) => {
@@ -95,23 +95,31 @@ fn redact_sensitive_values(value: &mut serde_json::Value) {
                 redact_sensitive_values(item);
             }
         }
+        // Numbers, bools, null carry no credential risk — left as-is.
         _ => {}
     }
 }
 
 /// Produce a safe, bounded diagnostic for a *token-response* body that failed to
-/// parse, guaranteeing no bearer credential is embedded verbatim.
+/// parse, guaranteeing no raw string value (and therefore no bearer credential)
+/// is embedded verbatim.
 ///
 /// Why: On the 2xx success path the token endpoint returns a body containing
 /// `access_token`/`refresh_token`. Deserializing it into the typed struct is
 /// practically always successful, but if it ever fails the raw body must NOT be
 /// echoed into the `parse token response` error — that would surface a live
-/// token. This routes every such body through key-based redaction (for JSON) or
-/// full suppression (for non-JSON, which could itself be a raw token).
-/// What: Parses `body` as JSON and scrubs credential-named values via
-/// [`redact_sensitive_values`], returning the bounded scrubbed shape; when the
-/// body is not JSON, returns only its byte length (never its content).
-/// Test: `redacts_token_values_in_json_body`, `redacts_non_json_token_body`.
+/// token, whether it appears as an object value, an array element, or the
+/// entire body being a bare JSON string. This routes every such body through
+/// whole-tree string redaction (for JSON) or full suppression (for non-JSON,
+/// which could itself be a raw token with no JSON structure at all).
+/// What: Parses `body` as JSON and scrubs every string leaf via
+/// [`redact_sensitive_values`] (including a root-level string/array), returning
+/// the bounded scrubbed shape; when the body is not JSON, returns only its byte
+/// length (never its content).
+/// Test: `redacts_token_values_in_json_body`, `redacts_non_json_token_body`,
+/// `redacts_nested_token_value`, `redacts_token_in_array`,
+/// `redacts_token_under_non_sensitive_key`, `redacts_root_level_token_string`,
+/// `redacts_root_level_token_array`.
 pub(crate) fn redact_token_response(body: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(body) {
         Ok(mut value) => {
@@ -267,6 +275,61 @@ mod tests {
         assert!(
             redacted.contains("expires_in"),
             "shape retained: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_nested_token_value() {
+        // A token nested under a non-top-level key must still be redacted —
+        // redaction is value-gated (every string leaf), not key-gated.
+        let body = r#"{"data":{"inner":"ya29.SECRET"}}"#;
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("ya29.SECRET"),
+            "nested string value must not survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_token_in_array() {
+        let body = r#"{"items":["ya29.SECRET"]}"#;
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("ya29.SECRET"),
+            "array element must not survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_token_under_non_sensitive_key() {
+        // The key name gives no hint that the value is a credential — value
+        // gating must catch this even though no key-fragment matches.
+        let body = r#"{"blob":"ya29.SECRET"}"#;
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("ya29.SECRET"),
+            "value under a non-sensitive key must not survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_root_level_token_string() {
+        // Valid JSON with no object/key at all — a bare quoted token string.
+        let body = r#""ya29.SECRET""#;
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("ya29.SECRET"),
+            "root-level string body must not survive: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redacts_root_level_token_array() {
+        let body = r#"["ya29.SECRET"]"#;
+        let redacted = redact_token_response(body);
+        assert!(
+            !redacted.contains("ya29.SECRET"),
+            "root-level array element must not survive: {redacted}"
         );
     }
 
