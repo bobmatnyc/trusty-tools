@@ -87,7 +87,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"
 fastembed = { version = "5", default-features = false }
-lru = "0.12"
+lru = "0.16"
 parking_lot = "0.12"
 dirs = "5"
 colored = "2"
@@ -100,7 +100,12 @@ tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"]
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
-jsonwebtoken = "9"
+# jsonwebtoken 10 splits the crypto backend behind a feature flag (no backend
+# in default features). We select `aws_lc_rs` (already built via aws-smithy) so
+# RS256 works, and avoid `rust_crypto` which would pull in the `rsa` crate
+# (RUSTSEC-2023-0071 Marvin advisory). `use_pem` stays on via default features
+# for `EncodingKey::from_rsa_pem`. See #2765 (GHSA-h395-gr6q-cpjc).
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 # Gzip decompression for prebuilt-binary tarballs (trusty-installer Phase 2).

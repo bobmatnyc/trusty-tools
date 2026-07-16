@@ -236,13 +236,11 @@ mod tests {
         let app_id = "99999";
         let token = mint_app_jwt(app_id, TEST_RSA_PEM).expect("mint_app_jwt should succeed");
 
-        // Decode without signature verification to inspect claims.
-        let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
-        validation.insecure_disable_signature_validation();
-        validation.set_required_spec_claims(&[] as &[&str]);
-
-        let decoding_key = jsonwebtoken::DecodingKey::from_secret(&[]);
-        let decoded = jsonwebtoken::decode::<AppJwtClaims>(&token, &decoding_key, &validation)
+        // Decode without signature verification to inspect claims. jsonwebtoken
+        // 10 deprecated `Validation::insecure_disable_signature_validation` in
+        // favour of the explicit `dangerous::insecure_decode`, which performs no
+        // signature or claim validation (safe here: test-only claim inspection).
+        let decoded = jsonwebtoken::dangerous::insecure_decode::<AppJwtClaims>(&token)
             .expect("decoding JWT claims should succeed");
 
         // iss must match the app_id.
