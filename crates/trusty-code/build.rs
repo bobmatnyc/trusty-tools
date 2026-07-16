@@ -43,15 +43,25 @@ fn git(args: &[&str]) -> Option<String> {
 /// Emit `cargo:rerun-if-changed` for `path` only when it actually exists.
 ///
 /// Why: Cargo treats a `rerun-if-changed` path that does NOT exist as
-/// perpetually changed, which would re-run this script on every `cargo build`
-/// in a non-git source tree. Guarding on existence keeps the no-git build
-/// (crates.io tarball) on Cargo's default "re-run when sources change"
-/// behaviour instead of thrashing.
-/// What: Prints the directive when `path` is present; otherwise does nothing.
-/// Test: Observable as a second consecutive `cargo build` being a no-op.
+/// perpetually changed, so declaring a missing path re-runs this script on
+/// every single `cargo build`. That is not hypothetical: the original directive
+/// here was a RELATIVE `.git/HEAD`, which Cargo resolves against the *package*
+/// root (`crates/trusty-code/.git/HEAD` — absent even in a normal checkout), so
+/// this script never cached in any tree. Guarding on existence keeps a build
+/// with nothing to watch (the crates.io tarball) on Cargo's default "re-run
+/// when sources change" behaviour instead of thrashing.
+/// What: Canonicalizes `path` and prints the directive only if that succeeds
+/// (which itself proves existence); otherwise does nothing. Canonicalizing
+/// matters because `git rev-parse --git-path` returns a path relative to the
+/// CWD in a plain checkout but an absolute one in a linked worktree — emitting
+/// an absolute path either way removes any doubt about what Cargo resolves the
+/// directive against.
+/// Test: `build_info::tests::packed_branch_ref_leaves_only_the_reflog_witnessing_a_commit`
+/// pins the packed-ref premise; also observable as a second consecutive
+/// `cargo build` being a no-op.
 fn rerun_if_exists(path: &str) {
-    if Path::new(path).exists() {
-        println!("cargo:rerun-if-changed={path}");
+    if let Ok(abs) = Path::new(path).canonicalize() {
+        println!("cargo:rerun-if-changed={}", abs.display());
     }
 }
 
@@ -64,11 +74,26 @@ fn main() {
     }
     // Committing on the same branch rewrites the branch ref, not HEAD itself
     // (HEAD keeps saying `ref: refs/heads/<branch>`), so watch the ref file too.
-    // A packed ref has no loose file — `rerun_if_exists` skips it silently.
     if let Some(name) = git(&["symbolic-ref", "--quiet", "HEAD"])
         && let Some(ref_path) = git(&["rev-parse", "--git-path", &name])
     {
         rerun_if_exists(&ref_path);
+    }
+    // The loose ref above is NOT sufficient on its own. Emitting any
+    // `rerun-if-changed` opts this script out of Cargo's default "re-run when
+    // any package file changes" heuristic — from here on ONLY declared paths
+    // are watched. If the branch ref happens to be PACKED at build time
+    // (`git gc --auto`, `git pack-refs`), no loose ref file exists for
+    // `rerun_if_exists` to watch; a later commit would then recreate the loose
+    // ref while touching no watched path, so this script would never re-run and
+    // the embedded SHA/date would go silently STALE until a `cargo clean`. A
+    // binary reporting a stale SHA is the exact failure #2823 exists to
+    // eliminate. `logs/HEAD` (the reflog) closes the gap: it is append-only and
+    // touched by effectively every ref-changing operation — commit, checkout,
+    // merge, reset — whether or not the branch ref is packed. Watching a third
+    // narrow path is far cheaper than an unconditional always-re-run.
+    if let Some(reflog) = git(&["rev-parse", "--git-path", "logs/HEAD"]) {
+        rerun_if_exists(&reflog);
     }
 
     let git_hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());

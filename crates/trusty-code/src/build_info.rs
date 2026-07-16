@@ -400,6 +400,93 @@ mod tests {
         }
     }
 
+    /// With the branch ref PACKED, only the reflog witnesses a new commit —
+    /// the premise `build.rs`'s `logs/HEAD` watch rests on (#2823).
+    ///
+    /// Why: Emitting any `rerun-if-changed` opts `build.rs` out of Cargo's
+    /// default "re-run when any package file changes" heuristic, so ONLY
+    /// declared paths are watched. If the branch ref is packed (`git gc --auto`)
+    /// there is no loose ref file to watch, and a later commit rewrites neither
+    /// `HEAD` nor any other watched path — so the script would not re-run and
+    /// the embedded SHA would go SILENTLY STALE. A binary reporting a stale SHA
+    /// is precisely the failure this ticket exists to eliminate. This pins the
+    /// two facts that make watching `logs/HEAD` the right fix, so a future
+    /// "the reflog watch looks redundant" cleanup fails loudly here.
+    /// What: In a throwaway repo (never the real one), pack the refs, then
+    /// assert (a) the loose ref really is gone — so `rerun_if_exists` would skip
+    /// it — while `logs/HEAD` exists, and (b) a commit on the packed branch
+    /// leaves `HEAD`'s content untouched but appends to the reflog. Compares
+    /// CONTENT rather than mtime to stay fast and granularity-independent.
+    /// Test: this test.
+    #[test]
+    fn packed_branch_ref_leaves_only_the_reflog_witnessing_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // A git older than this, or none at all, simply skips the test.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        run(&["init", "-q", "-b", "main", "."]);
+        std::fs::write(root.join("f"), "a").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "one"]);
+        run(&["pack-refs", "--all"]);
+
+        // `--git-path` yields a CWD-relative path in a plain checkout (and an
+        // absolute one in a linked worktree), so resolve against the repo root
+        // rather than this test process's CWD. `join` keeps an absolute path
+        // as-is, so this is correct for both shapes.
+        let git_path = |spec: &str| root.join(run(&["rev-parse", "--git-path", spec]));
+        let loose = git_path("refs/heads/main");
+        let head = git_path("HEAD");
+        let reflog = git_path("logs/HEAD");
+
+        assert!(
+            !loose.exists(),
+            "expected the branch ref to be packed away; if git stopped packing \
+             here the premise for watching logs/HEAD needs rechecking"
+        );
+        assert!(reflog.exists(), "reflog must exist to be watchable");
+
+        let head_before = std::fs::read_to_string(&head).unwrap();
+        let reflog_before = std::fs::read_to_string(&reflog).unwrap();
+
+        std::fs::write(root.join("f"), "b").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "two"]);
+
+        assert_eq!(
+            head_before,
+            std::fs::read_to_string(&head).unwrap(),
+            "HEAD still just says `ref: refs/heads/main` — watching it alone \
+             cannot catch a commit on a packed branch"
+        );
+        assert_ne!(
+            reflog_before,
+            std::fs::read_to_string(&reflog).unwrap(),
+            "the reflog must record the new commit — this is what makes \
+             logs/HEAD a sufficient watch when the ref is packed"
+        );
+    }
+
     #[tokio::test]
     async fn creates_missing_parent_dir() {
         let root = tempfile::tempdir().unwrap();

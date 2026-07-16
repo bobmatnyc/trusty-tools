@@ -23,10 +23,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   captured by `build.rs` from `git rev-parse --short HEAD` / `git log -1`, using
   the COMMIT date rather than a build wall-clock so rebuilds stay reproducible,
   and degrades to `"unknown"` (never a build failure, never `null`) outside a
-  git checkout — the crates.io-tarball path. `build.rs` now also resolves
-  `.git/HEAD` via `git rev-parse --git-path` (correct in a linked worktree,
-  where `.git` is a file) and only emits `cargo:rerun-if-changed` for paths that
-  exist, so a non-git build no longer re-runs the script on every build
+  git checkout — the crates.io-tarball path
+  ([#2823](https://github.com/bobmatnyc/trusty-tools/issues/2823))
+
+### Fixed
+
+- **`build.rs` re-ran on every single build, in every tree.** Its lone
+  `cargo:rerun-if-changed=.git/HEAD` directive was a relative path, which Cargo
+  resolves against the *package* root — i.e. `crates/trusty-code/.git/HEAD`,
+  which does not exist even in a normal checkout. Cargo treats a missing
+  watched path as perpetually changed, so the script never cached. Paths are
+  now resolved absolutely via `git rev-parse --git-path` (also making them
+  correct in a linked worktree, where `.git` is a *file* and HEAD lives in the
+  worktree's gitdir) and emitted only when they exist
+  ([#2823](https://github.com/bobmatnyc/trusty-tools/issues/2823))
+- **Guard against a silently stale embedded SHA when the branch ref is packed.**
+  Emitting any `rerun-if-changed` opts a script out of Cargo's default
+  "re-run when any package file changes" heuristic, so only declared paths are
+  watched. With the branch ref packed (`git gc --auto` / `git pack-refs`) no
+  loose ref file exists to watch, and a subsequent commit touches neither
+  `HEAD`'s content nor any other watched path — so the script would not re-run
+  and the embedded SHA/date would go stale until a `cargo clean`, which is the
+  very failure this ticket exists to eliminate. The append-only reflog
+  (`logs/HEAD`) is now watched as well: it is touched by effectively every
+  ref-changing operation regardless of whether the ref is packed or loose,
+  closing the gap without reverting to an unconditional re-run
   ([#2823](https://github.com/bobmatnyc/trusty-tools/issues/2823))
 
 ---
