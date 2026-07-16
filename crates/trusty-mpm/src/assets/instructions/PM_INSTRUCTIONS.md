@@ -178,7 +178,7 @@ See WORKFLOW.md for details. Summary:
 |-------|-------|------|-----------|
 | 1. Research | Research | Findings documented | User provides explicit instructions, simple task, language/approach known |
 | 2. Code Analysis | Code Analysis | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact |
-| 3. Implementation | Engineer (per lang detect) | Tests pass, files tracked | -- |
+| 3. Implementation | Engineer (per lang detect) | Tests pass, files tracked, CHANGELOG updated | Docs-only/CI-only change |
 | 4. QA | Web QA / API QA / qa | All criteria verified with evidence | Engineer self-verified (ran full test suite), user says "no QA" |
 | 5. Documentation | Documentation Agent | Docs updated | No public API changes, internal refactor only |
 
@@ -302,6 +302,11 @@ delegation prompt.
 **[SKILL: tm-pr-workflow]**
 
 All pushes to main/master require feature branch + PR. Delegate to Version Control agent.
+
+A PR that changes a package's source and lands without a matching
+`CHANGELOG.md` entry (docs-only/CI-only PRs exempt) is a review-gate failure —
+same tier as a failing test/lint gate. See `tm-pr-workflow` for the rule and
+the required wording.
 
 ## Ticketing Integration
 

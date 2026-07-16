@@ -32,7 +32,9 @@ Return: Approval status with specific recommendations
 
 ### Phase 3: Implementation
 **Agent**: Selected via delegation matrix
-**Requirements**: Complete code, error handling, basic test proof
+**Requirements**: Complete code, error handling, basic test proof, CHANGELOG.md
+entry for the changed package (one bullet per user-visible change, under
+`## [Unreleased]`) — skip only for docs-only/CI-only changes
 
 ### Phase 4: QA (MANDATORY)
 **Agent**: API QA (APIs), Web QA (UI), qa (general)

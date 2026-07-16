@@ -59,6 +59,27 @@ When a user asks to "commit to main" / "push to main" / "merge to main",
 proactively translate: "Creating feature branch workflow instead" — don't
 wait for a git error to correct course.
 
+## Changelog Requirement (Before Merge)
+
+Changelogs go stale when updating them is left to "sometime at release" — so
+it is part of every PR, not a separate chore:
+
+- Every PR that changes a package's source adds one bullet per user-visible
+  change to that package's `CHANGELOG.md`, under the topmost `## [Unreleased]`
+  heading (create the heading if the file has none yet). Match the file's
+  existing bullet style and wording. Docs-only / CI-only PRs may skip this.
+- A PR that changes source and lands without a matching changelog entry is a
+  **review-gate failure** — the same tier as a failing build/test/lint gate.
+  Treat it exactly like CB#8 (QA gate): block the merge, delegate back to the
+  Engineer to add the entry, don't wave it through as "trivial."
+- If the project has automated changelog-generation tooling (e.g. a
+  conventional-commits generator run at release time), that tooling and these
+  hand-written per-PR entries can conflict — it may regenerate a section from
+  git log without knowing about, merging, or deduping against what's already
+  written by hand. Check the project's own instructions (root `CLAUDE.md` /
+  `.trusty-mpm/INSTRUCTIONS.md`) for the precedence rule before assuming the
+  two coexist safely; do not invent one on the fly.
+
 ## The trusty-review Gate
 
 Before merge, delegate to the review gate:

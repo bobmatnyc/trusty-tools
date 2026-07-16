@@ -305,6 +305,71 @@ versions by version number.
 8. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
 9. Build and install: `cargo install --path crates/<dir> --locked`.
 
+### Per-PR Changelog Requirement (framework default — issue #2005-class, changelogs-stale directive)
+
+🔴 **Every PR that touches a crate's `src/**` adds a hand-written entry to that
+crate's `CHANGELOG.md`, in the same PR.** Add one bullet per user-visible
+change under the topmost `## [Unreleased]` heading (create that heading —
+directly below the `---`/header block — if the file has none yet). Match the
+existing bullet style, e.g.:
+
+```
+- fix pm_guard quoted-content scanning (closes #2741) ([#2744](https://github.com/bobmatnyc/trusty-tools/pull/2744))
+```
+
+The commit-hash link segment is optional in hand-written bullets — git-cliff
+adds it automatically when it regenerates the section at release time (see
+below). Docs-only and CI-only PRs may skip this step. A PR that changes crate
+source and lands without a changelog entry is a **review-gate failure**, the
+same tier as a failing `cargo test`/`cargo clippy` gate — the trusty-review
+gate or PM blocks merge until the entry is added, no "trivial change"
+exception.
+
+**Interaction rule with `scripts/generate-changelog.sh` / git-cliff (read, not
+guessed — see the script): do not let both mechanisms coexist unresolved.**
+`scripts/generate-changelog.sh` (invoked by `scripts/bump-version.sh` at
+release time) runs `git cliff --unreleased --prepend <crate>/CHANGELOG.md`.
+This regenerates a **fresh** `## [Unreleased]` section straight from
+conventional-commit git log and blindly **prepends** it — it never reads,
+merges, or dedupes against whatever hand-written content is already sitting
+under the file's existing `## [Unreleased]` heading. Left unresolved, this
+produces exactly the duplicate/stacked `## [Unreleased]` sections already
+visible in several crate changelogs today (e.g.
+`crates/trusty-mpm/CHANGELOG.md`, `crates/trusty-search/CHANGELOG.md`) — each
+release-time run stacks another overlapping section on top instead of
+replacing the draft. **Until #2793 lands** (tracks teaching
+`generate-changelog.sh` to replace/dedupe the `[Unreleased]` section instead
+of blindly prepending), `scripts/bump-version.sh` fails loudly with a fix hint
+if it detects more than one `## [Unreleased]` heading after the prepend, as a
+stopgap against silently shipping a duplicated changelog.
+
+Precedence: **git-cliff-generated content is canonical at release time and
+supersedes the hand-written draft — it replaces, it does not merge.** Before
+running `scripts/bump-version.sh <crate-dir> <level>` (or
+`scripts/generate-changelog.sh` directly):
+
+1. **Diff first, don't just delete.** `cliff.toml`'s `commit_preprocessors`
+   only linkify `(#NNN)` references in the commit **subject** line — commit
+   bodies are dropped (`split_commits = false`, subject-only template; see
+   `cliff.toml`'s own KNOWN LIMITATION note). git-cliff regenerates from the
+   squash-commit **subject only**, so it does **not** reliably reproduce
+   hand-written nuance that lived in a PR description or commit body but never
+   made it into the squash subject (a GHSA id, a specific config value, an
+   edge case called out by hand). **Do not assume "nothing is lost."** Run
+   `scripts/generate-changelog.sh <crate-dir> <tag-prefix> --stdout` and diff
+   it against the hand-written draft; any bullet/nuance the generated output
+   doesn't cover must be manually re-added to `CHANGELOG.md` *after*
+   generation, not assumed to be redundant.
+2. Fold whatever nuance you can into the squash-commit subject itself before
+   merging (so git-cliff captures it for future runs), and only then delete
+   the hand-maintained bullets under the crate's topmost `## [Unreleased]`
+   heading (the heading itself may stay empty or be removed —
+   `generate-changelog.sh` recreates it).
+
+This is a process rule; `scripts/generate-changelog.sh` needs no code change
+to honor it, but `scripts/bump-version.sh` now includes the stopgap duplicate-
+heading guard described above (see #2793 for the real fix).
+
 🟢 **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes to
 crates.io under the short package name `tga`. The binary-release workflow
 (`.github/workflows/release.yml`) accepts **both** tag forms — `tga-v<version>`

@@ -39,6 +39,12 @@ forbidding language in general; it exempts delegation-routing language only.
 - Reference issues in the body (`Closes #N`) to auto-close on merge.
 - Check `git status` before starting; never force-push to a shared branch
   without explicit instruction; leave the working tree clean.
+- Every PR that changes a package's source adds one bullet per user-visible
+  change to that package's `CHANGELOG.md`, under an `## [Unreleased]` heading
+  (create it if missing). Match the file's existing bullet style. Docs-only /
+  CI-only PRs may skip this. A missing entry is a review-gate failure, not
+  optional polish — see `tm-pr-workflow` for the merge-gate detail and how
+  this interacts with any project-specific changelog-generation tooling.
 
 ## Memory & Context Routing
 

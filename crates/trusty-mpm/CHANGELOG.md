@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- require a per-PR CHANGELOG.md entry in the default workflow (bundled `tm-pr-workflow` skill, `PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `BASE-AGENT.md`); PM treats a missing entry as a review-gate failure and the precedence rule vs. `scripts/generate-changelog.sh`/git-cliff is documented in `.trusty-mpm/INSTRUCTIONS.md` ([#2790](https://github.com/bobmatnyc/trusty-tools/pull/2790))
+
 ### Fixed
 
 - bare `tm` inside a decommissioned managed tmux session now relaunches in place instead of reconnecting to itself (closes #2777) ([#2780](https://github.com/bobmatnyc/trusty-tools/pull/2780))
