@@ -4,6 +4,7 @@ role: engineer
 description: Front-end web specialist with expertise in HTML5, CSS3, JavaScript, responsive design, accessibility, and user interface implementation
 model: sonnet
 extends: base-engineer
+skills: [web-performance-optimization, webapp-testing, git-workflow, test-driven-development, systematic-debugging, verification-before-completion]
 ---
 
 # Web UI Engineer

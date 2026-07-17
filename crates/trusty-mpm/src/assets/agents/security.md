@@ -4,6 +4,7 @@ role: security
 description: Security specialist. Performs vulnerability assessment, attack vector detection, secret scanning, and compliance review.
 model: sonnet
 extends: base-agent
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, env-manager, internal-comms, security-scanning, test-driven-development]
 ---
 
 # Security Agent

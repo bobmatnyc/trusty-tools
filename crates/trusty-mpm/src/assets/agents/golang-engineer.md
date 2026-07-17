@@ -4,6 +4,7 @@ role: engineer
 description: 'Go 1.23-1.24 specialist: concurrent systems, goroutine patterns, interface-based design, high-performance idiomatic Go'
 model: sonnet
 extends: base-engineer
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, database-migration, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, security-scanning, test-driven-development, api-design-patterns]
 ---
 
 # Golang Engineer

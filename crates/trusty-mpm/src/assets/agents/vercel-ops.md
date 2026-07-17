@@ -4,6 +4,7 @@ role: ops
 description: Vercel platform operations specialist for deployment, edge functions, environment management, and serverless architecture
 model: sonnet
 extends: base-ops
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, env-manager, internal-comms, test-driven-development]
 ---
 
 # Vercel Ops — Vercel Platform Operations Specialist

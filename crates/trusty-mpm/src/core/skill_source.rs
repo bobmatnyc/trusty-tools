@@ -19,7 +19,11 @@
 //! version/checksum concept, so this is the marker this module introduces.
 //! [`materialize_skill_artifacts`] writes every bundled skill file into
 //! `paths.skills`, pruning any `.md` file on disk the table no longer lists
-//! (renamed/removed skills). [`ensure_skill_source_fresh`] compares the
+//! (renamed/removed skills). Since issue #2903 this includes multi-file
+//! skills' nested `<stem>/references/<file>.md` artifacts, materialized under
+//! a matching nested directory (not flattened) and pruned recursively via
+//! [`prune_orphaned_skill_files`] — the pre-#2903 top-level-only sweep never
+//! descended into skill subdirectories. [`ensure_skill_source_fresh`] compares the
 //! current stamp against a marker file written alongside the source
 //! directory and re-materializes it only when they differ (including "never
 //! materialized at all"), so callers can invoke it unconditionally and cheap
@@ -29,6 +33,8 @@
 //! Test: `skill_bundle_stamp_is_stable_across_calls`,
 //! `materialize_skill_artifacts_writes_all_skills`,
 //! `materialize_skill_artifacts_prunes_files_not_in_table`,
+//! `materialize_skill_artifacts_writes_nested_reference_files`,
+//! `materialize_skill_artifacts_prunes_stale_reference_files`,
 //! `ensure_skill_source_fresh_materializes_when_missing`,
 //! `ensure_skill_source_fresh_is_noop_when_current`,
 //! `ensure_skill_source_fresh_prunes_renamed_files`,
@@ -112,12 +118,22 @@ pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>
             .strip_prefix("skills/")
             .unwrap_or(artifact.rel_path);
 
+        // A multi-file skill's `references/*.md` siblings (issue #2903) embed
+        // as nested rel_paths (`<stem>/references/<file>.md`); the mcp-shadow
+        // guard only ever applies to the skill's own name — the first path
+        // segment — never to a reference filename.
+        let stem = basename
+            .split('/')
+            .next()
+            .unwrap_or(basename)
+            .strip_suffix(".md")
+            .unwrap_or(basename);
+
         // Defense-in-depth mirror of the `skill_deployer::deploy_skills_filtered`
         // guard (#2186): a bundled skill whose basename (stem, `.md`-stripped)
         // contains "mcp" would shadow Claude Code's built-in `/mcp` command
         // once deployed. Refuse to even materialize it into the framework
         // source dir, so a bad name never reaches the deploy step at all.
-        let stem = basename.strip_suffix(".md").unwrap_or(basename);
         if stem.to_lowercase().contains("mcp") {
             tracing::warn!(
                 skill = %stem,
@@ -127,25 +143,66 @@ pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>
         }
 
         let dest = paths.skills.join(basename);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         atomic_write(&dest, artifact.contents)?;
         keep.insert(basename.to_string());
         written.push(basename.to_string());
     }
 
-    for entry in std::fs::read_dir(&paths.skills)? {
+    prune_orphaned_skill_files(&paths.skills, &paths.skills, &keep)?;
+
+    Ok(written)
+}
+
+/// Recursively remove any `.md` file under `dir` whose path (relative to
+/// `root`, `/`-separated) is not in `keep`, then remove any directory left
+/// empty by that pruning.
+///
+/// Why: [`materialize_skill_artifacts`] must prune stale entries for renamed
+/// or removed skills (#1917) AND, since #2903 added nested
+/// `<stem>/references/<file>.md` artifacts, stale reference files and their
+/// now-empty `<stem>/references/` or `<stem>/` directories — a flat top-level
+/// `read_dir` sweep (the pre-#2903 implementation) only ever saw top-level
+/// `.md` files and never descended into skill subdirectories.
+/// What: hidden entries (leading `.`, e.g. the bundle-stamp marker) are never
+/// touched; every other file is removed unless its root-relative path is in
+/// `keep`; every directory is recursed into first, then removed if left with
+/// no entries.
+/// Test: `materialize_skill_artifacts_prunes_files_not_in_table`,
+/// `materialize_skill_artifacts_prunes_stale_reference_files`.
+fn prune_orphaned_skill_files(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    keep: &HashSet<String>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        let path = entry.path();
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if name.starts_with('.') || !name.ends_with(".md") {
+        if name.starts_with('.') {
             continue;
         }
-        if !keep.contains(&name) {
-            std::fs::remove_file(entry.path())?;
+        if entry.file_type()?.is_dir() {
+            prune_orphaned_skill_files(&path, root, keep)?;
+            if std::fs::read_dir(&path)?.next().is_none() {
+                std::fs::remove_dir(&path)?;
+            }
+        } else if name.ends_with(".md") {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if !keep.contains(rel.as_str()) {
+                std::fs::remove_file(&path)?;
+            }
         }
     }
-
-    Ok(written)
+    Ok(())
 }
 
 /// Ensure `paths.skills` reflects the binary's currently-embedded skill
@@ -233,6 +290,53 @@ mod tests {
 
         assert!(!paths.skills.join("mpm-old-skill.md").exists());
         assert!(paths.skills.join("tm-doctor.md").exists());
+    }
+
+    #[test]
+    fn materialize_skill_artifacts_writes_nested_reference_files() {
+        // Issue #2903: a multi-file skill's `skills/<stem>/references/<file>.md`
+        // entries must materialize under a nested directory, not flattened —
+        // proven here against a real batch-1 skill (`systematic-debugging`)
+        // rather than a synthetic fixture, so the assertion pins the actual
+        // production layout.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+
+        materialize_skill_artifacts(&paths).unwrap();
+
+        let workflow = paths
+            .skills
+            .join("systematic-debugging")
+            .join("references")
+            .join("workflow.md");
+        assert!(
+            workflow.is_file(),
+            "expected nested reference file at {workflow:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&workflow).unwrap(),
+            crate::core::bundle::SYSTEMATIC_DEBUGGING_WORKFLOW
+        );
+    }
+
+    #[test]
+    fn materialize_skill_artifacts_prunes_stale_reference_files() {
+        // A reference file (and its now-empty parent directories) left over
+        // from a renamed/removed skill must be pruned, not just top-level
+        // `.md` files — the pre-#2903 flat `read_dir` sweep never descended
+        // into skill subdirectories.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let stale_refs = paths.skills.join("removed-skill").join("references");
+        std::fs::create_dir_all(&stale_refs).unwrap();
+        std::fs::write(stale_refs.join("old.md"), "stale\n").unwrap();
+
+        materialize_skill_artifacts(&paths).unwrap();
+
+        assert!(
+            !paths.skills.join("removed-skill").exists(),
+            "the entire orphaned skill directory must be pruned, including now-empty dirs"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ role: data-engineer
 description: Data transformation specialist. Builds ETL pipelines, performs database migrations, and processes large datasets efficiently.
 model: sonnet
 extends: base-engineer
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, database-migration, json-data-handling, xlsx, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Data Engineer Agent

@@ -72,6 +72,10 @@ mod tests_behavior_skill_tiers;
 mod tests_behavior_2890_skills;
 
 #[cfg(test)]
+#[path = "tests_behavior_2903_skills_tests.rs"]
+mod tests_behavior_2903_skills;
+
+#[cfg(test)]
 #[path = "tests_projects.rs"]
 mod tests_projects;
 

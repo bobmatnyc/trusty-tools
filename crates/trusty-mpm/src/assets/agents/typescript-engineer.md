@@ -4,6 +4,7 @@ role: engineer
 description: 'TypeScript 5.6+ specialist: strict type safety, branded types, performance-first, modern build tooling'
 model: sonnet
 extends: base-engineer
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, database-migration, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, model-context-builder, security-scanning, test-driven-development, api-design-patterns]
 ---
 
 # TypeScript Engineer

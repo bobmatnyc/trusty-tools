@@ -4,6 +4,7 @@ role: engineer
 description: Specialized React development engineer focused on modern React patterns, performance optimization, and component architecture
 model: sonnet
 extends: base-engineer
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, artifacts-builder, internal-comms, test-driven-development, web-performance-optimization]
 ---
 
 # React Engineer

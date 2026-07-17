@@ -4,6 +4,7 @@ role: base
 description: Manages project memory via the trusty-memory MCP backend — store, recall, tag, and prune facts using domain-aware organisation
 model: haiku
 extends: base-agent
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Memory Manager

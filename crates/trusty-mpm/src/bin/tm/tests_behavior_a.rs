@@ -330,9 +330,14 @@ fn install_then_deploy_deploys_skills() {
     // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions
     // on those two, kept out of this file to stay under the 500-SLOC
     // production cap — this file, unlike its `_tests.rs`-suffixed siblings,
-    // is NOT classified as a test file by the SLOC gate). See
-    // `bundle_tm_skills.rs`/`bundle.rs` (CODE_REVIEW_STANDARDS,
-    // CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL` for the authoritative list.
+    // is NOT classified as a test file by the SLOC gate) + 93 (issue #2903,
+    // skill-port batch 1: 25 upstream universal/ skill entry points + 68
+    // references/*.md files carried alongside multi-file skills; see
+    // `tests_behavior_2903_skills_tests.rs` for the dedicated deep
+    // assertions, kept out of this file for the same SLOC-cap reason).
+    // 21 + 2 + 93 = 116. See `bundle_tm_skills.rs`/`bundle.rs`
+    // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
+    // for the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
@@ -357,9 +362,10 @@ fn install_then_deploy_deploys_skills() {
     );
     assert_eq!(
         result.deployed.len(),
-        23,
-        "expected 23 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
-         + code-review-standards + contract-driven-testing); got {:?}",
+        116,
+        "expected 116 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+         + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries); \
+         got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

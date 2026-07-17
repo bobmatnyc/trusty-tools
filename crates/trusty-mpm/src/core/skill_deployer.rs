@@ -186,48 +186,120 @@ pub fn deploy_skills_filtered(
         // Claude Code discovers skills from <dest>/<name>/SKILL.md.
         let skill_dir = dest.join(&stem);
         let target_path = skill_dir.join("SKILL.md");
+        deploy_one_file(
+            &mut manifest,
+            &stem,
+            &target_path,
+            &content,
+            &now,
+            &mut stats,
+        )?;
 
-        // Classify the existing target file, if any.
-        if target_path.exists() {
-            if !manifest.is_managed(&stem) {
-                // User dropped their own file here — never touch it.
-                stats.skipped.push(stem);
-                continue;
-            }
-            let current = std::fs::read_to_string(&target_path)?;
-            if manifest.checksum_matches(&stem, &current) {
-                if checksum(&content) == checksum(&current) {
-                    // Deployed copy is already the latest content.
-                    stats.unchanged.push(stem);
-                    continue;
-                }
-                // Managed and unmodified by the user → safe to refresh.
-            } else {
-                // Managed but the user edited it → preserve their changes.
-                stats.skipped.push(stem);
-                continue;
+        // Mirror any reference files a multi-file skill carries alongside its
+        // SKILL.md (issue #2903 — upstream progressive-disclosure skills ship
+        // a lean entry point plus a `references/*.md` subtree loaded on
+        // demand). This runs independent of whether the entry point itself
+        // changed this pass, so a skill that gains a new reference file on a
+        // later deploy still picks it up even when its SKILL.md content is
+        // unchanged (`stats.unchanged`).
+        let refs_source_dir = source.join(&stem).join("references");
+        if refs_source_dir.is_dir() {
+            let mut ref_names: Vec<String> = std::fs::read_dir(&refs_source_dir)?
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().to_str()?.to_string();
+                    (e.file_type().ok()?.is_file() && is_skill_file(&name)).then_some(name)
+                })
+                .collect();
+            ref_names.sort_unstable();
+
+            for ref_name in ref_names {
+                let ref_content = std::fs::read_to_string(refs_source_dir.join(&ref_name))?;
+                let ref_key = format!("{stem}/references/{ref_name}");
+                let ref_target = skill_dir.join("references").join(&ref_name);
+                deploy_one_file(
+                    &mut manifest,
+                    &ref_key,
+                    &ref_target,
+                    &ref_content,
+                    &now,
+                    &mut stats,
+                )?;
             }
         }
-
-        // Write (new file, or safe refresh of a managed file) atomically.
-        // Create <dest>/<name>/ if needed, then write SKILL.md via
-        // write-temp-then-rename so a crash between the content write and the
-        // subsequent manifest save leaves the old file intact.
-        std::fs::create_dir_all(&skill_dir)?;
-        atomic_write(&target_path, &content)?;
-        manifest.managed.insert(
-            stem.clone(),
-            SkillManifestEntry {
-                checksum: checksum(&content),
-                deployed_at: now.clone(),
-            },
-        );
-        stats.deployed.push(stem);
     }
 
     manifest.save(dest)?;
 
     Ok(stats)
+}
+
+/// Deploy one managed file (a skill's `SKILL.md` or one of its
+/// `references/*.md` siblings) under the shared ownership rules.
+///
+/// Why: [`deploy_skills_filtered`] applies the IDENTICAL
+/// managed/unmanaged/unchanged/stale classification to both the entry-point
+/// `SKILL.md` (keyed by the bare stem) and each multi-file skill's
+/// `references/*.md` siblings (keyed by `<stem>/references/<file>`, issue
+/// #2903) — factoring it out here is what keeps those two call sites from
+/// silently diverging on the ownership rule.
+/// What: writes `content` to `target_path` (creating parent directories as
+/// needed) via [`atomic_write`] and records `key` in `manifest` UNLESS the
+/// target exists and is either unmanaged (user-owned — skip) or managed with
+/// a checksum mismatch (user-modified — skip), or is managed with a matching
+/// checksum and `content` is unchanged (unchanged — no-op). Every outcome is
+/// pushed to the matching `stats` vector under `key`.
+/// Test: `deploy_new_skill`, `deploy_skips_user_modified`,
+/// `deploy_unchanged_no_write`, `deploy_user_owned_skipped`, plus the
+/// reference-file tests below (`deploy_reference_files_land_alongside_skill`,
+/// `deploy_reference_files_skip_user_modified`,
+/// `deploy_reference_files_sync_even_when_entry_unchanged`).
+fn deploy_one_file(
+    manifest: &mut SkillManifest,
+    key: &str,
+    target_path: &Path,
+    content: &str,
+    now: &str,
+    stats: &mut DeployStats,
+) -> Result<(), Error> {
+    if target_path.exists() {
+        if !manifest.is_managed(key) {
+            // User dropped their own file here — never touch it.
+            stats.skipped.push(key.to_string());
+            return Ok(());
+        }
+        let current = std::fs::read_to_string(target_path)?;
+        if manifest.checksum_matches(key, &current) {
+            if checksum(content) == checksum(&current) {
+                // Deployed copy is already the latest content.
+                stats.unchanged.push(key.to_string());
+                return Ok(());
+            }
+            // Managed and unmodified by the user → safe to refresh.
+        } else {
+            // Managed but the user edited it → preserve their changes.
+            stats.skipped.push(key.to_string());
+            return Ok(());
+        }
+    }
+
+    // Write (new file, or safe refresh of a managed file) atomically.
+    // Create the parent directory if needed, then write via
+    // write-temp-then-rename so a crash between the content write and the
+    // subsequent manifest save leaves the old file intact.
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    atomic_write(target_path, content)?;
+    manifest.managed.insert(
+        key.to_string(),
+        SkillManifestEntry {
+            checksum: checksum(content),
+            deployed_at: now.to_string(),
+        },
+    );
+    stats.deployed.push(key.to_string());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -444,5 +516,146 @@ mod tests {
         let tgt = TempDir::new().unwrap();
         let stats = deploy_skills(Path::new("/nonexistent/trusty-mpm/skills"), tgt.path()).unwrap();
         assert_eq!(stats, DeployStats::default());
+    }
+
+    /// Write a multi-file skill: `<dir>/<stem>.md` plus `<dir>/<stem>/references/*.md`.
+    fn write_multi_file_skill(dir: &Path, stem: &str, refs: &[(&str, &str)]) {
+        fs::write(
+            dir.join(format!("{stem}.md")),
+            format!("---\nname: {stem}\n---\n\nEntry point.\n"),
+        )
+        .unwrap();
+        let refs_dir = dir.join(stem).join("references");
+        fs::create_dir_all(&refs_dir).unwrap();
+        for (name, body) in refs {
+            fs::write(refs_dir.join(name), body).unwrap();
+        }
+    }
+
+    #[test]
+    fn deploy_reference_files_land_alongside_skill() {
+        // Issue #2903: a multi-file skill's references/*.md siblings must
+        // deploy to <dest>/<stem>/references/<file> alongside SKILL.md.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_multi_file_skill(
+            src.path(),
+            "systematic-debugging",
+            &[("workflow.md", "WORKFLOW"), ("examples.md", "EXAMPLES")],
+        );
+
+        let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+        assert!(stats.deployed.contains(&"systematic-debugging".to_string()));
+        assert!(
+            stats
+                .deployed
+                .contains(&"systematic-debugging/references/workflow.md".to_string())
+        );
+        assert!(
+            stats
+                .deployed
+                .contains(&"systematic-debugging/references/examples.md".to_string())
+        );
+
+        let workflow = fs::read_to_string(
+            tgt.path()
+                .join("systematic-debugging")
+                .join("references")
+                .join("workflow.md"),
+        )
+        .unwrap();
+        assert_eq!(workflow, "WORKFLOW");
+        let examples = fs::read_to_string(
+            tgt.path()
+                .join("systematic-debugging")
+                .join("references")
+                .join("examples.md"),
+        )
+        .unwrap();
+        assert_eq!(examples, "EXAMPLES");
+    }
+
+    #[test]
+    fn deploy_reference_files_skip_user_modified() {
+        // A user-edited reference file must be preserved, not overwritten,
+        // exactly like a user-edited SKILL.md.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_multi_file_skill(src.path(), "systematic-debugging", &[("workflow.md", "V1")]);
+        deploy_skills(src.path(), tgt.path()).unwrap();
+
+        let ref_path = tgt
+            .path()
+            .join("systematic-debugging")
+            .join("references")
+            .join("workflow.md");
+        fs::write(&ref_path, "USER HAND-EDIT").unwrap();
+
+        // Source changes; user's edit must survive the redeploy.
+        fs::write(
+            src.path()
+                .join("systematic-debugging")
+                .join("references")
+                .join("workflow.md"),
+            "V2",
+        )
+        .unwrap();
+        let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+        assert!(
+            stats
+                .skipped
+                .contains(&"systematic-debugging/references/workflow.md".to_string())
+        );
+        assert_eq!(fs::read_to_string(&ref_path).unwrap(), "USER HAND-EDIT");
+    }
+
+    #[test]
+    fn deploy_reference_files_sync_even_when_entry_unchanged() {
+        // A new reference file added to a skill whose SKILL.md content did
+        // NOT change must still deploy — reference sync is independent of
+        // whether the entry point itself changed this pass.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_multi_file_skill(src.path(), "systematic-debugging", &[]);
+        deploy_skills(src.path(), tgt.path()).unwrap();
+
+        // SKILL.md is untouched, but a reference file is added afterward.
+        let refs_dir = src.path().join("systematic-debugging").join("references");
+        fs::write(refs_dir.join("new-ref.md"), "NEW REF").unwrap();
+
+        let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+        assert!(
+            stats
+                .unchanged
+                .contains(&"systematic-debugging".to_string()),
+            "entry point content is unchanged: {stats:?}"
+        );
+        assert!(
+            stats
+                .deployed
+                .contains(&"systematic-debugging/references/new-ref.md".to_string())
+        );
+        assert!(
+            tgt.path()
+                .join("systematic-debugging")
+                .join("references")
+                .join("new-ref.md")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn deploy_single_file_skill_has_no_references_dir() {
+        // A skill with no references/ subtree must not create an empty
+        // references/ directory under the deployed skill.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path()); // tm-doctor.md + example-skill.md, no refs
+
+        deploy_skills(src.path(), tgt.path()).unwrap();
+
+        assert!(!tgt.path().join("tm-doctor").join("references").exists());
     }
 }

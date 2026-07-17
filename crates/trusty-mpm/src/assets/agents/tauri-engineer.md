@@ -4,6 +4,7 @@ role: engineer
 description: 'Tauri desktop application specialist: hybrid web UI + Rust backend, IPC patterns, state management, system integration, cross-platform development with <10MB bundle sizes'
 model: sonnet
 extends: base-engineer
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Tauri Engineer

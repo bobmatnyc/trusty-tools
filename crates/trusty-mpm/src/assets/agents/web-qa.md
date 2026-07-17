@@ -4,6 +4,7 @@ role: qa
 description: Progressive 6-phase web testing with UAT mode for business intent verification, behavioral testing, and comprehensive acceptance validation alongside technical testing
 model: sonnet
 extends: base-qa
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, condition-based-waiting, test-driven-development, test-quality-inspector, testing-anti-patterns, webapp-testing, web-performance-optimization]
 ---
 
 # Web QA Agent
