@@ -349,36 +349,20 @@ fn install_then_deploy_deploys_skills() {
     // for the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
-    assert!(
-        result.deployed.contains(&"tm-circuit-breaker".to_string()),
-        "tm-circuit-breaker must be deployed; got {:?}",
-        result.deployed
-    );
-    assert!(
-        result.deployed.contains(&"tm-doctor".to_string()),
-        "tm-doctor must be deployed; got {:?}",
-        result.deployed
-    );
-    assert!(
-        result.deployed.contains(&"tm-issues-prune".to_string()),
-        "tm-issues-prune must be deployed; got {:?}",
-        result.deployed
-    );
-    assert!(
-        result.deployed.contains(&"tm-cli-operations".to_string()),
-        "tm-cli-operations must be deployed; got {:?}",
-        result.deployed
-    );
-    assert!(
-        result.deployed.contains(&"tm-capabilities".to_string()),
-        "tm-capabilities must be deployed; got {:?}",
-        result.deployed
-    );
-    assert!(
-        result.deployed.contains(&"documentation-style".to_string()),
-        "documentation-style must be deployed; got {:?}",
-        result.deployed
-    );
+    for expected in [
+        "tm-circuit-breaker",
+        "tm-doctor",
+        "tm-issues-prune",
+        "tm-cli-operations",
+        "tm-capabilities",
+        "documentation-style",
+    ] {
+        assert!(
+            result.deployed.contains(&expected.to_string()),
+            "{expected} must be deployed; got {:?}",
+            result.deployed
+        );
+    }
     assert_eq!(
         result.deployed.len(),
         130,

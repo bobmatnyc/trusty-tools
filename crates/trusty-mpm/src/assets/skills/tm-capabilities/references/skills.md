@@ -2,7 +2,7 @@
 
 Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a shared frontmatter line parser. Regenerate with `tm generate capabilities`.
 
-49 bundled skills.
+50 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -15,6 +15,7 @@ Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a s
 | `condition-based-waiting` | agent-reference | no | Replace arbitrary timeouts with condition polling for reliable async tests |
 | `contract-driven-testing` | agent-reference | no | Derive a three-level test pyramid directly from a function's Code Contracts (preconditions, postconditions, invariants) — contract-targeted unit tests, property-based tests, precondition-violation tests, plus the no-contracts fallback and the contract review checklist. Loaded by the code-critic agent. |
 | `database-migration` | agent-reference | no | Safe patterns for evolving database schemas in production with decision trees and troubleshooting guidance. |
+| `documentation-style` | agent-reference | no | SLD-grounded per-artifact-type documentation style guide: the four-axis Why/What/Test + Spec-References inline model, plus focused conventions for specs, READMEs, files, classes, methods/functions, and block comments. Use when writing or reviewing any documentation artifact. |
 | `env-manager` | agent-reference | no | Environment variable validation, security scanning, and management for Next.js, Vite, React, and Node.js applications |
 | `git-workflow` | agent-reference | no | Essential Git patterns for effective version control, eliminating redundant Git guidance per agent. |
 | `internal-comms` | agent-reference | no | Framework for writing concise 3P (Progress, Plans, Problems) team updates for executives and stakeholders |
