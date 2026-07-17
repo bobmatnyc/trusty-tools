@@ -44,6 +44,11 @@ tracing-subscriber = { workspace = true }
 # Phase 2: async trait dispatch for ToolExecutor, AgentRunner, SearchProvider
 async-trait = { workspace = true }
 
+# #2893 (epic #2892): shared `ServiceTier`/`RunContext`/`HistoryMessage` types,
+# deduped from tools/traits.rs against the canonical definitions trusty-agents
+# already re-exports from here (see crates/trusty-agents/src/tools/traits.rs).
+trusty-agents-common = { workspace = true }
+
 # Phase 3: TOML config parsing for AgentConfig
 toml = { workspace = true }
 

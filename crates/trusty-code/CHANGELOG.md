@@ -42,6 +42,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **trusty-code now depends on `trusty-agents-common`; `ServiceTier`,
+  `RunContext`, and `HistoryMessage` are re-exported instead of redeclared
+  (#2893, epic #2892).** `crates/trusty-code/src/tools/traits.rs` re-declared
+  ~150 lines of trait/type definitions that already exist in
+  `trusty-agents-common` (the same crate `trusty-agents` already re-exports
+  these from). `ServiceTier` and `RunContext` were byte-identical;
+  `HistoryMessage` was a strict field subset. All three are now
+  `pub use trusty_agents_common::...` re-exports — no behavior change.
+  `ToolExecutor`/`ToolResult` and `AgentRunner`/`AgentOutput` intentionally
+  stay LOCAL: tcode's `ToolResult` carries a `telemetry` field (#2862) and
+  `AgentOutput` carries a `finish_status` field (#2683, whose `usage:
+  TokenUsage` also carries a `cost_usd` field, #50) that the shared
+  definitions lack, and unifying them would require either a much larger
+  events-module move or changes to every `trusty-agents`/`cto-assistant`
+  call site — out of scope for this behavior-preserving refactor.
 - **BREAKING — projectless mode + one typed project binding (UI Phase-1).**
   "Project" was one concept split across two disagreeing API surfaces:
   `task.run` took a REQUIRED `project: PathBuf` (`task/protocol.rs:48`), while

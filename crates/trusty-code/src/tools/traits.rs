@@ -6,15 +6,47 @@
 //! the workflow engine and PM loop testable.
 //! What: Defines `ToolExecutor`, `AgentRunner`, `SearchProvider`, and
 //! `SkillResolver`. All are object-safe (`dyn`-able) and `Send + Sync`.
+//!
+//! `ServiceTier` and `RunContext`/`HistoryMessage` are byte-for-byte identical
+//! to the canonical definitions in `trusty-agents-common` (the same crate
+//! `trusty-agents` already re-exports these from — see
+//! `crates/trusty-agents/src/tools/traits.rs`) and are re-exported here rather
+//! than redeclared (#2893, epic #2892).
+//!
+//! `ToolExecutor`/`ToolResult` and `AgentRunner`/`AgentOutput` stay LOCAL,
+//! deliberately NOT deduped against `trusty-agents-common`, because tcode's
+//! versions carry fields the shared ones lack and that must not regress:
+//! `ToolResult::Success.telemetry` (`Option<Box<ToolTelemetry>>`, #2862) and
+//! `AgentOutput.finish_status` (`Option<FinishStatus>`, #2683; whose
+//! `AgentOutput.usage: crate::perf::TokenUsage` also carries a `cost_usd`
+//! field the shared `TokenUsage` lacks, #50). Unifying either would require
+//! either type-erasing tcode's telemetry (`ToolTelemetry` depends on
+//! `crate::events::{SearchHit, RecalledMemory}`, which are not portable to
+//! the shared crate without a much larger events-module move) or extending
+//! `trusty-agents-common`'s `TokenUsage`/`AgentOutput` and updating every
+//! `trusty-agents`/`cto-assistant` call site that pattern-matches
+//! `ToolResult::Success` — a real design decision outside this
+//! behavior-preserving refactor's scope. See PR discussion for #2893.
 //! Test: Mock impls of each trait are constructed in unit tests for
 //! `ToolRegistry`, delegating commands, and related code.
-
-use std::path::PathBuf;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+// Why: `ServiceTier` and the `AgentRunner` DI seam types (`RunContext`,
+//      `HistoryMessage`) are byte-identical (or a strict derive superset) of
+//      trusty-agents-common's canonical definitions — re-exporting instead of
+//      redeclaring eliminates ~40 duplicate lines without any behavior change
+//      (#2893). `AgentOutput`/`AgentRunner` stay local (see module docs above)
+//      so `HistoryMessage` here is the shared type used by the LOCAL
+//      `AgentRunner` trait below, not `trusty_agents_common::runner::AgentRunner`.
+// What: Re-exports the RBAC tier enum and the runner-context/history types.
+// Test: All existing `ServiceTier`/`RunContext`/`HistoryMessage` references in
+//       this crate resolve unchanged; `cargo test -p trusty-code` passes.
+pub use trusty_agents_common::ServiceTier;
+pub use trusty_agents_common::runner::{HistoryMessage, RunContext};
 
 use crate::tools::telemetry::ToolTelemetry;
 
@@ -166,25 +198,10 @@ impl ToolResult {
 }
 
 // ── ToolExecutor ─────────────────────────────────────────────────────────────
-
-/// Access tiers controlling which users/transports may invoke a tool.
-///
-/// Why: tcode exposes tools over multiple surfaces (CLI, API, TUI). Some tools
-/// (memory writes, shell exec) are unsafe for untrusted callers. `ServiceTier`
-/// provides a stable ladder that tools can declare their restrictions against.
-/// What: Ordered by trust level — `All` is the highest-privilege tier.
-/// Test: `rbac::tests::*` cover tier matching logic.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceTier {
-    /// Trusted operator — full tool access.
-    #[default]
-    All,
-    /// Analytics/reporting callers — read-heavy, no mutations.
-    Analytics,
-    /// Read-only callers — can only observe state.
-    ReadOnly,
-}
+//
+// `ServiceTier` (access tiers controlling which users/transports may invoke a
+// tool) is re-exported from `trusty-agents-common` above (#2893) rather than
+// redeclared here.
 
 /// Object-safe executor interface for a single named tool.
 ///
@@ -218,26 +235,10 @@ pub trait ToolExecutor: Send + Sync {
 }
 
 // ── RunContext ───────────────────────────────────────────────────────────────
-
-/// Per-invocation context threaded from orchestrator to agent runner.
-///
-/// Why: Passing per-call directives (assigned file, turn budget, working dir)
-/// as a `RunContext` instead of via `std::env::set_var` is sound under
-/// multi-threaded tokio — env mutation is not thread-safe in Rust 2024.
-/// What: Carries optional overrides; runners apply them to child processes via
-/// `Command::env` / `Command::current_dir`.
-/// Test: Exercised in `AgentRunner` trait tests (`test_run_with_history_forwards_ctx`).
-#[derive(Debug, Default, Clone)]
-pub struct RunContext {
-    /// Path to scope any file-writing tool to for this call.
-    pub assigned_file: Option<PathBuf>,
-    /// Max-turns cap override for this invocation.
-    pub max_turns_override: Option<u32>,
-    /// Working directory for the subprocess.
-    pub working_dir: Option<PathBuf>,
-    /// LLM model override for this invocation.
-    pub model: Option<String>,
-}
+//
+// `RunContext` (per-invocation context threaded from orchestrator to agent
+// runner) is re-exported from `trusty-agents-common::runner` above (#2893)
+// rather than redeclared here — the two definitions were byte-identical.
 
 // ── AgentOutput ──────────────────────────────────────────────────────────────
 
@@ -350,18 +351,14 @@ pub trait AgentRunner: Send + Sync {
 }
 
 // ── HistoryMessage ───────────────────────────────────────────────────────────
-
-/// A prior conversation turn forwarded to persistent-session agents.
-///
-/// Why: Persistent-session runners replay history on each subprocess restart
-/// so the sub-agent preserves conversational context.
-/// What: `role` is `"user"` or `"assistant"`; `content` is the turn text.
-/// Test: Used in `AgentRunner::run_with_history` signature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistoryMessage {
-    pub role: String,
-    pub content: String,
-}
+//
+// `HistoryMessage` (a prior conversation turn forwarded to persistent-session
+// agents, used by `AgentRunner::run_with_history` below) is re-exported from
+// `trusty-agents-common::runner` above (#2893) rather than redeclared here —
+// tcode's fields (`role`, `content`) were a strict subset of the shared type
+// (which additionally derives `PartialEq`/`Eq` and adds `user()`/`assistant()`
+// constructors). Not to be confused with `crate::ipc::HistoryMessage`, a
+// separate NDJSON wire type for the PM<->sub-agent IPC protocol.
 
 // ── SearchProvider ───────────────────────────────────────────────────────────
 

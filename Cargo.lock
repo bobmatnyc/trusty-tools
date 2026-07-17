@@ -10949,6 +10949,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "trusty-agents-common",
  "trusty-common",
  "uuid",
 ]
