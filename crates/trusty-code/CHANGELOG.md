@@ -10,6 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Native skill discovery on the `--legacy-in-process`/bake-off `run-task` path (#2924).** The `use_skill` tool and the `.claude/skills/` catalog now reach the PM's prompt and tool registry on `run_task::execute_run_task`, not just the daemon/thin-client path — a PM run through `run-task` can now discover and load project skills the same way a daemon session already could.
 - **Stable per-spawn `agent_id` for event attribution (DOC-39 AC-13.1/13.2).**
   Agent attribution on the event stream was keyed only by `agent: String` (the
   agent-config name), so two concurrently-delegated same-named agents (e.g.
