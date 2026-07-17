@@ -495,13 +495,24 @@ pub async fn run_review(
     }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
-    let parsed = parse_review_response(&llm_resp.text);
+    let mut parsed = parse_review_response(&llm_resp.text);
     if parsed.is_fail_safe {
         warn!(
             reason = ?parsed.fail_safe_reason,
             "verdict parsing fell back to fail-safe UNKNOWN (fail-closed, #1241)"
         );
     }
+
+    // ── Step 7-cite: verify diff-provable citations BEFORE grading (#2881) ─
+    // A confabulated `code_provable: true` finding drives the deterministic BLOCK
+    // floor at face value; verify each such finding's cited content against the
+    // actual (filtered) diff and downgrade any that is not grounded in the cited
+    // file, so a fabricated finding can never fail-close a clean PR.
+    let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(&filtered);
+    crate::pipeline::citation_check::downgrade_uncitable_findings(
+        &mut parsed.findings,
+        &cite_index,
+    );
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
     // `original_llm_grade` is the pre-floor LLM grade; it is held separately so

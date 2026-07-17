@@ -75,7 +75,21 @@ pub async fn run_map_reduce(
         concurrency = config.concurrency,
         "map-reduce: split diff into units"
     );
-    let outcomes = run_map_stage(&units, llm, ctx, config.concurrency).await;
+    let mut outcomes = run_map_stage(&units, llm, ctx, config.concurrency).await;
+
+    // Verify diff-provable citations BEFORE reduce derives the aggregate verdict
+    // (#2881): a per-unit reviewer can confabulate a `code_provable: true` finding
+    // whose cited content is not in the file it reviewed (the repro attributed a
+    // new test file's content to a large regenerated bundle).  Downgrade any such
+    // finding against the whole filtered diff so it can never force the deterministic
+    // BLOCK / REQUEST_CHANGES floor in `reduce`/`synthesize`.
+    let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
+    for outcome in &mut outcomes {
+        if let MapOutcome::Reviewed { findings, .. } = outcome {
+            crate::pipeline::citation_check::downgrade_uncitable_findings(findings, &cite_index);
+        }
+    }
+
     let reduced = reduce(outcomes, config);
     synthesize_review(reduced, llm, ctx, config).await
 }

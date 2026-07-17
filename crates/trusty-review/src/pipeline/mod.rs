@@ -24,6 +24,7 @@
 //!
 //! Test: each submodule carries its own unit tests.
 
+pub mod citation_check;
 pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;
