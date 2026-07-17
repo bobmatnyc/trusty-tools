@@ -24,5 +24,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   documented project-overrides-user precedence is unchanged, but when a
   project-level `<cwd>/.gworkspace-mcp/tokens.json` entry is expired while
   the user-level entry it shadows for the same profile is still valid, a
-  loud warning now names both paths instead of silently serving the stale
-  override forever.
+  structured warning now names both paths instead of silently serving the
+  stale override forever. `load()` is on the per-request hot path
+  (`BaseClient::get_access_token` calls it on every MCP tool invocation, plus
+  again on 401 retry), so the warning is throttled to at most once per
+  profile per process rather than repeating on every call.

@@ -35,3 +35,8 @@ open = { workspace = true }
 # fallback resolution) must run serially to avoid races across parallel
 # test threads.
 serial_test = { workspace = true }
+# tracing-test: captures real tracing::warn! emissions for the
+# stale-project-token-shadow throttling tests (storage.rs). Not in
+# [workspace.dependencies]; pinned locally, matching the existing
+# trusty-git-analytics precedent.
+tracing-test = "0.2"
