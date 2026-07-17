@@ -22,8 +22,10 @@ use tempfile::TempDir;
 
 use super::{ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task};
 use crate::agent_loop::AgentLoopError;
+use crate::agents::AgentConfig;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
-use crate::tools::{AgentOutput, EngineerCompletionSignal};
+use crate::runner::RegistryFactory;
+use crate::tools::{AgentOutput, EngineerCompletionSignal, RunContext};
 
 // ── Scripted offline LLM ───────────────────────────────────────────────────────
 
@@ -1752,5 +1754,48 @@ async fn use_skill_on_legacy_path_reaches_engineer_and_transcript() {
         "some \"python-engineer\" TurnRecord.tool_calls must contain \"use_skill\"; \
          transcript was: {:?}",
         report.transcript
+    );
+}
+
+/// Negative counterpart to `use_skill_on_legacy_path_reaches_engineer_and_transcript`
+/// (code-critic finding on PR #2943): asserts the ELSE branch of
+/// `ProjectToolFactory::build` — when `skill_resolver` is `None`, the
+/// engineer's advertised registry must NOT include `use_skill`.
+///
+/// Why: the positive test above proves `Some(resolver)` registers `use_skill`;
+/// nothing asserted the inverse. Driving this end-to-end via `execute_run_task`
+/// is impractical/flaky here because the #2895 embedded-skill fallback (see
+/// `skills::mod`'s `FsSkillResolver`/`format_skill_catalog` docs) makes
+/// `daily_driver_skills_catalog` resolve a non-empty catalog for almost any
+/// real project directory, so `skill_resolver` is virtually never `None` on
+/// the full end-to-end path. Constructing `ProjectToolFactory` directly and
+/// calling `RegistryFactory::build` is the clean, direct way to exercise the
+/// `None` branch in isolation without fighting that fallback.
+/// What: builds a `ProjectToolFactory` with `skill_resolver: None` against an
+/// empty project tempdir, calls `.build()` with default `AgentConfig`/
+/// `RunContext`, and asserts the resulting `ToolRegistry` does not contain
+/// `"use_skill"`, while sanity-checking a known-always-present tool
+/// (`"finish_task"`) IS present — guarding against a broken/empty registry
+/// vacuously satisfying the absence assertion.
+/// Test: this test.
+#[tokio::test]
+async fn use_skill_absent_from_engineer_when_no_skills() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let factory = super::ProjectToolFactory {
+        project: project.path().to_path_buf(),
+        skill_resolver: None,
+    };
+
+    let registry = factory
+        .build(&AgentConfig::default(), &RunContext::default())
+        .await;
+
+    assert!(
+        !registry.contains("use_skill"),
+        "engineer registry must NOT advertise use_skill when skill_resolver is None"
+    );
+    assert!(
+        registry.contains("finish_task"),
+        "sanity check: registry should still contain other always-present tools"
     );
 }
