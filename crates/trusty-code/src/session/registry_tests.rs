@@ -334,6 +334,8 @@ fn recall_telemetry(results: &[(f64, bool)]) -> crate::tools::RecallTelemetry {
             .map(|(score, injected)| crate::events::RecalledMemory {
                 score: *score,
                 injected: *injected,
+                text: String::new(),
+                run_id: None,
             })
             .collect(),
     }
@@ -416,11 +418,15 @@ async fn record_memory_recalled_publishes_event() {
         vec![
             crate::events::RecalledMemory {
                 score: 0.9,
-                injected: true
+                injected: true,
+                text: String::new(),
+                run_id: None,
             },
             crate::events::RecalledMemory {
                 score: 0.41,
-                injected: false
+                injected: false,
+                text: String::new(),
+                run_id: None,
             },
         ],
         "both the scores and the injected/held-back split must survive emission"

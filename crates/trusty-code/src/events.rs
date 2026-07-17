@@ -91,16 +91,34 @@ pub const UNATTRIBUTED_AGENT: &str = "unknown";
 pub const UNATTRIBUTED_AGENT_ID: &str = "unknown";
 
 /// One memory recalled by `recall_session`, with the flag that says whether
-/// it actually reached the model (UI Phase 1).
+/// it actually reached the model (UI Phase 1; `text`/`run_id` added for
+/// DOC-39 Slice C — the "what memory drove this / what was held back"
+/// context-construction debugging view).
 ///
 /// Why: see [`Event::MemoryRecalled`] — `injected` is the whole point of the
 /// event. `score` rides along because the UI renders it beside the memory
 /// ("41% · held"), and re-deriving it client-side is impossible: it is the
-/// memory daemon's own relevance score.
+/// memory daemon's own relevance score. Before DOC-39 Slice C, `text` was
+/// dropped at this exact boundary: `tools::recall_session::render_results`
+/// always had the recalled content in hand (it is what gets rendered/token-
+/// budgeted), but only the score and injected flag escaped into telemetry —
+/// so a held-back memory could be COUNTED but never READ by the UI, which
+/// defeats the "what was held back" debugging surface's entire point.
 /// What: `score` is trusty-memory's relevance score for the query, verbatim.
 /// `injected` is `true` when the tool's rendered result text included this
-/// result whole, `false` when its token budget dropped it.
-/// Test: `recalled_memory_round_trips_through_json`.
+/// result whole, `false` when its token budget dropped it. `text` is the
+/// recalled memory's raw content (untruncated — the same string
+/// `render_results` reads from `content`), empty string when the source
+/// entry carried no readable content rather than panicking. `run_id` is the
+/// originating run/session identifier the daemon result was tagged with,
+/// when the daemon's response carries one; `None` when absent (the current
+/// `trusty-memory` `memory_recall` response shape does not yet emit this
+/// field — see `docs/specs/trusty-code-harness-ui.md` §5.3 — so `None` is
+/// the expected value today, not a parsing failure). Both new fields are
+/// `#[serde(default)]` so a ring-buffer/transcript entry recorded before this
+/// ticket still deserializes.
+/// Test: `recalled_memory_round_trips_through_json`,
+/// `tools::recall_session::tests::telemetry_carries_recalled_text_and_run_id`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecalledMemory {
     /// trusty-memory's relevance score for this result, as returned.
@@ -108,6 +126,15 @@ pub struct RecalledMemory {
     /// Whether this result entered the model's context (`false` = recalled
     /// but held back by the tool's token budget).
     pub injected: bool,
+    /// The recalled memory's raw text content (DOC-39 Slice C). Empty string
+    /// when the source entry carried no readable `content`.
+    #[serde(default)]
+    pub text: String,
+    /// The originating run/session id the daemon tagged this result with, if
+    /// any (DOC-39 Slice C). `None` when the daemon response carries no such
+    /// field — see the struct docs.
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// Real-time event types streamed to UI clients (browser, future Tauri).
