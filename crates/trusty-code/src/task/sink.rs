@@ -290,6 +290,8 @@ mod tests {
                 results: vec![crate::events::RecalledMemory {
                     score: 0.4,
                     injected: false,
+                    text: "held back".to_string(),
+                    run_id: None,
                 }],
             }),
         )

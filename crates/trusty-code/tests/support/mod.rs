@@ -117,7 +117,7 @@ impl StdioSession {
     /// (logs aren't asserted on here), `kill_on_drop` so a panicking test
     /// still reaps the child instead of leaking a process.
     pub fn spawn() -> Self {
-        Self::spawn_inner(Some(std::path::Path::new(".")), None, None)
+        Self::spawn_inner(Some(std::path::Path::new(".")), None, None, &[])
     }
 
     /// Spawn `tcode serve --stdio` rooted at `project`, with
@@ -130,6 +130,7 @@ impl StdioSession {
             Some(project),
             Some(trusty_code::task::mock_llm::MOCK_LLM_ECHO),
             None,
+            &[],
         )
     }
 
@@ -146,7 +147,28 @@ impl StdioSession {
     /// e2e file.
     /// Test: `agent_id_e2e::fanned_out_same_named_delegations_get_distinct_agent_ids_over_the_wire`.
     pub fn spawn_with_mock_llm_variant(project: &std::path::Path, mock_llm_value: &str) -> Self {
-        Self::spawn_inner(Some(project), Some(mock_llm_value), None)
+        Self::spawn_inner(Some(project), Some(mock_llm_value), None, &[])
+    }
+
+    /// Like [`Self::spawn_with_mock_llm_variant`], additionally setting
+    /// `envs` in the child's environment (DOC-39 Slice C).
+    ///
+    /// Why: `tests/recall_content_e2e.rs` needs to point the daemon's
+    /// `recall_session` tool at a MOCK trusty-memory backend (via
+    /// `TRUSTY_MEMORY_URL`, `trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV`)
+    /// rather than a real daemon — no prior e2e scenario in this crate needed
+    /// to override an env var beyond the mock-LLM selector, so this is the
+    /// general form that adds that capability without touching any other
+    /// `spawn_*` caller.
+    /// What: identical to `spawn_with_mock_llm_variant`, plus every
+    /// `(key, value)` pair in `envs` set on the child.
+    /// Test: `recall_content_e2e::held_back_recall_result_carries_its_text_and_run_id_over_the_wire`.
+    pub fn spawn_with_mock_llm_variant_and_env(
+        project: &std::path::Path,
+        mock_llm_value: &str,
+        envs: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_inner(Some(project), Some(mock_llm_value), None, envs)
     }
 
     /// Spawn `tcode serve --stdio` with NO `--project` — a PROJECTLESS daemon.
@@ -164,6 +186,7 @@ impl StdioSession {
             None,
             Some(trusty_code::task::mock_llm::MOCK_LLM_ECHO),
             Some(home),
+            &[],
         )
     }
 
@@ -171,6 +194,7 @@ impl StdioSession {
         project: Option<&std::path::Path>,
         mock_llm_value: Option<&str>,
         home: Option<&std::path::Path>,
+        envs: &[(&str, &str)],
     ) -> Self {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
         cmd.arg("serve");
@@ -183,6 +207,9 @@ impl StdioSession {
         }
         if let Some(value) = mock_llm_value {
             cmd.env(trusty_code::task::mock_llm::MOCK_LLM_ENV, value);
+        }
+        for (key, value) in envs {
+            cmd.env(key, value);
         }
         let mut child = cmd
             .stdin(Stdio::piped())

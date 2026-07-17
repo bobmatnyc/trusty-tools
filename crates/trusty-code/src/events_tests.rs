@@ -149,6 +149,8 @@ fn kind_matches_serde_tag_for_every_variant() {
             results: vec![RecalledMemory {
                 score: 0.41,
                 injected: false,
+                text: "PKCE required".into(),
+                run_id: None,
             }],
         },
         Event::Log {
@@ -202,13 +204,15 @@ fn kind_matches_serde_tag_for_every_variant() {
 
 /// The UI-Phase-1 structured events must survive a full envelope
 /// round-trip with every field intact — including each recalled memory's
-/// `injected` flag.
+/// `injected` flag and (DOC-39 Slice C) its recalled `text` and `run_id`.
 ///
 /// Why: these events reach the UI over SSE and through `session.attach`'s
 /// ring-buffer replay, both of which serialize. A field that silently
 /// failed to round-trip would strand the UI's whole differentiating
 /// surface. `hit_count: None` is covered explicitly because `Option`
-/// round-tripping is where a shape regression would most plausibly hide.
+/// round-tripping is where a shape regression would most plausibly hide;
+/// `run_id: None` on the held-back entry covers the same risk for Slice C's
+/// new optional field.
 /// Test: this test.
 #[test]
 fn recalled_memory_round_trips_through_json() {
@@ -221,10 +225,14 @@ fn recalled_memory_round_trips_through_json() {
             RecalledMemory {
                 score: 0.93,
                 injected: true,
+                text: "PKCE is required for the OAuth flow".into(),
+                run_id: Some("run-42".into()),
             },
             RecalledMemory {
                 score: 0.41,
                 injected: false,
+                text: "held-back memory text".into(),
+                run_id: None,
             },
         ],
     };
@@ -236,6 +244,15 @@ fn recalled_memory_round_trips_through_json() {
     assert_eq!(value["event"]["agent_id"], "pm-1");
     assert_eq!(value["event"]["results"][1]["injected"], false);
     assert_eq!(value["event"]["results"][1]["score"], 0.41);
+    assert_eq!(
+        value["event"]["results"][1]["text"], "held-back memory text",
+        "the held-back result's TEXT must be present on the wire"
+    );
+    assert_eq!(value["event"]["results"][0]["run_id"], "run-42");
+    assert_eq!(
+        value["event"]["results"][1]["run_id"],
+        serde_json::Value::Null
+    );
 
     let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
     let Event::MemoryRecalled {
@@ -254,14 +271,40 @@ fn recalled_memory_round_trips_through_json() {
         vec![
             RecalledMemory {
                 score: 0.93,
-                injected: true
+                injected: true,
+                text: "PKCE is required for the OAuth flow".into(),
+                run_id: Some("run-42".into()),
             },
             RecalledMemory {
                 score: 0.41,
-                injected: false
+                injected: false,
+                text: "held-back memory text".into(),
+                run_id: None,
             },
         ],
         "the injected/held-back split must survive the wire"
+    );
+}
+
+/// A `RecalledMemory` recorded before DOC-39 Slice C (no `text`/`run_id` on
+/// the wire) must still deserialize, defaulting the new fields.
+///
+/// Why: `#[serde(default)]` on both new fields is the back-compat contract —
+/// a ring-buffer entry or persisted transcript recorded by an older binary
+/// must not fail to load just because Slice C added fields.
+/// Test: this test.
+#[test]
+fn recalled_memory_deserializes_without_text_or_run_id() {
+    let old_shape = serde_json::json!({"score": 0.5, "injected": true});
+    let back: RecalledMemory = serde_json::from_value(old_shape).unwrap();
+    assert_eq!(
+        back,
+        RecalledMemory {
+            score: 0.5,
+            injected: true,
+            text: String::new(),
+            run_id: None,
+        }
     );
 }
 

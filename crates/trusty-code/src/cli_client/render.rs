@@ -283,10 +283,14 @@ mod tests {
                 crate::events::RecalledMemory {
                     score: 0.9,
                     injected: true,
+                    text: "injected memory".to_string(),
+                    run_id: None,
                 },
                 crate::events::RecalledMemory {
                     score: 0.41,
                     injected: false,
+                    text: "held-back memory".to_string(),
+                    run_id: None,
                 },
             ],
         }));
