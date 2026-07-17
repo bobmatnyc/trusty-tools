@@ -133,6 +133,26 @@ pub mod compress;
 ///      submodule in place.
 pub mod agents;
 
+/// Skill deploy/manifest/tier machinery: `manifest`, `deployer`, `tiers`.
+///
+/// Why: Extracted from `trusty-mpm::core::{skill_deployer,skill_manifest,
+///      skill_tiers}` (#2892, #2818), mirroring the agent compose/deploy/
+///      manifest extraction, so `trusty-code` can eventually consume the same
+///      ownership-tracked skill deployer and tier-precedence resolver instead
+///      of forking them.
+/// What: `manifest::SkillManifest` tracks which deployed skill files a
+///      harness owns via a sha256 checksum ledger (reusing
+///      `agents::manifest::ManifestError`); `deployer::deploy_skills(_filtered)`
+///      writes skill sources into `<dest>/<name>/SKILL.md` without clobbering
+///      user edits; `tiers::plan_skill_tiers` / `deploy_all_skill_tiers`
+///      resolve and deploy the project-custom > user-custom > bundled
+///      precedence. `trusty-mpm` re-exports every item here from its
+///      `core::skill_deployer` / `core::skill_manifest` / `core::skill_tiers`
+///      modules for source compatibility with the existing call sites.
+/// Test: `cargo test -p trusty-agents-common skills::` exercises every
+///      submodule in place.
+pub mod skills;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
