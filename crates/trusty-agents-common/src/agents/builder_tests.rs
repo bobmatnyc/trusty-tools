@@ -840,3 +840,272 @@ fn skills_malformed_inline_value_never_errors() {
     assert!(composed.is_ok(), "malformed inline skills must not error");
     assert!(!composed.unwrap().contains("skills:"));
 }
+
+// ── #2897: max_tokens + tools (tcode agent-format unification, epic #2892) ─
+
+#[test]
+fn max_tokens_parses_from_frontmatter() {
+    // A bare `max_tokens:` scalar must parse and emit unchanged when there
+    // is no `extends` chain to merge across.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "solo",
+        "---\nname: solo\nrole: engineer\nmax_tokens: 4096\n---\n\n# Solo\n",
+    );
+    let composed = compose_agent("solo", tmp.path()).unwrap();
+    assert!(composed.contains("max_tokens: 4096"), "got:\n{composed}");
+}
+
+#[test]
+fn max_tokens_child_wins_across_chain() {
+    // Scalar child-wins merge, mirroring `model:` — the child's explicit
+    // value overrides the parent's.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\nmax_tokens: 8192\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\nmax_tokens: 4096\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("max_tokens: 4096"),
+        "child's max_tokens must win; got:\n{composed}"
+    );
+    assert!(!composed.contains("max_tokens: 8192"));
+}
+
+#[test]
+fn max_tokens_unset_child_inherits_parent() {
+    // A child that omits `max_tokens:` must inherit the parent's value
+    // rather than clearing it — same child-wins-only-when-set semantics as
+    // `model:`.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\nmax_tokens: 8192\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("max_tokens: 8192"),
+        "child must inherit parent's max_tokens when unset; got:\n{composed}"
+    );
+}
+
+#[test]
+fn max_tokens_malformed_value_is_dropped_not_panicking() {
+    // Code-critic finding on PR #2952 (MEDIUM): a non-numeric, negative, or
+    // out-of-range `max_tokens:` value must warn-and-drop (parse to `None`)
+    // rather than panicking or hard-erroring the compose — mirroring
+    // `skills_malformed_inline_value_never_errors`.
+    let tmp = TempDir::new().unwrap();
+    for (name, raw) in [
+        ("non-numeric", "not-a-number"),
+        ("negative", "-42"),
+        ("too-large", "99999999999999999999"), // far beyond u32::MAX
+    ] {
+        write_agent(
+            tmp.path(),
+            name,
+            &format!("---\nname: {name}\nrole: engineer\nmax_tokens: {raw}\n---\n\n# {name}\n"),
+        );
+        let composed = compose_agent(name, tmp.path());
+        assert!(
+            composed.is_ok(),
+            "malformed max_tokens ({name} = {raw:?}) must not error"
+        );
+        assert!(
+            !composed.unwrap().contains("max_tokens:"),
+            "malformed max_tokens ({name} = {raw:?}) must drop to None, not \
+             synthesise a `max_tokens:` line"
+        );
+    }
+}
+
+#[test]
+fn tools_parses_as_a_list() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "solo",
+        "---\nname: solo\nrole: engineer\ntools: [read, write, bash]\n---\n\n# Solo\n",
+    );
+    let composed = compose_agent("solo", tmp.path()).unwrap();
+    assert!(
+        composed.contains("tools: [read, write, bash]"),
+        "got:\n{composed}"
+    );
+}
+
+#[test]
+fn tools_malformed_inline_value_never_errors() {
+    // Mirrors `skills_malformed_inline_value_never_errors`: a genuinely
+    // unparseable inline value (comma with no real elements) must never
+    // hard-error the compose. Since the `tools:` key IS present (even though
+    // malformed), it parses to `Some(vec![])` — same as an explicit
+    // `tools: []` — which is the correct, safe degrade: a garbled
+    // restriction is not silently discarded back into "inherit everything".
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain",
+        "---\nname: plain\nrole: engineer\ntools: ,\n---\n\nBODY\n",
+    );
+    let composed = compose_agent("plain", tmp.path());
+    assert!(composed.is_ok(), "malformed inline tools must not error");
+    assert!(
+        composed.unwrap().contains("tools: []"),
+        "a malformed but present `tools:` key must degrade to an explicit \
+         empty override, not silently vanish"
+    );
+}
+
+#[test]
+fn tools_override_across_chain() {
+    // Unlike `skills:`, `tools:` REPLACES the parent's list entirely when
+    // the child declares a non-empty `tools:` — a restrictive leaf must be
+    // able to narrow a permissive base's tool set.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\ntools: [x, y, z]\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\ntools: [a, b]\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("tools: [a, b]"),
+        "child's tools must replace the parent's; got:\n{composed}"
+    );
+    assert!(!composed.contains("x, y, z"));
+}
+
+#[test]
+fn tools_unset_child_inherits_parent() {
+    // A child that omits `tools:` must inherit the parent's list unchanged.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\ntools: [x, y, z]\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("tools: [x, y, z]"),
+        "child must inherit parent's tools when unset; got:\n{composed}"
+    );
+}
+
+#[test]
+fn tools_empty_list_overrides_to_deny_all() {
+    // Code-critic finding on PR #2952 (MEDIUM): `tools: []` must be a
+    // distinguishable, explicit deny-all override — NOT collapse into the
+    // same "inherit the parent" behaviour an omitted `tools:` key produces.
+    // A non-empty parent list must be overridden down to zero, and this must
+    // be provably different from `tools_unset_child_inherits_parent` above
+    // (same parent, different child declaration, opposite outcome).
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\ntools: [x, y, z]\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\ntools: []\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("tools: []"),
+        "an explicit empty `tools:` must override the parent's list down to \
+         zero (deny-all), not inherit; got:\n{composed}"
+    );
+    assert!(
+        !composed.contains("x, y, z"),
+        "the parent's tools must not survive an explicit `tools: []` \
+         override; got:\n{composed}"
+    );
+}
+
+#[test]
+fn tools_override_contrasts_with_skills_union() {
+    // Same chain shape, both a `skills:` and a `tools:` declaration at each
+    // level — `skills:` must UNION (both survive) while `tools:` must
+    // OVERRIDE (only the child's survive). Proves the two list fields do not
+    // share merge logic.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\nskills: [base-skill]\ntools: [base-tool]\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\nskills: [leaf-skill]\ntools: [leaf-tool]\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    // skills: union — both survive.
+    assert!(
+        composed.contains("skills: [base-skill, leaf-skill]"),
+        "skills must union; got:\n{composed}"
+    );
+    // tools: override — only the child's tool survives.
+    assert!(
+        composed.contains("tools: [leaf-tool]"),
+        "tools must override, not union; got:\n{composed}"
+    );
+    assert!(
+        !composed.contains("base-tool"),
+        "the parent's tool must not survive the override; got:\n{composed}"
+    );
+}
+
+#[test]
+fn no_max_tokens_no_tools_agent_composes_unchanged() {
+    // Behavior-preservation for tm (#2897): a tm-style agent that never sets
+    // `max_tokens:`/`tools:` must compose byte-identically to the pre-#2897
+    // output — no `max_tokens:` or `tools:` line is synthesised, and no
+    // other field is perturbed.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-engineer",
+        "---\nname: base-engineer\nrole: base-engineer\n---\n\n# Base Engineer\n\nBASE BODY\n",
+    );
+    write_agent(
+        tmp.path(),
+        "rust-engineer",
+        "---\nname: rust-engineer\nrole: engineer\nextends: base-engineer\nmodel: sonnet\nskills: [toolchains-rust-core]\n---\n\n# Rust Engineer\n\nLEAF BODY\n",
+    );
+    let composed = compose_agent("rust-engineer", tmp.path()).unwrap();
+    let expected = "---\nname: rust-engineer\nrole: engineer\nmodel: sonnet\nskills: [toolchains-rust-core]\ninitialPrompt: \"Begin implementation. Read the task context and start coding immediately.\"\n---\n\n# Base Engineer\n\nBASE BODY\n\n# Rust Engineer\n\nLEAF BODY\n";
+    assert_eq!(
+        composed, expected,
+        "tm-style agent (no max_tokens/tools) must compose byte-identically \
+         to pre-#2897 output"
+    );
+    assert!(!composed.contains("max_tokens:"));
+    assert!(!composed.contains("tools:"));
+}

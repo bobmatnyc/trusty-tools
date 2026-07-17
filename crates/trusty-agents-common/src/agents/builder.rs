@@ -159,6 +159,36 @@ pub(crate) struct Frontmatter {
     /// What: the raw skill names in source order, before de-duplication
     /// (deduplication happens in [`merge_frontmatter`] across the chain).
     pub(crate) skills: Vec<String>,
+    /// Maximum-output-tokens budget, mirroring tcode's TOML `AgentConfig`
+    /// (issue #2897, epic #2892).
+    ///
+    /// Why: tcode's agent format is a superset of trusty-mpm's — this field
+    /// carries no meaning for trusty-mpm (which never sets it), but making
+    /// `Frontmatter` a superset lets both harnesses share one composer
+    /// instead of forking it.
+    /// What: parsed from a scalar `max_tokens:` key. Merges SCALAR CHILD-WINS
+    /// across an `extends` chain, same as `model:`.
+    pub(crate) max_tokens: Option<u32>,
+    /// Allowed tool names, mirroring tcode's TOML `AgentConfig` (issue #2897,
+    /// epic #2892).
+    ///
+    /// Why: unlike `skills:` (which accumulates across a chain, since a list
+    /// of dependencies naturally grows through inheritance), `tools:` must
+    /// let a restrictive leaf agent NARROW a permissive base's tool set — so
+    /// it merges by OVERRIDE, not union (Bob's explicit decision, #2897). The
+    /// field is `Option<Vec<String>>`, not a bare `Vec`, because "unset" and
+    /// "explicitly set to zero tools" are semantically distinct and must
+    /// stay distinguishable: `tools: []` is a deliberate deny-all override
+    /// that must NOT collapse into the "inherit the parent" case an absent
+    /// key produces (code-critic finding on PR #2952 — an `is_empty()` check
+    /// cannot tell "omitted" from "empty list" apart, silently breaking
+    /// deny-all). Mirrors tcode's `ToolsConfig.allowed: Option<Vec<String>>`
+    /// (`None` = all tools allowed, `Some(vec![])` = none) so Slice B's
+    /// projection maps cleanly.
+    /// What: `None` when the source declares no `tools:` key at all. `Some`
+    /// (populated via [`parse_list_value`], same grammar as `skills:`) when
+    /// the key is present, including `Some(vec![])` for `tools: []`.
+    pub(crate) tools: Option<Vec<String>>,
 }
 
 /// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
@@ -358,6 +388,48 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         parsed
     });
 
+    // #2897: `tools:` uses the same inline flow-array grammar as `skills:`
+    // (via `parse_list_value`) — same malformed-value warn-and-degrade
+    // behaviour, just a distinct merge policy (override, not union) applied
+    // downstream in `merge_frontmatter`. Unlike `skills:`, the OUTER `Option`
+    // here is load-bearing: `fields.remove("tools")` is `None` only when the
+    // key is entirely absent, which is what lets `merge_frontmatter`
+    // distinguish "inherit the parent" (key absent) from "explicit deny-all"
+    // (`tools: []`, which still parses to `Some(vec![])`).
+    let tools = fields.remove("tools").map(|raw_value| {
+        let parsed = parse_list_value(&raw_value);
+        let trimmed_raw = raw_value.trim();
+        if parsed.is_empty() && !trimmed_raw.is_empty() && trimmed_raw != "[]" {
+            tracing::warn!(
+                value = %raw_value,
+                "agent frontmatter `tools:` value could not be parsed as a list — \
+                 treating as empty"
+            );
+        }
+        parsed
+    });
+
+    // #2897: `max_tokens:` is a scalar integer, merged child-wins like
+    // `model:`. A malformed value (non-integer) is warned and dropped rather
+    // than hard-erroring the whole frontmatter parse.
+    let max_tokens = fields.remove("max_tokens").and_then(|raw_value| {
+        let trimmed = raw_value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match trimmed.parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!(
+                    value = %raw_value,
+                    "agent frontmatter `max_tokens:` value could not be parsed as an integer — \
+                     ignoring"
+                );
+                None
+            }
+        }
+    });
+
     let fm = Frontmatter {
         name: fields.remove("name"),
         role: fields.remove("role"),
@@ -373,6 +445,8 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
             .map(|v| unescape_yaml_double_quoted(&v)),
         resource_tier: fields.remove("resource_tier"),
         skills: skills_block.or(inline_skills).unwrap_or_default(),
+        max_tokens,
+        tools,
     };
     Ok((fm, body))
 }
@@ -453,11 +527,20 @@ fn unescape_yaml_double_quoted(value: &str) -> String {
 /// de-duplicated in first-seen (base-first) order — because a list of
 /// dependencies naturally accumulates through inheritance the way body text
 /// concatenates, unlike a scalar field where the child's value should replace
-/// the parent's. Emits the populated keys in a stable order.
+/// the parent's. `max_tokens:` (#2897) is a scalar and merges CHILD-WINS,
+/// identically to `model:`. `tools:` (#2897) is a list but, unlike `skills:`,
+/// merges by OVERRIDE, keyed on `Option` presence rather than emptiness — a
+/// child whose `tools:` key was present (`Some`, including the deliberate
+/// deny-all `Some(vec![])` from `tools: []`) replaces the parent's list
+/// entirely, so a restrictive leaf agent can narrow a permissive base's tool
+/// set down to zero; a child that omits `tools:` (`None`) inherits the
+/// parent's list unchanged. Emits the populated keys in a stable order.
 /// Test: `compose_engineer_chain` (merge), `tier_model_mapping`,
 /// `explicit_model_wins_over_tier`, `initial_prompt_injected_by_role`,
 /// `initial_prompt_explicit_wins`, `skills_union_across_chain`,
-/// `skills_deduplicated_across_chain` in builder_tests.rs.
+/// `skills_deduplicated_across_chain`, `max_tokens_child_wins_across_chain`,
+/// `tools_override_across_chain`, `tools_override_contrasts_with_skills_union`,
+/// `tools_empty_list_overrides_to_deny_all` in builder_tests.rs.
 fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     let mut merged = Frontmatter::default();
     for fm in chain {
@@ -486,6 +569,24 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
             if !merged.skills.contains(skill) {
                 merged.skills.push(skill.clone());
             }
+        }
+        // #2897: scalar child-wins, identical to `model:`.
+        if fm.max_tokens.is_some() {
+            merged.max_tokens = fm.max_tokens;
+        }
+        // #2897: OVERRIDE, not union (contrast with `skills:` above) — a
+        // child's `tools:` (whenever the key was present at all, i.e.
+        // `Some`) replaces the parent's list entirely, so a restrictive leaf
+        // can narrow a permissive base. Critically this branches on `Some`,
+        // NOT on non-empty: `tools: []` is `Some(vec![])` and MUST override
+        // to zero tools (deny-all) rather than being treated the same as an
+        // omitted key — collapsing "empty" and "absent" here would silently
+        // resurrect the parent's full tool list for an operator who
+        // deliberately locked an agent down (code-critic finding, PR #2952).
+        // An omitted child `tools:` (`None`) leaves the inherited value
+        // untouched.
+        if let Some(t) = &fm.tools {
+            merged.tools = Some(t.clone());
         }
     }
 
@@ -516,6 +617,9 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     if let Some(v) = &merged.model {
         out.push_str(&format!("model: {v}\n"));
     }
+    if let Some(v) = &merged.max_tokens {
+        out.push_str(&format!("max_tokens: {v}\n"));
+    }
     if let Some(v) = &merged.resource_tier {
         out.push_str(&format!("resource_tier: {v}\n"));
     }
@@ -524,6 +628,19 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         // file is self-describing — `tm doctor` / `tm agent show` read it
         // straight off the deployed `.md` without re-walking `extends:`.
         out.push_str(&format!("skills: [{}]\n", merged.skills.join(", ")));
+    }
+    if let Some(v) = &merged.tools {
+        // #2897: emit whenever `Some` — including `Some(vec![])`, which
+        // renders as the explicit empty array `tools: []` (an empty `join`
+        // yields an empty string between the brackets). This is the deny-all
+        // case and round-trips cleanly: re-parsing `tools: []` via
+        // `parse_list_value` yields an empty `Vec` again, and
+        // `split_frontmatter` sees the KEY as present, so it comes back as
+        // `Some(vec![])` — not `None` — preserving the override on a
+        // compose→deploy→re-compose cycle. A `None` (key never declared)
+        // emits no `tools:` line at all, mirroring the `skills:` emission
+        // above but keyed on presence rather than non-emptiness.
+        out.push_str(&format!("tools: [{}]\n", v.join(", ")));
     }
     if let Some(v) = &merged.initial_prompt {
         // Emit a YAML double-quoted scalar. The value is escaped so a `"` or

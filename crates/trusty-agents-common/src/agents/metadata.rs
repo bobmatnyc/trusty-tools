@@ -56,6 +56,20 @@ pub struct AgentMetadata {
     /// Declared skill dependencies (DOC-42), in declaration order,
     /// de-duplicated. Empty when the agent declares none.
     pub skills: Vec<String>,
+    /// Maximum-output-tokens budget (#2897, epic #2892), mirroring tcode's
+    /// TOML `AgentConfig`. `None` when the agent declares none — trusty-mpm
+    /// agents never set this key.
+    pub max_tokens: Option<u32>,
+    /// Allowed tool names (#2897, epic #2892), mirroring tcode's TOML
+    /// `AgentConfig`. `None` when the agent (and its whole `extends` chain)
+    /// never declares a `tools:` key — trusty-mpm agents never set this key,
+    /// so they always project to `None`. `Some(vec![])` is a deliberate
+    /// deny-all override, distinct from `None`; the two must never be
+    /// conflated (see the `Option`, not bare `Vec`, on
+    /// `builder::Frontmatter::tools`). Unlike `skills`, this list is
+    /// OVERRIDE-merged across an `extends` chain rather than unioned (see
+    /// `builder::merge_frontmatter`).
+    pub tools: Option<Vec<String>>,
 }
 
 impl From<Frontmatter> for AgentMetadata {
@@ -67,6 +81,8 @@ impl From<Frontmatter> for AgentMetadata {
             model: fm.model,
             extends: fm.extends,
             skills: fm.skills,
+            max_tokens: fm.max_tokens,
+            tools: fm.tools,
         }
     }
 }
