@@ -20,9 +20,16 @@
 //! `test_write_project_hooks_targets_project_dir`,
 //! `test_is_mpm_hook_command_recognises_tm_bin_name`,
 //! `test_write_project_hooks_replaces_stale_exe_path_group` in `tests`.
+//!
+//! Issue #2940: [`cleanup`] (sibling module) builds `tm hooks clean` and the
+//! `tm doctor` hook-hygiene probe on top of [`is_mpm_hook_command`] and
+//! [`strip_mpm_hook_entries`] — see that module's doc for the contamination
+//! background.
 
 #[cfg(test)]
 mod tests;
+
+pub mod cleanup;
 
 use std::path::{Path, PathBuf};
 
@@ -268,7 +275,12 @@ fn is_mpm_binary_filename(name: &str) -> bool {
 /// `test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants`,
 /// `test_write_project_hooks_replaces_stale_exe_path_group`,
 /// `test_write_project_hooks_collapses_stale_hash_and_mvp_entries`.
-fn is_mpm_hook_command(cmd: &str) -> bool {
+///
+/// `pub` (rather than `pub(crate)`) since issue #2940: [`cleanup`] and the
+/// `tm doctor` hook-hygiene probe both need this exact predicate so the
+/// contamination scan and the removal logic can never classify a command
+/// differently.
+pub fn is_mpm_hook_command(cmd: &str) -> bool {
     // The command must end with " hook" (with exactly one trailing sub-command word).
     let Some(binary) = cmd.strip_suffix(" hook") else {
         return false;
@@ -277,6 +289,31 @@ fn is_mpm_hook_command(cmd: &str) -> bool {
         .file_name()
         .and_then(|f| f.to_str())
         .is_some_and(is_mpm_binary_filename)
+}
+
+/// Recognise a foreign claude-mpm-owned hook command signature (issue #2940).
+///
+/// Why: a project that still carries claude-mpm's own hook wiring alongside
+/// (or instead of) tm's would fire BOTH harnesses' hooks in the same tm
+/// session, producing conflicting/undefined behaviour — `tm doctor` needs to
+/// warn about this without ever touching the foreign entry (that call is the
+/// operator's, not tm's). claude-mpm invokes its hooks via its own
+/// `claude-mpm`/`claude_mpm` binary or a script under a `.claude-mpm/`
+/// directory; neither ever produces a command [`is_mpm_hook_command`]
+/// recognises, so the two predicates are mutually exclusive by construction
+/// — checked here defensively so a command is NEVER double-classified.
+/// What: returns `true` when `cmd` contains the substring `claude-mpm` or
+/// `claude_mpm` (case-insensitive, covering both the installed CLI and a
+/// `.claude-mpm/`-rooted script path) AND [`is_mpm_hook_command`] does not
+/// already claim it.
+/// Test: `test_is_claude_mpm_hook_command_recognises_foreign_signatures`,
+/// `test_is_claude_mpm_hook_command_never_overlaps_tm`.
+pub fn is_claude_mpm_hook_command(cmd: &str) -> bool {
+    if is_mpm_hook_command(cmd) {
+        return false;
+    }
+    let lower = cmd.to_ascii_lowercase();
+    lower.contains("claude-mpm") || lower.contains("claude_mpm")
 }
 
 /// Strip trusty-mpm hook entries from every global Claude settings file.
@@ -328,11 +365,12 @@ pub fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
 
 /// Remove every trusty-mpm hook entry from a settings JSON value in-place.
 ///
-/// Why: shared logic between `remove_global_trusty_mpm_hooks` and tests.
+/// Why: shared logic between `remove_global_trusty_mpm_hooks`, [`cleanup`]
+/// (issue #2940's `tm hooks clean`), and tests.
 /// What: delegates to [`strip_mpm_hook_entries_for_events`] with `events =
 /// None`, which strips MPM-owned groups from every event key present.
 /// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`.
-fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
+pub fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
     strip_mpm_hook_entries_for_events(val, None)
 }
 

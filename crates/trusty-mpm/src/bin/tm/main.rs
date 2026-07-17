@@ -24,6 +24,7 @@ use commands::{
     compress::run_compress,
     daemon::{restart, run_daemon, start, stop_daemon},
     generate::generate,
+    hooks::clean as hooks_clean,
     install::install,
     launch::{connect, launch},
     manager::manager,
@@ -64,6 +65,10 @@ mod tests_behavior_e;
 #[cfg(test)]
 #[path = "tests_behavior_generate_tests.rs"]
 mod tests_behavior_generate;
+
+#[cfg(test)]
+#[path = "tests_behavior_hooks_tests.rs"]
+mod tests_behavior_hooks;
 
 #[cfg(test)]
 #[path = "tests_behavior_reset_agents_tests.rs"]
@@ -369,6 +374,12 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
+        Some(Command::Hooks { action }) => {
+            use cli::HooksAction;
+            match action {
+                HooksAction::Clean { path, force } => hooks_clean(path, force),
+            }
+        }
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
         Some(Command::Health) => health(&url).await,
