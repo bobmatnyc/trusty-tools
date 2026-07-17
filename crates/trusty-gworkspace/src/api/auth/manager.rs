@@ -16,9 +16,11 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
+use tracing::warn;
 
 use super::models::{OAuthToken, StoredToken};
 use super::oauth::errors::{redact_token_response, refresh_failure_message};
+use super::oauth::resolve_client_creds;
 use super::storage::TokenStorage;
 use crate::api::constants::OAUTH_TOKEN_URL;
 
@@ -39,9 +41,12 @@ struct GoogleTokenResponse {
 ///
 /// Why: Encapsulates Google's OAuth client credentials so `BaseClient` only
 /// needs to call one method to get a fresh token.
-/// What: Reads `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env
-/// vars on construction. `refresh` performs the HTTP exchange.
-/// Test: Construction is covered by `from_env_returns_none_when_missing`.
+/// What: Resolves `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env
+/// vars first, falling back to `~/.gworkspace-mcp/oauth_client.json` (see
+/// `from_env`), on construction. `refresh` performs the HTTP exchange.
+/// Test: Construction is covered by `from_env_falls_back_to_oauth_client_json`,
+/// `from_env_returns_none_when_both_absent`, and
+/// `from_env_prefers_env_vars_over_file`.
 pub struct OAuthManager {
     http: reqwest::Client,
     client_id: String,
@@ -49,18 +54,38 @@ pub struct OAuthManager {
 }
 
 impl OAuthManager {
-    /// Construct from env vars, returning `Ok(None)` when both are absent
-    /// (read-only token mode — refresh disabled).
+    /// Construct from env vars, falling back to `oauth_client.json` on disk.
+    ///
+    /// Why: Issue #2946 — no tm-managed session sets
+    /// `GOOGLE_OAUTH_CLIENT_ID`/`SECRET`, so `from_env` previously always
+    /// returned `None` there, silently disabling self-refresh: every
+    /// tm-managed MCP server ran read-only-token mode and 401'd on Google
+    /// once the access token expired (~1h). `setup`/`doctor` already resolve
+    /// client credentials with an env-first, file-fallback strategy via
+    /// `resolve_client_creds`; reusing it here (rather than duplicating the
+    /// parse logic) gives the refresh path the same fallback for free.
+    /// What: Delegates to [`resolve_client_creds`] (env vars win when
+    /// present, else reads `~/.gworkspace-mcp/oauth_client.json`). Returns
+    /// `Ok(None)` — with a warning logged — only when neither source yields
+    /// credentials (read-only token mode: refresh disabled).
+    /// Test: `from_env_falls_back_to_oauth_client_json`,
+    /// `from_env_returns_none_when_both_absent`,
+    /// `from_env_prefers_env_vars_over_file`.
     pub fn from_env() -> Result<Option<Self>> {
-        let id = std::env::var("GOOGLE_OAUTH_CLIENT_ID").ok();
-        let secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").ok();
-        match (id, secret) {
-            (Some(client_id), Some(client_secret)) => Ok(Some(Self {
+        match resolve_client_creds() {
+            Ok(creds) => Ok(Some(Self {
                 http: reqwest::Client::new(),
-                client_id,
-                client_secret,
+                client_id: creds.client_id,
+                client_secret: creds.client_secret,
             })),
-            _ => Ok(None),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "no OAuth client credentials found (env vars or oauth_client.json); \
+                     token refresh disabled — expired tokens will not self-refresh"
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -132,5 +157,133 @@ impl OAuthManager {
         storage.save(&all)?;
 
         Ok(new_token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::path::PathBuf;
+
+    /// Env vars mutated by the fallback tests below; captured/restored as a
+    /// group so a panic mid-test never leaks a fake `HOME` or client id into
+    /// later tests.
+    const MUTATED_ENV_VARS: &[&str] = &[
+        "HOME",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+    ];
+
+    /// RAII guard that snapshots and restores a fixed set of env vars, even
+    /// on panic.
+    ///
+    /// Why: `from_env`'s fallback path reads `HOME` (via `dirs::home_dir`)
+    /// indirectly through `resolve_client_creds`; testing it in-process means
+    /// mutating real process env state, which must never leak across tests
+    /// (issue #2946 fallback tests run `#[serial]` for the same reason).
+    /// What: Captures each var's current value on construction; `Drop`
+    /// restores it (`set_var` if it was present, `remove_var` if absent).
+    /// Test: exercised by every test in this module — a leaked var would
+    /// make a later, unrelated test flaky.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn capture(vars: &[&'static str]) -> Self {
+            let saved = vars.iter().map(|&v| (v, std::env::var(v).ok())).collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                // SAFETY: every caller of `EnvGuard` runs under `#[serial]`,
+                // so no other thread reads/writes these vars concurrently.
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    /// Build a fresh temp dir with a `.gworkspace-mcp/` subdir, never
+    /// touching the real `~/.gworkspace-mcp`.
+    fn fresh_temp_home(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gw-manager-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".gworkspace-mcp")).expect("mkdir temp home");
+        dir
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_falls_back_to_oauth_client_json() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        // SAFETY: serialised via #[serial]; EnvGuard restores on drop.
+        unsafe {
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
+        }
+        let home = fresh_temp_home("fallback");
+        std::fs::write(
+            home.join(".gworkspace-mcp").join("oauth_client.json"),
+            r#"{"client_id":"file-id","client_secret":"file-secret"}"#,
+        )
+        .expect("write oauth_client.json");
+        // SAFETY: see above.
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let mgr = OAuthManager::from_env()
+            .expect("from_env should not error")
+            .expect("oauth_client.json fallback should enable refresh");
+        assert_eq!(mgr.client_id, "file-id");
+        assert_eq!(mgr.client_secret, "file-secret");
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_returns_none_when_both_absent() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        // SAFETY: see EnvGuard doc.
+        unsafe {
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
+            std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
+        }
+        let home = fresh_temp_home("absent");
+        // SAFETY: see EnvGuard doc.
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let mgr = OAuthManager::from_env().expect("from_env should not error (warn, not error)");
+        assert!(
+            mgr.is_none(),
+            "refresh must stay disabled with neither env vars nor oauth_client.json present"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_prefers_env_vars_over_file() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        let home = fresh_temp_home("precedence");
+        std::fs::write(
+            home.join(".gworkspace-mcp").join("oauth_client.json"),
+            r#"{"client_id":"file-id","client_secret":"file-secret"}"#,
+        )
+        .expect("write oauth_client.json");
+        // SAFETY: see EnvGuard doc.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("GOOGLE_OAUTH_CLIENT_ID", "env-id");
+            std::env::set_var("GOOGLE_OAUTH_CLIENT_SECRET", "env-secret");
+        }
+
+        let mgr = OAuthManager::from_env()
+            .expect("from_env should not error")
+            .expect("env vars should enable refresh");
+        assert_eq!(mgr.client_id, "env-id", "env vars must win over the file");
+        assert_eq!(mgr.client_secret, "env-secret");
     }
 }

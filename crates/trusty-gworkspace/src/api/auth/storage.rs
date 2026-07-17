@@ -4,13 +4,18 @@
 //! CLI (which performs the interactive OAuth flow) and this Rust MCP server.
 //! What: Reads/writes a `HashMap<profile_name, StoredToken>` JSON object.
 //! Two-tier lookup: project-level `./.gworkspace-mcp/tokens.json` first,
-//! then `~/.gworkspace-mcp/tokens.json`.
+//! then `~/.gworkspace-mcp/tokens.json`. `load()` warns loudly (without
+//! changing the override contract) when a project-level entry shadowing a
+//! profile is expired while the user-level entry it hides is still valid
+//! (issue #2946 — a stale worktree-local override otherwise silently wins
+//! and re-poisons `save()` on every re-auth).
 //! Test: see integration test `tests/auth_models.rs`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use tracing::warn;
 
 use super::models::StoredToken;
 use crate::api::constants::DEFAULT_PROFILE;
@@ -76,10 +81,39 @@ impl TokenStorage {
     }
 
     /// Load merged tokens: user-level base, project-level overrides.
+    ///
+    /// Why: Preserves the documented override contract (project always wins
+    /// per profile key) so existing project-scoped setups keep working
+    /// unchanged. But a project override that is itself stale — e.g. minted
+    /// once inside a worktree and never refreshed since — silently wins over
+    /// a healthy user-level token and recreates the exact 401 loop from
+    /// issue #2946 with no signal to the operator. This surfaces that case
+    /// loudly instead of staying silent, without touching precedence.
+    /// What: Merges project-level entries over user-level per profile key;
+    /// before merging, logs a `tracing::warn!` (via
+    /// [`stale_shadow_warning`]) for every profile where the project-level
+    /// entry is expired while the user-level entry it shadows is not.
+    /// Test: `load_warns_when_project_shadow_is_stale` (log emission is
+    /// exercised via `stale_shadow_warning` directly — see its own tests —
+    /// plus `load_still_prefers_project_override_after_warning` for the
+    /// unchanged-precedence contract).
     pub fn load(&self) -> Result<HashMap<String, StoredToken>> {
         let mut merged = Self::load_from(&self.user_path).unwrap_or_default();
-        if let Some(p) = &self.project_path {
-            let project_tokens = Self::load_from(p).unwrap_or_default();
+        if let Some(project_path) = &self.project_path {
+            let project_tokens = Self::load_from(project_path).unwrap_or_default();
+            for (profile, project_token) in &project_tokens {
+                if let Some(user_token) = merged.get(profile)
+                    && let Some(msg) = stale_shadow_warning(
+                        profile,
+                        project_token,
+                        user_token,
+                        project_path,
+                        &self.user_path,
+                    )
+                {
+                    warn!("{msg}");
+                }
+            }
             merged.extend(project_tokens);
         }
         Ok(merged)
@@ -166,6 +200,45 @@ impl TokenStorage {
     }
 }
 
+/// Build a warning message when a project-level token entry shadows a
+/// user-level one for the same profile while itself being stale.
+///
+/// Why: Isolated as a pure predicate/formatter (no I/O, no logging) so the
+/// exact condition and wording are directly unit-testable without a temp
+/// filesystem — mirrors the `refresh_failure_message` pattern in
+/// `oauth::errors`.
+/// What: Returns `Some(message)` naming both paths and both `expires_at`
+/// timestamps when `project` is expired and `user` is not; `None` in every
+/// other case (both fresh, both stale, or the project entry is the fresher
+/// one) — those cases are not the silent-stale-shadow failure mode this
+/// guards against.
+/// Test: `warns_when_project_stale_and_user_fresh`,
+/// `no_warning_when_both_fresh`, `no_warning_when_both_stale`,
+/// `no_warning_when_project_is_fresher`.
+fn stale_shadow_warning(
+    profile: &str,
+    project: &StoredToken,
+    user: &StoredToken,
+    project_path: &Path,
+    user_path: &Path,
+) -> Option<String> {
+    if project.token.is_expired() && !user.token.is_expired() {
+        Some(format!(
+            "profile '{profile}': project-level tokens.json override at {} is EXPIRED \
+             (expires_at={}) but shadows a valid user-level token at {} (expires_at={}) — \
+             serving the STALE override per the documented project-overrides-user contract. \
+             Run setup from this directory, or remove {} to fall through to the fresher token.",
+            project_path.display(),
+            project.token.expires_at,
+            user_path.display(),
+            user.token.expires_at,
+            project_path.display(),
+        ))
+    } else {
+        None
+    }
+}
+
 impl Default for TokenStorage {
     fn default() -> Self {
         Self::new()
@@ -238,5 +311,115 @@ mod tests {
             Some("user@example.com")
         );
         assert!(loaded["primary"].metadata.is_default);
+    }
+
+    /// Build a `StoredToken` expiring `expires_in_secs` from now (negative =
+    /// already expired) for the stale-shadow-warning tests below.
+    fn make_stored(expires_in_secs: i64) -> StoredToken {
+        StoredToken {
+            version: 1,
+            metadata: crate::api::auth::models::TokenMetadata {
+                service_name: "test".into(),
+                provider: "google".into(),
+                created_at: chrono::Utc::now(),
+                last_refreshed: None,
+                email: Some("user@example.com".into()),
+                is_default: false,
+            },
+            token: crate::api::auth::models::OAuthToken {
+                access_token: "a".into(),
+                refresh_token: Some("r".into()),
+                expires_at: chrono::Utc::now() + chrono::Duration::seconds(expires_in_secs),
+                scopes: vec!["openid".into()],
+                token_type: "Bearer".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn warns_when_project_stale_and_user_fresh() {
+        let project = make_stored(-3600);
+        let user = make_stored(3600);
+        let msg = stale_shadow_warning(
+            "work",
+            &project,
+            &user,
+            Path::new("/proj/.gworkspace-mcp/tokens.json"),
+            Path::new("/home/user/.gworkspace-mcp/tokens.json"),
+        )
+        .expect("must warn: project stale, user fresh");
+        assert!(msg.contains("work"));
+        assert!(msg.contains("/proj/.gworkspace-mcp/tokens.json"));
+        assert!(msg.contains("/home/user/.gworkspace-mcp/tokens.json"));
+        assert!(msg.contains("EXPIRED"));
+    }
+
+    #[test]
+    fn no_warning_when_both_fresh() {
+        let project = make_stored(3600);
+        let user = make_stored(7200);
+        assert!(
+            stale_shadow_warning("work", &project, &user, Path::new("p"), Path::new("u")).is_none()
+        );
+    }
+
+    #[test]
+    fn no_warning_when_both_stale() {
+        // Both stale is not the silent-shadow failure mode — the caller gets
+        // an expired token either way, so no extra signal is needed here.
+        let project = make_stored(-3600);
+        let user = make_stored(-7200);
+        assert!(
+            stale_shadow_warning("work", &project, &user, Path::new("p"), Path::new("u")).is_none()
+        );
+    }
+
+    #[test]
+    fn no_warning_when_project_is_fresher() {
+        let project = make_stored(3600);
+        let user = make_stored(-3600);
+        assert!(
+            stale_shadow_warning("work", &project, &user, Path::new("p"), Path::new("u")).is_none()
+        );
+    }
+
+    #[test]
+    fn load_still_prefers_project_override_after_warning() {
+        // Regression guard for the precedence contract: this fix only adds a
+        // warning, it does not change which entry wins (see PR body) — a
+        // stale project override must still be served, just noisily.
+        let dir = std::env::temp_dir().join(format!("gw-storage-shadow-{}", uuid::Uuid::new_v4()));
+        let user_dir = dir.join("user");
+        let project_dir = dir.join("project");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let user_path = user_dir.join("tokens.json");
+        let project_path = project_dir.join("tokens.json");
+
+        let mut user_tokens = HashMap::new();
+        user_tokens.insert("work".to_string(), make_stored(3600));
+        std::fs::write(&user_path, serde_json::to_string(&user_tokens).unwrap()).unwrap();
+
+        let mut project_tokens = HashMap::new();
+        let mut stale = make_stored(-3600);
+        stale.token.access_token = "stale-access-token".into();
+        project_tokens.insert("work".to_string(), stale);
+        std::fs::write(
+            &project_path,
+            serde_json::to_string(&project_tokens).unwrap(),
+        )
+        .unwrap();
+
+        let storage = TokenStorage {
+            user_path,
+            project_path: Some(project_path),
+        };
+
+        let loaded = storage.load().unwrap();
+        assert_eq!(
+            loaded["work"].token.access_token, "stale-access-token",
+            "project override must still win per the documented contract \
+             (warn, don't change precedence)"
+        );
     }
 }

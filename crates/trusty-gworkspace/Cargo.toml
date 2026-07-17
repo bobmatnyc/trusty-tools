@@ -29,3 +29,9 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true }
 open = { workspace = true }
+
+[dev-dependencies]
+# serial_test: env-mutating tests (HOME override for oauth_client.json
+# fallback resolution) must run serially to avoid races across parallel
+# test threads.
+serial_test = { workspace = true }
