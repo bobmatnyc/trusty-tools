@@ -5,6 +5,12 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- `agents::builder::Frontmatter` (and the public `agents::metadata::AgentMetadata` it projects into) gains two fields — `max_tokens: Option<u32>` and `tools: Vec<String>` — making the shared frontmatter type a superset of tcode's TOML `AgentConfig` (refs #2897, epic #2892, Slice A). `max_tokens:` merges scalar child-wins across an `extends` chain, identically to `model:`. `tools:` merges by OVERRIDE (the child's non-empty list replaces the parent's entirely) — deliberately distinct from `skills:`'s union/accumulate merge, so a restrictive leaf agent can narrow a permissive base's tool set. Purely additive and behavior-preserving for trusty-mpm: `tm`'s agents never set either key, so composed output for a tm-style agent stays byte-identical.
+
 ## [0.2.2] — 2026-07-17
 
 ### Added

@@ -159,6 +159,27 @@ pub(crate) struct Frontmatter {
     /// What: the raw skill names in source order, before de-duplication
     /// (deduplication happens in [`merge_frontmatter`] across the chain).
     pub(crate) skills: Vec<String>,
+    /// Maximum-output-tokens budget, mirroring tcode's TOML `AgentConfig`
+    /// (issue #2897, epic #2892).
+    ///
+    /// Why: tcode's agent format is a superset of trusty-mpm's — this field
+    /// carries no meaning for trusty-mpm (which never sets it), but making
+    /// `Frontmatter` a superset lets both harnesses share one composer
+    /// instead of forking it.
+    /// What: parsed from a scalar `max_tokens:` key. Merges SCALAR CHILD-WINS
+    /// across an `extends` chain, same as `model:`.
+    pub(crate) max_tokens: Option<u32>,
+    /// Allowed tool names, mirroring tcode's TOML `AgentConfig` (issue #2897,
+    /// epic #2892).
+    ///
+    /// Why: unlike `skills:` (which accumulates across a chain, since a list
+    /// of dependencies naturally grows through inheritance), `tools:` must
+    /// let a restrictive leaf agent NARROW a permissive base's tool set — so
+    /// it merges by OVERRIDE, not union (Bob's explicit decision, #2897).
+    /// What: the raw tool names in source order, parsed the same way as
+    /// `skills:` (via [`parse_list_value`]). Absent `tools:` parses to an
+    /// empty `Vec`.
+    pub(crate) tools: Vec<String>,
 }
 
 /// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
@@ -358,6 +379,47 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         parsed
     });
 
+    // #2897: `tools:` uses the same inline flow-array grammar as `skills:`
+    // (via `parse_list_value`) — same malformed-value warn-and-degrade
+    // behaviour, just a distinct merge policy (override, not union) applied
+    // downstream in `merge_frontmatter`.
+    let tools = fields
+        .remove("tools")
+        .map(|raw_value| {
+            let parsed = parse_list_value(&raw_value);
+            let trimmed_raw = raw_value.trim();
+            if parsed.is_empty() && !trimmed_raw.is_empty() && trimmed_raw != "[]" {
+                tracing::warn!(
+                    value = %raw_value,
+                    "agent frontmatter `tools:` value could not be parsed as a list — \
+                     treating as empty"
+                );
+            }
+            parsed
+        })
+        .unwrap_or_default();
+
+    // #2897: `max_tokens:` is a scalar integer, merged child-wins like
+    // `model:`. A malformed value (non-integer) is warned and dropped rather
+    // than hard-erroring the whole frontmatter parse.
+    let max_tokens = fields.remove("max_tokens").and_then(|raw_value| {
+        let trimmed = raw_value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match trimmed.parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!(
+                    value = %raw_value,
+                    "agent frontmatter `max_tokens:` value could not be parsed as an integer — \
+                     ignoring"
+                );
+                None
+            }
+        }
+    });
+
     let fm = Frontmatter {
         name: fields.remove("name"),
         role: fields.remove("role"),
@@ -373,6 +435,8 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
             .map(|v| unescape_yaml_double_quoted(&v)),
         resource_tier: fields.remove("resource_tier"),
         skills: skills_block.or(inline_skills).unwrap_or_default(),
+        max_tokens,
+        tools,
     };
     Ok((fm, body))
 }
@@ -453,11 +517,18 @@ fn unescape_yaml_double_quoted(value: &str) -> String {
 /// de-duplicated in first-seen (base-first) order — because a list of
 /// dependencies naturally accumulates through inheritance the way body text
 /// concatenates, unlike a scalar field where the child's value should replace
-/// the parent's. Emits the populated keys in a stable order.
+/// the parent's. `max_tokens:` (#2897) is a scalar and merges CHILD-WINS,
+/// identically to `model:`. `tools:` (#2897) is a list but, unlike `skills:`,
+/// merges by OVERRIDE — a child that sets a non-empty `tools:` replaces the
+/// parent's list entirely, so a restrictive leaf agent can narrow a
+/// permissive base's tool set; a child that omits `tools:` inherits the
+/// parent's list unchanged. Emits the populated keys in a stable order.
 /// Test: `compose_engineer_chain` (merge), `tier_model_mapping`,
 /// `explicit_model_wins_over_tier`, `initial_prompt_injected_by_role`,
 /// `initial_prompt_explicit_wins`, `skills_union_across_chain`,
-/// `skills_deduplicated_across_chain` in builder_tests.rs.
+/// `skills_deduplicated_across_chain`, `max_tokens_child_wins_across_chain`,
+/// `tools_override_across_chain`, `tools_override_contrasts_with_skills_union`
+/// in builder_tests.rs.
 fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     let mut merged = Frontmatter::default();
     for fm in chain {
@@ -486,6 +557,17 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
             if !merged.skills.contains(skill) {
                 merged.skills.push(skill.clone());
             }
+        }
+        // #2897: scalar child-wins, identical to `model:`.
+        if fm.max_tokens.is_some() {
+            merged.max_tokens = fm.max_tokens;
+        }
+        // #2897: OVERRIDE, not union (contrast with `skills:` above) — a
+        // child's non-empty `tools:` replaces the parent's list entirely so a
+        // restrictive leaf can narrow a permissive base; an empty/omitted
+        // child `tools:` leaves the inherited value untouched.
+        if !fm.tools.is_empty() {
+            merged.tools = fm.tools.clone();
         }
     }
 
@@ -516,6 +598,9 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     if let Some(v) = &merged.model {
         out.push_str(&format!("model: {v}\n"));
     }
+    if let Some(v) = &merged.max_tokens {
+        out.push_str(&format!("max_tokens: {v}\n"));
+    }
     if let Some(v) = &merged.resource_tier {
         out.push_str(&format!("resource_tier: {v}\n"));
     }
@@ -524,6 +609,12 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         // file is self-describing — `tm doctor` / `tm agent show` read it
         // straight off the deployed `.md` without re-walking `extends:`.
         out.push_str(&format!("skills: [{}]\n", merged.skills.join(", ")));
+    }
+    if !merged.tools.is_empty() {
+        // #2897: emit the resolved (override-merged) tool list so a deployed
+        // agent file is self-describing, mirroring the `skills:` emission
+        // above.
+        out.push_str(&format!("tools: [{}]\n", merged.tools.join(", ")));
     }
     if let Some(v) = &merged.initial_prompt {
         // Emit a YAML double-quoted scalar. The value is escaped so a `"` or
