@@ -157,3 +157,71 @@ fn clean_settings_file_no_tm_hooks_is_noop() {
     let after = std::fs::read_to_string(&path).unwrap();
     assert_eq!(after, original);
 }
+
+/// Why (#2940 review round 1, MEDIUM): a settings file that fails to parse as
+/// JSON at all must be treated as "nothing to clean" — never as an error, and
+/// NEVER touched or backed up, even with `force: true`. This pins the
+/// early-return at `cleanup.rs`'s `serde_json::from_str` failure branch.
+/// What: writes deliberately invalid JSON, calls `clean_settings_file` with
+/// `force: true`, and asserts `Ok(None)`, the file is byte-for-byte
+/// unchanged, and no `.bak-*` file was created alongside it.
+#[test]
+fn clean_settings_file_malformed_json_is_noop() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+    let original = "{ not valid json !!";
+    std::fs::write(&path, original).unwrap();
+
+    let result = clean_settings_file(&path, true).unwrap();
+    assert!(
+        result.is_none(),
+        "malformed JSON must never be reported or touched"
+    );
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after, original,
+        "malformed JSON file must be byte-for-byte unchanged"
+    );
+    let has_backup = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().contains(".bak-"));
+    assert!(
+        !has_backup,
+        "a malformed file must never get a backup written"
+    );
+}
+
+/// Why (#2940 review round 1, MEDIUM): a settings file that parses as valid
+/// JSON but is NOT a top-level object (e.g. a bare array or string) must also
+/// be treated as "nothing to clean" — the same early-return contract as a
+/// missing or malformed file, never an error and never a write.
+/// What: writes a valid JSON array (not an object) as the settings file,
+/// calls `clean_settings_file` with `force: true`, and asserts `Ok(None)`,
+/// the file is byte-for-byte unchanged, and no backup was created.
+#[test]
+fn clean_settings_file_non_object_json_is_noop() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+    let original = serde_json::to_string_pretty(&json!(["not", "an", "object"])).unwrap();
+    std::fs::write(&path, &original).unwrap();
+
+    let result = clean_settings_file(&path, true).unwrap();
+    assert!(
+        result.is_none(),
+        "non-object top-level JSON must never be reported or touched"
+    );
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        after, original,
+        "non-object JSON file must be byte-for-byte unchanged"
+    );
+    let has_backup = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().contains(".bak-"));
+    assert!(
+        !has_backup,
+        "a non-object JSON file must never get a backup written"
+    );
+}

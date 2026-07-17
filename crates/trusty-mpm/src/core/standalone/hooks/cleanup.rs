@@ -15,6 +15,34 @@
 //! entries; [`foreign_hook_event_names`] detects a DIFFERENT harness's hooks
 //! (informational only — never removed); [`clean_settings_file`] performs the
 //! actual scan-or-apply pass over one file, always backing up before writing.
+//!
+//! Known limitations (issue #2940 review round 1):
+//! - **Mixed hook groups are invisible to both matchers.** [`event_names_matching`]
+//!   classifies a whole group by `.all()` over its inner `hooks[*].command`
+//!   entries — a hand-edited group whose inner array mixes ONE tm command with
+//!   ONE foreign (e.g. claude-mpm) command satisfies neither
+//!   [`tm_hook_event_names`] (not ALL entries are tm-owned) nor
+//!   [`foreign_hook_event_names`] (not ALL entries are foreign-owned), so it is
+//!   never flagged by `tm doctor` nor stripped by `tm hooks clean --force`,
+//!   even though it does carry a live tm entry. In practice every group this
+//!   module itself writes is homogeneous (see [`super::mpm_hook_additions_with_exe`]),
+//!   so this only bites a manually hand-edited settings file — a real gap, but
+//!   the full fix (an `.any()` classification plus per-entry filtering in
+//!   [`super::strip_mpm_hook_entries_for_events`], rather than per-group) is
+//!   deliberately out of this PR's scope to avoid ballooning the diff. Tracked
+//!   for a follow-up issue.
+//! - **The hash-suffixed binary matcher trusts any binary under a `deps/`
+//!   directory.** [`super::is_mpm_hook_command`]'s hash-suffix branch (via
+//!   [`super::is_mpm_hash_suffixed_artifact`]) requires the resolved path to
+//!   contain a `deps` path component — narrowing, but not eliminating, the
+//!   risk that a coincidentally-named foreign binary (`<stem>-<hexhash>` under
+//!   *some* `deps/` directory that isn't actually a tm Cargo build artifact)
+//!   is misclassified as tm-owned by `tm hooks clean --force`. The bare-name
+//!   branch (`tm`/`trusty-mpm`/`session_manager_mvp`, unscoped by path) carries
+//!   the same pre-existing residual risk. Dry-run mode always prints the
+//!   exact matched command strings before any deletion (see `commands::hooks::clean`)
+//!   so an operator can review before applying `--force`.
+//!
 //! Test: `cargo test -p trusty-mpm standalone::hooks::cleanup` — see
 //! `cleanup_tests.rs`.
 
@@ -123,19 +151,30 @@ fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> Vec<
 /// before mutating so a bad scan can always be undone by hand, and a missing
 /// or non-object file is treated as "nothing to clean" rather than an error
 /// (a project with no settings file, or one that failed to parse, has no tm
-/// contamination to report).
+/// contamination to report). The final write MUST be atomic (issue #2940
+/// review round 1, HIGH): a plain truncate-then-write left `settings.json`
+/// corrupt — unparseable by Claude Code until a manual `.bak` restore — if
+/// the process died mid-write; [`trusty_common::claude_config::write_json_atomic`]
+/// writes to a temp file and renames over `path`, matching the atomicity
+/// [`super::remove_global_trusty_mpm_hooks`] (mod.rs:353) already uses for
+/// the same class of mutation.
 /// What: reads `path` (missing file → `Ok(None)`, malformed/non-object JSON →
 /// `Ok(None)` — never touched), returns `Ok(None)` when
 /// [`contains_tm_hooks`] is `false`. Otherwise computes the contaminated
-/// event list, and when `force` is `true`: writes a byte-identical backup to
-/// `<path>.bak-<unix-epoch-seconds>`, strips the tm-owned groups via
-/// [`strip_mpm_hook_entries`], and writes the result back pretty-printed
-/// (preserving every other key). In dry-run mode (`force: false`) the file is
-/// never touched and `backup_path` is `None`.
+/// event list, and when `force` is `true`: writes a byte-identical backup of
+/// the pre-clean text to `<path>.bak-<unix-epoch-seconds>` (this crate's own
+/// backup, reported via [`CleanOutcome::backup_path`]; `write_json_atomic`
+/// additionally maintains its own internal `<path>.bak`, a harmless second
+/// safety net), strips the tm-owned groups via [`strip_mpm_hook_entries`],
+/// and atomically writes the result back (preserving every other key). In
+/// dry-run mode (`force: false`) the file is never touched and `backup_path`
+/// is `None`.
 /// Test: `clean_settings_file_dry_run_reports_without_writing`,
 /// `clean_settings_file_force_writes_backup_and_strips`,
 /// `clean_settings_file_preserves_non_tm_keys`,
-/// `clean_settings_file_missing_file_is_noop`.
+/// `clean_settings_file_missing_file_is_noop`,
+/// `clean_settings_file_malformed_json_is_noop`,
+/// `clean_settings_file_non_object_json_is_noop`.
 pub fn clean_settings_file(path: &Path, force: bool) -> anyhow::Result<Option<CleanOutcome>> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -168,9 +207,7 @@ pub fn clean_settings_file(path: &Path, force: bool) -> anyhow::Result<Option<Cl
 
         let changed = strip_mpm_hook_entries(&mut val);
         debug_assert!(changed, "removed_events was non-empty but nothing stripped");
-        let serialized = serde_json::to_string_pretty(&val)
-            .map_err(|e| anyhow::anyhow!("serialize {}: {e}", path.display()))?;
-        std::fs::write(path, serialized)
+        trusty_common::claude_config::write_json_atomic(path, &val)
             .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         backup_path = Some(bak);
     }

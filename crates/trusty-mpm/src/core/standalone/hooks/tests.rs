@@ -433,6 +433,35 @@ fn test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants() {
     );
 }
 
+/// Why (#2940 review round 1, MEDIUM): `is_mpm_hook_command` drives
+/// `tm hooks clean --force`'s DESTRUCTIVE deletion path. Before this test's
+/// fix, a foreign binary that happened to be named `<stem>-<hexhash>`
+/// anywhere on disk (e.g. an unrelated tool at `/usr/local/bin/tm-a1b2c3d4`)
+/// would be silently deleted from a project's settings even though it has
+/// nothing to do with tm — `resolve_stable_hook_exe`/`current_exe()` can only
+/// ever produce a hash-suffixed path under a Cargo `deps/` build-artifact
+/// directory, so the predicate must never trust the hash-suffixed shape
+/// outside one.
+/// What: asserts a `<stem>-<hexhash>` command whose path has NO `deps`
+/// component is rejected, while the same stem+hash under a `deps/` directory
+/// (any depth) still matches.
+#[test]
+fn test_is_mpm_hook_command_rejects_hash_suffixed_binary_outside_deps_dir() {
+    assert!(
+        !is_mpm_hook_command("/usr/local/bin/tm-a1b2c3d4 hook"),
+        "hash-suffixed binary outside any deps/ dir must NOT be treated as tm-owned"
+    );
+    assert!(
+        !is_mpm_hook_command("/opt/foreign-tool/trusty_mpm-deadbeef hook"),
+        "coincidental stem+hash match outside deps/ must NOT be treated as tm-owned"
+    );
+    // Sanity: the same hash-suffixed shape under ANY deps/ directory still matches.
+    assert!(
+        is_mpm_hook_command("/some/other/deps/tm-a1b2c3d4 hook"),
+        "hash-suffixed binary under a deps/ dir must still match"
+    );
+}
+
 /// Why (issue #2940): `tm doctor` and `tm hooks clean` must recognise a
 /// project's pre-existing claude-mpm hook wiring so they can warn about the
 /// conflict without mistaking it for a tm entry (which would delete someone
