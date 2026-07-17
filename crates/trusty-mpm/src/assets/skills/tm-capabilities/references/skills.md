@@ -2,7 +2,7 @@
 
 Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a shared frontmatter line parser. Regenerate with `tm generate capabilities`.
 
-50 bundled skills.
+51 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -23,6 +23,7 @@ Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a s
 | `model-context-builder` | agent-reference | no | MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing |
 | `requesting-code-review` | agent-reference | no | Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding |
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
+| `rust-build-performance` | agent-reference | no | Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks. |
 | `security-scanning` | agent-reference | no | CI security scanning: secrets, deps, SAST, triage, expiring exceptions |
 | `software-patterns` | agent-reference | no | Compare tradeoffs and recommend architectural patterns — dependency injection, service-oriented architecture, repository, domain events, circuit breaker, and anti-corruption layer. Use when choosing between design patterns, planning microservices boundaries, evaluating system design alternatives, or asking 'which pattern should I use' for a specific coupling or resilience problem. |
 | `systematic-debugging` | agent-reference | no | Step-by-step debugging workflow: reproduce the bug, isolate the failing component, trace to root cause, apply a targeted fix, and verify the fix resolves the issue without regressions. Use when you encounter a bug, error, exception, crash, or unexpected behavior that needs troubleshooting. |
