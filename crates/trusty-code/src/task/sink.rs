@@ -21,6 +21,7 @@ use async_trait::async_trait;
 
 use crate::agent_loop::{ContextBudgetSnapshot, ToolEventSink};
 use crate::session::SessionRegistry;
+use crate::tools::telemetry::ToolTelemetry;
 
 /// Forwards `AgentLoop` tool-dispatch hooks to a specific session's
 /// `SessionRegistry::record_tool_*` calls (#2056).
@@ -47,33 +48,73 @@ impl SessionToolEventSink {
 
 #[async_trait]
 impl ToolEventSink for SessionToolEventSink {
-    async fn tool_started(&self, call_id: &str, tool: &str, args_preview: &str) {
+    async fn tool_started(&self, agent: &str, call_id: &str, tool: &str, args_preview: &str) {
         if let Err(e) =
             self.registry
-                .record_tool_started(&self.session_id, tool, call_id, args_preview)
+                .record_tool_started(&self.session_id, agent, tool, call_id, args_preview)
         {
-            tracing::warn!(session_id = %self.session_id, tool, call_id, "record_tool_started failed: {e}");
+            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record_tool_started failed: {e}");
         }
     }
 
-    async fn tool_finished(&self, call_id: &str, tool: &str, success: bool, result_preview: &str) {
+    async fn tool_finished(
+        &self,
+        agent: &str,
+        call_id: &str,
+        tool: &str,
+        success: bool,
+        result_preview: &str,
+    ) {
         if let Err(e) = self.registry.record_tool_finished(
             &self.session_id,
+            agent,
             tool,
             call_id,
             success,
             result_preview,
         ) {
-            tracing::warn!(session_id = %self.session_id, tool, call_id, "record_tool_finished failed: {e}");
+            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record_tool_finished failed: {e}");
         }
     }
 
-    async fn tool_error(&self, call_id: &str, tool: &str, error: &str) {
-        if let Err(e) = self
-            .registry
-            .record_tool_error(&self.session_id, tool, call_id, error)
+    async fn tool_error(&self, agent: &str, call_id: &str, tool: &str, error: &str) {
+        if let Err(e) =
+            self.registry
+                .record_tool_error(&self.session_id, agent, tool, call_id, error)
         {
-            tracing::warn!(session_id = %self.session_id, tool, call_id, "record_tool_error failed: {e}");
+            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record_tool_error failed: {e}");
+        }
+    }
+
+    /// Fan a tool's structured telemetry out to the matching #UI-Phase-1
+    /// `record_*` call.
+    ///
+    /// Why: the variant-to-record mapping belongs here, in the daemon-glue
+    /// layer, rather than in `agent_loop` (which must not know about
+    /// `SessionRegistry`) or in the tools (which must not know about
+    /// sessions at all).
+    /// What: same log-and-swallow contract as the hooks above — a vanished
+    /// session must never derail a run.
+    /// Test: `tests::forwards_search_and_recall_telemetry`.
+    async fn tool_telemetry(
+        &self,
+        agent: &str,
+        call_id: &str,
+        tool: &str,
+        telemetry: &ToolTelemetry,
+    ) {
+        let recorded = match telemetry {
+            ToolTelemetry::Search(t) => {
+                self.registry
+                    .record_search_performed(&self.session_id, agent, t)
+            }
+            ToolTelemetry::Recall(t) => {
+                self.registry
+                    .record_memory_recalled(&self.session_id, agent, t)
+            }
+        };
+        if let Err(e) = recorded {
+            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record tool telemetry failed: {e}");
         }
     }
 
@@ -116,7 +157,8 @@ mod tests {
     }
 
     /// Each hook must forward to the matching `record_tool_*` call and
-    /// publish the corresponding #2055 event kind.
+    /// publish the corresponding #2055 event kind, carrying the agent it was
+    /// called with (UI Phase 1).
     #[tokio::test]
     async fn forwards_started_finished_and_error() {
         let registry = Arc::new(SessionRegistry::new());
@@ -124,17 +166,108 @@ mod tests {
         let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
         let mut events = crate::events::subscribe();
 
-        sink.tool_started("call-1", "bash", "echo hi").await;
+        sink.tool_started("pm", "call-1", "bash", "echo hi").await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_started");
+        assert!(
+            matches!(ev.event, crate::events::Event::ToolStarted { agent, .. } if agent == "pm")
+        );
 
-        sink.tool_finished("call-1", "bash", true, "hi").await;
+        sink.tool_finished("pm", "call-1", "bash", true, "hi").await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_finished");
 
-        sink.tool_error("call-1", "bash", "boom").await;
+        sink.tool_error("pm", "call-1", "bash", "boom").await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_error");
+    }
+
+    /// ONE shared sink instance must attribute events to whichever agent
+    /// calls it (UI Phase 1).
+    ///
+    /// Why: this is the whole reason `agent` is a per-call PARAMETER rather
+    /// than sink state — `task::executor::run_and_record` clones ONE `Arc` of
+    /// this sink into both the PM's loop and the delegated engineer's runner.
+    /// A sink that carried its own agent name could only ever report one of
+    /// them, leaving the two indistinguishable on the stream.
+    #[tokio::test]
+    async fn one_shared_sink_attributes_each_caller_separately() {
+        let registry = Arc::new(SessionRegistry::new());
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let sink: Arc<dyn ToolEventSink> = Arc::new(SessionToolEventSink::new(
+            Arc::clone(&registry),
+            session.id.clone(),
+        ));
+        // Two clones of the ONE Arc, exactly as production wires it.
+        let pm_view = Arc::clone(&sink);
+        let engineer_view = Arc::clone(&sink);
+        let mut events = crate::events::subscribe();
+
+        pm_view
+            .tool_started("pm", "c1", "delegate_to_agent", "{}")
+            .await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert!(
+            matches!(ev.event, crate::events::Event::ToolStarted { agent, .. } if agent == "pm")
+        );
+
+        engineer_view
+            .tool_started("python-engineer", "c2", "bash", "cargo test")
+            .await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert!(
+            matches!(ev.event, crate::events::Event::ToolStarted { agent, .. }
+                if agent == "python-engineer"),
+            "a shared sink must report the CALLER's agent, not one fixed name"
+        );
+    }
+
+    /// `tool_telemetry` must fan each variant out to its matching structured
+    /// event (UI Phase 1).
+    #[tokio::test]
+    async fn forwards_search_and_recall_telemetry() {
+        let registry = Arc::new(SessionRegistry::new());
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
+        let mut events = crate::events::subscribe();
+
+        sink.tool_telemetry(
+            "python-engineer",
+            "c1",
+            "search_code",
+            &ToolTelemetry::Search(crate::tools::SearchTelemetry {
+                lane: "lexical".to_string(),
+                query: "q".to_string(),
+                hit_count: Some(2),
+                latency_ms: 5,
+            }),
+        )
+        .await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "search_performed");
+        assert!(
+            matches!(ev.event, crate::events::Event::SearchPerformed { agent, lane, .. }
+                if agent == "python-engineer" && lane == "lexical")
+        );
+
+        sink.tool_telemetry(
+            "pm",
+            "c2",
+            "recall_session",
+            &ToolTelemetry::Recall(crate::tools::RecallTelemetry {
+                query: "q".to_string(),
+                results: vec![crate::events::RecalledMemory {
+                    score: 0.4,
+                    injected: false,
+                }],
+            }),
+        )
+        .await;
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "memory_recalled");
+        assert!(
+            matches!(ev.event, crate::events::Event::MemoryRecalled { agent, .. } if agent == "pm")
+        );
     }
 
     /// Hooks against an unknown session must not panic (they log and
@@ -143,9 +276,21 @@ mod tests {
     async fn unknown_session_does_not_panic() {
         let registry = Arc::new(SessionRegistry::new());
         let sink = SessionToolEventSink::new(registry, "does-not-exist".to_string());
-        sink.tool_started("c", "bash", "x").await;
-        sink.tool_finished("c", "bash", true, "x").await;
-        sink.tool_error("c", "bash", "x").await;
+        sink.tool_started("pm", "c", "bash", "x").await;
+        sink.tool_finished("pm", "c", "bash", true, "x").await;
+        sink.tool_error("pm", "c", "bash", "x").await;
+        sink.tool_telemetry(
+            "pm",
+            "c",
+            "search_code",
+            &ToolTelemetry::Search(crate::tools::SearchTelemetry {
+                lane: "semantic".to_string(),
+                query: "q".to_string(),
+                hit_count: None,
+                latency_ms: 1,
+            }),
+        )
+        .await;
         sink.context_budget(&budget_snapshot()).await;
     }
 

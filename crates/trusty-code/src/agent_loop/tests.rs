@@ -1216,6 +1216,10 @@ mod batched_multi_tool;
 // live in a focused child module to keep this file under its SLOC cap.
 mod write_batch;
 
+// (UI Phase 1) Agent-attribution + structured-telemetry forwarding guards live
+// in a focused child module to keep this file under its SLOC cap.
+mod sink_events;
+
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final
@@ -1274,115 +1278,7 @@ async fn agent_loop_live() {
     );
 }
 
-// ── #2056: ToolEventSink + cancellation ─────────────────────────────────────────
-
-/// A `ToolEventSink` that records every call as a tagged string, in order.
-///
-/// Why: The sink's whole purpose is call-order + argument fidelity; recording
-/// each hook as `"started:name"` / `"finished:name:success"` / `"error:name"`
-/// lets a test assert the exact sequence with one `Vec<String>` comparison.
-struct RecordingSink {
-    calls: Mutex<Vec<String>>,
-}
-
-impl RecordingSink {
-    fn new() -> Self {
-        Self {
-            calls: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn calls(&self) -> Vec<String> {
-        self.calls.lock().expect("lock poisoned").clone()
-    }
-}
-
-#[async_trait]
-impl ToolEventSink for RecordingSink {
-    async fn tool_started(&self, call_id: &str, tool: &str, _args_preview: &str) {
-        self.calls
-            .lock()
-            .expect("lock poisoned")
-            .push(format!("started:{tool}:{call_id}"));
-    }
-
-    async fn tool_finished(&self, call_id: &str, tool: &str, success: bool, _result_preview: &str) {
-        self.calls
-            .lock()
-            .expect("lock poisoned")
-            .push(format!("finished:{tool}:{call_id}:{success}"));
-    }
-
-    async fn tool_error(&self, call_id: &str, tool: &str, _error: &str) {
-        self.calls
-            .lock()
-            .expect("lock poisoned")
-            .push(format!("error:{tool}:{call_id}"));
-    }
-}
-
-/// A sink must observe `tool_started` then `tool_finished(success=true)`, in
-/// that order, for a successful dispatch.
-///
-/// Why: This is the exact sequence #2056's daemon-driven task execution relies
-/// on to stream live `tool_started`/`tool_finished` events to an attached
-/// client — a regression here would silently break that observability.
-/// What: Script [tool_call, stop]; attach a `RecordingSink`; assert its call
-/// log is exactly `["started:echo:call-1", "finished:echo:call-1:true"]`.
-/// Test: this test.
-#[tokio::test]
-async fn sink_receives_started_then_finished_in_order() {
-    let llm = Arc::new(ScriptedLlm::from_json(&[
-        tool_call_response("call-1", "hi"),
-        stop_response("done"),
-    ]));
-    let registry = registry_with_echo(false);
-    let sink = Arc::new(RecordingSink::new());
-
-    let agent =
-        make_loop(llm, registry, AgentLoopConfig::default()).with_tool_event_sink(sink.clone());
-    agent
-        .run("sys", "task")
-        .await
-        .expect("loop should complete");
-
-    assert_eq!(
-        sink.calls(),
-        vec!["started:echo:call-1", "finished:echo:call-1:true"]
-    );
-}
-
-/// A recoverable `ToolResult::Error` must notify `tool_finished(success=false)`,
-/// NOT `tool_error` — only a fatal/non-recoverable error is exceptional.
-///
-/// Why: #2055's taxonomy reserves `tool_error` for exceptional failures (tool
-/// crash/timeout); an ordinary recoverable tool error (the model can retry) is
-/// still a "the tool finished, unsuccessfully" event, not an exceptional one.
-/// What: Script a tool call against the failing echo tool (`EchoTool { fail:
-/// true }`, which returns `ToolResult::err` — recoverable); assert the sink saw
-/// `finished:...:false`, never `error:...`.
-/// Test: this test.
-#[tokio::test]
-async fn sink_recoverable_error_is_finished_not_error() {
-    let llm = Arc::new(ScriptedLlm::from_json(&[
-        tool_call_response("call-1", "hi"),
-        stop_response("done"),
-    ]));
-    let registry = registry_with_echo(true);
-    let sink = Arc::new(RecordingSink::new());
-
-    let agent =
-        make_loop(llm, registry, AgentLoopConfig::default()).with_tool_event_sink(sink.clone());
-    agent
-        .run("sys", "task")
-        .await
-        .expect("loop should complete");
-
-    assert_eq!(
-        sink.calls(),
-        vec!["started:echo:call-1", "finished:echo:call-1:false"]
-    );
-}
+// ── #2056: cancellation (the ToolEventSink guards live in `tests::sink_events`) ──
 
 /// A set cancellation flag must abort the loop with `AgentLoopError::Cancelled`
 /// before the next turn's LLM call — never mid-tool-call.

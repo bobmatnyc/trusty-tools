@@ -30,8 +30,10 @@
 //! any thread carrying envelopes, helpers to publish and subscribe, and a
 //! `__OMPM_EVENT__ <json>\n` stderr-relay protocol so events emitted by
 //! `--workflow` subprocesses can be re-broadcast by the parent API server.
-//! Test: `events::publish` round-trips through `subscribe()`. The relay
-//! prefix is stable so the parent stderr reader can detect and re-publish.
+//! Test: see `events_tests` (sibling file, `#[cfg(test)]`) — `events::publish`
+//! round-trips through `subscribe()`, `kind()` is pinned against the serde tag
+//! for every variant, and the relay prefix is stable so the parent stderr
+//! reader can detect and re-publish.
 
 use std::sync::OnceLock;
 
@@ -57,6 +59,41 @@ pub const EVENT_LINE_PREFIX: &str = "__OMPM_EVENT__ ";
 /// memory bounded (~256KB at 256 bytes/event) while tolerating slow SSE
 /// subscribers without dropping recent events under typical load.
 const CHANNEL_CAPACITY: usize = 1024;
+
+/// The `agent` attribution value used when a tool event's `AgentLoop` was
+/// never told which agent it is running as (UI Phase 1).
+///
+/// Why: attribution is a builder opt-in (`AgentLoop::with_agent`), so a loop
+/// built by a caller that predates it — or by a test — still has to emit
+/// SOMETHING. An explicit, documented sentinel is strictly better than an
+/// empty string, which a UI would render as a blank agent chip and could not
+/// tell apart from a genuine empty name. Every PRODUCTION construction site
+/// sets a real name, so this value appearing in a live stream is a wiring
+/// bug worth seeing rather than hiding.
+/// What: the literal `"unknown"`; joins against nothing in the agent-keyed
+/// taxonomy, which is the point.
+/// Test: `agent_loop::tests::sink_events::unattributed_loop_emits_unknown_agent`.
+pub const UNATTRIBUTED_AGENT: &str = "unknown";
+
+/// One memory recalled by `recall_session`, with the flag that says whether
+/// it actually reached the model (UI Phase 1).
+///
+/// Why: see [`Event::MemoryRecalled`] — `injected` is the whole point of the
+/// event. `score` rides along because the UI renders it beside the memory
+/// ("41% · held"), and re-deriving it client-side is impossible: it is the
+/// memory daemon's own relevance score.
+/// What: `score` is trusty-memory's relevance score for the query, verbatim.
+/// `injected` is `true` when the tool's rendered result text included this
+/// result whole, `false` when its token budget dropped it.
+/// Test: `recalled_memory_round_trips_through_json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecalledMemory {
+    /// trusty-memory's relevance score for this result, as returned.
+    pub score: f64,
+    /// Whether this result entered the model's context (`false` = recalled
+    /// but held back by the tool's token budget).
+    pub injected: bool,
+}
 
 /// Real-time event types streamed to UI clients (browser, future Tauri).
 ///
@@ -125,11 +162,19 @@ pub enum Event {
     ///
     /// Why: `call_id` correlates this with the matching `ToolFinished`/
     /// `ToolError` when a session runs multiple tool calls in sequence or
-    /// concurrently.
+    /// concurrently. `agent` (UI Phase 1) is the attribution key: without it
+    /// a client can only guess WHICH agent made a call by interleaving this
+    /// stream with `AgentSpawned`/`AgentDone` ordering, which breaks the
+    /// moment the PM and a delegated engineer have overlapping calls. It is
+    /// the agent NAME (not a synthetic id) so it joins directly against the
+    /// pre-existing `LlmRequested`/`LlmResponded.agent_name` and
+    /// `AgentSpawned`/`AgentDone`/`PmDelegating.agent` keys — see
+    /// [`UNATTRIBUTED_AGENT`] for the fallback when a loop runs unattributed.
     /// What: `args_preview` is truncated via `preview()` before emission.
     /// Test: `session::registry::registry_tests::record_tool_started_publishes_event`.
     ToolStarted {
         session_id: String,
+        agent: String,
         tool: String,
         call_id: String,
         args_preview: String,
@@ -137,8 +182,10 @@ pub enum Event {
     /// A tool invocation completed (success or failure signalled by `success`,
     /// not a separate error variant — use `ToolError` for exceptional
     /// failures the caller wants to narrate distinctly, e.g. a timeout).
+    /// `agent` attributes the call — see [`Event::ToolStarted`].
     ToolFinished {
         session_id: String,
+        agent: String,
         tool: String,
         call_id: String,
         success: bool,
@@ -147,11 +194,66 @@ pub enum Event {
     /// A tool invocation raised an exceptional error (as opposed to
     /// completing with `success: false`) — e.g. the tool process crashed or
     /// timed out rather than returning a normal failure result.
+    /// `agent` attributes the call — see [`Event::ToolStarted`].
     ToolError {
         session_id: String,
+        agent: String,
         tool: String,
         call_id: String,
         error: String,
+    },
+
+    // -- Structured retrieval telemetry (UI Phase 1) --
+    /// A `search_code` call resolved to a concrete trusty-search lane and
+    /// returned `hit_count` hits in `latency_ms` (UI Phase 1).
+    ///
+    /// Why: `ToolStarted`/`ToolFinished` carry only TRUNCATED STRING
+    /// PREVIEWS of a search's arguments and rendered result text. The UI's
+    /// core bet is that a change is explained by the searches and memories
+    /// that drove it — which needs the search's real routed lane, its hit
+    /// count, and its cost as DATA, not as a prefix of prose the UI would
+    /// have to re-parse. Emitted ALONGSIDE (never instead of) the generic
+    /// tool events, so every existing consumer is unaffected.
+    /// What: `lane` is the lane trusty-search ACTUALLY served, which is not
+    /// always the mode the model asked for: a `semantic`/`symbol` query that
+    /// hits a still-building index transparently retries on the lexical lane
+    /// (issue #2783), and that degraded reality is reported as
+    /// `lane: "lexical"` — see `tools::trusty_search`'s `SearchLane`.
+    /// `hit_count` is `None` when the lane served results whose shape this
+    /// crate could not count (never a silent zero, which would read as "no
+    /// hits"). `latency_ms` measures the whole tool call, retry included.
+    /// Test: `session::registry::registry_tests::record_search_performed_publishes_event`,
+    /// `tools::trusty_search_tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
+    SearchPerformed {
+        session_id: String,
+        agent: String,
+        lane: String,
+        query: String,
+        hit_count: Option<usize>,
+        latency_ms: u64,
+    },
+    /// A `recall_session` call recalled `results` from durable memory, each
+    /// flagged with whether it actually ENTERED the model's context
+    /// (UI Phase 1).
+    ///
+    /// Why: the differentiating UI surface distinguishes memories that were
+    /// injected into context from ones that were recalled but HELD BACK —
+    /// rendered as e.g. "PKCE required… 41% · held" next to the injected
+    /// ones. `recall_session` has always known both the scores and which
+    /// results its token budget dropped, but that knowledge died inside the
+    /// tool's rendered text. This is the event that lets it out.
+    /// What: `results` is ordered highest-score-first (the order the daemon
+    /// returned and the tool preserved). `injected: false` means EXACTLY
+    /// "recalled but not entered into context" — the tool drops WHOLE
+    /// lowest-scored results to fit its token budget, so a held-back result
+    /// is one the model never saw.
+    /// Test: `session::registry::registry_tests::record_memory_recalled_publishes_event`,
+    /// `tools::recall_session::tests::telemetry_marks_budget_dropped_results_held_back`.
+    MemoryRecalled {
+        session_id: String,
+        agent: String,
+        query: String,
+        results: Vec<RecalledMemory>,
     },
 
     // -- Diagnostics / progress / generic message (#2055 taxonomy) --
@@ -450,6 +552,8 @@ impl Event {
             | Event::ToolStarted { session_id, .. }
             | Event::ToolFinished { session_id, .. }
             | Event::ToolError { session_id, .. }
+            | Event::SearchPerformed { session_id, .. }
+            | Event::MemoryRecalled { session_id, .. }
             | Event::Log { session_id, .. }
             | Event::Progress { session_id, .. }
             | Event::Message { session_id, .. }
@@ -499,6 +603,8 @@ impl Event {
             Event::ToolStarted { .. } => "tool_started",
             Event::ToolFinished { .. } => "tool_finished",
             Event::ToolError { .. } => "tool_error",
+            Event::SearchPerformed { .. } => "search_performed",
+            Event::MemoryRecalled { .. } => "memory_recalled",
             Event::Log { .. } => "log",
             Event::Progress { .. } => "progress",
             Event::Message { .. } => "message",
@@ -666,208 +772,5 @@ pub fn preview(s: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_serializes_with_type_tag() {
-        let ev = Event::PmThinking {
-            session_id: "s1".into(),
-            text: "considering options".into(),
-        };
-        let s = serde_json::to_string(&ev).unwrap();
-        assert!(s.contains("\"type\":\"pm_thinking\""), "{s}");
-        assert!(s.contains("\"session_id\":\"s1\""), "{s}");
-    }
-
-    #[test]
-    fn ping_roundtrips() {
-        let s = serde_json::to_string(&Event::Ping).unwrap();
-        let back: Event = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back, Event::Ping));
-    }
-
-    #[test]
-    fn session_id_returns_correct_field() {
-        let ev = Event::AgentMessage {
-            session_id: "abc".into(),
-            agent: "python".into(),
-            text: "hi".into(),
-        };
-        assert_eq!(ev.session_id(), Some("abc"));
-        assert_eq!(Event::Ping.session_id(), None);
-    }
-
-    #[test]
-    fn bus_is_singleton() {
-        let a = bus();
-        let b = bus();
-        // Two senders to the same channel: a message sent on `a` should be
-        // visible to a receiver from `b`.
-        let mut rx = b.subscribe();
-        let envelope = SessionEventEnvelope::new("s-bus".into(), 1, Utc::now(), Event::Ping);
-        let _ = a.send(envelope);
-        // Drain via try_recv to avoid an async runtime in this sync test.
-        let got = rx.try_recv().expect("expected an envelope");
-        assert!(matches!(got.event, Event::Ping));
-    }
-
-    #[tokio::test]
-    async fn publish_round_trips_through_subscribe() {
-        let mut rx = subscribe();
-        let envelope = SessionEventEnvelope::new(
-            "t1".into(),
-            1,
-            Utc::now(),
-            Event::SessionStarted {
-                session_id: "t1".into(),
-                project: "demo".into(),
-            },
-        );
-        publish(envelope);
-        let got = rx.recv().await.unwrap();
-        assert_eq!(got.session_id, "t1");
-        assert_eq!(got.seq, 1);
-        assert_eq!(got.kind, "session_started");
-        match got.event {
-            Event::SessionStarted {
-                session_id,
-                project,
-            } => {
-                assert_eq!(session_id, "t1");
-                assert_eq!(project, "demo");
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    /// `kind()` must match the serde `"type"` tag for every variant — the
-    /// guard `SessionEventEnvelope::new`'s doc comment references.
-    #[test]
-    fn kind_matches_serde_tag_for_every_variant() {
-        let samples: Vec<Event> = vec![
-            Event::SessionStarted {
-                session_id: "s".into(),
-                project: "p".into(),
-            },
-            Event::SessionDone {
-                session_id: "s".into(),
-                status: "done".into(),
-            },
-            Event::SessionCancelled {
-                session_id: "s".into(),
-            },
-            Event::SessionStatusChanged {
-                session_id: "s".into(),
-                status: "running".into(),
-            },
-            Event::SessionInput {
-                session_id: "s".into(),
-                input: "hi".into(),
-            },
-            Event::ToolStarted {
-                session_id: "s".into(),
-                tool: "bash".into(),
-                call_id: "c1".into(),
-                args_preview: "ls".into(),
-            },
-            Event::ToolFinished {
-                session_id: "s".into(),
-                tool: "bash".into(),
-                call_id: "c1".into(),
-                success: true,
-                result_preview: "ok".into(),
-            },
-            Event::ToolError {
-                session_id: "s".into(),
-                tool: "bash".into(),
-                call_id: "c1".into(),
-                error: "boom".into(),
-            },
-            Event::Log {
-                session_id: "s".into(),
-                level: "info".into(),
-                message: "m".into(),
-            },
-            Event::Progress {
-                session_id: "s".into(),
-                message: "m".into(),
-                percent: None,
-            },
-            Event::Message {
-                session_id: "s".into(),
-                text: "hi".into(),
-            },
-            Event::IndexReadiness {
-                session_id: "s".into(),
-                state: "warming".into(),
-                index_id: Some("repo".into()),
-                lifecycle_status: Some("indexed_lexical".into()),
-                chunk_count: Some(7),
-                lexical_ready: true,
-                semantic_ready: false,
-                graph_ready: false,
-                summary: "warming".into(),
-            },
-            Event::ContextBudget {
-                session_id: "s".into(),
-                context_window_tokens: 200_000,
-                overhead_tokens: 1_000,
-                overhead_cap_tokens: 80_000,
-                working_context_pct: 99,
-                overhead_pct: 1,
-                within_budget: true,
-                compaction_fired: false,
-                compaction_rounds: 0,
-            },
-            Event::Ping,
-        ];
-        for ev in samples {
-            let value = serde_json::to_value(&ev).unwrap();
-            let wire_type = value["type"].as_str().unwrap_or("ping");
-            assert_eq!(
-                ev.kind(),
-                wire_type,
-                "kind() drifted from the serde tag for {ev:?}"
-            );
-        }
-    }
-
-    /// `SessionEventEnvelope` must round-trip through JSON with every field
-    /// present, and `kind` must be derived from `event.kind()`.
-    #[test]
-    fn session_event_envelope_round_trips_through_json() {
-        let event = Event::SessionInput {
-            session_id: "s1".into(),
-            input: "hello".into(),
-        };
-        let envelope = SessionEventEnvelope::new("s1".into(), 7, Utc::now(), event);
-
-        let value = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(value["session_id"], "s1");
-        assert_eq!(value["seq"], 7);
-        assert_eq!(value["kind"], "session_input");
-        assert_eq!(value["event"]["type"], "session_input");
-        assert!(value["at"].is_string());
-
-        let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
-        assert_eq!(back.session_id, "s1");
-        assert_eq!(back.seq, 7);
-    }
-
-    #[test]
-    fn preview_truncates_at_char_boundary() {
-        assert_eq!(preview("hi", 5), "hi");
-        let out = preview("abcdef", 3);
-        assert_eq!(out.chars().count(), 4); // 3 + ellipsis
-        assert!(out.starts_with("abc"));
-        assert!(out.ends_with('\u{2026}'));
-    }
-
-    #[test]
-    fn event_line_prefix_is_stable() {
-        // Lock in the wire constant — changing it breaks the parent/child
-        // relay protocol.
-        assert_eq!(EVENT_LINE_PREFIX, "__OMPM_EVENT__ ");
-    }
-}
+#[path = "events_tests.rs"]
+mod tests;

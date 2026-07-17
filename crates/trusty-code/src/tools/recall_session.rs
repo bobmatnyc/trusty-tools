@@ -40,7 +40,9 @@ use tracing::warn;
 use trusty_common::mcp::memory_rpc::call_memory_tool_at;
 
 use crate::agent_loop::estimate_tokens;
+use crate::events::RecalledMemory;
 use crate::memory_envelope::{parse_tools_call_envelope, tools_call_params};
+use crate::tools::telemetry::{RecallTelemetry, ToolTelemetry};
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// The tool's registered/advertised name.
@@ -154,8 +156,16 @@ fn filter_and_cap(results: &[Value], tag: &str, top_k: usize) -> Vec<Value> {
 /// asked for, so an operator diagnosing "the model missed a fact it should
 /// have recalled" needs this visible from stderr, not just inferable from
 /// the rendered text length.
-/// Test: `tests::render_drops_whole_lowest_scored_entries_over_budget`.
-fn render_results(query: &str, results: &[Value]) -> String {
+///
+/// (UI Phase 1) Also returns HOW MANY leading results made it into that
+/// text. Because the loop takes a strict prefix (it `break`s at the first
+/// over-budget entry rather than skipping it and trying the next), the
+/// included set is always `results[..injected_count]` — so one count fully
+/// describes the injected/held-back split, and
+/// [`recall_telemetry`] turns it into the per-result `injected` flags.
+/// Test: `tests::render_drops_whole_lowest_scored_entries_over_budget`,
+/// `tests::render_includes_all_entries_within_budget`.
+fn render_results(query: &str, results: &[Value]) -> (String, usize) {
     let mut entries: Vec<String> = Vec::new();
     let mut budget_used = 0usize;
     for r in results {
@@ -176,10 +186,41 @@ fn render_results(query: &str, results: &[Value]) -> String {
             "recall_session: token budget exceeded — dropping lowest-scored result(s)"
         );
     }
-    format!(
-        "Session memory results for \"{query}\":\n\n{}",
-        entries.join("\n\n---\n\n")
+    let injected_count = entries.len();
+    (
+        format!(
+            "Session memory results for \"{query}\":\n\n{}",
+            entries.join("\n\n---\n\n")
+        ),
+        injected_count,
     )
+}
+
+/// Build the structured account of what was recalled and what reached the
+/// model (UI Phase 1).
+///
+/// Why: this is the whole point of `Event::MemoryRecalled` — the UI renders
+/// held-back memories ("41% · held") beside injected ones, and only this
+/// tool ever knows which was which.
+/// What: `results` is the filtered/capped, score-sorted list; the first
+/// `injected_count` of them entered context (see [`render_results`]) and the
+/// rest were recalled but dropped whole by the token budget. A result whose
+/// entry carries no numeric `score` reports `0.0` rather than being omitted
+/// — the UI must still see that the memory was recalled and held back.
+/// Test: `tests::telemetry_marks_budget_dropped_results_held_back`,
+/// `tests::telemetry_marks_all_injected_when_within_budget`.
+fn recall_telemetry(query: &str, results: &[Value], injected_count: usize) -> RecallTelemetry {
+    RecallTelemetry {
+        query: query.to_string(),
+        results: results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| RecalledMemory {
+                score: r.get("score").and_then(Value::as_f64).unwrap_or(0.0),
+                injected: i < injected_count,
+            })
+            .collect(),
+    }
 }
 
 #[async_trait]
@@ -290,7 +331,15 @@ impl ToolExecutor for RecallSessionTool {
             ));
         }
 
-        ToolResult::ok(render_results(&parsed.query, &filtered))
+        // (UI Phase 1) The render decides the injected/held-back split; the
+        // telemetry reports it. Both derive from the SAME call so they can
+        // never disagree about what the model actually saw.
+        let (text, injected_count) = render_results(&parsed.query, &filtered);
+        ToolResult::ok(text).with_telemetry(ToolTelemetry::Recall(recall_telemetry(
+            &parsed.query,
+            &filtered,
+            injected_count,
+        )))
     }
 }
 
@@ -373,7 +422,7 @@ mod tests {
             r["content"] = json!("small tail entry");
             r
         }];
-        let rendered = render_results("q", &results);
+        let (rendered, injected_count) = render_results("q", &results);
         assert!(
             rendered.contains(&huge),
             "first entry always included whole"
@@ -382,6 +431,7 @@ mod tests {
             !rendered.contains("small tail entry"),
             "second (lower-scored) entry must be dropped whole, not merged/truncated in"
         );
+        assert_eq!(injected_count, 1, "only the first entry entered context");
     }
 
     #[test]
@@ -390,9 +440,124 @@ mod tests {
             result_entry("first", 0.9, &["session:s1"]),
             result_entry("second", 0.8, &["session:s1"]),
         ];
-        let rendered = render_results("q", &results);
+        let (rendered, injected_count) = render_results("q", &results);
         assert!(rendered.contains("first"));
         assert!(rendered.contains("second"));
+        assert_eq!(
+            injected_count, 2,
+            "both entries fit, so both entered context"
+        );
+    }
+
+    // ── telemetry (UI Phase 1) ───────────────────────────────────────────
+
+    /// Extract the `RecallTelemetry` a result carries, or panic.
+    fn recall_telemetry_of(result: &ToolResult) -> &RecallTelemetry {
+        match result.telemetry() {
+            Some(ToolTelemetry::Recall(t)) => t,
+            other => panic!("expected recall telemetry, got {other:?}"),
+        }
+    }
+
+    /// A result the token budget dropped must be reported as recalled but
+    /// NOT injected — the UI's "41% · held" surface.
+    ///
+    /// Why: THE point of `Event::MemoryRecalled`. The tool has always known
+    /// which results its budget dropped; before this ticket that knowledge
+    /// died inside the rendered text. `injected: false` must mean exactly
+    /// "recalled but not entered into context".
+    /// What: two results where the first alone busts the budget; assert the
+    /// second is present in the telemetry, flagged held-back, with its score.
+    /// Test: this test.
+    #[test]
+    fn telemetry_marks_budget_dropped_results_held_back() {
+        let huge = "x".repeat((TOKEN_BUDGET + 100) * 4);
+        let results = vec![
+            result_entry(&huge, 0.9, &["session:s1"]),
+            result_entry("held back", 0.41, &["session:s1"]),
+        ];
+        let (_text, injected_count) = render_results("q", &results);
+        let telemetry = recall_telemetry("q", &results, injected_count);
+
+        assert_eq!(
+            telemetry.results,
+            vec![
+                RecalledMemory {
+                    score: 0.9,
+                    injected: true
+                },
+                RecalledMemory {
+                    score: 0.41,
+                    injected: false
+                },
+            ],
+            "a budget-dropped result must still be REPORTED, flagged held-back \
+             — dropping it from the telemetry too would hide it from the UI \
+             entirely, which is the exact opposite of the requirement"
+        );
+    }
+
+    /// Every result that fit the budget must be reported injected.
+    #[test]
+    fn telemetry_marks_all_injected_when_within_budget() {
+        let results = vec![
+            result_entry("first", 0.9, &["session:s1"]),
+            result_entry("second", 0.8, &["session:s1"]),
+        ];
+        let (_text, injected_count) = render_results("q", &results);
+        let telemetry = recall_telemetry("q", &results, injected_count);
+
+        assert!(
+            telemetry.results.iter().all(|r| r.injected),
+            "both fit, so both entered context: {:?}",
+            telemetry.results
+        );
+        assert_eq!(telemetry.query, "q");
+    }
+
+    /// `execute` must attach telemetry whose injected flags agree with the
+    /// text it actually returned (UI Phase 1).
+    ///
+    /// Why: an end-to-end guard that the render and the telemetry can never
+    /// disagree about what the model saw — the failure mode a UI could not
+    /// detect on its own.
+    /// Test: this test.
+    #[tokio::test]
+    async fn execute_attaches_telemetry_matching_the_rendered_text() {
+        let results = vec![
+            result_entry("visible one", 0.9, &["session:s1", "turn"]),
+            result_entry("visible two", 0.7, &["session:s1", "turn"]),
+        ];
+        let (base_url, _captured) = spawn_recall_mock(results).await;
+        let tool = RecallSessionTool::new("s1", base_url, "p");
+
+        let result = tool.execute(json!({"query": "foo"})).await;
+        let telemetry = recall_telemetry_of(&result);
+
+        assert_eq!(telemetry.query, "foo");
+        assert_eq!(telemetry.results.len(), 2);
+        for (i, r) in telemetry.results.iter().enumerate() {
+            assert!(r.injected, "result {i} is in the text, so it is injected");
+        }
+        assert!(result.content().contains("visible one"));
+        assert!(result.content().contains("visible two"));
+    }
+
+    /// The fail-open paths must attach no telemetry — nothing was recalled.
+    ///
+    /// Why: emitting a `MemoryRecalled` with an empty result set for an
+    /// unreachable daemon would tell the UI "we recalled nothing relevant"
+    /// when the truth is "we could not look". Those are different facts.
+    /// Test: this test.
+    #[tokio::test]
+    async fn fail_open_paths_report_no_telemetry() {
+        let tool = RecallSessionTool::new("s1", "http://127.0.0.1:1", "p");
+        let result = tool.execute(json!({"query": "anything"})).await;
+        assert!(!result.is_error());
+        assert!(
+            result.telemetry().is_none(),
+            "an unreachable daemon is not a recall with zero results"
+        );
     }
 
     /// Dropping a lowest-scored result for budget emits an INFO-level log

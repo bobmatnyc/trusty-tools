@@ -888,25 +888,32 @@ struct RecordingSink {
 
 #[async_trait]
 impl ToolEventSink for RecordingSink {
-    async fn tool_started(&self, call_id: &str, tool: &str, _args_preview: &str) {
+    async fn tool_started(&self, agent: &str, call_id: &str, tool: &str, _args_preview: &str) {
         self.calls
             .lock()
             .expect("lock poisoned")
-            .push(format!("started:{tool}:{call_id}"));
+            .push(format!("started:{agent}:{tool}:{call_id}"));
     }
 
-    async fn tool_finished(&self, call_id: &str, tool: &str, success: bool, _result_preview: &str) {
+    async fn tool_finished(
+        &self,
+        agent: &str,
+        call_id: &str,
+        tool: &str,
+        success: bool,
+        _result_preview: &str,
+    ) {
         self.calls
             .lock()
             .expect("lock poisoned")
-            .push(format!("finished:{tool}:{call_id}:{success}"));
+            .push(format!("finished:{agent}:{tool}:{call_id}:{success}"));
     }
 
-    async fn tool_error(&self, call_id: &str, tool: &str, _error: &str) {
+    async fn tool_error(&self, agent: &str, call_id: &str, tool: &str, _error: &str) {
         self.calls
             .lock()
             .expect("lock poisoned")
-            .push(format!("error:{tool}:{call_id}"));
+            .push(format!("error:{agent}:{tool}:{call_id}"));
     }
 }
 
@@ -917,7 +924,9 @@ impl ToolEventSink for RecordingSink {
 /// the same sink the delegating (PM) loop uses; this is the propagation seam
 /// that makes that possible.
 /// What: Script [tool_call("mytool"), stop]; attach a `RecordingSink` to the
-/// runner; assert it saw `started`/`finished` for `mytool`.
+/// runner; assert it saw `started`/`finished` for `mytool`, ATTRIBUTED
+/// (UI Phase 1) to `python-engineer` — the delegated agent — rather than to
+/// the PM that shares this same sink instance.
 /// Test: this test.
 #[tokio::test]
 async fn sink_reaches_delegated_loop() {
@@ -945,7 +954,13 @@ async fn sink_reaches_delegated_loop() {
 
     assert_eq!(
         sink.calls.lock().expect("lock poisoned").as_slice(),
-        ["started:mytool:call-1", "finished:mytool:call-1:true"]
+        [
+            "started:python-engineer:mytool:call-1",
+            "finished:python-engineer:mytool:call-1:true"
+        ],
+        "the runner must attribute a delegated sub-agent's tool events to \
+         that sub-agent — the sink is shared with the PM, so an unattributed \
+         (or PM-attributed) event here would make the two indistinguishable"
     );
 }
 

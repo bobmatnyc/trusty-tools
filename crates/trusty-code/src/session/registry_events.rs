@@ -20,6 +20,7 @@
 //! `registry_tests::record_message_publishes_event`.
 
 use super::*;
+use crate::tools::telemetry::{RecallTelemetry, SearchTelemetry};
 
 use crate::agent_loop::ContextBudgetSnapshot;
 
@@ -138,11 +139,14 @@ impl SessionRegistry {
     /// or bus directly.
     /// What: errors with `session_not_found` if `id` is unknown; `args_preview`
     /// is truncated via `crate::events::preview` before emission so a large
-    /// argument payload can't blow the ring buffer / wire size.
+    /// argument payload can't blow the ring buffer / wire size. `agent`
+    /// (UI Phase 1) is the dispatching agent's name — see
+    /// [`crate::events::Event::ToolStarted`].
     /// Test: `registry_tests::record_tool_started_publishes_event`.
     pub fn record_tool_started(
         &self,
         id: &str,
+        agent: &str,
         tool: &str,
         call_id: &str,
         args: &str,
@@ -152,6 +156,7 @@ impl SessionRegistry {
             id,
             Event::ToolStarted {
                 session_id: id.to_string(),
+                agent: agent.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 args_preview: crate::events::preview(args, 500),
@@ -166,6 +171,7 @@ impl SessionRegistry {
     pub fn record_tool_finished(
         &self,
         id: &str,
+        agent: &str,
         tool: &str,
         call_id: &str,
         success: bool,
@@ -176,6 +182,7 @@ impl SessionRegistry {
             id,
             Event::ToolFinished {
                 session_id: id.to_string(),
+                agent: agent.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 success,
@@ -191,6 +198,7 @@ impl SessionRegistry {
     pub fn record_tool_error(
         &self,
         id: &str,
+        agent: &str,
         tool: &str,
         call_id: &str,
         error: &str,
@@ -200,9 +208,66 @@ impl SessionRegistry {
             id,
             Event::ToolError {
                 session_id: id.to_string(),
+                agent: agent.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 error: error.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Record a `search_code` call's real lane + hit count + latency
+    /// (UI Phase 1). See [`crate::events::Event::SearchPerformed`].
+    ///
+    /// Why: emitted ALONGSIDE the generic tool events so the UI can trace a
+    /// change back to the searches that drove it without re-parsing prose.
+    /// What: same existence guard + ring-buffer/sequencing path as every
+    /// other `record_*`, so a structured event replays on `session.attach`
+    /// exactly like the generic ones.
+    /// Test: `registry_tests::record_search_performed_publishes_event`.
+    pub fn record_search_performed(
+        &self,
+        id: &str,
+        agent: &str,
+        telemetry: &SearchTelemetry,
+    ) -> Result<(), RpcError> {
+        self.ensure_exists(id)?;
+        self.record(
+            id,
+            Event::SearchPerformed {
+                session_id: id.to_string(),
+                agent: agent.to_string(),
+                lane: telemetry.lane.clone(),
+                query: telemetry.query.clone(),
+                hit_count: telemetry.hit_count,
+                latency_ms: telemetry.latency_ms,
+            },
+        );
+        Ok(())
+    }
+
+    /// Record a `recall_session` call's results and which ones entered
+    /// context (UI Phase 1). See [`crate::events::Event::MemoryRecalled`].
+    ///
+    /// Why: the `injected` flag is the UI's differentiating surface —
+    /// injected memories vs ones recalled and held back.
+    /// What: as [`Self::record_search_performed`].
+    /// Test: `registry_tests::record_memory_recalled_publishes_event`.
+    pub fn record_memory_recalled(
+        &self,
+        id: &str,
+        agent: &str,
+        telemetry: &RecallTelemetry,
+    ) -> Result<(), RpcError> {
+        self.ensure_exists(id)?;
+        self.record(
+            id,
+            Event::MemoryRecalled {
+                session_id: id.to_string(),
+                agent: agent.to_string(),
+                query: telemetry.query.clone(),
+                results: telemetry.results.clone(),
             },
         );
         Ok(())

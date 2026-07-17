@@ -398,7 +398,14 @@ impl InProcessAgentRunner {
             // repeated "one final run to confirm" passes. Same single
             // construction site, so both `run_task` and `task::executor`
             // delegations get it.
-            .with_redundant_run_suppression();
+            .with_redundant_run_suppression()
+            // (UI Phase 1) Attribute this sub-agent's tool events to itself.
+            // This is the ONE production construction site for every delegated
+            // sub-agent loop (both `run_task` and `task::executor` delegate
+            // through this runner), and the sink it shares with the PM below is
+            // the same `Arc` — so this call is what makes a delegated
+            // engineer's tool calls distinguishable from the PM's.
+            .with_agent(agent_name);
         if let Some(sink) = &self.sink {
             agent_loop = agent_loop.with_tool_event_sink(Arc::clone(sink));
         }

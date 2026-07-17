@@ -31,6 +31,7 @@ pub mod goals;
 pub mod recall_session;
 pub mod registry;
 pub mod skill;
+pub mod telemetry;
 pub mod traits;
 pub mod trusty_search;
 
@@ -50,6 +51,7 @@ pub use goals::{CLEAR_GOAL_TOOL_NAME, ClearGoalTool, SET_GOAL_TOOL_NAME, SetGoal
 pub use recall_session::{RECALL_SESSION_TOOL_NAME, RecallSessionTool};
 pub use registry::ToolRegistry;
 pub use skill::{USE_SKILL_TOOL_NAME, UseSkillTool};
+pub use telemetry::{RecallTelemetry, SearchTelemetry, ToolTelemetry};
 pub use traits::{
     AgentOutput, AgentRunner, HistoryMessage, RunContext, SearchProvider, SearchResult,
     ServiceTier, SkillResolver, ToolExecutor, ToolResult,
