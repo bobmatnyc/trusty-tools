@@ -378,7 +378,6 @@ crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_ticket_with_system
 crates/trusty-mpm/src/bin/tm/commands/auth.rs	set_token_reads_from_explicit_arg
 crates/trusty-mpm/src/bin/tm/commands/auth.rs	set_token_reads_from_stdin
 crates/trusty-mpm/src/bin/tm/commands/daemon.rs	group_sessions_by_git_root_groups_correctly
-crates/trusty-mpm/src/bin/tm/commands/install.rs	install_claude_hooks_creates_fallback
 crates/trusty-mpm/src/bin/tm/commands/install.rs	install_claude_hooks_is_idempotent
 crates/trusty-mpm/src/bin/tm/commands/issue/ops.rs	ops_transition_assignee_unchanged
 crates/trusty-mpm/src/bin/tm/commands/issue/ops.rs	ops_transition_rejects_invalid
@@ -531,7 +530,6 @@ crates/trusty-mpm/src/daemon/bug_report/scrubber/rules.rs	posix_path_with_home_v
 crates/trusty-mpm/src/daemon/bug_report/token.rs	jwt_claims_correct
 crates/trusty-mpm/src/daemon/bug_report/token.rs	resolution_order_app_used_when_both_env_vars_set
 crates/trusty-mpm/src/daemon/bug_report/types.rs	filing_result_serializes_roundtrip
-crates/trusty-mpm/src/daemon/doctor.rs	check_agents_scoped_to_managed_workspace_fails_on_empty_roster
 crates/trusty-mpm/src/daemon/error.rs	invalid_transition_body_lists_allowed
 crates/trusty-mpm/src/daemon/idle_reaper.rs	counter_removed_after_action
 crates/trusty-mpm/src/daemon/idle_reaper.rs	new_state_is_empty
