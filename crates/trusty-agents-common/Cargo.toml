@@ -25,6 +25,12 @@ regex = { workspace = true }
 # process-global event bus. The workspace `tokio` already enables "full"
 # (which includes the `sync` feature that provides `broadcast`).
 tokio = { workspace = true }
+# agents::manifest hashes deployed content for the ownership ledger (#2892).
+sha2 = { workspace = true }
+# agents::manifest::ManifestError is a self-contained thiserror enum (#2892).
+thiserror = { workspace = true }
+# agents::deployer warns once on untracked-modified files (#2892).
+tracing = { workspace = true }
 
 [dev-dependencies]
 # session_registry tests use tempfile for isolated state-dir creation.

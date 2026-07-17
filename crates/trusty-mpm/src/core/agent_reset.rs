@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use crate::core::agent_builder::{AgentBuildError, compose_agent, source_chain};
 use crate::core::agent_deployer::is_agent_file;
 use crate::core::agent_manifest::{
-    AgentManifest, ManifestEntry, ManifestLoad, Origin, atomic_write, checksum,
+    AgentManifest, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write, checksum,
 };
 
 /// Summary of one [`reset_agents`] run.
@@ -206,7 +206,7 @@ pub fn reset_agents(
 
         std::fs::create_dir_all(target_dir)?;
         atomic_write(&target_path, &composed).map_err(|e| match e {
-            crate::core::error::Error::Io(io) => AgentBuildError::Io(io),
+            ManifestError::Io(io) => AgentBuildError::Io(io),
             other => AgentBuildError::FrontmatterParse(other.to_string()),
         })?;
         manifest.managed.insert(
@@ -222,7 +222,7 @@ pub fn reset_agents(
     }
 
     manifest.save(target_dir).map_err(|e| match e {
-        crate::core::error::Error::Io(io) => AgentBuildError::Io(io),
+        ManifestError::Io(io) => AgentBuildError::Io(io),
         other => AgentBuildError::FrontmatterParse(other.to_string()),
     })?;
 
