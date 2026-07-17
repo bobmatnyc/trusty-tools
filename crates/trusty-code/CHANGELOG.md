@@ -235,7 +235,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   spends a later one's budget. Exhausting it is now **recoverable** — it no
   longer stops the PM loop, matching the precedent set by #2683/#2805's
   post-completion refusal. The cap's actual purpose is preserved by a new
-  run-wide `MAX_ENGINEER_INVOCATIONS = 12` ceiling (4× the per-delegation
+  run-wide `MAX_FAILED_INVOCATIONS = 12` ceiling (4× the per-delegation
   budget): a genuinely failing engineer stays bounded, and only that ceiling —
   a condition no fresh delegation could clear — latches the loop-stopping
   signal. Not a #2805 regression; #2805 fixed the *symptom* and remains correct

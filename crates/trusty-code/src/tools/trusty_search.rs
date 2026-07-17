@@ -528,7 +528,8 @@ impl ToolExecutor for TrustySearchTool {
     /// generic tool events still narrate them.
     /// Test: `tests::execute_fail_open_when_binary_absent`,
     /// `tests::execute_rejects_malformed_args_recoverably`,
-    /// `tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
+    /// `tests::resolved_lane_reports_lexical_when_the_retry_served_it`,
+    /// `tests::execute_attaches_telemetry_when_lane_reply_has_no_text`.
     async fn execute(&self, args: Value) -> ToolResult {
         let started = std::time::Instant::now();
         let parsed: SearchArgs = match serde_json::from_value(args) {
@@ -618,7 +619,8 @@ impl ToolExecutor for TrustySearchTool {
                 .with_telemetry(telemetry(SearchLane::resolved(mode, false), &text)),
             None => ToolResult::ok(format!(
                 "trusty-search returned no results. {FALLBACK_HINT}"
-            )),
+            ))
+            .with_telemetry(telemetry(SearchLane::resolved(mode, false), "")),
         }
     }
 }
