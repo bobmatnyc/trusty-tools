@@ -316,3 +316,107 @@ async fn fail_open_paths_report_no_telemetry() {
         "an absent daemon is not a search with zero hits"
     );
 }
+
+// ── execute: lane reached but reply carries no extractable text ────────────
+
+/// Spawn a minimal fake MCP stdio server as a throwaway executable shell
+/// script.
+///
+/// Why: exercising `execute()`'s "lane reached, but the reply had no
+/// extractable text" arm end-to-end requires a process that speaks just
+/// enough MCP to complete the handshake plus two `tools/call` round-trips
+/// (`list_indexes`, then the lane call itself) — `TrustySearchTool` always
+/// drives a real `StdioMcpClient` subprocess, so there is no lighter-weight
+/// seam to fake this at.
+/// What: writes an executable POSIX shell script that replies to the Nth
+/// request line it sees (matched only by the presence of an `"id":` field,
+/// so the handshake's `notifications/initialized` notification — which has
+/// no id — is silently skipped) with the Nth canned response, verbatim.
+/// Test: `execute_attaches_telemetry_when_lane_reply_has_no_text`.
+#[cfg(unix)]
+fn write_fake_mcp_server(responses: &[Value; 3]) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = format!(
+        "#!/bin/sh\ni=0\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":'*)\n      i=$((i + 1))\n      case \"$i\" in\n        1) printf '%s\\n' '{}' ;;\n        2) printf '%s\\n' '{}' ;;\n        3) printf '%s\\n' '{}' ;;\n      esac\n      ;;\n  esac\ndone\n",
+        responses[0], responses[1], responses[2],
+    );
+
+    let path = std::env::temp_dir().join(format!(
+        "tcode-fake-mcp-{}-{}.sh",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::write(&path, script).expect("write fake mcp script");
+    let mut perms = std::fs::metadata(&path)
+        .expect("stat fake mcp script")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod fake mcp script");
+    path
+}
+
+/// Why: `execute`'s doc comment promises every path that actually reaches a
+/// lane attaches a `SearchTelemetry`. The `mcp_text(&result) == None` arm — a
+/// lane reply that is otherwise successful (no `isError`) but carries a
+/// `content` item with no `text` field — previously attached none, silently
+/// breaking that invariant even though a real search genuinely happened.
+/// What: drives `execute()` against a fake MCP server that completes the
+/// handshake, answers `list_indexes` with an empty list (so `grep` mode needs
+/// no index), then answers the `grep` call with a textless `content` item.
+/// Asserts `execute()` still fails open (a successful, non-error `ToolResult`)
+/// AND now attaches telemetry for this arm.
+/// Test: this test.
+#[tokio::test]
+#[cfg(unix)]
+async fn execute_attaches_telemetry_when_lane_reply_has_no_text() {
+    let init_resp = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "serverInfo": { "name": "fake-trusty-search", "version": "0.0.0" },
+            "protocolVersion": "2024-11-05"
+        }
+    });
+    let list_indexes_resp = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": { "content": [{ "type": "text", "text": "{\"indexes\":[]}" }] }
+    });
+    let grep_resp = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        // No "text" field on the content item — this is what makes
+        // `mcp_text` return `None` despite a genuinely successful,
+        // non-error lane reply.
+        "result": { "content": [{ "type": "text" }] }
+    });
+
+    let script_path = write_fake_mcp_server(&[init_resp, list_indexes_resp, grep_resp]);
+    let tool = TrustySearchTool::new(std::env::temp_dir()).with_binary(
+        script_path
+            .to_str()
+            .expect("utf8 fake mcp script path")
+            .to_string(),
+    );
+
+    let result = tool
+        .execute(json!({ "query": "TODO", "mode": "grep" }))
+        .await;
+
+    let _ = std::fs::remove_file(&script_path);
+
+    assert!(
+        !result.is_error(),
+        "a malformed-but-successful lane reply is still fail-open success: {}",
+        result.content()
+    );
+    assert!(
+        result.telemetry().is_some(),
+        "execute()'s doc comment promises every lane-reached path attaches \
+         telemetry, but the no-extractable-text arm attached none"
+    );
+}
