@@ -17,6 +17,7 @@ pub mod analytics;
 pub mod community;
 pub mod decay;
 pub mod dream;
+pub mod dream_consolidation;
 pub mod embed;
 pub mod filter;
 pub mod git;

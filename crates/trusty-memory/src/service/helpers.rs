@@ -313,6 +313,10 @@ struct UserConfigMin {
     openrouter: OpenRouterMin,
     #[serde(default)]
     local_model: LocalModelMin,
+    /// `[dream_consolidation]` section (epic #2866): tool-calling dream
+    /// consolidation pass config. Absent section → all defaults (disabled).
+    #[serde(default)]
+    dream_consolidation: trusty_common::memory_core::dream_consolidation::DreamConsolidationConfig,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -359,6 +363,11 @@ pub struct LoadedUserConfig {
     pub openrouter_api_key: String,
     pub openrouter_model: String,
     pub local_model: trusty_common::LocalModelConfig,
+    /// Tool-calling dream-consolidation pass config (epic #2866).
+    /// Default OFF; opt in via a `[dream_consolidation]` section with
+    /// `enabled = true` in `~/.trusty-memory/config.toml`.
+    pub dream_consolidation:
+        trusty_common::memory_core::dream_consolidation::DreamConsolidationConfig,
 }
 
 impl Default for LoadedUserConfig {
@@ -367,6 +376,8 @@ impl Default for LoadedUserConfig {
             openrouter_api_key: String::new(),
             openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
             local_model: trusty_common::LocalModelConfig::default(),
+            dream_consolidation:
+                trusty_common::memory_core::dream_consolidation::DreamConsolidationConfig::default(),
         }
     }
 }
@@ -400,6 +411,7 @@ pub fn load_user_config() -> Option<LoadedUserConfig> {
             base_url: parsed.local_model.base_url,
             model: parsed.local_model.model,
         },
+        dream_consolidation: parsed.dream_consolidation,
     })
 }
 

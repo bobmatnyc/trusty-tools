@@ -247,6 +247,18 @@ impl Dreamer {
         let (semantically_consolidated, semantic_llm_calls, semantic_cache_hits) =
             semantic_consolidation_pass(handle, &self.config, self.consolidator.clone()).await;
 
+        // ── Phase: Tool-calling dream consolidation (epic #2866) ───────────────
+        // Default-OFF and fail-open by contract: with the pass disabled, no
+        // provider configured, or any provider/parse error, this returns
+        // all-zero stats and the cycle proceeds exactly as before.
+        let llm_consolidation = crate::memory_core::dream_consolidation::dream_consolidation_pass(
+            handle,
+            &self.config,
+            None,
+            None,
+        )
+        .await;
+
         // Persist the trimmed L1 snapshot so a restart sees the consolidated state.
         if let Err(e) = handle.flush() {
             tracing::warn!("dream flush failed: {e:#}");
@@ -284,6 +296,7 @@ impl Dreamer {
             recall_score_before,
             recall_score_after,
             fading,
+            llm_consolidation,
         };
         stats.update_compression_ratio();
 

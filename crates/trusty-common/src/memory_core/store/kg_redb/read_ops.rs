@@ -214,6 +214,47 @@ impl KgStoreRedb {
         total
     }
 
+    /// Collect the distinct subjects of every ACTIVE triple with `predicate`.
+    ///
+    /// Why: The dream-consolidation tombstone design (epic #2866, spec §4.3)
+    /// needs "all drawers with an active `superseded_by` edge" as ONE bulk
+    /// scan per recall/pass — not one KG query per drawer. No existing read
+    /// method returns subjects filtered by predicate.
+    /// What: Full scan of the TRIPLES table (same acceptable-cost rationale
+    /// as `list_active` — redb has no secondary index on predicate), keeping
+    /// subjects of rows that are active (`valid_to_ms.is_none()`) and whose
+    /// predicate matches exactly. Returns a de-duplicated `HashSet`.
+    /// Test: `subjects_for_predicate_returns_active_matches` in kg tests.
+    pub fn subjects_for_predicate(&self, predicate: &str) -> Result<HashSet<String>> {
+        let rtx = self
+            .db()
+            .begin_read()
+            .context("begin subjects_for_predicate txn")?;
+        let triples = rtx
+            .open_table(TRIPLES)
+            .context("open triples table for subjects_for_predicate")?;
+        let mut out = HashSet::new();
+        for entry in triples.iter().context("iter triples")? {
+            let (k, v) = entry.context("read triples row")?;
+            if k.value().starts_with(b"hist:") {
+                continue;
+            }
+            let value: TripleValue =
+                decode_value(v.value()).context("decode TripleValue in subjects_for_predicate")?;
+            if value.valid_to_ms.is_some() {
+                continue;
+            }
+            let (s, p) = match decode_triple_key(k.value()) {
+                Some(parts) => parts,
+                None => continue,
+            };
+            if p == predicate {
+                out.insert(s);
+            }
+        }
+        Ok(out)
+    }
+
     /// No-op checkpoint hook.
     ///
     /// Why: SQLite needed `PRAGMA wal_checkpoint(PASSIVE)` to bound the WAL.

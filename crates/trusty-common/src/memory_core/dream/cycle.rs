@@ -546,11 +546,16 @@ pub(super) async fn semantic_consolidation_pass(
 
     // spec-001: exclude protected Task drawers from consolidation entirely so
     // they are never folded into a canonical summary or superseded.
+    // Epic #2866: also exclude drawers already archived via an active
+    // `superseded_by` edge so a tombstoned original can never be re-batched
+    // into another canonical summary (one bulk KG scan, fail-open).
+    let archived = handle.kg.archived_drawer_ids().await;
     let snapshot: Vec<Drawer> = handle
         .drawers
         .read()
         .iter()
         .filter(|d| !d.drawer_type.is_protected())
+        .filter(|d| !archived.contains(&d.id))
         .cloned()
         .collect();
     if snapshot.is_empty() {
@@ -633,10 +638,14 @@ pub async fn consolidate_scoped(
     // `max_age_days` is guaranteed positive here (the `<= 0` guard above
     // returned early), so the cutoff is strictly in the past.
     let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
+    // Epic #2866: exclude drawers already tombstoned by dream consolidation
+    // so an archived original is never re-consolidated (and then evicted).
+    let archived = handle.kg.archived_drawer_ids().await;
     let snapshot: Vec<Drawer> = handle
         .list_drawers(room, None, usize::MAX)
         .into_iter()
         .filter(|d| !d.drawer_type.is_protected())
+        .filter(|d| !archived.contains(&d.id))
         .filter(|d| d.created_at <= cutoff)
         .collect();
     if snapshot.is_empty() {

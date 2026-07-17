@@ -73,6 +73,42 @@ async fn retract_closes_active_interval() {
     assert_eq!(again, 0);
 }
 
+/// Why: The tombstone-archival filter (epic #2866) preloads "all subjects
+/// with an active `superseded_by` edge" in one bulk scan; the helper must
+/// return only ACTIVE rows with the exact predicate, and re-asserting a
+/// (subject, predicate) with a new object must not duplicate the subject.
+#[tokio::test]
+async fn subjects_for_predicate_returns_active_matches() {
+    let dir = tempdir().unwrap();
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
+    let mk = |s: &str, p: &str, o: &str| Triple {
+        subject: s.to_string(),
+        predicate: p.to_string(),
+        object: o.to_string(),
+        valid_from: Utc::now(),
+        valid_to: None,
+        confidence: 1.0,
+        provenance: None,
+    };
+    kg.assert(mk("drawer:a", "superseded_by", "drawer:x"))
+        .await
+        .unwrap();
+    kg.assert(mk("drawer:b", "superseded_by", "drawer:x"))
+        .await
+        .unwrap();
+    kg.assert(mk("drawer:c", "unrelated_pred", "drawer:x"))
+        .await
+        .unwrap();
+    // Retract one edge: its subject must drop out of the active set.
+    kg.retract("drawer:b", "superseded_by").await.unwrap();
+
+    let subjects = kg.subjects_for_predicate("superseded_by").await.unwrap();
+    assert!(subjects.contains("drawer:a"), "active edge included");
+    assert!(!subjects.contains("drawer:b"), "retracted edge excluded");
+    assert!(!subjects.contains("drawer:c"), "other predicate excluded");
+    assert_eq!(subjects.len(), 1);
+}
+
 #[tokio::test]
 async fn second_assert_closes_prior_interval() {
     let dir = tempdir().unwrap();

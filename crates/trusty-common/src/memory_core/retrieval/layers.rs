@@ -363,10 +363,19 @@ pub fn expand_query(query: &str) -> String {
 /// caller always receives at most `top_k` results regardless of how many
 /// L0/L1 entries the palace has.  Applies `expand_query` before embedding
 /// to bridge the user-vocabulary / technical-vocabulary gap.
+///
+/// Tombstone filter (epic #2866): drawers with an ACTIVE `superseded_by` KG
+/// edge (archived by dream consolidation) are excluded from this default
+/// path — their content lives on in the consolidation summary drawer. The
+/// archived set is preloaded once per call and the lookup FAILS OPEN (a KG
+/// error hides nothing). `recall_deep` deliberately does NOT filter, so
+/// deep recall remains the include-archived escape hatch.
 /// Test: `recall_ranks_by_similarity_over_importance` verifies that a
 /// low-importance but on-topic drawer outranks a high-importance but
 /// off-topic drawer after this function returns.
 /// `recall_top_k_caps_result_count` (issue #877) verifies the length cap.
+/// `dream_consolidation::tests::recall_excludes_tombstoned_sources` covers
+/// the tombstone filter.
 pub async fn recall(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
@@ -390,6 +399,14 @@ pub async fn recall(
     rescore_l1_by_similarity(&mut combined, &sim_scores);
 
     dedup_extend(&mut combined, l2);
+
+    // Tombstone filter (epic #2866): drop drawers archived by dream
+    // consolidation from the default recall path. One bulk KG scan per
+    // call; fail-open (empty set on KG error). `recall_deep` skips this.
+    let archived = handle.kg.archived_drawer_ids().await;
+    if !archived.is_empty() {
+        combined.retain(|r| !archived.contains(&r.drawer.id));
+    }
 
     // Re-rank the full merged list by score descending so relevance (not
     // layer number or raw importance) determines which results surface first.

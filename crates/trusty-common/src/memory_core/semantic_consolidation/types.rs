@@ -151,12 +151,15 @@ pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) 
 
 // ─── Internal prompt/response helpers ───────────────────────────────────────
 
-/// Internal: build the user-turn content for a consolidation prompt.
+/// Build the user-turn content for a consolidation prompt.
 ///
-/// Why: shared by both `OpenRouterInference` and `OllamaInference`.
+/// Why: shared by `OpenRouterInference` / `OllamaInference` AND the
+/// tool-calling `dream_consolidation` pass (epic #2866) — the drawer-list
+/// formatting is the same contract for both generations of consolidation.
 /// What: formats each drawer as `ID: <id>\nContent: <content>\n---\n`.
-/// Test: exercised indirectly via inference integration tests.
-pub(super) fn build_consolidation_prompt(drawers: &[Drawer]) -> String {
+/// Test: exercised indirectly via inference integration tests and
+/// `dream_consolidation::tests`.
+pub fn build_consolidation_prompt(drawers: &[Drawer]) -> String {
     let mut lines = Vec::new();
     for d in drawers {
         lines.push(format!("ID: {}\nContent: {}\n", d.id, d.content));

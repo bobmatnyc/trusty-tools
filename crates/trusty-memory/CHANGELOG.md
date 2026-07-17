@@ -14,6 +14,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- opt-in tool-calling dream consolidation (epic [#2866](https://github.com/bobmatnyc/trusty-tools/issues/2866)): new `[dream_consolidation]` section in `~/.trusty-memory/config.toml` (`enabled` — default `false`, `model` — default `anthropic/claude-haiku-4-5`, `max_batch_size`, `max_calls_per_cycle`); `dream_consolidate_room` / `palace_dream` now also run the tool-calling pass when enabled and report its stats in a new `llm_consolidation` response field. Fail-open: with the section absent or disabled the tools behave byte-for-byte as before
+
 ### Fixed
 
 - idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))

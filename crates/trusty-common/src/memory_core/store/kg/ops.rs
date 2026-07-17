@@ -131,6 +131,60 @@ impl KnowledgeGraph {
             .count()
     }
 
+    /// Collect the distinct subjects of every active triple with `predicate`.
+    ///
+    /// Why: The tombstone-archival filter (epic #2866, spec §4.3) needs the
+    /// full archived-id set in one bulk scan per recall/pass instead of one
+    /// query per drawer.
+    /// What: Delegates to `KgStoreRedb::subjects_for_predicate` on the
+    /// blocking pool.
+    /// Test: `subjects_for_predicate_returns_active_matches`.
+    pub async fn subjects_for_predicate(
+        &self,
+        predicate: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let store = self.store.clone();
+        let predicate = predicate.to_string();
+        let subjects =
+            tokio::task::spawn_blocking(move || store.subjects_for_predicate(&predicate))
+                .await
+                .context("subjects_for_predicate spawn_blocking join error")??;
+        Ok(subjects)
+    }
+
+    /// Resolve the set of drawer ids archived by an active `superseded_by` edge.
+    ///
+    /// Why: Recall and the consolidation passes must exclude tombstoned
+    /// drawers (epic #2866, spec §4.2/§4.3); each caller preloads this set
+    /// once per call/pass. FAIL-OPEN by contract: a KG read failure must
+    /// degrade recall filtering to "no drawers hidden", never break recall.
+    /// What: Fetches `subjects_for_predicate("superseded_by")`, parses each
+    /// `drawer:<uuid>` subject into a `Uuid` (non-drawer subjects are
+    /// ignored), and returns the set. On any error, logs at WARN and returns
+    /// an empty set.
+    /// Test: `dream_consolidation::tests::recall_excludes_tombstoned_sources`
+    /// exercises the populated path; the fail-open path is by construction.
+    pub async fn archived_drawer_ids(&self) -> std::collections::HashSet<Uuid> {
+        match self
+            .subjects_for_predicate(
+                crate::memory_core::dream_consolidation::SUPERSEDED_BY_PREDICATE,
+            )
+            .await
+        {
+            Ok(subjects) => subjects
+                .iter()
+                .filter_map(|s| s.strip_prefix("drawer:"))
+                .filter_map(|raw| Uuid::parse_str(raw).ok())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "archived_drawer_ids: KG scan failed (filter disabled for this call): {e:#}"
+                );
+                std::collections::HashSet::new()
+            }
+        }
+    }
+
     /// Compatibility shim for the old WAL checkpoint API.
     ///
     /// Why: The Dreamer cycle called this to bound SQLite's WAL. redb manages

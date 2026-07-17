@@ -17,6 +17,7 @@ use crate::AppState;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading, DreamConfig};
+use trusty_common::memory_core::dream_consolidation::dream_consolidation_pass;
 
 use super::helpers::{open_palace_handle, parse_room, resolve_palace};
 
@@ -35,8 +36,11 @@ const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 /// counts). Also computes the palace-wide fading-memories resurface list (issue
 /// #2352) — high-value memories that have decayed below the resurface threshold,
 /// surfaced (never auto-boosted) so the caller can touch or `memory_forget`
-/// them. Returns
-/// `{ palace, room, summary_facts_created, facts_evicted, fading }`.
+/// them. Also runs the tool-calling dream-consolidation pass (epic #2866)
+/// when `[dream_consolidation] enabled = true` in the user config — default
+/// OFF and fail-open, so the tool's behaviour is unchanged until opted in.
+/// Returns
+/// `{ palace, room, summary_facts_created, facts_evicted, fading, llm_consolidation }`.
 /// Test: `dream_consolidate_room_returns_shape` (no-op path) and
 /// `palace_dream_response_includes_fading` in `tests/dream_room_mcp.rs`.
 pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value) -> Result<Value> {
@@ -67,10 +71,18 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
     let dream_cfg = DreamConfig {
         openrouter_api_key: cfg.openrouter_api_key,
         local_model_enabled: cfg.local_model.enabled,
+        consolidation: cfg.dream_consolidation,
         ..DreamConfig::default()
     };
 
-    let stats = consolidate_scoped(&handle, &dream_cfg, room, max_age_days, None).await?;
+    let stats = consolidate_scoped(&handle, &dream_cfg, room.clone(), max_age_days, None).await?;
+
+    // Tool-calling dream-consolidation pass (epic #2866). Default OFF via
+    // config; fail-open by contract — the call below can never error, it
+    // returns all-zero stats when disabled or when no provider is available.
+    let llm_stats = dream_consolidation_pass(&handle, &dream_cfg, room, None).await;
+    let llm_stats =
+        serde_json::to_value(&llm_stats).context("serialize llm consolidation stats")?;
 
     // Fading-memories resurface pass (issue #2352): palace-wide, read-only.
     // Surfaced here so the on-demand caller sees the same list the idle dream
@@ -84,6 +96,7 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
         "summary_facts_created": stats.summary_facts_created,
         "facts_evicted": stats.facts_evicted,
         "fading": fading,
+        "llm_consolidation": llm_stats,
     }))
 }
 

@@ -21,7 +21,7 @@ pub use consolidator::SemanticConsolidator;
 pub use inference::{Inference, MockInference, OllamaInference, OpenRouterInference};
 pub use types::{
     CanonicalDrawer, ConsolidationAction, ConsolidationResult, SemanticConsolidationConfig,
-    inference_available, parse_consolidation_actions,
+    build_consolidation_prompt, inference_available, parse_consolidation_actions,
 };
 
 #[cfg(test)]

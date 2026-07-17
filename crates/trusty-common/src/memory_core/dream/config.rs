@@ -8,6 +8,7 @@
 //! `dream::tests::dream_stats_persisted_after_cycle`.
 
 use super::fading::{FadingMemory, FadingParams};
+use crate::memory_core::dream_consolidation::{DreamConsolidationConfig, DreamConsolidationStats};
 use crate::memory_core::semantic_consolidation::SemanticConsolidationConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,17 @@ pub struct DreamConfig {
     /// importance >= 0.7 whose effective importance has fallen below 0.3.
     /// Test: `dream_config_defaults`.
     pub fading: FadingParams,
+
+    /// Config for the tool-calling dream-consolidation pass (epic #2866).
+    ///
+    /// Why: The pass mutates durable memory (summary drawers, KG facts,
+    /// tombstones) and spends LLM calls, so it is default-OFF and fully
+    /// fail-open — with `consolidation.enabled = false` (the default) the
+    /// dream cycle behaves exactly as it did before this field existed.
+    /// What: See [`DreamConsolidationConfig`]. Threaded here the same way
+    /// `semantic` is so the dream loop keeps a single config surface.
+    /// Test: `dream_consolidation::tests::config_defaults_are_off_and_haiku`.
+    pub consolidation: DreamConsolidationConfig,
 }
 
 impl Default for DreamConfig {
@@ -90,6 +102,7 @@ impl Default for DreamConfig {
             local_model_enabled: true,
             recall_benchmark_enabled: true,
             fading: FadingParams::default(),
+            consolidation: DreamConsolidationConfig::default(),
         }
     }
 }
@@ -201,6 +214,17 @@ pub struct DreamStats {
     /// `palace_dream_response_includes_fading` MCP test in trusty-memory.
     #[serde(default)]
     pub fading: Vec<FadingMemory>,
+
+    /// Telemetry from the tool-calling dream-consolidation pass (epic #2866).
+    ///
+    /// Why: Operators validating the opt-in pass need per-cycle visibility
+    /// into calls spent, summaries created, facts asserted, and sources
+    /// tombstoned. All-zero when the pass is disabled (the default).
+    /// What: See [`DreamConsolidationStats`]. `#[serde(default)]` keeps
+    /// older `dream_stats.json` snapshots readable.
+    /// Test: `dream_consolidation::tests::dream_cycle_completes_with_pass_enabled_no_provider`.
+    #[serde(default)]
+    pub llm_consolidation: DreamConsolidationStats,
 }
 
 impl DreamStats {
