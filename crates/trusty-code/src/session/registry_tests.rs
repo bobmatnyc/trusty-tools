@@ -1302,8 +1302,10 @@ async fn warming_index_is_distinguishable_from_ready_with_zero_hits() {
     // `session_started`/`session_status_changed` on the same session_id the
     // filter below matches on, which would otherwise be the first envelope
     // read back instead of the readiness event under test.
-    let warming_session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let ready_session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let warming_session =
+        registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let ready_session =
+        registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     let warming = readiness("walking", 0, false, false);
