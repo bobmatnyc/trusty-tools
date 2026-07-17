@@ -242,7 +242,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             }
             BudgetDecision::Exhausted { budget } => {
                 let exhausted_reason = format!(
-                    "PM file-change budget {budget}/{budget} used this turn (prohibitions P1–P3). \
+                    "PM file-change budget {budget}/{budget} used this turn (prohibitions P1/P5). \
                      Delegate further changes to {hint} via the Task/Agent tool."
                 );
                 audit_denied_tool(url, session_id, tool_name, &exhausted_reason).await;

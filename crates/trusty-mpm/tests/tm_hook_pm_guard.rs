@@ -236,7 +236,7 @@ fn pm_guard_allows_non_source_single_file_write() {
 
 #[test]
 fn pm_guard_denies_forbidden_bash_verb_after_budget_exhausted() {
-    // `sed -i` edits a file in place — a P1/P1-P3 circumvention via Bash. It
+    // `sed -i` edits a file in place — a P1/P5 circumvention via Bash. It
     // is budget-eligible (issue #2918): allowed up to 3 times, then denied.
     let home = isolated_home();
     let home_s = home.path().to_string_lossy().to_string();
