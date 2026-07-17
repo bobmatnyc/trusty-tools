@@ -324,8 +324,15 @@ fn install_then_deploy_deploys_skills() {
     // tm-doctor + the tm overview skill (tm-skills-portfolio epic: the
     // `example-skill.md` placeholder and the 11 mpm-* guidance skills no longer
     // ship; the previously-orphaned tm-doctor.md is now wired in; issue #2185
-    // added tm-issues-prune; issue #2321 added tm-cli-operations). See
-    // `bundle_tm_skills.rs`/`bundle_all.rs::ALL` for the authoritative list.
+    // added tm-issues-prune; issue #2321 added tm-cli-operations) + 2 (issue
+    // #2890: code-review-standards, contract-driven-testing — code-critic's
+    // declared `skills:` dependencies; see
+    // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions
+    // on those two, kept out of this file to stay under the 500-SLOC
+    // production cap — this file, unlike its `_tests.rs`-suffixed siblings,
+    // is NOT classified as a test file by the SLOC gate). See
+    // `bundle_tm_skills.rs`/`bundle.rs` (CODE_REVIEW_STANDARDS,
+    // CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL` for the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
@@ -350,8 +357,9 @@ fn install_then_deploy_deploys_skills() {
     );
     assert_eq!(
         result.deployed.len(),
-        21,
-        "expected 21 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview); got {:?}",
+        23,
+        "expected 23 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+         + code-review-standards + contract-driven-testing); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

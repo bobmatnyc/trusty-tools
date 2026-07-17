@@ -5,6 +5,7 @@ user-invocable: false
 version: "1.0.0"
 category: agent-reference
 tags: [contracts, testing, property-based-testing, code-critic]
+effort: low
 ---
 
 # Contract-Driven Testing
@@ -162,6 +163,17 @@ fn top_k_rejects_empty_items() {
 fn top_k_rejects_nonpositive_k() {
     top_k(&[1.0, 2.0], 0);
 }
+```
+
+**TypeScript:**
+```typescript
+test("topK throws on empty items", () => {
+  expect(() => topK([], 1)).toThrow(/items must be non-empty/);
+});
+
+test("topK throws on non-positive k", () => {
+  expect(() => topK([1.0, 2.0], 0)).toThrow(/k must be positive/);
+});
 ```
 
 ## When There Are No Contracts (Yet)

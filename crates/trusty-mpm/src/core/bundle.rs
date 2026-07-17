@@ -143,6 +143,32 @@ pub const PROMPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/prompt-en
 /// Concrete code-critic agent — adversarial reviewer (`extends: base-qa`).
 pub const CODE_CRITIC_AGENT: &str = include_str!("../assets/agents/code-critic.md");
 
+/// `code-review-standards` skill — the full adversarial review rubric
+/// (severity taxonomy, 80% confidence filter, verdict protocol) that
+/// `code-critic` declares in its `skills:` frontmatter (issue #2890, DOC-42).
+///
+/// Why: DOC-28 (self-awareness incident) taught that a skill file existing
+/// under `src/assets/skills/` is not sufficient for it to ship — it must also
+/// be registered as a [`crate::core::bundle::BundledArtifact`] in [`ALL`] or
+/// `deploy_all_skill_tiers` never sees it (the exact historical bug that left
+/// `tm-doctor.md` orphaned; see `bundle_tm_skills.rs`'s module doc).
+/// What: embedded markdown skill file deployed to
+/// `skills/code-review-standards.md`.
+/// Test: `bundle_table_is_complete`, `code_critic_declared_skills_are_in_bundle`.
+pub const CODE_REVIEW_STANDARDS: &str = include_str!("../assets/skills/code-review-standards.md");
+
+/// `contract-driven-testing` skill — the three-level test pyramid derived
+/// from Code Contracts that `code-critic` declares in its `skills:`
+/// frontmatter (issue #2890, DOC-42).
+///
+/// Why: see [`CODE_REVIEW_STANDARDS`] — registration in [`ALL`] is what
+/// actually makes a bundled skill installable, not the presence of the file.
+/// What: embedded markdown skill file deployed to
+/// `skills/contract-driven-testing.md`.
+/// Test: `bundle_table_is_complete`, `code_critic_declared_skills_are_in_bundle`.
+pub const CONTRACT_DRIVEN_TESTING: &str =
+    include_str!("../assets/skills/contract-driven-testing.md");
+
 /// Concrete gcp-ops agent — Google Cloud Platform (`extends: base-ops`).
 pub const GCP_OPS_AGENT: &str = include_str!("../assets/agents/gcp-ops.md");
 

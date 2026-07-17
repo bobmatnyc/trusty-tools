@@ -5,6 +5,7 @@ user-invocable: false
 version: "1.0.0"
 category: agent-reference
 tags: [code-review, severity, verdict, quality-gate, code-critic]
+effort: low
 ---
 
 # Code Review Standards
