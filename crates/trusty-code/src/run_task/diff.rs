@@ -202,7 +202,8 @@ fn git_diff_trees(root: &Path, before_tree: &str, after_tree: &str) -> String {
 /// the simplest faithful representation.
 /// What: Walks `root`, reading each regular file into a `relative-path → content`
 /// map. Binary/unreadable files are stored as a placeholder marker. Skips the
-/// `.git` directory and any path component starting with `.git`.
+/// exact `.git` directory (not merely any `.git`-prefixed name) and macOS
+/// filesystem-metadata noise (see #2880).
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
 fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
@@ -218,6 +219,35 @@ fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
 /// past this many levels. 128 is far deeper than any real project tree.
 const MAX_WALK_DEPTH: usize = 128;
 
+/// Recognize macOS filesystem-metadata noise that must never count as a
+/// project deliverable (#2880).
+///
+/// Why: On macOS, Finder/Spotlight/Time Machine drop stray metadata files
+/// into ANY directory that gets touched — most commonly `.DS_Store` and
+/// AppleDouble `._*` shadow files, but also `.Spotlight-V100`, `.Trashes`,
+/// `.fseventsd`, `.TemporaryItems`, `.apdisk`, and `.com.apple.*` markers.
+/// These can appear between a run's before/after snapshot with no relation
+/// to the task at all (e.g. Finder indexing the `tempfile::tempdir()` used
+/// in tests), flipping `has_deliverable` and flaking outcome-classification
+/// tests. None of this is real project content, so it must never be
+/// collected into a snapshot.
+/// What: Returns `true` when `name` (a single path component, not a full
+/// path) is exactly `.DS_Store`, `.apdisk`, or starts with `._`,
+/// `.com.apple.`, `.Spotlight-`, `.Trashes`, `.fseventsd`, or
+/// `.TemporaryItems`. Deliberately narrow — it must never match a real
+/// hidden deliverable like `.gitignore` or `.github`.
+/// Test: `diff::tests::collect_files_ignores_macos_metadata_noise`.
+fn is_os_metadata(name: &str) -> bool {
+    name == ".DS_Store"
+        || name == ".apdisk"
+        || name.starts_with("._")
+        || name.starts_with(".com.apple.")
+        || name.starts_with(".Spotlight-")
+        || name.starts_with(".Trashes")
+        || name.starts_with(".fseventsd")
+        || name.starts_with(".TemporaryItems")
+}
+
 /// Recursive helper for `snapshot_files`, guarded against symlink cycles
 /// (#1475 bug 5).
 ///
@@ -226,13 +256,19 @@ const MAX_WALK_DEPTH: usize = 128;
 /// forming any cycle) caused unbounded recursion and a stack overflow. Both
 /// a per-call symlink check AND a depth bound are applied so a cycle can
 /// never be traversed, regardless of how it is shaped.
-/// What: Iterates `dir`; skips any entry whose `symlink_metadata` reports
-/// `is_symlink()` (a symlink is never followed, whether it points to a file
-/// or a directory — the run's diff cares about real project content, not
-/// symlink targets that may point outside the project entirely); recurses
-/// into real subdirectories (except `.git`) up to [`MAX_WALK_DEPTH`]; records
-/// readable regular files keyed by their path relative to `base`.
-/// Test: `diff::tests::collect_files_terminates_on_symlink_cycle`.
+/// What: Iterates `dir`; skips the `.git` VCS directory (matched as an exact
+/// path component, NOT a bare string-prefix — a prefix match would wrongly
+/// also skip real deliverables like `.gitignore` or `.github`) and any
+/// macOS filesystem-metadata entry (see [`is_os_metadata`], #2880); skips
+/// any entry whose `symlink_metadata` reports `is_symlink()` (a symlink is
+/// never followed, whether it points to a file or a directory — the run's
+/// diff cares about real project content, not symlink targets that may
+/// point outside the project entirely); recurses into real subdirectories
+/// up to [`MAX_WALK_DEPTH`]; records readable regular files keyed by their
+/// path relative to `base`.
+/// Test: `diff::tests::collect_files_terminates_on_symlink_cycle`,
+/// `diff::tests::collect_files_ignores_macos_metadata_noise`,
+/// `diff::tests::collect_files_still_collects_dot_git_lookalikes`.
 fn collect_files(base: &Path, dir: &Path, map: &mut BTreeMap<String, String>, depth: usize) {
     if depth > MAX_WALK_DEPTH {
         return;
@@ -243,7 +279,8 @@ fn collect_files(base: &Path, dir: &Path, map: &mut BTreeMap<String, String>, de
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with(".git") {
+        let name_str = name.to_string_lossy();
+        if name_str == ".git" || is_os_metadata(&name_str) {
             continue;
         }
         // `symlink_metadata` does NOT follow the link — this is the check
@@ -407,6 +444,64 @@ mod tests {
         assert!(
             !map.keys().any(|k| k.starts_with("loop/")),
             "the symlink must not have been traversed into: {map:?}"
+        );
+    }
+
+    /// macOS filesystem-metadata noise (`.DS_Store`, `._*` AppleDouble
+    /// shadow files) must never be collected as a project deliverable
+    /// (#2880).
+    ///
+    /// Why: Finder/Spotlight can drop these files into a tempdir between a
+    /// run's before/after snapshot with no relation to the task, flipping
+    /// `has_deliverable` and flaking outcome-classification tests.
+    /// What: Seed a tempdir with `.DS_Store`, `._foo`, and a real file
+    /// (`real.txt`); assert only `real.txt` is collected.
+    /// Test: this test.
+    #[test]
+    fn collect_files_ignores_macos_metadata_noise() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".DS_Store"), "binary junk").expect("write .DS_Store");
+        std::fs::write(tmp.path().join("._foo"), "appledouble junk").expect("write ._foo");
+        std::fs::write(tmp.path().join("real.txt"), "real content").expect("write real.txt");
+
+        let map = snapshot_files(tmp.path());
+
+        assert_eq!(
+            map.keys().collect::<Vec<_>>(),
+            vec!["real.txt"],
+            "only the real deliverable must be collected: {map:?}"
+        );
+    }
+
+    /// Real dotfile/dotdir deliverables whose name merely starts with the
+    /// string `.git` — `.gitignore`, `.github` — must still be collected
+    /// (#2880).
+    ///
+    /// Why: The `.git` VCS-directory skip must match an exact path
+    /// component, not a bare string-prefix; a prefix match would wrongly
+    /// also exclude `.gitignore` and `.github`, which are real project
+    /// deliverables.
+    /// What: Seed a tempdir with a `.gitignore` file and a `.github/`
+    /// directory containing a file; assert both are collected.
+    /// Test: this test.
+    #[test]
+    fn collect_files_still_collects_dot_git_lookalikes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".gitignore"), "target/").expect("write .gitignore");
+        std::fs::create_dir(tmp.path().join(".github")).expect("mkdir .github");
+        std::fs::write(tmp.path().join(".github").join("workflow.yml"), "name: ci")
+            .expect("write workflow");
+
+        let map = snapshot_files(tmp.path());
+
+        assert!(
+            map.contains_key(".gitignore"),
+            ".gitignore must still be collected: {map:?}"
+        );
+        assert!(
+            map.keys()
+                .any(|k| k == ".github/workflow.yml" || k == ".github\\workflow.yml"),
+            ".github/workflow.yml must still be collected: {map:?}"
         );
     }
 
