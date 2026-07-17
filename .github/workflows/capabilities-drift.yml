@@ -1,0 +1,40 @@
+# tm-capabilities drift gate for the trusty-tools workspace (issue #2913).
+#
+# Enforces that the committed `tm-capabilities` bundled skill (CLI command
+# tree, MCP tool catalog, agent roster, skill catalog, doctor checks) matches
+# exactly what `tm generate capabilities` produces right now — a stale
+# generated file fails the job instead of silently rotting.
+name: Capabilities drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches ci.yml).
+concurrency:
+  group: capabilities-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capabilities-drift:
+    name: tm-capabilities generated-skill drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SKIP_UI_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      # MSRV floor is 1.91 (root Cargo.toml rust-version), matching ci.yml.
+      - name: Install Rust toolchain (1.91)
+        uses: dtolnay/rust-toolchain@1.91
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: capabilities-drift
+
+      - name: Check tm-capabilities generated skill for drift
+        run: bash scripts/check_capabilities.sh

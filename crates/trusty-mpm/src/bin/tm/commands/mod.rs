@@ -16,6 +16,7 @@ pub(crate) mod compress;
 pub(crate) mod daemon;
 pub(crate) mod delete;
 pub(crate) mod first_run;
+pub(crate) mod generate;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
 pub(crate) mod guided_inplace;
