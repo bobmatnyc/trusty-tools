@@ -356,4 +356,70 @@ mod tests {
         );
         assert_eq!(toml_cfg.system_prompt.content, md_cfg.system_prompt.content);
     }
+
+    /// `extract_body` closes the frontmatter block on the FIRST `---` fence
+    /// only and never re-enters — a `---` line appearing later, inside the
+    /// prose body (a markdown horizontal rule between two paragraphs), must
+    /// survive verbatim in `system_prompt.content` rather than being mistaken
+    /// for a second frontmatter delimiter.
+    ///
+    /// Why: code-critic finding on PR #2954 — this is the highest-risk edge
+    /// case in the fence-scanning loop (`in_frontmatter` flips to `false` and
+    /// stays `false`), and had no regression pin.
+    /// What: a `.md` fixture whose body contains a paragraph, a bare `---`
+    /// horizontal-rule line, then a second paragraph. Loads through the real
+    /// `compose_agent` -> `load_md_agent` path (not `extract_body` in
+    /// isolation) so the assertion exercises the actual composed output.
+    /// Asserts the horizontal rule is present verbatim as its own line in the
+    /// resulting body.
+    /// Test: this test.
+    #[test]
+    fn interior_horizontal_rule_survives_in_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("hr.md"),
+            "---\nname: hr\nrole: engineer\n---\n\nFirst paragraph.\n\n---\n\nSecond paragraph.\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&tmp.path().join("hr.md")).expect("load");
+        assert!(
+            cfg.system_prompt
+                .content
+                .lines()
+                .any(|line| line.trim() == "---"),
+            "interior horizontal rule must survive verbatim as its own line; got: {:?}",
+            cfg.system_prompt.content
+        );
+        assert!(cfg.system_prompt.content.contains("First paragraph."));
+        assert!(cfg.system_prompt.content.contains("Second paragraph."));
+    }
+
+    /// A `.md` agent with a valid frontmatter block and NO prose body after
+    /// the closing fence projects to an EMPTY `system_prompt.content` — no
+    /// panic, no leftover blank lines, no stray `---`.
+    ///
+    /// Why: code-critic finding on PR #2954 — the frontmatter-only/empty-body
+    /// case is the other edge of the fence-scanning loop and had no
+    /// regression pin.
+    /// What: a `.md` fixture whose closing fence is the last line of the
+    /// file. Loads through the real `compose_agent` -> `load_md_agent` path.
+    /// Asserts `system_prompt.content == ""`.
+    /// Test: this test.
+    #[test]
+    fn frontmatter_only_agent_has_empty_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("empty.md"),
+            "---\nname: empty\nrole: engineer\n---\n",
+        )
+        .expect("write");
+
+        let cfg = load_md_agent(&tmp.path().join("empty.md")).expect("load");
+        assert_eq!(
+            cfg.system_prompt.content, "",
+            "frontmatter-only agent must project to an empty body, got: {:?}",
+            cfg.system_prompt.content
+        );
+    }
 }
