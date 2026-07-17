@@ -190,7 +190,7 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns an eleven-check report against a live daemon.
+    // `/doctor` returns a thirteen-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
@@ -199,9 +199,10 @@ async fn execute_doctor_against_test_daemon() {
             // output_style check (7); A2 (tm-skills-portfolio epic) added the
             // skill_source check (8); #gh-account-awareness added the gh_account
             // check (9); #2158 added the deployment check (10); #2246 added the
-            // oauth_token check, bringing the total to 11. #1905's stale-skill
-            // cleanup is a one-time migration, not a probe here.
-            assert_eq!(report.checks.len(), 11);
+            // oauth_token check (11); #2876 added the skill_staleness and
+            // legacy_sources checks, bringing the total to 13. #1905's
+            // stale-skill cleanup is a one-time migration, not a probe here.
+            assert_eq!(report.checks.len(), 13);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

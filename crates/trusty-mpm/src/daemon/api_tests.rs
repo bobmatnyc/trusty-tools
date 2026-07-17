@@ -1078,17 +1078,17 @@ async fn pair_reset_clears_pairing() {
 
 #[tokio::test]
 async fn doctor_endpoint_returns_report() {
-    // `GET /api/v1/doctor` returns an eleven-check report (#1840 added the
+    // `GET /api/v1/doctor` returns a thirteen-check report (#1840 added the
     // worktrees check; DOC-28 R4(a) added the output_style check; A2
     // (tm-skills-portfolio epic) added the skill_source check;
     // #gh-account-awareness added the gh_account check; #2158 added the
-    // deployment check; #2246 added the oauth_token check). #1905's
-    // stale-skill cleanup is a one-time migration, not a `run_doctor` probe,
-    // so it does not appear here; the per-check statuses carry the
-    // diagnosis, not the HTTP status.
+    // deployment check; #2246 added the oauth_token check; #2876 added the
+    // skill_staleness and legacy_sources checks). #1905's stale-skill cleanup
+    // is a one-time migration, not a `run_doctor` probe, so it does not appear
+    // here; the per-check statuses carry the diagnosis, not the HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
-    assert_eq!(report.checks.len(), 11);
+    assert_eq!(report.checks.len(), 13);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -1099,6 +1099,8 @@ async fn doctor_endpoint_returns_report() {
             "skill_source",
             "output_style",
             "deployment",
+            "skill_staleness",
+            "legacy_sources",
             "memory",
             "search",
             "worktrees",
