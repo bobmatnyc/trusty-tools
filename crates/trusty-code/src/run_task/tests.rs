@@ -93,6 +93,19 @@ impl ScriptedLlm {
             .cloned()
             .expect("at least one request recorded")
     }
+
+    /// The tool-schema names advertised on the request at `idx` (0-based, call
+    /// order) — lets a test reach a non-first turn's advertised schema, e.g.
+    /// the delegated engineer's first turn (request idx 1, right after the
+    /// PM's own delegate call at idx 0).
+    fn tool_names_at(&self, idx: usize) -> Vec<String> {
+        self.tool_names
+            .lock()
+            .expect("tool_names lock")
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| panic!("no request recorded at idx {idx}"))
+    }
 }
 
 #[async_trait]
@@ -1679,6 +1692,65 @@ async fn use_skill_on_legacy_path_reaches_pm_and_transcript() {
     assert!(
         saw_use_skill,
         "some TurnRecord.tool_calls must contain \"use_skill\"; transcript was: {:?}",
+        report.transcript
+    );
+}
+
+/// Experimental (refs #2892): the delegated ENGINEER's own per-delegation
+/// registry (`ProjectToolFactory::build`) now also registers `use_skill`,
+/// backed by the SAME resolver the PM's catalog/tool were built from —
+/// mirrors `use_skill_on_legacy_path_reaches_pm_and_transcript` above, but
+/// scripts the ENGINEER (not the PM) to be the one that calls `use_skill`.
+///
+/// Why: before this change, only the PM could fetch a skill's full body on
+/// this legacy/bake-off CLI path; the delegated engineer received the
+/// catalog text in its prompt (`build_engineer_runner`'s
+/// `.with_skills_catalog`) but had no tool to act on it.
+/// What: seeds a project with `.claude/skills/demo/SKILL.md`; scripts
+/// [PM delegate, engineer use_skill, engineer stop, PM stop]. Asserts (1) the
+/// tool schema advertised on the engineer's first request (call idx 1, right
+/// after the PM's own delegate call at idx 0) includes `"use_skill"`, and (2)
+/// some `TurnRecord` tagged `"python-engineer"` has a `tool_calls` entry for
+/// `"use_skill"`.
+/// Test: this test.
+#[tokio::test]
+async fn use_skill_on_legacy_path_reaches_engineer_and_transcript() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let skills_dir = project.path().join(".claude").join("skills").join("demo");
+    std::fs::create_dir_all(&skills_dir).expect("mkdir skill dir");
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nfull demo body\n",
+    )
+    .expect("write SKILL.md");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("use the demo skill"),
+        use_skill_response("demo"),
+        stop_response("engineer: loaded the demo skill"),
+        stop_response("pm: task complete"),
+    ]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    // The engineer's own registry (advertised on its first request, idx 1 —
+    // idx 0 is the PM's delegate_to_agent turn) must include use_skill.
+    let names = llm.tool_names_at(1);
+    assert!(
+        names.contains(&"use_skill".to_string()),
+        "engineer registry must advertise use_skill when a skill catalog resolves; got {names:?}"
+    );
+
+    // The recorded transcript must show the ENGINEER (not just the PM)
+    // actually calling use_skill.
+    let saw_engineer_use_skill = report.transcript.iter().any(|turn| {
+        turn.role == "python-engineer" && turn.tool_calls.iter().any(|name| name == "use_skill")
+    });
+    assert!(
+        saw_engineer_use_skill,
+        "some \"python-engineer\" TurnRecord.tool_calls must contain \"use_skill\"; \
+         transcript was: {:?}",
         report.transcript
     );
 }
