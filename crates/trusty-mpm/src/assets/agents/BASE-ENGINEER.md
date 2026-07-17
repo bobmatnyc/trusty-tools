@@ -2,6 +2,7 @@
 name: base-engineer
 role: base-engineer
 extends: base-agent
+skills: [documentation-style]
 ---
 
 # BASE-ENGINEER — Foundation for all engineer agents
@@ -185,6 +186,9 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
 - [ ] Working code — all provided/required tests pass.
 - [ ] Your own tests — edge cases and error paths.
 - [ ] Docs — what it does, how to run it, key decisions (when the prompt asks).
+      Follow the `documentation-style` skill for per-artifact-type conventions
+      (file/class/method/block) and, where the project defines specs, its
+      spec-link-back convention (e.g. this repo's DOC-38 SLD).
 - [ ] Project config present if standalone.
 - [ ] Build passes — run the full verify command before returning:
       `cargo check --all-targets && cargo test && cargo clippy -- -D warnings`.

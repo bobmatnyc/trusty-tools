@@ -334,10 +334,16 @@ fn install_then_deploy_deploys_skills() {
     // skill-port batch 1: 25 upstream universal/ skill entry points + 68
     // references/*.md files carried alongside multi-file skills; see
     // `tests_behavior_2903_skills_tests.rs` for the dedicated deep
-    // assertions, kept out of this file for the same SLOC-cap reason).
-    // 21 + 2 + 93 = 116. Issue #2913 adds 7 more: the tm-capabilities entry
-    // point plus 6 references/*.md files (5 generated + 1 hand-authored
-    // workflows.md) — 116 + 7 = 123. See `bundle_tm_skills.rs`/
+    // assertions, kept out of this file for the same SLOC-cap reason) + 7
+    // (issue #2911: the `documentation-style` bundled skill — entry SKILL.md
+    // plus 6 references/*.md files; see
+    // `tests_behavior_2911_documentation_style_tests.rs` for the dedicated
+    // deep assertions, kept out of this file for the same SLOC-cap reason)
+    // + 7 (issue #2913: the `tm-capabilities` auto-generated harness catalog
+    // — entry SKILL.md plus 5 generated + 1 hand-authored references/*.md
+    // files; see `tests_behavior_generate_tests.rs` for the generator's own
+    // coverage, kept out of this file for the same SLOC-cap reason).
+    // 21 + 2 + 93 + 7 + 7 = 130. See `bundle_tm_skills.rs`/
     // `bundle_tm_capabilities.rs`/`bundle.rs`
     // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
     // for the authoritative list.
@@ -368,12 +374,17 @@ fn install_then_deploy_deploys_skills() {
         "tm-capabilities must be deployed; got {:?}",
         result.deployed
     );
+    assert!(
+        result.deployed.contains(&"documentation-style".to_string()),
+        "documentation-style must be deployed; got {:?}",
+        result.deployed
+    );
     assert_eq!(
         result.deployed.len(),
-        123,
-        "expected 123 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+        130,
+        "expected 130 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
          + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries \
-         + 7 tm-capabilities entries); \
+         + 7 documentation-style entries + 7 tm-capabilities entries); \
          got {:?}",
         result.deployed
     );

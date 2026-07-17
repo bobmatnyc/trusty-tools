@@ -19,6 +19,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- bundled `documentation-style` skill: a two-tier (`SKILL.md` + 6 `references/*.md`) SLD-grounded style guide covering the four-axis Why/What/Test + opt-in Spec-References inline doc model, per-artifact-type conventions (spec, README, file-level, class/module, method/function, block/inline), and context-economy guidance — defers to DOC-38 for the actual reference grammar rather than restating it (Annex B follow-up F2). `BASE-ENGINEER.md`'s Deliverables Checklist now points engineers at it, and declares `skills: [documentation-style]` in frontmatter so every engineer-family agent picks it up via the existing DOC-42 union-across-chain compose merge (closes #2911)
 - adopt DOC-38 policy + sld-lint gate (closes #2853, #2854) ([#2863](https://github.com/bobmatnyc/trusty-tools/pull/2863)) ([`580c9a7`](https://github.com/bobmatnyc/trusty-tools/commit/580c9a7d08e873d9706c6b05cfe83eafb2befbfa))
 
 ### Fixed

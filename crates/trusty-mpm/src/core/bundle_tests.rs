@@ -87,6 +87,15 @@ fn constants_are_non_empty() {
     assert!(!TM_ISSUES_PRUNE.trim().is_empty());
     assert!(!TM_CLI_OPERATIONS.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
+    // --- BEGIN issue #2911: documentation-style bundled skill (append-only) ---
+    assert!(!DOCUMENTATION_STYLE.trim().is_empty());
+    assert!(!DOCUMENTATION_STYLE_SPEC.trim().is_empty());
+    assert!(!DOCUMENTATION_STYLE_README.trim().is_empty());
+    assert!(!DOCUMENTATION_STYLE_FILE_LEVEL.trim().is_empty());
+    assert!(!DOCUMENTATION_STYLE_CLASS.trim().is_empty());
+    assert!(!DOCUMENTATION_STYLE_METHOD_FUNCTION.trim().is_empty());
+    assert!(!DOCUMENTATION_STYLE_BLOCK_INLINE.trim().is_empty());
+    // --- END issue #2911 ---
 }
 
 #[test]
@@ -387,15 +396,18 @@ fn bundle_table_is_complete() {
     //   condition-based-waiting, model-context-builder, test-quality-inspector,
     //   testing-anti-patterns, webapp-testing, api-documentation, xlsx,
     //   code-production-process. 71 + 93 = 164.
+    // Issue #2911 (7): documentation-style bundled skill — entry SKILL.md plus
+    //   6 references/*.md files (spec, readme, file-level, class,
+    //   method-function, block-inline). 164 + 7 = 171.
     // Issue #2913 (7): tm-capabilities auto-generated harness capability
     //   catalog — entry `skills/tm-capabilities.md` plus five generated
     //   `references/{cli,mcp-tools,agents,skills,doctor}.md` files plus one
-    //   hand-authored `references/workflows.md`. 164 + 7 = 171.
-    assert_eq!(ALL.len(), 171);
+    //   hand-authored `references/workflows.md`. 171 + 7 = 178.
+    assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 171, "artifact paths must be unique");
+    assert_eq!(paths.len(), 178, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -1045,5 +1057,76 @@ fn pm_authority_doctrine_survives_composition() {
         composed_normalized.contains("never merge red or pending CI"),
         "composed version-control is missing its own PR-workflow \
          objective-safety-gate (red/pending CI) text"
+    );
+}
+
+#[test]
+fn documentation_style_skill_is_in_bundle() {
+    // Issue #2911: the documentation-style entry SKILL.md must be present in
+    // `ALL` — mirrors `tm_doctor_skill_is_wired_into_bundle` and
+    // `skill_port_batch1_skills_are_in_bundle` above: a source file existing
+    // under `src/assets/skills/` is not sufficient, only `ALL` registration
+    // makes `deploy_all_skill_tiers` ship it.
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/documentation-style.md"),
+        "documentation-style.md must be present in the ALL bundle table"
+    );
+    assert!(DOCUMENTATION_STYLE.starts_with("---\n"));
+    assert!(DOCUMENTATION_STYLE.contains("name: documentation-style"));
+    // SLD self-compliance (DOC-38 §2.5): the entry SKILL.md carries
+    // `spec_refs:` frontmatter pointing at the grammar section it defers to,
+    // with `anchor` equal to `id` per DOC-38's self-check rule.
+    assert!(DOCUMENTATION_STYLE.contains("spec_refs:"));
+    assert!(DOCUMENTATION_STYLE.contains("id: SPEC-SLD-02~draft"));
+    assert!(DOCUMENTATION_STYLE.contains("anchor: SPEC-SLD-02~draft"));
+}
+
+#[test]
+fn documentation_style_references_land_on_disk() {
+    // Issue #2911: all 6 references/*.md files must be SEPARATE `ALL` entries
+    // alongside the entry-point SKILL.md — mirrors
+    // `skill_port_batch1_references_land_on_disk`. Real deploy-reachability
+    // (landing under a deployed `.claude/skills/documentation-style/references/`)
+    // is proven end-to-end in `tests_behavior_2911_documentation_style_tests.rs`.
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/documentation-style.md")
+    );
+    for rel_path in [
+        "skills/documentation-style/references/spec.md",
+        "skills/documentation-style/references/readme.md",
+        "skills/documentation-style/references/file-level.md",
+        "skills/documentation-style/references/class.md",
+        "skills/documentation-style/references/method-function.md",
+        "skills/documentation-style/references/block-inline.md",
+    ] {
+        assert!(
+            ALL.iter().any(|a| a.rel_path == rel_path),
+            "{rel_path} must be present in the ALL bundle table"
+        );
+    }
+}
+
+#[test]
+fn documentation_style_unions_into_engineer_family_via_base_engineer() {
+    // Issue #2911: BASE-ENGINEER.md now declares `skills: [documentation-style]`;
+    // compose_agent's DOC-42 union-across-chain merge (builder.rs
+    // `merge_frontmatter`) must propagate it into every concrete engineer-family
+    // agent composed from the REAL bundled asset files, not a synthetic fixture.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+
+    let composed = compose_agent("rust-engineer", &assets_dir)
+        .expect("compose_agent(rust-engineer) must succeed");
+    assert!(
+        composed.contains("documentation-style"),
+        "composed rust-engineer is missing the BASE-ENGINEER-declared \
+         documentation-style skill (union-across-chain, DOC-42): {composed}"
     );
 }
