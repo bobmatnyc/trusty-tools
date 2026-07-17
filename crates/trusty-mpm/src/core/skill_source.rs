@@ -90,20 +90,23 @@ pub fn skill_bundle_stamp() -> String {
 /// path, not the user-facing incremental `tm install`), then removes any
 /// existing top-level `*.md` file whose name is not one of the artifacts just
 /// written. Hidden files (leading `.`, e.g. the stamp marker) are never
-/// touched. An artifact whose basename (stem, `.md`-stripped) contains "mcp"
+/// touched. An artifact whose OWN stem (the first path segment, `.md`-stripped
+/// — never a nested `references/*.md` sibling's filename) contains "mcp"
 /// (case-insensitive) is skipped entirely — never written, and any stale copy
 /// already on disk is pruned by the sweep below (exercised indirectly by
 /// `materialize_skill_artifacts_prunes_files_not_in_table`, which asserts the
 /// prune sweep removes a file absent from `keep`) — as a defense-in-depth
 /// mirror of the `skill_deployer` deploy guard (#2186): such a name would
-/// shadow Claude Code's built-in `/mcp` command once deployed. The compiled-in
-/// `bundle::ALL` table currently contains no such artifact, so this branch has
-/// no dedicated fixture-backed unit test here; coverage lives in
-/// `skill_deployer::tests::deploy_skips_mcp_named_skill`, which exercises the
-/// identical stem-matching rule against an arbitrary source directory. Returns
-/// the basenames written.
+/// shadow Claude Code's built-in `/mcp` command once deployed. Issue #2913
+/// added the first `bundle::ALL` artifact that exercises the nested-path edge
+/// of this guard (`tm-capabilities/references/mcp-tools.md` — a reference
+/// filename containing "mcp" whose owning skill's stem, `tm-capabilities`,
+/// does not); a prior version of the stem computation incorrectly widened the
+/// guard to the full nested path in that case, silently refusing to
+/// materialize the file. Returns the basenames written.
 /// Test: `materialize_skill_artifacts_writes_all_skills`,
-/// `materialize_skill_artifacts_prunes_files_not_in_table`.
+/// `materialize_skill_artifacts_prunes_files_not_in_table`,
+/// `materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename`.
 pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>> {
     std::fs::create_dir_all(&paths.skills)?;
 
@@ -122,12 +125,20 @@ pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>
         // as nested rel_paths (`<stem>/references/<file>.md`); the mcp-shadow
         // guard only ever applies to the skill's own name — the first path
         // segment — never to a reference filename.
-        let stem = basename
-            .split('/')
-            .next()
-            .unwrap_or(basename)
-            .strip_suffix(".md")
-            .unwrap_or(basename);
+        //
+        // Bug fix (issue #2913): the previous chain's final `.unwrap_or(basename)`
+        // fell back to the FULL nested path (not the first segment) whenever
+        // that first segment didn't itself end in ".md" — which is always true
+        // for a `references/*.md` sibling. That silently widened the mcp-shadow
+        // check to the entire nested path, so a reference file merely NAMED
+        // `mcp-*.md` (e.g. `tm-capabilities/references/mcp-tools.md`) tripped
+        // the guard even though the owning skill's own stem (`tm-capabilities`)
+        // never contained "mcp". Binding the first segment once and stripping
+        // `.md` from THAT (not from `basename`) fixes both the single-file case
+        // (`foo.md` -> `foo`) and the nested case (`foo/references/bar.md` ->
+        // `foo`) correctly.
+        let first_segment = basename.split('/').next().unwrap_or(basename);
+        let stem = first_segment.strip_suffix(".md").unwrap_or(first_segment);
 
         // Defense-in-depth mirror of the `skill_deployer::deploy_skills_filtered`
         // guard (#2186): a bundled skill whose basename (stem, `.md`-stripped)
@@ -316,6 +327,40 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&workflow).unwrap(),
             crate::core::bundle::SYSTEMATIC_DEBUGGING_WORKFLOW
+        );
+    }
+
+    #[test]
+    fn materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename() {
+        // Regression (issue #2913): a bug in the old stem computation fell
+        // back to the FULL nested rel_path (not just the first path segment)
+        // whenever that segment didn't itself end in ".md" — which is always
+        // true for a `references/*.md` sibling. That silently widened the
+        // mcp-shadow guard (#2186) to the entire nested path, so a reference
+        // file merely NAMED `mcp-*.md` (e.g.
+        // `tm-capabilities/references/mcp-tools.md`) tripped the guard even
+        // though the owning skill's own stem (`tm-capabilities`) never
+        // contains "mcp". Pins the real production artifact so a regression
+        // fails immediately.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+
+        materialize_skill_artifacts(&paths).unwrap();
+
+        let mcp_tools_ref = paths
+            .skills
+            .join("tm-capabilities")
+            .join("references")
+            .join("mcp-tools.md");
+        assert!(
+            mcp_tools_ref.is_file(),
+            "expected tm-capabilities/references/mcp-tools.md to materialize \
+             despite its filename containing \"mcp\" — only the skill's own \
+             stem should be checked, at {mcp_tools_ref:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&mcp_tools_ref).unwrap(),
+            crate::core::bundle::TM_CAPABILITIES_MCP_TOOLS
         );
     }
 

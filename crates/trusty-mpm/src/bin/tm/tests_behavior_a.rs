@@ -335,7 +335,10 @@ fn install_then_deploy_deploys_skills() {
     // references/*.md files carried alongside multi-file skills; see
     // `tests_behavior_2903_skills_tests.rs` for the dedicated deep
     // assertions, kept out of this file for the same SLOC-cap reason).
-    // 21 + 2 + 93 = 116. See `bundle_tm_skills.rs`/`bundle.rs`
+    // 21 + 2 + 93 = 116. Issue #2913 adds 7 more: the tm-capabilities entry
+    // point plus 6 references/*.md files (5 generated + 1 hand-authored
+    // workflows.md) — 116 + 7 = 123. See `bundle_tm_skills.rs`/
+    // `bundle_tm_capabilities.rs`/`bundle.rs`
     // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
     // for the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
@@ -360,11 +363,17 @@ fn install_then_deploy_deploys_skills() {
         "tm-cli-operations must be deployed; got {:?}",
         result.deployed
     );
+    assert!(
+        result.deployed.contains(&"tm-capabilities".to_string()),
+        "tm-capabilities must be deployed; got {:?}",
+        result.deployed
+    );
     assert_eq!(
         result.deployed.len(),
-        116,
-        "expected 116 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
-         + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries); \
+        123,
+        "expected 123 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+         + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries \
+         + 7 tm-capabilities entries); \
          got {:?}",
         result.deployed
     );

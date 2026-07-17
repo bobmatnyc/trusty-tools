@@ -20,6 +20,7 @@ mod auth;
 mod catalog;
 mod coordinator;
 mod deliverables;
+mod generate;
 mod issue;
 mod mcp;
 mod meta;
@@ -43,6 +44,7 @@ pub(crate) use deliverables::{
     DeliverableKindArg, DeliverableStatusArg, DeliverablesAction, EstimationTierArg,
     MilestonesAction,
 };
+pub(crate) use generate::GenerateAction;
 pub(crate) use issue::IssueCmd;
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use meta::MetaAction;

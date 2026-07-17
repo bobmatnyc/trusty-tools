@@ -288,6 +288,15 @@ pub use tm_skills_inner::{
     TM_WORKFLOW,
 };
 
+// --- tm-capabilities: auto-generated harness capability catalog (issue
+// #2913) — generator lives in `crates/trusty-mpm/src/bin/tm/generate/`.
+#[path = "bundle_tm_capabilities.rs"]
+mod tm_capabilities_inner;
+pub use tm_capabilities_inner::{
+    TM_CAPABILITIES, TM_CAPABILITIES_AGENTS, TM_CAPABILITIES_CLI, TM_CAPABILITIES_DOCTOR,
+    TM_CAPABILITIES_MCP_TOOLS, TM_CAPABILITIES_SKILLS, TM_CAPABILITIES_WORKFLOWS,
+};
+
 /// Default (professional) Claude Code output style deployed to
 /// `~/.claude/output-styles/trusty-mpm.md`.
 ///

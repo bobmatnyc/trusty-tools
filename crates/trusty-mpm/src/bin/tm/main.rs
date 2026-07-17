@@ -11,6 +11,7 @@ mod cli;
 mod cli_manager;
 mod commands;
 mod formatters;
+mod generate;
 mod gh_identity;
 mod types;
 
@@ -22,6 +23,7 @@ use commands::{
     agent::agent,
     compress::run_compress,
     daemon::{restart, run_daemon, start, stop_daemon},
+    generate::generate,
     install::install,
     launch::{connect, launch},
     manager::manager,
@@ -58,6 +60,10 @@ mod tests_behavior_d;
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
 mod tests_behavior_e;
+
+#[cfg(test)]
+#[path = "tests_behavior_generate_tests.rs"]
+mod tests_behavior_generate;
 
 #[cfg(test)]
 #[path = "tests_behavior_reset_agents_tests.rs"]
@@ -356,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
         Some(Command::Agent { action }) => agent(action).await,
+        Some(Command::Generate { action }) => generate(action).await,
         Some(Command::Health) => health(&url).await,
         Some(Command::Tui {
             url: tui_url,

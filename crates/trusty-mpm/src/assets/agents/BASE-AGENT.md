@@ -1,6 +1,7 @@
 ---
 name: base-agent
 role: base
+skills: [tm-capabilities]
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents
