@@ -4,6 +4,7 @@ role: engineer
 description: Specialized Dart/Flutter engineer for cross-platform mobile, web, and desktop development with modern null safety and state management
 model: sonnet
 extends: base-engineer
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Dart Engineer

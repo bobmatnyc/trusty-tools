@@ -335,11 +335,22 @@ fn bundle_table_is_complete() {
     //   tm-cli-operations (#2321: tm CLI operation incl. MCP setup/management)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
     // Issue #2034 (1): docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md
-    assert_eq!(ALL.len(), 71);
+    // Issue #2903 (93, skill-port batch 1, epic #2902): 25 upstream
+    //   universal/ skills (entry SKILL.md files) plus 68 references/*.md
+    //   files carried alongside multi-file skills — systematic-debugging,
+    //   verification-before-completion, git-workflow, test-driven-development,
+    //   requesting-code-review, writing-plans, json-data-handling,
+    //   root-cause-tracing, internal-comms, brainstorming, software-patterns,
+    //   security-scanning, api-design-patterns, database-migration,
+    //   env-manager, web-performance-optimization, artifacts-builder,
+    //   condition-based-waiting, model-context-builder, test-quality-inspector,
+    //   testing-anti-patterns, webapp-testing, api-documentation, xlsx,
+    //   code-production-process. 71 + 93 = 164.
+    assert_eq!(ALL.len(), 164);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 71, "artifact paths must be unique");
+    assert_eq!(paths.len(), 164, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -718,10 +729,117 @@ fn code_critic_declared_skills_are_in_bundle() {
     assert!(CODE_REVIEW_STANDARDS.contains("name: code-review-standards"));
     assert!(CONTRACT_DRIVEN_TESTING.starts_with("---\n"));
     assert!(CONTRACT_DRIVEN_TESTING.contains("name: contract-driven-testing"));
-    // The agent's declared `skills:` frontmatter must name exactly these two
-    // skills, so the (future, #2889) co-deployment mechanism has something
-    // real to resolve.
-    assert!(CODE_CRITIC_AGENT.contains("skills: [code-review-standards, contract-driven-testing]"));
+    // The agent's declared `skills:` frontmatter must name both of these,
+    // so the DOC-42 co-deployment mechanism has something real to resolve —
+    // issue #2903 extended the declaration with four more batch-1 skills
+    // code-critic's upstream counterpart also names (code-production-process,
+    // software-patterns, systematic-debugging, verification-before-completion),
+    // so this only asserts the two #2890-era names are still present, not the
+    // full six-skill list (that full-list assertion lives in
+    // `code_critic_declares_batch1_skills`).
+    assert!(CODE_CRITIC_AGENT.contains("code-review-standards"));
+    assert!(CODE_CRITIC_AGENT.contains("contract-driven-testing"));
+    assert!(CODE_CRITIC_AGENT.contains("skills: ["));
+}
+
+#[test]
+fn code_critic_declares_batch1_skills() {
+    // Issue #2903: code-critic's upstream counterpart declares 5 skills
+    // (code-review-standards, code-production-process, software-patterns,
+    // systematic-debugging, verification-before-completion); #2890 ported
+    // only the first, this issue ports the remaining 4 — extend the
+    // declaration to the full upstream-matched set (plus the net-new
+    // `contract-driven-testing`, which has no upstream counterpart).
+    assert!(CODE_CRITIC_AGENT.contains(
+        "skills: [code-review-standards, contract-driven-testing, code-production-process, \
+         software-patterns, systematic-debugging, verification-before-completion]"
+    ));
+}
+
+#[test]
+fn skill_port_batch1_skills_are_in_bundle() {
+    // Issue #2903 (epic #2902): all 25 batch-1 universal/ skill entry points
+    // must be present in `ALL` — mirrors `tm_doctor_skill_is_wired_into_bundle`
+    // and `code_critic_declared_skills_are_in_bundle` above: a source file
+    // existing under `src/assets/skills/` is not sufficient, only `ALL`
+    // registration makes `deploy_all_skill_tiers` ship it.
+    const BATCH1_ENTRIES: &[&str] = &[
+        "skills/systematic-debugging.md",
+        "skills/verification-before-completion.md",
+        "skills/git-workflow.md",
+        "skills/test-driven-development.md",
+        "skills/requesting-code-review.md",
+        "skills/writing-plans.md",
+        "skills/json-data-handling.md",
+        "skills/root-cause-tracing.md",
+        "skills/internal-comms.md",
+        "skills/brainstorming.md",
+        "skills/software-patterns.md",
+        "skills/security-scanning.md",
+        "skills/api-design-patterns.md",
+        "skills/database-migration.md",
+        "skills/env-manager.md",
+        "skills/web-performance-optimization.md",
+        "skills/artifacts-builder.md",
+        "skills/condition-based-waiting.md",
+        "skills/model-context-builder.md",
+        "skills/test-quality-inspector.md",
+        "skills/testing-anti-patterns.md",
+        "skills/webapp-testing.md",
+        "skills/api-documentation.md",
+        "skills/xlsx.md",
+        "skills/code-production-process.md",
+    ];
+    assert_eq!(BATCH1_ENTRIES.len(), 25);
+    for rel_path in BATCH1_ENTRIES {
+        assert!(
+            ALL.iter().any(|a| &a.rel_path == rel_path),
+            "{rel_path} must be present in the ALL bundle table"
+        );
+    }
+}
+
+#[test]
+fn skill_port_batch1_references_land_on_disk() {
+    // A sample of multi-file batch-1 skills must carry their references/*.md
+    // files as SEPARATE `ALL` entries alongside the entry-point SKILL.md — the
+    // multi-file skill-directory extension this issue adds to the bundle/
+    // deploy machinery (epic #2902 constraint #2). Real deploy-reachability
+    // (landing under a deployed `.claude/skills/<name>/references/`) is
+    // proven end-to-end in `tests_behavior_2903_skills_tests.rs`.
+    for (entry, refs) in [
+        (
+            "skills/systematic-debugging.md",
+            &[
+                "skills/systematic-debugging/references/anti-patterns.md",
+                "skills/systematic-debugging/references/examples.md",
+                "skills/systematic-debugging/references/troubleshooting.md",
+                "skills/systematic-debugging/references/workflow.md",
+            ][..],
+        ),
+        (
+            "skills/software-patterns.md",
+            &[
+                "skills/software-patterns/references/anti-patterns.md",
+                "skills/software-patterns/references/code-smell-signals.md",
+                "skills/software-patterns/references/decision-trees.md",
+                "skills/software-patterns/references/examples.md",
+                "skills/software-patterns/references/foundational-patterns.md",
+                "skills/software-patterns/references/situational-patterns.md",
+            ][..],
+        ),
+    ] {
+        assert!(
+            ALL.iter().any(|a| a.rel_path == entry),
+            "{entry} must be present in the ALL bundle table"
+        );
+        for rel_path in refs {
+            assert!(
+                ALL.iter().any(|a| &a.rel_path == rel_path),
+                "{rel_path} must be present in the ALL bundle table"
+            );
+        }
+    }
 }
 
 #[test]

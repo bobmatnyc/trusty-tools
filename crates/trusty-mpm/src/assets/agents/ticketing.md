@@ -4,6 +4,7 @@ role: ticketing
 description: Ticket management specialist. Creates, updates, and tracks issues with scope validation, scope-aware linking, and workflow state intelligence.
 model: haiku
 extends: base-agent
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Ticketing Agent

@@ -4,6 +4,7 @@ role: research
 description: Expert research analyst. Investigates codebases, maps architectures, assesses technology stacks, and captures structured findings.
 model: sonnet
 extends: base-research
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Research Agent

@@ -4,7 +4,7 @@ role: qa
 description: Adversarial code review using a structured rubric. Outputs APPROVE/WARN/BLOCK verdict with line-level citations. Independent of implementer to avoid anchoring bias.
 model: sonnet
 extends: base-qa
-skills: [code-review-standards, contract-driven-testing]
+skills: [code-review-standards, contract-driven-testing, code-production-process, software-patterns, systematic-debugging, verification-before-completion]
 ---
 
 # Code Critic

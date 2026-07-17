@@ -4,6 +4,7 @@ role: version-control
 description: Git operations specialist. Manages branches, versioning, releases, and merge conflict resolution with clean history.
 model: haiku
 extends: base-ops
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Version Control Agent

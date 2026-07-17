@@ -41,6 +41,28 @@ pub enum InstallPolicy {
     SeedOnce,
 }
 
+/// Build an [`InstallPolicy::Overwrite`] artifact entry.
+///
+/// Why: nearly every bundled artifact is framework-owned and must track
+/// upgrades (`InstallPolicy::Overwrite`) — only the user-editable `CLAUDE.md`
+/// stub uses [`InstallPolicy::SeedOnce`]. Spelling out the 5-line
+/// [`BundledArtifact`] struct literal for all ~164 entries would blow the
+/// 500-SLOC production cap (issue #2903 alone adds 93 skill-port entries);
+/// this shorthand collapses the common case to one line per entry so [`ALL`]
+/// stays a single, cap-compliant table instead of being split across files
+/// (which Rust cannot do for one array literal without unsafe const-array
+/// concatenation or forbidden global/lazy state).
+/// What: returns a [`BundledArtifact`] with `install: InstallPolicy::Overwrite`.
+/// Test: `bundle_table_is_complete` (exercises every entry `ALL` produces,
+/// including those built by this helper).
+const fn overwrite(rel_path: &'static str, contents: &'static str) -> BundledArtifact {
+    BundledArtifact {
+        rel_path,
+        contents,
+        install: InstallPolicy::Overwrite,
+    }
+}
+
 /// Every bundled framework artifact, in install order.
 ///
 /// Why: gives the installer (and tests) one canonical list to walk.
@@ -48,367 +70,400 @@ pub enum InstallPolicy {
 /// placeholder skill, and Phase 1 (#770) mpm-* guidance skills.
 /// Test: `bundle_table_is_complete`.
 pub const ALL: &[BundledArtifact] = &[
-    BundledArtifact {
-        rel_path: "hooks/optimizer.toml",
-        contents: OPTIMIZER_TOML,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "hooks/overseer.toml",
-        contents: OVERSEER_TOML,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "instructions/INSTRUCTIONS.md",
-        contents: FRAMEWORK_INSTRUCTIONS,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("hooks/optimizer.toml", OPTIMIZER_TOML),
+    overwrite("hooks/overseer.toml", OVERSEER_TOML),
+    overwrite("instructions/INSTRUCTIONS.md", FRAMEWORK_INSTRUCTIONS),
     BundledArtifact {
         rel_path: "instructions/CLAUDE.md",
         contents: CLAUDE_STUB,
         install: InstallPolicy::SeedOnce,
     },
-    BundledArtifact {
-        rel_path: "agents/BASE-AGENT.md",
-        contents: BASE_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/BASE-ENGINEER.md",
-        contents: BASE_ENGINEER,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/BASE-RESEARCH.md",
-        contents: BASE_RESEARCH,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/BASE-QA.md",
-        contents: BASE_QA,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/BASE-OPS.md",
-        contents: BASE_OPS,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/engineer.md",
-        contents: ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/qa.md",
-        contents: QA_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/research.md",
-        contents: RESEARCH_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/ops.md",
-        contents: OPS_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/security.md",
-        contents: SECURITY_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/documentation.md",
-        contents: DOCUMENTATION_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/data-engineer.md",
-        contents: DATA_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/version-control.md",
-        contents: VERSION_CONTROL_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/ticketing.md",
-        contents: TICKETING_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/code-analyzer.md",
-        contents: CODE_ANALYZER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/python-engineer.md",
-        contents: PYTHON_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/typescript-engineer.md",
-        contents: TYPESCRIPT_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/golang-engineer.md",
-        contents: GOLANG_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/rust-engineer.md",
-        contents: RUST_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/java-engineer.md",
-        contents: JAVA_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/php-engineer.md",
-        contents: PHP_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/ruby-engineer.md",
-        contents: RUBY_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/react-engineer.md",
-        contents: REACT_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/nextjs-engineer.md",
-        contents: NEXTJS_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/svelte-engineer.md",
-        contents: SVELTE_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/web-qa.md",
-        contents: WEB_QA_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/api-qa.md",
-        contents: API_QA_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("agents/BASE-AGENT.md", BASE_AGENT),
+    overwrite("agents/BASE-ENGINEER.md", BASE_ENGINEER),
+    overwrite("agents/BASE-RESEARCH.md", BASE_RESEARCH),
+    overwrite("agents/BASE-QA.md", BASE_QA),
+    overwrite("agents/BASE-OPS.md", BASE_OPS),
+    overwrite("agents/engineer.md", ENGINEER_AGENT),
+    overwrite("agents/qa.md", QA_AGENT),
+    overwrite("agents/research.md", RESEARCH_AGENT),
+    overwrite("agents/ops.md", OPS_AGENT),
+    overwrite("agents/security.md", SECURITY_AGENT),
+    overwrite("agents/documentation.md", DOCUMENTATION_AGENT),
+    overwrite("agents/data-engineer.md", DATA_ENGINEER_AGENT),
+    overwrite("agents/version-control.md", VERSION_CONTROL_AGENT),
+    overwrite("agents/ticketing.md", TICKETING_AGENT),
+    overwrite("agents/code-analyzer.md", CODE_ANALYZER_AGENT),
+    overwrite("agents/python-engineer.md", PYTHON_ENGINEER_AGENT),
+    overwrite("agents/typescript-engineer.md", TYPESCRIPT_ENGINEER_AGENT),
+    overwrite("agents/golang-engineer.md", GOLANG_ENGINEER_AGENT),
+    overwrite("agents/rust-engineer.md", RUST_ENGINEER_AGENT),
+    overwrite("agents/java-engineer.md", JAVA_ENGINEER_AGENT),
+    overwrite("agents/php-engineer.md", PHP_ENGINEER_AGENT),
+    overwrite("agents/ruby-engineer.md", RUBY_ENGINEER_AGENT),
+    overwrite("agents/react-engineer.md", REACT_ENGINEER_AGENT),
+    overwrite("agents/nextjs-engineer.md", NEXTJS_ENGINEER_AGENT),
+    overwrite("agents/svelte-engineer.md", SVELTE_ENGINEER_AGENT),
+    overwrite("agents/web-qa.md", WEB_QA_AGENT),
+    overwrite("agents/api-qa.md", API_QA_AGENT),
     // --- Increment 3: remaining 14 agents ---
-    BundledArtifact {
-        rel_path: "agents/javascript-engineer.md",
-        contents: JAVASCRIPT_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/phoenix-engineer.md",
-        contents: PHOENIX_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/dart-engineer.md",
-        contents: DART_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/dotnet-engineer.md",
-        contents: DOTNET_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/tauri-engineer.md",
-        contents: TAURI_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/web-ui-engineer.md",
-        contents: WEB_UI_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/refactoring-engineer.md",
-        contents: REFACTORING_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/prompt-engineer.md",
-        contents: PROMPT_ENGINEER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/code-critic.md",
-        contents: CODE_CRITIC_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("agents/javascript-engineer.md", JAVASCRIPT_ENGINEER_AGENT),
+    overwrite("agents/phoenix-engineer.md", PHOENIX_ENGINEER_AGENT),
+    overwrite("agents/dart-engineer.md", DART_ENGINEER_AGENT),
+    overwrite("agents/dotnet-engineer.md", DOTNET_ENGINEER_AGENT),
+    overwrite("agents/tauri-engineer.md", TAURI_ENGINEER_AGENT),
+    overwrite("agents/web-ui-engineer.md", WEB_UI_ENGINEER_AGENT),
+    overwrite("agents/refactoring-engineer.md", REFACTORING_ENGINEER_AGENT),
+    overwrite("agents/prompt-engineer.md", PROMPT_ENGINEER_AGENT),
+    overwrite("agents/code-critic.md", CODE_CRITIC_AGENT),
     // --- Issue #2890: code-critic's declared `skills:` dependencies ---
-    BundledArtifact {
-        rel_path: "skills/code-review-standards.md",
-        contents: CODE_REVIEW_STANDARDS,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/contract-driven-testing.md",
-        contents: CONTRACT_DRIVEN_TESTING,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/gcp-ops.md",
-        contents: GCP_OPS_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/vercel-ops.md",
-        contents: VERCEL_OPS_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/local-ops.md",
-        contents: LOCAL_OPS_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/memory-manager.md",
-        contents: MEMORY_MANAGER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/mpm-agent-manager.md",
-        contents: MPM_AGENT_MANAGER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "agents/mpm-skills-manager.md",
-        contents: MPM_SKILLS_MANAGER_AGENT,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("skills/code-review-standards.md", CODE_REVIEW_STANDARDS),
+    overwrite("skills/contract-driven-testing.md", CONTRACT_DRIVEN_TESTING),
+    overwrite("agents/gcp-ops.md", GCP_OPS_AGENT),
+    overwrite("agents/vercel-ops.md", VERCEL_OPS_AGENT),
+    overwrite("agents/local-ops.md", LOCAL_OPS_AGENT),
+    overwrite("agents/memory-manager.md", MEMORY_MANAGER_AGENT),
+    overwrite("agents/mpm-agent-manager.md", MPM_AGENT_MANAGER_AGENT),
+    overwrite("agents/mpm-skills-manager.md", MPM_SKILLS_MANAGER_AGENT),
     // --- A3 (tm-skills-portfolio epic): previously orphaned tm-doctor.md ---
-    BundledArtifact {
-        rel_path: "skills/tm-doctor.md",
-        contents: TM_DOCTOR,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("skills/tm-doctor.md", TM_DOCTOR),
     // --- tm-skills-portfolio epic: the /tm- skill catalog (supersedes mpm-*) ---
-    BundledArtifact {
-        rel_path: "skills/tm-circuit-breaker.md",
-        contents: TM_CIRCUIT_BREAKER,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-verification-protocols.md",
-        contents: TM_VERIFICATION_PROTOCOLS,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-tool-usage-guide.md",
-        contents: TM_TOOL_USAGE_GUIDE,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-git-file-tracking.md",
-        contents: TM_GIT_FILE_TRACKING,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-adr.md",
-        contents: TM_ADR,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-workflow.md",
-        contents: TM_WORKFLOW,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-agent-architecture.md",
-        contents: TM_AGENT_ARCHITECTURE,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-postmortem.md",
-        contents: TM_POSTMORTEM,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-bug-reporting.md",
-        contents: TM_BUG_REPORTING,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-teaching-templates.md",
-        contents: TM_TEACHING_TEMPLATES,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-ticketing.md",
-        contents: TM_TICKETING,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-pr-workflow.md",
-        contents: TM_PR_WORKFLOW,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-delegation-patterns.md",
-        contents: TM_DELEGATION_PATTERNS,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-session-management.md",
-        contents: TM_SESSION_MANAGEMENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-session-pause.md",
-        contents: TM_SESSION_PAUSE,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-session-resume.md",
-        contents: TM_SESSION_RESUME,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm-init.md",
-        contents: TM_INIT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/tm.md",
-        contents: TM_OVERVIEW,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("skills/tm-circuit-breaker.md", TM_CIRCUIT_BREAKER),
+    overwrite(
+        "skills/tm-verification-protocols.md",
+        TM_VERIFICATION_PROTOCOLS,
+    ),
+    overwrite("skills/tm-tool-usage-guide.md", TM_TOOL_USAGE_GUIDE),
+    overwrite("skills/tm-git-file-tracking.md", TM_GIT_FILE_TRACKING),
+    overwrite("skills/tm-adr.md", TM_ADR),
+    overwrite("skills/tm-workflow.md", TM_WORKFLOW),
+    overwrite("skills/tm-agent-architecture.md", TM_AGENT_ARCHITECTURE),
+    overwrite("skills/tm-postmortem.md", TM_POSTMORTEM),
+    overwrite("skills/tm-bug-reporting.md", TM_BUG_REPORTING),
+    overwrite("skills/tm-teaching-templates.md", TM_TEACHING_TEMPLATES),
+    overwrite("skills/tm-ticketing.md", TM_TICKETING),
+    overwrite("skills/tm-pr-workflow.md", TM_PR_WORKFLOW),
+    overwrite("skills/tm-delegation-patterns.md", TM_DELEGATION_PATTERNS),
+    overwrite("skills/tm-session-management.md", TM_SESSION_MANAGEMENT),
+    overwrite("skills/tm-session-pause.md", TM_SESSION_PAUSE),
+    overwrite("skills/tm-session-resume.md", TM_SESSION_RESUME),
+    overwrite("skills/tm-init.md", TM_INIT),
+    overwrite("skills/tm.md", TM_OVERVIEW),
     // --- Issue #2185: gh issue backlog prune/prioritize PM delegation skill ---
-    BundledArtifact {
-        rel_path: "skills/tm-issues-prune.md",
-        contents: TM_ISSUES_PRUNE,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("skills/tm-issues-prune.md", TM_ISSUES_PRUNE),
     // --- Issue #2321: tm CLI operations skill (MCP mgmt, sessions, diagnostics) ---
-    BundledArtifact {
-        rel_path: "skills/tm-cli-operations.md",
-        contents: TM_CLI_OPERATIONS,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("skills/tm-cli-operations.md", TM_CLI_OPERATIONS),
     // --- DOC-28 R1: canonical self-description doc ---
-    BundledArtifact {
-        rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",
-        contents: WHAT_IS_TRUSTY_MPM,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite("docs/WHAT-IS-TRUSTY-MPM.md", WHAT_IS_TRUSTY_MPM),
     // --- Issue #2034: architecture doc covering memory/sessions/search ---
-    BundledArtifact {
-        rel_path: "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
-        contents: ARCHITECTURE_MEMORY_SESSIONS_SEARCH,
-        install: InstallPolicy::Overwrite,
-    },
+    overwrite(
+        "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
+        ARCHITECTURE_MEMORY_SESSIONS_SEARCH,
+    ),
+    // --- Issue #2903 (skill-port batch 1, epic #2902): 25 upstream
+    // universal/ skills (entry SKILL.md + references/*.md), resolved via
+    // the alias table so DOC-42 agent skills: declarations resolve. Uses
+    // the overwrite() shorthand — every entry here is framework-owned.
+    overwrite("skills/systematic-debugging.md", SYSTEMATIC_DEBUGGING),
+    overwrite(
+        "skills/systematic-debugging/references/anti-patterns.md",
+        SYSTEMATIC_DEBUGGING_ANTI_PATTERNS,
+    ),
+    overwrite(
+        "skills/systematic-debugging/references/examples.md",
+        SYSTEMATIC_DEBUGGING_EXAMPLES,
+    ),
+    overwrite(
+        "skills/systematic-debugging/references/troubleshooting.md",
+        SYSTEMATIC_DEBUGGING_TROUBLESHOOTING,
+    ),
+    overwrite(
+        "skills/systematic-debugging/references/workflow.md",
+        SYSTEMATIC_DEBUGGING_WORKFLOW,
+    ),
+    overwrite(
+        "skills/verification-before-completion.md",
+        VERIFICATION_BEFORE_COMPLETION,
+    ),
+    overwrite(
+        "skills/verification-before-completion/references/gate-function.md",
+        VERIFICATION_BEFORE_COMPLETION_GATE_FUNCTION,
+    ),
+    overwrite(
+        "skills/verification-before-completion/references/integration-and-workflows.md",
+        VERIFICATION_BEFORE_COMPLETION_INTEGRATION_AND_WORKFLOWS,
+    ),
+    overwrite(
+        "skills/verification-before-completion/references/red-flags-and-failures.md",
+        VERIFICATION_BEFORE_COMPLETION_RED_FLAGS_AND_FAILURES,
+    ),
+    overwrite(
+        "skills/verification-before-completion/references/verification-patterns.md",
+        VERIFICATION_BEFORE_COMPLETION_VERIFICATION_PATTERNS,
+    ),
+    overwrite("skills/root-cause-tracing.md", ROOT_CAUSE_TRACING),
+    overwrite(
+        "skills/root-cause-tracing/references/advanced-techniques.md",
+        ROOT_CAUSE_TRACING_ADVANCED_TECHNIQUES,
+    ),
+    overwrite(
+        "skills/root-cause-tracing/references/examples.md",
+        ROOT_CAUSE_TRACING_EXAMPLES,
+    ),
+    overwrite(
+        "skills/root-cause-tracing/references/integration.md",
+        ROOT_CAUSE_TRACING_INTEGRATION,
+    ),
+    overwrite(
+        "skills/root-cause-tracing/references/tracing-techniques.md",
+        ROOT_CAUSE_TRACING_TRACING_TECHNIQUES,
+    ),
+    overwrite("skills/test-driven-development.md", TEST_DRIVEN_DEVELOPMENT),
+    overwrite(
+        "skills/test-driven-development/references/anti-patterns.md",
+        TEST_DRIVEN_DEVELOPMENT_ANTI_PATTERNS,
+    ),
+    overwrite(
+        "skills/test-driven-development/references/examples.md",
+        TEST_DRIVEN_DEVELOPMENT_EXAMPLES,
+    ),
+    overwrite(
+        "skills/test-driven-development/references/integration.md",
+        TEST_DRIVEN_DEVELOPMENT_INTEGRATION,
+    ),
+    overwrite(
+        "skills/test-driven-development/references/philosophy.md",
+        TEST_DRIVEN_DEVELOPMENT_PHILOSOPHY,
+    ),
+    overwrite(
+        "skills/test-driven-development/references/workflow.md",
+        TEST_DRIVEN_DEVELOPMENT_WORKFLOW,
+    ),
+    overwrite("skills/condition-based-waiting.md", CONDITION_BASED_WAITING),
+    overwrite(
+        "skills/condition-based-waiting/references/patterns-and-implementation.md",
+        CONDITION_BASED_WAITING_PATTERNS_AND_IMPLEMENTATION,
+    ),
+    overwrite("skills/test-quality-inspector.md", TEST_QUALITY_INSPECTOR),
+    overwrite(
+        "skills/test-quality-inspector/references/assertion-quality.md",
+        TEST_QUALITY_INSPECTOR_ASSERTION_QUALITY,
+    ),
+    overwrite(
+        "skills/test-quality-inspector/references/inspection-checklist.md",
+        TEST_QUALITY_INSPECTOR_INSPECTION_CHECKLIST,
+    ),
+    overwrite(
+        "skills/test-quality-inspector/references/red-flags.md",
+        TEST_QUALITY_INSPECTOR_RED_FLAGS,
+    ),
+    overwrite("skills/testing-anti-patterns.md", TESTING_ANTI_PATTERNS),
+    overwrite(
+        "skills/testing-anti-patterns/references/completeness-anti-patterns.md",
+        TESTING_ANTI_PATTERNS_COMPLETENESS_ANTI_PATTERNS,
+    ),
+    overwrite(
+        "skills/testing-anti-patterns/references/core-anti-patterns.md",
+        TESTING_ANTI_PATTERNS_CORE_ANTI_PATTERNS,
+    ),
+    overwrite(
+        "skills/testing-anti-patterns/references/detection-guide.md",
+        TESTING_ANTI_PATTERNS_DETECTION_GUIDE,
+    ),
+    overwrite(
+        "skills/testing-anti-patterns/references/python-examples.md",
+        TESTING_ANTI_PATTERNS_PYTHON_EXAMPLES,
+    ),
+    overwrite(
+        "skills/testing-anti-patterns/references/tdd-connection.md",
+        TESTING_ANTI_PATTERNS_TDD_CONNECTION,
+    ),
+    overwrite("skills/webapp-testing.md", WEBAPP_TESTING),
+    overwrite("skills/git-workflow.md", GIT_WORKFLOW),
+    overwrite("skills/requesting-code-review.md", REQUESTING_CODE_REVIEW),
+    overwrite(
+        "skills/requesting-code-review/references/code-reviewer-template.md",
+        REQUESTING_CODE_REVIEW_CODE_REVIEWER_TEMPLATE,
+    ),
+    overwrite(
+        "skills/requesting-code-review/references/review-examples.md",
+        REQUESTING_CODE_REVIEW_REVIEW_EXAMPLES,
+    ),
+    overwrite("skills/writing-plans.md", WRITING_PLANS),
+    overwrite(
+        "skills/writing-plans/references/best-practices.md",
+        WRITING_PLANS_BEST_PRACTICES,
+    ),
+    overwrite(
+        "skills/writing-plans/references/plan-structure-templates.md",
+        WRITING_PLANS_PLAN_STRUCTURE_TEMPLATES,
+    ),
+    overwrite("skills/brainstorming.md", BRAINSTORMING),
+    overwrite("skills/json-data-handling.md", JSON_DATA_HANDLING),
+    overwrite("skills/database-migration.md", DATABASE_MIGRATION),
+    overwrite(
+        "skills/database-migration/references/decision-trees.md",
+        DATABASE_MIGRATION_DECISION_TREES,
+    ),
+    overwrite(
+        "skills/database-migration/references/troubleshooting.md",
+        DATABASE_MIGRATION_TROUBLESHOOTING,
+    ),
+    overwrite("skills/software-patterns.md", SOFTWARE_PATTERNS),
+    overwrite(
+        "skills/software-patterns/references/anti-patterns.md",
+        SOFTWARE_PATTERNS_ANTI_PATTERNS,
+    ),
+    overwrite(
+        "skills/software-patterns/references/code-smell-signals.md",
+        SOFTWARE_PATTERNS_CODE_SMELL_SIGNALS,
+    ),
+    overwrite(
+        "skills/software-patterns/references/decision-trees.md",
+        SOFTWARE_PATTERNS_DECISION_TREES,
+    ),
+    overwrite(
+        "skills/software-patterns/references/examples.md",
+        SOFTWARE_PATTERNS_EXAMPLES,
+    ),
+    overwrite(
+        "skills/software-patterns/references/foundational-patterns.md",
+        SOFTWARE_PATTERNS_FOUNDATIONAL_PATTERNS,
+    ),
+    overwrite(
+        "skills/software-patterns/references/situational-patterns.md",
+        SOFTWARE_PATTERNS_SITUATIONAL_PATTERNS,
+    ),
+    overwrite("skills/security-scanning.md", SECURITY_SCANNING),
+    overwrite(
+        "skills/security-scanning/references/ci-workflows.md",
+        SECURITY_SCANNING_CI_WORKFLOWS,
+    ),
+    overwrite(
+        "skills/security-scanning/references/common-findings-and-fixes.md",
+        SECURITY_SCANNING_COMMON_FINDINGS_AND_FIXES,
+    ),
+    overwrite(
+        "skills/security-scanning/references/open-source-safety.md",
+        SECURITY_SCANNING_OPEN_SOURCE_SAFETY,
+    ),
+    overwrite(
+        "skills/security-scanning/references/supply-chain-and-sbom.md",
+        SECURITY_SCANNING_SUPPLY_CHAIN_AND_SBOM,
+    ),
+    overwrite(
+        "skills/security-scanning/references/tooling-matrix.md",
+        SECURITY_SCANNING_TOOLING_MATRIX,
+    ),
+    overwrite(
+        "skills/security-scanning/references/triage-and-remediation.md",
+        SECURITY_SCANNING_TRIAGE_AND_REMEDIATION,
+    ),
+    overwrite("skills/api-design-patterns.md", API_DESIGN_PATTERNS),
+    overwrite(
+        "skills/api-design-patterns/references/authentication.md",
+        API_DESIGN_PATTERNS_AUTHENTICATION,
+    ),
+    overwrite(
+        "skills/api-design-patterns/references/graphql-patterns.md",
+        API_DESIGN_PATTERNS_GRAPHQL_PATTERNS,
+    ),
+    overwrite(
+        "skills/api-design-patterns/references/grpc-patterns.md",
+        API_DESIGN_PATTERNS_GRPC_PATTERNS,
+    ),
+    overwrite(
+        "skills/api-design-patterns/references/rest-patterns.md",
+        API_DESIGN_PATTERNS_REST_PATTERNS,
+    ),
+    overwrite(
+        "skills/api-design-patterns/references/versioning-strategies.md",
+        API_DESIGN_PATTERNS_VERSIONING_STRATEGIES,
+    ),
+    overwrite(
+        "skills/web-performance-optimization.md",
+        WEB_PERFORMANCE_OPTIMIZATION,
+    ),
+    overwrite(
+        "skills/web-performance-optimization/references/core-web-vitals.md",
+        WEB_PERFORMANCE_OPTIMIZATION_CORE_WEB_VITALS,
+    ),
+    overwrite(
+        "skills/web-performance-optimization/references/framework-specific.md",
+        WEB_PERFORMANCE_OPTIMIZATION_FRAMEWORK_SPECIFIC,
+    ),
+    overwrite(
+        "skills/web-performance-optimization/references/modern-patterns-2025.md",
+        WEB_PERFORMANCE_OPTIMIZATION_MODERN_PATTERNS_2025,
+    ),
+    overwrite(
+        "skills/web-performance-optimization/references/monitoring.md",
+        WEB_PERFORMANCE_OPTIMIZATION_MONITORING,
+    ),
+    overwrite(
+        "skills/web-performance-optimization/references/optimization-techniques.md",
+        WEB_PERFORMANCE_OPTIMIZATION_OPTIMIZATION_TECHNIQUES,
+    ),
+    overwrite(
+        "skills/web-performance-optimization/references/quick-wins.md",
+        WEB_PERFORMANCE_OPTIMIZATION_QUICK_WINS,
+    ),
+    overwrite("skills/api-documentation.md", API_DOCUMENTATION),
+    overwrite("skills/env-manager.md", ENV_MANAGER),
+    overwrite(
+        "skills/env-manager/references/frameworks.md",
+        ENV_MANAGER_FRAMEWORKS,
+    ),
+    overwrite(
+        "skills/env-manager/references/security.md",
+        ENV_MANAGER_SECURITY,
+    ),
+    overwrite(
+        "skills/env-manager/references/synchronization.md",
+        ENV_MANAGER_SYNCHRONIZATION,
+    ),
+    overwrite(
+        "skills/env-manager/references/troubleshooting.md",
+        ENV_MANAGER_TROUBLESHOOTING,
+    ),
+    overwrite(
+        "skills/env-manager/references/validation.md",
+        ENV_MANAGER_VALIDATION,
+    ),
+    overwrite("skills/code-production-process.md", CODE_PRODUCTION_PROCESS),
+    overwrite(
+        "skills/code-production-process/references/critic-isolation.md",
+        CODE_PRODUCTION_PROCESS_CRITIC_ISOLATION,
+    ),
+    overwrite(
+        "skills/code-production-process/references/skip-rules.md",
+        CODE_PRODUCTION_PROCESS_SKIP_RULES,
+    ),
+    overwrite(
+        "skills/code-production-process/references/stage-architect.md",
+        CODE_PRODUCTION_PROCESS_STAGE_ARCHITECT,
+    ),
+    overwrite(
+        "skills/code-production-process/references/stage-critic.md",
+        CODE_PRODUCTION_PROCESS_STAGE_CRITIC,
+    ),
+    overwrite(
+        "skills/code-production-process/references/stage-implement.md",
+        CODE_PRODUCTION_PROCESS_STAGE_IMPLEMENT,
+    ),
+    overwrite(
+        "skills/code-production-process/references/stage-research.md",
+        CODE_PRODUCTION_PROCESS_STAGE_RESEARCH,
+    ),
+    overwrite(
+        "skills/code-production-process/references/stage-security.md",
+        CODE_PRODUCTION_PROCESS_STAGE_SECURITY,
+    ),
+    overwrite(
+        "skills/code-production-process/references/stage-tests.md",
+        CODE_PRODUCTION_PROCESS_STAGE_TESTS,
+    ),
+    overwrite("skills/internal-comms.md", INTERNAL_COMMS),
+    overwrite("skills/artifacts-builder.md", ARTIFACTS_BUILDER),
+    overwrite("skills/model-context-builder.md", MODEL_CONTEXT_BUILDER),
+    overwrite("skills/xlsx.md", XLSX),
 ];

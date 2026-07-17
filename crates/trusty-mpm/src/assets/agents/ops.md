@@ -4,6 +4,7 @@ role: ops
 description: Local operations specialist for deployment, DevOps, and process management. Manages environments, services, and quality gates.
 model: sonnet
 extends: base-ops
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, database-migration, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, env-manager, internal-comms, security-scanning, test-driven-development]
 ---
 
 # Ops Agent

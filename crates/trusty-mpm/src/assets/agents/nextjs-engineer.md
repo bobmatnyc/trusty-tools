@@ -4,6 +4,7 @@ role: engineer
 description: 'Next.js 15+ specialist: App Router, Server Components, Partial Prerendering, performance-first React applications'
 model: sonnet
 extends: base-engineer
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, artifacts-builder, internal-comms, test-driven-development, web-performance-optimization]
 ---
 
 # Next.js Engineer

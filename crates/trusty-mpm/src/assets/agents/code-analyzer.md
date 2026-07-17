@@ -4,6 +4,7 @@ role: code-analyzer
 description: Code analysis specialist. Reviews code for correctness, quality, security, and architectural health using static analysis.
 model: sonnet
 extends: base-research
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Code Analyzer Agent

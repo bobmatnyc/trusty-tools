@@ -4,6 +4,7 @@ role: qa
 description: Specialized API and backend testing for REST, GraphQL, and server-side functionality
 model: sonnet
 extends: base-qa
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, condition-based-waiting, test-driven-development, test-quality-inspector, testing-anti-patterns, api-design-patterns, api-documentation]
 ---
 
 # API QA Agent

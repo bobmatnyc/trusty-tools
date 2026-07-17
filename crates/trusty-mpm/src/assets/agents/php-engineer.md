@@ -4,6 +4,7 @@ role: engineer
 description: 'PHP 8.4-8.5 + Laravel 11-12 specialist: strict types, modern security (WebAuthn/passkeys), performance-first applications'
 model: sonnet
 extends: base-engineer
+skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, security-scanning, test-driven-development]
 ---
 
 # PHP Engineer

@@ -4,6 +4,7 @@ role: base
 description: Manages skill lifecycle in trusty-mpm — discovery, deployment, tech-stack-based recommendations, and contribution workflow for the skills catalog
 model: sonnet
 extends: base-agent
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # MPM Skills Manager

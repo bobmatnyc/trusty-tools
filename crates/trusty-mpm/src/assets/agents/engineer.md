@@ -4,6 +4,7 @@ role: engineer
 extends: base-engineer
 description: General-purpose software engineer. Implements features, fixes bugs, refactors code.
 model: sonnet
+skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Engineer
