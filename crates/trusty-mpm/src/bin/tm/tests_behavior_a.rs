@@ -342,8 +342,12 @@ fn install_then_deploy_deploys_skills() {
     // + 7 (issue #2913: the `tm-capabilities` auto-generated harness catalog
     // — entry SKILL.md plus 5 generated + 1 hand-authored references/*.md
     // files; see `tests_behavior_generate_tests.rs` for the generator's own
-    // coverage, kept out of this file for the same SLOC-cap reason).
-    // 21 + 2 + 93 + 7 + 7 = 130. See `bundle_tm_skills.rs`/
+    // coverage, kept out of this file for the same SLOC-cap reason) + 1
+    // (rust-build-performance, per Bob directive 2026-07-17: a single
+    // flat-file bundled skill declared by rust-engineer and tauri-engineer;
+    // see `tests_behavior_rust_build_performance_tests.rs` for the dedicated
+    // deploy-reachability assertion).
+    // 21 + 2 + 93 + 7 + 7 + 1 = 131. See `bundle_tm_skills.rs`/
     // `bundle_tm_capabilities.rs`/`bundle.rs`
     // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
     // for the authoritative list.
@@ -365,11 +369,11 @@ fn install_then_deploy_deploys_skills() {
     }
     assert_eq!(
         result.deployed.len(),
-        130,
-        "expected 130 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+        131,
+        "expected 131 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
          + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries \
-         + 7 documentation-style entries + 7 tm-capabilities entries); \
-         got {:?}",
+         + 7 documentation-style entries + 7 tm-capabilities entries \
+         + 1 rust-build-performance entry); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

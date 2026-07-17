@@ -57,6 +57,50 @@ const DEFAULT_HNSW_MAX_ELEMENTS: usize = 1_000_000;
 /// vectors) would NOT be caught — tracked in issue #1717.
 pub(super) const POPULATED_SNAPSHOT_THRESHOLD_BYTES: u64 = 100_000; // 100 KB
 
+/// Minimum plausible bytes-per-dimension-per-vector used to compute the
+/// pre-`view()` safety floor in [`UsearchStore::load_from`] (issue #2922).
+///
+/// Why: this is a **safety** floor, not just a data-quality one. Testing the
+/// #2922 scenario (a shutdown flush truncating `hnsw.usearch` mid-write) found
+/// that calling `usearch::Index::view` on a small truncated/garbage file does
+/// **not** reliably return an `Err` — it can **SIGSEGV the whole process**.
+/// usearch's binary format trusts header-embedded size/offset fields when
+/// mapping the point/graph regions; a file truncated below the point where
+/// those fields live (or with a mangled header) leads the C++ side to read or
+/// map past the actual file extent, which is undefined behaviour from
+/// userspace's perspective — no `Result::Err`, no panic Rust can `catch_unwind`,
+/// just a crash. The only safe mitigation available without deep knowledge of
+/// usearch's on-disk layout is to never call `view()` at all when the file is
+/// implausibly small for the vector count the sidecar claims.
+///
+/// A *flat* byte floor doesn't work: this codebase's own test suite builds
+/// tiny `dim=4` stores whose real, valid, fully-loadable snapshots are as
+/// small as ~270 bytes for 1 vector — smaller than any flat floor generous
+/// enough to also tolerate quantized (int8) production stores. Instead the
+/// floor scales with the sidecar's own claimed size: at minimum 1 byte per
+/// dimension per vector (the raw point data alone, permissive enough to cover
+/// int8-quantized stores as well as f32 ones) plus a small fixed per-vector
+/// allowance for graph/header bookkeeping — comfortably above a truncation as
+/// extreme as the reported 586 MB → 112-byte case (a real dim≈384,
+/// tens-of-thousands-of-vectors snapshot has a floor in the tens of
+/// megabytes) while staying well under this codebase's own tiny test/dev
+/// snapshots.
+/// What: `expected_chunks * (dim * MIN_BYTES_PER_DIM_PER_VECTOR +
+/// MIN_FIXED_OVERHEAD_BYTES_PER_VECTOR)`, checked in [`UsearchStore::load_from`]
+/// before the `view()` call, only when the sidecar's `id_to_key` is non-empty
+/// (a legitimately empty snapshot can be a genuine few hundred bytes and must
+/// not be flagged).
+/// Test: `tests::test_load_undersized_hnsw_binary_with_valid_sidecar_returns_none_without_crashing`,
+/// `tests::test_load_tiny_legitimate_snapshot_does_not_trip_size_floor`.
+pub(super) const MIN_BYTES_PER_DIM_PER_VECTOR: u64 = 1;
+
+/// Fixed per-vector byte allowance added to the [`MIN_BYTES_PER_DIM_PER_VECTOR`]
+/// scaling term — see that constant's doc for the full rationale. Deliberately
+/// small (well under the ~150-270 bytes/vector overhead this codebase's own
+/// tiny `dim=4` test snapshots exhibit) so the floor never false-positives on
+/// a genuine small index while still rejecting a handful-of-bytes truncation.
+pub(super) const MIN_FIXED_OVERHEAD_BYTES_PER_VECTOR: u64 = 32;
+
 /// Read the HNSW max-elements cap from the environment, with a sane default.
 /// Shared with `TRUSTY_MAX_CHUNKS` so a single knob bounds both the chunk
 /// corpus and the vector store.
@@ -155,6 +199,31 @@ pub struct UsearchStore {
     /// Test: `tests::test_demote_to_view_full_cycle`,
     /// `tests::test_demote_to_view_skips_when_dirty`.
     pub(super) dirty: Arc<AtomicBool>,
+    /// Serializes the entire `save()` operation (both the HNSW write+rename
+    /// and the sidecar write+rename) for this store instance.
+    ///
+    /// Why (issue #2922): `save()`'s HNSW write lock (`self.index`) only
+    /// covers the usearch FFI call itself, not the `std::fs::rename` that
+    /// follows it. Without an outer lock, two independent savers of the same
+    /// store — e.g. the graceful-shutdown flush (`shutdown_flush.rs`) racing
+    /// an in-flight `spawn_incremental_persist` background task that hadn't
+    /// finished when shutdown began — can interleave: saver A finishes its
+    /// FFI write to `hnsw_path.usearch.tmp` and is about to rename it, while
+    /// saver B (which started later) reuses the *same* tmp path, truncates
+    /// and rewrites it with its own snapshot, and renames first. A's later
+    /// rename then either clobbers B's fresher file with A's staler-but-still
+    /// complete one, or fails outright because its tmp file was already
+    /// consumed. Holding this lock across the whole save makes every save()
+    /// call fully serialized end-to-end, so the live file always ends up as
+    /// exactly one caller's complete, self-consistent snapshot — whichever
+    /// caller was last to acquire the lock — never a mix of two writers' tmp
+    /// files and never a stale rename racing a fresh one.
+    /// What: acquired via `lock_owned()` for the full body of [`Self::save`].
+    /// A task that is `abort()`-ed while suspended waiting on this lock (or
+    /// inside the FFI call it guards) never reaches its own rename — dropping
+    /// the future drops the guard, releasing the lock for the next waiter.
+    /// Test: `tests::test_concurrent_saves_are_serialized_and_end_consistent`.
+    pub(super) save_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl UsearchStore {
@@ -210,6 +279,7 @@ impl UsearchStore {
             is_view: Arc::new(AtomicBool::new(false)),
             hnsw_path: Arc::new(RwLock::new(None)),
             dirty: Arc::new(AtomicBool::new(false)),
+            save_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -244,6 +314,12 @@ impl UsearchStore {
     /// `tests::test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
     /// covers the #1711 guard.
     pub async fn save(&self, hnsw_path: &Path) -> Result<()> {
+        // Issue #2922: serialize the whole save (write+rename of both the
+        // HNSW binary and the JSON sidecar) against any other concurrent
+        // `save()` call on this store. See the `save_lock` field doc for why
+        // this is required beyond the HNSW `RwLock` alone.
+        let _save_guard = self.save_lock.clone().lock_owned().await;
+
         // Fast path: in view mode the in-memory state is a mmap of the
         // on-disk snapshot — there is nothing dirty to flush. Skipping the
         // save here avoids rewriting the same bytes on every shutdown and
@@ -438,6 +514,37 @@ impl UsearchStore {
         };
 
         let expected_chunks = key_map.id_to_key.len();
+
+        // Safety floor (issue #2922) — see `MIN_BYTES_PER_DIM_PER_VECTOR`. Must
+        // run BEFORE any `Index::view()` call: viewing a truncated/corrupt
+        // file below this size is not just a data-loss risk, it can SIGSEGV
+        // the process. Only applies when vectors are actually expected — a
+        // legitimately empty snapshot is a genuine few hundred bytes, and the
+        // floor scales with the sidecar's own claimed size so it never flags
+        // a genuine tiny (e.g. low-dim test) snapshot.
+        if expected_chunks > 0 {
+            let per_vector_bytes = (key_map.dim as u64)
+                .saturating_mul(MIN_BYTES_PER_DIM_PER_VECTOR)
+                .saturating_add(MIN_FIXED_OVERHEAD_BYTES_PER_VECTOR);
+            let min_plausible_bytes = (expected_chunks as u64).saturating_mul(per_vector_bytes);
+            let on_disk_bytes = std::fs::metadata(hnsw_path).map(|m| m.len()).unwrap_or(0);
+            if on_disk_bytes < min_plausible_bytes {
+                tracing::error!(
+                    "usearch: snapshot {} is only {} bytes but its sidecar {} expects {} \
+                     vectors of dim {} (minimum plausible size {} bytes) — refusing to \
+                     view() an implausibly small/truncated file (issue #2922). Discarding \
+                     and falling back to a fresh (BM25-only until reindex) store.",
+                    hnsw_path.display(),
+                    on_disk_bytes,
+                    sidecar.display(),
+                    expected_chunks,
+                    key_map.dim,
+                    min_plausible_bytes,
+                );
+                return Ok(None);
+            }
+        }
+
         let store = Self::with_capacity_hint(key_map.dim, expected_chunks)?;
         let hnsw_str = match hnsw_path.to_str() {
             Some(s) => s,
@@ -463,6 +570,34 @@ impl UsearchStore {
             }
             // NOTE: `reserve` would mutate (invalidate) the view; skip it — the
             // eventual `ensure_mutable` reserves on first write.
+
+            // Data-loss detection (issue #2922): a truncated `.usearch` binary
+            // (e.g. a shutdown flush cut off mid-write before atomic-rename
+            // hardening, or on-disk corruption from any other source) can
+            // still contain a valid-enough header for `Index::view` to
+            // succeed while reporting far fewer points than the sidecar
+            // expects — most acutely, 0. Without this check the store would
+            // silently come up "loaded" with an empty graph while
+            // `hnsw_snapshot_ready` (driven by mere file existence) told
+            // `/health` semantic search was ready, exactly reproducing the
+            // reported bug ("hnsw.usearch truncated to 112 bytes ... health
+            // kept reporting semantic: ready"). Treat any non-empty sidecar
+            // paired with a 0-point view as corrupt and discard, matching the
+            // `save()`-side #1711 guard's philosophy in the opposite
+            // direction (refuse to *load* an empty-over-populated mismatch,
+            // just as #1711 refuses to *save* one).
+            let restored_size = index.size();
+            if expected_chunks > 0 && restored_size == 0 {
+                tracing::error!(
+                    "usearch: snapshot {} viewed successfully but reports 0 vectors while its \
+                     sidecar {} expects {} — treating as truncated/corrupt (issue #2922); \
+                     discarding and falling back to a fresh (BM25-only until reindex) store",
+                    hnsw_path.display(),
+                    sidecar.display(),
+                    expected_chunks,
+                );
+                return Ok(None);
+            }
         }
         store.is_view.store(true, Ordering::Release);
         *store.hnsw_path.write().await = Some(hnsw_path.to_path_buf());

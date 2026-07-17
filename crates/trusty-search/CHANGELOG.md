@@ -12,26 +12,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - native document indexing — pdf/docx/xls/xlsx/xlsm text extraction feeds the existing chunk pipeline on both the reindex/ingest path and the live watcher (closes #2923)
 - explicit allow_sensitive_path bypass for index creation ([#2747](https://github.com/bobmatnyc/trusty-tools/pull/2747)) ([`1bc4bcc`](https://github.com/bobmatnyc/trusty-tools/commit/1bc4bccfa49235e14053ad9a01127972e4c0f9ce))
 - DOC-37 MVP — RepoIdentity join key + identity-filtered listing + grouped prune-orphans ([#2617](https://github.com/bobmatnyc/trusty-tools/pull/2617)) ([`2c51047`](https://github.com/bobmatnyc/trusty-tools/commit/2c510472cb1c5a23526f81881a8bcaf415468016))
-
-### Fixed
-
-- default max fan-out + --serial flag (closes concurrency-limiter 503s) ([#2850](https://github.com/bobmatnyc/trusty-tools/pull/2850)) ([`7571f2c`](https://github.com/bobmatnyc/trusty-tools/commit/7571f2c65d5d07369d724b7d659871656a851b14))
-- enforce rss_limit_mb — bound RSS growth (closes #2846) ([#2849](https://github.com/bobmatnyc/trusty-tools/pull/2849)) ([`4ea29ef`](https://github.com/bobmatnyc/trusty-tools/commit/4ea29ef6b971c40fa88b5972114a40e7af6d56bd))
-- bound graceful-stop flush so it can't hang until SIGKILL ([#1746](https://github.com/bobmatnyc/trusty-tools/pull/1746)) ([#2830](https://github.com/bobmatnyc/trusty-tools/pull/2830)) ([`9e56faf`](https://github.com/bobmatnyc/trusty-tools/commit/9e56fafe21a707c3accf4dba993496891ad23b69))
-- bump lru and jsonwebtoken to patched versions ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
-- bump vulnerable UI dependencies across embedded Svelte UIs ([#2774](https://github.com/bobmatnyc/trusty-tools/pull/2774)) ([`a223b5b`](https://github.com/bobmatnyc/trusty-tools/commit/a223b5b00fee2e2f946d9a1dcf3a2fdbe27cf4c6))
-- deterministic reindex-completion rendezvous in tests, replacing wall-clock polls ([#2738](https://github.com/bobmatnyc/trusty-tools/pull/2738)) ([`a15c5ee`](https://github.com/bobmatnyc/trusty-tools/commit/a15c5eebea27f183e1dc3240583129a6f1121c95))
-- inject repo_identity registry path to remove TRUSTY_DATA_DIR getenv race ([#2725](https://github.com/bobmatnyc/trusty-tools/pull/2725)) ([`77fdaaf`](https://github.com/bobmatnyc/trusty-tools/commit/77fdaafac40724d91c5a19fff461cca38bb44f7c))
-- deterministic no-starvation probe test replaces wall-clock deadline ([#2714](https://github.com/bobmatnyc/trusty-tools/pull/2714)) ([`044b38f`](https://github.com/bobmatnyc/trusty-tools/commit/044b38f9591f942549b9d690af407387fe9a73cb))
-- SLOC-counter /* trap + stray conflict markers (closes #2489, #2509, #2390) ([#2561](https://github.com/bobmatnyc/trusty-tools/pull/2561)) ([`e4aed64`](https://github.com/bobmatnyc/trusty-tools/commit/e4aed64cfffff0eee3593669879b0cf136188137))
-
-### Changed
-
-- MatchReason enum replaces match_reason string literals ([#2707](https://github.com/bobmatnyc/trusty-tools/pull/2707)) ([`a451eef`](https://github.com/bobmatnyc/trusty-tools/commit/a451eefb751f099fe0cd9b171d77667d9387a5b8))
-- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
-
-### Added
-
 - steady-state memory-limit enforcement — the configured `rss_limit_mb` /
   `TRUSTY_MEMORY_LIMIT_MB` soft ceiling was previously accepted but only ever
   enforced inside the reindex pipeline, so a long-lived serving daemon that
@@ -68,8 +48,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- shutdown-flush no longer truncates HNSW on timeout: `UsearchStore::save` now serializes concurrent savers of the same store, the graceful-shutdown flush deadline scales with each index's on-disk snapshot size (was a flat 10s) and flushes indexes with bounded concurrency instead of strictly sequentially, and a truncated/corrupt on-disk HNSW snapshot is now detected on load (via a pre-`view()` size floor plus a post-view zero-vector-vs-populated-sidecar guard) so `/health` no longer reports semantic search ready when it silently fell back to BM25-only (closes #2922) ([#2930](https://github.com/bobmatnyc/trusty-tools/pull/2930)) ([`f212b2e`](https://github.com/bobmatnyc/trusty-tools/commit/f212b2e1a1e8c74e29a6cf407023599ae3cb53bf))
+- default max fan-out + --serial flag (closes concurrency-limiter 503s) ([#2850](https://github.com/bobmatnyc/trusty-tools/pull/2850)) ([`7571f2c`](https://github.com/bobmatnyc/trusty-tools/commit/7571f2c65d5d07369d724b7d659871656a851b14))
+- enforce rss_limit_mb — bound RSS growth (closes #2846) ([#2849](https://github.com/bobmatnyc/trusty-tools/pull/2849)) ([`4ea29ef`](https://github.com/bobmatnyc/trusty-tools/commit/4ea29ef6b971c40fa88b5972114a40e7af6d56bd))
+- bound graceful-stop flush so it can't hang until SIGKILL ([#1746](https://github.com/bobmatnyc/trusty-tools/pull/1746)) ([#2830](https://github.com/bobmatnyc/trusty-tools/pull/2830)) ([`9e56faf`](https://github.com/bobmatnyc/trusty-tools/commit/9e56fafe21a707c3accf4dba993496891ad23b69))
+- bump lru and jsonwebtoken to patched versions ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
+- bump vulnerable UI dependencies across embedded Svelte UIs ([#2774](https://github.com/bobmatnyc/trusty-tools/pull/2774)) ([`a223b5b`](https://github.com/bobmatnyc/trusty-tools/commit/a223b5b00fee2e2f946d9a1dcf3a2fdbe27cf4c6))
+- deterministic reindex-completion rendezvous in tests, replacing wall-clock polls ([#2738](https://github.com/bobmatnyc/trusty-tools/pull/2738)) ([`a15c5ee`](https://github.com/bobmatnyc/trusty-tools/commit/a15c5eebea27f183e1dc3240583129a6f1121c95))
+- inject repo_identity registry path to remove TRUSTY_DATA_DIR getenv race ([#2725](https://github.com/bobmatnyc/trusty-tools/pull/2725)) ([`77fdaaf`](https://github.com/bobmatnyc/trusty-tools/commit/77fdaafac40724d91c5a19fff461cca38bb44f7c))
+- deterministic no-starvation probe test replaces wall-clock deadline ([#2714](https://github.com/bobmatnyc/trusty-tools/pull/2714)) ([`044b38f`](https://github.com/bobmatnyc/trusty-tools/commit/044b38f9591f942549b9d690af407387fe9a73cb))
+- SLOC-counter /* trap + stray conflict markers (closes #2489, #2509, #2390) ([#2561](https://github.com/bobmatnyc/trusty-tools/pull/2561)) ([`e4aed64`](https://github.com/bobmatnyc/trusty-tools/commit/e4aed64cfffff0eee3593669879b0cf136188137))
 - graceful stop no longer intermittently hangs for `TimeoutStopSec` (300 s) before a SIGKILL: `UsearchStore::save` now runs the blocking usearch `Index::save` FFI call via `tokio::task::spawn_blocking` instead of inline on an async worker, so a stalled save occupies a blocking-pool thread instead of starving the runtime's workers; the shutdown flush loop additionally runs each index's snapshot on its own detached task and enforces the per-index deadline on the `JoinHandle` as defense-in-depth. The daemon also hard-exits via `std::process::exit(0)` once `run_daemon` returns, so a worker stuck in blocking FFI or a CUDA/embedder teardown deadlock cannot block tokio's runtime teardown at process exit (the embedder sidecar is still reaped via its stdin-EOF exit path, not `kill_on_drop`, on this path). No data-loss behaviour changes — the #1711 empty-snapshot guard is untouched ([#1746](https://github.com/bobmatnyc/trusty-tools/issues/1746))
 - bump `lru` 0.12 → 0.16, fixing RUSTSEC-2026-0002 (`IterMut` violates Stacked Borrows, GHSA-rhfx-m35p-ff5j); no call-site changes needed ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
+
+### Changed
+
+- MatchReason enum replaces match_reason string literals ([#2707](https://github.com/bobmatnyc/trusty-tools/pull/2707)) ([`a451eef`](https://github.com/bobmatnyc/trusty-tools/commit/a451eefb751f099fe0cd9b171d77667d9387a5b8))
+- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
 
 ## [0.32.4] — 2026-07-13
 
