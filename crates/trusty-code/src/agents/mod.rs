@@ -3,54 +3,112 @@
 //! Why: Sub-agents (and the PM itself) are defined declaratively in TOML files
 //! under `.claude/agents/` so model, prompt, and LLM parameters can evolve
 //! without code changes. This module is the assembly point for config types
-//! and the discovery helpers.
+//! and the discovery helpers. As of #2897 (epic #2892, Slice B) a Markdown+
+//! frontmatter `.md` loader ([`md_loader`]) is DARK-LAUNCHED alongside the
+//! TOML loader — both formats are discovered and loaded; TOML retirement is
+//! a later slice (D).
 //! What: Re-exports `AgentConfig` and all nested config types from `config`;
-//! provides `discover_agents` for scanning an agents directory, and
-//! `load_all_agents` for loading every config in it. `load_all_agents` falls
-//! back to `crate::assets::DEFAULT_AGENTS` (#2895) when the *parsed* result is
-//! empty — not merely when no `.toml` paths were discovered — so a
-//! `.claude/agents/` dir that exists but holds only unparseable TOML still
+//! provides `discover_agents` for scanning an agents directory (now `*.toml`
+//! AND `*.md`), and `load_all_agents` for loading every config in it,
+//! dispatching to the TOML or `.md` loader by extension. `load_all_agents`
+//! falls back to `crate::assets::DEFAULT_AGENTS` (#2895) when the *parsed*
+//! result is empty — not merely when no paths were discovered — so a
+//! `.claude/agents/` dir that exists but holds only unparseable configs still
 //! yields a usable `engineer`/`qa-agent`/`code-reviewer` set instead of
 //! silently starting with zero agents. A disk directory with even one
 //! successfully-parsed config is treated as the project opting in to its own
 //! catalog, so it is used as-is and the embedded defaults are not merged in.
-//! Test: `discover_agents` tests place TOML files in a tempdir and verify the
-//! returned list. `AgentConfig::load` tests read individual files.
+//! Test: `discover_agents` tests place TOML/`.md` files in a tempdir and
+//! verify the returned list. `AgentConfig::load` tests read individual TOML
+//! files; `md_loader`'s own tests cover the `.md` path.
 //! `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 //! `load_all_agents_falls_back_to_embedded_when_disk_all_invalid`, and
 //! `load_all_agents_disk_wins_when_present` cover the fallback threshold.
 
 pub mod config;
+pub mod md_loader;
 
 pub use config::{
     AgentConfig, AgentInfo, LlmParams, RunnerConfig, RunnerKind, SystemPrompt, ToolsConfig,
 };
+pub use md_loader::load_md_agent;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Discover all agent configs in the given directory.
 ///
 /// Why: tcode needs to know which agents are available before the PM loop
-/// starts so it can validate `delegate_to_agent` calls pre-flight.
-/// What: Scans `dir/*.toml` and returns `(name, path)` pairs sorted by name.
-/// Files that fail to parse are skipped with a tracing warning.
-/// Test: `discover_agents_finds_tomls`, `discover_agents_skips_non_toml`.
+/// starts so it can validate `delegate_to_agent` calls pre-flight. As of
+/// #2897 both `.toml` (existing) and `.md` (dark-launched) source files are
+/// discovered, since both loaders coexist this slice.
+/// What: Scans `dir/*.toml` and `dir/*.md`, keyed by file stem (the agent
+/// name), and returns `(name, path)` pairs sorted by name. When BOTH a
+/// `<name>.toml` and `<name>.md` exist for the same agent name — an edge
+/// case, not the common single-format-per-agent path — the `.toml` wins
+/// deterministically and a warning is logged: the TOML loader is the
+/// established, still-authoritative format during this dark launch (`.md`
+/// retirement of TOML is Slice D), so an operator who has not yet migrated
+/// a given agent keeps getting the config they already have.
+/// Test: `discover_agents_finds_tomls`, `discover_agents_finds_md`,
+/// `discover_agents_toml_wins_on_collision`.
 pub fn discover_agents(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         tracing::debug!("agents dir not found or unreadable: {}", dir.display());
         return vec![];
     };
-    let mut agents: Vec<(String, std::path::PathBuf)> = entries
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("toml") {
-                let name = p.file_stem()?.to_str()?.to_string();
-                Some((name, p))
-            } else {
-                None
+
+    // `is_toml` tracked per entry so a same-name `.toml`/`.md` collision can
+    // be resolved deterministically (TOML wins) regardless of directory
+    // iteration order.
+    let mut by_name: HashMap<String, (std::path::PathBuf, bool)> = HashMap::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let ext = p.extension().and_then(|x| x.to_str());
+        let is_toml = ext == Some("toml");
+        let is_md = ext == Some("md");
+        if !is_toml && !is_md {
+            continue;
+        }
+        let Some(name) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let name = name.to_string();
+
+        match by_name.get(&name) {
+            None => {
+                by_name.insert(name, (p, is_toml));
             }
-        })
+            Some((existing_path, existing_is_toml)) => {
+                if *existing_is_toml {
+                    // Existing entry is already the winning `.toml`; an `.md`
+                    // for the same name loses.
+                    tracing::warn!(
+                        "agent '{name}' has both {} and {} — using the .toml \
+                         (established format wins during the .md dark launch)",
+                        existing_path.display(),
+                        p.display()
+                    );
+                } else if is_toml {
+                    // The `.md` seen first loses to this later `.toml`.
+                    tracing::warn!(
+                        "agent '{name}' has both {} and {} — using the .toml \
+                         (established format wins during the .md dark launch)",
+                        p.display(),
+                        existing_path.display()
+                    );
+                    by_name.insert(name, (p, is_toml));
+                }
+                // Two entries of the same extension for one stem cannot occur
+                // (distinct filenames with identical stem+ext collide on
+                // disk), so no other branch is reachable.
+            }
+        }
+    }
+
+    let mut agents: Vec<(String, std::path::PathBuf)> = by_name
+        .into_iter()
+        .map(|(name, (p, _))| (name, p))
         .collect();
     agents.sort_by(|a, b| a.0.cmp(&b.0));
     agents
@@ -61,29 +119,37 @@ pub fn discover_agents(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
 /// Why: Startup needs a map of all available agents; individual parse errors
 /// should not crash the whole harness. A project that has not yet created
 /// `.claude/agents/`, has created it but left it empty, or has populated it
-/// with only unparseable TOML must not start with zero agents — see the
+/// with only unparseable configs must not start with zero agents — see the
 /// embedded-fallback note below.
-/// What: Calls `discover_agents`, then `AgentConfig::load` on each,
-/// collecting only the successfully parsed configs (failures are logged at
-/// WARN level and skipped). The fallback threshold is the *parsed* result
-/// being empty, not merely `discover_agents` finding no paths — a directory
-/// full of `.toml` files that all fail to parse must fall back exactly like
-/// an empty or missing directory does. Any single successfully-parsed disk
-/// config is treated as the project's own catalog and used as-is, never
+/// What: Calls `discover_agents`, then dispatches each discovered path to
+/// `AgentConfig::load` (`.toml`) or [`md_loader::load_md_agent`] (`.md`) by
+/// extension, collecting only the successfully parsed configs (failures are
+/// logged at WARN level and skipped). The fallback threshold is the *parsed*
+/// result being empty, not merely `discover_agents` finding no paths — a
+/// directory full of configs that all fail to parse must fall back exactly
+/// like an empty or missing directory does. Any single successfully-parsed
+/// disk config is treated as the project's own catalog and used as-is, never
 /// merged with the embedded set. Falls back to `load_embedded_default_agents`
 /// when parsing yields nothing. Disk agents always win when present.
 /// Test: `load_all_agents_skips_invalid`,
 /// `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 /// `load_all_agents_falls_back_to_embedded_when_disk_all_invalid`,
-/// `load_all_agents_disk_wins_when_present`.
+/// `load_all_agents_disk_wins_when_present`, `load_all_agents_loads_md_agents`.
 pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
     let parsed: Vec<AgentConfig> = discover_agents(dir)
         .into_iter()
-        .filter_map(|(name, path)| match AgentConfig::load(&path) {
-            Ok(cfg) => Some(cfg),
-            Err(e) => {
-                tracing::warn!("skipping agent '{name}': {e}");
-                None
+        .filter_map(|(name, path)| {
+            let loaded = if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                md_loader::load_md_agent(&path)
+            } else {
+                AgentConfig::load(&path)
+            };
+            match loaded {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    tracing::warn!("skipping agent '{name}': {e}");
+                    None
+                }
             }
         })
         .collect();
@@ -148,8 +214,11 @@ mod tests {
 
     /// `discover_agents` finds TOML files and returns sorted (name, path) pairs.
     ///
-    /// Why: Verify the scanning and sorting logic.
-    /// What: Place two TOML + one non-TOML in a tempdir; assert two results in order.
+    /// Why: Verify the scanning and sorting logic. Uses a `.txt` file (not
+    /// `.md`) as the "irrelevant extension" fixture — since #2897, `.md` is a
+    /// legitimate discovered agent format, not an ignorable extension.
+    /// What: Place two TOML + one `.txt` in a tempdir; assert two results in
+    /// order.
     /// Test: This test.
     #[test]
     fn discover_agents_finds_tomls() {
@@ -164,11 +233,59 @@ mod tests {
             "[agent]\nname=\"engineer\"\n",
         )
         .expect("write");
-        std::fs::write(tmp.path().join("README.md"), "docs").expect("write");
+        std::fs::write(tmp.path().join("README.txt"), "docs").expect("write");
 
         let agents = discover_agents(tmp.path());
         let names: Vec<&str> = agents.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["engineer", "qa-agent"], "sorted by name");
+    }
+
+    /// `discover_agents` also finds `.md` files (#2897 dark launch), sorted
+    /// alongside `.toml` results by name.
+    ///
+    /// Why: both formats must coexist in discovery this slice.
+    /// What: one `.toml` + one `.md`, distinct names; both are discovered.
+    /// Test: this test.
+    #[test]
+    fn discover_agents_finds_md() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("engineer.toml"),
+            "[agent]\nname=\"engineer\"\n",
+        )
+        .expect("write");
+        std::fs::write(
+            tmp.path().join("md-agent.md"),
+            "---\nname: md-agent\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let agents = discover_agents(tmp.path());
+        let names: Vec<&str> = agents.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["engineer", "md-agent"], "sorted by name");
+    }
+
+    /// When both a `<name>.toml` and `<name>.md` exist for the same agent
+    /// name, the `.toml` deterministically wins (established format, during
+    /// the `.md` dark launch).
+    ///
+    /// Why: pins the collision-resolution policy so it can't silently flip
+    /// with `HashMap` iteration order.
+    /// What: `dup.toml` and `dup.md`, both named `dup`; `discover_agents`
+    /// returns exactly one `dup` entry pointing at the `.toml` path.
+    /// Test: this test.
+    #[test]
+    fn discover_agents_toml_wins_on_collision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let toml_path = tmp.path().join("dup.toml");
+        std::fs::write(&toml_path, "[agent]\nname=\"dup\"\n").expect("write toml");
+        std::fs::write(tmp.path().join("dup.md"), "---\nname: dup\n---\n\nBody.\n")
+            .expect("write md");
+
+        let agents = discover_agents(tmp.path());
+        assert_eq!(agents.len(), 1, "collision must resolve to one entry");
+        assert_eq!(agents[0].0, "dup");
+        assert_eq!(agents[0].1, toml_path, "the .toml path must win");
     }
 
     /// `discover_agents` returns empty when the directory does not exist.
@@ -260,6 +377,43 @@ mod tests {
         let agents = load_all_agents(tmp.path());
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent.name, "custom");
+    }
+
+    /// `load_all_agents` loads `.md` agents alongside `.toml` agents (#2897
+    /// dark launch) — both dispatch through the same discover/load/collect
+    /// pipeline.
+    ///
+    /// Why: proves `load_all_agents` actually routes `.md` paths to
+    /// `md_loader::load_md_agent`, not just that `discover_agents` finds them.
+    /// What: one `.toml` agent + one `.md` agent on disk; both appear in the
+    /// loaded result with correctly projected fields.
+    /// Test: this test.
+    #[test]
+    fn load_all_agents_loads_md_agents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("toml-agent.toml"),
+            "[agent]\nname=\"toml-agent\"\n",
+        )
+        .expect("write toml");
+        std::fs::write(
+            tmp.path().join("md-agent.md"),
+            "---\nname: md-agent\nmodel: sonnet\n---\n\nAn md-format agent.\n",
+        )
+        .expect("write md");
+
+        let agents = load_all_agents(tmp.path());
+        let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
+        assert_eq!(agents.len(), 2, "both formats must load");
+        assert!(names.contains(&"toml-agent"));
+        assert!(names.contains(&"md-agent"));
+
+        let md_cfg = agents
+            .iter()
+            .find(|a| a.agent.name == "md-agent")
+            .expect("md-agent present");
+        assert_eq!(md_cfg.agent.model.as_deref(), Some("sonnet"));
+        assert_eq!(md_cfg.system_prompt.content, "An md-format agent.");
     }
 
     /// `locate_agents_dir` prefers `.claude/agents`, falls back to

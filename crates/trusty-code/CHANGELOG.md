@@ -10,6 +10,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Markdown+frontmatter `.md` agent loader, dark-launched alongside TOML
+  (#2897, epic #2892, Slice B).** `agents::md_loader::load_md_agent` composes
+  a `.md` agent source file's `extends:` chain via
+  `trusty-agents-common::agents::builder::compose_agent` (Slice A, #2952) and
+  projects the result onto tcode's existing `AgentConfig`: `model` ->
+  `agent.model`, `max_tokens` -> `llm.max_tokens`, `tools:
+  Option<Vec<String>>` -> `ToolsConfig.allowed` (a direct map — both sides
+  share identical `None`=all-allowed / `Some([])`=deny-all /
+  `Some(list)`=allowlist semantics), and the composed prose body ->
+  `system_prompt.content`. The composed frontmatter's HR-1 role-derived
+  `initialPrompt` enrichment (keyed off trusty-mpm's role table, which
+  collides by name with tcode's `engineer`/`qa` roles) is guaranteed to never
+  leak into `system_prompt.content` — the body extraction only reads past the
+  closing frontmatter fence and the public `AgentMetadata` projection has no
+  `initial_prompt` field at all. `discover_agents`/`load_all_agents` now scan
+  and load both `*.toml` and `*.md` agent files; when both exist for the same
+  agent name, the `.toml` deterministically wins (a warning is logged). Purely
+  additive and behavior-preserving — the TOML loader is unchanged; TOML
+  retirement is a later slice (D).
 - **Engineer receives `use_skill` on the `--legacy-in-process`/`run_task` path (#2942).** The `python-engineer` role's tool registry (`ProjectToolFactory` in `run_task/mod.rs`) now conditionally registers `UseSkillTool` alongside its other project tools when a `SkillResolver` is available, so the engineer can fetch a skill's full body mid-turn instead of relying solely on the catalog summary baked into its system prompt.
 - **Native skill discovery on the `--legacy-in-process`/bake-off `run-task` path (#2924).** The `use_skill` tool and the `.claude/skills/` catalog now reach the PM's prompt and tool registry on `run_task::execute_run_task`, not just the daemon/thin-client path — a PM run through `run-task` can now discover and load project skills the same way a daemon session already could.
 - **Embedded default agents & skills, disk-first with embedded fallback
