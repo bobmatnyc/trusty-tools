@@ -84,7 +84,9 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
 /// past it to the next `---` line and returns everything after, trimmed. A
 /// document with no opening fence (defensive fallback; `compose_agent` always
 /// emits one) returns the whole string trimmed.
-/// Test: `hr1_initial_prompt_not_leaked_into_body`, `extract_body_strips_frontmatter`.
+/// Test: `hr1_initial_prompt_not_leaked_into_body`,
+/// `interior_horizontal_rule_survives_in_body`,
+/// `frontmatter_only_agent_has_empty_body`.
 fn extract_body(composed: &str) -> String {
     let mut lines = composed.lines();
     match lines.next() {
