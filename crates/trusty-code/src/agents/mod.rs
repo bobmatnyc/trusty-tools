@@ -7,14 +7,17 @@
 //! What: Re-exports `AgentConfig` and all nested config types from `config`;
 //! provides `discover_agents` for scanning an agents directory, and
 //! `load_all_agents` for loading every config in it. `load_all_agents` falls
-//! back to `crate::assets::DEFAULT_AGENTS` (#2895) when the disk scan finds
-//! nothing — a project with no `.claude/agents/` (or an empty one) still
-//! gets a usable `engineer`/`qa-agent`/`code-reviewer` set. A disk directory
-//! with even one valid config is treated as the project opting in to its own
+//! back to `crate::assets::DEFAULT_AGENTS` (#2895) when the *parsed* result is
+//! empty — not merely when no `.toml` paths were discovered — so a
+//! `.claude/agents/` dir that exists but holds only unparseable TOML still
+//! yields a usable `engineer`/`qa-agent`/`code-reviewer` set instead of
+//! silently starting with zero agents. A disk directory with even one
+//! successfully-parsed config is treated as the project opting in to its own
 //! catalog, so it is used as-is and the embedded defaults are not merged in.
 //! Test: `discover_agents` tests place TOML files in a tempdir and verify the
 //! returned list. `AgentConfig::load` tests read individual files.
-//! `load_all_agents_falls_back_to_embedded_when_disk_empty` and
+//! `load_all_agents_falls_back_to_embedded_when_disk_empty`,
+//! `load_all_agents_falls_back_to_embedded_when_disk_all_invalid`, and
 //! `load_all_agents_disk_wins_when_present` cover the fallback threshold.
 
 pub mod config;
@@ -57,23 +60,24 @@ pub fn discover_agents(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
 ///
 /// Why: Startup needs a map of all available agents; individual parse errors
 /// should not crash the whole harness. A project that has not yet created
-/// `.claude/agents/` (or has created it but left it empty) must not start
-/// with zero agents — see the embedded-fallback note below.
-/// What: Calls `discover_agents`, then `AgentConfig::load` on each; returns
-/// successfully parsed configs only. Failures are logged at WARN level. If
-/// `discover_agents` finds no `.toml` files at all (empty is the fallback
-/// threshold — any single valid disk config is treated as the project's own
-/// catalog and used as-is, never merged with the embedded set), falls back to
-/// `load_embedded_default_agents`. Disk agents always win when present.
+/// `.claude/agents/`, has created it but left it empty, or has populated it
+/// with only unparseable TOML must not start with zero agents — see the
+/// embedded-fallback note below.
+/// What: Calls `discover_agents`, then `AgentConfig::load` on each,
+/// collecting only the successfully parsed configs (failures are logged at
+/// WARN level and skipped). The fallback threshold is the *parsed* result
+/// being empty, not merely `discover_agents` finding no paths — a directory
+/// full of `.toml` files that all fail to parse must fall back exactly like
+/// an empty or missing directory does. Any single successfully-parsed disk
+/// config is treated as the project's own catalog and used as-is, never
+/// merged with the embedded set. Falls back to `load_embedded_default_agents`
+/// when parsing yields nothing. Disk agents always win when present.
 /// Test: `load_all_agents_skips_invalid`,
 /// `load_all_agents_falls_back_to_embedded_when_disk_empty`,
+/// `load_all_agents_falls_back_to_embedded_when_disk_all_invalid`,
 /// `load_all_agents_disk_wins_when_present`.
 pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
-    let discovered = discover_agents(dir);
-    if discovered.is_empty() {
-        return load_embedded_default_agents();
-    }
-    discovered
+    let parsed: Vec<AgentConfig> = discover_agents(dir)
         .into_iter()
         .filter_map(|(name, path)| match AgentConfig::load(&path) {
             Ok(cfg) => Some(cfg),
@@ -82,7 +86,11 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
                 None
             }
         })
-        .collect()
+        .collect();
+    if parsed.is_empty() {
+        return load_embedded_default_agents();
+    }
+    parsed
 }
 
 /// Parse `crate::assets::DEFAULT_AGENTS` in-memory, skipping parse errors.
@@ -208,6 +216,28 @@ mod tests {
     #[test]
     fn load_all_agents_falls_back_to_embedded_when_disk_empty() {
         let agents = load_all_agents(std::path::Path::new("/nonexistent/agents/dir"));
+        let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
+        assert_eq!(names, vec!["engineer", "qa-agent", "code-reviewer"]);
+    }
+
+    /// A `.claude/agents/` dir that exists and holds `.toml` files, but every
+    /// one of them fails to parse, must fall back to the embedded defaults
+    /// exactly like a missing/empty dir does — not silently return zero
+    /// agents (code-critic finding, #2895 follow-up).
+    ///
+    /// Why: The fallback threshold is the *parsed* result being empty, not
+    /// merely `discover_agents` finding no `.toml` paths. Keying on paths
+    /// alone would defeat the "never zero agents" goal for a directory that
+    /// exists but is entirely malformed.
+    /// What: One `broken.toml` (invalid TOML) on disk, nothing else;
+    /// `load_all_agents` returns the three bundled defaults, not `[]`.
+    /// Test: this test.
+    #[test]
+    fn load_all_agents_falls_back_to_embedded_when_disk_all_invalid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("broken.toml"), "<<NOT TOML>>").expect("write");
+
+        let agents = load_all_agents(tmp.path());
         let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
         assert_eq!(names, vec!["engineer", "qa-agent", "code-reviewer"]);
     }

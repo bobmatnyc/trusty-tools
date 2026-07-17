@@ -19,10 +19,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   universal skills (format-identical `SKILL.md` files, reused verbatim;
   `tm-*` orchestration skills excluded since they drive trusty-mpm MCP tools
   tcode does not have) at compile time via `include_str!`.
-  `agents::load_all_agents` and `skills::discover_skill_metadata` fall back
-  to the embedded set only when the disk scan is empty — any disk config,
-  even a single file, is used as-is and never merged with the embedded
-  defaults.
+  `agents::load_all_agents` falls back to the embedded set when the
+  *parsed* result is empty (a directory with only unparseable TOML still
+  falls back, not just a missing/empty one); `skills::discover_skill_metadata`
+  falls back when the disk scan is empty. Either way, any successfully
+  discovered disk config — even a single file — is used as-is and never
+  merged with the embedded defaults.
 - **Stable per-spawn `agent_id` for event attribution (DOC-39 AC-13.1/13.2).**
   Agent attribution on the event stream was keyed only by `agent: String` (the
   agent-config name), so two concurrently-delegated same-named agents (e.g.

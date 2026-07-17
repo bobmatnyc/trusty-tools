@@ -457,6 +457,12 @@ mod tests {
     ///
     /// Why: This is the safety guard against an LLM hallucinating a skill
     /// name — no path is ever built from a name outside the discovered set.
+    /// What: `tmp` is an empty tempdir, so `discover_skill_metadata` returns
+    /// the embedded-fallback catalog (the 28 names in
+    /// `crate::assets::DEFAULT_SKILLS`, #2895), not a truly empty one;
+    /// `"ghost-skill"` is absent from that catalog too, so this now exercises
+    /// unknown-name rejection against the embedded fallback rather than an
+    /// empty set — the guard behaves identically either way.
     /// Test: this test.
     #[test]
     fn load_skill_body_rejects_unknown_name() {
@@ -560,6 +566,12 @@ mod tests {
     ///
     /// Why: Guards against a panic or leaked IO error surfacing through the
     /// trait's `Option`-returning API.
+    /// What: `tmp` is an empty tempdir, so the resolver's cached metadata is
+    /// the embedded-fallback catalog (the 28 names in
+    /// `crate::assets::DEFAULT_SKILLS`, #2895), not a truly empty one;
+    /// `"ghost"` is absent from that catalog too, so this now exercises
+    /// unknown-name resolution against the embedded fallback rather than an
+    /// empty set.
     /// Test: this test.
     #[test]
     fn fs_skill_resolver_resolve_unknown_returns_none() {

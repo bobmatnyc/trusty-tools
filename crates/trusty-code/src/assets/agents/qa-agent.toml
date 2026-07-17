@@ -32,8 +32,6 @@ append_skills = ["test-quality-inspector", "testing-anti-patterns", "verificatio
 [tools]
 allowed = [
     "read_file",
-    "write_file",
-    "edit",
     "grep",
     "glob",
     "list_dir",

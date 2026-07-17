@@ -601,8 +601,13 @@ fn build_engineer_runner(
 /// now that `work_root` must also be threaded through for projectless runs.
 /// What: `project_context` is the project's `CLAUDE.md` (`None` when absent —
 /// always the case projectless, since the scratch root has none);
-/// `skills_catalog` is the rendered `.claude/skills/` metadata catalog
-/// (`None` in `Parity` mode or when empty).
+/// `skills_catalog` is the rendered skill-metadata catalog from either the
+/// project's `.claude/skills/` or, when that is empty or absent,
+/// `crate::assets::DEFAULT_SKILLS` — the embedded default catalog
+/// (`skills::discover_skill_metadata`'s embedded-fallback, #2895). `None`
+/// only in `HarnessMode::Parity` (which never discovers skills at all, disk
+/// or embedded); in `DailyDriver` the embedded fallback means this is
+/// effectively always `Some`.
 /// Test: exercised via `task::executor::tests::*`'s engineer-runner paths.
 struct EngineerPromptContext {
     project_context: Option<String>,
@@ -616,11 +621,15 @@ struct EngineerPromptContext {
 /// progressively disclose" — so `Parity` runs must never discover
 /// `.claude/skills/` at all, let alone advertise the `use_skill` tool or
 /// inject the catalog into the prompt.
-/// What: Returns `None` for `HarnessMode::Parity` or when the project has no
-/// (or an empty) skill catalog; otherwise `Some((rendered_catalog,
-/// resolver))` — the resolver backs the `use_skill` tool registration. A
-/// projectless run passes its scratch root, which has no `.claude/skills/`, so
-/// this naturally yields `None` without a projectless special case.
+/// What: Returns `None` for `HarnessMode::Parity`; otherwise
+/// `Some((rendered_catalog, resolver))` — the resolver backs the `use_skill`
+/// tool registration. `skills::discover_skill_metadata` (the source behind
+/// `resolver.metadata()`) falls back to the embedded default skill catalog
+/// (`crate::assets::DEFAULT_SKILLS`, #2895) when the project has no (or an
+/// empty) `.claude/skills/` directory, so in `HarnessMode::DailyDriver` the
+/// catalog is no longer ever empty — a projectless run (scratch root, no
+/// `.claude/skills/`) now resolves to the embedded catalog rather than
+/// `None`, the same as any other project with no disk skills.
 /// Test: `task::executor::tests::daily_driver_skills_catalog_*`.
 fn daily_driver_skills_catalog(
     params: &TaskRunParams,

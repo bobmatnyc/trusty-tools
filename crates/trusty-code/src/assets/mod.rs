@@ -60,9 +60,10 @@ const CODE_REVIEWER_TOML: &str = include_str!("agents/code-reviewer.toml");
 /// Why: gives `agents::load_all_agents`'s embedded-fallback branch a fixed,
 /// ordered table to parse when the disk `.claude/agents/` directory is empty
 /// or absent.
-/// What: `engineer` (general implementation), `qa-agent` (verification,
-/// read/write but no production-code edits), `code-reviewer` (adversarial,
-/// read-only review).
+/// What: `engineer` (general implementation, full read/write tool set),
+/// `qa-agent` (verification — read/inspect/run only, no `write_file`/`edit`,
+/// hands bugs back to the engineer rather than fixing them), `code-reviewer`
+/// (adversarial, read-only review, no `bash`).
 /// Test: `assets::tests::default_agents_parse_and_names_match`.
 pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent {
