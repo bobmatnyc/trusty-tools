@@ -7,9 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- pm_guard — 3-per-turn file-change budget, read-only-redirection fix, content-aware routing hints ([#2928](https://github.com/bobmatnyc/trusty-tools/pull/2928)) ([`95b69c8`](https://github.com/bobmatnyc/trusty-tools/commit/95b69c80e08e396de8da7fe606d329e8360835a3))
+- rust-build-performance bundled skill — dev-loop + dependency-graph build hygiene ([#2929](https://github.com/bobmatnyc/trusty-tools/pull/2929)) ([`c278874`](https://github.com/bobmatnyc/trusty-tools/commit/c278874db20e017323de27129f59647682de643f))
+
 ### Fixed
 
-- `tm install` no longer discovers and mutates every `.claude/settings.json` / `settings.local.json` reachable under `$HOME` — tm hooks are now written ONLY into the tm-owned managed `CLAUDE_CONFIG_DIR`, never into project directories. Adds `tm hooks clean [--path <dir>] [--force]` to remove tm hook entries a pre-fix install already wrote into project settings files (dry-run by default, backs up before an atomic temp-file+rename write, never a truncate-in-place — a kill mid-write can no longer corrupt `settings.json`), and two new `tm doctor` checks — `hooks_contamination` (tm hooks found in a known project's settings, suggests `tm hooks clean`) and `hooks_foreign_conflict` (foreign/claude-mpm hooks that would fire inside a tm session, informational only) — bringing the doctor suite to 17 checks. The hash-suffixed-binary hook matcher now additionally requires a `deps/` path component before `--force` will delete a match, narrowing the risk of misclassifying a coincidentally-named foreign binary (closes #2940)
+- `tm install` no longer discovers and mutates every `.claude/settings.json` / `settings.local.json` reachable under `$HOME` — tm hooks are now written ONLY into the tm-owned managed `CLAUDE_CONFIG_DIR`, never into project directories. Adds `tm hooks clean [--path <dir>] [--force]` to remove tm hook entries a pre-fix install already wrote into project settings files (dry-run by default, backs up before an atomic temp-file+rename write, never a truncate-in-place — a kill mid-write can no longer corrupt `settings.json`), and two new `tm doctor` checks — `hooks_contamination` (tm hooks found in a known project's settings, suggests `tm hooks clean`) and `hooks_foreign_conflict` (foreign/claude-mpm hooks that would fire inside a tm session, informational only) — bringing the doctor suite to 17 checks. The hash-suffixed-binary hook matcher now additionally requires a `deps/` path component before `--force` will delete a match, narrowing the risk of misclassifying a coincidentally-named foreign binary (closes #2940) ([#2945](https://github.com/bobmatnyc/trusty-tools/pull/2945)) ([`3940d7f`](https://github.com/bobmatnyc/trusty-tools/commit/3940d7f90d25fd57ef02ea47bb09a20cca06d34e))
 
 ---
 ## [0.19.23] — 2026-07-17
