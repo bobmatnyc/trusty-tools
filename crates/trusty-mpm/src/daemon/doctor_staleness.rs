@@ -3,8 +3,8 @@
 //! Why: trusty-mpm's per-project conventions (notably the commit/PR attribution
 //! footer) ship in bundled skills and framework instructions. Two silent drift
 //! modes let stale text keep being served — the exact failure behind the PR
-//! #2825 attribution bypass: (1) a workspace whose deployed skills predate the
-//! installed binary's bundled assets, and (2) leftover GLOBAL instruction
+//! #2825 attribution bypass: (1) a workspace whose deployed skills differ from
+//! the installed binary's bundled assets, and (2) leftover GLOBAL instruction
 //! sources (`~/.claude/skills/tm-*` copies from the pre-project-local deploy
 //! model, and the legacy `~/.trusty-mpm/claude-config` managed-config dir) that
 //! shadow the current framework. Neither is caught by the narrower

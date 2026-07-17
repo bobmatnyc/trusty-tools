@@ -71,7 +71,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// on the multi-account ambiguity), and the `oauth_token` probe (issue #2246 —
 /// warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain
 /// login loop), the `skill_staleness` and `legacy_sources` probes (issue #2876
-/// — warn when deployed skills predate the bundled assets, or when legacy
+/// — warn when deployed skills differ from the bundled assets, or when legacy
 /// global instruction sources linger) — folding the resulting thirteen
 /// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the worst
 /// of them.

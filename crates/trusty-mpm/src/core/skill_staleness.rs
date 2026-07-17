@@ -3,18 +3,20 @@
 //! Why: trusty-mpm's per-project conventions (e.g. the commit/PR attribution
 //! footer) ship inside bundled skills that `skill_deployer::deploy_skills`
 //! copies into a project's `.claude/skills/`. A long-lived worktree — or any
-//! workspace not re-provisioned since the bundled asset last changed — keeps
+//! workspace not re-provisioned since the bundled asset changed — keeps
 //! serving the OLD skill text until the next deploy self-heals it. That silent
 //! drift is exactly how the PR #2825 attribution bypass slipped through, so the
-//! stack needs one honest, read-only signal that "the deployed skills predate
-//! the installed binary's assets" (issue #2876).
+//! stack needs one honest, read-only signal that "the deployed skills differ
+//! from the installed binary's bundled source" (issue #2876). The check is a
+//! symmetric content-checksum diff — it makes no temporal claim about which
+//! side is newer, only that they no longer match.
 //! What: [`stale_skills`] compares each bundled source skill's CURRENT content
 //! checksum against the checksum recorded in the deploy manifest at the target
-//! directory. A managed skill whose source no longer matches what was last
-//! deployed is returned as stale — precisely the set the next
-//! `deploy_skills_filtered` run would refresh. It never reads the deployed file
-//! or touches disk beyond loading the manifest, so it is safe to call from both
-//! the read-only `tm doctor` path and the launch path.
+//! directory. A managed skill whose source differs from what was last deployed
+//! is returned as stale — precisely the set the next `deploy_skills_filtered`
+//! run would refresh. It never reads the deployed file or touches disk beyond
+//! loading the manifest, so it is safe to call from both the read-only `tm
+//! doctor` path and the launch path.
 //! Test: the `tests` module below covers the fresh, stale, unmanaged, and
 //! missing-source cases.
 
@@ -28,9 +30,10 @@ use crate::core::skill_manifest::SkillManifest;
 ///
 /// Why: this is the deploy self-heal's own "safe to refresh" trigger surfaced
 /// as a diagnostic — a non-empty result means `dest_dir` carries skill text
-/// older than the current bundled assets and a relaunch / `tm install` would
-/// update it (issue #2876). Reporting it lets `tm doctor` and `prepare_session`
-/// warn BEFORE a stale skill (e.g. an outdated attribution footer) is acted on.
+/// that differs from the current bundled source, and a relaunch / `tm install`
+/// would reconcile it (issue #2876). Reporting it lets `tm doctor` and
+/// `prepare_session` warn BEFORE a stale skill (e.g. an outdated attribution
+/// footer) is acted on.
 /// What: loads the [`SkillManifest`] from `dest_dir`, then for every `.md`
 /// skill file under `source_dir` whose stem the manifest already manages,
 /// compares `checksum(source_content)` against the stored checksum. Stems that
