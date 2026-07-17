@@ -66,6 +66,19 @@ pub struct DeployResult {
     /// Test: `declared_skills_populated_for_every_processed_agent`,
     /// `declared_skills_empty_when_agent_declares_none`.
     pub declared_skills: HashMap<String, Vec<String>>,
+    /// Agents whose compose step failed, as `"<name>: <error>"` — DOC-42,
+    /// issue #2906 review (CRITICAL finding).
+    ///
+    /// Why: a single malformed agent asset (e.g. unterminated frontmatter)
+    /// must never abort the ENTIRE roster deploy — every other well-formed
+    /// agent still needs to land, and the caller (`tm install`, session
+    /// launch) needs to know WHICH agent(s) were skipped and why, rather than
+    /// the whole operation failing with no roster deployed at all.
+    /// What: one entry per source agent whose [`compose_agent`] call
+    /// returned `Err`; that agent is neither composed nor written, and
+    /// processing continues with the next agent.
+    /// Test: `deploy_isolates_single_malformed_agent_failure`.
+    pub failed: Vec<String>,
 }
 
 /// Whether a source filename names a trusty-mpm agent to compose.
@@ -167,7 +180,22 @@ pub fn deploy_agents_filtered(
 
     for name in names {
         let filename = format!("{name}.md");
-        let composed = compose_agent(&name, source_dir)?;
+        // DOC-42 issue #2906 review (CRITICAL): isolate a per-agent compose
+        // failure instead of propagating it with `?` — one malformed asset
+        // (e.g. unterminated frontmatter) must not abort the entire roster
+        // deploy. Log loudly, record it, and move on to the next agent.
+        let composed = match compose_agent(&name, source_dir) {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::error!(
+                    agent = %name,
+                    "agent compose FAILED — skipping this agent, roster deploy \
+                     continues for the rest of the roster: {err}"
+                );
+                result.failed.push(format!("{name}: {err}"));
+                continue;
+            }
+        };
         let target_path = target_dir.join(&filename);
 
         // DOC-42: record declared skills for EVERY processed agent, before
@@ -643,6 +671,36 @@ mod tests {
             result.declared_skills.get("code-critic"),
             Some(&vec!["code-review-standards".to_string()])
         );
+    }
+
+    #[test]
+    fn deploy_isolates_single_malformed_agent_failure() {
+        // Issue #2906 review (CRITICAL finding): one malformed agent asset
+        // (here, unterminated frontmatter — missing closing `---`) must NOT
+        // abort the entire roster deploy. The well-formed sibling agent must
+        // still deploy, and the failure must be recorded (not silently
+        // dropped) rather than propagated as an `Err` from `deploy_agents`.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        fs::write(
+            src.path().join("broken.md"),
+            "---\nname: broken\n\n# No closing fence\n",
+        )
+        .unwrap();
+        fs::write(
+            src.path().join("good.md"),
+            "---\nname: good\nrole: engineer\n---\n\n# Good\n\nGOOD BODY\n",
+        )
+        .unwrap();
+
+        let result = deploy_agents(src.path(), tgt.path())
+            .expect("a single malformed agent must not abort the whole deploy");
+
+        assert!(result.deployed.contains(&"good.md".to_string()));
+        assert!(tgt.path().join("good.md").is_file());
+        assert!(!tgt.path().join("broken.md").exists());
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0].starts_with("broken:"));
     }
 
     #[test]

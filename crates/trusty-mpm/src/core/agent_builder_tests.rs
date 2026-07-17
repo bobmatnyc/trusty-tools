@@ -733,6 +733,80 @@ fn compose_agent_matches_sibling_2890_code_critic_fixture() {
 }
 
 #[test]
+fn compose_agent_parses_block_style_skills_list() {
+    // Issue #2906 review (CRITICAL): DOC-42 §1.1's motivating example (and
+    // every realistic upstream `claude-mpm-agents` asset) declares `skills:`
+    // as a YAML BLOCK sequence, not the inline flow array:
+    //   skills:
+    //     - code-review-standards
+    //     - code-production-process
+    // This must compose successfully (not error) and populate BOTH items.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "code-critic",
+        "---\nname: code-critic\nrole: qa\nskills:\n  - code-review-standards\n  - code-production-process\n---\n\n# Code Critic\n\nBODY\n",
+    );
+    let composed = compose_agent("code-critic", tmp.path());
+    assert!(
+        composed.is_ok(),
+        "block-style skills list must compose successfully, got: {composed:?}"
+    );
+    let composed = composed.unwrap();
+    assert!(composed.contains("skills: [code-review-standards, code-production-process]"));
+}
+
+#[test]
+fn compose_agent_block_style_skills_survives_inheritance() {
+    // The block-style form must union across `extends:` exactly like the
+    // inline flow form does.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-qa",
+        "---\nname: base-qa\nrole: base-qa\nskills:\n  - verification-before-completion\n---\n\n# Base QA\n\nBASE BODY\n",
+    );
+    write_agent(
+        tmp.path(),
+        "code-critic",
+        "---\nname: code-critic\nrole: qa\nextends: base-qa\nskills:\n  - code-review-standards\n---\n\n# Critic\n\nLEAF BODY\n",
+    );
+    let composed = compose_agent("code-critic", tmp.path()).unwrap();
+    assert!(composed.contains("skills: [verification-before-completion, code-review-standards]"));
+}
+
+#[test]
+fn compose_agent_block_style_skills_with_trailing_content() {
+    // A block sequence followed by MORE frontmatter keys (not immediately the
+    // closing fence) must still parse: the block ends on the first
+    // non-`-`/non-blank line, and that line is then parsed normally.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "critic",
+        "---\nname: critic\nskills:\n  - code-review-standards\n  - systematic-debugging\nmodel: sonnet\n---\n\nBODY\n",
+    );
+    let composed = compose_agent("critic", tmp.path()).unwrap();
+    assert!(composed.contains("skills: [code-review-standards, systematic-debugging]"));
+    assert!(composed.contains("model: sonnet"));
+}
+
+#[test]
+fn compose_agent_empty_block_style_skills_omits_the_key() {
+    // A bare `skills:` with NO continuation items (block never populated)
+    // must degrade to empty — equivalent to omission — not error.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain",
+        "---\nname: plain\nskills:\nmodel: sonnet\n---\n\nBODY\n",
+    );
+    let composed = compose_agent("plain", tmp.path());
+    assert!(composed.is_ok(), "empty block-style skills must not error");
+    assert!(!composed.unwrap().contains("skills:"));
+}
+
+#[test]
 fn skills_malformed_value_is_treated_as_empty() {
     // A `skills:` line whose value doesn't look like a list (e.g. blank)
     // must never hard-error the compose — it parses to an empty list.
@@ -744,5 +818,23 @@ fn skills_malformed_value_is_treated_as_empty() {
     );
     let composed = compose_agent("plain", tmp.path());
     assert!(composed.is_ok(), "malformed skills value must not error");
+    assert!(!composed.unwrap().contains("skills:"));
+}
+
+#[test]
+fn skills_malformed_inline_value_never_errors() {
+    // Issue #2906 review (MEDIUM finding): a genuinely unparseable inline
+    // value (comma(s) with no real elements) must still degrade to an empty
+    // list rather than error — the fix adds a `tracing::warn!` at this call
+    // site (not directly assertable in a unit test without a subscriber),
+    // but the never-halt contract IS assertable here.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain",
+        "---\nname: plain\nskills: ,\n---\n\nBODY\n",
+    );
+    let composed = compose_agent("plain", tmp.path());
+    assert!(composed.is_ok(), "malformed inline skills must not error");
     assert!(!composed.unwrap().contains("skills:"));
 }

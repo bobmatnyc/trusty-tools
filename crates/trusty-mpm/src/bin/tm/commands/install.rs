@@ -426,6 +426,14 @@ pub(crate) fn deploy_report_lines(
             deploy.untracked_modified.len()
         ));
     }
+    // DOC-42 issue #2906 review (CRITICAL finding): a per-agent compose
+    // failure no longer aborts the whole deploy — surface it here so it is
+    // never silently dropped from `tm install`'s output.
+    for failure in &deploy.failed {
+        lines.push(format!(
+            "\u{2717} {failure} (agent skipped, compose failed)"
+        ));
+    }
     lines
 }
 

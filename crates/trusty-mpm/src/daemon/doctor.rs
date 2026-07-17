@@ -79,9 +79,12 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain
 /// login loop), the `skill_staleness` and `legacy_sources` probes (issue #2876
 /// — warn when deployed skills differ from the bundled assets, or when legacy
-/// global instruction sources linger), and the `agent_skills` probe (DOC-42,
-/// issue #2889 — flags dangling `skills:` frontmatter references and
-/// undeclared prose skill mentions) — folding the resulting fourteen
+/// global instruction sources linger), and the `agent_skills` /
+/// `agent_skills_prose_hints` probe pair (DOC-42, issue #2889 — the former
+/// flags dangling `skills:` frontmatter references and can `Warn`; the
+/// latter is always `Ok` and carries undeclared prose skill mentions as
+/// informational text, per issue #2906 review — folding both severities
+/// into one check caused alert fatigue) — folding the resulting fifteen
 /// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the worst
 /// of them.
 ///
@@ -105,7 +108,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_fourteen_checks`,
+/// Test: `run_doctor_produces_fifteen_checks`,
 /// `check_agents_scoped_to_managed_workspace_fails_on_empty_roster`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -121,6 +124,12 @@ pub async fn run_doctor(
     // itself for a managed session, else the operator's home directory.
     let skills_root: &Path = project_dir.unwrap_or(&home);
 
+    // DOC-42 issue #2906 review (MEDIUM finding): dangling `skills:`
+    // references and informational prose-mention hints carry different
+    // severities, so `check_agent_skills` now returns two independent
+    // checks from one scan rather than folding both into a single `Warn`.
+    let (agent_skills, agent_skills_prose_hints) = check_agent_skills(&paths);
+
     let mut checks = vec![
         check_instructions(project_dir),
         check_agents(&paths),
@@ -130,7 +139,8 @@ pub async fn run_doctor(
         check_deployment_completeness(&paths),
         check_skill_staleness(&paths),
         check_legacy_instruction_sources(&home),
-        check_agent_skills(&paths),
+        agent_skills,
+        agent_skills_prose_hints,
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
@@ -609,14 +619,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_fourteen_checks() {
+    async fn run_doctor_produces_fifteen_checks() {
         // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
         // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
         // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
-        // `agent_skills` (thirteen → fourteen). #1905's stale-skill cleanup
-        // is deliberately NOT a `run_doctor` probe — see the `run_doctor` doc.
+        // `agent_skills` (thirteen → fourteen); issue #2906 review splits that
+        // into `agent_skills` + `agent_skills_prose_hints` (fourteen → fifteen).
+        // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
+        // — see the `run_doctor` doc.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 14);
+        assert_eq!(report.checks.len(), 15);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -630,6 +642,7 @@ mod tests {
                 "skill_staleness",
                 "legacy_sources",
                 "agent_skills",
+                "agent_skills_prose_hints",
                 "memory",
                 "search",
                 "worktrees",
