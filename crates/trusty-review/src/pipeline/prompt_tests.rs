@@ -562,6 +562,7 @@ fn review_schema_is_openai_strict_compliant() {
         [
             "body",
             "category",
+            "code_provable",
             "confidence",
             "consequence",
             "file",

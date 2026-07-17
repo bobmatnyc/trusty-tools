@@ -277,6 +277,67 @@ pub fn clamp_grade_to_verdict(grade: Grade, actual_verdict: &Verdict) -> Grade {
     }
 }
 
+/// Reconcile a grade with an already-decided verdict in BOTH directions
+/// (#PR84 RULE 2 adversarial-review MEDIUM fix).
+///
+/// Why: `clamp_grade_to_verdict` only clamps a grade that is too OPTIMISTIC
+/// relative to `actual_verdict` (implies a MILDER verdict than what actually
+/// happened) — correct pre-RULE-2, when `grade::derive_verdict` could only
+/// STRICTEN the model/grade-implied verdict via the severity floor, never
+/// soften it, so the actual verdict was never milder than what a strict grade
+/// implied. RULE 2 (`grade::derive_verdict_with`'s citability gate on a
+/// self-reported BLOCK) — and the pre-existing low-confidence override — can
+/// now produce a `final_verdict` MILDER than what `grade` implies: e.g. the
+/// model self-reports `grade: "F"` (implies BLOCK) on a single uncited,
+/// non-diff-provable High finding; RULE 2 downgrades the verdict to
+/// REQUEST_CHANGES, but `clamp_grade_to_verdict(F, RequestChanges)` leaves `F`
+/// UNCHANGED — `is_at_least_as_strict(Block, RequestChanges)` is `true`, so the
+/// early-return guard skips clamping entirely — producing a contradictory
+/// "Grade: F — Request Changes" heading in the posted review (`posting.rs`
+/// renders both), violating the documented invariant that grade and verdict
+/// never disagree except UNKNOWN.
+/// What: when `grade`'s implied verdict is STRICTER than `actual_verdict`,
+/// returns the WORST (strictest) grade still within `actual_verdict`'s band —
+/// the mirror of `clamp_grade_to_verdict`'s "cap to the BEST grade in band"
+/// direction. Otherwise delegates to [`clamp_grade_to_verdict`] unchanged
+/// (handles the "too optimistic" direction and the already-consistent case
+/// identically to before this fix).
+/// Test: `pr84_real_entry_point_self_reported_block_confident_uncited_downgrades`
+/// (grade_tests.rs — the reproduction), `reconcile_grade_caps_too_strict_grade_down`,
+/// `reconcile_grade_delegates_when_too_optimistic`,
+/// `reconcile_grade_noop_when_consistent` (letter_grade_tests.rs).
+pub fn reconcile_grade_with_verdict(grade: Grade, actual_verdict: &Verdict) -> Grade {
+    let grade_verdict = verdict_for_grade(grade);
+    if verdict_ordinal(&grade_verdict) > verdict_ordinal(actual_verdict) {
+        // Grade is too STRICT (severe) for the actual verdict — raise it to the
+        // worst grade still consistent with `actual_verdict`'s band.
+        floor_grade_for_verdict(actual_verdict)
+    } else {
+        // Grade is already consistent, or too OPTIMISTIC — existing clamp
+        // handles both (a no-op in the "already consistent" case).
+        clamp_grade_to_verdict(grade, actual_verdict)
+    }
+}
+
+/// The WORST (strictest) grade still within `verdict`'s band — the floor,
+/// mirroring `clamp_grade_to_verdict`'s per-band ceiling (the best grade).
+///
+/// Why: needed by [`reconcile_grade_with_verdict`] to raise an over-severe
+/// grade (e.g. `F`) up to the strictest grade that still agrees with a milder
+/// `actual_verdict` (e.g. `D-` for REQUEST_CHANGES) rather than leaving it
+/// inconsistent.
+/// What: `APPROVE → B-`, `APPROVE* → C-`, `REQUEST_CHANGES → D-`,
+/// `BLOCK`/`UNKNOWN → F`.
+/// Test: `reconcile_grade_caps_too_strict_grade_down`.
+fn floor_grade_for_verdict(verdict: &Verdict) -> Grade {
+    match verdict {
+        Verdict::Approve => Grade::BMinus,
+        Verdict::ApproveWithReservations => Grade::CMinus,
+        Verdict::RequestChanges => Grade::DMinus,
+        Verdict::Block | Verdict::Unknown => Grade::F,
+    }
+}
+
 // ─── Shallow-clean-review detection (#1877) ──────────────────────────────────
 
 /// Heuristic output-token floor per character of diff sent to the reviewer,

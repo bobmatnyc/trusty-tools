@@ -13,8 +13,39 @@ use super::*;
 use crate::models::{Finding, FindingCategory, VerifyOutcome};
 use crate::pipeline::letter_grade::Grade;
 
+/// A finding that is escalation-eligible by default (`code_provable = true`).
+///
+/// Why: these floor tests assert the behaviour of GENUINE findings — a real
+/// correctness/security bug provable from the diff.  Under the #PR84 citability
+/// gate such a finding must be cited or `code_provable` to drive the BLOCK floor,
+/// so the shared helper marks findings `code_provable` to preserve the tests'
+/// original intent ("a real High finding blocks").  The gate itself — that a
+/// non-citable, non-diff-provable High finding is capped at advisory — is
+/// exercised separately by `speculative_finding` (see the #PR84 tests below).
 fn finding(effort: Effort, confidence: f32) -> Finding {
-    Finding::new("src/lib.rs", "test", "desc", "", confidence, effort)
+    let mut f = Finding::new("src/lib.rs", "test", "desc", "", confidence, effort);
+    f.code_provable = true;
+    f
+}
+
+/// A finding with NO escalation grounding: no `source_citation` and NOT
+/// `code_provable` — external framework/library/platform speculation, the PR #84
+/// failure mode.  Under the #PR84 citability gate such a finding may never drive
+/// the BLOCK floor, even at High effort.
+fn speculative_finding(effort: Effort, confidence: f32) -> Finding {
+    // `Finding::new` already defaults `code_provable` to false and
+    // `source_citation` to None; spelled out here for the readers of these tests.
+    let mut f = Finding::new(
+        "src/lib.rs",
+        "framework-claim",
+        "desc",
+        "",
+        confidence,
+        effort,
+    );
+    f.code_provable = false;
+    f.source_citation = None;
+    f
 }
 
 /// Build a method-conformance finding (#1359) at a given effort + confidence.
@@ -1206,5 +1237,422 @@ fn parse_threshold_rejects_invalid_and_out_of_range() {
     assert!(
         approx(parse_threshold(Some("NaN"), 0.5), 0.5),
         "non-finite (NaN) input must fall back to the default"
+    );
+}
+
+// ── #PR84 citability gate (RULE 1 + RULE 2) ──────────────────────────────────
+//
+// Regression coverage for the `duetto-eve-agents` PR #84 mis-grade: trusty-review
+// returned BLOCK / Grade F on a SINGLE finding it self-tagged `effort: high`,
+// `confidence: 0.65`, `verified: confirmed` — a FALSE, non-citable claim about
+// Vercel routing behaviour (contradicted by Vercel's docs, disproven in prod).
+// The deterministic floor trusted the model's self-reported `effort`
+// unconditionally and hard-clamped to BLOCK with no citability check.
+//
+// RULE 1 — a finding may drive the BLOCK floor at high/critical effort ONLY when
+// it is cited (`source_citation`) OR a core-algorithmic-correctness bug provable
+// from the diff (`code_provable`).  RULE 2 — the deterministic BLOCK floor must
+// NOT clamp to BLOCK on a high-effort finding that fails RULE 1.
+
+/// `is_escalation_eligible` truth table (the RULE 1 gate).
+#[test]
+fn is_escalation_eligible_gate_truth_table() {
+    // Uncited, not diff-provable → NOT eligible (the PR #84 shape).
+    assert!(!is_escalation_eligible(&speculative_finding(
+        Effort::High,
+        0.9
+    )));
+
+    // Backed by a non-blank source_citation → eligible.
+    let mut cited = speculative_finding(Effort::High, 0.9);
+    cited.source_citation = Some("src/handler.ts:42".to_string());
+    assert!(is_escalation_eligible(&cited));
+
+    // A blank/whitespace citation is NOT a citation → still NOT eligible.
+    let mut blank = speculative_finding(Effort::High, 0.9);
+    blank.source_citation = Some("   ".to_string());
+    assert!(!is_escalation_eligible(&blank));
+
+    // Flagged code_provable (core algorithmic-correctness) → eligible.
+    let mut provable = speculative_finding(Effort::High, 0.9);
+    provable.code_provable = true;
+    assert!(is_escalation_eligible(&provable));
+}
+
+/// RULE 2 (the PR #84 reproduction): an uncited, non-diff-provable High finding
+/// at confidence 0.65 must NOT force BLOCK.
+///
+/// Why: this is the exact failure — a single `effort: high`, `confidence: 0.65`,
+/// no `source_citation`, not `code_provable` finding hard-clamped the verdict to
+/// BLOCK.  Under the citability gate the finding is advisory.
+///
+/// Softened per adversarial-review item 7: this test no longer hard-pins the
+/// exact non-BLOCK tier.  The real PR #84 finding was `verified: Confirmed`
+/// (confidence not demoted by verification), and a deployment may tune
+/// `TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD` (#1597) away from the 0.65 default —
+/// either could move this specific boundary case between APPROVE and
+/// REQUEST_CHANGES without ever reopening BLOCK.  The invariant this test pins
+/// is `!= Block`; the confidence-boundary companion below additionally checks
+/// just above the override line.
+/// What: model APPROVE* + one speculative High@0.65 → never BLOCK.
+#[test]
+fn pr84_uncited_high_finding_does_not_block() {
+    let findings = vec![speculative_finding(Effort::High, 0.65)];
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84: an uncited, non-diff-provable High finding must NOT force BLOCK"
+    );
+    assert!(
+        matches!(
+            verdict,
+            Verdict::Approve | Verdict::ApproveWithReservations | Verdict::RequestChanges
+        ),
+        "must land in a non-blocking tier, got {verdict:?}"
+    );
+}
+
+/// Confidence-boundary companion (adversarial-review item 7): just ABOVE the
+/// low-confidence override line (0.65 default), the same uncited High finding
+/// still never reaches BLOCK — the override no longer applies at this
+/// confidence, but RULE 1's citability gate independently caps it below BLOCK.
+#[test]
+fn pr84_uncited_high_finding_just_above_low_confidence_boundary_never_blocks() {
+    let findings = vec![speculative_finding(Effort::High, 0.66)];
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84: an uncited High finding just above the low-confidence override \
+         line must still never reach BLOCK"
+    );
+}
+
+/// RULE 1 cap: even a CONFIDENT (> 0.80) uncited, non-diff-provable High finding
+/// escalates no further than REQUEST_CHANGES (advisory) — never BLOCK.
+///
+/// Why: RULE 1 caps non-citable framework/platform speculation at low/medium; a
+/// demoted High is treated as a Medium in the floor, so a high-confidence one can
+/// reach REQUEST_CHANGES but the BLOCK tier stays closed to it.
+#[test]
+fn pr84_confident_uncited_high_caps_at_request_changes() {
+    let findings = vec![speculative_finding(Effort::High, 0.85)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "#PR84: a confident uncited High is capped at advisory REQUEST_CHANGES"
+    );
+    assert_ne!(verdict, Verdict::Block, "#PR84: it must never reach BLOCK");
+}
+
+/// RULE 2 control (citation): a High finding backed by a `source_citation` STILL
+/// drives the BLOCK floor exactly as before — the gate does not weaken genuine,
+/// grounded blockers.
+#[test]
+fn high_finding_with_source_citation_still_blocks() {
+    let mut f = speculative_finding(Effort::High, 0.65);
+    f.source_citation = Some("src/handler.ts:42".to_string());
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &[f]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a cited High finding must still drive the BLOCK floor"
+    );
+}
+
+/// RULE 2 control (code_provable): a High finding flagged as a core
+/// algorithmic-correctness bug provable from the diff STILL drives BLOCK.
+#[test]
+fn high_finding_code_provable_still_blocks() {
+    let mut f = speculative_finding(Effort::High, 0.65);
+    f.code_provable = true;
+    let verdict = derive_verdict(Verdict::Approve, &[f]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a diff-provable High finding must still drive the BLOCK floor"
+    );
+}
+
+/// RULE 2 (author-gated carve-out — deterministic backstop): a risk the PR author
+/// has already documented and gated is, by its nature, non-citable framework
+/// speculation.  The prompt is the primary enforcement (it can read the PR
+/// description and must not re-raise such a risk as blocking); this test shows the
+/// deterministic citability gate is a hard backstop — even a very confident
+/// uncited framework risk can never reach BLOCK, only advisory REQUEST_CHANGES.
+#[test]
+fn pr84_author_gated_framework_risk_does_not_block() {
+    let findings = vec![speculative_finding(Effort::High, 0.95)];
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84: an author-gated (non-citable) framework risk must never BLOCK"
+    );
+}
+
+// ── #PR84 adversarial-review follow-up: RULE 2 real entry point (item 3) ─────
+//
+// An adversarial review of the first #PR84 fix found the citability gate lived
+// ONLY in `correctness_floor` — `stricter_of(model_proposed, floor)` can only
+// RAISE the verdict from the floor, never LOWER a model self-reported BLOCK.
+// PR #84's review self-reported `verdict: BLOCK`, `grade: F` — the tests above
+// call `derive_verdict(ApproveWithReservations, ...)`, a verdict PR #84 never
+// actually proposed, so they could not have caught this.  These tests reproduce
+// the REAL self-report shape through `derive_verdict_with_grade`, the entry
+// point `runner_helpers.rs` actually calls.
+
+/// The exact PR #84 self-report (`verdict: BLOCK`, `grade: F`) on a single
+/// uncited, non-diff-provable High@0.65 finding must not survive the real
+/// entry point — and (adversarial-review MEDIUM fix) the returned GRADE must
+/// agree with the downgraded verdict, not still read `F`.
+///
+/// At this exact confidence (0.65), `derive_verdict_with`'s pre-existing
+/// low-confidence override collapses the verdict all the way to `Approve`.
+/// Before the MEDIUM fix, `clamp_grade_to_verdict(F, Approve)` left the grade
+/// at `F` unchanged ("APPROVE accepts any grade" only handled the "too
+/// optimistic" direction), producing a contradictory "Grade: F — Approve"
+/// pairing. `letter_grade::reconcile_grade_with_verdict` now also handles the
+/// "too severe" direction, raising the grade to the floor of the ACTUAL
+/// verdict's band.
+#[test]
+fn pr84_real_entry_point_self_reported_block_does_not_survive() {
+    let findings = vec![speculative_finding(Effort::High, 0.65)];
+    let (verdict, grade) = derive_verdict_with_grade(Verdict::Block, Grade::F, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84 RULE 2: a self-reported BLOCK/F resting solely on an uncited, \
+         non-diff-provable High finding must not survive derive_verdict_with_grade \
+         — the real entry point the runner calls"
+    );
+    assert_ne!(
+        grade,
+        Some(Grade::F),
+        "adversarial-review MEDIUM fix: the grade must be reconciled consistent \
+         with the downgraded verdict, not still read F"
+    );
+    let g = grade.expect("grade must be Some for a non-Unknown verdict");
+    assert!(
+        verdict_for_grade(g).ordinal() <= verdict.ordinal(),
+        "the grade's implied verdict ({:?}) must never be stricter than the \
+         actual verdict ({verdict:?})",
+        verdict_for_grade(g)
+    );
+}
+
+/// THE CRUX FIX (item 3 acceptance criterion): at a confidence ABOVE the
+/// low-confidence override line — unlike the 0.65 boundary case above, which the
+/// override independently collapses regardless of RULE 2 — a model
+/// self-reported BLOCK/F on an uncited High finding passes COMPLETELY ungated
+/// WITHOUT the RULE 2 sanitization in `derive_verdict_with`:
+/// `stricter_of(Block, floor)` always picks BLOCK regardless of what the floor
+/// computes, because `stricter_of` can only raise a verdict, never lower a
+/// stricter model-proposed one.  This is the test that flips from FAILING (pre
+/// RULE 2 fix) to PASSING (post fix) — confirmed by running it against the
+/// pre-fix code path in the adversarial-review round.
+///
+/// Also asserts the returned GRADE (adversarial-review MEDIUM fix): the
+/// original test ignored `_grade`, which is how the "Grade: F — Request
+/// Changes" contradiction slipped through review.
+#[test]
+fn pr84_real_entry_point_self_reported_block_confident_uncited_downgrades() {
+    let findings = vec![speculative_finding(Effort::High, 0.85)];
+    let (verdict, grade) = derive_verdict_with_grade(Verdict::Block, Grade::F, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "#PR84 RULE 2 crux: a confident (>0.65) self-reported BLOCK/F resting \
+         solely on an uncited, non-diff-provable High finding must downgrade to \
+         REQUEST_CHANGES — without RULE 2 this returns BLOCK unconditionally"
+    );
+    assert_ne!(verdict, Verdict::Block);
+    assert_ne!(
+        grade,
+        Some(Grade::F),
+        "adversarial-review MEDIUM fix: grade F must not survive alongside a \
+         downgraded REQUEST_CHANGES verdict — 'Grade: F — Request Changes' is a \
+         contradictory heading posting.rs would otherwise render"
+    );
+    let g = grade.expect("grade must be Some for a non-Unknown verdict");
+    assert!(
+        verdict_for_grade(g).ordinal() <= verdict.ordinal(),
+        "the grade's implied verdict ({:?}) must never be stricter than the \
+         actual verdict ({verdict:?})",
+        verdict_for_grade(g)
+    );
+}
+
+/// Control: a citable/diff-provable High finding STILL forces BLOCK through the
+/// real entry point, keeping BOTH `verdict: Block` AND `grade: F` — RULE 2 (and
+/// its MEDIUM grade-reconciliation companion) must not weaken a genuine,
+/// grounded self-reported BLOCK.
+#[test]
+fn pr84_real_entry_point_self_reported_block_with_citation_still_blocks() {
+    let mut f = speculative_finding(Effort::High, 0.85);
+    f.source_citation = Some("src/handler.ts:42".to_string());
+    let (verdict, grade) = derive_verdict_with_grade(Verdict::Block, Grade::F, &[f]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a cited High finding must still BLOCK through derive_verdict_with_grade"
+    );
+    assert_eq!(
+        grade,
+        Some(Grade::F),
+        "a genuine, grounded BLOCK must keep grade F — the MEDIUM fix must not \
+         soften a legitimately consistent BLOCK/F pairing"
+    );
+}
+
+// ── #PR84 adversarial-review follow-up: recall lock (item 4) ─────────────────
+
+/// A genuine, high-confidence auth-bypass finding correctly flagged
+/// `code_provable: true` (as the strengthened prompt instructs — see the stock
+/// system prompt's citable-findings-gate worked example) still drives BLOCK.
+/// Locks the RECALL path: the citability gate must not cost real detection when
+/// the model correctly self-tags a genuine bug.
+#[test]
+fn code_provable_auth_bypass_locks_recall_to_block() {
+    let mut f = speculative_finding(Effort::High, 0.95);
+    f.code_provable = true;
+    let verdict = derive_verdict(Verdict::Block, &[f]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a high-confidence auth-bypass finding correctly flagged code_provable \
+         must still BLOCK — locks the recall path for genuine bugs"
+    );
+}
+
+/// Companion (the residual tradeoff, made explicit): the SAME auth-bypass
+/// finding, but with `code_provable` omitted (defaults to `false` via
+/// `#[serde(default)]` — the non-strict Bedrock provider path) is demoted from
+/// BLOCK.  This is the accepted "no BLOCK without empirical proof" tradeoff
+/// (fail-open on citability is intentional per RULE 2); the strengthened prompt
+/// wording (worked example) is the mitigation, not a deterministic guarantee —
+/// flagged for dry-run/shadow validation.
+#[test]
+fn code_provable_omitted_demotes_auth_bypass_from_block() {
+    let f = speculative_finding(Effort::High, 0.95); // code_provable defaults false
+    let verdict = derive_verdict(Verdict::Block, &[f]);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84 residual tradeoff: an uncited High finding with code_provable \
+         omitted (non-strict provider default) is demoted — even a genuine bug \
+         is capped at advisory unless the model sets code_provable or cites it"
+    );
+}
+
+// ── #PR84 adversarial-review follow-up: junk-citation hardening (item 5) ─────
+
+/// A junk/vague `source_citation` that does NOT match the citation grammar (no
+/// path:line, ticket key, `#issue`, or spec section) must NOT reopen the BLOCK
+/// floor — closes the reopening an adversarial review found in the original
+/// "any non-blank string qualifies" rule.
+#[test]
+fn pr84_junk_citation_does_not_reopen_block() {
+    let mut f = speculative_finding(Effort::High, 0.9);
+    f.source_citation = Some("see the docs, trust me".to_string());
+    assert!(
+        !is_escalation_eligible(&f),
+        "a junk citation with no grammar-matching identifier must not qualify"
+    );
+    let verdict = derive_verdict(Verdict::Block, &[f]);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "#PR84: a junk/vague source_citation must not reopen the BLOCK floor"
+    );
+}
+
+/// Grammar-matching citation shapes DO qualify — the hardening is a shape check,
+/// not a blanket rejection of citations.
+#[test]
+fn citation_grammar_accepts_documented_shapes() {
+    let shapes = [
+        "src/handler.ts:42",     // path:line
+        "IMPL-2026-05-009 WP-9", // ticket key (prompt's own documented example)
+        "TICKET-123",            // bare ticket key
+        "#123",                  // GitHub issue/PR
+        "PRD § 4.2",             // spec section
+    ];
+    for shape in shapes {
+        let mut f = speculative_finding(Effort::High, 0.9);
+        f.source_citation = Some(shape.to_string());
+        assert!(
+            is_escalation_eligible(&f),
+            "citation shape {shape:?} must match the citation grammar"
+        );
+    }
+}
+
+// ── #PR84 adversarial-review follow-up: downgrade-scope tightening (item 2/LOW) ─
+//
+// The RULE 2 sanitize (`has_disqualified_high && !has_high`) previously fired
+// whenever ANY disqualified High co-occurred with a model-proposed BLOCK — even
+// when the model's BLOCK was independently grounded by OTHER, genuine evidence
+// (e.g. a confident Medium finding).  An unrelated disqualified High could strip
+// an otherwise-valid, Medium-grounded self-reported BLOCK.  Fixed (the
+// "preferred" option from the review): the sanitize now ALSO requires that
+// `severity_floor` over the substantive set WITH disqualified Highs excluded is
+// `Approve` — i.e. no other finding independently grounds even an advisory-level
+// concern — before downgrading.
+
+/// The exact PR #84 shape (disqualified High is the SOLE grounds) still
+/// downgrades — the scope tightening must not defang the crux fix.
+#[test]
+fn pr84_sole_disqualified_high_still_downgrades() {
+    let findings = vec![speculative_finding(Effort::High, 0.85)];
+    let verdict = derive_verdict(Verdict::Block, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "a disqualified High with NO other grounds must still downgrade a \
+         self-reported BLOCK"
+    );
+}
+
+/// The LOW-severity fix itself: an UNRELATED disqualified High must NOT strip a
+/// self-reported BLOCK that is independently grounded by a confident,
+/// non-disqualified Medium finding — the Medium alone already floors to at
+/// least REQUEST_CHANGES, so the model's BLOCK is trusted exactly as
+/// `grade_model_block_kept_when_no_critical_finding` already expects when no
+/// disqualified High is involved at all.
+#[test]
+fn pr84_disqualified_high_does_not_strip_block_grounded_by_independent_medium() {
+    let findings = vec![
+        finding(Effort::Medium, 0.9),            // genuine, independent grounds
+        speculative_finding(Effort::High, 0.85), // unrelated disqualified High
+    ];
+    let verdict = derive_verdict(Verdict::Block, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "#PR84 LOW fix: an unrelated disqualified High must not strip a \
+         self-reported BLOCK that is independently grounded by a confident, \
+         non-disqualified Medium finding"
+    );
+}
+
+/// Companion: when the ONLY other findings are Low-effort (no meaningful
+/// independent grounds), the disqualified High still downgrades the BLOCK — a
+/// Low finding does not count as "independent grounds" any more than no
+/// finding at all.
+#[test]
+fn pr84_disqualified_high_with_only_low_effort_companion_still_downgrades() {
+    let findings = vec![
+        finding(Effort::Low, 0.9),
+        speculative_finding(Effort::High, 0.85),
+    ];
+    let verdict = derive_verdict(Verdict::Block, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "a Low-effort companion finding provides no independent grounds — the \
+         disqualified High must still downgrade the BLOCK"
     );
 }

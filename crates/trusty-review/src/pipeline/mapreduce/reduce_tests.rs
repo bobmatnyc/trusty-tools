@@ -16,8 +16,17 @@ fn cfg() -> MapReduceConfig {
     MapReduceConfig::default()
 }
 
+/// A finding that is escalation-eligible by default (`code_provable = true`).
+///
+/// Why: (#PR84 adversarial-review follow-up) `derive_verdict`'s BLOCK floor now
+/// requires a High-effort finding to be escalation-eligible (cited or
+/// diff-provable) to drive BLOCK.  These reduce-stage tests model GENUINE,
+/// diff-provable bugs (e.g. an auth-bypass description), so the shared helper
+/// marks them `code_provable` to preserve each test's original intent.
 fn finding(file: &str, kind: &str, desc: &str, conf: f32, effort: Effort) -> Finding {
-    Finding::new(file, kind, desc, "", conf, effort)
+    let mut f = Finding::new(file, kind, desc, "", conf, effort);
+    f.code_provable = true;
+    f
 }
 
 fn reviewed(file: &str, verdict: Verdict, findings: Vec<Finding>) -> MapOutcome {

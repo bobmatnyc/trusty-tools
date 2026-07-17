@@ -50,13 +50,73 @@
 //!
 //!   | Finding set                                          | Minimum floor   |
 //!   |------------------------------------------------------|-----------------|
-//!   | Any `High` effort (critical/high sev.)               | BLOCK           |
-//!   | ≥1 `Medium` effort with confidence > 0.80             | REQUEST_CHANGES |
+//!   | `High` effort AND escalation-eligible (#PR84)        | BLOCK           |
+//!   | ≥1 `Medium` effort with confidence > 0.80, OR a       | REQUEST_CHANGES |
+//!   |   citability-demoted `High` (confidence > 0.80)      |                 |
 //!   | Only `Low` effort or no floor-counting findings      | APPROVE         |
 //!
-//!   The model can never soften a Critical, High, or confident-Medium finding
-//!   below the floor — none of the three tiers above are subject to the
-//!   APPROVE-review_body reconciliation cap.
+//!   The model can never soften an escalation-eligible Critical/High or a
+//!   confident-Medium finding below the floor. #PR84 (citability gate): a `High`
+//!   finding drives the BLOCK floor ONLY when it is escalation-eligible — backed
+//!   by a `source_citation` OR flagged `code_provable` (a core
+//!   algorithmic-correctness bug provable from the diff). A non-citable, non-diff-
+//!   provable `High` finding (external framework/library/platform speculation) is
+//!   demoted to the advisory Medium tier and can NEVER force BLOCK — see
+//!   `is_escalation_eligible` / `drives_block_floor`.
+//!
+//! ### Every BLOCK-emitting site is gated (adversarial-review follow-up)
+//!
+//! An initial version of the #PR84 fix gated ONLY `correctness_floor` (the
+//! severity floor), which left THREE other paths able to reproduce the exact
+//! PR #84 mis-grade unchanged:
+//!
+//!   1. **Model-proposed / grade-implied BLOCK** — `stricter_of(model_proposed,
+//!      floor)` can only RAISE the verdict toward the floor; it could never LOWER
+//!      a model self-reported `verdict:"BLOCK"` (or grade `"F"`, via
+//!      `derive_verdict_with_grade`'s `effective_model`) that itself rested on a
+//!      disqualified High.  **Fixed** in `derive_verdict_with` (this function) —
+//!      see the `has_disqualified_high` sanitization below.  Because this is the
+//!      single choke point every other verdict-deriving call site funnels
+//!      through (`derive_verdict_with_grade`, `mapreduce::reduce`'s worst-chunk
+//!      seed, `verify::rederive_verdict`'s baseline), the fix propagates to all
+//!      of them automatically.
+//!   2. **Map-reduce synthesis floor** (`mapreduce::synthesis::apply_synthesis_floor`)
+//!      — a hand-rolled floor for large diffs that does NOT call `derive_verdict`
+//!      at all; it tested bare `f.effort == Effort::High`.  **Fixed** — now uses
+//!      `drives_block_floor` (Tier 1) with a `correctness_floor`-equivalent
+//!      confidence-gated demotion (Tier 1.5) for a disqualified High.
+//!   3. **Verification re-derivation** (`verify::rederive_verdict`'s
+//!      `any_confirmed_high` baseline selector) — bare `f.effort == Effort::High`
+//!      picked path (a) (preserve `primary_verdict` as a hard floor) regardless
+//!      of citability.  **Fixed** — now requires `drives_block_floor`; a
+//!      confirmed-but-disqualified High falls through to path (a2) instead,
+//!      which still independently re-derives via `derive_verdict` (so it is NOT
+//!      silently dropped, just no longer treated as an unconditional floor).
+//!
+//! ### Second-round adversarial-review fixes (grade consistency + downgrade scope)
+//!
+//! A follow-up review of the four fixes above found two more issues, both fixed:
+//!
+//!   - **MEDIUM — grade/verdict disagreement after a RULE 2 downgrade.** When
+//!     RULE 2 downgrades a self-reported BLOCK, the model's original `grade`
+//!     (e.g. `"F"`) was left untouched by `letter_grade::clamp_grade_to_verdict`,
+//!     which only clamps a grade that is too OPTIMISTIC for the actual
+//!     verdict — a grade too SEVERE (like `F` next to a downgraded
+//!     REQUEST_CHANGES) passed through unchanged, rendering a contradictory
+//!     "Grade: F — Request Changes" heading.  **Fixed**: `derive_verdict_with_grade`
+//!     now calls `letter_grade::reconcile_grade_with_verdict`, which handles
+//!     BOTH directions.
+//!   - **LOW — downgrade scope was broader than necessary.** The RULE 2
+//!     sanitize originally fired on `has_disqualified_high && !has_high` alone,
+//!     which could strip an otherwise-valid, Medium-grounded self-reported
+//!     BLOCK whenever an UNRELATED disqualified High happened to also be
+//!     present.  **Fixed**: the sanitize now additionally requires
+//!     `severity_floor` over the substantive set with disqualified Highs
+//!     excluded to be `Approve` (no OTHER independent grounds) before
+//!     downgrading — see `no_independent_grounds` below. Tested by
+//!     `pr84_disqualified_high_does_not_strip_block_grounded_by_independent_medium`
+//!     and `pr84_disqualified_high_with_only_low_effort_companion_still_downgrades`
+//!     (grade_tests.rs).
 //!
 //! `Verdict::Unknown` is always preserved (pass-through) — the model has
 //! signalled the diff was unassessable and no rule applies.
@@ -109,10 +169,35 @@
 //! `low_confidence_high_effort_finding_still_drives_floor` (PR #1350),
 //! `refuted_high_effort_finding_is_still_excluded` (PR #1350).
 
+use std::sync::LazyLock;
+
+use regex::Regex;
 use tracing::debug;
 
 use crate::models::{Effort, Finding, FindingCategory, Verdict, VerifyOutcome};
-use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict, verdict_for_grade};
+use crate::pipeline::letter_grade::{Grade, reconcile_grade_with_verdict, verdict_for_grade};
+
+/// Citation-grammar pattern a `source_citation` must match to be treated as
+/// escalation-eligible (RULE 1 hardening, #PR84 adversarial-review follow-up).
+///
+/// Why: the original #PR84 fix accepted ANY non-blank `source_citation` string,
+/// so a model could re-open the BLOCK floor with a junk/vague string (e.g. "see
+/// the docs", "trust me") that carries no verifiable grounding. Requiring the
+/// citation to match one of the four grammar shapes the prompt actually teaches
+/// (`code:`, `jira:`, `apex:`, `gh:` — see the inline citation grammar in the
+/// system prompt) closes that reopening. This is a SHAPE check only — it does
+/// NOT cross-reference the cited identifier against the actual diff/context
+/// (that would require plumbing the diff/context into `derive_verdict`, a much
+/// larger change); flagged as a residual gap for follow-up validation.
+/// What: matches any of — a `path:line` reference (e.g. `src/handler.ts:42`), a
+/// ticket key (e.g. `IMPL-2026-05-009`, `TICKET-123`), a bare GitHub reference
+/// (`#123`), or a spec-section mark (e.g. `PRD § 4.2`).
+/// Test: `pr84_junk_citation_does_not_reopen_block`,
+/// `high_finding_with_source_citation_still_blocks`.
+static CITATION_GRAMMAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\w./-]+\.[A-Za-z0-9]+:\d+|\b[A-Z][A-Z0-9]+-\d+\b|#\d+|§\s*\d")
+        .expect("citation grammar regex is a valid literal")
+});
 
 // ─── Confidence thresholds ────────────────────────────────────────────────────
 
@@ -306,6 +391,21 @@ impl Thresholds {
     }
 }
 
+/// Resolve the current `FLOOR_MIN_CONFIDENCE` calibration threshold from the
+/// process environment (adversarial-review follow-up).
+///
+/// Why: the map-reduce synthesis floor (`mapreduce::synthesis::apply_synthesis_floor`)
+/// demotes an ungated High finding to the same confidence-gated REQUEST_CHANGES
+/// tier `correctness_floor` Tier 2 gives it — both floors must apply the SAME
+/// bar, including any operator override via `TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE`
+/// (#1597), or the two floors could disagree at the threshold boundary.
+/// What: returns `Thresholds::from_env().floor_min`.
+/// Test: exercised transitively by `synthesis_high_confidence_demoted_high_floors_to_request_changes`
+/// in `synthesis_tests.rs`.
+pub(crate) fn floor_min_confidence() -> f32 {
+    Thresholds::from_env().floor_min
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Compute the final review verdict from the model-proposed verdict and findings.
@@ -384,11 +484,76 @@ fn derive_verdict_with(
         .collect();
 
     // Low-confidence override (ceiling): if ALL substantive findings are advisory-
-    // only (confidence ≤ threshold) AND none are High-effort, the batch is noise.
-    // Override the model down to APPROVE — this specifically prevents APPROVE*
-    // over-fire (Fix 4).  High-effort findings escape this gate: a confirmed
-    // bug with low confidence should still BLOCK, not disappear.
-    let has_high = substantive.iter().any(|f| is_high_severity(f));
+    // only (confidence ≤ threshold) AND none are BLOCK-floor-driving, the batch is
+    // noise.  Override the model down to APPROVE — this specifically prevents
+    // APPROVE* over-fire (Fix 4).  Only an escalation-eligible High finding (cited
+    // or diff-provable) escapes this gate: a confirmed bug with low confidence
+    // should still BLOCK, not disappear.  #PR84: a non-citable High finding
+    // (external framework/platform speculation) is NOT eligible, so it no longer
+    // keeps the batch out of the APPROVE override — it is advisory, not a blocker.
+    let has_high = substantive.iter().any(|f| drives_block_floor(f));
+
+    // #PR84 RULE 2 (adversarial-review crux fix): a model self-reported — or
+    // grade-implied, via `derive_verdict_with_grade`'s `effective_model` —
+    // proposed BLOCK is ITSELF subject to the citability gate, not just the
+    // floor below.  Without this, `stricter_of(model_proposed, floor)` can only
+    // RAISE the verdict from the floor toward the model's proposal; it can never
+    // LOWER a model-proposed BLOCK, so a model that self-reports
+    // `verdict:"BLOCK"` (or `grade:"F"`) purely on the strength of an uncited,
+    // non-diff-provable High finding — the exact PR #84 shape — would pass BLOCK
+    // through completely ungated.  Downgrade the proposal to REQUEST_CHANGES when
+    // a disqualified (high-severity, NOT escalation-eligible) finding is present,
+    // no escalation-eligible High finding is ALSO present to independently
+    // justify BLOCK, AND — adversarial-review LOW-severity scope fix — no OTHER
+    // (non-disqualified) substantive finding independently grounds at least an
+    // advisory-level concern on its own.
+    //
+    // The third condition matters: `has_disqualified_high && !has_high` ALONE
+    // would strip an otherwise-valid self-reported BLOCK whenever a purely
+    // UNRELATED disqualified High happens to co-occur with genuine, separate
+    // grounds (e.g. a confident Medium finding) — an adversarial review found
+    // this could over-fire.  Recomputing `severity_floor` over the substantive
+    // set with disqualified Highs removed answers "is there ANY OTHER reason to
+    // trust the model's escalation, independent of the disqualified finding?" —
+    // if yes (the reduced floor clears APPROVE), the model's BLOCK is preserved
+    // exactly as `grade_model_block_kept_when_no_critical_finding` already
+    // expects; only a disqualified High with NO other grounds at all (the PR #84
+    // shape) triggers the downgrade.
+    //
+    // Deliberately scoped to "a disqualified High finding is present" — NOT
+    // merely "no eligible High finding at all" — so this does not touch:
+    //   - `verify::rederive_verdict`'s infra-failure preservation (path c),
+    //     which intentionally keeps `primary_verdict` on verifier infra failure
+    //     (#726) independent of citability, and is invoked with an EMPTY
+    //     `survivors` list when the only finding was excluded as
+    //     ErrorRefuted/TruncationRefuted — there is no disqualified High for
+    //     this gate to see, so BLOCK correctly survives;
+    //   - a model that escalates to BLOCK past a bare Medium finding (no High
+    //     at all) — a pre-#PR84 "model knows more" pattern unrelated to High-
+    //     severity citability (`grade_model_block_kept_when_no_critical_finding`).
+    let has_disqualified_high = substantive.iter().any(|f| is_disqualified_high(f));
+    let non_disqualified_substantive: Vec<&Finding> = substantive
+        .iter()
+        .filter(|f| !is_disqualified_high(f))
+        .copied()
+        .collect();
+    let no_independent_grounds =
+        severity_floor(&non_disqualified_substantive, thresholds) == Verdict::Approve;
+    let model_proposed = if model_proposed == Verdict::Block
+        && has_disqualified_high
+        && !has_high
+        && no_independent_grounds
+    {
+        debug!(
+            "model-proposed BLOCK rests solely on a disqualified (uncited, \
+             non-diff-provable) High finding, with no other independent grounds \
+             — downgrading to REQUEST_CHANGES (#PR84 RULE 2)"
+        );
+        Verdict::RequestChanges
+    } else {
+        model_proposed
+    };
+
     let threshold = thresholds.low_confidence;
     let all_low_confidence =
         !substantive.is_empty() && substantive.iter().all(|f| f.confidence <= threshold);
@@ -484,8 +649,78 @@ fn is_substantive(f: &Finding, thresholds: &Thresholds) -> bool {
 /// Test: `is_high_severity_matches_high_effort`,
 /// `low_confidence_high_effort_finding_still_drives_floor` (#1350),
 /// `floor_excludes_refuted_and_low_confidence_findings` (#1343).
-fn is_high_severity(f: &Finding) -> bool {
+pub(crate) fn is_high_severity(f: &Finding) -> bool {
     f.effort == Effort::High
+}
+
+/// Return `true` when a finding clears the citability gate and is therefore
+/// eligible to drive the deterministic BLOCK floor (RULE 1, #PR84 calibration).
+///
+/// Why: PR #84 (`duetto-eve-agents` #84) was graded BLOCK/F on a SINGLE finding
+/// the model self-tagged `effort: high` — a FALSE, non-citable claim about
+/// Vercel's routing (contradicted by Vercel's docs and disproven in prod).  The
+/// floor trusted the model's self-reported effort unconditionally and hard-clamped
+/// to BLOCK with no citability check.  The rule: a high/critical finding may
+/// escalate toward BLOCK ONLY if it is either (a) backed by a non-empty
+/// `source_citation` (code location / spec / doc / ticket) OR (b) a CORE
+/// algorithmic-correctness issue argued from the diff itself (a logic/data/security
+/// bug provable from the code under review, flagged `code_provable`).  Non-citable
+/// speculation about external framework/library/platform behavior is NOT eligible;
+/// it is capped at the advisory (Medium) tier and can never force BLOCK.
+/// What: returns true iff `source_citation` is present, non-blank, AND matches
+/// [`CITATION_GRAMMAR_RE`] (a junk/vague string no longer qualifies — hardened
+/// per the adversarial-review follow-up, see the regex doc comment) OR
+/// `code_provable` is set.  Deliberately narrow — this is the ONLY relaxation of
+/// the BLOCK floor and it must not weaken it beyond the two #PR84 rules.
+/// Test: `pr84_uncited_high_finding_does_not_block`,
+/// `high_finding_with_source_citation_still_blocks`,
+/// `high_finding_code_provable_still_blocks`,
+/// `pr84_junk_citation_does_not_reopen_block`.
+pub(crate) fn is_escalation_eligible(f: &Finding) -> bool {
+    let cited = f
+        .source_citation
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .is_some_and(|c| CITATION_GRAMMAR_RE.is_match(c));
+    cited || f.code_provable
+}
+
+/// Return `true` when a finding drives the deterministic BLOCK floor: it is
+/// high-severity AND escalation-eligible (RULE 2, #PR84 calibration).
+///
+/// Why: the BLOCK floor must not clamp to BLOCK on a high-effort finding that
+/// fails the citability gate (uncited AND not core-algorithmic-correctness).
+/// Because the floor previously trusted the model's self-reported `effort`
+/// unconditionally, a prompt-only change is not self-enforcing — this predicate is
+/// the deterministic backstop.  A high finding that is NOT escalation-eligible is
+/// demoted to the advisory (Medium) tier by `correctness_floor` rather than
+/// driving BLOCK.  Reused verbatim by the map-reduce synthesis floor
+/// (`mapreduce::synthesis::apply_synthesis_floor`) and the model-proposed-BLOCK
+/// sanitization below, so every BLOCK-emitting site in the pipeline applies the
+/// SAME gate (adversarial-review follow-up — see the module doc's "sites gated"
+/// list).
+/// What: returns `is_high_severity(f) && is_escalation_eligible(f)`.
+/// Test: `pr84_uncited_high_finding_does_not_block` and its citation/code-provable
+/// controls.
+pub(crate) fn drives_block_floor(f: &Finding) -> bool {
+    is_high_severity(f) && is_escalation_eligible(f)
+}
+
+/// Return `true` when a finding is a "disqualified High" — high-severity but
+/// FAILING the citability gate (RULE 1) — the finding class RULE 2 demotes to
+/// the advisory tier instead of letting it drive BLOCK.
+///
+/// Why: this exact predicate was previously inlined at three call sites
+/// (`correctness_floor`'s Tier 2, `derive_verdict_with`'s RULE 2 sanitize scope
+/// check, and the map-reduce synthesis floor's Tier 1.5) — naming it once keeps
+/// all three in agreement and gives a single place to audit the "disqualified"
+/// definition (adversarial-review follow-up, Duplicate Elimination).
+/// What: returns `is_high_severity(f) && !is_escalation_eligible(f)`.
+/// Test: covered transitively by every `#PR84` test in this module and
+/// `synthesis_tests.rs`.
+pub(crate) fn is_disqualified_high(f: &Finding) -> bool {
+    is_high_severity(f) && !is_escalation_eligible(f)
 }
 
 // ─── Floor computation ────────────────────────────────────────────────────────
@@ -554,31 +789,46 @@ fn severity_floor(findings: &[&Finding], thresholds: &Thresholds) -> Verdict {
 /// showed requiring a SECOND corroborating Medium finding before escalating was
 /// the single largest source of the reviewer under-firing REQUEST_CHANGES.
 /// What: applies the three-tier rule set over correctness findings:
-///   1. Any `High`-effort finding → BLOCK
+///   1. Any escalation-eligible `High`-effort finding → BLOCK.  #PR84: a High
+///      finding drives BLOCK ONLY when it clears the citability gate
+///      (`is_escalation_eligible` — cited OR `code_provable`); a non-citable,
+///      non-diff-provable High finding is demoted to Tier 2 (advisory) and can
+///      never force BLOCK.
 ///   2. ≥1 high-confidence (`confidence > FLOOR_MIN_CONFIDENCE`) Medium-effort
-///      finding → REQUEST_CHANGES
+///      finding — OR a High finding demoted by the #PR84 citability gate —
+///      → REQUEST_CHANGES
 ///   3. Only `Low` / no floor-counting findings → APPROVE
 ///
 /// Test: `grade_two_medium_yields_request_changes`,
 ///       `grade_one_medium_yields_request_changes` (#1876),
-///       `grade_advisory_medium_below_floor_threshold_does_not_escalate`.
+///       `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
+///       `pr84_uncited_high_finding_does_not_block`,
+///       `high_finding_with_source_citation_still_blocks`.
 fn correctness_floor(findings: &[&&Finding], thresholds: &Thresholds) -> Verdict {
     if findings.is_empty() {
         return Verdict::Approve;
     }
 
-    // Partition findings by effort tier.
-    let has_high = findings.iter().any(|f| is_high_severity(f));
+    // Partition findings by effort tier.  #PR84: a High-effort finding only
+    // drives the BLOCK floor when it clears the citability gate (cited OR
+    // `code_provable`).  A non-citable, non-diff-provable High finding is external
+    // framework/platform speculation — it is demoted to the advisory (Medium) tier
+    // below and can never force BLOCK.
+    let has_block_high = findings.iter().any(|f| drives_block_floor(f));
 
     // Only count Medium findings whose confidence clears the floor threshold
-    // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).
+    // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).  A
+    // High finding demoted by the #PR84 citability gate (high-severity but NOT
+    // escalation-eligible) is treated as a Medium here — it may raise the floor to
+    // REQUEST_CHANGES when it is confident, but never to BLOCK.
     let medium_floor = thresholds.floor_min;
-    let has_confident_medium = findings
-        .iter()
-        .any(|f| f.effort == Effort::Medium && f.confidence > medium_floor);
+    let has_confident_medium = findings.iter().any(|f| {
+        let advisory_medium = f.effort == Effort::Medium || is_disqualified_high(f);
+        advisory_medium && f.confidence > medium_floor
+    });
 
-    // Tier 1: any High-effort (critical/high severity) → BLOCK floor.
-    if has_high {
+    // Tier 1: any escalation-eligible High-effort (critical/high severity) → BLOCK.
+    if has_block_high {
         return Verdict::Block;
     }
 
@@ -662,9 +912,13 @@ fn stricter_of(a: Verdict, b: Verdict) -> Verdict {
 /// Special case: when `model_proposed == Unknown`, it is preserved unconditionally
 /// (the model could not assess the diff; grade/floor do not apply).
 ///
-/// Also returns the final grade, clamped by `clamp_grade_to_verdict` so the grade
-/// and verdict never disagree in the output — EXCEPT for `Verdict::Unknown`, which
-/// returns `None` (no letter grade).
+/// Also returns the final grade, reconciled by `letter_grade::reconcile_grade_with_verdict`
+/// (adversarial-review MEDIUM fix — supersedes a bare `clamp_grade_to_verdict` call,
+/// which only handled a grade too OPTIMISTIC for the final verdict; RULE 2 above can
+/// now make `final_verdict` MILDER than what `grade` implies, e.g. self-reported
+/// `grade:"F"` downgraded to REQUEST_CHANGES, so the reconciliation must also cap an
+/// over-severe grade DOWN to agree) so the grade and verdict never disagree in the
+/// output — EXCEPT for `Verdict::Unknown`, which returns `None` (no letter grade).
 ///
 /// ## UNKNOWN ⇒ no letter grade (#1474)
 ///
@@ -711,10 +965,13 @@ pub fn derive_verdict_with_grade(
     // Step 3: apply the severity floor over the effective model proposal.
     let final_verdict = derive_verdict(effective_model, findings);
 
-    // Clamp the grade so it is consistent with the final verdict.  `final_verdict`
-    // is never Unknown here (the Unknown branch returned above), so the clamp always
+    // Reconcile the grade so it is consistent with the final verdict IN BOTH
+    // DIRECTIONS (adversarial-review MEDIUM fix): too-optimistic (existing
+    // `clamp_grade_to_verdict` behaviour) AND too-severe (new — RULE 2 can
+    // downgrade `final_verdict` below what `grade` implies).  `final_verdict`
+    // is never Unknown here (the Unknown branch returned above), so this always
     // yields a real letter grade.
-    let final_grade = clamp_grade_to_verdict(grade, &final_verdict);
+    let final_grade = reconcile_grade_with_verdict(grade, &final_verdict);
 
     (final_verdict, Some(final_grade))
 }

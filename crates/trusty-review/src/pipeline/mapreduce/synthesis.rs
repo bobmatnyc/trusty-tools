@@ -13,9 +13,12 @@
 //! makes ONE additional LLM call asking the model to judge the PR holistically
 //! (given the deduped finding list and per-chunk verdicts), and returns a new
 //! `ReducedReview` whose `verdict`, `grade`, and `summary` come from the synthesis
-//! response.  The two-tier safety floor is re-applied after synthesis (#1665):
-//! any non-refuted `Effort::High` finding floors the verdict to at least BLOCK;
-//! failing that, a mechanical BLOCK floors the synthesis verdict to at least
+//! response.  The safety floor is re-applied after synthesis (#1665; re-gated for
+//! the #PR84 adversarial-review follow-up): any non-refuted, escalation-eligible
+//! High finding (cited or diff-provable — see `grade::drives_block_floor`) floors
+//! the verdict to at least BLOCK; a disqualified (uncited, non-diff-provable)
+//! High is demoted to at least REQUEST_CHANGES when confident, never BLOCK;
+//! failing both, a mechanical BLOCK floors the synthesis verdict to at least
 //! REQUEST_CHANGES (so synthesis cannot de-escalate BLOCK to APPROVE/APPROVE*).
 //! The count-based Medium floor is deliberately omitted — the LLM has already
 //! holistically judged those findings.  Any synthesis error causes a graceful
@@ -32,7 +35,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::mapreduce::MapReduceConfig,
     llm::{ChatMessage, LlmProvider, LlmRequest},
-    models::{Effort, Finding, Verdict},
+    models::{Finding, Verdict},
     pipeline::{letter_grade::Grade, mapreduce::map::MapContext},
 };
 
@@ -262,64 +265,85 @@ struct ParsedSynthesis {
 
 // ─── Two-tier synthesis floor ─────────────────────────────────────────────────
 
-/// Apply the two-tier synthesis floor after the synthesis LLM call (#1665).
+/// Apply the citability-gated synthesis floor after the synthesis LLM call
+/// (#1665; re-gated for the #PR84 adversarial-review follow-up).
 ///
 /// Why: the synthesis LLM has holistically judged the PR; re-applying the full
 /// `derive_verdict` (which includes the count-based `≥2 Medium →
 /// REQUEST_CHANGES` floor) would undo the calibration the synthesis was designed
-/// to provide.  Two non-negotiable floors remain (#1665, decided policy):
+/// to provide.  Non-negotiable floors remain (#1665, decided policy), now gated
+/// by the SAME citability rule as `grade::correctness_floor` — this is a live
+/// path for large diffs (`runner.rs` → `run_mapreduce_branch` →
+/// `synthesize_review`), and an adversarial review found the original bare
+/// `f.effort == Effort::High` test here left the exact PR #84 mis-grade fully
+/// reproducible on this path even after `correctness_floor` was fixed:
 ///
-///   **Tier 1 — High finding → BLOCK:**
-///   ANY non-refuted `Effort::High` finding must floor the verdict to at least
-///   BLOCK.  Critical findings cannot be forgiven by synthesis — that would be a
-///   safety hole.  This matches the unified path's `correctness_floor` semantics
-///   (`Effort::High` is the only severity above Medium; there is no separate
-///   `Critical` variant).
+///   **Tier 1 — escalation-eligible High finding → BLOCK:**
+///   ANY non-refuted High finding that is escalation-eligible
+///   (`grade::drives_block_floor` — cited or `code_provable`) must floor the
+///   verdict to at least BLOCK.  Critical, well-grounded findings cannot be
+///   forgiven by synthesis — that would be a safety hole.
+///
+///   **Tier 1.5 — disqualified High finding, confident → REQUEST_CHANGES:**
+///   A High finding that FAILS the citability gate (uncited, non-diff-provable —
+///   the PR #84 shape) can never floor to BLOCK here, mirroring
+///   `correctness_floor` Tier 2's demoted-High treatment exactly: when its
+///   confidence clears `grade::floor_min_confidence()`, it still floors to at
+///   least REQUEST_CHANGES (advisory, not silently dropped).
 ///
 ///   **Tier 2 — mechanical BLOCK → at least REQUEST_CHANGES:**
-///   If no High finding is present but the mechanical (pre-synthesis) verdict was
-///   `Verdict::Block`, synthesis may de-escalate BLOCK → REQUEST_CHANGES but MUST
-///   NOT de-escalate BLOCK → APPROVE or APPROVE*.  A per-chunk BLOCK without a
-///   High finding is typically driven by a Medium-count heuristic; an LLM
-///   holistically judging those nits minor is permitted — but the human reviewer
-///   must at minimum be informed via REQUEST_CHANGES, not silently APPROVED.
+///   If neither tier above applies but the mechanical (pre-synthesis) verdict
+///   was `Verdict::Block`, synthesis may de-escalate BLOCK → REQUEST_CHANGES but
+///   MUST NOT de-escalate BLOCK → APPROVE or APPROVE*.  (`mechanical_verdict`
+///   itself already passed through `derive_verdict`'s own #PR84 gate, so this
+///   tier cannot reintroduce an ungated BLOCK.)
 ///
-///   **Tier 3 — no floor:** when neither condition above applies, synthesis may
-///   soften the verdict freely (e.g. REQUEST_CHANGES → APPROVE is allowed for
-///   non-BLOCK mechanical verdicts with no High findings).
+///   **Tier 3 — no floor:** when no condition above applies, synthesis may
+///   soften the verdict freely.
 ///
 /// What: given `synthesized` (the LLM's raw output), `findings` (the deduped
 /// finding set), and `mechanical_verdict` (the deterministic pre-synthesis
 /// verdict captured before synthesis ran):
-///   - Returns `BLOCK` when `has_unrefuted_high`.
-///   - Returns `max_by_ordinal(synthesized, REQUEST_CHANGES)` when
-///     `mechanical_verdict == Block` (and no High finding).
+///   - Returns `BLOCK` when an unrefuted, escalation-eligible High is present.
+///   - Returns `max_by_ordinal(synthesized, REQUEST_CHANGES)` when a disqualified
+///     High is present at confident confidence, or when `mechanical_verdict ==
+///     Block`.
 ///   - Otherwise returns `synthesized` unchanged.
 ///
 /// Test: `synthesis_high_severity_still_floors`,
 /// `synthesis_block_without_high_finding_floors_to_request_changes`,
-/// `synthesis_mechanical_rc_allows_full_softening` in synthesis_tests.rs.
+/// `synthesis_mechanical_rc_allows_full_softening`,
+/// `synthesis_pr84_uncited_high_does_not_block` (adversarial-review follow-up),
+/// `synthesis_confident_uncited_high_floors_to_request_changes` in
+/// synthesis_tests.rs.
 pub(crate) fn apply_synthesis_floor(
     synthesized: Verdict,
     findings: &[Finding],
     mechanical_verdict: &Verdict,
 ) -> Verdict {
     use crate::models::VerifyOutcome;
+    use crate::pipeline::grade::{
+        drives_block_floor, floor_min_confidence, is_escalation_eligible, is_high_severity,
+    };
 
-    // A refuted finding is disproven — never counts toward any floor.
-    let has_unrefuted_high = findings.iter().any(|f| {
-        f.effort == Effort::High
-            && !matches!(
-                f.verified,
-                Some(VerifyOutcome::Refuted)
-                    | Some(VerifyOutcome::ErrorRefuted { .. })
-                    | Some(VerifyOutcome::TruncationRefuted)
-            )
-    });
+    let not_refuted = |f: &&Finding| {
+        !matches!(
+            f.verified,
+            Some(VerifyOutcome::Refuted)
+                | Some(VerifyOutcome::ErrorRefuted { .. })
+                | Some(VerifyOutcome::TruncationRefuted)
+        )
+    };
+
+    // #PR84 RULE 1/2: only an escalation-eligible (cited or diff-provable)
+    // unrefuted High finding floors to BLOCK — mirrors `correctness_floor`
+    // Tier 1 exactly.  A refuted finding is disproven — never counts toward any
+    // floor, gated or not.
+    let has_unrefuted_high = findings.iter().filter(not_refuted).any(drives_block_floor);
 
     if has_unrefuted_high {
-        // Tier 1: BLOCK is the minimum for a critical finding — take the stricter
-        // of the synthesized verdict and BLOCK.
+        // Tier 1: BLOCK is the minimum for a critical, well-grounded finding —
+        // take the stricter of the synthesized verdict and BLOCK.
         if synthesized.ordinal() < Verdict::Block.ordinal() {
             debug!(
                 synthesis_verdict = %synthesized,
@@ -330,9 +354,31 @@ pub(crate) fn apply_synthesis_floor(
         return synthesized;
     }
 
+    // Tier 1.5 (#PR84 adversarial-review follow-up): a High finding that FAILS
+    // the citability gate (uncited, non-diff-provable) can never floor to BLOCK
+    // — but it is not silently dropped either.  Mirrors `correctness_floor`
+    // Tier 2's demoted-High treatment: when confident enough
+    // (`confidence > floor_min_confidence()`), it still floors to at least
+    // REQUEST_CHANGES.
+    let has_confident_disqualified_high = findings.iter().filter(not_refuted).any(|f| {
+        is_high_severity(f) && !is_escalation_eligible(f) && f.confidence > floor_min_confidence()
+    });
+
+    if has_confident_disqualified_high && synthesized.ordinal() < Verdict::RequestChanges.ordinal()
+    {
+        debug!(
+            synthesis_verdict = %synthesized,
+            "synthesis floor tier-1.5: confident High finding failed the citability \
+             gate (uncited, non-diff-provable) — demoted to REQUEST_CHANGES, not BLOCK \
+             (#PR84 adversarial-review follow-up)"
+        );
+        return Verdict::RequestChanges;
+    }
+
     if *mechanical_verdict == Verdict::Block {
-        // Tier 2: mechanical BLOCK without High finding — synthesis may de-escalate
-        // BLOCK → REQUEST_CHANGES but NOT further toward APPROVE.
+        // Tier 2: mechanical BLOCK without an escalation-eligible High finding —
+        // synthesis may de-escalate BLOCK → REQUEST_CHANGES but NOT further
+        // toward APPROVE.
         if synthesized.ordinal() < Verdict::RequestChanges.ordinal() {
             debug!(
                 synthesis_verdict = %synthesized,

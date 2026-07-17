@@ -161,6 +161,19 @@ pub fn review_response_schema() -> ResponseSchema {
                         "suggested_replacement": {
                             "type": ["string", "null"],
                             "description": "EXACT replacement code for the line(s) at `line`, suitable for a one-click GitHub suggestion block. Provide ONLY when the fix is a concrete code replacement that maps to specific line(s) at this location; otherwise null and describe the fix in `body`. Do NOT include a code fence or surrounding prose — just the literal replacement line(s)."
+                        },
+                        // `code_provable` (#PR84) is a plain boolean added to
+                        // `required` by `enforce_strict_mode` for OpenAI strict.
+                        // It is the core-algorithmic-correctness gate: only a
+                        // `code_provable` OR `source_citation`-backed finding may
+                        // drive the deterministic BLOCK floor at high/critical
+                        // severity (see the prompt's citability rule). Non-strict
+                        // providers / older models that omit it funnel through the
+                        // SAME serde path where `LlmFinding.code_provable` is
+                        // `#[serde(default)]` → `false` (fail-closed).
+                        "code_provable": {
+                            "type": "boolean",
+                            "description": "Set true ONLY when this is a core algorithmic-correctness bug (logic, data, or security) provable from the DIFF ITSELF — a defect you can demonstrate from the code under review. Set false for any claim that rests on external framework/library/platform behavior you cannot cite (put a citation in source_citation instead). A high/critical-severity finding may only BLOCK when code_provable is true OR source_citation is set; uncited framework/platform speculation must NOT be high/critical."
                         }
                     }
                 }

@@ -48,8 +48,11 @@ use crate::{
         BLOCK_VERDICT_MIN_CONFIDENCE, VERIFY_CANDIDATE_MIN_CONFIDENCE, VERIFY_REFUTED_CONFIDENCE,
     },
     llm::{LlmError, LlmProvider},
-    models::{Effort, Finding, Verdict, VerifyOutcome},
-    pipeline::{grade::derive_verdict, verify_prompt::build_verify_request},
+    models::{Finding, Verdict, VerifyOutcome},
+    pipeline::{
+        grade::{derive_verdict, drives_block_floor},
+        verify_prompt::build_verify_request,
+    },
 };
 
 /// Maximum number of verifier calls to run concurrently.
@@ -267,11 +270,24 @@ fn rederive_verdict(
         .cloned()
         .collect();
 
-    // Does any confirmed (surviving) finding have High effort?
+    // Does any confirmed (surviving) finding drive the BLOCK floor — i.e. is it
+    // High-effort AND escalation-eligible (cited or diff-provable)?
+    //
+    // #PR84 adversarial-review follow-up: this previously used a bare
+    // `f.effort == Effort::High` check, so a CONFIRMED-but-disqualified (uncited,
+    // non-diff-provable) High finding — exactly PR #84's shape post-verification
+    // (`verified: Confirmed`, no citation) — routed to path (a) below and pinned
+    // `primary_verdict` (e.g. a self-reported BLOCK) as a HARD floor.
+    // `derive_verdict`'s own #PR84 gate (in `grade.rs`) already prevents that
+    // baseline from surviving as an outright ungated BLOCK, but path (a) vs (a2)
+    // selection should agree with the unified path's citability rule on its own
+    // merits — using `drives_block_floor` here keeps this call site consistent
+    // with `correctness_floor` / the map-reduce synthesis floor rather than
+    // relying solely on the downstream `derive_verdict` safety net.
     let any_confirmed_high = survivors
         .iter()
         .filter(|f| matches!(f.verified, Some(VerifyOutcome::Confirmed)))
-        .any(|f| f.effort == Effort::High);
+        .any(drives_block_floor);
 
     // Four-way baseline selection (see Why above):
     //  a)  confirmed + at least one High-effort confirmed

@@ -89,7 +89,7 @@ impl LlmProvider for RecordingReviewer {
             // after an LLM synthesis pass.  A Medium finding might be holistically
             // softened by synthesis (the intended calibration); a High finding must
             // ALWAYS floor to BLOCK/REQUEST_CHANGES regardless of synthesis (#1663).
-            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"the build() signature changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1}]}"#
+            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"the build() signature changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };
