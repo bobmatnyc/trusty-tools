@@ -12,6 +12,7 @@
 //! Test: this file IS the test module for `deployer`; run with
 //! `cargo test -p trusty-agents-common -- agents::deployer`.
 
+use super::*;
 use std::fs;
 use tempfile::TempDir;
 
@@ -210,8 +211,7 @@ fn deploy_user_owned_skipped() {
 fn deploy_missing_source_dir_is_empty_result() {
     // Deploying from a non-existent source directory is a no-op success.
     let tgt = TempDir::new().unwrap();
-    let result =
-        deploy_agents(Path::new("/nonexistent/trusty-mpm/agents"), tgt.path()).unwrap();
+    let result = deploy_agents(Path::new("/nonexistent/trusty-mpm/agents"), tgt.path()).unwrap();
     assert_eq!(result, DeployResult::default());
 }
 
@@ -312,8 +312,7 @@ fn deploy_filtered_respects_predicate() {
     let tgt = TempDir::new().unwrap();
     write_sources(src.path()); // base-agent.md + engineer.md
 
-    let result =
-        deploy_agents_filtered(src.path(), tgt.path(), |name| name == "engineer").unwrap();
+    let result = deploy_agents_filtered(src.path(), tgt.path(), |name| name == "engineer").unwrap();
 
     // engineer.md deployed; base-agent.md filtered out and not written.
     assert!(result.deployed.contains(&"engineer.md".to_string()));
