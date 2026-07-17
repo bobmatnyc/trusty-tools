@@ -1494,6 +1494,54 @@ async fn record_index_readiness_unknown_session_errors() {
     assert!(registry.record_index_readiness("nope", None, "x").is_err());
 }
 
+/// (DOC-39 §5.6 Slice D) `record_index_readiness` must cache the snapshot it
+/// records, so a LATER `get_readiness` call — without ever re-subscribing to
+/// the event stream — retrieves the exact same state.
+///
+/// Why: this is the registry-level half of the late-attaching-client
+/// guarantee: `Event::IndexReadiness` fires once and is easy to miss, so the
+/// cache `record_index_readiness` writes (not the event itself) is what
+/// `get_readiness` reads back. Exercised directly at the `SessionRegistry`
+/// level (no JSON-RPC handler in between) so a regression in the caching
+/// assignment itself — as opposed to the protocol layer's passthrough — is
+/// caught here.
+/// What: records a `Some(IndexReadiness)` probe, then calls `get_readiness`
+/// and asserts it returns `ReadinessQuery::Probed` with `state`/`summary`
+/// matching what was just recorded.
+/// Test: this test.
+#[tokio::test]
+async fn record_index_readiness_caches_snapshot_for_late_query() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    let r = readiness("ready", 128, true, true);
+    registry
+        .record_index_readiness(&session.id, Some(&r), &r.summary())
+        .unwrap();
+
+    let queried = registry.get_readiness(&session.id).unwrap();
+    match queried {
+        events::ReadinessQuery::Probed(snapshot) => {
+            assert_eq!(snapshot.state, "ready");
+            assert_eq!(snapshot.summary, r.summary());
+            assert!(snapshot.semantic_ready);
+        }
+        events::ReadinessQuery::NeverProbed => {
+            panic!("expected a cached snapshot after record_index_readiness, got NeverProbed")
+        }
+    }
+}
+
+/// `get_readiness` against an unknown session must error, not panic —
+/// mirrors every other registry method's `session_not_found` convention.
+/// Test: this test.
+#[tokio::test]
+async fn get_readiness_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry.get_readiness("nope").unwrap_err();
+    assert_eq!(err.code, -32007);
+}
+
 /// `record_context_budget` must publish a `ContextBudget` event mapping the
 /// snapshot field-for-field.
 #[tokio::test]
