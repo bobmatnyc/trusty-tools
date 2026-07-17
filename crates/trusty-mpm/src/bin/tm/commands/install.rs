@@ -164,6 +164,31 @@ pub(crate) async fn install(
         println!("  {line}");
     }
 
+    // DOC-42 (issue #2889): a full `tm install` already deploys every bundled
+    // skill (`|_| true` above), so no co-deploy `select` override is needed —
+    // but a `skills:` entry declared by an agent that resolves in NO tier at
+    // all is still a real gap worth surfacing, so run the same resolution
+    // logging `session_launch` uses.
+    let bundled_stems = trusty_mpm::core::skill_tiers::list_source_stems(&paths.skill_source_dir())
+        .unwrap_or_default();
+    let user_stems =
+        trusty_mpm::core::skill_tiers::list_source_stems(&paths.user_skill_source_dir())
+            .unwrap_or_default();
+    let project_stems =
+        trusty_mpm::core::skill_tiers::list_project_custom_stems(&paths.claude_skills_dir())
+            .unwrap_or_default();
+    let dangling = trusty_mpm::core::agent_skill_codeploy::log_declared_skills(
+        &deploy.declared_skills,
+        &project_stems,
+        &user_stems,
+        &bundled_stems,
+    );
+    for (agent, skill) in &dangling {
+        println!(
+            "  warning: agent `{agent}` declares skill `{skill}`, but it was not found in any tier"
+        );
+    }
+
     // Wire the MPM lifecycle hooks into every Claude settings file on the
     // machine. Per-file failures are non-fatal so one bad file does not sink
     // the whole install. Uses absolute-path hook commands resolved from the
@@ -399,6 +424,14 @@ pub(crate) fn deploy_report_lines(
             "\u{26a0} {} untracked agent file(s) differ from the bundle and were skipped; \
              run `tm install --reset-agents` to review and reconcile them.",
             deploy.untracked_modified.len()
+        ));
+    }
+    // DOC-42 issue #2906 review (CRITICAL finding): a per-agent compose
+    // failure no longer aborts the whole deploy — surface it here so it is
+    // never silently dropped from `tm install`'s output.
+    for failure in &deploy.failed {
+        lines.push(format!(
+            "\u{2717} {failure} (agent skipped, compose failed)"
         ));
     }
     lines

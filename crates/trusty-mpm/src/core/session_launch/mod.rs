@@ -36,10 +36,13 @@ mod tests_roster;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
+use crate::core::agent_skill_codeploy::{co_deploy_skill_set, log_declared_skills};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
-use crate::core::skill_tiers::deploy_all_skill_tiers;
+use crate::core::skill_tiers::{
+    deploy_all_skill_tiers, list_project_custom_stems, list_source_stems,
+};
 use native_mcp::inject_native_trusty_mcps;
 use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
@@ -412,11 +415,31 @@ fn prepare_session_inner(
         );
     }
 
+    // DOC-42 (issue #2889): fold every deployed agent's declared `skills:`
+    // into the bundled-tier `select` predicate below, so a skill the harness
+    // manifest would otherwise exclude still deploys when an agent depends on
+    // it (§SPEC-AGENTSKILLS-02 co-deploy guarantee). Resolving the stem sets
+    // ONCE here (rather than inside `deploy_all_skill_tiers`) lets the same
+    // sets drive both the co-deploy `select` override AND the resolution
+    // logging below, without a second directory scan.
+    let bundled_stems = list_source_stems(&plan.skill_source).unwrap_or_default();
+    let user_stems = list_source_stems(&fw.user_skill_source_dir()).unwrap_or_default();
+    let project_stems = list_project_custom_stems(&fw.claude_skills_dir()).unwrap_or_default();
+    let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
+    log_declared_skills(
+        &deploy.declared_skills,
+        &project_stems,
+        &user_stems,
+        &bundled_stems,
+    );
+
     // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
     // Skills carry no inheritance, so this is a manifest-tracked content copy.
     // Three tiers merge here with precedence project-custom > user-custom >
     // bundled (#2816): the manifest's skill-set selection restricts WHICH
-    // BUNDLED source skills deploy; the user-custom tier
+    // BUNDLED source skills deploy — OR'd with `co_deploy_skills` (DOC-42) so
+    // an agent-declared dependency still deploys even when the manifest
+    // wouldn't otherwise select it; the user-custom tier
     // (`~/.trusty-mpm/skills/`) is deployed in full and overrides a same-named
     // bundled skill; a skill the user hand-placed in the project's
     // `.claude/skills/` (absent from the deploy manifest) outranks both and is
@@ -428,7 +451,7 @@ fn prepare_session_inner(
         &plan.skill_source,
         &fw.user_skill_source_dir(),
         &fw.claude_skills_dir(),
-        |name| plan.skill_selected(name),
+        |name| plan.skill_selected(name) || co_deploy_skills.contains(name),
     ) {
         Ok(result) => result.stats,
         Err(err) => {

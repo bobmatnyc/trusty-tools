@@ -77,6 +77,40 @@ fn strip_one_quote_pair(value: &str) -> &str {
     value
 }
 
+/// Parse a frontmatter array-style scalar into its element list.
+///
+/// Why: `skills:` (DOC-42, issue #2889) is the first list-valued frontmatter
+/// field trusty-mpm parses; rather than pulling in a full YAML parser, it
+/// reuses the existing line-based grammar with one addition — an inline
+/// bracket array on the same line as the key, e.g.
+/// `skills: [code-review-standards, verification-before-completion]` — which
+/// is the grammar `docs/specs/agent-bundled-skills.md` §SPEC-AGENTSKILLS-01
+/// documents as normative.
+/// What: strips one balanced `[`...`]` pair (falling back to the bare value
+/// when unbracketed), splits on `,`, trims and unquotes each element via
+/// [`strip_one_quote_pair`], and drops empty elements — so `skills: []`,
+/// `skills:` (blank value), and a trailing comma all yield an empty list. A
+/// single bare name with no brackets (`skills: foo`) is treated as a
+/// one-element list for caller convenience.
+/// Test: `parse_list_value_*` in this file.
+pub fn parse_list_value(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split(',')
+        .map(str::trim)
+        .map(strip_one_quote_pair)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +228,51 @@ mod tests {
     fn parse_kv_malformed_no_colon_returns_none() {
         // A line with no colon at all cannot be split and must return None.
         assert!(parse_kv_line("not_a_kv_line").is_none());
+    }
+
+    // ── parse_list_value (DOC-42 `skills:` grammar) ────────────────────────
+
+    #[test]
+    fn parse_list_value_bracket_array() {
+        let items = parse_list_value("[code-review-standards, systematic-debugging]");
+        assert_eq!(items, vec!["code-review-standards", "systematic-debugging"]);
+    }
+
+    #[test]
+    fn parse_list_value_single_element() {
+        assert_eq!(
+            parse_list_value("[toolchains-rust-core]"),
+            vec!["toolchains-rust-core"]
+        );
+    }
+
+    #[test]
+    fn parse_list_value_empty_brackets_is_empty() {
+        assert!(parse_list_value("[]").is_empty());
+    }
+
+    #[test]
+    fn parse_list_value_blank_is_empty() {
+        assert!(parse_list_value("").is_empty());
+        assert!(parse_list_value("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_list_value_trailing_comma_drops_empty_element() {
+        assert_eq!(parse_list_value("[a, b, ]"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_list_value_unbracketed_bare_name_is_one_element() {
+        // Convenience: a bare name with no brackets is a one-element list.
+        assert_eq!(
+            parse_list_value("toolchains-rust-core"),
+            vec!["toolchains-rust-core"]
+        );
+    }
+
+    #[test]
+    fn parse_list_value_strips_quotes_per_element() {
+        assert_eq!(parse_list_value(r#"["a", 'b']"#), vec!["a", "b"]);
     }
 }

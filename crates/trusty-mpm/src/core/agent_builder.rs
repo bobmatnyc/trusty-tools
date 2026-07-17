@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::frontmatter::parse_kv_line;
+use super::frontmatter::{parse_kv_line, parse_list_value};
 
 /// Maximum inheritance-chain depth before [`compose_agent`] gives up.
 ///
@@ -130,19 +130,31 @@ pub fn build_source_map(source_dir: &Path) -> SourceMap {
 /// Why: agent composition only needs a handful of YAML keys; a small struct
 /// avoids pulling in a full YAML library and keeps merging explicit.
 /// What: the `extends` parent (if any) plus the passthrough display fields.
+/// `pub(crate)` so [`crate::core::agent_metadata`] can project it into the
+/// public, display-oriented [`crate::core::agent_metadata::AgentMetadata`]
+/// without duplicating the frontmatter grammar.
 /// Test: exercised indirectly by every `compose_*` test.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Frontmatter {
-    name: Option<String>,
-    role: Option<String>,
-    description: Option<String>,
-    model: Option<String>,
-    extends: Option<String>,
+pub(crate) struct Frontmatter {
+    pub(crate) name: Option<String>,
+    pub(crate) role: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) extends: Option<String>,
     /// Auto-submitted first turn when the agent is spawned (claude-mpm parity).
-    initial_prompt: Option<String>,
+    pub(crate) initial_prompt: Option<String>,
     /// Resource tier (`intensive`/`high`/`standard`/`lightweight`) used to
     /// derive a default `model` when none is explicitly set.
-    resource_tier: Option<String>,
+    pub(crate) resource_tier: Option<String>,
+    /// Declared skill dependencies (DOC-42 §SPEC-AGENTSKILLS-01, issue #2889).
+    ///
+    /// Why: agents may declare which skills they depend on so co-deployment
+    /// (§SPEC-AGENTSKILLS-02) and diagnostics (§SPEC-AGENTSKILLS-03) can act
+    /// on the declaration instead of relying on unenforceable prose. Absent
+    /// `skills:` parses to an empty `Vec` — exactly today's behavior.
+    /// What: the raw skill names in source order, before de-duplication
+    /// (deduplication happens in [`merge_frontmatter`] across the chain).
+    pub(crate) skills: Vec<String>,
 }
 
 /// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
@@ -225,7 +237,7 @@ fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
 /// stable. The escaped scalar value is decoded via
 /// [`unescape_yaml_double_quoted`] so the original prompt text (including any
 /// embedded `"`/`\`) survives the cycle verbatim.
-fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError> {
+pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError> {
     let trimmed_start = raw.trim_start_matches(['\u{feff}']);
     let mut lines = trimmed_start.lines();
 
@@ -239,12 +251,55 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
     let mut closed = false;
     let mut consumed = first_line_len(trimmed_start);
 
+    // DOC-42 block-style `skills:` list support (issue #2906 review, CRITICAL
+    // finding). `docs/specs/agent-bundled-skills.md` §1.1's motivating
+    // example — and every realistic upstream `claude-mpm-agents` asset — uses
+    // the YAML BLOCK form:
+    //   skills:
+    //     - code-review-standards
+    //     - code-production-process
+    // not the inline flow form `skills: [a, b]`. A bare `skills:` line has an
+    // EMPTY value, so each following `- item` continuation line has no colon
+    // at all — before this fix that unconditionally hit the generic
+    // `expected key: value` hard error below, in violation of
+    // §SPEC-AGENTSKILLS-01's "malformed → WARN and treat as empty, never
+    // halt the load" contract. `in_skills_block` tracks whether the line
+    // just parsed opened a bare `skills:` key (or a prior continuation line
+    // is still being consumed); `skills_block`, once `Some`, wins over any
+    // later inline `skills:` value (there cannot legally be both in one
+    // document, but if there were, the block form — which is what this
+    // parser actively consumed line-by-line — is the more specific match).
+    let mut in_skills_block = false;
+    let mut skills_block: Option<Vec<String>> = None;
+
     for line in lines {
         consumed += line.len() + 1; // +1 for the newline `lines()` strips.
         if line.trim() == "---" {
             closed = true;
             break;
         }
+
+        if in_skills_block {
+            let trimmed = line.trim_start();
+            if let Some(item_text) = trimmed.strip_prefix('-') {
+                // A block-sequence item under `skills:` — reuse
+                // `parse_list_value` per-item so quoting/whitespace rules
+                // stay identical to the inline flow-array form.
+                skills_block
+                    .get_or_insert_with(Vec::new)
+                    .extend(parse_list_value(item_text.trim()));
+                continue;
+            } else if line.trim().is_empty() {
+                // Blank lines are legal inside a YAML block sequence; they
+                // do not terminate it.
+                continue;
+            }
+            // Any other content ends the block; fall through to parse THIS
+            // line normally (it may be the next key, or the closing fence,
+            // already handled above).
+            in_skills_block = false;
+        }
+
         // Use the shared parser so colon-containing values (URLs, timestamps,
         // model ids) are preserved rather than truncated or hard-errored on.
         match parse_kv_line(line) {
@@ -253,6 +308,14 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
                 return Err(AgentBuildError::FrontmatterParse(format!(
                     "expected `key: value`, got `{line}`"
                 )));
+            }
+            Some((key, value)) if key == "skills" && value.trim().is_empty() => {
+                // A bare `skills:` line — either the start of a block-style
+                // list (continuation lines follow) or a deliberately empty
+                // declaration. Either way, ensure `skills_block` is `Some`
+                // so the empty-inline-value path below is never consulted.
+                in_skills_block = true;
+                skills_block.get_or_insert_with(Vec::new);
             }
             Some((key, value)) => {
                 fields.insert(key, value);
@@ -272,6 +335,25 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
         .trim_start_matches('\n')
         .to_string();
 
+    // DOC-42 issue #2906 review, MEDIUM finding: a malformed *inline*
+    // `skills:` value (e.g. `skills: ,` or `skills: [,]`) silently degraded
+    // to an empty list with no signal. Warn explicitly whenever the raw
+    // value was non-empty and not the deliberate `[]` empty-array spelling,
+    // yet parsed to nothing — this is the "malformed" branch
+    // §SPEC-AGENTSKILLS-01 requires be logged, not silently swallowed.
+    let inline_skills = fields.remove("skills").map(|raw_value| {
+        let parsed = parse_list_value(&raw_value);
+        let trimmed_raw = raw_value.trim();
+        if parsed.is_empty() && !trimmed_raw.is_empty() && trimmed_raw != "[]" {
+            tracing::warn!(
+                value = %raw_value,
+                "agent frontmatter `skills:` value could not be parsed as a list — \
+                 treating as empty"
+            );
+        }
+        parsed
+    });
+
     let fm = Frontmatter {
         name: fields.remove("name"),
         role: fields.remove("role"),
@@ -286,6 +368,7 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
             .remove("initialprompt")
             .map(|v| unescape_yaml_double_quoted(&v)),
         resource_tier: fields.remove("resource_tier"),
+        skills: skills_block.or(inline_skills).unwrap_or_default(),
     };
     Ok((fm, body))
 }
@@ -360,11 +443,17 @@ fn unescape_yaml_double_quoted(value: &str) -> String {
 /// What: folds the chain base-first, overlaying each file's set fields, then
 /// (a) fills `model` from `resource_tier` when no explicit `model` was set
 /// (explicit always wins), and (b) fills `initialPrompt` from the agent `role`
-/// when the source declared none and the role is not excluded. Emits the
-/// populated keys in a stable order.
+/// when the source declared none and the role is not excluded. `skills:`
+/// (DOC-42, issue #2889) is a UNION across the chain rather than an override —
+/// a base agent's declared skills and a child's additions both survive,
+/// de-duplicated in first-seen (base-first) order — because a list of
+/// dependencies naturally accumulates through inheritance the way body text
+/// concatenates, unlike a scalar field where the child's value should replace
+/// the parent's. Emits the populated keys in a stable order.
 /// Test: `compose_engineer_chain` (merge), `tier_model_mapping`,
 /// `explicit_model_wins_over_tier`, `initial_prompt_injected_by_role`,
-/// `initial_prompt_explicit_wins` in agent_builder_tests.rs.
+/// `initial_prompt_explicit_wins`, `skills_union_across_chain`,
+/// `skills_deduplicated_across_chain` in agent_builder_tests.rs.
 fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     let mut merged = Frontmatter::default();
     for fm in chain {
@@ -385,6 +474,14 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         }
         if fm.resource_tier.is_some() {
             merged.resource_tier = fm.resource_tier.clone();
+        }
+        // DOC-42: union, not override — de-duplicated, first-seen (base-first)
+        // order, so a child agent's additions never drop a base's declared
+        // skills.
+        for skill in &fm.skills {
+            if !merged.skills.contains(skill) {
+                merged.skills.push(skill.clone());
+            }
         }
     }
 
@@ -417,6 +514,12 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     }
     if let Some(v) = &merged.resource_tier {
         out.push_str(&format!("resource_tier: {v}\n"));
+    }
+    if !merged.skills.is_empty() {
+        // DOC-42: emit the flattened, unioned skill list so a deployed agent
+        // file is self-describing — `tm doctor` / `tm agent show` read it
+        // straight off the deployed `.md` without re-walking `extends:`.
+        out.push_str(&format!("skills: [{}]\n", merged.skills.join(", ")));
     }
     if let Some(v) = &merged.initial_prompt {
         // Emit a YAML double-quoted scalar. The value is escaped so a `"` or

@@ -14,8 +14,8 @@
 use clap::Parser;
 
 use crate::cli::{
-    CatalogAction, Cli, Command, DEFAULT_URL, McpCmd, McpTransportArg, MetaAction, ProjectAction,
-    SessionAction, SlackCmd, TelegramCmd,
+    AgentAction, CatalogAction, Cli, Command, DEFAULT_URL, McpCmd, McpTransportArg, MetaAction,
+    ProjectAction, SessionAction, SlackCmd, TelegramCmd,
 };
 use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
@@ -307,6 +307,43 @@ fn cli_parses_validate_with_path_and_repair() {
 fn cli_parses_health() {
     let cli = Cli::try_parse_from(["trusty-mpm", "health"]).unwrap();
     assert!(matches!(cli.command.unwrap(), Command::Health));
+}
+
+#[test]
+fn cli_parses_agent_list() {
+    // DOC-42 / issue #2889.
+    let cli = Cli::try_parse_from(["trusty-mpm", "agent", "list"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Agent {
+            action: AgentAction::List { json },
+        } => assert!(!json),
+        other => panic!("expected Command::Agent list, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_agent_list_json() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "agent", "list", "--json"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Agent {
+            action: AgentAction::List { json },
+        } => assert!(json),
+        other => panic!("expected Command::Agent list --json, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_agent_show() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "agent", "show", "code-critic"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Agent {
+            action: AgentAction::Show { name, json },
+        } => {
+            assert_eq!(name, "code-critic");
+            assert!(!json);
+        }
+        other => panic!("expected Command::Agent show, got {other:?}"),
+    }
 }
 
 #[test]

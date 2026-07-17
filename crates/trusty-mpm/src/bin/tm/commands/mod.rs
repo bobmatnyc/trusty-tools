@@ -9,6 +9,7 @@
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
+pub(crate) mod agent;
 pub(crate) mod auth;
 pub(crate) mod banner;
 pub(crate) mod compress;

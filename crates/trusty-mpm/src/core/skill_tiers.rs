@@ -100,6 +100,36 @@ pub struct TierPlan {
     pub shadowed: Vec<Shadow>,
 }
 
+/// Resolve a single skill stem's tier via the 3-tier precedence, or `None` if
+/// absent from every tier.
+///
+/// Why (DOC-42, issue #2889): agent-bundled skills need the SAME precedence
+/// rule [`plan_skill_tiers`] encodes, but for one declared skill name at a
+/// time — co-deployment logging, `tm doctor`'s dangling-reference check, and
+/// `tm agent show`'s per-skill tier column all ask "which tier (if any) does
+/// THIS ONE stem resolve to?" rather than planning a full multi-stem deploy.
+/// What: `Project` if `project` contains `stem`, else `User` if `user`
+/// contains it, else `Bundled` if `bundled` contains it, else `None` (the
+/// skill does not exist in any tier — a dangling reference).
+/// Test: `resolve_tier_project_wins`, `resolve_tier_user_wins_over_bundled`,
+/// `resolve_tier_bundled_only`, `resolve_tier_absent_is_none`.
+pub fn resolve_skill_tier(
+    stem: &str,
+    project: &BTreeSet<String>,
+    user: &BTreeSet<String>,
+    bundled: &BTreeSet<String>,
+) -> Option<SkillTier> {
+    if project.contains(stem) {
+        Some(SkillTier::Project)
+    } else if user.contains(stem) {
+        Some(SkillTier::User)
+    } else if bundled.contains(stem) {
+        Some(SkillTier::Bundled)
+    } else {
+        None
+    }
+}
+
 /// Resolve tier precedence for a set of skill stems.
 ///
 /// Why: precedence must be decided in ONE pure, exhaustively-tested place so
@@ -387,6 +417,46 @@ mod tests {
                 winner: SkillTier::Project,
                 loser: SkillTier::User,
             }]
+        );
+    }
+
+    // ── resolve_skill_tier (DOC-42, issue #2889) ────────────────────────────
+
+    #[test]
+    fn resolve_tier_project_wins() {
+        assert_eq!(
+            resolve_skill_tier("dup", &set(&["dup"]), &set(&["dup"]), &set(&["dup"])),
+            Some(SkillTier::Project)
+        );
+    }
+
+    #[test]
+    fn resolve_tier_user_wins_over_bundled() {
+        assert_eq!(
+            resolve_skill_tier("dup", &BTreeSet::new(), &set(&["dup"]), &set(&["dup"])),
+            Some(SkillTier::User)
+        );
+    }
+
+    #[test]
+    fn resolve_tier_bundled_only() {
+        assert_eq!(
+            resolve_skill_tier("b", &BTreeSet::new(), &BTreeSet::new(), &set(&["b"])),
+            Some(SkillTier::Bundled)
+        );
+    }
+
+    #[test]
+    fn resolve_tier_absent_is_none() {
+        // A dangling declared skill — present in no tier — resolves to None.
+        assert_eq!(
+            resolve_skill_tier(
+                "missing",
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new()
+            ),
+            None
         );
     }
 

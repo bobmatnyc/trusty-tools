@@ -19,6 +19,7 @@ use std::io::IsTerminal as _;
 use clap::Parser;
 use cli::{Cli, Command};
 use commands::{
+    agent::agent,
     compress::run_compress,
     daemon::{restart, run_daemon, start, stop_daemon},
     install::install,
@@ -350,6 +351,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
+        Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Health) => health(&url).await,
         Some(Command::Tui {
             url: tui_url,

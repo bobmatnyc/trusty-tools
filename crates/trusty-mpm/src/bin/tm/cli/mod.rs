@@ -266,6 +266,24 @@ pub(crate) enum Command {
         #[arg(long)]
         repair: bool,
     },
+    /// Inspect the deployed agent roster's declared skills (DOC-42, issue #2889).
+    ///
+    /// Why: `skills:` frontmatter declares which skills an agent depends on
+    /// (`docs/specs/agent-bundled-skills.md` §SPEC-AGENTSKILLS-01); this
+    /// command surfaces those declarations and their 3-tier resolution so an
+    /// operator debugging a missing-skill error can see the gap without
+    /// grepping deployed `.md` files by hand.
+    /// What: `list` prints every deployed agent with its declared skills;
+    /// `show <name>` prints one agent's full metadata plus each declared
+    /// skill's resolved tier (or `NOT FOUND`). Reads the operator's deployed
+    /// roster (`~/.claude/agents/`, `~/.claude/skills/`) directly — no daemon
+    /// round-trip needed.
+    /// Test: `cli_parses_agent_list`, `cli_parses_agent_show`.
+    Agent {
+        /// Agent action to perform.
+        #[command(subcommand)]
+        action: AgentAction,
+    },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
     /// Launch the ratatui multi-session TUI dashboard.
