@@ -96,6 +96,7 @@ fn constants_are_non_empty() {
     assert!(!DOCUMENTATION_STYLE_METHOD_FUNCTION.trim().is_empty());
     assert!(!DOCUMENTATION_STYLE_BLOCK_INLINE.trim().is_empty());
     // --- END issue #2911 ---
+    assert!(!RUST_BUILD_PERFORMANCE.trim().is_empty());
 }
 
 #[test]
@@ -358,11 +359,14 @@ fn bundle_table_is_complete() {
     // Issue #2911 (7): documentation-style bundled skill — entry SKILL.md plus
     //   6 references/*.md files (spec, readme, file-level, class,
     //   method-function, block-inline). 164 + 7 = 171.
-    assert_eq!(ALL.len(), 171);
+    // rust-build-performance (1, per Bob directive 2026-07-17): a single
+    //   flat-file bundled skill (no references/ — small enough to not need
+    //   one), declared by rust-engineer and tauri-engineer. 171 + 1 = 172.
+    assert_eq!(ALL.len(), 172);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 171, "artifact paths must be unique");
+    assert_eq!(paths.len(), 172, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -1084,4 +1088,45 @@ fn documentation_style_unions_into_engineer_family_via_base_engineer() {
         "composed rust-engineer is missing the BASE-ENGINEER-declared \
          documentation-style skill (union-across-chain, DOC-42): {composed}"
     );
+}
+
+#[test]
+fn rust_build_performance_skill_is_in_bundle() {
+    // Per Bob directive 2026-07-17: the rust-build-performance entry SKILL.md
+    // must be present in `ALL` — mirrors `documentation_style_skill_is_in_bundle`:
+    // a source file existing under `src/assets/skills/` is not sufficient,
+    // only `ALL` registration makes `deploy_all_skill_tiers` ship it.
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/rust-build-performance.md"),
+        "rust-build-performance.md must be present in the ALL bundle table"
+    );
+    assert!(RUST_BUILD_PERFORMANCE.starts_with("---\n"));
+    assert!(RUST_BUILD_PERFORMANCE.contains("name: rust-build-performance"));
+}
+
+#[test]
+fn rust_build_performance_declared_by_rust_family_agents() {
+    // Per Bob directive 2026-07-17: rust-engineer and tauri-engineer both
+    // declare `rust-build-performance` directly in their own `skills:`
+    // frontmatter (NOT via BASE-ENGINEER — not every engineer compiles
+    // Rust), proven against the REAL bundled asset files via compose_agent,
+    // mirroring `documentation_style_unions_into_engineer_family_via_base_engineer`.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+
+    for agent in ["rust-engineer", "tauri-engineer"] {
+        let composed = compose_agent(agent, &assets_dir)
+            .unwrap_or_else(|e| panic!("compose_agent({agent}) must succeed: {e}"));
+        assert!(
+            composed.contains("rust-build-performance"),
+            "composed {agent} is missing its own declared \
+             rust-build-performance skill: {composed}"
+        );
+    }
 }

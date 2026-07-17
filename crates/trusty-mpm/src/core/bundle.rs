@@ -198,6 +198,12 @@ pub use skills_documentation_style_inner::{
     DOCUMENTATION_STYLE_README, DOCUMENTATION_STYLE_SPEC,
 };
 
+// --- Rust build-performance bundled skill (per Bob directive 2026-07-17) —
+// own module, declared by rust-engineer and tauri-engineer's `skills:`.
+#[path = "bundle_skills_rust_build_performance.rs"]
+mod skills_rust_build_performance_inner;
+pub use skills_rust_build_performance_inner::RUST_BUILD_PERFORMANCE;
+
 // --- Skill-port batch 1 (issue #2903, epic #2902): 25 upstream universal/
 // skills, split across 4 modules by category to stay under the 500-SLOC cap.
 #[path = "bundle_skills_batch1_debugging.rs"]

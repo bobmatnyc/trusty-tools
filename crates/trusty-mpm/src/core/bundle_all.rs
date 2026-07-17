@@ -494,4 +494,8 @@ pub const ALL: &[BundledArtifact] = &[
         DOCUMENTATION_STYLE_BLOCK_INLINE,
     ),
     // --- END issue #2911 ---
+    // --- BEGIN rust-build-performance bundled skill (per Bob directive
+    // 2026-07-17; append-only) ---
+    overwrite("skills/rust-build-performance.md", RUST_BUILD_PERFORMANCE),
+    // --- END rust-build-performance ---
 ];

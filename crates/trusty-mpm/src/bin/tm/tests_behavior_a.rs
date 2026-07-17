@@ -338,8 +338,12 @@ fn install_then_deploy_deploys_skills() {
     // (issue #2911: the `documentation-style` bundled skill — entry SKILL.md
     // plus 6 references/*.md files; see
     // `tests_behavior_2911_documentation_style_tests.rs` for the dedicated
-    // deep assertions, kept out of this file for the same SLOC-cap reason).
-    // 21 + 2 + 93 + 7 = 123. See `bundle_tm_skills.rs`/`bundle.rs`
+    // deep assertions, kept out of this file for the same SLOC-cap reason) + 1
+    // (rust-build-performance, per Bob directive 2026-07-17: a single
+    // flat-file bundled skill declared by rust-engineer and tauri-engineer;
+    // see `tests_behavior_rust_build_performance_tests.rs` for the dedicated
+    // deploy-reachability assertion).
+    // 21 + 2 + 93 + 7 + 1 = 124. See `bundle_tm_skills.rs`/`bundle.rs`
     // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
     // for the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
@@ -366,10 +370,10 @@ fn install_then_deploy_deploys_skills() {
     );
     assert_eq!(
         result.deployed.len(),
-        123,
-        "expected 123 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+        124,
+        "expected 124 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
          + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries \
-         + 7 documentation-style entries); got {:?}",
+         + 7 documentation-style entries + 1 rust-build-performance entry); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

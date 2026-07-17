@@ -80,6 +80,10 @@ mod tests_behavior_2903_skills;
 mod tests_behavior_2911_documentation_style;
 
 #[cfg(test)]
+#[path = "tests_behavior_rust_build_performance_tests.rs"]
+mod tests_behavior_rust_build_performance;
+
+#[cfg(test)]
 #[path = "tests_projects.rs"]
 mod tests_projects;
 
