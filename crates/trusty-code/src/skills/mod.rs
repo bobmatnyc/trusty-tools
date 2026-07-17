@@ -22,10 +22,16 @@
 //! [`FsSkillResolver`] implements `tools::traits::SkillResolver` over this
 //! discovery layer, giving the tool-registry layer a ready-to-register
 //! concrete resolver.
+//! `discover_skill_metadata` falls back to `crate::assets::DEFAULT_SKILLS`
+//! (#2895) when the disk directory has no skills — a project with no
+//! `.claude/skills/` (or an empty one) still gets trusty-mpm's universal
+//! skill catalog. A disk directory with even one skill is used as-is (never
+//! merged with the embedded set) — disk always wins.
 //! Test: `skills::tests::*` — discovery over tempdir fixtures (happy path,
 //! missing dir, missing `SKILL.md`, malformed/no-frontmatter file), lazy body
-//! load (found + unknown-name), catalog formatting (empty + populated), and
-//! `FsSkillResolver`'s `SkillResolver` trait conformance.
+//! load (found + unknown-name), catalog formatting (empty + populated),
+//! embedded-fallback threshold, and `FsSkillResolver`'s `SkillResolver` trait
+//! conformance.
 
 mod frontmatter;
 
@@ -87,24 +93,64 @@ pub fn locate_skills_dir(project_root: &Path) -> PathBuf {
 ///
 /// Why: The catalog must be built once, cheaply, from cheap-to-read
 /// frontmatter only — the whole point of progressive disclosure is to avoid
-/// reading full skill bodies until they are actually invoked.
+/// reading full skill bodies until they are actually invoked. A project that
+/// has not yet created `.claude/skills/` (or has created it but left it
+/// empty) must not start with zero skills — see the embedded-fallback note
+/// below.
 /// What: Scans immediate subdirectories of `dir`; a subdirectory without a
 /// readable `SKILL.md` is skipped (not an error — mirrors
 /// `agents::discover_agents`'s graceful-skip convention). Returns entries
-/// sorted by `name`. A missing/unreadable `dir` yields an empty Vec.
+/// sorted by `name`. If the scan yields zero entries (missing/unreadable
+/// `dir`, or an existing-but-empty one — empty is the fallback threshold; a
+/// disk directory with even one discoverable skill is used as-is, never
+/// merged with the embedded set), falls back to `embedded_skill_metadata`
+/// (`crate::assets::DEFAULT_SKILLS`, #2895). Disk skills always win when
+/// present.
 /// Test: `discover_skill_metadata_reads_name_and_description`,
 /// `discover_skill_metadata_skips_dir_without_skill_md`,
-/// `discover_skill_metadata_missing_dir_is_empty`,
+/// `discover_skill_metadata_falls_back_to_embedded_when_disk_empty`,
+/// `discover_skill_metadata_disk_wins_when_present`,
 /// `discover_skill_metadata_falls_back_to_dirname`.
 pub fn discover_skill_metadata(dir: &Path) -> Vec<SkillMetadata> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         tracing::debug!("skills dir not found or unreadable: {}", dir.display());
-        return vec![];
+        return embedded_skill_metadata();
     };
 
     let mut skills: Vec<SkillMetadata> = entries
         .flatten()
         .filter_map(|entry| load_metadata_from_skill_dir(&entry.path()))
+        .collect();
+    if skills.is_empty() {
+        return embedded_skill_metadata();
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// Build the embedded-default skill catalog from `crate::assets::DEFAULT_SKILLS`.
+///
+/// Why: The embedded-fallback path for `discover_skill_metadata` — parses
+/// each bundled `SKILL.md`'s frontmatter in-memory, exactly as
+/// `load_metadata_from_skill_dir` does for a disk file, so the resulting
+/// `SkillMetadata` is indistinguishable from a disk-discovered one.
+/// What: Maps every `EmbeddedSkill` through `parse_frontmatter`, sorted by
+/// name (the table is already declared in name order, but this does not
+/// depend on that).
+/// Test: `discover_skill_metadata_falls_back_to_embedded_when_disk_empty`.
+fn embedded_skill_metadata() -> Vec<SkillMetadata> {
+    let mut skills: Vec<SkillMetadata> = crate::assets::DEFAULT_SKILLS
+        .iter()
+        .map(|embedded| {
+            let front = parse_frontmatter(embedded.skill_md);
+            SkillMetadata {
+                name: front
+                    .get("name")
+                    .cloned()
+                    .unwrap_or_else(|| embedded.name.to_string()),
+                description: front.get("description").cloned().unwrap_or_default(),
+            }
+        })
         .collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
@@ -144,11 +190,16 @@ fn load_metadata_from_skill_dir(path: &Path) -> Option<SkillMetadata> {
 /// `resolve`) actually needs it.
 /// What: Rejects any `name` not present in `known` (the cached catalog) up
 /// front — this doubles as the path-traversal guard, since the join'd path is
-/// only ever built from a name the catalog itself already discovered on disk.
-/// Reads `<skills_dir>/<name>/SKILL.md` and returns the body after the
-/// frontmatter fence, trimmed.
+/// only ever built from a name the catalog itself already discovered (on disk
+/// or embedded). Reads `<skills_dir>/<name>/SKILL.md`; if that read fails
+/// (the disk fallback case: `known` came from `embedded_skill_metadata`, so
+/// there is no such file) and `name` matches an entry in
+/// `crate::assets::DEFAULT_SKILLS`, returns that embedded body instead
+/// (#2895). Otherwise propagates the disk `Io` error. Either way, the
+/// frontmatter fence is stripped and the body trimmed.
 /// Test: `load_skill_body_returns_body_without_frontmatter`,
-/// `load_skill_body_rejects_unknown_name`.
+/// `load_skill_body_rejects_unknown_name`,
+/// `load_skill_body_falls_back_to_embedded_when_disk_read_fails`.
 pub fn load_skill_body(
     skills_dir: &Path,
     name: &str,
@@ -158,10 +209,21 @@ pub fn load_skill_body(
         return Err(SkillError::Unknown(name.to_string()));
     }
     let path = skills_dir.join(name).join("SKILL.md");
-    let raw = std::fs::read_to_string(&path).map_err(|source| SkillError::Io {
-        name: name.to_string(),
-        source,
-    })?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(source) => {
+            if let Some(embedded) = crate::assets::DEFAULT_SKILLS
+                .iter()
+                .find(|e| e.name == name)
+            {
+                return Ok(strip_frontmatter(embedded.skill_md).trim().to_string());
+            }
+            return Err(SkillError::Io {
+                name: name.to_string(),
+                source,
+            });
+        }
+    };
     Ok(strip_frontmatter(&raw).trim().to_string())
 }
 
@@ -310,15 +372,47 @@ mod tests {
         assert_eq!(skills[0].name, "real-skill");
     }
 
-    /// A missing skills directory yields an empty catalog, not an error.
+    /// A missing skills directory falls back to the embedded default
+    /// catalog, not an empty one (#2895).
     ///
-    /// Why: Most projects will not have a `.claude/skills/` dir at all;
-    /// this must never panic or hard-fail discovery.
+    /// Why: Most projects will not have a `.claude/skills/` dir at all; a
+    /// fresh project must still see trusty-mpm's universal skill set rather
+    /// than starting with zero skills.
+    /// What: Discover from a nonexistent path; expect the full embedded
+    /// catalog (28 skills, sorted by name — matches
+    /// `crate::assets::tests::default_skills_names_are_unique`'s count).
     /// Test: this test.
     #[test]
-    fn discover_skill_metadata_missing_dir_is_empty() {
+    fn discover_skill_metadata_falls_back_to_embedded_when_disk_empty() {
         let skills = discover_skill_metadata(Path::new("/nonexistent/skills/dir"));
-        assert!(skills.is_empty());
+        assert_eq!(skills.len(), 28);
+        assert!(skills.iter().any(|s| s.name == "systematic-debugging"));
+        assert!(
+            skills.windows(2).all(|w| w[0].name <= w[1].name),
+            "embedded fallback must be sorted by name"
+        );
+    }
+
+    /// A disk directory with even one discoverable skill is used as-is; the
+    /// embedded defaults are never merged in alongside it.
+    ///
+    /// Why: Pins the fallback threshold (empty disk scan only) so a project
+    /// that has deliberately curated its own skill catalog is not silently
+    /// joined by the 28 embedded defaults it did not ask for.
+    /// Test: this test.
+    #[test]
+    fn discover_skill_metadata_disk_wins_when_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_skill(
+            tmp.path(),
+            "only-skill",
+            "---\nname: only-skill\ndescription: The only one\n---\n",
+            "body\n",
+        );
+
+        let skills = discover_skill_metadata(tmp.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "only-skill");
     }
 
     /// A `SKILL.md` with no frontmatter fence falls back to the directory
@@ -370,6 +464,29 @@ mod tests {
         let known = discover_skill_metadata(tmp.path());
         let err = load_skill_body(tmp.path(), "ghost-skill", &known);
         assert!(matches!(err, Err(SkillError::Unknown(_))));
+    }
+
+    /// `load_skill_body` falls back to `crate::assets::DEFAULT_SKILLS` when
+    /// the disk read fails but the name is a known embedded default (#2895).
+    ///
+    /// Why: `known` may itself have come from `embedded_skill_metadata` (an
+    /// empty disk dir); the body loader must be able to resolve those names
+    /// too, not just names discovered from real files.
+    /// What: An empty tempdir (so `discover_skill_metadata` returns the
+    /// embedded catalog), then `load_skill_body` for a real embedded skill
+    /// name returns its body without hitting disk.
+    /// Test: this test.
+    #[test]
+    fn load_skill_body_falls_back_to_embedded_when_disk_read_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let known = discover_skill_metadata(tmp.path());
+        let body =
+            load_skill_body(tmp.path(), "systematic-debugging", &known).expect("embedded body");
+        assert!(!body.trim().is_empty());
+        assert!(
+            !body.contains("name: systematic-debugging"),
+            "frontmatter must be stripped"
+        );
     }
 
     /// `format_skill_catalog` returns an empty string for an empty catalog.

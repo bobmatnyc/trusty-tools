@@ -151,6 +151,18 @@ pub mod rbac;
 /// live provider tests.
 pub mod llm;
 
+/// Embedded default agents & skills (#2895).
+///
+/// Why: A fresh project has no `.claude/agents/` or `.claude/skills/` yet;
+/// bundling a working default set at compile time (mirroring, not sharing,
+/// `trusty-mpm`'s embed pattern) gives every project a usable harness before
+/// any project-level config exists. Disk-based config always wins when present.
+/// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (three native-TOML tcode agents);
+/// `EmbeddedSkill`/`DEFAULT_SKILLS` (trusty-mpm's universal skill set, minus
+/// the `tm-*` orchestration skills).
+/// Test: `assets::tests::*`.
+pub mod assets;
+
 /// Agent configuration loading.
 ///
 /// Why: Sub-agents are defined declaratively in TOML files under
