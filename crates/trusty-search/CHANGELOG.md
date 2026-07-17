@@ -9,7 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- native document indexing — pdf/docx/xls/xlsx/xlsm text extraction feeds the existing chunk pipeline on both the reindex/ingest path and the live watcher (closes #2923)
+- native document indexing — pdf/docx/xls/xlsx/xlsm text extraction feeds the existing chunk pipeline on both the reindex/ingest path and the live watcher, closing #2923 ([#2932](https://github.com/bobmatnyc/trusty-tools/pull/2932)) ([`b11da19`](https://github.com/bobmatnyc/trusty-tools/commit/b11da19ae33748c431f8039a51a6a6d46eff670e))
 - explicit allow_sensitive_path bypass for index creation ([#2747](https://github.com/bobmatnyc/trusty-tools/pull/2747)) ([`1bc4bcc`](https://github.com/bobmatnyc/trusty-tools/commit/1bc4bccfa49235e14053ad9a01127972e4c0f9ce))
 - DOC-37 MVP — RepoIdentity join key + identity-filtered listing + grouped prune-orphans ([#2617](https://github.com/bobmatnyc/trusty-tools/pull/2617)) ([`2c51047`](https://github.com/bobmatnyc/trusty-tools/commit/2c510472cb1c5a23526f81881a8bcaf415468016))
 - steady-state memory-limit enforcement — the configured `rss_limit_mb` /
