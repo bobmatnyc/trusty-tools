@@ -7,9 +7,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.9.1] — 2026-07-16
+
+### Added
+
+- Fireworks.ai as a native LLM provider (fireworks/* routing + constrained structured output) ([#2572](https://github.com/bobmatnyc/trusty-tools/pull/2572)) ([`19d1729`](https://github.com/bobmatnyc/trusty-tools/commit/19d1729bc3061c31166cd2041efec4c2b3e2891d))
+- turnkey launchd bootstrap for the shared daemon set (closes #2557, #2556) ([#2566](https://github.com/bobmatnyc/trusty-tools/pull/2566)) ([`f47b428`](https://github.com/bobmatnyc/trusty-tools/commit/f47b4286aeb42d0a5871939edf0019a70cdfab78))
+
 ### Fixed
 
+- citable-findings grading rules + citation grammar (fixes PR #84 miscalibration) ([#2825](https://github.com/bobmatnyc/trusty-tools/pull/2825)) ([`805def5`](https://github.com/bobmatnyc/trusty-tools/commit/805def58cc3a08f186b402337e0c722cc01b4a20))
+- bump lru and jsonwebtoken to patched versions ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
 - bump `jsonwebtoken` 9 → 10 (`aws_lc_rs` backend), fixing GHSA-h395-gr6q-cpjc; migrated the test-only JWT decode-without-verification call site to `jsonwebtoken::dangerous::insecure_decode` (closes #2765) ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
+- inject calibration thresholds to fix grade-test parallel-run flake ([#2702](https://github.com/bobmatnyc/trusty-tools/pull/2702)) ([`ed06f1d`](https://github.com/bobmatnyc/trusty-tools/commit/ed06f1dcf4f5b72e43cea18e35165fbac246ead5))
+
+### Changed
+
+- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
+- mount config command on all 10 primary binaries ([#2528](https://github.com/bobmatnyc/trusty-tools/pull/2528)) ([`a58ea52`](https://github.com/bobmatnyc/trusty-tools/commit/a58ea5223167553f0d90fb5258d582d510dca316))
 
 ## [0.9.0] — 2026-07-11
 
