@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- verify `code_provable` finding citations against the actual diff before grading, so a confabulated finding whose cited content is not present in the cited file can no longer fail-close a clean PR (closes #2881). A diff-provable finding that cites a file absent from the diff, or quotes content that lives in a different changed file (the repro attributed a new vitest test file's content to a large regenerated bundle), is now downgraded to advisory — its `code_provable` flag and any `code:` citation are cleared and its confidence lowered — instead of driving the deterministic BLOCK / REQUEST_CHANGES floor. Applied on both the unified and map-reduce review paths; the check is fail-open (findings that quote nothing concrete, or whose quote is grounded in the cited file, are untouched).
+
 ## [0.9.1] — 2026-07-16
 
 ### Added
