@@ -135,19 +135,29 @@ fn daily_driver_skills_catalog_none_in_parity() {
     );
 }
 
-/// `daily_driver_skills_catalog` returns `None` when the project has no
-/// `.claude/skills/` directory at all, even in `HarnessMode::DailyDriver`.
+/// `daily_driver_skills_catalog` falls back to the embedded default skill
+/// catalog (#2895) when the project has no `.claude/skills/` directory at
+/// all, in `HarnessMode::DailyDriver`.
+///
+/// Why: `skills::discover_skill_metadata`'s embedded-fallback (#2895) means
+/// a project with no disk skills is no longer catalog-empty — it now
+/// resolves to `crate::assets::DEFAULT_SKILLS`. This test previously asserted
+/// `None` here; that assumption is exactly what #2895 changes, so the
+/// assertion now pins the new (intended) behavior instead.
+/// Test: this test.
 #[test]
-fn daily_driver_skills_catalog_none_when_no_skills_dir() {
+fn daily_driver_skills_catalog_falls_back_to_embedded_when_no_skills_dir() {
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
 
     let mut p = params(&agents, &project, "s");
     p.mode = crate::mode::HarnessMode::DailyDriver;
 
-    assert!(
-        daily_driver_skills_catalog(&p, p.binding.root().expect("bound in this test")).is_none()
-    );
+    let (catalog, resolver) =
+        daily_driver_skills_catalog(&p, p.binding.root().expect("bound in this test"))
+            .expect("embedded catalog present");
+    assert!(catalog.contains("systematic-debugging"));
+    assert!(resolver.resolve("systematic-debugging").is_some());
 }
 
 /// A project's `.claude/settings.json` `code_harness.cadence_turns` override

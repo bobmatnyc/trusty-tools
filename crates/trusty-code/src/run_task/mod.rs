@@ -156,10 +156,15 @@ pub(crate) type ReadinessObserver =
 /// protect that path's benchmark-fairness guarantee, this path never runs in
 /// `Parity` at all, so it always resolves the catalog as if it were
 /// `HarnessMode::DailyDriver` outright, with no mode check needed.
-/// What: Returns `None` when `project` has no (or an empty) `.claude/skills/`
-/// catalog; otherwise `Some((rendered_catalog, resolver))` — the resolver
-/// backs the PM's `use_skill` tool registration and the rendered catalog
-/// feeds `assemble_system_prompt_for_mode`.
+/// What: Returns `Some((rendered_catalog, resolver))` — the resolver backs
+/// the PM's `use_skill` tool registration and the rendered catalog feeds
+/// `assemble_system_prompt_for_mode`. `skills::discover_skill_metadata` (the
+/// source behind `resolver.metadata()`) falls back to the embedded default
+/// skill catalog (`crate::assets::DEFAULT_SKILLS`, #2895) when `project` has
+/// no (or an empty) `.claude/skills/` directory, so `catalog.is_empty()`
+/// below is no longer reachable in practice — this path effectively always
+/// returns `Some` now, the same as `task::executor`'s
+/// `daily_driver_skills_catalog` in `DailyDriver` mode.
 /// Test: `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`.
 fn daily_driver_skills_catalog(project: &Path) -> Option<(String, Arc<dyn SkillResolver>)> {
     let skills_dir = locate_skills_dir(project);

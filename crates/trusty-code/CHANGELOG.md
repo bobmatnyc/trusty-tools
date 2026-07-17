@@ -11,6 +11,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **Native skill discovery on the `--legacy-in-process`/bake-off `run-task` path (#2924).** The `use_skill` tool and the `.claude/skills/` catalog now reach the PM's prompt and tool registry on `run_task::execute_run_task`, not just the daemon/thin-client path — a PM run through `run-task` can now discover and load project skills the same way a daemon session already could.
+- **Embedded default agents & skills, disk-first with embedded fallback
+  (#2895).** A project with no `.claude/agents/` and/or `.claude/skills/`
+  (or an empty one) previously started with zero agents and zero skills.
+  `crates/trusty-code/src/assets/` now bundles three native-TOML default
+  agents (`engineer`, `qa-agent`, `code-reviewer`) plus trusty-mpm's 28
+  universal skills (format-identical `SKILL.md` files, reused verbatim;
+  `tm-*` orchestration skills excluded since they drive trusty-mpm MCP tools
+  tcode does not have) at compile time via `include_str!`.
+  `agents::load_all_agents` falls back to the embedded set when the
+  *parsed* result is empty (a directory with only unparseable TOML still
+  falls back, not just a missing/empty one); `skills::discover_skill_metadata`
+  falls back when the disk scan is empty. Either way, any successfully
+  discovered disk config — even a single file — is used as-is and never
+  merged with the embedded defaults.
 - **Stable per-spawn `agent_id` for event attribution (DOC-39 AC-13.1/13.2).**
   Agent attribution on the event stream was keyed only by `agent: String` (the
   agent-config name), so two concurrently-delegated same-named agents (e.g.
