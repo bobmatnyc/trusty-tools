@@ -447,6 +447,122 @@ pub mod cli_client;
 /// Test: `cargo run -p trusty-code -- --version` must print this value.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Test-only cross-module log-capture support for the #2857 observability
+/// tests (`*_logs_warn`/`*_logs_info` across `agent_loop`, `verify_gate`,
+/// `recall_session`, and `tools::delegate`).
+///
+/// Why: An EARLIER version of this support used
+/// `tracing::subscriber::set_default` (a per-thread SCOPED override),
+/// installed/removed fresh by every capturing test. `tracing`'s callsite
+/// "interest" cache is process-GLOBAL and is only recomputed when a
+/// subscriber is installed or removed; with many capture tests concurrently
+/// installing/removing their own scoped subscriber across a wide
+/// `cargo test` thread pool, the cache would intermittently settle on
+/// "nobody is interested" for a callsite at the exact moment a genuinely
+/// interested thread's event fired, silently dropping it — reproduced
+/// directly (an empty capture buffer in ~1-in-3 to 1-in-2 full-suite runs at
+/// `--test-threads` >= 4, but NEVER at `--test-threads=1`). Serializing the
+/// scoped installs did not fix it, because interest churn from ANY
+/// concurrently active install/remove anywhere in the process could still
+/// race the check.
+/// What: Installs exactly ONE global default subscriber, exactly once, for
+/// the whole test-binary process ([`ensure_global_capture_installed`], via
+/// `std::sync::Once`) — no scoped per-thread overrides, no repeated
+/// install/remove churn, so the callsite interest cache settles to "always
+/// interested" the first time each callsite is hit and never gets
+/// invalidated again. Its layer ([`GlobalCaptureLayer`]) writes every
+/// event's level + message into a `thread_local!` buffer — thread-local
+/// storage is inherently race-free across concurrent test threads (each
+/// thread only ever sees its OWN events), and a fresh `#[test]`/
+/// `#[tokio::test]` on a REUSED pool thread runs strictly after the
+/// previous one on that same thread finished, so [`begin_capture`]'s clear
+/// can never race a still-running previous test. [`captured_at_least`]
+/// reads back messages at `min_level` or more severe.
+/// `logging::tests::init_tracing_for_test_is_idempotent` also calls
+/// [`begin_capture`] before its own `try_init()`, guaranteeing this
+/// module's global install always wins the one-shot `set_global_default`
+/// race regardless of which test the harness happens to schedule first.
+/// Test: exercised indirectly by every `*_logs_warn`/`*_logs_info` test in
+/// this crate; a regression here would reintroduce the intermittent
+/// empty-capture failure this module exists to eliminate.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::RefCell;
+    use std::sync::Once;
+
+    thread_local! {
+        static CAPTURED: RefCell<Vec<(tracing::Level, String)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// The permanent, process-wide capture layer (see module docs).
+    struct GlobalCaptureLayer;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GlobalCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor(String);
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            let level = *event.metadata().level();
+            CAPTURED.with(|c| c.borrow_mut().push((level, visitor.0)));
+        }
+    }
+
+    static INSTALL_ONCE: Once = Once::new();
+
+    /// Install [`GlobalCaptureLayer`] as the process's global default
+    /// subscriber, exactly once. Idempotent and safe to call from every
+    /// capturing test's setup.
+    pub(crate) fn ensure_global_capture_installed() {
+        INSTALL_ONCE.call_once(|| {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            let subscriber = tracing_subscriber::registry().with(GlobalCaptureLayer);
+            // Best-effort: every subscriber-touching test in this crate calls
+            // this function (directly or via `begin_capture`) before doing
+            // anything else tracing-related, so this install always wins the
+            // one-shot `set_global_default` race in practice.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
+    /// Ensure the global capture layer is installed and clear THIS thread's
+    /// captured-event buffer, ready to record a fresh test's events.
+    ///
+    /// Why/What: see module docs above.
+    pub(crate) fn begin_capture() {
+        ensure_global_capture_installed();
+        CAPTURED.with(|c| c.borrow_mut().clear());
+    }
+
+    /// This thread's captured event messages at `min_level` or more severe,
+    /// recorded since the last [`begin_capture`] call on this thread.
+    ///
+    /// Why/What: see module docs above.
+    pub(crate) fn captured_at_least(min_level: tracing::Level) -> Vec<String> {
+        CAPTURED.with(|c| {
+            c.borrow()
+                .iter()
+                .filter(|(level, _)| *level <= min_level)
+                .map(|(_, msg)| msg.clone())
+                .collect()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

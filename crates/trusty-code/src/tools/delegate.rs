@@ -226,8 +226,12 @@ impl DelegateToAgentTool {
     /// `assemble_report`.
     /// What: Builder-style setter; returns `self` for chaining. When unset (the
     /// default), the refusal behaviour is disabled and this tool behaves
-    /// exactly as before.
-    /// Test: `delegate_refused_once_engineer_completed`.
+    /// exactly as before. (#2857) Every refusal fired via this signal emits a
+    /// `tracing::warn!` — the refusal silently changes the run's outcome (a
+    /// delegation attempt the model made is dropped without ever invoking the
+    /// runner), so it must be diagnosable from stderr alone, not just from the
+    /// tool-facing error text.
+    /// Test: `delegate_refused_once_engineer_completed`, `delegate_refusal_logs_warn`.
     pub fn with_completion_signal(mut self, signal: EngineerCompletionSignal) -> Self {
         self.completion_signal = Some(signal);
         self
@@ -305,6 +309,11 @@ impl ToolExecutor for DelegateToAgentTool {
         if let Some(signal) = &self.completion_signal
             && signal.is_completed()
         {
+            tracing::warn!(
+                "delegate_to_agent refused (#2683 completion latch): the delegated engineer \
+                 already reported a successful finish_task completion for this run — refusing \
+                 further delegation without invoking the runner"
+            );
             return ToolResult::err(
                 "delegate_to_agent refused: the delegated engineer already reported a \
                  successful completion (finish_task with status=completed) for this run. \

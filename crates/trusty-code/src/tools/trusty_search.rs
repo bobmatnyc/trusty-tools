@@ -425,9 +425,18 @@ impl ToolExecutor for TrustySearchTool {
     ///
     /// Why: an explicit model tool call must never derail the agent loop — a
     /// missing/unready trusty-search surfaces as a SUCCESSFUL "use grep/glob"
-    /// result, not a tool error the model might retry-loop on.
+    /// result, not a tool error the model might retry-loop on. (#2857) The
+    /// #2783 lexical-fallback branch is a silent degradation the model acts
+    /// on (it receives narrower exact-match results without knowing the
+    /// semantic/symbol lane was skipped) — it now emits `tracing::info!`
+    /// naming the mode and lane, so an operator can tell from stderr that a
+    /// run's discovery quality was degraded, matching this method's other
+    /// two `tracing::warn!` sites for a hard call failure / in-band error.
     /// Test: `tests::execute_fail_open_when_binary_absent`,
-    /// `tests::execute_rejects_malformed_args_recoverably`.
+    /// `tests::execute_rejects_malformed_args_recoverably`; the lexical-
+    /// fallback branch itself is exercised end-to-end only where a live
+    /// daemon is available (`lexical_fallback`'s own doc), with its decision
+    /// predicate covered by `tests::should_lexical_fallback_only_for_stage_not_ready`.
     async fn execute(&self, args: Value) -> ToolResult {
         let parsed: SearchArgs = match serde_json::from_value(args) {
             Ok(p) => p,
@@ -475,6 +484,12 @@ impl ToolExecutor for TrustySearchTool {
                 } else {
                     "semantic"
                 };
+                tracing::info!(
+                    mode,
+                    lane_label,
+                    "search_code: {lane_label} index not ready (STAGE_NOT_READY, #2783) — \
+                     serving degraded lexical results instead"
+                );
                 return ToolResult::ok(format!(
                     "trusty-search's {lane_label} index is still building; \
                      showing lexical (exact-match) results instead:\n{text}"

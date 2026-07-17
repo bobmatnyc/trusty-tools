@@ -552,6 +552,11 @@ impl AgentLoop {
     /// push below, so both see the rejection, not the original success; this
     /// also means the `finish_args` assignment below never fires for a
     /// gate-rejected call, so the loop simply continues to the next turn.
+    /// (#2857) Both outcome-changing decisions in this method log at `warn`/
+    /// `info`: the redundant-rerun short-circuit (`info` — the by-design
+    /// #2682 suppression outcome) and the gate rejection (`warn` — an
+    /// unplanned extra turn is forced), so either is diagnosable from a
+    /// single run's stderr.
     /// Test: `agent_loop::tests::recoverable_tool_error_continues`,
     /// `agent_loop::tests::malformed_tool_arguments_report_recoverable_error_and_loop_continues`,
     /// `sink_receives_started_then_finished_in_order`,
@@ -561,7 +566,9 @@ impl AgentLoop {
     /// `finish_task_missing_required_field_is_recoverable_not_terminal`,
     /// `finish_task_invalid_enum_value_is_recoverable_not_terminal`,
     /// `finish_gate_trips_and_recovers`,
-    /// `finish_gate_inert_without_named_test_command`.
+    /// `finish_gate_trip_logs_warn`,
+    /// `finish_gate_inert_without_named_test_command`,
+    /// `redundant_rerun_suppression_logs_info`.
     async fn dispatch_all(
         &self,
         tool_calls: &[ToolCall],
@@ -599,6 +606,11 @@ impl AgentLoop {
                 && crate::redundant_run::is_test_bash_call(call)
                 && crate::redundant_run::is_redundant_test_rerun(&transcript.messages(), &call.id)
             {
+                tracing::info!(
+                    call_id = %call.id,
+                    "agent_loop: suppressing redundant full-suite re-run (#2682) — an \
+                     identical test command already passed and nothing has changed since"
+                );
                 ToolResult::ok(crate::redundant_run::REDUNDANT_RERUN_MESSAGE.to_string())
             } else {
                 self.registry.dispatch_gated(tool, args.clone(), None).await
@@ -614,6 +626,10 @@ impl AgentLoop {
                 && !result.is_error()
                 && let Some(reason) = self.finish_gate.as_ref().and_then(|gate| gate(transcript))
             {
+                tracing::warn!(
+                    reason = %reason,
+                    "agent_loop: verify-before-finish gate intercepted finish_task (#2279)"
+                );
                 result = ToolResult::err(reason);
             }
 
@@ -733,9 +749,18 @@ impl AgentLoop {
     /// delegates to `cadence::maybe_cadence_compress`, reusing
     /// `self.config.compaction.keep_last_messages` as the shared active-zone
     /// size rather than introducing a second, possibly-inconsistent knob.
+    /// (#2857) `cadence::maybe_cadence_compress`'s returned `CadenceOutcome`
+    /// was previously discarded entirely — its own doc says it exists "for
+    /// observability/tests", yet nothing observed it. When `outcome.fired`,
+    /// this now emits `tracing::info!` with the round count and whether the
+    /// transcript ended within budget — a notable-but-normal event (routine
+    /// scheduled compression), not a failure, hence `info` rather than
+    /// `warn`. The budget-floor-exceeded case is already `warn!`-logged
+    /// inside `cadence::enforce_budget` itself.
     /// Test: `agent_loop::tests::cadence_disabled_by_default`,
     /// `agent_loop::tests::cadence_never_fires_in_parity_mode`,
-    /// `agent_loop::tests::cadence_fires_in_daily_driver_when_configured`.
+    /// `agent_loop::tests::cadence_fires_in_daily_driver_when_configured`,
+    /// `agent_loop::tests::cadence_fire_logs_info`.
     fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
         if self.config.mode != HarnessMode::DailyDriver {
             return;
@@ -744,12 +769,19 @@ impl AgentLoop {
             return;
         };
         let context_window = crate::provider::resolve_context_window(&self.config.model);
-        cadence::maybe_cadence_compress(
+        let outcome = cadence::maybe_cadence_compress(
             transcript,
             cadence_cfg,
             self.config.compaction.keep_last_messages,
             context_window,
         );
+        if outcome.fired {
+            tracing::info!(
+                rounds = outcome.rounds,
+                within_budget = outcome.within_budget,
+                "agent_loop: cadence compression fired (#2346)"
+            );
+        }
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.

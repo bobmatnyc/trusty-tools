@@ -24,10 +24,15 @@
 //! `AgentLoop::with_redundant_run_suppression`) and, on a match, short-circuits
 //! the dispatch with [`REDUNDANT_RERUN_MESSAGE`] instead of actually spawning
 //! the suite — saving the turn's wall-clock cost and nudging the model to
-//! proceed to finish.
+//! proceed to finish. (#2857) That short-circuit is itself a decision that
+//! silently changes the run's outcome (a test invocation the model requested
+//! did NOT happen), so `agent_loop::AgentLoop::dispatch_all` logs it via
+//! `tracing::info!` at the call site — a suppressed run is still the
+//! expected, by-design outcome (not a failure), so `info` rather than `warn`.
 //! Test: `redundant_run::tests::*`, plus
-//! `agent_loop::tests::redundant_test_rerun_is_suppressed` and
-//! `agent_loop::tests::test_rerun_after_edit_is_not_suppressed`.
+//! `agent_loop::tests::redundant_test_rerun_is_suppressed`,
+//! `agent_loop::tests::test_rerun_after_edit_is_not_suppressed`, and
+//! `agent_loop::tests::redundant_rerun_suppression_logs_info`.
 
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::BASH_TOOL_NAME;
