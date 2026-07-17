@@ -227,7 +227,9 @@ mod tests {
     #[tokio::test]
     async fn build_router_wires_fs_list_dir() {
         let project = tempfile::tempdir().expect("project tempdir");
-        let (router, _sessions) = build_router(project.path().to_path_buf());
+        let (router, _sessions) = build_router(
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        );
 
         let req = Request {
             jsonrpc: Some("2.0".to_string()),
