@@ -1,5 +1,6 @@
 //! Markdown+frontmatter agent loader for tcode, DARK-LAUNCHED alongside the
-//! TOML loader (issue #2897, epic #2892, Slice B).
+//! TOML loader (issue #2897, epic #2892, Slice B), and now also the loader
+//! for tcode's own EMBEDDED default agents (Slice C).
 //!
 //! Why: trusty-agents-common's `agents::builder` compose machinery (Slice A,
 //! #2952) already resolves `extends:` inheritance chains for trusty-mpm's
@@ -8,16 +9,28 @@
 //! `.md` parser, tcode reuses that composer and projects its output onto its
 //! existing `AgentConfig`. This is purely additive: the TOML loader
 //! (`AgentConfig::load`) is untouched, and both formats coexist through this
-//! slice. TOML retirement is Slice D.
+//! slice. TOML retirement is Slice D. Slice C (#2897) additionally routes
+//! `crate::assets::DEFAULT_AGENTS`'s embedded fallback through this module:
+//! the embedded strings have no source directory to resolve an `extends:`
+//! chain against (they are compiled-in `&'static str`, not files on disk), so
+//! [`project_embedded_md`] skips `compose_agent` entirely and calls
+//! [`agent_metadata_from_str`]/[`extract_body`] directly on the raw string —
+//! both are already string-in, string/struct-out, so no file-path dependency
+//! stands in the way. The two entry points ([`load_md_agent`] for disk,
+//! [`project_embedded_md`] for embedded strings) share the exact same
+//! [`project_to_agent_config`] mapping, so there is only ever one frontmatter
+//! -> `AgentConfig` projection to maintain.
 //! What: [`load_md_agent`] reads a `.md` agent source file, calls
 //! `trusty_agents_common::agents::builder::compose_agent` to resolve its
 //! `extends:` chain into one flattened document, projects the composed
 //! frontmatter (via `agents::metadata::agent_metadata_from_str`) and prose
-//! body onto tcode's `AgentConfig`.
+//! body onto tcode's `AgentConfig`. [`project_embedded_md`] does the same
+//! projection for an in-memory `&'static str` with no `extends:` resolution.
 //! Test: `parallel_fixture_equivalence` (same agent authored as `.toml` and
 //! `.md` load to field-identical configs), `tools_projection_*` (the
 //! `Option<Vec<String>>` direct-map), `hr1_initial_prompt_not_leaked_into_body`
-//! (the HR-1 guard).
+//! (the HR-1 guard), `assets::tests::*` (embedded-default field-identity vs.
+//! the retired TOML fixtures).
 
 use std::path::Path;
 
@@ -61,6 +74,32 @@ pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let body = extract_body(&composed);
 
     Ok(project_to_agent_config(name, metadata, body))
+}
+
+/// Project an embedded (in-memory, no source directory) `.md` agent document
+/// onto tcode's [`AgentConfig`] — the entry point for
+/// `crate::assets::DEFAULT_AGENTS`'s embedded fallback (Slice C, #2897).
+///
+/// Why: `load_md_agent` resolves an `extends:` inheritance chain via
+/// `compose_agent`, which requires a real source directory to scan for
+/// sibling `.md` files. Embedded default agents are compiled-in
+/// `&'static str` constants with no filesystem location and no `extends:`
+/// chain, so composing would be both impossible (no directory to resolve
+/// against) and unnecessary (none of the three bundled defaults declare
+/// `extends:`). This function shares every other step of the projection —
+/// [`agent_metadata_from_str`] for the frontmatter and [`extract_body`] for
+/// the prose body — with [`load_md_agent`], so the frontmatter -> `AgentConfig`
+/// mapping in [`project_to_agent_config`] is written and tested exactly once.
+/// What: parses `raw`'s frontmatter and body directly (no `compose_agent`
+/// call), then delegates to [`project_to_agent_config`]. `default_name` is
+/// used only when `raw`'s frontmatter carries no `name:` field, mirroring
+/// `load_md_agent`'s file-stem fallback.
+/// Test: `assets::tests::default_agents_field_identical_to_retired_toml`,
+/// `assets::tests::default_agents_parse_and_names_match`.
+pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> AgentConfig {
+    let metadata = agent_metadata_from_str(raw);
+    let body = extract_body(raw);
+    project_to_agent_config(default_name, metadata, body)
 }
 
 /// Strip the leading YAML frontmatter block from a composed agent document.

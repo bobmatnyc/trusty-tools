@@ -9,30 +9,38 @@
 //! disk-based `.claude/agents/` and `.claude/skills/` always take precedence
 //! when present (see `agents::load_all_agents` and
 //! `skills::discover_skill_metadata`'s embedded-fallback branches).
-//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the three native-TOML default
-//! agent configs (`engineer`, `qa-agent`, `code-reviewer`) authored for
-//! tcode's own `AgentConfig` schema (agents are TOML here, not Markdown+
-//! frontmatter, so they are NOT reused from trusty-mpm — see module docs on
-//! `agents::config`). [`EmbeddedSkill`]/[`DEFAULT_SKILLS`] — trusty-mpm's
-//! universal skill set (format-identical `SKILL.md` files), reused verbatim
-//! per Bob's reuse directive; the `tm-*` orchestration skills are excluded
-//! because they drive trusty-mpm MCP tools tcode does not have.
-//! Test: `assets::tests::*` — every embedded agent TOML parses, every skill
-//! name is unique, and every skill's frontmatter `name:` matches its table key.
+//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the three default agent
+//! configs (`engineer`, `qa-agent`, `code-reviewer`), authored as Markdown+
+//! frontmatter (`.md`) as of #2897 Slice C (previously native TOML; the TOML
+//! loader for USER `.claude/agents/*.toml` configs is untouched and stays
+//! until Slice D). The embedded fallback projects each `.md` string onto
+//! tcode's `AgentConfig` via `agents::md_loader::project_embedded_md`, which
+//! shares its frontmatter->`AgentConfig` mapping with the disk `.md` loader
+//! (`agents::md_loader::load_md_agent`) — see that module's docs.
+//! [`EmbeddedSkill`]/[`DEFAULT_SKILLS`] — trusty-mpm's universal skill set
+//! (format-identical `SKILL.md` files), reused verbatim per Bob's reuse
+//! directive; the `tm-*` orchestration skills are excluded because they drive
+//! trusty-mpm MCP tools tcode does not have.
+//! Test: `assets::tests::*` — every embedded agent `.md` parses and projects
+//! to a field-identical `AgentConfig` vs. the retired TOML fixtures, every
+//! skill name is unique, and every skill's frontmatter `name:` matches its
+//! table key.
 
-/// One embedded default agent: its dispatch name and raw TOML source.
+/// One embedded default agent: its dispatch name and raw `.md` source.
 ///
 /// Why: `agents::mod`'s embedded-fallback needs both the name (for logging)
-/// and the raw TOML (to hand to `AgentConfig::from_toml_str`).
-/// What: `name` matches the `[agent].name` field inside `toml`; `toml` is the
-/// verbatim embedded file contents.
+/// and the raw `.md` document (to hand to
+/// `agents::md_loader::project_embedded_md`).
+/// What: `name` matches the frontmatter `name:` field inside `md`; `md` is
+/// the verbatim embedded file contents (frontmatter fence + prose body).
 /// Test: `assets::tests::default_agents_parse_and_names_match`.
 #[derive(Debug, Clone, Copy)]
 pub struct EmbeddedAgent {
-    /// Dispatch key, matching `[agent].name` inside `toml`.
+    /// Dispatch key, matching the frontmatter `name:` inside `md`.
     pub name: &'static str,
-    /// Raw TOML source, parseable via `AgentConfig::from_toml_str`.
-    pub toml: &'static str,
+    /// Raw `.md` source (frontmatter fence + prose body), projectable via
+    /// `agents::md_loader::project_embedded_md`.
+    pub md: &'static str,
 }
 
 /// One embedded default skill: its catalog name and raw `SKILL.md` source.
@@ -51,9 +59,9 @@ pub struct EmbeddedSkill {
     pub skill_md: &'static str,
 }
 
-const ENGINEER_TOML: &str = include_str!("agents/engineer.toml");
-const QA_AGENT_TOML: &str = include_str!("agents/qa-agent.toml");
-const CODE_REVIEWER_TOML: &str = include_str!("agents/code-reviewer.toml");
+const ENGINEER_MD: &str = include_str!("agents/engineer.md");
+const QA_AGENT_MD: &str = include_str!("agents/qa-agent.md");
+const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
 
 /// The three default tcode agents, embedded at compile time.
 ///
@@ -68,15 +76,15 @@ const CODE_REVIEWER_TOML: &str = include_str!("agents/code-reviewer.toml");
 pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent {
         name: "engineer",
-        toml: ENGINEER_TOML,
+        md: ENGINEER_MD,
     },
     EmbeddedAgent {
         name: "qa-agent",
-        toml: QA_AGENT_TOML,
+        md: QA_AGENT_MD,
     },
     EmbeddedAgent {
         name: "code-reviewer",
-        toml: CODE_REVIEWER_TOML,
+        md: CODE_REVIEWER_MD,
     },
 ];
 
