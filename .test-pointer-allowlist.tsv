@@ -164,7 +164,6 @@ crates/trusty-code/src/agent_loop/transcript.rs	push_response_appends_assistant
 crates/trusty-code/src/agents/config.rs	agent_config_llm_params
 crates/trusty-code/src/agents/config.rs	agent_config_runner_kind
 crates/trusty-code/src/agents/config.rs	agent_config_system_prompt
-crates/trusty-code/src/agents/mod.rs	discover_agents_skips_non_toml
 crates/trusty-code/src/events.rs	ast_operation_round_trips_through_subscribe
 crates/trusty-code/src/jsonrpc/error.rs	rpc_error_domain_sets_error_type_in_data
 crates/trusty-code/src/llm/client_trait.rs	llm_client_implements_trait
