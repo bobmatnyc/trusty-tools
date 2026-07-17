@@ -318,9 +318,16 @@ pub(crate) async fn restore_one_index(
         .corpus_store()
         .and_then(|c| c.chunk_count().ok())
         .unwrap_or(0);
-    let hnsw_snapshot_ready = crate::service::persistence::hnsw_path_for_entry(&entry)
-        .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
-        .unwrap_or(false);
+    // Issue #2922: a persisted HNSW file existing on disk does not mean it
+    // actually loaded — `hnsw_load_failed` (set by `build_indexer_from_entry`
+    // via `build_store_for_entry`) catches the truncated/corrupt case that
+    // mere `has_persisted_hnsw` file-existence checking silently missed,
+    // which previously let `/health` report `semantic: ready` for an index
+    // that had silently fallen back to an empty in-memory store.
+    let hnsw_snapshot_ready = !indexer.hnsw_load_failed
+        && crate::service::persistence::hnsw_path_for_entry(&entry)
+            .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
+            .unwrap_or(false);
     let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
     let stages = derive_warm_boot_stages(WarmBootInputs {
         chunk_count,

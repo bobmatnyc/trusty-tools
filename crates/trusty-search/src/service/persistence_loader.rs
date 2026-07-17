@@ -101,9 +101,14 @@ pub async fn build_indexer_from_entry(
     let index_id = &entry.id;
     let root_path = entry.root_path.clone();
     let dim = embedder.dimension();
-    let store: Arc<dyn VectorStore> = build_store_for_entry(entry, dim).await?;
+    let (store, hnsw_load_failed): (Arc<dyn VectorStore>, bool) =
+        build_store_for_entry(entry, dim).await?;
     let mut indexer =
         CodeIndexer::new(index_id, root_path).with_components(Arc::clone(embedder), store);
+    // Issue #2922: propagate whether a persisted snapshot existed but failed
+    // to load, so warm-boot / lazy-load can fold it into `hnsw_snapshot_ready`
+    // instead of trusting bare file existence.
+    indexer.hnsw_load_failed = hnsw_load_failed;
 
     // Issue #28/#840/#1158: wire the durable redb corpus store.  Failure is
     // non-fatal but logged at ERROR (#840) because a missing corpus means the
@@ -260,15 +265,24 @@ fn stamp_if_unversioned_for_entry(entry: &PersistedIndex) {
 ///
 /// Why: uses `hnsw_path_for_entry` so colocated indexes read from the project's
 /// `.trusty-search/hnsw.usearch`; propagates OOM as `Err` (closes #954).
-/// What: resolves path, checks for snapshot, loads (or falls back), returns store.
-/// Test: warm-boot integration tests (legacy) + colocated integration tests.
-async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Result<Arc<dyn VectorStore>> {
+/// What: resolves path, checks for snapshot, loads (or falls back), returns
+/// `(store, load_failed)`. `load_failed` is `true` only when a snapshot file
+/// existed but could not be restored (issue #2922) — never for the ordinary
+/// "no snapshot yet" first-boot case — so callers can distinguish "never
+/// indexed" from "corrupt/truncated on-disk state" when deriving
+/// `hnsw_snapshot_ready` for `/health`.
+/// Test: warm-boot integration tests (legacy) + colocated integration tests;
+/// `tests::build_store_for_entry_flags_load_failure_on_corrupt_snapshot`.
+async fn build_store_for_entry(
+    entry: &PersistedIndex,
+    dim: usize,
+) -> Result<(Arc<dyn VectorStore>, bool)> {
     let index_id = &entry.id;
     let path = match persistence::hnsw_path_for_entry(entry) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("cannot resolve hnsw path for '{index_id}': {e}");
-            return fresh_store(dim);
+            return Ok((fresh_store(dim)?, false));
         }
     };
 
@@ -281,7 +295,7 @@ async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Result<Arc
                         index_id,
                         path.display()
                     );
-                    return Ok(Arc::new(store));
+                    return Ok((Arc::new(store), false));
                 }
                 tracing::warn!(
                     "warm-boot: hnsw snapshot for '{}' has dim {} but embedder is {} — starting fresh",
@@ -291,21 +305,30 @@ async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Result<Arc
                 );
             }
             Ok(None) => {
-                // Sidecar missing/corrupt — fall back to fresh.
+                // Sidecar missing/corrupt, or the #2922 zero-vector-vs-populated
+                // guard tripped — fall back to fresh.
                 tracing::warn!(
-                    "warm-boot: hnsw snapshot at {} could not be loaded — starting fresh",
-                    path.display()
+                    "warm-boot: hnsw snapshot at {} could not be loaded — starting fresh \
+                     (semantic search will report not-ready for '{}' until reindexed, issue #2922)",
+                    path.display(),
+                    index_id,
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    "warm-boot: error loading hnsw snapshot at {}: {e} — starting fresh",
-                    path.display()
+                    "warm-boot: error loading hnsw snapshot at {}: {e} — starting fresh \
+                     (semantic search will report not-ready for '{}' until reindexed, issue #2922)",
+                    path.display(),
+                    index_id,
                 );
             }
         }
+        // A snapshot file existed but we fell through to the fresh-store
+        // fallback above — issue #2922: the caller must NOT treat this index
+        // as having a ready semantic snapshot.
+        return Ok((fresh_store(dim)?, true));
     }
-    fresh_store(dim)
+    Ok((fresh_store(dim)?, false))
 }
 
 /// Allocate a fresh empty `UsearchStore`. Returns `Err` on OOM instead of
@@ -435,6 +458,98 @@ mod tests {
             chunk_count > 0,
             "#483: reloaded index must contain the written chunk (got {chunk_count}); \
              writer/loader paths must agree on the colocated location"
+        );
+    }
+
+    // ── Issue #2922 regression ────────────────────────────────────────────────
+
+    /// Why: this is the acceptance test for the "health reports semantic
+    /// ready while silently BM25-only" half of issue #2922. Before the fix,
+    /// `hnsw_snapshot_ready` (and therefore `hnsw_load_failed`) had no way to
+    /// tell "a file exists" apart from "a file exists AND loaded correctly" —
+    /// a truncated `.usearch` snapshot still passed `has_persisted_hnsw`.
+    /// What: saves a real HNSW snapshot with one vector via `UsearchStore`,
+    /// truncates the on-disk `.usearch` file to simulate the exact corruption
+    /// reported in #2922 (a timed-out shutdown flush cutting a save short),
+    /// then calls `build_indexer_from_entry` and asserts `hnsw_load_failed`
+    /// is `true` and the restored store is empty (never a silent partial
+    /// state).
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn build_store_for_entry_flags_load_failure_on_corrupt_snapshot() {
+        use crate::core::store::{UsearchStore, VectorStore};
+
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let embedder = mock_embedder();
+        let dim = embedder.dimension();
+
+        let entry = PersistedIndex {
+            id: "test-idx-2922".to_string(),
+            root_path: root.clone(),
+            colocated: true,
+            ..Default::default()
+        };
+        let hnsw_path = persistence::hnsw_path_for_entry(&entry).unwrap();
+
+        // Write a real, valid snapshot containing one vector.
+        let store = UsearchStore::new(dim).unwrap();
+        store
+            .upsert("chunk-1", vec![0.1; dim])
+            .await
+            .expect("upsert must succeed");
+        store.save(&hnsw_path).await.expect("save must succeed");
+        assert!(hnsw_path.exists(), "precondition: snapshot must exist");
+
+        // Simulate the #2922 corruption: a shutdown flush cut off mid-write,
+        // leaving a truncated (but still `path.exists()`-true) file.
+        std::fs::write(&hnsw_path, b"truncated").expect("truncate hnsw.usearch");
+
+        let (loaded_store, load_failed): (Arc<dyn VectorStore>, bool) =
+            build_store_for_entry(&entry, dim).await.unwrap();
+        assert!(
+            load_failed,
+            "#2922: a snapshot file that exists but fails to load must set load_failed=true"
+        );
+        assert_eq!(
+            loaded_store.len().await.unwrap(),
+            0,
+            "#2922: a corrupt snapshot must never silently restore partial/wrong data"
+        );
+
+        // End-to-end: `build_indexer_from_entry` must propagate the flag onto
+        // the indexer so the warm-boot / lazy-load call sites can fold it
+        // into `hnsw_snapshot_ready`.
+        let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+        assert!(
+            indexer.hnsw_load_failed,
+            "#2922: CodeIndexer::hnsw_load_failed must be propagated from build_store_for_entry"
+        );
+    }
+
+    /// Why: the ordinary first-boot case (no snapshot has ever been written)
+    /// must NOT be flagged as a load failure — only a snapshot that existed
+    /// and couldn't be restored is a failure (issue #2922).
+    /// What: builds an indexer for an entry with no on-disk HNSW snapshot at
+    /// all and asserts `hnsw_load_failed` stays `false`.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn build_store_for_entry_does_not_flag_first_boot_as_failure() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let embedder = mock_embedder();
+
+        let entry = PersistedIndex {
+            id: "test-idx-2922-firstboot".to_string(),
+            root_path: root.clone(),
+            colocated: true,
+            ..Default::default()
+        };
+        let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+        assert!(
+            !indexer.hnsw_load_failed,
+            "#2922: a never-indexed entry (no snapshot file at all) must not be \
+             flagged as a load failure"
         );
     }
 

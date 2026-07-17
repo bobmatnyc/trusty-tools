@@ -256,6 +256,106 @@ async fn test_load_corrupt_sidecar_returns_none() {
     assert!(loaded.is_none(), "corrupt sidecar must fall back to None");
 }
 
+/// Why (issue #2922 — the exact reported failure, AND a worse one this test
+/// discovered): a shutdown flush cut off mid-write leaves a truncated
+/// `.usearch` binary on disk while its sidecar remains a valid, populated
+/// JSON file (the sidecar is written and renamed AFTER the HNSW binary in
+/// `save()`, so this is the realistic corruption shape). The naive fix —
+/// calling `Index::view()` and matching on its `Result` — is NOT safe: this
+/// test originally truncated the binary and called `load_from` directly, and
+/// that call **SIGSEGV'd the test process**. usearch's `view()` trusts
+/// header-embedded size fields and can read/map past a truncated file's
+/// actual extent; that is undefined behaviour, not a `Result::Err` Rust can
+/// catch. The real fix is [`MIN_LOADABLE_HNSW_FILE_BYTES`] — a size floor
+/// checked BEFORE `view()` is ever called whenever the sidecar expects
+/// vectors, so an implausibly small file (like the reported 112-byte
+/// truncation) is refused without ever touching the FFI.
+/// What: saves a real one-vector snapshot, then truncates the `.usearch`
+/// binary to a handful of bytes (leaving the valid, populated sidecar in
+/// place). Asserts `load_from` returns `Ok(None)` — proving the size-floor
+/// guard fires and `view()` is never reached, so the test process does not
+/// crash.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_load_undersized_hnsw_binary_with_valid_sidecar_returns_none_without_crashing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.save(&path).await.unwrap();
+    assert!(
+        path.with_extension("keys.json").exists(),
+        "precondition: sidecar must exist and be valid"
+    );
+
+    // Simulate the exact #2922 corruption: the HNSW binary truncated to a
+    // handful of bytes — well under the scaled floor for this store
+    // (1 vector, dim=4 → 36 bytes; see MIN_BYTES_PER_DIM_PER_VECTOR /
+    // MIN_FIXED_OVERHEAD_BYTES_PER_VECTOR), sidecar untouched (still
+    // reports 1 key).
+    std::fs::write(&path, b"\x00\x01trunc8").unwrap();
+    assert!(
+        std::fs::metadata(&path).unwrap().len() < 36,
+        "precondition: corrupted payload must be under the size floor for \
+         this store shape, so this test exercises the pre-view guard, not view()"
+    );
+
+    // If this hangs or crashes the test process, the size-floor guard in
+    // `load_from` did not fire before an unsafe `view()` call.
+    let loaded = UsearchStore::load_from(&path).await.unwrap();
+    assert!(
+        loaded.is_none(),
+        "#2922: an undersized .usearch binary paired with a populated sidecar \
+         must never be restored as a successful load"
+    );
+}
+
+/// Why (issue #2922 guard precision — the false-positive risk): the
+/// size-floor guard scales with the sidecar's own claimed vector count/dim
+/// specifically so it never rejects a genuinely tiny, valid snapshot — this
+/// codebase's own test fixtures routinely use `dim=4` with only a handful of
+/// vectors, and those real on-disk snapshots are only a few hundred bytes.
+/// What: saves and reloads a real 1-vector, dim=4 snapshot (no corruption)
+/// and asserts it loads successfully as `Some` with the correct vector —
+/// proving the floor did not false-positive on legitimate tiny data.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_load_tiny_legitimate_snapshot_does_not_trip_size_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.save(&path).await.unwrap();
+
+    let loaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load must not error")
+        .expect("a genuine tiny snapshot must not be rejected by the size floor");
+    assert_eq!(loaded.len().await.unwrap(), 1);
+}
+
+/// Why (issue #2922 guard precision): the zero-vector-vs-populated-sidecar
+/// corruption guard must only fire when the sidecar actually expects vectors.
+/// A legitimately empty index (never had any vectors upserted) must still
+/// round-trip through save/load normally — the guard must not false-positive
+/// on the ordinary empty-index case.
+/// What: saves and reloads an empty store; asserts `load_from` returns
+/// `Some` with `len() == 0`, not `None`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_load_empty_snapshot_roundtrips_without_tripping_corruption_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let store = UsearchStore::new(4).unwrap();
+    store.save(&path).await.unwrap();
+
+    let loaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load ok")
+        .expect("a legitimately empty snapshot must still load as Some");
+    assert_eq!(loaded.len().await.unwrap(), 0);
+}
+
 /// Issue #2179 regression: `rewrite_keys_to_relative` (the M003 one-time
 /// key-migration path) must leave `is_view` truthful relative to the
 /// underlying `usearch::Index` mode — not just flip the flag to `false`
@@ -693,5 +793,62 @@ async fn test_demote_to_view_skips_without_path() {
     assert!(
         !store.try_demote_to_view().await.unwrap(),
         "a store with no known hnsw_path must never demote"
+    );
+}
+
+/// Why (issue #2922): the shutdown flush and an in-flight
+/// `spawn_incremental_persist` background task can both call `save()` on the
+/// SAME `UsearchStore` for the SAME path concurrently — e.g. shutdown begins
+/// while a periodic incremental snapshot from the last commit batch hasn't
+/// finished yet. Without `save_lock` serializing the whole write+rename
+/// sequence (not just the HNSW `RwLock`, which only covers the FFI call),
+/// two overlapping saves can interleave at the tmp-file/rename boundary and
+/// leave a mixed or missing live file. `save_lock` must make every `save()`
+/// call fully atomic relative to every other one on the same store.
+/// What: fires several concurrent `save()` calls at the same store/path via
+/// `tokio::join!`-style fan-out, then asserts the live file is loadable
+/// afterward and reports the correct (fully-consistent, not partial) vector
+/// count — proving no interleaved/corrupted write occurred despite the race.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_concurrent_saves_are_serialized_and_end_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    let store = Arc::new(UsearchStore::new(4).unwrap());
+    for i in 0..20u32 {
+        store
+            .upsert(&format!("chunk-{i}"), vec![i as f32, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+    }
+
+    // Fan out several concurrent save() calls at the same store + path,
+    // mirroring shutdown-flush racing an in-flight incremental persist.
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let path = path.clone();
+        handles.push(tokio::spawn(
+            async move { store.save(&path).await.map(|_| ()) },
+        ));
+    }
+    for h in handles {
+        h.await
+            .expect("save task must not panic")
+            .expect("save() must not error under concurrent callers");
+    }
+
+    // The live file must be a single, fully-consistent, loadable snapshot —
+    // never a mix of two writers' tmp files.
+    let loaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load must not error")
+        .expect("live file must be a complete, loadable snapshot after concurrent saves");
+    assert_eq!(
+        loaded.len().await.unwrap(),
+        20,
+        "concurrent saves of the same 20-vector store must never leave a \
+         partial/interleaved snapshot on disk"
     );
 }
