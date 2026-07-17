@@ -243,8 +243,8 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
 /// the canonical join still starts with the canonical `root`. Any failure
 /// (unsafe path, missing file, symlink escape, non-UTF-8) yields `None` rather
 /// than an error — a lookup failure is `ref-path-missing`, not a crash.
-/// Test: `tests::safe_read_rejects_absolute`, `tests::safe_read_rejects_escape`,
-/// `tests::safe_read_resolves_in_tree`.
+/// Test: `tests::safe_read_rejects_absolute`, `tests::safe_read_rejects_dotdot_escape`,
+/// `tests::safe_read_rejects_symlink_escape`, `tests::safe_read_resolves_in_tree`.
 fn safe_read(root: &Path, path: &str) -> Option<String> {
     if trusty_common::sld::is_unsafe_path(path) {
         return None;
