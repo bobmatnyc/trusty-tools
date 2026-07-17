@@ -113,6 +113,26 @@ pub mod harness_doc;
 ///       re-exported call site.
 pub mod compress;
 
+/// Agent compose/deploy/manifest machinery: `builder`, `manifest`,
+/// `deployer`, and the shared `frontmatter` line parser.
+///
+/// Why: Extracted from `trusty-mpm::core::{agent_builder,agent_manifest,
+///      agent_deployer,frontmatter}` (#2892), mirroring the precedent set by
+///      `ToolExecutor`/`AgentRunner`, so `trusty-code` can eventually consume
+///      the same `extends:`-inheritance composer and ownership-tracked
+///      deployer instead of forking them.
+/// What: `builder::compose_agent` / `builder::source_chain` resolve an
+///      inheritance chain into one flattened Markdown document;
+///      `manifest::AgentManifest` tracks which deployed files a harness owns
+///      via a sha256 checksum ledger; `deployer::deploy_agents(_filtered)`
+///      writes composed agents into a target directory without clobbering
+///      user edits. `trusty-mpm` re-exports every item here from its
+///      `core::agent_builder` / `core::agent_manifest` / `core::agent_deployer`
+///      / `core::frontmatter` modules for source compatibility.
+/// Test: `cargo test -p trusty-agents-common agents::` exercises every
+///      submodule in place.
+pub mod agents;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

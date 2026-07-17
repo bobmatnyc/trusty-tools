@@ -281,25 +281,98 @@ fn resolved_lane_reports_lexical_when_the_retry_served_it() {
 }
 
 /// Why: the UI renders a hit count; each lane wraps its payload differently,
-/// so the counter must read all the observed shapes.
+/// so the counter must read all the observed shapes. Each item's `path`
+/// (the `CodeChunk` shape) must also be collected (DOC-39 Slice B).
 #[test]
-fn count_hits_reads_each_lane_shape() {
-    assert_eq!(count_hits(r#"{"results":[{"a":1},{"a":2}]}"#), Some(2));
-    assert_eq!(count_hits(r#"{"hits":[{"a":1}]}"#), Some(1));
-    assert_eq!(count_hits(r#"{"matches":[]}"#), Some(0));
+fn parse_search_hits_reads_each_lane_shape() {
+    assert_eq!(
+        parse_search_hits(
+            r#"{"results":[{"path":"a.rs","score":0.9},{"path":"b.rs","score":0.4}]}"#
+        ),
+        (
+            Some(2),
+            vec![
+                SearchHit {
+                    path: "a.rs".into(),
+                    score: 0.9
+                },
+                SearchHit {
+                    path: "b.rs".into(),
+                    score: 0.4
+                },
+            ]
+        )
+    );
+    assert_eq!(
+        parse_search_hits(r#"{"hits":[{"path":"c.rs","score":1.0}]}"#),
+        (
+            Some(1),
+            vec![SearchHit {
+                path: "c.rs".into(),
+                score: 1.0
+            }]
+        )
+    );
+    assert_eq!(parse_search_hits(r#"{"matches":[]}"#), (Some(0), vec![]));
 }
 
 /// Why: an uncountable payload must report `None`, never `0` — "we could not
 /// count" and "there were no hits" are different facts, and a UI showing a
-/// confident `0 hits` for the former would be wrong.
+/// confident `0 hits` for the former would be wrong. `hits` must stay empty
+/// in lockstep.
 #[test]
-fn count_hits_is_none_for_unrecognised_payloads() {
-    assert_eq!(count_hits("not json at all"), None);
-    assert_eq!(count_hits(r#"{"unexpected":"shape"}"#), None);
+fn parse_search_hits_is_none_for_unrecognised_payloads() {
+    assert_eq!(parse_search_hits("not json at all"), (None, vec![]));
     assert_eq!(
-        count_hits(r#"{"results":"not-an-array"}"#),
-        None,
+        parse_search_hits(r#"{"unexpected":"shape"}"#),
+        (None, vec![])
+    );
+    assert_eq!(
+        parse_search_hits(r#"{"results":"not-an-array"}"#),
+        (None, vec![]),
         "a non-array under a known key is uncountable, not empty"
+    );
+}
+
+/// Why: `grep`'s `GrepMatch` shape carries `file`, never `path` or `score` —
+/// the path must fall back to `file` and the score must default to `0.0`
+/// rather than dropping the hit entirely (DOC-39 Slice B).
+#[test]
+fn parse_search_hits_falls_back_to_file_and_defaults_missing_score() {
+    let (count, hits) = parse_search_hits(
+        r#"{"matches":[{"file":"src/main.rs","line":10},{"file":"src/lib.rs","line":2}]}"#,
+    );
+    assert_eq!(count, Some(2));
+    assert_eq!(
+        hits,
+        vec![
+            SearchHit {
+                path: "src/main.rs".into(),
+                score: 0.0
+            },
+            SearchHit {
+                path: "src/lib.rs".into(),
+                score: 0.0
+            },
+        ]
+    );
+}
+
+/// Why: a hit with neither `path` nor `file` cannot be pointed at by the UI —
+/// it must be skipped rather than fabricating an empty path (DOC-39 Slice B).
+#[test]
+fn parse_search_hits_skips_items_with_no_path_or_file() {
+    let (count, hits) =
+        parse_search_hits(r#"{"results":[{"score":0.5},{"path":"src/ok.rs","score":0.1}]}"#);
+    // `count` mirrors the raw array length (matches pre-existing `hit_count`
+    // semantics), while `hits` only carries the pointable ones.
+    assert_eq!(count, Some(2));
+    assert_eq!(
+        hits,
+        vec![SearchHit {
+            path: "src/ok.rs".into(),
+            score: 0.1
+        }]
     );
 }
 

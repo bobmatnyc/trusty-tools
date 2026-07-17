@@ -1,13 +1,15 @@
-//! Tests for `agent_builder` — split out to keep `agent_builder.rs` under the
+//! Tests for `builder` — split out to keep `builder.rs` under the
 //! 500-line hard cap enforced by `scripts/check_line_cap.sh`.
 //!
-//! Why: the implementation file (agent_builder.rs) was approaching its frozen
-//! budget; the #389 regression tests would have pushed it over, so the test
-//! module was extracted here following the same pattern used elsewhere in the
-//! crate (e.g. `delegation_authority_tests.rs`).
+//! Why: the implementation file (originally trusty-mpm's `agent_builder.rs`)
+//! was approaching its frozen budget; the #389 regression tests would have
+//! pushed it over, so the test module was extracted here following the same
+//! pattern used elsewhere in the crate. Moved verbatim to
+//! `trusty-agents-common::agents::builder_tests` alongside the implementation
+//! in the #2892 extraction.
 //! What: all unit and regression tests for [`compose_agent`] and
 //! [`source_chain`], including colon-in-value round-trip checks.
-//! Test: run with `cargo test -p trusty-mpm -- core::agent_builder`.
+//! Test: run with `cargo test -p trusty-agents-common -- agents::builder`.
 
 use super::*;
 use std::fs;

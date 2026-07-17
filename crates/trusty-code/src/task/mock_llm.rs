@@ -44,6 +44,25 @@ pub const MOCK_LLM_ECHO: &str = "echo";
 /// the fan-out shape sees it.
 pub const MOCK_LLM_ECHO_FANOUT: &str = "echo-fanout";
 
+/// The `TCODE_MOCK_LLM` value that selects [`RecallEchoLlmClient`] (DOC-39
+/// Slice C).
+///
+/// Why: neither [`EchoLlmClient`] nor [`FanoutEchoLlmClient`]'s scripts ever
+/// call `recall_session` — Slice C's e2e proof (recalled TEXT + `run_id`
+/// reaching `Event::MemoryRecalled` for a HELD-BACK result) needs the PM to
+/// issue that call against a mock trusty-memory backend, so this is its own
+/// opt-in value, same pattern as [`MOCK_LLM_ECHO_FANOUT`].
+pub const MOCK_LLM_ECHO_RECALL: &str = "echo-recall";
+
+/// The `TCODE_MOCK_LLM` value that selects [`SearchEchoLlmClient`] (DOC-39
+/// Slice B).
+///
+/// Why: neither [`EchoLlmClient`] nor [`FanoutEchoLlmClient`]'s scripts ever
+/// call `search_code` — the mandatory real-wire e2e proof that
+/// `Event::SearchPerformed.hits` carries real per-hit path/score data needs
+/// a script that does.
+pub const MOCK_LLM_ECHO_SEARCH: &str = "echo-search";
+
 /// Build the `Arc<dyn LlmClientTrait>` `task.run` executions share.
 ///
 /// Why: the single seam that decides "real model or offline mock" — kept
@@ -51,8 +70,9 @@ pub const MOCK_LLM_ECHO_FANOUT: &str = "echo-fanout";
 /// once and is easy to find.
 /// What: if [`MOCK_LLM_ENV`] is set to [`MOCK_LLM_ECHO`], returns an
 /// [`EchoLlmClient`]; if set to [`MOCK_LLM_ECHO_FANOUT`] (DOC-39 AC-13),
-/// returns a [`FanoutEchoLlmClient`]. Otherwise builds a real
-/// `DispatchingLlmClient` — routing
+/// returns a [`FanoutEchoLlmClient`]; if set to [`MOCK_LLM_ECHO_SEARCH`]
+/// (DOC-39 Slice B), returns a [`SearchEchoLlmClient`]. Otherwise builds a
+/// real `DispatchingLlmClient` — routing
 /// `bedrock/*` slugs to AWS Bedrock, `fireworks/*` to Fireworks, and everything
 /// else to OpenRouter (#1021 phase 1; #2406). Construction touches no
 /// credentials: the OpenAI-dialect providers resolve their key lazily via the
@@ -67,6 +87,8 @@ pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
     match std::env::var(MOCK_LLM_ENV).ok().as_deref() {
         Some(MOCK_LLM_ECHO) => return Ok(Arc::new(EchoLlmClient::new())),
         Some(MOCK_LLM_ECHO_FANOUT) => return Ok(Arc::new(FanoutEchoLlmClient::new())),
+        Some(MOCK_LLM_ECHO_RECALL) => return Ok(Arc::new(RecallEchoLlmClient::new())),
+        Some(MOCK_LLM_ECHO_SEARCH) => return Ok(Arc::new(SearchEchoLlmClient::new())),
         _ => {}
     }
     Ok(Arc::new(DispatchingLlmClient::new()))
@@ -319,6 +341,178 @@ fn bash_response_named(call_id: &str, command: &str) -> Value {
     })
 }
 
+/// A deterministic, scripted `LlmClientTrait` exercising the PM calling
+/// `recall_session` (DOC-39 Slice C's e2e proof).
+///
+/// Why: [`EchoLlmClient`] and [`FanoutEchoLlmClient`]'s scripts never call
+/// `recall_session`, so neither can drive the wire proof that a HELD-BACK
+/// recall result's actual TEXT (not just its score) reaches
+/// `Event::MemoryRecalled`. This script has the PM call `recall_session`
+/// exactly once, then stop — `tests/recall_content_e2e.rs` pairs it with a
+/// mock trusty-memory backend (`TRUSTY_MEMORY_URL` override) that returns one
+/// huge, high-scored result and one small, lower-scored result so the tool's
+/// own token budget drops the second one whole (mirroring
+/// `tools::recall_session`'s own budget tests) — the held-back case this
+/// slice must prove survives onto the wire.
+/// What: an atomic cursor over a fixed 2-response script:
+///
+/// 1. PM calls `recall_session(query="pkce oauth flow")`.
+/// 2. PM stops with final text.
+///
+/// Running past the script's end returns an `LlmError` rather than panicking.
+/// Test: `task::mock_llm::tests::recall_script_drives_a_single_recall_call`;
+/// exercised end-to-end (as a real subprocess) by
+/// `tests/recall_content_e2e.rs`.
+pub struct RecallEchoLlmClient {
+    cursor: AtomicUsize,
+}
+
+impl RecallEchoLlmClient {
+    /// Construct a fresh client at the start of its script.
+    pub fn new() -> Self {
+        Self {
+            cursor: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for RecallEchoLlmClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for RecallEchoLlmClient {
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        let fixture = match idx {
+            0 => recall_response(),
+            1 => stop_response("pm: recalled what I needed"),
+            _ => {
+                return Err(LlmError::MissingConfig(format!(
+                    "RecallEchoLlmClient script exhausted at call {idx}"
+                )));
+            }
+        };
+        serde_json::from_value(fixture).map_err(|e| {
+            LlmError::MissingConfig(format!(
+                "RecallEchoLlmClient: invalid scripted fixture: {e}"
+            ))
+        })
+    }
+}
+
+/// Turn 1 fixture: the PM calls `recall_session` once.
+fn recall_response() -> Value {
+    json!({
+        "id": "mock-recall",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-recall",
+                    "type": "function",
+                    "function": {
+                        "name": "recall_session",
+                        "arguments": json!({"query": "pkce oauth flow"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}
+    })
+}
+
+/// A deterministic, scripted `LlmClientTrait` exercising the engineer's
+/// `search_code` tool (DOC-39 Slice B's mandatory real-wire e2e proof that
+/// `Event::SearchPerformed.hits` carries real per-hit path/score data, not
+/// just a count).
+///
+/// Why: [`EchoLlmClient`]'s script only ever calls `bash`, so it cannot drive
+/// `search_code` at all. This client's fixed script is otherwise identical
+/// in shape (delegate once, one tool call, two stops) so it composes with
+/// the same daemon-driving harness `tests/task_e2e.rs` already uses.
+/// What: an atomic cursor over a fixed 4-response script:
+///
+/// 1. PM calls `delegate_to_agent(python-engineer, ...)`.
+/// 2. Engineer calls `search_code(query="where does auth live", mode="semantic")`.
+/// 3. Engineer stops with final text.
+/// 4. PM stops with final text.
+///
+/// Running past the script's end returns an `LlmError` rather than
+/// panicking, mirroring [`EchoLlmClient`].
+/// Test: `task::mock_llm::tests::search_script_drives_full_delegation_flow`;
+/// exercised end-to-end (as a real subprocess, against a fake trusty-search
+/// MCP binary) by `tests/search_hits_e2e.rs`.
+pub struct SearchEchoLlmClient {
+    cursor: AtomicUsize,
+}
+
+impl SearchEchoLlmClient {
+    /// Construct a fresh client at the start of its script.
+    pub fn new() -> Self {
+        Self {
+            cursor: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for SearchEchoLlmClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for SearchEchoLlmClient {
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        let fixture = match idx {
+            0 => delegate_response(),
+            1 => search_code_response(),
+            2 => stop_response("engineer: found it"),
+            3 => stop_response("pm: task complete"),
+            _ => {
+                return Err(LlmError::MissingConfig(format!(
+                    "SearchEchoLlmClient script exhausted at call {idx}"
+                )));
+            }
+        };
+        serde_json::from_value(fixture).map_err(|e| {
+            LlmError::MissingConfig(format!(
+                "SearchEchoLlmClient: invalid scripted fixture: {e}"
+            ))
+        })
+    }
+}
+
+/// Turn 2 fixture (search variant): the engineer calls `search_code` instead
+/// of `bash` — the whole reason [`SearchEchoLlmClient`] exists.
+fn search_code_response() -> Value {
+    json!({
+        "id": "mock-search",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-search",
+                    "type": "function",
+                    "function": {
+                        "name": "search_code",
+                        "arguments": json!({"query": "where does auth live", "mode": "semantic"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}
+    })
+}
+
 /// Serializes every test in this crate that sets/reads the process-wide
 /// [`MOCK_LLM_ENV`] var — `cargo test` runs tests in parallel within one
 /// binary, and an unguarded `set_var`/`remove_var` pair would race across
@@ -409,6 +603,69 @@ mod tests {
 
         let turn6 = client.chat(&req).await.expect("turn 6 (pm stop)");
         assert!(turn6.first_tool_calls().is_empty());
+
+        let err = client.chat(&req).await;
+        assert!(err.is_err(), "the script must not silently repeat");
+    }
+
+    /// (DOC-39 Slice C) The recall script must drive exactly the
+    /// recall -> stop shape `tests/recall_content_e2e.rs` relies on.
+    #[tokio::test]
+    async fn recall_script_drives_a_single_recall_call() {
+        let client = RecallEchoLlmClient::new();
+        let req = ChatRequest {
+            model: "mock".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: None,
+        };
+
+        let turn1 = client.chat(&req).await.expect("turn 1");
+        let calls = turn1.first_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "recall_session");
+        assert!(calls[0].function.arguments.contains("pkce"));
+
+        let turn2 = client.chat(&req).await.expect("turn 2 (pm stop)");
+        assert!(turn2.first_tool_calls().is_empty());
+
+        let err = client.chat(&req).await;
+        assert!(err.is_err(), "the script must not silently repeat");
+    }
+
+    /// (DOC-39 Slice B) The search script must drive exactly the
+    /// delegate -> search_code -> stop -> stop shape
+    /// `tests/search_hits_e2e.rs` relies on.
+    #[tokio::test]
+    async fn search_script_drives_full_delegation_flow() {
+        let client = SearchEchoLlmClient::new();
+        let req = ChatRequest {
+            model: "mock".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: None,
+        };
+
+        let turn1 = client.chat(&req).await.expect("turn 1");
+        assert_eq!(
+            turn1.first_tool_calls()[0].function.name,
+            "delegate_to_agent"
+        );
+
+        let turn2 = client.chat(&req).await.expect("turn 2");
+        assert_eq!(turn2.first_tool_calls()[0].function.name, "search_code");
+
+        let turn3 = client.chat(&req).await.expect("turn 3");
+        assert!(turn3.first_tool_calls().is_empty());
+
+        let turn4 = client.chat(&req).await.expect("turn 4");
+        assert!(turn4.first_tool_calls().is_empty());
 
         let err = client.chat(&req).await;
         assert!(err.is_err(), "the script must not silently repeat");

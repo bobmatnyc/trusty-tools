@@ -321,6 +321,26 @@ fn search_telemetry(lane: &str, hit_count: Option<usize>) -> crate::tools::Searc
         lane: lane.to_string(),
         query: "where is auth".to_string(),
         hit_count,
+        hits: vec![],
+        latency_ms: 12,
+    }
+}
+
+/// Build a `SearchTelemetry` carrying real `(path, score)` hits (DOC-39
+/// Slice B), for the test that proves `hits` — not just `hit_count` —
+/// survives `record_search_performed`.
+fn search_telemetry_with_hits(hits: &[(&str, f64)]) -> crate::tools::SearchTelemetry {
+    crate::tools::SearchTelemetry {
+        lane: "semantic".to_string(),
+        query: "where is auth".to_string(),
+        hit_count: Some(hits.len()),
+        hits: hits
+            .iter()
+            .map(|(path, score)| crate::events::SearchHit {
+                path: (*path).to_string(),
+                score: *score,
+            })
+            .collect(),
         latency_ms: 12,
     }
 }
@@ -334,6 +354,8 @@ fn recall_telemetry(results: &[(f64, bool)]) -> crate::tools::RecallTelemetry {
             .map(|(score, injected)| crate::events::RecalledMemory {
                 score: *score,
                 injected: *injected,
+                text: String::new(),
+                run_id: None,
             })
             .collect(),
     }
@@ -373,6 +395,52 @@ async fn record_search_performed_publishes_event() {
                 && hit_count == Some(7)
                 && latency_ms == 12
     ));
+}
+
+/// `record_search_performed` must publish each hit's `path` AND `score` in
+/// `hits`, not just `hit_count` (DOC-39 Slice B) — the search-audit UI's
+/// whole point is knowing WHICH files a search touched.
+///
+/// Why: `hit_count` alone predates this ticket; a regression that keeps
+/// threading `hit_count` but drops `hits` would pass every pre-existing
+/// assertion while still failing the requirement this event exists to serve.
+#[tokio::test]
+async fn record_search_performed_publishes_hits_with_path_and_score() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_search_performed(
+            &session.id,
+            "python-engineer",
+            "eng-1",
+            &search_telemetry_with_hits(&[("src/auth.rs", 0.87), ("src/session/session.rs", 0.52)]),
+        )
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    let Event::SearchPerformed {
+        hits, hit_count, ..
+    } = envelope.event
+    else {
+        panic!("expected SearchPerformed");
+    };
+    assert_eq!(hit_count, Some(2));
+    assert_eq!(
+        hits,
+        vec![
+            crate::events::SearchHit {
+                path: "src/auth.rs".to_string(),
+                score: 0.87
+            },
+            crate::events::SearchHit {
+                path: "src/session/session.rs".to_string(),
+                score: 0.52
+            },
+        ],
+        "each hit's path AND score must survive record_search_performed"
+    );
 }
 
 /// `record_memory_recalled` must publish a `MemoryRecalled` event preserving
@@ -416,11 +484,15 @@ async fn record_memory_recalled_publishes_event() {
         vec![
             crate::events::RecalledMemory {
                 score: 0.9,
-                injected: true
+                injected: true,
+                text: String::new(),
+                run_id: None,
             },
             crate::events::RecalledMemory {
                 score: 0.41,
-                injected: false
+                injected: false,
+                text: String::new(),
+                run_id: None,
             },
         ],
         "both the scores and the injected/held-back split must survive emission"

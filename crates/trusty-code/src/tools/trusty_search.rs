@@ -32,7 +32,8 @@
 //! `tests::is_mcp_error_detects_error_flag`,
 //! `tests::is_stage_not_ready_detects_meta_code`,
 //! `tests::should_lexical_fallback_only_for_stage_not_ready`,
-//! `tests::lexical_params_matches_search_lexical_schema`.
+//! `tests::lexical_params_matches_search_lexical_schema`,
+//! `tests::parse_search_hits_reads_each_lane_shape` (DOC-39 Slice B).
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,7 @@ use tokio::sync::{Mutex, OnceCell};
 use tracing::warn;
 use trusty_common::stdio_mcp_client::StdioMcpClient;
 
+use crate::events::SearchHit;
 use crate::tools::telemetry::{SearchTelemetry, ToolTelemetry};
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
@@ -403,22 +405,53 @@ impl SearchLane {
     }
 }
 
-/// Count the hits in a trusty-search result payload (UI Phase 1).
+/// Parse the hit count AND each hit's path/score from a trusty-search result
+/// payload, in one JSON parse (UI Phase 1; `hits` added DOC-39 Slice B).
 ///
-/// Why: the UI renders "N hits" beside a search, and the count is otherwise
-/// only recoverable by re-parsing the tool's rendered prose.
+/// Why: the UI renders "N hits" beside a search (`hit_count`) and the
+/// search-audit surface needs to know WHICH files those hits were
+/// (`hits`) — both are only recoverable from the same parsed array, so
+/// this walks it once for both rather than re-parsing `text` a second time.
 /// What: every trusty-search lane wraps its payload as a JSON object with an
 /// array under `results`, `hits`, or `matches` — the three keys observed
-/// across the semantic/KG/grep/lexical lanes. Returns `None` when `text` is
-/// not JSON or carries no recognisable array, so an uncountable shape is
-/// reported honestly as "unknown" rather than as a misleading `0`.
-/// Test: `tests::count_hits_reads_each_lane_shape`,
-/// `tests::count_hits_is_none_for_unrecognised_payloads`.
-fn count_hits(text: &str) -> Option<usize> {
-    let body: Value = serde_json::from_str(text).ok()?;
-    ["results", "hits", "matches"]
+/// across the semantic/KG/grep/lexical lanes. Returns `(None, vec![])` when
+/// `text` is not JSON or carries no recognisable array, so an uncountable
+/// shape is reported honestly as "unknown" rather than as a misleading `0`.
+/// Each array item's path is read from `path` (trusty-search's portable
+/// root-relative `CodeChunk` field), falling back to `file` (its absolute
+/// path, and the ONLY path field `grep`'s `GrepMatch` shape carries); an item
+/// with neither is skipped — a hit the UI cannot point at is not worth
+/// reporting. Score is read from `score`, defaulting to `0.0` for shapes
+/// (e.g. `grep`) that carry none at all.
+/// Test: `tests::parse_search_hits_reads_each_lane_shape`,
+/// `tests::parse_search_hits_is_none_for_unrecognised_payloads`,
+/// `tests::parse_search_hits_falls_back_to_file_and_defaults_missing_score`,
+/// `tests::parse_search_hits_skips_items_with_no_path_or_file`.
+fn parse_search_hits(text: &str) -> (Option<usize>, Vec<SearchHit>) {
+    let Ok(body) = serde_json::from_str::<Value>(text) else {
+        return (None, Vec::new());
+    };
+    let Some(items) = ["results", "hits", "matches"]
         .iter()
-        .find_map(|key| body.get(*key).and_then(Value::as_array).map(Vec::len))
+        .find_map(|key| body.get(*key).and_then(Value::as_array))
+    else {
+        return (None, Vec::new());
+    };
+    let hits = items
+        .iter()
+        .filter_map(|item| {
+            let path = item
+                .get("path")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("file").and_then(Value::as_str))?;
+            let score = item.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            Some(SearchHit {
+                path: path.to_string(),
+                score,
+            })
+        })
+        .collect();
+    (Some(items.len()), hits)
 }
 
 /// Build the MCP arguments for `mode`, returning the tool name + params.
@@ -548,10 +581,12 @@ impl ToolExecutor for TrustySearchTool {
         // the query, measured at the moment of return so `latency_ms` covers
         // any transparent retry too.
         let telemetry = |lane: SearchLane, text: &str| {
+            let (hit_count, hits) = parse_search_hits(text);
             ToolTelemetry::Search(SearchTelemetry {
                 lane: lane.label().to_string(),
                 query: parsed.query.clone(),
-                hit_count: count_hits(text),
+                hit_count,
+                hits,
                 latency_ms: started.elapsed().as_millis() as u64,
             })
         };

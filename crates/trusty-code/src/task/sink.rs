@@ -269,6 +269,7 @@ mod tests {
                 lane: "lexical".to_string(),
                 query: "q".to_string(),
                 hit_count: Some(2),
+                hits: vec![],
                 latency_ms: 5,
             }),
         )
@@ -290,6 +291,8 @@ mod tests {
                 results: vec![crate::events::RecalledMemory {
                     score: 0.4,
                     injected: false,
+                    text: "held back".to_string(),
+                    run_id: None,
                 }],
             }),
         )
@@ -322,6 +325,7 @@ mod tests {
                 lane: "semantic".to_string(),
                 query: "q".to_string(),
                 hit_count: None,
+                hits: vec![],
                 latency_ms: 1,
             }),
         )

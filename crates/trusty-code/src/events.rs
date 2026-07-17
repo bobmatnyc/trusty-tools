@@ -91,16 +91,34 @@ pub const UNATTRIBUTED_AGENT: &str = "unknown";
 pub const UNATTRIBUTED_AGENT_ID: &str = "unknown";
 
 /// One memory recalled by `recall_session`, with the flag that says whether
-/// it actually reached the model (UI Phase 1).
+/// it actually reached the model (UI Phase 1; `text`/`run_id` added for
+/// DOC-39 Slice C — the "what memory drove this / what was held back"
+/// context-construction debugging view).
 ///
 /// Why: see [`Event::MemoryRecalled`] — `injected` is the whole point of the
 /// event. `score` rides along because the UI renders it beside the memory
 /// ("41% · held"), and re-deriving it client-side is impossible: it is the
-/// memory daemon's own relevance score.
+/// memory daemon's own relevance score. Before DOC-39 Slice C, `text` was
+/// dropped at this exact boundary: `tools::recall_session::render_results`
+/// always had the recalled content in hand (it is what gets rendered/token-
+/// budgeted), but only the score and injected flag escaped into telemetry —
+/// so a held-back memory could be COUNTED but never READ by the UI, which
+/// defeats the "what was held back" debugging surface's entire point.
 /// What: `score` is trusty-memory's relevance score for the query, verbatim.
 /// `injected` is `true` when the tool's rendered result text included this
-/// result whole, `false` when its token budget dropped it.
-/// Test: `recalled_memory_round_trips_through_json`.
+/// result whole, `false` when its token budget dropped it. `text` is the
+/// recalled memory's raw content (untruncated — the same string
+/// `render_results` reads from `content`), empty string when the source
+/// entry carried no readable content rather than panicking. `run_id` is the
+/// originating run/session identifier the daemon result was tagged with,
+/// when the daemon's response carries one; `None` when absent (the current
+/// `trusty-memory` `memory_recall` response shape does not yet emit this
+/// field — see `docs/specs/trusty-code-harness-ui.md` §5.3 — so `None` is
+/// the expected value today, not a parsing failure). Both new fields are
+/// `#[serde(default)]` so a ring-buffer/transcript entry recorded before this
+/// ticket still deserializes.
+/// Test: `recalled_memory_round_trips_through_json`,
+/// `tools::recall_session::tests::telemetry_carries_recalled_text_and_run_id`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecalledMemory {
     /// trusty-memory's relevance score for this result, as returned.
@@ -108,6 +126,44 @@ pub struct RecalledMemory {
     /// Whether this result entered the model's context (`false` = recalled
     /// but held back by the tool's token budget).
     pub injected: bool,
+    /// The recalled memory's raw text content (DOC-39 Slice C). Empty string
+    /// when the source entry carried no readable `content`.
+    #[serde(default)]
+    pub text: String,
+    /// The originating run/session id the daemon tagged this result with, if
+    /// any (DOC-39 Slice C). `None` when the daemon response carries no such
+    /// field — see the struct docs.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+/// One search hit's path and relevance score, as parsed from a
+/// `search_code` call's underlying trusty-search response (UI "what drove
+/// this" search-audit detail — DOC-39 Slice B).
+///
+/// Why: [`Event::SearchPerformed`]'s `hit_count` tells the UI HOW MANY files
+/// a search touched but not WHICH ones — the audit trail's whole point is
+/// tracing a change back to the exact files that surfaced it, and a bare
+/// count cannot answer "was it this file". `tools::trusty_search` already
+/// walks every hit out of the raw MCP response once to COUNT it; this struct
+/// carries the same per-hit path/score it already has in hand from that SAME
+/// walk, so no second parse pass is needed.
+/// What: `path` is the hit's index-relative path when the lane reports one,
+/// falling back to its absolute path otherwise (see
+/// `tools::trusty_search::parse_search_hits` for exactly which JSON key is
+/// read per lane). `score` is the lane's relevance score reinterpreted as
+/// `f64` (matches `serde_json::Value::as_f64`'s own numeric representation,
+/// regardless of the daemon's internal `f32`/`f64`); it defaults to `0.0`
+/// for lanes (e.g. `grep`) whose hits carry no score at all — a real hit
+/// that is merely unscored, never fabricated data.
+/// Test: `search_hit_round_trips_through_json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// The hit's path, as reported by the trusty-search lane that served it.
+    pub path: String,
+    /// The lane's relevance score for this hit, or `0.0` when the lane
+    /// reports no score (e.g. `grep`).
+    pub score: f64,
 }
 
 /// Real-time event types streamed to UI clients (browser, future Tauri).
@@ -239,7 +295,8 @@ pub enum Event {
 
     // -- Structured retrieval telemetry (UI Phase 1) --
     /// A `search_code` call resolved to a concrete trusty-search lane and
-    /// returned `hit_count` hits in `latency_ms` (UI Phase 1).
+    /// returned `hit_count` hits (each with its `path`/`score` in `hits`) in
+    /// `latency_ms` (UI Phase 1; `hits` added DOC-39 Slice B).
     ///
     /// Why: `ToolStarted`/`ToolFinished` carry only TRUNCATED STRING
     /// PREVIEWS of a search's arguments and rendered result text. The UI's
@@ -247,7 +304,9 @@ pub enum Event {
     /// that drove it — which needs the search's real routed lane, its hit
     /// count, and its cost as DATA, not as a prefix of prose the UI would
     /// have to re-parse. Emitted ALONGSIDE (never instead of) the generic
-    /// tool events, so every existing consumer is unaffected.
+    /// tool events, so every existing consumer is unaffected. `hits` extends
+    /// this the same way: the search-audit UI needs to know WHICH files a
+    /// search touched, not just how many.
     /// What: `lane` is the lane trusty-search ACTUALLY served, which is not
     /// always the mode the model asked for: a `semantic`/`symbol` query that
     /// hits a still-building index transparently retries on the lexical lane
@@ -255,9 +314,13 @@ pub enum Event {
     /// `lane: "lexical"` — see `tools::trusty_search`'s `SearchLane`.
     /// `hit_count` is `None` when the lane served results whose shape this
     /// crate could not count (never a silent zero, which would read as "no
-    /// hits"). `latency_ms` measures the whole tool call, retry included.
+    /// hits"); `hits` is `[]` in that same uncountable case. Both come from
+    /// the SAME parse of the tool's response — see
+    /// `tools::trusty_search::parse_search_hits`. `latency_ms` measures the
+    /// whole tool call, retry included.
     /// Test: `session::registry::registry_tests::record_search_performed_publishes_event`,
-    /// `tools::trusty_search_tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
+    /// `tools::trusty_search_tests::resolved_lane_reports_lexical_when_the_retry_served_it`,
+    /// `search_hit_round_trips_through_json`.
     SearchPerformed {
         session_id: String,
         agent: String,
@@ -269,6 +332,12 @@ pub enum Event {
         lane: String,
         query: String,
         hit_count: Option<usize>,
+        /// Per-hit path + score, in the order the lane returned them
+        /// (DOC-39 Slice B). `#[serde(default)]` — absent on any transcript
+        /// recorded before this field existed, mirroring `agent_id`'s
+        /// old-transcript-compatibility contract.
+        #[serde(default)]
+        hits: Vec<SearchHit>,
         latency_ms: u64,
     },
     /// A `recall_session` call recalled `results` from durable memory, each

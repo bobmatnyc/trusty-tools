@@ -268,6 +268,7 @@ mod tests {
             lane: "lexical".to_string(),
             query: "where is auth".to_string(),
             hit_count: Some(3),
+            hits: vec![],
             latency_ms: 42,
         }));
         assert!(line.contains("[python-engineer]"), "{line}");
@@ -283,10 +284,14 @@ mod tests {
                 crate::events::RecalledMemory {
                     score: 0.9,
                     injected: true,
+                    text: "injected memory".to_string(),
+                    run_id: None,
                 },
                 crate::events::RecalledMemory {
                     score: 0.41,
                     injected: false,
+                    text: "held-back memory".to_string(),
+                    run_id: None,
                 },
             ],
         }));

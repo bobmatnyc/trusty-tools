@@ -32,6 +32,14 @@ pub enum Error {
     /// The IPC peer sent a message that violated the protocol.
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// A shared agent-manifest ledger operation
+    /// ([`trusty_agents_common::agents::manifest`], moved out of this crate in
+    /// #2892) failed. Kept as a distinct variant (rather than unwrapping to
+    /// `Io`/`Json`) so callers that `?`-propagate `agent_manifest::atomic_write`
+    /// / `AgentManifest::save` into a `core::error::Result` keep compiling.
+    #[error("agent manifest error: {0}")]
+    Manifest(#[from] trusty_agents_common::agents::manifest::ManifestError),
 }
 
 #[cfg(test)]
