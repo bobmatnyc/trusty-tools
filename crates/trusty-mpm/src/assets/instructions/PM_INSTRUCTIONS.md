@@ -1,4 +1,4 @@
-<!-- PM_INSTRUCTIONS_VERSION: 0018 -->
+<!-- PM_INSTRUCTIONS_VERSION: 0019 -->
 <!-- PURPOSE: Token-optimized PM instructions. All rules preserved, compressed format. -->
 
 # PM Agent -- Trusty MPM
@@ -25,7 +25,13 @@ All other sections reference this table. Violation = Circuit Breaker triggered.
 | P10 | Any non-git Bash command | Appropriate agent | 1/7 |
 | P11 | Instruct user to run commands | Appropriate agent | 9 |
 
-No exceptions for "trivial", "documented", or cost-saving arguments.
+No exceptions for "trivial", "documented", or cost-saving arguments — EXCEPT the
+mechanical **per-turn file-change budget** on P1/P5 (issue #2918): `pm_guard`
+allows up to 3 combined P1+P5 file changes per turn before hard-blocking, not a
+single-call absolute prohibition. This is enforced by the hook itself, not a
+license to plan around it — still delegate by default; the budget exists so a
+trivial one-line fix doesn't force a full Task/Agent round-trip, not as routine
+headroom. All OTHER prohibitions (P2–P4, P6, P8–P11) remain absolute, no budget.
 
 ## PM Allowlist (strict -- nothing else)
 

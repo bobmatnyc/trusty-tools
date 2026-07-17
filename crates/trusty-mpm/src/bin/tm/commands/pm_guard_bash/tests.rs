@@ -293,6 +293,101 @@ fn evaluate_bash_command_allows_dev_null_redirect() {
     }
 }
 
+// ---- #2745 false-positive instance: 2>/dev/null on a read-only multi-line,
+// multi-segment command (Bob's live hotstats-worktree repro, 2026-07-17) ----
+
+#[test]
+fn evaluate_bash_command_allows_bob_hotstats_dev_null_repro() {
+    // Bob's live repro: a `cd` + `echo` + `ls … 2>/dev/null` composed over a
+    // newline and `&&` was denied by an older deployed pm_guard binary. The
+    // current classifier already treats `2>/dev/null` as a discard sink, not
+    // a file write, across the whole (multi-segment, multi-line) command —
+    // this locks that behaviour in as a permanent regression test.
+    let cmd = "cd /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.base/.claude/worktrees/tm-hotstats-product-poc-01\necho \"=== docs tree ===\" && ls docs docs/provenance 2>/dev/null";
+    assert_eq!(
+        evaluate_bash_command(cmd),
+        None,
+        "read-only cd/echo/ls with 2>/dev/null must be allowed"
+    );
+}
+
+#[test]
+fn evaluate_bash_command_allows_more_dev_null_and_fd_dup_shapes() {
+    // The task's explicit list of read-only redirection shapes that must
+    // never trip the edit heuristic.
+    for cmd in [
+        "ls docs 2>/dev/null",
+        "cargo check 2>&1",
+        "which rustc >/dev/null",
+        "which rustc &>/dev/null",
+        "ls a b 2>/dev/null && echo done",
+    ] {
+        assert_eq!(
+            evaluate_bash_command(cmd),
+            None,
+            "expected allow for read-only redirection shape: {cmd:?}"
+        );
+    }
+}
+
+// ---- #2918: content-aware delegation routing hint extraction -------------
+
+#[test]
+fn extract_shell_edit_target_from_redirection() {
+    assert_eq!(
+        extract_shell_edit_target("echo 'code' > src/lib.rs"),
+        Some("src/lib.rs".to_string())
+    );
+    assert_eq!(
+        extract_shell_edit_target("printf x >> docs/notes.md"),
+        Some("docs/notes.md".to_string())
+    );
+}
+
+#[test]
+fn extract_shell_edit_target_from_trailing_sed_awk_patch_arg() {
+    assert_eq!(
+        extract_shell_edit_target("sed -i s/a/b/ app/main.py"),
+        Some("app/main.py".to_string())
+    );
+    assert_eq!(
+        extract_shell_edit_target("patch -p1 web/App.tsx"),
+        Some("web/App.tsx".to_string())
+    );
+    assert_eq!(
+        extract_shell_edit_target("git apply my.patch"),
+        Some("my.patch".to_string())
+    );
+}
+
+#[test]
+fn extract_shell_edit_target_none_when_unresolvable() {
+    // A verb with no plausible trailing target (not sed/awk/patch/git-apply)
+    // yields no hint — caller falls back to generic.
+    assert_eq!(extract_shell_edit_target("git status"), None);
+    // A trailing flag with nothing after it yields no hint either.
+    assert_eq!(extract_shell_edit_target("sed -i"), None);
+}
+
+#[test]
+fn extract_shell_edit_target_best_effort_on_script_only_sed() {
+    // `sed -n '1,5p'` has no target file — the trailing-token heuristic is
+    // best-effort only (it never affects allow/deny, only the suggested
+    // delegate name) and may pick up the script text itself here.
+    assert_eq!(
+        extract_shell_edit_target("sed -n '1,5p'"),
+        Some("'1,5p'".to_string())
+    );
+}
+
+#[test]
+fn extract_shell_edit_target_ignores_dev_null_and_fd_dup() {
+    // These are not file-write redirects, so no target — falls through to
+    // the trailing-token heuristic (which also yields nothing here).
+    assert_eq!(extract_shell_edit_target("ls docs 2>/dev/null"), None);
+    assert_eq!(extract_shell_edit_target("cargo check 2>&1"), None);
+}
+
 #[test]
 fn evaluate_bash_command_denies_hidden_substitution_verb() {
     // A forbidden verb inside a command substitution must be caught.

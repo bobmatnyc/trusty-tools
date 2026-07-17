@@ -303,6 +303,111 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
     None
 }
 
+/// Best-effort target path for a shell command already classified as a
+/// [`SHELL_EDIT_REASON`] deny, for content-aware delegation routing (issue
+/// #2918).
+///
+/// Why: `pm_guard`'s denial message used to hardcode "delegate to
+/// rust-engineer" no matter what file the shell command actually touched.
+/// Routing by content type needs the target path; unlike the Edit/Write tools
+/// (which name it directly in `tool_input.file_path`), a Bash command only has
+/// its target embedded in the command text itself.
+/// What: scans each composition segment ([`split_shell_segments`]) for either
+/// a real file-write redirect ([`redirection_target`]) or, for a
+/// sed/awk-family/`patch`/`git apply` segment, the command's trailing
+/// non-flag token ([`trailing_file_token`]) — the conventional position of the
+/// target file for those verbs. Returns the first match found; `None` when no
+/// segment yields a plausible target (the caller then falls back to the
+/// generic delegation hint). This is a best-effort HINT only — it never
+/// affects the allow/deny decision, only which agent name a denial message
+/// suggests.
+/// Test: `extract_shell_edit_target_*`.
+pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
+    for segment in split_shell_segments(command) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(target) = redirection_target(trimmed) {
+            return Some(target);
+        }
+        if let Some(program) = first_command_token(trimmed) {
+            let is_sed_awk_family =
+                matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
+            let is_git_apply =
+                program == "git" && shell_lex::git_subcommand(trimmed).as_deref() == Some("apply");
+            if (is_sed_awk_family || is_git_apply)
+                && let Some(target) = trailing_file_token(trimmed)
+            {
+                return Some(target);
+            }
+        }
+    }
+    None
+}
+
+/// The real file-write redirect target in `command`, if any (owned-string
+/// sibling of [`has_file_write_redirection`], for routing-hint extraction
+/// rather than a pure yes/no classification).
+///
+/// What: same scan rules as [`has_file_write_redirection`] — skips fd-dups
+/// (`>&`, `2>&1`) and `/dev/null` discards — but returns the target token
+/// itself the first time a real file-write redirect is found, instead of a
+/// bool.
+/// Test: `extract_shell_edit_target_from_redirection`.
+fn redirection_target(command: &str) -> Option<String> {
+    let scan = QuoteScan::new(command);
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if scan.balanced && !scan.is_unquoted(i) {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'>' {
+            let mut j = i + 1;
+            if j < bytes.len() && bytes[j] == b'>' {
+                j += 1;
+            }
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'&' {
+                i = j + 1;
+                continue;
+            }
+            let start = j;
+            while j < bytes.len() && !matches!(bytes[j], b' ' | b'>' | b'<' | b'|' | b';' | b'&') {
+                j += 1;
+            }
+            let target = &command[start..j];
+            if target == "/dev/null" || target.is_empty() {
+                i = j;
+                continue;
+            }
+            return Some(target.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The trailing non-flag whitespace-separated token of `command`.
+///
+/// Why: `sed -i s/a/b/ file.rs`, `patch -p1 file.diff`, and `git apply
+/// my.patch` all conventionally place the target file last; this is the cheap
+/// heuristic [`extract_shell_edit_target`] uses for those verbs.
+/// What: the last `split_whitespace` token, unless it starts with `-` (an
+/// option flag with nothing after it) in which case there is no plausible
+/// target.
+fn trailing_file_token(command: &str) -> Option<String> {
+    command
+        .split_whitespace()
+        .next_back()
+        .filter(|t| !t.starts_with('-'))
+        .map(str::to_string)
+}
+
 /// Whether `command` redirects output to a *file* (a filesystem write), as
 /// opposed to an fd-duplication like `2>&1` / `>&2`.
 ///
