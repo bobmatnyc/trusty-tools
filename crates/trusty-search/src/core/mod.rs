@@ -7,6 +7,7 @@ pub mod corpus;
 pub mod corpus_recovery;
 pub mod embed;
 pub mod entity;
+pub mod extract;
 pub mod git;
 pub mod indexer;
 pub mod memguard;
@@ -28,6 +29,9 @@ pub use chunker::{chunk_ast, chunk_text, ChunkType, RawChunk};
 pub use classifier::{QueryClassifier, QueryIntent};
 pub use embed::{Embedder, FastEmbedder};
 pub use entity::{extract_entities, EdgeKind, EntityExtractor, EntityType, RawEntity};
+pub use extract::{
+    extract_text, is_extractable_ext, read_content, ExtractError, Extracted, MAX_OFFICE_FILE_BYTES,
+};
 pub use indexer::{CodeChunk, CodeIndexer};
 pub use memory_policy::{
     resolve_coreml_batch_size, resolve_coreml_tripwire_mb, MemoryPolicy, MemoryTier,

@@ -486,7 +486,9 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
     let read_futs = batch.iter().map(|path| {
         let path = path.clone();
         async move {
-            let content = tokio::fs::read_to_string(&path).await;
+            // Issue #2923: pdf/docx/xls/xlsx/xlsm route through the office
+            // document extractor instead of being treated as UTF-8 text.
+            let content = crate::core::extract::read_content(&path).await;
             (path, content)
         }
     });

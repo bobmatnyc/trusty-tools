@@ -204,10 +204,14 @@ async fn handle_modified(
         return;
     }
 
-    let content = match tokio::fs::read_to_string(path).await {
+    // Issue #2923: pdf/docx/xls/xlsx/xlsm route through the office document
+    // extractor instead of being treated as UTF-8 text — mirrors
+    // `service::reindex::batch`'s dispatch so the watcher and the
+    // reindex/ingest path behave identically for these formats.
+    let content = match crate::core::extract::read_content(path).await {
         Ok(s) => s,
         Err(err) => {
-            tracing::debug!(?err, ?path, "skip unreadable file");
+            tracing::debug!(%err, ?path, "skip unreadable file");
             return;
         }
     };
@@ -554,6 +558,60 @@ mod tests {
         assert!(
             tracker.is_empty().await,
             "no files should be tracked after the watcher was stopped"
+        );
+    }
+
+    /// Issue #2923: writing a `.docx` inside a watched directory must be
+    /// indexed via the office-document extractor — the watcher path must not
+    /// diverge from the reindex/ingest path (`service::reindex::batch`) that
+    /// already routes these extensions through `core::extract`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modified_docx_file_triggers_indexing_via_extractor() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
+        let tracker = IndexedFiles::new();
+
+        let _task = spawn_watch_loop(dir.path(), Arc::clone(&indexer), tracker.clone())
+            .expect("watch loop starts");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Minimal valid docx: a zip containing just word/document.xml with
+        // one paragraph — enough for `core::extract::docx::extract` to
+        // recover text (see `core::extract::docx` for the full fixture
+        // pattern; kept minimal here since only the watcher dispatch is
+        // under test, not extraction correctness).
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Watched document paragraph.</w:t></w:r></w:p></w:body></w:document>"#;
+        let mut docx_bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut docx_bytes);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("word/document.xml", opts).unwrap();
+            zip.write_all(document_xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let file = dir.path().join("memo.docx");
+        tokio::fs::write(&file, &docx_bytes)
+            .await
+            .expect("write docx");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if indexer.read().await.chunk_count() > 0 {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("docx was never indexed via the watcher path");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert!(
+            tracker.len().await >= 1,
+            "expected the docx to be tracked after indexing"
         );
     }
 }

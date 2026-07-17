@@ -1881,3 +1881,152 @@ fn inprocess_embedder_flag_isolated_across_scenarios() {
         "Scenario B: second consecutive reset must leave flag false (idempotent)"
     );
 }
+
+// ── Issue #2923: end-to-end office document indexing ─────────────────────
+
+/// Write a minimal single-page PDF containing `text` at `path`, with a
+/// byte-accurate `xref` table (mirrors `core::extract::pdf`'s test fixture).
+fn write_minimal_pdf(path: &std::path::Path, text: &str) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut offsets: Vec<usize> = Vec::with_capacity(5);
+    buf.extend_from_slice(b"%PDF-1.4\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> \
+          /MediaBox [0 0 200 200] /Contents 5 0 R >>\nendobj\n",
+    );
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    );
+    offsets.push(buf.len());
+    let stream = format!("BT /F1 24 Tf 10 100 Td ({text}) Tj ET");
+    buf.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            stream.len(),
+            stream
+        )
+        .as_bytes(),
+    );
+    let xref_start = buf.len();
+    let mut xref = String::from("xref\n0 6\n0000000000 65535 f \n");
+    for off in &offsets {
+        xref.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    buf.extend_from_slice(xref.as_bytes());
+    buf.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF").as_bytes(),
+    );
+    fs::write(path, buf).unwrap();
+}
+
+/// Write a minimal `.docx` (a zip containing only `word/document.xml`) at
+/// `path`, with one paragraph containing `text`.
+fn write_minimal_docx(path: &std::path::Path, text: &str) {
+    use std::io::Write as _;
+    let document_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+    );
+    let mut buf = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut buf);
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("word/document.xml", opts).unwrap();
+        zip.write_all(document_xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    fs::write(path, buf).unwrap();
+}
+
+/// Write a minimal single-sheet `.xlsx` at `path` with one data row
+/// containing `cell_text`.
+fn write_minimal_xlsx(path: &std::path::Path, cell_text: &str) {
+    use std::io::Write as _;
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+    let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let sheet_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{cell_text}</t></is></c></row></sheetData></worksheet>"#
+    );
+
+    let mut buf = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut buf);
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("[Content_Types].xml", opts).unwrap();
+        zip.write_all(content_types.as_bytes()).unwrap();
+        zip.start_file("_rels/.rels", opts).unwrap();
+        zip.write_all(root_rels.as_bytes()).unwrap();
+        zip.start_file("xl/workbook.xml", opts).unwrap();
+        zip.write_all(workbook_xml.as_bytes()).unwrap();
+        zip.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();
+        zip.write_all(workbook_rels.as_bytes()).unwrap();
+        zip.start_file("xl/worksheets/sheet1.xml", opts).unwrap();
+        zip.write_all(sheet_xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    fs::write(path, buf).unwrap();
+}
+
+/// End-to-end: a directory containing one PDF, one DOCX, and one XLSX (plus a
+/// normal `.rs` source file) is reindexed, and every one of the four files'
+/// distinctive content is retrievable via the lexical (BM25) search lane.
+///
+/// Why: this is the acceptance test for issue #2923 — the walker, the
+/// office-document extractor, and the reindex/ingest batch pipeline
+/// (`service::reindex::batch::prepare_batch_payload` →
+/// `crate::core::extract::read_content`) must all cooperate to turn office
+/// documents into searchable chunks, not just compile.
+/// What: writes the four fixtures, runs a full reindex via
+/// `spawn_reindex_awaitable`, then issues one `SearchStage::Lexical` query
+/// per document's distinctive term and asserts each returns a hit.
+/// Test: this test.
+#[tokio::test]
+async fn office_documents_are_indexed_and_lexically_searchable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    write_minimal_pdf(&root.join("report.pdf"), "AlphaPdfMarker");
+    write_minimal_docx(&root.join("memo.docx"), "BravoDocxMarker paragraph text.");
+    write_minimal_xlsx(&root.join("budget.xlsx"), "CharlieXlsxMarker");
+    fs::write(root.join("main.rs"), "fn delta_source_marker() {}\n").unwrap();
+
+    let handle = make_handle_with_flag("office-docs-test", root.clone(), false);
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+    let idx = handle.indexer.read().await;
+    for (marker, source) in [
+        ("AlphaPdfMarker", "report.pdf"),
+        ("BravoDocxMarker", "memo.docx"),
+        ("CharlieXlsxMarker", "budget.xlsx"),
+        ("delta_source_marker", "main.rs"),
+    ] {
+        let results = idx
+            .search(&crate::core::indexer::SearchQuery {
+                text: marker.to_string(),
+                top_k: 5,
+                expand_graph: false,
+                compact: false,
+                stage: Some(crate::core::indexer::SearchStage::Lexical),
+                ..Default::default()
+            })
+            .await
+            .expect("search");
+        assert!(
+            results.iter().any(|c| c.content.contains(marker)),
+            "{source}: expected a lexical hit for {marker:?}, got: {results:?}"
+        );
+    }
+}

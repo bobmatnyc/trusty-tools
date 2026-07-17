@@ -15,4 +15,4 @@ crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	1218
 crates/trusty-mpm/src/daemon/mcp_backend.rs	564
 crates/trusty-mpm/src/runtime/claude_code.rs	1616
 crates/trusty-search/src/main.rs	666
-crates/trusty-search/src/service/walker.rs	1116
+crates/trusty-search/src/service/walker.rs	1167
