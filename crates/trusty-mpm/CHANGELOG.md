@@ -5,6 +5,16 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.19.22] — 2026-07-17
+
+### Added
+
+- agent-bundled skills mechanism (DOC-42, [`docs/specs/agent-bundled-skills.md`](../../../docs/specs/agent-bundled-skills.md)): agents declare a `skills:` frontmatter list (block- and inline-style YAML both parse), the deploy pipeline co-deploys each referenced skill alongside its owning agent, `tm doctor` gains two new checks (`agent_skills` for dangling skill references, can Warn; `agent_skills_prose_hints`, always informational) bringing the doctor suite to 15 checks, and `tm agent list` / `tm agent show <agent>` surface each agent's resolved skill tier in the CLI. Per-agent deploy-failure isolation: `deploy_agents_filtered` no longer aborts the whole roster on one agent's compose failure — it logs the failure, records it in `DeployResult.failed`, and continues deploying the rest of the roster (closes [#2889](https://github.com/bobmatnyc/trusty-tools/issues/2889)) ([#2906](https://github.com/bobmatnyc/trusty-tools/pull/2906)) ([`4e4a2b9`](https://github.com/bobmatnyc/trusty-tools/commit/4e4a2b993547afef8b15bf29365163186a93f14f))
+
+### Fixed
+
+- restore code-critic's upstream review content as two bundled skills — `code-review-standards` (severity taxonomy, 80% confidence filter, APPROVE/WARN/BLOCK verdict protocol) and `contract-driven-testing` (three-level test pyramid derived from Code Contracts) — with the `code-critic` agent's `skills:` frontmatter updated to reference both (closes [#2890](https://github.com/bobmatnyc/trusty-tools/issues/2890)) ([#2900](https://github.com/bobmatnyc/trusty-tools/pull/2900)) ([`5214cd7`](https://github.com/bobmatnyc/trusty-tools/commit/5214cd700a48f4f688f8d596a40b822a37a6df4b))
+
 ## [Unreleased]
 
 ### Added
