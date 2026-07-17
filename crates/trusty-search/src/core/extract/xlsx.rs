@@ -11,6 +11,18 @@
 //! which handles xls/xlsx/xlsm (and ods) uniformly, and walks
 //! `Reader::worksheets()`.
 //!
+//! RESIDUAL RISK (zip-bomb, documented per review of PR #2932 / issue #2923):
+//! unlike the docx path (which bounds decompression via
+//! `docx::MAX_DOCUMENT_XML_BYTES`), calamine decompresses sheet XML
+//! internally and exposes no pre-decompression size check or bounded-reader
+//! seam to interpose on — a crafted spreadsheet under the 10 MiB
+//! `MAX_OFFICE_FILE_BYTES` container cap could still expand to a large
+//! in-memory sheet model before `MAX_EXTRACTED_TEXT_BYTES` truncation runs
+//! post-hoc in `extract_text`. Mitigations in place: the 10 MiB container
+//! cap, the [`EXTRACT_TIMEOUT`](super::EXTRACT_TIMEOUT) wall-clock bound on
+//! the blocking-pool extraction, and the post-hoc extracted-text cap. A
+//! calamine-level guard is tracked on issue #2923.
+//!
 //! Test: `test_extracts_single_sheet`, `test_extracts_multiple_sheets_as_sections`,
 //! `test_not_a_workbook_errors`.
 

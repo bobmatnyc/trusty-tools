@@ -66,6 +66,22 @@ pub const MAX_OFFICE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// Test: `test_extract_text_truncates_oversized_output`.
 pub const MAX_EXTRACTED_TEXT_BYTES: usize = 5 * 1024 * 1024;
 
+/// Wall-clock budget for a single file's extraction on the blocking pool.
+///
+/// Why: a pathological input (e.g. a PDF that sends `pdf-extract` into a
+/// quadratic parse) would otherwise pin a `spawn_blocking` pool thread
+/// forever, and watch-triggered re-extraction of the same file compounds the
+/// leak until the pool starves. 30s is far beyond any legitimate 10 MiB
+/// office document while still bounding how long an ingest slot can stall.
+/// What: enforced in [`read_content`] via `tokio::time::timeout`; on expiry
+/// the file is treated exactly like an extraction failure (skip + log at the
+/// call sites). NOTE: `spawn_blocking` tasks cannot be cancelled — the
+/// abandoned thread runs to completion in the background; the timeout bounds
+/// pipeline stalling, not the thread itself.
+/// Test: `test_run_extract_with_timeout_times_out`,
+/// `test_run_extract_with_timeout_passes_through_success`.
+pub const EXTRACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Return `true` when `ext` (no leading dot, any case) is a format
 /// [`extract_text`] can handle.
 ///
@@ -151,7 +167,9 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
 /// (issue #2923) was exactly that watch_loop's `read_to_string` assumption
 /// diverged from what a format-aware ingest path would need.
 /// What: dispatches on extension. Extraction runs on `tokio::task::spawn_blocking`
-/// since `pdf-extract`/`calamine`/`zip` are synchronous parsers; a non-fatal
+/// since `pdf-extract`/`calamine`/`zip` are synchronous parsers, bounded by
+/// [`EXTRACT_TIMEOUT`] (expiry is reported as an ordinary extraction error, so
+/// both call sites skip + log it); a non-fatal
 /// extraction warning (e.g. a likely-scanned PDF) is logged via `tracing::warn!`
 /// rather than propagated as an error — the file is still indexed with
 /// whatever text (possibly none) was recovered. Plain-text extensions fall
@@ -176,14 +194,38 @@ pub async fn read_content(path: &Path) -> Result<String, String> {
 
     let owned = path.to_path_buf();
     let path_str = owned.display().to_string();
-    let extracted = tokio::task::spawn_blocking(move || extract_text(&owned))
-        .await
-        .map_err(|e| format!("extract task panicked: {e}"))?
-        .map_err(|e| e.to_string())?;
+    let extracted = run_extract_with_timeout(move || extract_text(&owned), EXTRACT_TIMEOUT).await?;
     if let Some(warning) = extracted.warning {
         tracing::warn!(path = %path_str, %warning, "office document extraction warning");
     }
     Ok(extracted.text)
+}
+
+/// Run a synchronous extraction closure on the blocking pool with a wall-clock
+/// timeout.
+///
+/// Why: isolates the timeout/panic-containment plumbing from [`read_content`]
+/// so the timeout path is unit-testable with a deliberately slow closure
+/// instead of needing a real pathological document. Preserves the
+/// `JoinError -> Err(String)` panic-containment semantics: a panicking parser
+/// (pdf-extract has known panic paths on malformed input) is contained as an
+/// error, never propagated.
+/// What: `tokio::time::timeout` around `spawn_blocking(f)`. Timeout expiry
+/// and task panic both map to `Err(String)`, indistinguishable from an
+/// extraction error to callers (skip + log). See [`EXTRACT_TIMEOUT`]'s docs
+/// for the cannot-cancel-blocking-thread caveat.
+/// Test: `test_run_extract_with_timeout_times_out`,
+/// `test_run_extract_with_timeout_passes_through_success`.
+async fn run_extract_with_timeout<F>(f: F, limit: std::time::Duration) -> Result<Extracted, String>
+where
+    F: FnOnce() -> Result<Extracted, ExtractError> + Send + 'static,
+{
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(f)).await {
+        Err(_elapsed) => Err(format!("extraction timed out after {limit:?}")),
+        Ok(join) => join
+            .map_err(|e| format!("extract task panicked: {e}"))?
+            .map_err(|e| e.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -210,22 +252,75 @@ mod tests {
 
     #[test]
     fn test_extract_text_truncates_oversized_output() {
-        // Build an Extracted directly rather than a real oversized file — the
-        // truncation logic in `extract_text` only runs on the dispatch
-        // result, so exercise it via a format whose extractor we fully
-        // control: reuse docx's paragraph parser with a huge single run.
-        let big = "x".repeat(MAX_EXTRACTED_TEXT_BYTES + 10);
-        let mut extracted = Extracted {
-            text: big,
-            warning: None,
-        };
-        if extracted.text.len() > MAX_EXTRACTED_TEXT_BYTES {
-            let mut cut = MAX_EXTRACTED_TEXT_BYTES;
-            while cut > 0 && !extracted.text.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            extracted.text.truncate(cut);
+        // Drive a REAL oversized extraction end-to-end through extract_text
+        // (not a re-implementation of the truncation loop): a docx whose
+        // single run exceeds MAX_EXTRACTED_TEXT_BYTES of text. DEFLATE keeps
+        // the on-disk container tiny (well under MAX_OFFICE_FILE_BYTES) and
+        // the document.xml stays under docx's 50 MiB decompression cap, so
+        // only the extracted-text cap can be the limiting factor here.
+        use std::io::Write;
+        let big_run = "x".repeat(MAX_EXTRACTED_TEXT_BYTES + 4096);
+        let document_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{big_run}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file("word/document.xml", opts).unwrap();
+            zip.write_all(document_xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
         }
-        assert!(extracted.text.len() <= MAX_EXTRACTED_TEXT_BYTES);
+        assert!(
+            (buf.len() as u64) < MAX_OFFICE_FILE_BYTES,
+            "fixture container must stay under the office file cap"
+        );
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("huge.docx");
+        std::fs::write(&path, buf).unwrap();
+
+        let extracted = extract_text(&path).expect("extraction must succeed");
+        assert!(
+            extracted.text.len() <= MAX_EXTRACTED_TEXT_BYTES,
+            "extracted text must be truncated to the cap (got {})",
+            extracted.text.len()
+        );
+        assert!(
+            extracted.text.starts_with("xxx"),
+            "truncation must keep the leading content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_extract_with_timeout_times_out() {
+        let result = run_extract_with_timeout(
+            || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                Ok(Extracted {
+                    text: "too late".to_string(),
+                    warning: None,
+                })
+            },
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        let err = result.expect_err("a stalled extraction must time out");
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_run_extract_with_timeout_passes_through_success() {
+        let result = run_extract_with_timeout(
+            || {
+                Ok(Extracted {
+                    text: "ok".to_string(),
+                    warning: None,
+                })
+            },
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(result.expect("fast extraction must succeed").text, "ok");
     }
 }

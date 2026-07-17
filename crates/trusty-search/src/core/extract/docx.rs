@@ -28,10 +28,28 @@ use super::{ExtractError, Extracted};
 /// package convention.
 const DOCUMENT_XML_PATH: &str = "word/document.xml";
 
+/// Cap on the UNCOMPRESSED size of `word/document.xml` (bytes).
+///
+/// Why: `MAX_OFFICE_FILE_BYTES` caps only the compressed container on disk;
+/// DEFLATE ratios can reach ~1000:1, so without a decompressed-size bound a
+/// crafted ~10 MiB `.docx` (a zip bomb) could expand to multi-GB in memory
+/// before the post-hoc `MAX_EXTRACTED_TEXT_BYTES` truncation in
+/// `extract_text` ever runs — one hostile file in a watched directory would
+/// OOM the daemon. 50 MiB of XML gives ~10x markup overhead headroom over
+/// the 5 MiB extracted-text cap while keeping worst-case memory bounded.
+/// What: enforced twice in [`extract`] — the zip entry's declared
+/// uncompressed size is rejected up front, AND the reader is wrapped in
+/// `Read::take` so a lying size field cannot bypass the bound.
+/// Test: `test_oversized_document_xml_rejected_by_declared_size`,
+/// `test_bounded_read_rejects_underdeclared_entry`.
+const MAX_DOCUMENT_XML_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Extract paragraph text from a `.docx` file.
 ///
-/// Why/What: see module docs.
-/// Test: `test_extracts_paragraphs_preserving_breaks`.
+/// Why/What: see module docs. Decompression is bounded by
+/// [`MAX_DOCUMENT_XML_BYTES`] (zip-bomb defence; see that constant's docs).
+/// Test: `test_extracts_paragraphs_preserving_breaks`,
+/// `test_oversized_document_xml_rejected_by_declared_size`.
 pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
     let file = std::fs::File::open(path).map_err(|source| ExtractError::Io {
         path: path.display().to_string(),
@@ -39,17 +57,47 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
     })?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| ExtractError::Docx(e.to_string()))?;
 
-    let mut xml = String::new();
-    archive
+    let entry = archive
         .by_name(DOCUMENT_XML_PATH)
-        .map_err(|e| ExtractError::Docx(format!("{DOCUMENT_XML_PATH}: {e}")))?
-        .read_to_string(&mut xml)
-        .map_err(|e| ExtractError::Docx(e.to_string()))?;
+        .map_err(|e| ExtractError::Docx(format!("{DOCUMENT_XML_PATH}: {e}")))?;
+    let declared = entry.size();
+    let xml = read_entry_bounded(entry, declared, MAX_DOCUMENT_XML_BYTES)?;
 
     Ok(Extracted {
         text: paragraphs_from_document_xml(&xml)?,
         warning: None,
     })
+}
+
+/// Read a zip entry to a `String`, refusing to decompress past `cap` bytes.
+///
+/// Why: the zip-bomb defence must hold even when the entry's central-directory
+/// size field lies, so the declared-size check alone is not enough — the
+/// actual decompressed byte stream is also hard-capped via `Read::take`.
+/// What: rejects when the entry DECLARES (`declared`) more than `cap`
+/// uncompressed bytes; otherwise reads at most `cap + 1` bytes and rejects if
+/// the stream exceeds `cap` (i.e. the declared size was false). Content must
+/// be valid UTF-8. Generic over `Read` so the lying-size path is unit-testable
+/// without crafting a malicious zip.
+/// Test: `test_oversized_document_xml_rejected_by_declared_size`,
+/// `test_bounded_read_rejects_underdeclared_entry`.
+fn read_entry_bounded<R: Read>(entry: R, declared: u64, cap: u64) -> Result<String, ExtractError> {
+    if declared > cap {
+        return Err(ExtractError::Docx(format!(
+            "{DOCUMENT_XML_PATH} declares {declared} uncompressed bytes, over the {cap} byte cap"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(declared as usize);
+    entry
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ExtractError::Docx(e.to_string()))?;
+    if bytes.len() as u64 > cap {
+        return Err(ExtractError::Docx(format!(
+            "{DOCUMENT_XML_PATH} decompressed past the {cap} byte cap (declared {declared})"
+        )));
+    }
+    String::from_utf8(bytes).map_err(|e| ExtractError::Docx(e.to_string()))
 }
 
 /// Parse `word/document.xml` content into paragraph text, separated by a
@@ -145,6 +193,42 @@ mod tests {
         // Paragraph break: the two paragraphs are separated by a blank line.
         assert!(extracted.text.contains("Hello world.\n\nSecond paragraph."));
         assert!(extracted.warning.is_none());
+    }
+
+    #[test]
+    fn test_paragraphs_from_document_xml_basic() {
+        let xml = format!(
+            r#"<w:document {NS}><w:body><w:p><w:r><w:t>Just one paragraph.</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let text = paragraphs_from_document_xml(&xml).unwrap();
+        assert_eq!(text.trim(), "Just one paragraph.");
+    }
+
+    #[test]
+    fn test_oversized_document_xml_rejected_by_declared_size() {
+        // declared size over the cap must be rejected BEFORE any decompression.
+        let data = b"whatever";
+        let result = read_entry_bounded(std::io::Cursor::new(&data[..]), 1000, 100);
+        let err = result.expect_err("declared size over cap must error");
+        assert!(err.to_string().contains("over the 100 byte cap"), "{err}");
+    }
+
+    #[test]
+    fn test_bounded_read_rejects_underdeclared_entry() {
+        // A lying size field (declares under the cap, actually decompresses
+        // past it) must still be stopped by the Read::take hard bound.
+        let data = vec![b'x'; 200];
+        let result = read_entry_bounded(std::io::Cursor::new(data), 50, 100);
+        let err = result.expect_err("stream past cap must error");
+        assert!(err.to_string().contains("decompressed past"), "{err}");
+    }
+
+    #[test]
+    fn test_bounded_read_accepts_within_cap() {
+        let data = b"hello world";
+        let text =
+            read_entry_bounded(std::io::Cursor::new(&data[..]), data.len() as u64, 100).unwrap();
+        assert_eq!(text, "hello world");
     }
 
     #[test]
