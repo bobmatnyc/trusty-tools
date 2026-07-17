@@ -137,6 +137,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **P1: the re-delegation cap counted ALL delegations, not retries — killing
+  runs before the build started.** `MAX_REDELEGATIONS = 3` was documented as
+  bounding *retries after failure*, but the counter incremented on every
+  engineer invocation run-wide and was never reset per call, so a *successful*
+  delegation permanently consumed budget a later one then lacked. A PM using
+  delegation for legitimate reconnaissance — the normal PM shape — was silently
+  guillotined: the 4th call was refused **without the inner runner ever being
+  invoked** (zero engineer turns, no code written), and the latched signal then
+  fired `run_task`'s `with_stop_signal`, halting the PM loop at the next turn
+  boundary and making it unrecoverable by design. L4 bake-off run-6 issued 3
+  read-only recon delegations and had its 4th — the actual build — refused,
+  ending `partial`/exit 6 with 0/9 tests and 0/5 deliverables; runs 3/4/5
+  succeeded only by luck of issuing one fewer recon call. Measured cost: 2-in-7
+  total-loss runs caused by the harness rather than the model. The cap now
+  counts retries: `MAX_REDELEGATIONS` is checked against a counter **local to
+  each delegation**, reset at loop entry, so a successful delegation never
+  spends a later one's budget. Exhausting it is now **recoverable** — it no
+  longer stops the PM loop, matching the precedent set by #2683/#2805's
+  post-completion refusal. The cap's actual purpose is preserved by a new
+  run-wide `MAX_ENGINEER_INVOCATIONS = 12` ceiling (4× the per-delegation
+  budget): a genuinely failing engineer stays bounded, and only that ceiling —
+  a condition no fresh delegation could clear — latches the loop-stopping
+  signal. Not a #2805 regression; #2805 fixed the *symptom* and remains correct
+  ([#2852](https://github.com/bobmatnyc/trusty-tools/issues/2852))
+- **The re-delegation cap was completely silent.** It emitted no log line
+  anywhere — run-6's stderr was 5 lines with no mention of it — so the only
+  evidence a run had been killed was a label buried in the report's `task`
+  field, discoverable only by cross-run forensic comparison. Both the
+  per-delegation retry exhaustion and the run-wide ceiling now `warn!` (to
+  stderr, never stdout) naming the attempt count and, for the ceiling, that the
+  PM loop is being stopped
+  ([#2852](https://github.com/bobmatnyc/trusty-tools/issues/2852))
 - **`build.rs` re-ran on every single build, in every tree.** Its lone
   `cargo:rerun-if-changed=.git/HEAD` directive was a relative path, which Cargo
   resolves against the *package* root — i.e. `crates/trusty-code/.git/HEAD`,

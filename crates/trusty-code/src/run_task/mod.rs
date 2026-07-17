@@ -155,7 +155,7 @@ pub struct RunTaskParams {
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `diff_reflects_engineer_file_change`, `usage_and_cost_aggregate_end_to_end`,
 /// `exit_code_reflects_run_failure`,
-/// `pm_stops_redelegating_once_cap_latched_ends_partial_promptly`.
+/// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
@@ -250,18 +250,31 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         project_context.as_deref(),
         catchup_ctx.as_deref(),
     );
-    // (#2265 fix #5) Once the shared re-delegation cap latches, every further
-    // `delegate_to_agent` call the PM might issue is a guaranteed dead end —
-    // `RedelegatingRunner` will reject it immediately without even invoking
-    // the engineer. Wiring the SAME signal into the PM's own loop as a stop
-    // condition (checked at the existing turn-boundary, alongside the #2056
-    // cancellation flag) stops the PM from spending its remaining
+    // (#2265 fix #5, re-scoped by #2852) Once the shared cap latches, every
+    // further `delegate_to_agent` call the PM might issue is a guaranteed dead
+    // end — `RedelegatingRunner` will reject it immediately without even
+    // invoking the engineer. Wiring the SAME signal into the PM's own loop as
+    // a stop condition (checked at the existing turn-boundary, alongside the
+    // #2056 cancellation flag) stops the PM from spending its remaining
     // `max_turns` issuing those doomed calls one per turn — the bake-off L1
-    // regression this fix closes (see `redelegation` module docs for the
-    // full before/after). `assemble_report` already maps a cap-latched,
-    // deliverable-bearing run to `ExitCode::Partial` regardless of which
-    // `AgentLoopError` variant the PM's loop returns, so this purely trims
-    // wasted turns — it does not change the reported outcome.
+    // regression fix #5 closes (see `redelegation` module docs for the
+    // full before/after).
+    //
+    // #2852 is what makes that "guaranteed dead end" premise TRUE. This hook
+    // is unrecoverable by construction — the PM never gets another turn — so
+    // it may only ever fire on a condition no subsequent delegation could
+    // clear. `is_cap_reached()` now latches ONLY on the run-wide
+    // `MAX_FAILED_INVOCATIONS` ceiling — a run whose delegations have failed
+    // that many times over, which is exactly such a condition. Successful
+    // invocations never feed it, no matter how many the PM makes.
+    // It deliberately does NOT latch on a single delegation exhausting its
+    // `MAX_REDELEGATIONS` retries: that is recoverable (a fresh delegation
+    // gets a full budget), and stopping the loop on it is precisely the bug
+    // #2852 fixes — it killed runs whose next call was the real build.
+    // `assemble_report` still maps a cap- OR retry-exhausted, deliverable-
+    // bearing run to `ExitCode::Partial` regardless of which `AgentLoopError`
+    // variant the PM's loop returns, so this purely trims wasted turns — it
+    // does not change the reported outcome.
     let stop_signal = redelegation_signal.clone();
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
@@ -688,17 +701,39 @@ fn assemble_report(
         // must not be blindly reported as `run_failure` when a deliverable
         // already exists on disk — the diff is filesystem-based, so it is
         // authoritative regardless of which attempt produced it.
+        //
+        // #2852 split the one cap flag in two. Reporting must key off BOTH:
+        // `is_cap_reached` (the run-wide invocation ceiling, which also stops
+        // the PM loop) and `is_retry_budget_exhausted` (some delegation burned
+        // all its retries — recoverable, so it does NOT stop the loop, but it
+        // is still exactly the "engineer was retried to exhaustion" diagnosis
+        // this label exists to report). Keying off only the former would have
+        // silently downgraded genuinely retry-exhausted runs to an opaque
+        // `run_failure` — losing the diagnostics #2852 set out to improve.
         let cap_reached = redelegation_signal.is_cap_reached();
+        let retry_exhausted = redelegation_signal.is_retry_budget_exhausted();
+        let budget_spent = cap_reached || retry_exhausted;
         let is_turn_cap = matches!(e, AgentLoopError::TurnCapExceeded { .. });
         let rendered_diff = diff::diff_snapshots(&before, &after);
         let has_deliverable = !rendered_diff.trim().is_empty();
 
-        if (cap_reached || is_turn_cap) && has_deliverable {
+        if (budget_spent || is_turn_cap) && has_deliverable {
             let label = if cap_reached {
+                // #2852: quote the FAILURE count, which is the ceiling's actual
+                // input and is exactly the number of invocations that really
+                // failed — never a pre-incremented dispatch counter, which
+                // would tell an operator "13" when 12 occurred.
+                format!(
+                    "partial: engineer failure ceiling reached after {} failed invocations; \
+                     partial work preserved at {}",
+                    redelegation_signal.failed_invocations(),
+                    params.project.display()
+                )
+            } else if retry_exhausted {
                 format!(
                     "partial: re-delegation limit reached after {} attempts; partial work \
                      preserved at {}",
-                    redelegation_signal.attempts(),
+                    redelegation::MAX_REDELEGATIONS,
                     params.project.display()
                 )
             } else {
@@ -725,9 +760,15 @@ fn assemble_report(
         // retry budget), even though the exit code itself is unchanged.
         let label = if cap_reached {
             format!(
+                "run failure (engineer failure ceiling reached after {} failed invocations, \
+                 no deliverable produced)",
+                redelegation_signal.failed_invocations()
+            )
+        } else if retry_exhausted {
+            format!(
                 "run failure (re-delegation limit reached after {} attempts, no deliverable \
                  produced)",
-                redelegation_signal.attempts()
+                redelegation::MAX_REDELEGATIONS
             )
         } else {
             "run failure".to_string()

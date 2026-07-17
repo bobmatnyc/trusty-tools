@@ -940,6 +940,91 @@ fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
     );
 }
 
+/// `assemble_report` maps a retry-exhausted run WITH a deliverable to
+/// `Partial`, labelled "re-delegation limit reached" (#2852).
+///
+/// Why: Post-#2852 this is arguably the most common real-world shape: retry
+/// exhaustion is now RECOVERABLE, so the PM keeps its turns and the loop ends
+/// on some other error while `retry_budget_exhausted` stays latched. Reporting
+/// keys off that flag rather than only `cap_reached` precisely so such runs
+/// keep their honest "the engineer was retried to exhaustion" diagnosis instead
+/// of silently degrading to an opaque `run_failure` — the exact regression
+/// #2852 set out to prevent. Nothing pinned this label's text, so it could have
+/// rotted freely; this test is that pin.
+/// What: Calls `assemble_report` directly with a signal that has ONLY
+/// `retry_budget_exhausted` latched (never `cap_reached`), a non-`TurnCap` PM
+/// error, and a before/after pair that differ. Assert `Partial`, and that the
+/// label names the re-delegation limit and the attempt count — NOT the
+/// invocation ceiling, which did not fire.
+/// Test: this test.
+#[test]
+fn assemble_report_maps_retry_exhausted_with_deliverable_to_partial() {
+    let params = RunTaskParams {
+        agent: "pm".into(),
+        task: "write hello.py".into(),
+        project: PathBuf::from("/tmp/does-not-matter"),
+        agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
+        engineer_model: None,
+        deadline_secs: None,
+    };
+    let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
+
+    let before = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+    let mut after_map = std::collections::BTreeMap::new();
+    after_map.insert("hello.py".to_string(), "print('hi')".to_string());
+    let after = super::diff::Snapshot::Files(after_map);
+
+    // Deliberately NOT a turn cap: the point is that the retry-exhausted flag
+    // alone carries the label, independent of which loop error surfaced.
+    let pm_result: Result<AgentOutput, AgentLoopError> =
+        Err(AgentLoopError::Llm(LlmError::ApiError {
+            status: 500,
+            body: "upstream exploded".to_string(),
+        }));
+
+    let signal = RedelegationCapSignal::retry_exhausted_for_test();
+    let completion = EngineerCompletionSignal::new();
+    let report = super::assemble_report(
+        &params,
+        &transcript,
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+        super::RunOutcome {
+            before,
+            after,
+            pm_result,
+        },
+        &signal,
+        &completion,
+    );
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Partial,
+        "a retry-exhausted run that still produced a deliverable must map to Partial, \
+         not RunFailure (#2852), got label: {}",
+        report.task
+    );
+    assert!(
+        report.task.contains("re-delegation limit reached"),
+        "the label must name the re-delegation limit so the diagnosis is not lost, \
+         got: {}",
+        report.task
+    );
+    assert!(
+        report
+            .task
+            .contains(&super::redelegation::MAX_REDELEGATIONS.to_string()),
+        "the label must quote the per-delegation attempt count, got: {}",
+        report.task
+    );
+    assert!(
+        !report.task.contains("failure ceiling"),
+        "the run-wide ceiling never fired — the label must not claim it did, got: {}",
+        report.task
+    );
+}
+
 /// The mirror negative case: a `TurnCapExceeded` PM error with an EMPTY diff
 /// (no deliverable at all) stays `RunFailure` — the gate is purely "was work
 /// produced", per fix #4's requirement to not weaken the genuine-failure path.
@@ -1181,105 +1266,105 @@ async fn gratuitous_redelegation_after_finish_is_refused_and_run_succeeds() {
     );
 }
 
-// ── #2265 fix #5: PM stops re-delegating once the cap latches ──────────────────
+// ── #2265 fix #5 / #2852: PM stops re-delegating once the run-wide ceiling ─────
+// ── latches (a single delegation's retry exhaustion must NOT stop it) ──────────
 
-/// An `LlmClientTrait` that forces a retryable `LlmError` at specific GLOBAL
-/// call indices (shared across the PM's and the engineer's chat calls) and
-/// otherwise forwards to an inner `ScriptedLlm`, whose own fixture cursor
-/// only advances on forwarded (non-forced-error) calls.
+/// Answers every PM turn with a `delegate_to_agent` call; lets the engineer's
+/// very first call write the deliverable, then fails every engineer call after
+/// it with a retryable transport error.
 ///
-/// Why: `repeated_llm_errors_trigger_redelegation_cap_not_pm_turn_cap` proves
-/// the cap latches within one `delegate_to_agent` dispatch, but its mock
-/// exhausts entirely at that point — a bare-exhaustion error also aborts the
-/// PM's OWN next `chat` call, so that test cannot distinguish "the PM's loop
-/// stopped itself before calling chat again" (this fix) from "the PM's chat
-/// call happened and failed anyway" (the pre-fix behaviour would produce the
-/// same shape of error there). This wrapper keeps VALID `delegate_to_agent`
-/// fixtures queued up behind the forced-error window, standing in for a real
-/// model that keeps deciding to re-delegate because it does not understand
-/// the cap-reached tool error — the exact bake-off L1 failure mode. If the
-/// PM's loop does NOT stop itself, those fixtures get consumed and recorded;
-/// if it does, the global call counter never reaches them.
-/// What: `error_at` global call indices return `LlmError::ApiError` (a
-/// retryable `AgentLoopError::Llm` per `redelegation_hint`) without touching
-/// `inner`; every other index forwards to `inner.chat`, so `inner`'s fixture
-/// list is consumed strictly in the order its calls are actually forwarded.
-/// Test: `pm_stops_redelegating_once_cap_latched_ends_partial_promptly`.
-struct FlakyThenRepeatLlm {
-    inner: ScriptedLlm,
-    counter: AtomicUsize,
-    error_at: Vec<usize>,
+/// Why: The #2852 ceiling test needs a PM that keeps delegating while every
+/// engineer invocation ultimately fails — a scenario `FlakyThenRepeatLlm`'s
+/// global call-index scripting cannot express, because the PM's and engineer's
+/// calls interleave unpredictably once retries are in play. Keying off the
+/// request's advertised tool schema (only the PM is offered
+/// `delegate_to_agent`) makes the roles unambiguous and the test fully
+/// deterministic regardless of how many retries occur.
+/// What: Inspects `req.tools` to classify the caller. PM requests get a canned
+/// delegate call. The engineer's first request replays `first` (a `write_file`
+/// that puts a real deliverable on disk); every later engineer request returns
+/// `LlmError::ApiError`, which `redelegation_hint` classifies as retryable.
+/// Test: `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
+struct FirstEngineerCallWritesThenAllFail {
+    first: Arc<ScriptedLlm>,
+    delegate: ChatResponse,
+    pm_calls: AtomicUsize,
+    engineer_calls: AtomicUsize,
 }
 
 #[async_trait]
-impl LlmClientTrait for FlakyThenRepeatLlm {
+impl LlmClientTrait for FirstEngineerCallWritesThenAllFail {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let idx = self.counter.fetch_add(1, Ordering::SeqCst);
-        if self.error_at.contains(&idx) {
-            return Err(LlmError::ApiError {
-                status: 500,
-                body: "synthetic retryable transport failure".to_string(),
-            });
+        let is_pm = req
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|t| t.function.name == "delegate_to_agent"));
+        if is_pm {
+            self.pm_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(self.delegate.clone());
         }
-        self.inner.chat(req).await
+        if self.engineer_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return self.first.chat(req).await;
+        }
+        Err(LlmError::ApiError {
+            status: 500,
+            body: "synthetic retryable transport failure".to_string(),
+        })
     }
 }
 
-/// Once the shared re-delegation cap latches, the PM must stop issuing
-/// `delegate_to_agent` calls immediately (bounded total chat calls, well
-/// under the PM's `max_turns` of 8) and the run must still end `Partial`
-/// with the deliverable the engineer already wrote preserved in the diff.
+/// Once the run-wide engineer-failure ceiling latches, the PM must stop
+/// issuing `delegate_to_agent` calls (bounded well under its `max_turns` of 8)
+/// and the run must still end `Partial` with the deliverable preserved.
 ///
-/// Why: This is the exact #2265 follow-up regression closed by fix #5: before
-/// this fix, `AgentLoop::run_inner` had no way to learn the cap had latched,
-/// so the PM's own LLM — seeing only an opaque tool error, with nothing
-/// telling it re-delegating again is pointless — could keep calling
-/// `delegate_to_agent` every remaining turn, each one an instant, guaranteed
-/// dead end (bake-off L1 evidence: "re-delegation limit reached after 10
+/// Why: This is #2265 fix #5's regression, re-based onto #2852's split. Fix #5
+/// stops the PM burning its remaining `max_turns` on doomed calls once the cap
+/// latches (bake-off L1 evidence: "re-delegation limit reached after 10
 /// attempts … turn cap of 8 exceeded", 3 productive attempts + 7 wasted PM
-/// turns). The exit code must NOT change — `assemble_report` already maps a
-/// cap-latched, deliverable-bearing run to `Partial` regardless of which
-/// `AgentLoopError` variant fired; this test proves the fix trims the wasted
-/// turns without touching that mapping.
-/// What: Script [PM delegate, engineer write_file (the deliverable), then 3
-/// forced retryable `Llm` errors — engineer's own second turn plus its two
-/// internal reuse-hint retries — landing the shared cap at
-/// `MAX_REDELEGATIONS` attempts entirely inside that ONE PM dispatch]. Queue
-/// SIX MORE valid `delegate_to_agent` fixtures behind that window (as if a
-/// real model kept trying) — enough to fill the PM's remaining `max_turns`
-/// budget if the fix did not stop it. Assert: `exit == Partial`, the diff
-/// still names `hello.py`, the PM's own turn count is exactly 1 (it never
-/// reached a second turn), and the total number of chat calls made across
-/// the whole run stayed small (well below the ~12 calls an unfixed run would
-/// need to hit its own `TurnCapExceeded`) — direct proof the trailing
-/// `delegate_response` fixtures were never consumed.
+/// turns). #2852 narrowed WHICH condition may fire that unrecoverable hook to
+/// the one a fresh delegation cannot clear — the run-wide
+/// `MAX_FAILED_INVOCATIONS` ceiling — so this test now drives the ceiling
+/// rather than a single delegation's retry exhaustion.
+///
+/// This test previously asserted `pm_turns == 1`: that a PM whose FIRST
+/// delegation exhausted its retries never got a second turn. That assertion is
+/// dropped as a deliberate POLICY change, and the record is worth stating
+/// precisely: the old scenario (one delegation whose engineer failed its own
+/// retries three times) was the cap's original, still-valid purpose — a
+/// genuinely struggling engineer — NOT run-6's bug, which was several separate
+/// SUCCESSFUL delegations starving a later one. So the old assertion was not
+/// itself defective, and an earlier version of this comment overstated the case
+/// by claiming it "encoded the bug". What actually changed is the policy: under
+/// #2852 that scenario now latches `retry_budget_exhausted` (recoverable), so
+/// the PM does get a second turn — which is the intended behaviour, because a
+/// fresh delegation with a full budget may well succeed. The scenario is
+/// therefore rebuilt around the ceiling, and the bound is now "well under
+/// max_turns" rather than "exactly 1".
+/// What: The engineer writes the deliverable on its first turn, then every
+/// engineer call fails retryably forever while the PM keeps delegating. That
+/// first success costs no ceiling budget (#2852 — only failures count);
+/// each subsequent delegation burns `MAX_REDELEGATIONS` failures, so the
+/// ceiling latches on delegation 5. Assert: `exit == Partial`, the diff still names `hello.py`,
+/// the report names the ceiling, and the PM stopped strictly before its own
+/// 8-turn cap — proof the stop signal, not the turn cap, ended the run.
 /// Test: this test.
 #[tokio::test]
-async fn pm_stops_redelegating_once_cap_latched_ends_partial_promptly() {
+async fn run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly() {
     let agents = agents_dir("openai/gpt-4o-mini");
     let project = tempfile::tempdir().expect("project tempdir");
 
-    let inner = ScriptedLlm::from_json(&[
-        delegate_response("do work"),
-        write_file_response("hello.py", "print(1)"),
-        // Trailing fixtures a real, cap-unaware model might trigger by
-        // calling delegate_to_agent again on turns 2..8 — must NEVER be
-        // consumed once the fix is in place.
-        delegate_response("task-2"),
-        delegate_response("task-3"),
-        delegate_response("task-4"),
-        delegate_response("task-5"),
-        delegate_response("task-6"),
-        delegate_response("task-7"),
-    ]);
-    let llm = Arc::new(FlakyThenRepeatLlm {
-        inner,
-        counter: AtomicUsize::new(0),
-        // Global calls: 0=PM delegate, 1=engineer write_file, then 2,3,4 are
-        // the engineer's own failing turn plus its two internal reuse-hint
-        // retries — landing attempt 4 (> MAX_REDELEGATIONS=3) and latching
-        // the cap without a 5th call.
-        error_at: vec![2, 3, 4],
+    // The engineer's FIRST invocation writes the deliverable, then fails; every
+    // later invocation fails outright. Delegating the write via a one-shot
+    // scripted response keeps a real diff on disk to assert Partial against.
+    let first = Arc::new(ScriptedLlm::from_json(&[write_file_response(
+        "hello.py", "print(1)",
+    )]));
+    let llm = Arc::new(FirstEngineerCallWritesThenAllFail {
+        first,
+        delegate: serde_json::from_value(delegate_response("do work"))
+            .expect("valid delegate fixture"),
+        pm_calls: AtomicUsize::new(0),
+        engineer_calls: AtomicUsize::new(0),
     });
 
     let report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
@@ -1287,7 +1372,7 @@ async fn pm_stops_redelegating_once_cap_latched_ends_partial_promptly() {
     assert_eq!(
         report.exit,
         ExitCode::Partial,
-        "the cap latched but the engineer's write_file already produced a \
+        "the ceiling latched but the engineer's write_file already produced a \
          deliverable, so this must be Partial, not RunFailure; got task: {}",
         report.task
     );
@@ -1296,20 +1381,27 @@ async fn pm_stops_redelegating_once_cap_latched_ends_partial_promptly() {
         "the deliverable diff must be preserved, got: {}",
         report.diff
     );
-
-    let pm_turns = report.transcript.iter().filter(|t| t.role == "pm").count();
-    assert_eq!(
-        pm_turns, 1,
-        "the PM must stop after its single delegating turn — it must never \
-         reach a second turn once the cap has latched"
+    assert!(
+        report.task.contains("engineer failure ceiling reached"),
+        "the report must name the run-wide ceiling (#2852) as the terminal \
+         condition, got: {}",
+        report.task
     );
 
-    let total_calls = llm.counter.load(Ordering::SeqCst);
+    let pm_turns = report.transcript.iter().filter(|t| t.role == "pm").count();
     assert!(
-        total_calls <= 5,
-        "the PM must not have issued any further delegate_to_agent calls \
-         after the cap latched (bounded, not spinning to the ~12 calls an \
-         unfixed 8-turn PM loop would need), got {total_calls} total chat calls"
+        pm_turns < 8,
+        "the stop signal — not the PM's own 8-turn cap — must have ended the \
+         run, got {pm_turns} PM turns"
+    );
+    // Precise invocation bounding is asserted at the unit level in
+    // `redelegation::tests::failure_ceiling_latches_cap_reached`;
+    // here it is enough that the PM stopped delegating rather than spinning
+    // out its whole turn budget on calls the ceiling would only refuse.
+    assert!(
+        llm.pm_calls.load(Ordering::SeqCst) < 8,
+        "the PM must stop delegating once the ceiling latches, got {} PM calls",
+        llm.pm_calls.load(Ordering::SeqCst)
     );
 }
 

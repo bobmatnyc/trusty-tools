@@ -1424,7 +1424,7 @@ async fn cancel_flag_aborts_before_next_turn() {
 /// Why: This is the generic mechanism `run_task`'s PM loop relies on to stop
 /// issuing `delegate_to_agent` calls the turn after the shared re-delegation
 /// cap latches (see `run_task::mod`'s `execute_run_task` wiring and
-/// `run_task::tests::pm_stops_redelegating_once_cap_latched_ends_partial_promptly`
+/// `run_task::tests::run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`
 /// for the production end-to-end proof); this test isolates the loop
 /// mechanism itself from any `run_task`-specific signal.
 /// What: A closure pre-set to always return `true` before the loop even
