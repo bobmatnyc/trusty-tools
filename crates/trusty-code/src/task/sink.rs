@@ -193,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn one_shared_sink_attributes_each_caller_separately() {
         let registry = Arc::new(SessionRegistry::new());
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let sink: Arc<dyn ToolEventSink> = Arc::new(SessionToolEventSink::new(
             Arc::clone(&registry),
             session.id.clone(),
@@ -227,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_search_and_recall_telemetry() {
         let registry = Arc::new(SessionRegistry::new());
-        let session = registry.create("t".to_string(), None, None);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
         let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
         let mut events = crate::events::subscribe();
 

@@ -349,7 +349,7 @@ fn recall_telemetry(results: &[(f64, bool)]) -> crate::tools::RecallTelemetry {
 #[tokio::test]
 async fn record_search_performed_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
@@ -382,7 +382,7 @@ async fn record_search_performed_publishes_event() {
 #[tokio::test]
 async fn record_memory_recalled_publishes_event() {
     let registry = SessionRegistry::new();
-    let session = registry.create("t".to_string(), None, None);
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let mut events = crate::events::subscribe();
 
     registry
