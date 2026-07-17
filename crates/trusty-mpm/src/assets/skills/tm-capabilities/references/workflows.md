@@ -20,9 +20,11 @@ Claude Code session.
    (`session_launch`) creates or reuses a git worktree, deploys the bundled
    agent/skill roster (`bundle::ALL` → `~/.claude/{agents,skills}` or the
    managed workspace tier), and seeds framework instructions.
-3. **Start the session** — `session_new` (MCP) or `tm session new` / guided
+3. **Start the session** — `session_new` (MCP) or `tm sessions new` / guided
    default (`tm` with no subcommand) launches Claude Code inside the
    provisioned worktree, with `CLAUDE_CONFIG_DIR` and the output style wired.
+   (`tm session new` — singular — still parses as a deprecated alias; see
+   `references/cli.md`.)
 4. **Verify** — `tm doctor` (see §3 below) confirms the roster deployed
    cleanly before real work starts.
 
