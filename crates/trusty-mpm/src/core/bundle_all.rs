@@ -249,6 +249,17 @@ pub const ALL: &[BundledArtifact] = &[
         contents: CODE_CRITIC_AGENT,
         install: InstallPolicy::Overwrite,
     },
+    // --- Issue #2890: code-critic's declared `skills:` dependencies ---
+    BundledArtifact {
+        rel_path: "skills/code-review-standards.md",
+        contents: CODE_REVIEW_STANDARDS,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/contract-driven-testing.md",
+        contents: CONTRACT_DRIVEN_TESTING,
+        install: InstallPolicy::Overwrite,
+    },
     BundledArtifact {
         rel_path: "agents/gcp-ops.md",
         contents: GCP_OPS_AGENT,
