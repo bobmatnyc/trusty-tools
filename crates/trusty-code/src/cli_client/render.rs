@@ -246,6 +246,7 @@ mod tests {
         let line = render_event_line(&envelope(Event::ToolStarted {
             session_id: "s-1".to_string(),
             agent: "python-engineer".to_string(),
+            agent_id: "eng-1".to_string(),
             tool: "bash".to_string(),
             call_id: "c1".to_string(),
             args_preview: "echo hi".to_string(),
@@ -263,6 +264,7 @@ mod tests {
         let line = render_event_line(&envelope(Event::SearchPerformed {
             session_id: "s-1".to_string(),
             agent: "python-engineer".to_string(),
+            agent_id: "eng-1".to_string(),
             lane: "lexical".to_string(),
             query: "where is auth".to_string(),
             hit_count: Some(3),
@@ -275,6 +277,7 @@ mod tests {
         let line = render_event_line(&envelope(Event::MemoryRecalled {
             session_id: "s-1".to_string(),
             agent: "pm".to_string(),
+            agent_id: "pm-1".to_string(),
             query: "pkce".to_string(),
             results: vec![
                 crate::events::RecalledMemory {

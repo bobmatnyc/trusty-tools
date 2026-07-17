@@ -209,6 +209,12 @@ pub struct AgentLoop {
     /// engineer's. `None` falls back to `events::UNATTRIBUTED_AGENT` — see
     /// [`Self::with_agent`].
     agent: Option<String>,
+    /// (DOC-39 AC-13.1/13.2) This loop's STABLE per-spawn id, stamped
+    /// alongside `agent` on every tool event. `agent` alone cannot
+    /// distinguish two concurrently-delegated loops sharing one name; this
+    /// is the correlation key a UI must use instead. `None` falls back to
+    /// `events::UNATTRIBUTED_AGENT_ID` — see [`Self::with_agent_id`].
+    agent_id: Option<String>,
     cancel: Option<Arc<AtomicBool>>,
     stop_signal: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     finish_gate: Option<FinishGate>,
@@ -247,6 +253,7 @@ impl AgentLoop {
             registry,
             sink: None,
             agent: None,
+            agent_id: None,
             cancel: None,
             stop_signal: None,
             finish_gate: None,
@@ -296,6 +303,41 @@ impl AgentLoop {
         self.agent
             .as_deref()
             .unwrap_or(crate::events::UNATTRIBUTED_AGENT)
+    }
+
+    /// Declare this loop's STABLE per-spawn id, for tool-event attribution
+    /// (DOC-39 AC-13.1/13.2).
+    ///
+    /// Why: `agent` names the sub-agent KIND (e.g. `"python-engineer"`), but
+    /// two concurrently-delegated sub-agents of the SAME kind share that
+    /// name and were, before this existed, indistinguishable on the event
+    /// stream except by fragile `AgentSpawned`/`AgentDone` ordering
+    /// inference — exactly the gap DOC-39 AC-13 closes. `agent_id` is a
+    /// per-spawn identity: production mints a fresh UUID v4 once per
+    /// delegation (`runner::in_process::InProcessAgentRunner::run_pipeline`)
+    /// and once per PM session
+    /// (`task::executor::run_and_record`/`run_task::execute_run_task`, both
+    /// via a session- or run-scoped id), then attaches it here.
+    /// What: Builder-style setter; returns `self` for chaining. Unset loops
+    /// emit `events::UNATTRIBUTED_AGENT_ID`. Additive alongside `agent`:
+    /// callers that never opt in keep emitting the pre-existing sentinel,
+    /// same as `agent` itself.
+    /// Test: `agent_loop::tests::sink_events::sequentially_spawned_same_named_loops_get_distinct_agent_ids`.
+    pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = Some(id.into());
+        self
+    }
+
+    /// This loop's stable per-spawn id, or `events::UNATTRIBUTED_AGENT_ID`
+    /// (DOC-39 AC-13).
+    ///
+    /// Why: every sink call needs it; centralising the fallback keeps the
+    /// sentinel in one place, mirroring [`Self::agent_name`].
+    /// Test: `agent_loop::tests::sink_events::unattributed_loop_emits_unknown_agent`.
+    fn agent_id_str(&self) -> &str {
+        self.agent_id
+            .as_deref()
+            .unwrap_or(crate::events::UNATTRIBUTED_AGENT_ID)
     }
 
     /// Attach a cancellation flag checked once per turn boundary (#2056).
@@ -629,8 +671,14 @@ impl AgentLoop {
             };
 
             if let Some(sink) = &self.sink {
-                sink.tool_started(self.agent_name(), &call.id, tool, &args.to_string())
-                    .await;
+                sink.tool_started(
+                    self.agent_name(),
+                    self.agent_id_str(),
+                    &call.id,
+                    tool,
+                    &args.to_string(),
+                )
+                .await;
             }
 
             // #2682: short-circuit a redundant full-suite re-run BEFORE
@@ -674,7 +722,15 @@ impl AgentLoop {
             }
 
             if let Some(sink) = &self.sink {
-                notify_result(sink.as_ref(), self.agent_name(), &call.id, tool, &result).await;
+                notify_result(
+                    sink.as_ref(),
+                    self.agent_name(),
+                    self.agent_id_str(),
+                    &call.id,
+                    tool,
+                    &result,
+                )
+                .await;
             }
 
             transcript.push_tool_result(&call.id, tool, result.content());
@@ -709,9 +765,11 @@ impl AgentLoop {
         let message = error.to_string();
         if let Some(sink) = &self.sink {
             let agent = self.agent_name();
-            sink.tool_started(agent, call_id, tool, "<invalid-arguments>")
+            let agent_id = self.agent_id_str();
+            sink.tool_started(agent, agent_id, call_id, tool, "<invalid-arguments>")
                 .await;
-            sink.tool_error(agent, call_id, tool, &message).await;
+            sink.tool_error(agent, agent_id, call_id, tool, &message)
+                .await;
         }
         transcript.push_tool_result(call_id, tool, &message);
     }
@@ -1097,19 +1155,28 @@ fn schema_tool_name(schema: &Value) -> &str {
 async fn notify_result(
     sink: &dyn ToolEventSink,
     agent: &str,
+    agent_id: &str,
     call_id: &str,
     tool: &str,
     result: &ToolResult,
 ) {
     if result.is_fatal() {
-        sink.tool_error(agent, call_id, tool, result.content())
+        sink.tool_error(agent, agent_id, call_id, tool, result.content())
             .await;
     } else {
-        sink.tool_finished(agent, call_id, tool, !result.is_error(), result.content())
-            .await;
+        sink.tool_finished(
+            agent,
+            agent_id,
+            call_id,
+            tool,
+            !result.is_error(),
+            result.content(),
+        )
+        .await;
     }
     if let Some(telemetry) = result.telemetry() {
-        sink.tool_telemetry(agent, call_id, tool, telemetry).await;
+        sink.tool_telemetry(agent, agent_id, call_id, tool, telemetry)
+            .await;
     }
 }
 

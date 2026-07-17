@@ -117,7 +117,7 @@ impl StdioSession {
     /// (logs aren't asserted on here), `kill_on_drop` so a panicking test
     /// still reaps the child instead of leaking a process.
     pub fn spawn() -> Self {
-        Self::spawn_inner(Some(std::path::Path::new(".")), false, None)
+        Self::spawn_inner(Some(std::path::Path::new(".")), None, None)
     }
 
     /// Spawn `tcode serve --stdio` rooted at `project`, with
@@ -126,7 +126,27 @@ impl StdioSession {
     /// requiring a live `OPENROUTER_API_KEY` — the mandatory offline
     /// black-box path for `tests/task_e2e.rs`.
     pub fn spawn_with_mock_llm(project: &std::path::Path) -> Self {
-        Self::spawn_inner(Some(project), true, None)
+        Self::spawn_inner(
+            Some(project),
+            Some(trusty_code::task::mock_llm::MOCK_LLM_ECHO),
+            None,
+        )
+    }
+
+    /// Spawn `tcode serve --stdio` rooted at `project`, with `TCODE_MOCK_LLM`
+    /// set to `mock_llm_value` (DOC-39 AC-13).
+    ///
+    /// Why: [`Self::spawn_with_mock_llm`] hardcodes
+    /// `trusty_code::task::mock_llm::MOCK_LLM_ECHO`'s fixed single-delegation
+    /// script, which cannot exercise a fan-out to two SAME-named delegated
+    /// agents — the acceptance proof `tests/agent_id_e2e.rs` needs. This is
+    /// the general form that lets a caller select any registered mock-LLM
+    /// variant (e.g. `trusty_code::task::mock_llm::MOCK_LLM_ECHO_FANOUT`)
+    /// while keeping `spawn_with_mock_llm` itself unchanged for every other
+    /// e2e file.
+    /// Test: `agent_id_e2e::two_same_named_delegations_get_distinct_agent_ids`.
+    pub fn spawn_with_mock_llm_variant(project: &std::path::Path, mock_llm_value: &str) -> Self {
+        Self::spawn_inner(Some(project), Some(mock_llm_value), None)
     }
 
     /// Spawn `tcode serve --stdio` with NO `--project` — a PROJECTLESS daemon.
@@ -140,12 +160,16 @@ impl StdioSession {
     /// fixture's agent configs hermetically. `TCODE_MOCK_LLM=echo` as usual.
     /// Test: `task_e2e::projectless_task_runs_end_to_end`.
     pub fn spawn_projectless_with_mock_llm(home: &std::path::Path) -> Self {
-        Self::spawn_inner(None, true, Some(home))
+        Self::spawn_inner(
+            None,
+            Some(trusty_code::task::mock_llm::MOCK_LLM_ECHO),
+            Some(home),
+        )
     }
 
     fn spawn_inner(
         project: Option<&std::path::Path>,
-        mock_llm: bool,
+        mock_llm_value: Option<&str>,
         home: Option<&std::path::Path>,
     ) -> Self {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
@@ -157,11 +181,8 @@ impl StdioSession {
         if let Some(home) = home {
             cmd.env("HOME", home);
         }
-        if mock_llm {
-            cmd.env(
-                trusty_code::task::mock_llm::MOCK_LLM_ENV,
-                trusty_code::task::mock_llm::MOCK_LLM_ECHO,
-            );
+        if let Some(value) = mock_llm_value {
+            cmd.env(trusty_code::task::mock_llm::MOCK_LLM_ENV, value);
         }
         let mut child = cmd
             .stdin(Stdio::piped())

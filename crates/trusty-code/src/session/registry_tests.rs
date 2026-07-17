@@ -356,6 +356,7 @@ async fn record_search_performed_publishes_event() {
         .record_search_performed(
             &session.id,
             "python-engineer",
+            "eng-1",
             &search_telemetry("grep", Some(7)),
         )
         .unwrap();
@@ -364,8 +365,9 @@ async fn record_search_performed_publishes_event() {
     assert_eq!(envelope.kind, "search_performed");
     assert!(matches!(
         envelope.event,
-        Event::SearchPerformed { agent, lane, query, hit_count, latency_ms, .. }
+        Event::SearchPerformed { agent, agent_id, lane, query, hit_count, latency_ms, .. }
             if agent == "python-engineer"
+                && agent_id == "eng-1"
                 && lane == "grep"
                 && query == "where is auth"
                 && hit_count == Some(7)
@@ -389,6 +391,7 @@ async fn record_memory_recalled_publishes_event() {
         .record_memory_recalled(
             &session.id,
             "pm",
+            "pm-1",
             &recall_telemetry(&[(0.9, true), (0.41, false)]),
         )
         .unwrap();
@@ -397,6 +400,7 @@ async fn record_memory_recalled_publishes_event() {
     assert_eq!(envelope.kind, "memory_recalled");
     let Event::MemoryRecalled {
         agent,
+        agent_id,
         query,
         results,
         ..
@@ -405,6 +409,7 @@ async fn record_memory_recalled_publishes_event() {
         panic!("expected MemoryRecalled");
     };
     assert_eq!(agent, "pm");
+    assert_eq!(agent_id, "pm-1");
     assert_eq!(query, "pkce");
     assert_eq!(
         results,
@@ -431,15 +436,19 @@ async fn record_tool_started_publishes_event() {
     let mut events = crate::events::subscribe();
 
     registry
-        .record_tool_started(&session.id, "pm", "bash", "call-1", "ls -la")
+        .record_tool_started(&session.id, "pm", "pm-1", "bash", "call-1", "ls -la")
         .unwrap();
 
     let envelope = next_event_for(&mut events, &session.id).await;
     assert_eq!(envelope.kind, "tool_started");
     assert!(matches!(
         envelope.event,
-        Event::ToolStarted { agent, tool, call_id, args_preview, .. }
-            if agent == "pm" && tool == "bash" && call_id == "call-1" && args_preview == "ls -la"
+        Event::ToolStarted { agent, agent_id, tool, call_id, args_preview, .. }
+            if agent == "pm"
+                && agent_id == "pm-1"
+                && tool == "bash"
+                && call_id == "call-1"
+                && args_preview == "ls -la"
     ));
 }
 
@@ -452,15 +461,15 @@ async fn record_tool_finished_publishes_event() {
     let mut events = crate::events::subscribe();
 
     registry
-        .record_tool_finished(&session.id, "pm", "bash", "call-1", true, "done")
+        .record_tool_finished(&session.id, "pm", "pm-1", "bash", "call-1", true, "done")
         .unwrap();
 
     let envelope = next_event_for(&mut events, &session.id).await;
     assert_eq!(envelope.kind, "tool_finished");
     assert!(matches!(
         envelope.event,
-        Event::ToolFinished { agent, success, result_preview, .. }
-            if agent == "pm" && success && result_preview == "done"
+        Event::ToolFinished { agent, agent_id, success, result_preview, .. }
+            if agent == "pm" && agent_id == "pm-1" && success && result_preview == "done"
     ));
 }
 
@@ -472,14 +481,15 @@ async fn record_tool_error_publishes_event() {
     let mut events = crate::events::subscribe();
 
     registry
-        .record_tool_error(&session.id, "pm", "bash", "call-1", "timed out")
+        .record_tool_error(&session.id, "pm", "pm-1", "bash", "call-1", "timed out")
         .unwrap();
 
     let envelope = next_event_for(&mut events, &session.id).await;
     assert_eq!(envelope.kind, "tool_error");
     assert!(matches!(
         envelope.event,
-        Event::ToolError { agent, error, .. } if agent == "pm" && error == "timed out"
+        Event::ToolError { agent, agent_id, error, .. }
+            if agent == "pm" && agent_id == "pm-1" && error == "timed out"
     ));
 }
 
@@ -538,35 +548,35 @@ async fn record_plumbing_methods_reject_unknown_session() {
     let registry = SessionRegistry::new();
     assert_eq!(
         registry
-            .record_tool_started("nope", "pm", "t", "c", "a")
+            .record_tool_started("nope", "pm", "pm-1", "t", "c", "a")
             .unwrap_err()
             .code,
         -32007
     );
     assert_eq!(
         registry
-            .record_tool_finished("nope", "pm", "t", "c", true, "r")
+            .record_tool_finished("nope", "pm", "pm-1", "t", "c", true, "r")
             .unwrap_err()
             .code,
         -32007
     );
     assert_eq!(
         registry
-            .record_tool_error("nope", "pm", "t", "c", "e")
+            .record_tool_error("nope", "pm", "pm-1", "t", "c", "e")
             .unwrap_err()
             .code,
         -32007
     );
     assert_eq!(
         registry
-            .record_search_performed("nope", "pm", &search_telemetry("semantic", Some(1)))
+            .record_search_performed("nope", "pm", "pm-1", &search_telemetry("semantic", Some(1)))
             .unwrap_err()
             .code,
         -32007
     );
     assert_eq!(
         registry
-            .record_memory_recalled("nope", "pm", &recall_telemetry(&[(0.9, true)]))
+            .record_memory_recalled("nope", "pm", "pm-1", &recall_telemetry(&[(0.9, true)]))
             .unwrap_err()
             .code,
         -32007

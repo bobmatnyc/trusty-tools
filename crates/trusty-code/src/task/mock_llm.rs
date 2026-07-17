@@ -33,13 +33,26 @@ pub const MOCK_LLM_ENV: &str = "TCODE_MOCK_LLM";
 /// The `TCODE_MOCK_LLM` value that selects [`EchoLlmClient`].
 pub const MOCK_LLM_ECHO: &str = "echo";
 
+/// The `TCODE_MOCK_LLM` value that selects [`FanoutEchoLlmClient`] (DOC-39
+/// AC-13).
+///
+/// Why: [`EchoLlmClient`]'s fixed script delegates to `python-engineer`
+/// exactly ONCE, which cannot exercise "two delegations to the SAME
+/// `agent_name`" — the acceptance proof AC-13 requires. A separate opt-in
+/// value keeps every existing `MOCK_LLM_ECHO` consumer (and its fixed
+/// 4-response script) byte-identical; only a test that explicitly asks for
+/// the fan-out shape sees it.
+pub const MOCK_LLM_ECHO_FANOUT: &str = "echo-fanout";
+
 /// Build the `Arc<dyn LlmClientTrait>` `task.run` executions share.
 ///
 /// Why: the single seam that decides "real model or offline mock" — kept
 /// here (not inlined at each call site) so the decision is made exactly
 /// once and is easy to find.
 /// What: if [`MOCK_LLM_ENV`] is set to [`MOCK_LLM_ECHO`], returns an
-/// [`EchoLlmClient`]. Otherwise builds a real `DispatchingLlmClient` — routing
+/// [`EchoLlmClient`]; if set to [`MOCK_LLM_ECHO_FANOUT`] (DOC-39 AC-13),
+/// returns a [`FanoutEchoLlmClient`]. Otherwise builds a real
+/// `DispatchingLlmClient` — routing
 /// `bedrock/*` slugs to AWS Bedrock, `fireworks/*` to Fireworks, and everything
 /// else to OpenRouter (#1021 phase 1; #2406). Construction touches no
 /// credentials: the OpenAI-dialect providers resolve their key lazily via the
@@ -51,8 +64,10 @@ pub const MOCK_LLM_ECHO: &str = "echo";
 /// Test: `task::mock_llm::tests::mock_env_selects_echo_client`,
 /// `task::mock_llm::tests::real_client_builds_without_openrouter_key`.
 pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
-    if std::env::var(MOCK_LLM_ENV).ok().as_deref() == Some(MOCK_LLM_ECHO) {
-        return Ok(Arc::new(EchoLlmClient::new()));
+    match std::env::var(MOCK_LLM_ENV).ok().as_deref() {
+        Some(MOCK_LLM_ECHO) => return Ok(Arc::new(EchoLlmClient::new())),
+        Some(MOCK_LLM_ECHO_FANOUT) => return Ok(Arc::new(FanoutEchoLlmClient::new())),
+        _ => {}
     }
     Ok(Arc::new(DispatchingLlmClient::new()))
 }
@@ -173,6 +188,137 @@ fn stop_response(text: &str) -> Value {
     })
 }
 
+/// A deterministic, scripted `LlmClientTrait` exercising a FAN-OUT to two
+/// concurrently-delegated `python-engineer` sub-agents (DOC-39 AC-13's
+/// acceptance proof).
+///
+/// Why: [`EchoLlmClient`]'s fixed script delegates to `python-engineer`
+/// exactly once, so it cannot prove the fix this ticket ships — that TWO
+/// delegations to the SAME `agent_name` mint DISTINCT `agent_id`s. This
+/// client scripts the PM issuing both `delegate_to_agent` calls in ONE
+/// assistant turn (a genuine tool-calls fan-out); `agent_loop::dispatch_all`
+/// still dispatches them one after another (there is no concurrent-execution
+/// primitive in the loop itself), but each dispatch re-enters
+/// `runner::in_process::InProcessAgentRunner::run_pipeline` — the ONE
+/// production call site that mints a fresh UUID v4 per spawn — so the
+/// two engineer sub-loops still get their OWN `agent_id` even though they run
+/// sequentially. That is exactly what AC-13 requires: `agent_name` alone
+/// cannot distinguish the two, `agent_id` can.
+/// What: an atomic cursor over a fixed 6-response script:
+///
+/// 1. PM's ONE assistant turn issues TWO `delegate_to_agent` tool calls, both
+///    targeting `python-engineer` (`call-delegate-a`, `call-delegate-b`).
+/// 2. Engineer A calls `bash(command="echo hello-from-engineer-a")`.
+/// 3. Engineer A stops with final text.
+/// 4. Engineer B calls `bash(command="echo hello-from-engineer-b")`.
+/// 5. Engineer B stops with final text.
+/// 6. PM stops with final text.
+///
+/// Running past the script's end returns an `LlmError` rather than panicking.
+/// Test: `task::mock_llm::tests::fanout_script_drives_two_delegations_to_the_same_agent`;
+/// exercised end-to-end (as a real subprocess) by `tests/agent_id_e2e.rs`.
+pub struct FanoutEchoLlmClient {
+    cursor: AtomicUsize,
+}
+
+impl FanoutEchoLlmClient {
+    /// Construct a fresh client at the start of its script.
+    pub fn new() -> Self {
+        Self {
+            cursor: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for FanoutEchoLlmClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for FanoutEchoLlmClient {
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        let fixture = match idx {
+            0 => fanout_delegate_response(),
+            1 => bash_response_named("call-bash-a", "echo hello-from-engineer-a"),
+            2 => stop_response("engineer A: done"),
+            3 => bash_response_named("call-bash-b", "echo hello-from-engineer-b"),
+            4 => stop_response("engineer B: done"),
+            5 => stop_response("pm: fan-out complete"),
+            _ => {
+                return Err(LlmError::MissingConfig(format!(
+                    "FanoutEchoLlmClient script exhausted at call {idx}"
+                )));
+            }
+        };
+        serde_json::from_value(fixture).map_err(|e| {
+            LlmError::MissingConfig(format!(
+                "FanoutEchoLlmClient: invalid scripted fixture: {e}"
+            ))
+        })
+    }
+}
+
+/// Turn 1 fixture: the PM's ONE assistant turn fans out to `python-engineer`
+/// TWICE — the two-tool-calls-in-one-turn shape `FanoutEchoLlmClient` needs.
+fn fanout_delegate_response() -> Value {
+    json!({
+        "id": "mock-fanout-delegate",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "call-delegate-a",
+                        "type": "function",
+                        "function": {
+                            "name": "delegate_to_agent",
+                            "arguments": json!({"agent_name": "python-engineer", "task": "task A"}).to_string()
+                        }
+                    },
+                    {
+                        "id": "call-delegate-b",
+                        "type": "function",
+                        "function": {
+                            "name": "delegate_to_agent",
+                            "arguments": json!({"agent_name": "python-engineer", "task": "task B"}).to_string()
+                        }
+                    }
+                ]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70}
+    })
+}
+
+/// Like [`bash_response`] but with a caller-chosen `call_id`/command, so the
+/// fan-out script can distinguish engineer A's and engineer B's `bash` calls.
+fn bash_response_named(call_id: &str, command: &str) -> Value {
+    json!({
+        "id": "mock-bash",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json!({"command": command}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}
+    })
+}
+
 /// Serializes every test in this crate that sets/reads the process-wide
 /// [`MOCK_LLM_ENV`] var — `cargo test` runs tests in parallel within one
 /// binary, and an unguarded `set_var`/`remove_var` pair would race across
@@ -217,6 +363,52 @@ mod tests {
 
         let turn4 = client.chat(&req).await.expect("turn 4");
         assert!(turn4.first_tool_calls().is_empty());
+
+        let err = client.chat(&req).await;
+        assert!(err.is_err(), "the script must not silently repeat");
+    }
+
+    /// (DOC-39 AC-13) The fan-out script must drive exactly the
+    /// two-delegate -> bash A -> stop A -> bash B -> stop B -> pm-stop shape
+    /// `tests/agent_id_e2e.rs` relies on.
+    #[tokio::test]
+    async fn fanout_script_drives_two_delegations_to_the_same_agent() {
+        let client = FanoutEchoLlmClient::new();
+        let req = ChatRequest {
+            model: "mock".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: None,
+        };
+
+        let turn1 = client.chat(&req).await.expect("turn 1");
+        let calls = turn1.first_tool_calls();
+        assert_eq!(calls.len(), 2, "the PM must fan out to TWO delegations");
+        assert!(calls.iter().all(|c| c.function.name == "delegate_to_agent"));
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.function.arguments.contains("python-engineer")),
+            "both delegations must target the SAME agent_name"
+        );
+
+        let turn2 = client.chat(&req).await.expect("turn 2 (engineer A bash)");
+        assert_eq!(turn2.first_tool_calls()[0].function.name, "bash");
+
+        let turn3 = client.chat(&req).await.expect("turn 3 (engineer A stop)");
+        assert!(turn3.first_tool_calls().is_empty());
+
+        let turn4 = client.chat(&req).await.expect("turn 4 (engineer B bash)");
+        assert_eq!(turn4.first_tool_calls()[0].function.name, "bash");
+
+        let turn5 = client.chat(&req).await.expect("turn 5 (engineer B stop)");
+        assert!(turn5.first_tool_calls().is_empty());
+
+        let turn6 = client.chat(&req).await.expect("turn 6 (pm stop)");
+        assert!(turn6.first_tool_calls().is_empty());
 
         let err = client.chat(&req).await;
         assert!(err.is_err(), "the script must not silently repeat");

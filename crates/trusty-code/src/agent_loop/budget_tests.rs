@@ -32,9 +32,34 @@ impl BudgetSink {
 
 #[async_trait]
 impl ToolEventSink for BudgetSink {
-    async fn tool_started(&self, _agent: &str, _call_id: &str, _tool: &str, _args_preview: &str) {}
-    async fn tool_finished(&self, _agent: &str, _c: &str, _t: &str, _s: bool, _r: &str) {}
-    async fn tool_error(&self, _agent: &str, _call_id: &str, _tool: &str, _error: &str) {}
+    async fn tool_started(
+        &self,
+        _agent: &str,
+        _agent_id: &str,
+        _call_id: &str,
+        _tool: &str,
+        _args_preview: &str,
+    ) {
+    }
+    async fn tool_finished(
+        &self,
+        _agent: &str,
+        _agent_id: &str,
+        _c: &str,
+        _t: &str,
+        _s: bool,
+        _r: &str,
+    ) {
+    }
+    async fn tool_error(
+        &self,
+        _agent: &str,
+        _agent_id: &str,
+        _call_id: &str,
+        _tool: &str,
+        _error: &str,
+    ) {
+    }
 
     async fn context_budget(&self, snapshot: &ContextBudgetSnapshot) {
         self.snapshots

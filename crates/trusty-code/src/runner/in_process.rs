@@ -383,6 +383,18 @@ impl InProcessAgentRunner {
             self.skills_catalog.as_deref(),
         );
 
+        // (DOC-39 AC-13.1/13.2) Mint a fresh, per-spawn stable id for THIS
+        // delegation. Why here specifically: `run_pipeline` is the ONE
+        // production call site that constructs a delegated sub-agent's
+        // `AgentLoop` — both `run_task` and `task::executor` delegate through
+        // this runner (see the struct's own docs) — and it runs exactly once
+        // per `delegate_to_agent` invocation, i.e. once per spawn. `agent_name`
+        // alone (e.g. `"python-engineer"`) cannot distinguish two
+        // concurrently-delegated sub-agents of the same kind; this UUID v4 is
+        // the correlation key a UI must key on instead — see
+        // `AgentLoop::with_agent_id`'s docs.
+        let agent_id = uuid::Uuid::new_v4().to_string();
+
         let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry)
             // #2279: every sub-agent this runner drives gets the default
             // verify-before-finish gate — its own `bash` calls land in its
@@ -405,7 +417,11 @@ impl InProcessAgentRunner {
             // through this runner), and the sink it shares with the PM below is
             // the same `Arc` — so this call is what makes a delegated
             // engineer's tool calls distinguishable from the PM's.
-            .with_agent(agent_name);
+            .with_agent(agent_name)
+            // (DOC-39 AC-13) Attribute this SPAWN's tool events with the fresh
+            // id minted above — the missing half of the UI Phase-1 attribution
+            // that let two same-named concurrent delegations collide.
+            .with_agent_id(agent_id);
         if let Some(sink) = &self.sink {
             agent_loop = agent_loop.with_tool_event_sink(Arc::clone(sink));
         }

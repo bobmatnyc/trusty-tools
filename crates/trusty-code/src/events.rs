@@ -75,6 +75,21 @@ const CHANNEL_CAPACITY: usize = 1024;
 /// Test: `agent_loop::tests::sink_events::unattributed_loop_emits_unknown_agent`.
 pub const UNATTRIBUTED_AGENT: &str = "unknown";
 
+/// The `agent_id` attribution value used when a tool event's `AgentLoop` was
+/// never told a stable per-spawn id (DOC-39 AC-13.1/13.2).
+///
+/// Why: mirrors [`UNATTRIBUTED_AGENT`] — a loop built before
+/// `AgentLoop::with_agent_id` existed (or a test double) still has to emit
+/// SOMETHING for `agent_id`, and reusing the same sentinel text keeps a
+/// grep/dashboard treating "unattributed" consistently across both fields
+/// rather than inventing a second magic string with no behavioural
+/// difference.
+/// What: the literal `"unknown"` — identical to [`UNATTRIBUTED_AGENT`], kept
+/// as its own named constant purely so call sites document which fallback
+/// they mean.
+/// Test: `agent_loop::tests::sink_events::unattributed_loop_emits_unknown_agent`.
+pub const UNATTRIBUTED_AGENT_ID: &str = "unknown";
+
 /// One memory recalled by `recall_session`, with the flag that says whether
 /// it actually reached the model (UI Phase 1).
 ///
@@ -170,11 +185,24 @@ pub enum Event {
     /// pre-existing `LlmRequested`/`LlmResponded.agent_name` and
     /// `AgentSpawned`/`AgentDone`/`PmDelegating.agent` keys — see
     /// [`UNATTRIBUTED_AGENT`] for the fallback when a loop runs unattributed.
+    /// (DOC-39 AC-13.1/13.2) `agent` alone cannot distinguish two
+    /// concurrently-delegated sub-agents sharing one name (e.g. two
+    /// `python-engineer` delegations) — `agent_id` is the STABLE per-spawn
+    /// id minted once per delegation
+    /// (`runner::in_process::InProcessAgentRunner::run_pipeline`) that a
+    /// client must key correlation off instead; `agent` remains the
+    /// human-readable label.
     /// What: `args_preview` is truncated via `preview()` before emission.
     /// Test: `session::registry::registry_tests::record_tool_started_publishes_event`.
     ToolStarted {
         session_id: String,
         agent: String,
+        /// (DOC-39 AC-13) stable per-spawn id — see the variant's own docs
+        /// above. `#[serde(default)]` so a transcript recorded before this
+        /// field existed still deserializes (decoding to `""`, not
+        /// [`UNATTRIBUTED_AGENT_ID`]'s sentinel text).
+        #[serde(default)]
+        agent_id: String,
         tool: String,
         call_id: String,
         args_preview: String,
@@ -182,10 +210,13 @@ pub enum Event {
     /// A tool invocation completed (success or failure signalled by `success`,
     /// not a separate error variant — use `ToolError` for exceptional
     /// failures the caller wants to narrate distinctly, e.g. a timeout).
-    /// `agent` attributes the call — see [`Event::ToolStarted`].
+    /// `agent` attributes the call — see [`Event::ToolStarted`]. `agent_id`
+    /// (DOC-39 AC-13) is the same per-spawn stable id.
     ToolFinished {
         session_id: String,
         agent: String,
+        #[serde(default)]
+        agent_id: String,
         tool: String,
         call_id: String,
         success: bool,
@@ -194,10 +225,13 @@ pub enum Event {
     /// A tool invocation raised an exceptional error (as opposed to
     /// completing with `success: false`) — e.g. the tool process crashed or
     /// timed out rather than returning a normal failure result.
-    /// `agent` attributes the call — see [`Event::ToolStarted`].
+    /// `agent` attributes the call — see [`Event::ToolStarted`]. `agent_id`
+    /// (DOC-39 AC-13) is the same per-spawn stable id.
     ToolError {
         session_id: String,
         agent: String,
+        #[serde(default)]
+        agent_id: String,
         tool: String,
         call_id: String,
         error: String,
@@ -227,6 +261,11 @@ pub enum Event {
     SearchPerformed {
         session_id: String,
         agent: String,
+        /// (DOC-39 AC-13) the dispatching agent's stable per-spawn id — see
+        /// `Event::ToolStarted`'s docs. `#[serde(default)]` for the same
+        /// old-transcript-compatibility reason.
+        #[serde(default)]
+        agent_id: String,
         lane: String,
         query: String,
         hit_count: Option<usize>,
@@ -252,6 +291,11 @@ pub enum Event {
     MemoryRecalled {
         session_id: String,
         agent: String,
+        /// (DOC-39 AC-13) the dispatching agent's stable per-spawn id — see
+        /// `Event::ToolStarted`'s docs. `#[serde(default)]` for the same
+        /// old-transcript-compatibility reason.
+        #[serde(default)]
+        agent_id: String,
         query: String,
         results: Vec<RecalledMemory>,
     },
@@ -292,23 +336,35 @@ pub enum Event {
     },
 
     // -- Agent activity --
+    /// (DOC-39 AC-13) not yet emitted by any production call site — reserved
+    /// for a future agent-lifecycle producer. `agent_id` is defined now so
+    /// that producer never has to retrofit it onto an already-shipped wire
+    /// shape.
     AgentSpawned {
         session_id: String,
         agent: String,
+        #[serde(default)]
+        agent_id: String,
     },
     AgentMessage {
         session_id: String,
         agent: String,
         text: String,
     },
+    /// (DOC-39 AC-13) see [`Event::AgentSpawned`]'s note — not yet emitted.
     AgentDone {
         session_id: String,
         agent: String,
+        #[serde(default)]
+        agent_id: String,
         status: String,
     },
+    /// (DOC-39 AC-13) see [`Event::AgentSpawned`]'s note — not yet emitted.
     AgentFailed {
         session_id: String,
         agent: String,
+        #[serde(default)]
+        agent_id: String,
         error: String,
     },
 
@@ -411,9 +467,13 @@ pub enum Event {
     /// `AgentStarted` fires AFTER the spawn handshake (or at the start of an
     /// in-process runner loop) so the UI can show "spawning…" vs. "running"
     /// states. `runner_type` is one of "subprocess", "claude-code", "inline".
+    /// (DOC-39 AC-13) `agent_id` — see [`Event::AgentSpawned`]'s note; not yet
+    /// emitted by any production call site.
     AgentStarted {
         session_id: String,
         agent_name: String,
+        #[serde(default)]
+        agent_id: String,
         runner_type: String,
     },
 
