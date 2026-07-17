@@ -887,8 +887,9 @@ struct RecordingSink {
     /// (DOC-39 AC-13) `(agent, agent_id)` pairs seen by `tool_started`, in
     /// call order — kept separate from `calls` so every pre-existing test
     /// asserting `calls`'s string format is untouched; only
-    /// `concurrently_delegated_same_named_agents_get_distinct_ids` reads
-    /// this.
+    /// `sequential_delegations_to_same_named_agent_get_distinct_ids` and
+    /// `concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`
+    /// read this.
     started_ids: Mutex<Vec<(String, String)>>,
 }
 

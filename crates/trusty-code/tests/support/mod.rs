@@ -144,7 +144,7 @@ impl StdioSession {
     /// variant (e.g. `trusty_code::task::mock_llm::MOCK_LLM_ECHO_FANOUT`)
     /// while keeping `spawn_with_mock_llm` itself unchanged for every other
     /// e2e file.
-    /// Test: `agent_id_e2e::two_same_named_delegations_get_distinct_agent_ids`.
+    /// Test: `agent_id_e2e::fanned_out_same_named_delegations_get_distinct_agent_ids_over_the_wire`.
     pub fn spawn_with_mock_llm_variant(project: &std::path::Path, mock_llm_value: &str) -> Self {
         Self::spawn_inner(Some(project), Some(mock_llm_value), None)
     }
