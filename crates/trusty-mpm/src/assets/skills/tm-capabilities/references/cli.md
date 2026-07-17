@@ -1,0 +1,193 @@
+# CLI Command Reference
+
+Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
+
+52 top-level commands.
+
+- `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
+  - `list` — List every deployed agent with its declared skills
+  - `show` — Show one agent's metadata and per-skill resolution
+- `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the TUI focused on the matched session
+- `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
+  - `clear-token` — Remove the stored token, if present
+  - `set-token` — Store a `CLAUDE_CODE_OAUTH_TOKEN` for managed sessions to use
+  - `status` — Report the current auth configuration without printing any secret
+- `banner` — Preview the launch banner in the current terminal without starting Claude
+- `catalog` — Sync and inspect the claude-mpm agent/skill catalog
+  - `apply` — Rebuild/redeploy the manifest-selected content from the catalog (HR-3)
+  - `ls` — List the cached agents and skills
+  - `status` — Report whether the deployed content has drifted from the synced catalog
+  - `sync` — Fetch or refresh the agent/skill catalog from the claude-mpm repo
+- `compress` — Compress a piped command's stdout — the `tm hook` PreToolUse Bash command-rewrite spike's filter stage (issue #1956, Option 0)
+- `config` — Manage inference provider configuration (API keys) — the universal `config keys set/list/test/unset` surface shared by every trusty-* binary (epic #2400 Wave 1, #2405)
+  - `keys` — Manage inference provider API keys (set / list / test / unset)
+    - `list` — List which providers have a key and via which tier (names/tiers only)
+    - `set` — Store a provider's API key in the secure store (File-0600 or OS keyring)
+    - `test` — Cheap live auth check: probe the provider with the resolved key
+    - `unset` — Remove a provider's key from the secure store (never touches env/.env.local)
+- `connect` — Start or attach to a session without running the deployment sequence
+- `coordinator` — Send a message to the cross-session coordinator / session manager
+  - `serve` — Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface)
+- `daemon` — Run the trusty-mpm daemon
+- `doctor` — Run a full system diagnostic of the trusty-mpm stack
+- `events` — Show the recent hook-event feed
+- `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
+  - `capabilities` — Regenerate the `tm-capabilities` bundled skill's generated files
+- `gui` — Launch the Tauri desktop GUI (or open the web build in the browser when Tauri is unavailable)
+- `health` — Report daemon health: reachability, catalog freshness, and a fleet summary
+- `hook` — Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop)
+- `install` — Install the bundled framework artifacts to `~/.trusty-mpm/framework/`
+- `issue` — YAML-configurable issue state-management (labels/transitions/assignee)
+  - `current` — Report an issue's current state, derived from its labels
+  - `repair` — Resolve a mid-transition issue carrying multiple state labels
+  - `seed-config` — Write the embedded default model to the user config path
+  - `seed-labels` — Create any missing labels (states + extra families) in the repo
+  - `states` — List the configured states and transitions (reads YAML only)
+  - `transition` — Move an issue to `<to-state>`, validating the edge against the model
+- `launch` — Launch a session with full setup: deploys instructions, agents, and skills, then starts Claude
+- `load` — Clone or refresh the managed workspace for a registered alias (DOC-24)
+- `login` — One-time keychain login for managed `tm run` sessions (WI-10, DOC-24)
+- `ls` — Interactive managed-session connector — list sessions and connect (#2311)
+- `manager` — Layer-3 portfolio manager — cross-project status, digest, and chat (DOC-36, epic #2109, WI-6 #2583)
+  - `chat` — One-shot chat turn against the portfolio manager persona
+  - `digest` — LLM-authored portfolio (or single-project) narrative, with a deterministic fallback when no inference provider is configured
+  - `route` — Route a free-text task to the project it belongs to (advisory)
+  - `status` — Deterministic cross-project portfolio rollup — no LLM call
+- `mcp` — Register user-level MCP servers into tm's OWN tm-owned CLAUDE_CONFIG_DIR
+  - `add` — Add (or replace) a user-scope MCP server
+  - `get` — Show one user-scope MCP server's definition
+  - `list` — List all user-scope MCP servers in the tm config dir
+  - `remove` — Remove a user-scope MCP server by name
+  - `test` — Verify MCP servers by running a real handshake against each
+- `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
+  - `run` — Boot the metaharness for a single run
+- `optimizer` — Inspect or configure the token-use optimizer
+  - `set` — Set the default compression level (rewrites the framework policy file)
+  - `status` — Show current optimizer configuration
+- `overseer` — Inspect the session overseer
+  - `status` — Show the overseer's enabled status and handler type
+- `path` — Print the stable repo path for a loaded alias (DOC-24 IDE-attach)
+- `project` — Define and manage projects (registered working directories)
+  - `info` — Show the current project's registered info and config
+  - `init` — Register a working directory as a trusty-mpm project
+  - `list` — List all registered projects with their status
+- `projects` — Manage the project registry (registry B) and its Deliverable/Milestone ledger
+  - `config` — View or edit a project's deterministic config (§3.1/§6, #2120)
+    - `set` — Set a field to a new value
+    - `tags` — Add and/or remove tags in one call (§6: "no free-text replace-whole-list footgun" — there is no plain tags-replace form)
+    - `unset` — Clear (unset) a field back to absent
+  - `deliverables` — Manage a project's Deliverables (§10.8)
+    - `add` — Create a Deliverable (starts in `proposed`)
+    - `list` — List a project's Deliverables (optionally filtered by status)
+    - `set-status` — Transition a Deliverable's status (enforces the §10.3 state machine)
+    - `show` — Show one Deliverable by id
+  - `list` — List registered projects (optionally filtered by tag)
+  - `milestones` — Manage a project's Milestones (§10.8)
+    - `add` — Create a Milestone
+    - `list` — List a project's Milestones
+    - `show` — Show one Milestone by id
+  - `register` — Register (idempotent upsert) a project in registry B
+  - `show` — Show a project's config PLUS a read-only nested sessions listing
+  - `status` — Show a project's deterministic status rollup (session histogram + flags)
+- `register` — Register a GitHub repo alias for the standalone managed driver (DOC-24)
+- `repair` — Recover from corrupt or inconsistent deploy state
+  - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
+- `restart` — Stop the running daemon and start a fresh one
+- `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
+- `run` — Launch an interactive `claude` session for a managed alias (DOC-24)
+- `serve` — Alias for `start` — start the daemon if not running, no-op if it is
+- `services` — Inspect and probe workspace service daemons
+  - `health` — Probe the health endpoint and print OK or FAIL
+  - `init` — Write the default manifest to ~/.claude-mpm/services.yaml
+  - `list` — List all declared services with their current status
+  - `log` — Print the path to the most-recent log file
+  - `port` — Print the port number for a service (scriptable: PORT=$(tm services port X))
+  - `restart` — Restart a service using its manifest `restart_cmd`
+  - `status` — Show detailed status for one service
+  - `url` — Print the full base URL for a service (e.g. http://localhost:7878)
+- `sessctl` — Manage SESSCTL control-plane sessions (WI-2 #1593)
+  - `auth` — Show the auth state for a session
+  - `connect` — Connect to a session (writer if write-lock available, observer otherwise)
+  - `list` — List all SESSCTL sessions
+  - `run` — Spawn a SESSCTL session for a project via the daemon HTTP API
+  - `stop` — Stop a session (graceful by default, --force for immediate)
+- `session` — [DEPRECATED] Alias of `sessions` (#2116) — use `tm sessions <verb>`
+  - `activity` — Show recent activity for a managed session
+  - `answer` — Answer a managed session's pending decision
+  - `attach` — Print the tmux attach command for a managed session
+  - `breakers` — Show every agent's circuit-breaker state
+  - `catchup` — Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge)
+  - `clean` — Reap dead sessions for the current project
+  - `decommission` — Decommission a managed session: stop runtime + remove workspace from disk
+  - `decommission-ephemeral` — Tear down EVERY ephemeral (test/throwaway) managed session (#1508)
+  - `delete` — Hard-delete a managed session RECORD from the store (#2012)
+  - `events` — Show the recent hook-event feed for one session
+  - `info` — Show detailed info for a specific session
+  - `instructions` — Print the composed launch instructions a session would receive
+  - `list` — List sessions for the current project
+  - `ls` — List managed sessions (session-manager MVP)
+  - `managed-resume` — [DEPRECATED] Resume a stopped managed session — use `resume` instead
+  - `managed-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
+  - `output` — Capture the current output of a session's tmux pane
+  - `pause` — Pause a running session, saving state for later resume
+  - `prune` — Prune managed sessions by state + compact tombstones (#1508)
+  - `prune-idle` — Reclaim idle managed sessions: stop idle, decommission done (#1313)
+  - `prune-worktrees` — Remove orphaned per-session git worktree directories (#1840)
+  - `resume` — Resume a stopped/paused session (managed or project session)
+  - `run` — Send a command to a session's tmux pane
+  - `runtime-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `send` — Inject text into a managed session's pane
+  - `start` — Start a new Claude Code session in the current/specified project
+  - `stop` — Stop a session by id or friendly name (managed or project session)
+  - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
+- `sessions` — Define and manage Claude Code sessions within a project
+  - `activity` — Show recent activity for a managed session
+  - `answer` — Answer a managed session's pending decision
+  - `attach` — Print the tmux attach command for a managed session
+  - `breakers` — Show every agent's circuit-breaker state
+  - `catchup` — Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge)
+  - `clean` — Reap dead sessions for the current project
+  - `decommission` — Decommission a managed session: stop runtime + remove workspace from disk
+  - `decommission-ephemeral` — Tear down EVERY ephemeral (test/throwaway) managed session (#1508)
+  - `delete` — Hard-delete a managed session RECORD from the store (#2012)
+  - `events` — Show the recent hook-event feed for one session
+  - `info` — Show detailed info for a specific session
+  - `instructions` — Print the composed launch instructions a session would receive
+  - `list` — List sessions for the current project
+  - `ls` — List managed sessions (session-manager MVP)
+  - `managed-resume` — [DEPRECATED] Resume a stopped managed session — use `resume` instead
+  - `managed-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `new` — Spawn a new managed session from a repo + ref (session-manager MVP)
+  - `output` — Capture the current output of a session's tmux pane
+  - `pause` — Pause a running session, saving state for later resume
+  - `prune` — Prune managed sessions by state + compact tombstones (#1508)
+  - `prune-idle` — Reclaim idle managed sessions: stop idle, decommission done (#1313)
+  - `prune-worktrees` — Remove orphaned per-session git worktree directories (#1840)
+  - `resume` — Resume a stopped/paused session (managed or project session)
+  - `run` — Send a command to a session's tmux pane
+  - `runtime-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
+  - `send` — Inject text into a managed session's pane
+  - `start` — Start a new Claude Code session in the current/specified project
+  - `stop` — Stop a session by id or friendly name (managed or project session)
+  - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
+- `slack` — Manage the Slack remote-management bot (start, stop) — DOC-20 adapter #1294
+  - `start` — Start the Slack bot process (Socket Mode — no public webhook required)
+  - `stop` — Stop the Slack bot process if running
+- `start` — Start the daemon if not running, or show status if already running
+- `status` — Show daemon and session status
+- `statusline` — Read Claude Code statusLine JSON from stdin and print one compact line
+- `stop` — Stop every running trusty-mpm daemon process
+- `supervisor` — Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206)
+- `telegram` — Manage the Telegram remote-management bot (pair, status, start, stop)
+  - `pair` — Request a one-time pairing code for the Telegram bot
+  - `start` — Start the Telegram bot process
+  - `status` — Show Telegram bot pairing status
+  - `stop` — Stop the Telegram bot process if running
+- `ticket` — One-shot issue → branch → PR → close workflow (#1237)
+- `tui` — Launch the ratatui multi-session TUI dashboard
+- `update` — Refresh a loaded alias — pull latest and re-deploy managed config (DOC-24)
+- `validate` — Validate a workspace's deployed `.claude/{agents,skills}` payload and `settings.json` against the canonical bundled roster (issue #2158)
+- `watch` — Watch a board for label-routed issues and dispatch them autonomously
+  - `listen` — Long-running: poll on `--interval-secs`, dispatching new issues each cycle
+  - `poll` — One-shot: list label-matched issues, dispatch each, then exit

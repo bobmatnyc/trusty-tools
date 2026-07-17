@@ -1,0 +1,23 @@
+# Doctor Check Reference
+
+Generated from a maintained literal list cross-checked against `run_doctor`'s actual check names (see this module's `doctor_checks_match_run_doctor_names` test — an added, removed, or renamed check fails the test suite). Source: `crates/trusty-mpm/src/daemon/doctor.rs` and its five sibling `doctor_*.rs` files. Regenerate with `tm generate capabilities`.
+
+15 checks, in execution order.
+
+| # | Check | What it probes |
+|---|---|---|
+| 1 | `instructions` | Framework instructions deployed and non-empty for the target project. |
+| 2 | `agents` | Bundled agent roster deployed under the operator/workspace `.claude/agents/` tier. |
+| 3 | `skills` | Bundled skill catalog deployed under the operator/workspace `.claude/skills/` tier. |
+| 4 | `skill_source` | The framework's own skill source directory is present and readable. |
+| 5 | `output_style` | The `trusty-mpm` Claude Code output style is configured and its file exists (DOC-28 F4). |
+| 6 | `deployment` | Full manifest-completeness diff of the deployed payload against the canonical bundled roster (issue #2158). |
+| 7 | `skill_staleness` | Deployed skill content matches the bundled/embedded source (issue #2876). |
+| 8 | `legacy_sources` | No legacy global instruction sources linger from a pre-migration install (issue #2876). |
+| 9 | `agent_skills` | Every agent's declared `skills:` frontmatter resolves to a real skill — dangling references fail (DOC-42, issue #2889). |
+| 10 | `agent_skills_prose_hints` | Informational: skill names mentioned in agent prose but not declared in `skills:` frontmatter (always `Ok`, issue #2906). |
+| 11 | `memory` | trusty-memory sidecar reachability probe (bounded by `PROBE_TIMEOUT`). |
+| 12 | `search` | trusty-search sidecar reachability + expected-index-present probe (bounded by `PROBE_TIMEOUT`). |
+| 13 | `worktrees` | No orphaned git worktrees under the managed workspace root (Fix 1b, #1840). |
+| 14 | `gh_account` | Active `gh` CLI identity is unambiguous — warns on multi-account ambiguity. |
+| 15 | `oauth_token` | Warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop (issue #2246). |

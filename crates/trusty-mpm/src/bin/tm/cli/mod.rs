@@ -284,6 +284,22 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Regenerate derived, committed artifacts from live harness surfaces
+    /// (issue #2913).
+    ///
+    /// Why: a dev-time codegen namespace, following the same "generate,
+    /// commit, CI-diff" pattern as `scripts/check_line_cap.sh`'s
+    /// `--update`/ratchet convention — never a build.rs and never
+    /// deploy-time-dynamic (see `tm-capabilities`'s provenance banner for the
+    /// rationale).
+    /// What: `capabilities` regenerates the `tm-capabilities` bundled skill;
+    /// see [`GenerateAction`].
+    /// Test: `cli_parses_generate_capabilities`, `cli_parses_generate_capabilities_check`.
+    Generate {
+        /// Generate action to perform.
+        #[command(subcommand)]
+        action: GenerateAction,
+    },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
     /// Launch the ratatui multi-session TUI dashboard.

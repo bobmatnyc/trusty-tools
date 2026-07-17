@@ -139,6 +139,47 @@ fn tm_skills_are_in_bundle() {
 }
 
 #[test]
+fn tm_capabilities_is_in_bundle() {
+    // Issue #2913: the generated tm-capabilities entry + all five
+    // references/*.md files, plus the hand-authored references/workflows.md,
+    // must be present in ALL so `trusty-mpm install` deploys them offline —
+    // the same "registration here is what makes deploy_all_skill_tiers ship
+    // it" lesson as the code-critic bundled-skills fix (issue #2890).
+    let paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
+    for expected in &[
+        "skills/tm-capabilities.md",
+        "skills/tm-capabilities/references/cli.md",
+        "skills/tm-capabilities/references/mcp-tools.md",
+        "skills/tm-capabilities/references/agents.md",
+        "skills/tm-capabilities/references/skills.md",
+        "skills/tm-capabilities/references/doctor.md",
+        "skills/tm-capabilities/references/workflows.md",
+    ] {
+        assert!(paths.contains(expected), "missing bundled file: {expected}");
+    }
+}
+
+#[test]
+fn tm_capabilities_has_frontmatter() {
+    // The entry file must carry the standard bundled-skill frontmatter shape
+    // (name/description/user-invocable), same convention as every other
+    // skill in ALL.
+    assert!(TM_CAPABILITIES.starts_with("---\nname: tm-capabilities\n"));
+    assert!(TM_CAPABILITIES.contains("user-invocable: false"));
+}
+
+#[test]
+fn tm_capabilities_constants_are_non_empty() {
+    assert!(!TM_CAPABILITIES.trim().is_empty());
+    assert!(!TM_CAPABILITIES_CLI.trim().is_empty());
+    assert!(!TM_CAPABILITIES_MCP_TOOLS.trim().is_empty());
+    assert!(!TM_CAPABILITIES_AGENTS.trim().is_empty());
+    assert!(!TM_CAPABILITIES_SKILLS.trim().is_empty());
+    assert!(!TM_CAPABILITIES_DOCTOR.trim().is_empty());
+    assert!(!TM_CAPABILITIES_WORKFLOWS.trim().is_empty());
+}
+
+#[test]
 fn tm_skills_have_frontmatter() {
     // Every /tm- skill must carry YAML frontmatter with a tm-native `name:`
     // and must not leak unadapted claude-mpm references.
@@ -358,11 +399,15 @@ fn bundle_table_is_complete() {
     // Issue #2911 (7): documentation-style bundled skill — entry SKILL.md plus
     //   6 references/*.md files (spec, readme, file-level, class,
     //   method-function, block-inline). 164 + 7 = 171.
-    assert_eq!(ALL.len(), 171);
+    // Issue #2913 (7): tm-capabilities auto-generated harness capability
+    //   catalog — entry `skills/tm-capabilities.md` plus five generated
+    //   `references/{cli,mcp-tools,agents,skills,doctor}.md` files plus one
+    //   hand-authored `references/workflows.md`. 171 + 7 = 178.
+    assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 171, "artifact paths must be unique");
+    assert_eq!(paths.len(), 178, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

@@ -466,8 +466,7 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("skills/artifacts-builder.md", ARTIFACTS_BUILDER),
     overwrite("skills/model-context-builder.md", MODEL_CONTEXT_BUILDER),
     overwrite("skills/xlsx.md", XLSX),
-    // --- BEGIN issue #2911: documentation-style bundled skill (append-only;
-    // sibling PR #2913 owns the ALL table above this marker) ---
+    // --- BEGIN issue #2911: documentation-style bundled skill (append-only) ---
     overwrite("skills/documentation-style.md", DOCUMENTATION_STYLE),
     overwrite(
         "skills/documentation-style/references/spec.md",
@@ -494,4 +493,36 @@ pub const ALL: &[BundledArtifact] = &[
         DOCUMENTATION_STYLE_BLOCK_INLINE,
     ),
     // --- END issue #2911 ---
+    // --- Issue #2913: tm-capabilities auto-generated harness capability
+    // catalog (entry SKILL.md + references/*.md). Generator lives at
+    // `crates/trusty-mpm/src/bin/tm/generate/`; regenerate with
+    // `tm generate capabilities`. `references/workflows.md` is the one
+    // hand-authored file in this set. Appended at the end of `ALL` (not
+    // interleaved) to minimize merge conflicts with concurrent skill-port
+    // work touching this same table.
+    overwrite("skills/tm-capabilities.md", TM_CAPABILITIES),
+    overwrite(
+        "skills/tm-capabilities/references/cli.md",
+        TM_CAPABILITIES_CLI,
+    ),
+    overwrite(
+        "skills/tm-capabilities/references/mcp-tools.md",
+        TM_CAPABILITIES_MCP_TOOLS,
+    ),
+    overwrite(
+        "skills/tm-capabilities/references/agents.md",
+        TM_CAPABILITIES_AGENTS,
+    ),
+    overwrite(
+        "skills/tm-capabilities/references/skills.md",
+        TM_CAPABILITIES_SKILLS,
+    ),
+    overwrite(
+        "skills/tm-capabilities/references/doctor.md",
+        TM_CAPABILITIES_DOCTOR,
+    ),
+    overwrite(
+        "skills/tm-capabilities/references/workflows.md",
+        TM_CAPABILITIES_WORKFLOWS,
+    ),
 ];
