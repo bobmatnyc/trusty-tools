@@ -202,7 +202,8 @@ fn git_diff_trees(root: &Path, before_tree: &str, after_tree: &str) -> String {
 /// the simplest faithful representation.
 /// What: Walks `root`, reading each regular file into a `relative-path → content`
 /// map. Binary/unreadable files are stored as a placeholder marker. Skips the
-/// `.git` directory and any path component starting with `.git`.
+/// exact `.git` directory (not merely any `.git`-prefixed name) and macOS
+/// filesystem-metadata noise (see #2880).
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
 fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
