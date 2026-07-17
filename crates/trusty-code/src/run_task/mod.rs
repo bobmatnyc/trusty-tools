@@ -21,7 +21,7 @@ mod report;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,16 +31,18 @@ use async_trait::async_trait;
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig};
 use crate::agents::AgentConfig;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
+use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
-use crate::prompt::assemble_system_prompt;
+use crate::prompt::assemble_system_prompt_for_mode;
 use crate::provider::{
     resolve_context_window, resolve_deadline_secs, resolve_max_tokens, resolve_model,
 };
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
+use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, EngineerCompletionSignal,
-    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RunContext, ToolRegistry,
-    TrustySearchTool, WriteFileTool, WriteFilesTool,
+    FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RunContext, SkillResolver,
+    ToolRegistry, TrustySearchTool, UseSkillTool, WriteFileTool, WriteFilesTool,
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
@@ -143,6 +145,32 @@ pub(crate) fn ensure_project_indexed_in_background(
 /// Test: `run_task::tests::background_indexing_invokes_readiness_observer`.
 pub(crate) type ReadinessObserver =
     Box<dyn FnOnce(Option<trusty_common::search_readiness::IndexReadiness>) + Send>;
+
+/// Discover the (cheap, metadata-only) skill catalog under `project` and build
+/// a resolver over it (#2924).
+///
+/// Why: this legacy one-shot/bake-off CLI path (`execute_run_task`) predates
+/// #2059's `HarnessMode` plumbing and has no `--mode` flag or `RunTaskParams`
+/// field to thread a resolved mode through — unlike `task::executor`'s
+/// `daily_driver_skills_catalog`, which gates on `HarnessMode::Parity` to
+/// protect that path's benchmark-fairness guarantee, this path never runs in
+/// `Parity` at all, so it always resolves the catalog as if it were
+/// `HarnessMode::DailyDriver` outright, with no mode check needed.
+/// What: Returns `None` when `project` has no (or an empty) `.claude/skills/`
+/// catalog; otherwise `Some((rendered_catalog, resolver))` — the resolver
+/// backs the PM's `use_skill` tool registration and the rendered catalog
+/// feeds `assemble_system_prompt_for_mode`.
+/// Test: `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`.
+fn daily_driver_skills_catalog(project: &Path) -> Option<(String, Arc<dyn SkillResolver>)> {
+    let skills_dir = locate_skills_dir(project);
+    let resolver: Arc<dyn SkillResolver> = Arc::new(FsSkillResolver::new(skills_dir));
+    let catalog = format_skill_catalog(&resolver.metadata());
+    if catalog.is_empty() {
+        None
+    } else {
+        Some((catalog, resolver))
+    }
+}
 
 /// Inputs to a single `run-task` invocation, parsed from the CLI.
 ///
@@ -247,12 +275,21 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // all-tests-passing run as `partial`/exit-6.
     let completion_signal = EngineerCompletionSignal::new();
 
+    // #2924: discover the (cheap, metadata-only) skill catalog and, mirroring
+    // `task::executor::run_and_record`'s DailyDriver-only wiring, register
+    // `use_skill` so the PM can lazily fetch a skill's full body on demand.
+    // This CLI path has no `--mode`/Parity guarantee to protect (see
+    // `daily_driver_skills_catalog`'s own docs), so it always resolves the
+    // catalog as if running under `HarnessMode::DailyDriver`.
+    let skills_catalog = daily_driver_skills_catalog(&params.project);
+
     // Build the engineer runner, scoped to the project working dir, sharing the
     // transcript (engineer turns are tagged "python-engineer").
     let engineer_runner = build_engineer_runner(
         wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
         project_context.clone(),
+        skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
         Arc::clone(&transcript),
         deadline_secs,
         redelegation_signal.clone(),
@@ -271,6 +308,12 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
             .with_completion_signal(completion_signal.clone()),
     ));
     pm_registry.register(Arc::new(FinishTaskTool::new()));
+    // #2924: mirrors `task::executor::run_and_record` — only the PM registers
+    // `use_skill`; the delegated engineer inherits the catalog/prompt but not
+    // the tool itself.
+    if let Some((_, resolver)) = &skills_catalog {
+        pm_registry.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
+    }
 
     // The PM's loop uses a transcript-recording client tagged "pm".
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
@@ -285,10 +328,15 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // the section.  Sub-agents are NOT wired here; only the PM receives this digest.
     let catchup_ctx = crate::catchup::pm_catchup_context(&params.project).await;
 
-    let pm_system = assemble_system_prompt(
+    // #2924: mirrors `task::executor::run_and_record` — always resolves as
+    // `HarnessMode::DailyDriver` (see `daily_driver_skills_catalog`'s docs
+    // for why this path never needs to resolve `Parity`).
+    let pm_system = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
         &pm_config,
         project_context.as_deref(),
         catchup_ctx.as_deref(),
+        skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
     );
     // (#2265 fix #5, re-scoped by #2852) Once the shared cap latches, every
     // further `delegate_to_agent` call the PM might issue is a guaranteed dead
@@ -409,11 +457,19 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 /// What: Returns an `Arc<dyn AgentRunner>` the `DelegateToAgentTool` dispatches
 /// to. The engineer's own LLM turns are recorded under the "python-engineer" role.
 /// `redelegation_signal` is shared with `assemble_report` via the caller.
-/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
+/// `skills_catalog` (#2924) is the same rendered metadata catalog the PM's own
+/// prompt gets, threaded through so the delegated engineer's DailyDriver
+/// prompt also sees it — mirrors `task::executor::build_engineer_runner`,
+/// including that wiring the `use_skill` *tool* into the engineer's own
+/// per-delegation registry (`ProjectToolFactory::build`) is deliberately
+/// deferred, exactly as the daemon path defers it.
+/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
+/// `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`.
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
     params: &RunTaskParams,
     project_context: Option<String>,
+    skills_catalog: Option<String>,
     transcript: SharedTranscript,
     deadline_secs: u64,
     redelegation_signal: RedelegationCapSignal,
@@ -429,9 +485,16 @@ fn build_engineer_runner(
     });
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
-        .with_timeout_secs(deadline_secs);
+        .with_timeout_secs(deadline_secs)
+        // #2924: mirrors `task::executor::build_engineer_runner` — this path
+        // always resolves as `HarnessMode::DailyDriver` (see
+        // `daily_driver_skills_catalog`'s docs).
+        .with_mode(HarnessMode::DailyDriver);
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
+    }
+    if let Some(catalog) = skills_catalog {
+        runner = runner.with_skills_catalog(catalog);
     }
     let pinned = apply_engineer_model_override(Arc::new(runner), params);
     Arc::new(redelegation::RedelegatingRunner::new(

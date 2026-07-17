@@ -1603,3 +1603,82 @@ fn background_indexing_invokes_readiness_observer() {
     rx.recv_timeout(std::time::Duration::from_secs(10))
         .expect("the readiness observer must be invoked, even when nothing is probeable");
 }
+
+/// A response where the assistant calls `use_skill(name)` (#2924).
+fn use_skill_response(name: &str) -> Value {
+    json!({
+        "id": "gen-use-skill",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-use-skill",
+                    "type": "function",
+                    "function": {
+                        "name": "use_skill",
+                        "arguments": json!({"name": name}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 25, "completion_tokens": 6, "total_tokens": 31}
+    })
+}
+
+/// The `--legacy-in-process`/bake-off `run_task` path (`execute_run_task`)
+/// wires the skill catalog and `use_skill` tool into the PM's registry the
+/// same way the daemon path (`task::executor::run_and_record`) already does
+/// (#2924) — before this fix, `daily_driver_skills_catalog` and
+/// `UseSkillTool` registration existed ONLY on the daemon path, so a PM
+/// running through this CLI path could never discover or invoke a project
+/// skill at all.
+///
+/// Why: mirrors `runner::tests::skills_catalog_reaches_daily_driver_prompt`,
+/// but proves the wiring at the `execute_run_task` orchestration layer
+/// (config → prompt → registry → transcript), not just at the
+/// `InProcessAgentRunner` builder layer that test already covers.
+/// What: seeds a project with `.claude/skills/demo/SKILL.md`; scripts the PM
+/// to call `use_skill(name: "demo")` on its first turn, then stop; asserts
+/// the resolved skill body reached the tool result (via the recorded
+/// transcript's tool call) and that some `TurnRecord.tool_calls` contains
+/// `"use_skill"`.
+/// Test: this test.
+#[tokio::test]
+async fn use_skill_on_legacy_path_reaches_pm_and_transcript() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let skills_dir = project.path().join(".claude").join("skills").join("demo");
+    std::fs::create_dir_all(&skills_dir).expect("mkdir skill dir");
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nfull demo body\n",
+    )
+    .expect("write SKILL.md");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        use_skill_response("demo"),
+        stop_response("pm: loaded the demo skill"),
+    ]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    // The PM's own prompt must have advertised the catalog and the tool.
+    let names = llm.first_tool_names();
+    assert!(
+        names.contains(&"use_skill".to_string()),
+        "PM registry must advertise use_skill when a skill catalog resolves; got {names:?}"
+    );
+
+    // The recorded transcript must show the PM actually calling use_skill.
+    let saw_use_skill = report
+        .transcript
+        .iter()
+        .any(|turn| turn.tool_calls.iter().any(|name| name == "use_skill"));
+    assert!(
+        saw_use_skill,
+        "some TurnRecord.tool_calls must contain \"use_skill\"; transcript was: {:?}",
+        report.transcript
+    );
+}
