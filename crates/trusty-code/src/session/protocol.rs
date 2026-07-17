@@ -5,19 +5,22 @@
 //! CLI (and later TUI/TELGUI/REST) never touch `SessionRegistry` directly.
 //! What: [`register`] wires `session.create`, `session.list`,
 //! `session.status`, `session.send`, `session.attach`, `session.detach`,
-//! `session.cancel`, (#2058) `session.get_transcript`, and (#2350)
-//! `session.set_goal`/`session.clear_goal`/`session.get_goals` onto a
-//! [`Router`], all closed over the SAME `Arc<SessionRegistry>` so every
-//! method sees a consistent view. Each handler parses its typed `params`,
-//! forwards to the matching `SessionRegistry` method, and maps the result
-//! onto the JSON-RPC result shape the vision spec's §4.3 examples describe.
+//! `session.cancel`, (#2058) `session.get_transcript`, (#2350)
+//! `session.set_goal`/`session.clear_goal`/`session.get_goals`, and
+//! (DOC-39 §5.6 Slice D) `session.get_readiness` onto a [`Router`], all
+//! closed over the SAME `Arc<SessionRegistry>` so every method sees a
+//! consistent view. Each handler parses its typed `params`, forwards to the
+//! matching `SessionRegistry` method, and maps the result onto the JSON-RPC
+//! result shape the vision spec's §4.3 examples describe.
 //! The three goal methods' handler bodies live in the sibling
-//! `protocol_goals` module (kept out of this file purely for the 500-SLOC
-//! cap — see that module's docs), but are registered here alongside every
-//! other `session.*` method so this remains the one place listing the full
-//! surface.
+//! `protocol_goals` module, and `session.get_readiness`'s in the sibling
+//! `protocol_readiness` module (both kept out of this file purely for the
+//! 500-SLOC cap — see each module's docs), but are registered here alongside
+//! every other `session.*` method so this remains the one place listing the
+//! full surface.
 //! Test: `protocol::tests::*` (parameter validation, error mapping);
-//! `protocol_goals::tests::*` (the three goal methods); the full
+//! `protocol_goals::tests::*` (the three goal methods);
+//! `protocol_readiness::tests::*` (`session.get_readiness`); the full
 //! attach/detach streaming behaviour is covered by `session::registry_tests`
 //! (registry-level) and `tests/session_e2e.rs`/`tests/task_e2e.rs`
 //! (API-driven, real daemon).
@@ -138,6 +141,15 @@ pub fn register(router: &mut Router, registry: Arc<SessionRegistry>) {
         move |params: Value, ctx: ConnectionContext| {
             let r = r.clone();
             async move { protocol_goals::get_goals(&r, params, ctx).await }
+        },
+    );
+
+    let r = registry.clone();
+    router.register(
+        "session.get_readiness",
+        move |params: Value, ctx: ConnectionContext| {
+            let r = r.clone();
+            async move { protocol_readiness::get_readiness(&r, params, ctx).await }
         },
     );
 }
@@ -378,6 +390,11 @@ async fn get_transcript(
 #[path = "protocol_goals.rs"]
 mod protocol_goals;
 
+/// `session.get_readiness` (DOC-39 §5.6 Slice D), split into its own file for
+/// the same 500-SLOC-cap reason as `protocol_goals` above.
+#[path = "protocol_readiness.rs"]
+mod protocol_readiness;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +427,7 @@ mod tests {
             ("session.detach", json!({"session_id": session.id})),
             ("session.get_transcript", json!({"session_id": session.id})),
             ("session.get_goals", json!({"session_id": session.id})),
+            ("session.get_readiness", json!({"session_id": session.id})),
         ];
         for (method, params) in cases {
             let req = Request {

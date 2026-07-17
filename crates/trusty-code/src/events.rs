@@ -470,6 +470,12 @@ pub enum Event {
     /// individually. `index_id`/`lifecycle_status`/`chunk_count` are `None`
     /// exactly when `state == "unavailable"` (nothing was probed). `summary` is
     /// the same human-readable line the stderr log carries.
+    /// (DOC-39 §5.6 Slice D) This event is EMITTED ONCE, at task start — a
+    /// client that attaches after it fired sees nothing. `session.get_readiness`
+    /// is the query counterpart: it returns the last-recorded
+    /// [`IndexReadinessSnapshot`] (this variant's fields, minus `session_id`)
+    /// for late attachers, so "what is readiness right now" doesn't depend on
+    /// having been subscribed at the right moment.
     /// Test: `session::registry::registry_tests::record_index_readiness_*`,
     /// `session::registry::registry_tests::warming_index_is_distinguishable_from_ready_with_zero_hits`.
     IndexReadiness {
@@ -532,6 +538,39 @@ pub enum Event {
 
     // -- Keepalive --
     Ping,
+}
+
+/// A cached snapshot of the `Event::IndexReadiness` payload (DOC-39 §5.6
+/// Slice D — `session.get_readiness` query RPC).
+///
+/// Why: `Event::IndexReadiness` above is emitted exactly once, at task start
+/// — a fire-once event, not a queryable value. A UI client that attaches to
+/// a session AFTER that one-time probe fired has no way to ask "what is the
+/// readiness state right now"; it can only ever see events that arrive while
+/// it happens to be subscribed. This struct is the field-for-field twin of
+/// `Event::IndexReadiness`'s payload (deliberately excluding `session_id`,
+/// which is contextual to the cache slot it lives in, not the event) so
+/// `SessionRegistry` can cache the last-recorded probe per session and
+/// `session.get_readiness` can hand it back verbatim to a late-attaching
+/// client — one shape for both the streamed event and the query response,
+/// with no independent field-naming to drift out of sync.
+/// What: every field name and type matches the corresponding field on
+/// `Event::IndexReadiness` exactly. `SessionRegistry::record_index_readiness`
+/// builds one of these first and derives the `Event::IndexReadiness` it
+/// publishes from it, so the two can never disagree.
+/// Test: `session::registry_tests::record_index_readiness_caches_snapshot_*`,
+/// `session::protocol_readiness::tests::*`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexReadinessSnapshot {
+    /// `"ready"` | `"warming"` | `"unavailable"` — see `Event::IndexReadiness`.
+    pub state: String,
+    pub index_id: Option<String>,
+    pub lifecycle_status: Option<String>,
+    pub chunk_count: Option<u64>,
+    pub lexical_ready: bool,
+    pub semantic_ready: bool,
+    pub graph_ready: bool,
+    pub summary: String,
 }
 
 impl Event {
