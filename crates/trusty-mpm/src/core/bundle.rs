@@ -187,6 +187,17 @@ pub const MPM_AGENT_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-age
 /// Concrete mpm-skills-manager agent — skill lifecycle and recommendations (`extends: base-agent`).
 pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-skills-manager.md");
 
+// --- Issue #2911: `documentation-style` bundled skill (SLD-grounded
+// per-artifact-type documentation conventions) — own module, kept separate
+// from the batch-1 groups since it lands independently of epic #2902.
+#[path = "bundle_skills_documentation_style.rs"]
+mod skills_documentation_style_inner;
+pub use skills_documentation_style_inner::{
+    DOCUMENTATION_STYLE, DOCUMENTATION_STYLE_BLOCK_INLINE, DOCUMENTATION_STYLE_CLASS,
+    DOCUMENTATION_STYLE_FILE_LEVEL, DOCUMENTATION_STYLE_METHOD_FUNCTION,
+    DOCUMENTATION_STYLE_README, DOCUMENTATION_STYLE_SPEC,
+};
+
 // --- Skill-port batch 1 (issue #2903, epic #2902): 25 upstream universal/
 // skills, split across 4 modules by category to stay under the 500-SLOC cap.
 #[path = "bundle_skills_batch1_debugging.rs"]
