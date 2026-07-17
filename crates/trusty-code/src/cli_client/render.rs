@@ -268,6 +268,7 @@ mod tests {
             lane: "lexical".to_string(),
             query: "where is auth".to_string(),
             hit_count: Some(3),
+            hits: vec![],
             latency_ms: 42,
         }));
         assert!(line.contains("[python-engineer]"), "{line}");

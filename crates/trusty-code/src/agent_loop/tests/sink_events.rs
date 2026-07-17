@@ -231,6 +231,7 @@ impl ToolExecutor for TelemetryTool {
                 lane: "semantic".to_string(),
                 query: "q".to_string(),
                 hit_count: Some(4),
+                hits: vec![],
                 latency_ms: 3,
             },
         ))

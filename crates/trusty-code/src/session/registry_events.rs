@@ -311,8 +311,9 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// Record a `search_code` call's real lane + hit count + latency
-    /// (UI Phase 1). See [`crate::events::Event::SearchPerformed`].
+    /// Record a `search_code` call's real lane + hit count + per-hit
+    /// path/score + latency (UI Phase 1; `hits` added DOC-39 Slice B). See
+    /// [`crate::events::Event::SearchPerformed`].
     ///
     /// Why: emitted ALONGSIDE the generic tool events so the UI can trace a
     /// change back to the searches that drove it without re-parsing prose.
@@ -337,6 +338,7 @@ impl SessionRegistry {
                 lane: telemetry.lane.clone(),
                 query: telemetry.query.clone(),
                 hit_count: telemetry.hit_count,
+                hits: telemetry.hits.clone(),
                 latency_ms: telemetry.latency_ms,
             },
         );
