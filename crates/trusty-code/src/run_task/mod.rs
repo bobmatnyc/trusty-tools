@@ -155,7 +155,7 @@ pub struct RunTaskParams {
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `diff_reflects_engineer_file_change`, `usage_and_cost_aggregate_end_to_end`,
 /// `exit_code_reflects_run_failure`,
-/// `pm_stops_redelegating_once_cap_latched_ends_partial_promptly`.
+/// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
@@ -264,7 +264,9 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // is unrecoverable by construction — the PM never gets another turn — so
     // it may only ever fire on a condition no subsequent delegation could
     // clear. `is_cap_reached()` now latches ONLY on the run-wide
-    // `MAX_ENGINEER_INVOCATIONS` ceiling, which is exactly such a condition.
+    // `MAX_FAILED_INVOCATIONS` ceiling — a run whose delegations have failed
+    // that many times over, which is exactly such a condition. Successful
+    // invocations never feed it, no matter how many the PM makes.
     // It deliberately does NOT latch on a single delegation exhausting its
     // `MAX_REDELEGATIONS` retries: that is recoverable (a fresh delegation
     // gets a full budget), and stopping the loop on it is precisely the bug
@@ -717,10 +719,14 @@ fn assemble_report(
 
         if (budget_spent || is_turn_cap) && has_deliverable {
             let label = if cap_reached {
+                // #2852: quote the FAILURE count, which is the ceiling's actual
+                // input and is exactly the number of invocations that really
+                // failed — never a pre-incremented dispatch counter, which
+                // would tell an operator "13" when 12 occurred.
                 format!(
-                    "partial: engineer invocation ceiling reached after {} invocations; \
+                    "partial: engineer failure ceiling reached after {} failed invocations; \
                      partial work preserved at {}",
-                    redelegation_signal.attempts(),
+                    redelegation_signal.failed_invocations(),
                     params.project.display()
                 )
             } else if retry_exhausted {
@@ -754,9 +760,9 @@ fn assemble_report(
         // retry budget), even though the exit code itself is unchanged.
         let label = if cap_reached {
             format!(
-                "run failure (engineer invocation ceiling reached after {} invocations, no \
-                 deliverable produced)",
-                redelegation_signal.attempts()
+                "run failure (engineer failure ceiling reached after {} failed invocations, \
+                 no deliverable produced)",
+                redelegation_signal.failed_invocations()
             )
         } else if retry_exhausted {
             format!(
