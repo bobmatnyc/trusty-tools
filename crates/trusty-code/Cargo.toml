@@ -62,6 +62,7 @@ libc = { workspace = true }
 # back to the process CWD instead would silently bind to a directory the
 # operator never chose — the exact implicit-binding bug `ProjectBinding` exists
 # to prevent.
+# fs_browse: `~` expansion + home-collapsed breadcrumbs for the UI's picker
 dirs = { workspace = true }
 
 # verify_gate (#2279): matches a `bash` tool call's command against the

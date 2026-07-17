@@ -82,8 +82,12 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// `agents_dir` from it via `crate::agents::locate_agents_dir` (the same
 /// `.claude/agents` / `.open-mpm/agents` convention `tcode run-task` uses)
 /// and passes both down to spawned executions.
+/// `fs.list_dir` (UI Phase-1) is the one group that needs NO shared state — a
+/// directory listing is a pure function of the filesystem at call time — so it
+/// registers with neither `sessions` nor `project`.
 /// What: builds an empty `Router` + a fresh `SessionRegistry`, calls
-/// `methods::register`, `crate::session::protocol::register`, and
+/// `methods::register`, `crate::session::protocol::register`,
+/// `crate::fs_browse::protocol::register`, and
 /// `crate::task::protocol::register` on them, and returns both.
 ///
 /// `binding` is the daemon's project binding. Its `None` (projectless) state is
@@ -95,13 +99,15 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// CWD (which would silently bind a directory nobody chose).
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
-/// `build_router_is_projectless_without_a_project`.
+/// `build_router_is_projectless_without_a_project`,
+/// `build_router_wires_fs_list_dir`.
 pub fn build_router(binding: ProjectBinding) -> (Router, Arc<SessionRegistry>) {
     let sessions = Arc::new(SessionRegistry::new());
     let agents_dir = binding.agents_dir();
     let mut router = Router::new();
     methods::register(&mut router);
     crate::session::protocol::register(&mut router, sessions.clone());
+    crate::fs_browse::protocol::register(&mut router);
     crate::task::protocol::register(&mut router, sessions.clone(), binding, agents_dir);
     (router, sessions)
 }
@@ -213,6 +219,31 @@ mod tests {
             resp.error
         );
         assert_eq!(resp.result.unwrap()["id"], session.id);
+    }
+
+    /// `build_router` must also wire `fs.list_dir` (UI Phase-1), so the UI's
+    /// project picker is reachable over the same `/rpc` endpoint as everything
+    /// else.
+    #[tokio::test]
+    async fn build_router_wires_fs_list_dir() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let (router, _sessions) = build_router(
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        );
+
+        let req = Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "fs.list_dir".to_string(),
+            params: Some(json!({"path": project.path().display().to_string()})),
+        };
+        let resp = router.dispatch(req, &test_ctx()).await;
+        assert!(
+            resp.error.is_none(),
+            "fs.list_dir must be registered, got {:?}",
+            resp.error
+        );
+        assert!(resp.result.expect("result")["entries"].is_array());
     }
 
     /// `DEFAULT_HTTP_PORT` must stay the documented value (7881) so a

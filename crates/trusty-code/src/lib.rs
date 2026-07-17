@@ -380,6 +380,18 @@ pub mod jsonrpc;
 /// `serve::transport::tests::*`, `serve::http::tests::*`.
 pub mod serve;
 
+/// Daemon-side directory inspection for the UI's project picker (UI Phase-1).
+///
+/// Why: the UI is a thin client — no UI target (web OR Tauri) touches the
+/// filesystem directly, so browsing the local disk to pick a project has to be
+/// a daemon API. One call serves both the picker's rendering (screen 7a's
+/// breadcrumb + per-entry `git` badge) and the three-state project binding
+/// model (projectless → non-git dir → git repo).
+/// What: `list_dir`, `DirListing`, `DirEntryInfo`, `ListDirError`, and
+/// `fs_browse::protocol::register` (wires `fs.list_dir` onto a `Router`).
+/// Test: `fs_browse::tests::*`, `fs_browse::protocol::tests::*`.
+pub mod fs_browse;
+
 /// Daemon-owned session model + attach/detach protocol (#2054, Axiom 4).
 ///
 /// Why: "The Daemon OWNS Sessions; CLI Attaches Over the API" — sessions

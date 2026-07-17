@@ -113,6 +113,30 @@ impl RpcError {
         )
     }
 
+    /// Build a `-32002 not_found` error (vision spec §13.2).
+    ///
+    /// Why: the spec's general "the thing you named does not exist" code,
+    /// distinct from the session-specific `-32007 session_not_found` — used by
+    /// methods whose subject is not a session (e.g. `fs.list_dir` on a path
+    /// that isn't there).
+    /// What: `data.error_type = "not_found"`.
+    /// Test: `rpc_error_not_found_sets_code_and_type`.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::domain(-32002, "not_found", message)
+    }
+
+    /// Build a `-32001 permission_denied` error (vision spec §13.2).
+    ///
+    /// Why: the spec's "caller lacks permission" code. tcode adds no permission
+    /// layer of its own — it runs as the user with the user's entitlements — so
+    /// this reports an OS-level refusal (e.g. an unreadable directory) rather
+    /// than a policy decision tcode made.
+    /// What: `data.error_type = "permission_denied"`.
+    /// Test: `rpc_error_permission_denied_sets_code_and_type`.
+    pub fn permission_denied(message: impl Into<String>) -> Self {
+        Self::domain(-32001, "permission_denied", message)
+    }
+
     /// Build a `-32003 invalid_argument` error (vision spec §13.2).
     ///
     /// Why: the spec's domain-level "malformed request" code, distinct from
@@ -188,6 +212,23 @@ mod tests {
         assert_eq!(e.code, -32007);
         assert!(e.message.contains("s-123"));
         assert_eq!(e.data, Some(json!({"error_type": "session_not_found"})));
+    }
+
+    /// `not_found` must use the spec's `-32002` code and tag `error_type`.
+    #[test]
+    fn rpc_error_not_found_sets_code_and_type() {
+        let e = RpcError::not_found("path not found: /x");
+        assert_eq!(e.code, -32002);
+        assert_eq!(e.data, Some(json!({"error_type": "not_found"})));
+    }
+
+    /// `permission_denied` must use the spec's `-32001` code and tag
+    /// `error_type`.
+    #[test]
+    fn rpc_error_permission_denied_sets_code_and_type() {
+        let e = RpcError::permission_denied("permission denied: /x");
+        assert_eq!(e.code, -32001);
+        assert_eq!(e.data, Some(json!({"error_type": "permission_denied"})));
     }
 
     /// `invalid_argument` must use the spec's `-32003` code and tag
