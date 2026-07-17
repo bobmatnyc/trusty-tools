@@ -394,6 +394,24 @@ fn prepare_session_inner(
         tracing::warn!("failed to refresh skill source directory: {err}");
     }
 
+    // Surface pre-deploy skill staleness (issue #2876). Reading the deployed
+    // manifest BEFORE the refresh below tells us which bundled skills this
+    // workspace was serving STALE — a long-lived worktree that never
+    // re-provisioned keeps the old skill text (e.g. an outdated attribution
+    // footer) until this very deploy self-heals it. The deploy below fixes it;
+    // the warn makes the drift auditable so an operator can see a workspace was
+    // running behind the installed binary's assets. Non-fatal and read-only.
+    let stale =
+        crate::core::skill_staleness::stale_skills(&plan.skill_source, &fw.claude_skills_dir());
+    if !stale.is_empty() {
+        tracing::warn!(
+            project_dir = %project_dir.display(),
+            stale_skills = %stale.join(", "),
+            "deployed skills were stale relative to bundled assets — refreshing now \
+             (run `tm doctor` to audit; long-lived worktrees drift until re-provisioned)"
+        );
+    }
+
     // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
     // Skills carry no inheritance, so this is a manifest-tracked content copy.
     // Three tiers merge here with precedence project-custom > user-custom >

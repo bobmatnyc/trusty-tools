@@ -40,6 +40,12 @@ use doctor_fs_checks::{check_agents, check_instructions, check_skill_source, che
 mod doctor_deploy_validate;
 use doctor_deploy_validate::check_deployment_completeness;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #2876 —
+// the skill-staleness and legacy-instruction-source probes).
+#[path = "doctor_staleness.rs"]
+mod doctor_staleness;
+use doctor_staleness::{check_legacy_instruction_sources, check_skill_staleness};
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -64,8 +70,11 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// (#gh-account-awareness — surfaces the active github.com identity and warns
 /// on the multi-account ambiguity), and the `oauth_token` probe (issue #2246 —
 /// warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain
-/// login loop) — folding the resulting eleven [`DoctorCheck`]s into a
-/// [`DoctorReport`] whose `overall` status is the worst of them.
+/// login loop), the `skill_staleness` and `legacy_sources` probes (issue #2876
+/// — warn when deployed skills predate the bundled assets, or when legacy
+/// global instruction sources linger) — folding the resulting thirteen
+/// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the worst
+/// of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -87,7 +96,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_eleven_checks`,
+/// Test: `run_doctor_produces_thirteen_checks`,
 /// `check_agents_scoped_to_managed_workspace_fails_on_empty_roster`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -110,6 +119,8 @@ pub async fn run_doctor(
         check_skill_source(&paths),
         check_output_style(project_dir, &home),
         check_deployment_completeness(&paths),
+        check_skill_staleness(&paths),
+        check_legacy_instruction_sources(&home),
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
@@ -588,12 +599,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_eleven_checks() {
+    async fn run_doctor_produces_thirteen_checks() {
         // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
-        // adds `oauth_token` (ten → eleven). #1905's stale-skill cleanup is
-        // deliberately NOT a `run_doctor` probe — see the `run_doctor` doc comment.
+        // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
+        // and `legacy_sources` (eleven → thirteen). #1905's stale-skill cleanup
+        // is deliberately NOT a `run_doctor` probe — see the `run_doctor` doc.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 13);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -604,6 +616,8 @@ mod tests {
                 "skill_source",
                 "output_style",
                 "deployment",
+                "skill_staleness",
+                "legacy_sources",
                 "memory",
                 "search",
                 "worktrees",

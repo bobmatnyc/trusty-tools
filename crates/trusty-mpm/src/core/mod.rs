@@ -77,6 +77,7 @@ pub mod session_store;
 pub mod skill_deployer;
 pub mod skill_manifest;
 pub mod skill_source;
+pub mod skill_staleness;
 pub mod skill_tiers;
 pub mod sm;
 pub mod spawn_disclaim;
