@@ -904,6 +904,36 @@ fn max_tokens_unset_child_inherits_parent() {
 }
 
 #[test]
+fn max_tokens_malformed_value_is_dropped_not_panicking() {
+    // Code-critic finding on PR #2952 (MEDIUM): a non-numeric, negative, or
+    // out-of-range `max_tokens:` value must warn-and-drop (parse to `None`)
+    // rather than panicking or hard-erroring the compose — mirroring
+    // `skills_malformed_inline_value_never_errors`.
+    let tmp = TempDir::new().unwrap();
+    for (name, raw) in [
+        ("non-numeric", "not-a-number"),
+        ("negative", "-42"),
+        ("too-large", "99999999999999999999"), // far beyond u32::MAX
+    ] {
+        write_agent(
+            tmp.path(),
+            name,
+            &format!("---\nname: {name}\nrole: engineer\nmax_tokens: {raw}\n---\n\n# {name}\n"),
+        );
+        let composed = compose_agent(name, tmp.path());
+        assert!(
+            composed.is_ok(),
+            "malformed max_tokens ({name} = {raw:?}) must not error"
+        );
+        assert!(
+            !composed.unwrap().contains("max_tokens:"),
+            "malformed max_tokens ({name} = {raw:?}) must drop to None, not \
+             synthesise a `max_tokens:` line"
+        );
+    }
+}
+
+#[test]
 fn tools_parses_as_a_list() {
     let tmp = TempDir::new().unwrap();
     write_agent(
@@ -915,6 +945,29 @@ fn tools_parses_as_a_list() {
     assert!(
         composed.contains("tools: [read, write, bash]"),
         "got:\n{composed}"
+    );
+}
+
+#[test]
+fn tools_malformed_inline_value_never_errors() {
+    // Mirrors `skills_malformed_inline_value_never_errors`: a genuinely
+    // unparseable inline value (comma with no real elements) must never
+    // hard-error the compose. Since the `tools:` key IS present (even though
+    // malformed), it parses to `Some(vec![])` — same as an explicit
+    // `tools: []` — which is the correct, safe degrade: a garbled
+    // restriction is not silently discarded back into "inherit everything".
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain",
+        "---\nname: plain\nrole: engineer\ntools: ,\n---\n\nBODY\n",
+    );
+    let composed = compose_agent("plain", tmp.path());
+    assert!(composed.is_ok(), "malformed inline tools must not error");
+    assert!(
+        composed.unwrap().contains("tools: []"),
+        "a malformed but present `tools:` key must degrade to an explicit \
+         empty override, not silently vanish"
     );
 }
 
@@ -960,6 +1013,38 @@ fn tools_unset_child_inherits_parent() {
     assert!(
         composed.contains("tools: [x, y, z]"),
         "child must inherit parent's tools when unset; got:\n{composed}"
+    );
+}
+
+#[test]
+fn tools_empty_list_overrides_to_deny_all() {
+    // Code-critic finding on PR #2952 (MEDIUM): `tools: []` must be a
+    // distinguishable, explicit deny-all override — NOT collapse into the
+    // same "inherit the parent" behaviour an omitted `tools:` key produces.
+    // A non-empty parent list must be overridden down to zero, and this must
+    // be provably different from `tools_unset_child_inherits_parent` above
+    // (same parent, different child declaration, opposite outcome).
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\ntools: [x, y, z]\n---\n\n# Base\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-agent\ntools: []\n---\n\n# Leaf\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    assert!(
+        composed.contains("tools: []"),
+        "an explicit empty `tools:` must override the parent's list down to \
+         zero (deny-all), not inherit; got:\n{composed}"
+    );
+    assert!(
+        !composed.contains("x, y, z"),
+        "the parent's tools must not survive an explicit `tools: []` \
+         override; got:\n{composed}"
     );
 }
 
