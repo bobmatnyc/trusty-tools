@@ -1,6 +1,6 @@
 ---
 name: testing-anti-patterns
-description: "Never test mock behavior. Never add test-only methods to production classes. Understand dependencies before mocking. Language-agnostic principles with TypeScript/Jest and Python/pytest examples."
+description: "Never test mock behavior. Never add test-only methods to production classes. Understand dependencies before mocking. Language-agnostic principles with TypeScript/Jest and Python pytest-style examples."
 user-invocable: false
 version: "1.0.0"
 category: agent-reference
