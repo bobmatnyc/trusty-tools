@@ -9,6 +9,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- adopt DOC-38 policy + sld-lint gate (closes #2853, #2854) ([#2863](https://github.com/bobmatnyc/trusty-tools/pull/2863)) ([`580c9a7`](https://github.com/bobmatnyc/trusty-tools/commit/580c9a7d08e873d9706c6b05cfe83eafb2befbfa))
+
+### Fixed
+
+- durable attribution enforcement — CLAUDE.md + template + staleness/legacy-dir doctor checks (closes #2876) ([#2878](https://github.com/bobmatnyc/trusty-tools/pull/2878)) ([`2012eb1`](https://github.com/bobmatnyc/trusty-tools/commit/2012eb1ea7dd8ab579583811144ebd6ec65350f7))
+
+### Added
+
 - bundled `documentation` agent persona now carries a **Spec-Linked Documentation (SLD / DOC-38)** section: where a repo adopts DOC-38, doc-writing agents declare Markdown→spec links in `spec_refs:` frontmatter, carry the bold-field spec header block + `{#SPEC-…}` anchors, avoid restating the grammar, and run the `sld-lint` gate (`scripts/check_sld.sh`) before handoff ([#2853](https://github.com/bobmatnyc/trusty-tools/issues/2853))
 - add dotnet-engineer bundled agent + .NET stack detection ([#2832](https://github.com/bobmatnyc/trusty-tools/pull/2832)) ([`7f69a1c`](https://github.com/bobmatnyc/trusty-tools/commit/7f69a1c543518dbb40a1cb5cad8b1e037e7a965c))
 - durable, framework-level enforcement of the commit/PR attribution footer, closing the bypass where a non-tm-skill-tier session emitted the harness default `🤖 Generated with Claude Code` footer instead of `🤖🤖🤖 Generated with trusty-mpm — …` (PR #2825 incident). Four parts: `BASE-AGENT.md`'s Git Workflow now carries the footer rule so every delegated subagent inherits it via the composed dispatch context (the PM already had it via `PM_INSTRUCTIONS.md`); the seeded/scaffolded project `CLAUDE.md` template (the `CLAUDE_MD_STUB` seed, the `instructions/CLAUDE.md` asset, and the `tm-init` skill scaffold guidance) gains a "Commit & PR Attribution" section so new projects inherit it; a new `tm doctor` **`skill_staleness`** check (backed by the pure `core::skill_staleness::stale_skills` manifest-vs-source diff, also warn-logged in `prepare_session`) flags a workspace whose deployed skills differ from the installed binary's bundled assets — the long-lived-worktree drift that let the stale footer persist; and a new `tm doctor` **`legacy_sources`** check flags leftover `~/.claude/skills/tm-*` global copies and the legacy `~/.trusty-mpm/claude-config` directory as stale instruction sources. Both new probes are advisory (never Fail); doctor grows 11 → 13 checks (closes #2876)
