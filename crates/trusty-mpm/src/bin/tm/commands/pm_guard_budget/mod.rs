@@ -47,6 +47,19 @@
 //! only affects the rare storage-failure branch; the common path (storage
 //! healthy) is unaffected.
 //!
+//! **Read-side posture (round 2, code-critic PR #2928 HIGH):** the paragraph
+//! above covers the WRITE side; the read side had the identical fail-open bug
+//! in the opposite direction — [`record_file_change_at`] loaded the prior
+//! state via `.ok()`, which collapsed "no prior session" (legitimately fresh —
+//! `ErrorKind::NotFound`) and "the file exists but is unreadable or corrupt"
+//! (permissions, a directory sitting at the file's path, truncated/garbage
+//! JSON) into the same `None`, silently granting a fresh window with zero
+//! telemetry. [`read_prev_state`] now distinguishes the two: only
+//! `NotFound` yields `Ok(None)`; every other read or parse failure is
+//! `Err(_)`, logged via `tracing::warn!`, and downgraded to
+//! [`BudgetDecision::Exhausted`] — symmetric with the write-side posture
+//! above.
+//!
 //! **Concurrency:** two `tm hook --pm-guard` processes for the SAME session
 //! can fire close together (parallel tool calls in one turn). The
 //! read-advance-write sequence is protected by [`with_session_lock`], a
@@ -54,10 +67,18 @@
 //! read-modify-write cycles serialize instead of racing a lost update (which
 //! would let more than the budget through). Lock acquisition is capped well
 //! under the hook's 10s `PreToolUse` timeout; on a timeout (e.g. a stale lock
-//! from a crashed process older than [`STALE_LOCK_SECS`] is force-cleared
-//! first, so this should only fire under genuine contention or a wedged
-//! holder) the call ALSO fails toward `Exhausted`, consistent with the
-//! storage-failure posture above.
+//! from a crashed process older than [`STALE_LOCK_SECS`] is atomically cleared
+//! first via [`try_clear_if_stale`], so this should only fire under genuine
+//! contention or a wedged holder) the call ALSO fails toward `Exhausted`,
+//! consistent with the storage-failure posture above. **Round 2 (code-critic
+//! PR #2928 MEDIUM):** the original stale-clear was a `metadata`-check +
+//! unconditional `remove_file` — a TOCTOU race where two racers could both
+//! judge the same lock stale, and a loser's `remove_file` could delete a
+//! winner's freshly-recreated lock purely by path, letting a third racer also
+//! acquire (double acquisition). [`try_clear_if_stale`] now claims the clear
+//! atomically via `fs::rename` to a unique per-racer sibling path: `rename`'s
+//! atomicity means at most one racer's rename can observe and move the
+//! original path, so only that racer proceeds to delete it and retry.
 //! Test: `advance_budget_*` (pure core), `record_file_change_*` (I/O
 //! round-trip, using a temp dir), `persist_and_verify_*`,
 //! `verify_roundtrip_*`, `with_session_lock_*`.
@@ -270,9 +291,19 @@ fn record_file_change_at(dir: &Path, session_id: &str, budget: usize, now: u64) 
         return BudgetDecision::Exhausted { budget };
     };
 
-    let prev = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|s| serde_json::from_str::<BudgetState>(&s).ok());
+    let prev = match read_prev_state(&file) {
+        Ok(prev) => prev,
+        Err(err) => {
+            tracing::warn!(
+                session_id,
+                error = %err,
+                "pm_guard_budget: failed to read/parse prior turn-budget state; \
+                 failing toward deny (treating as budget-exhausted) rather than \
+                 silently treating a corrupt/unreadable state file as a fresh window"
+            );
+            return BudgetDecision::Exhausted { budget };
+        }
+    };
     let (state, decision) = advance_budget(prev, now, budget);
 
     if let Err(err) = persist_and_verify(dir, &file, &state) {
@@ -286,6 +317,37 @@ fn record_file_change_at(dir: &Path, session_id: &str, budget: usize, now: u64) 
         return BudgetDecision::Exhausted { budget };
     }
     decision
+}
+
+/// Read and parse the prior [`BudgetState`] from `file`, distinguishing a
+/// legitimately-fresh session (file doesn't exist yet) from any other read or
+/// parse failure.
+///
+/// Why (HIGH, code-critic PR #2928): the prior version collapsed BOTH cases
+/// via `.ok()` — an existing-but-unreadable file (permissions, `rm -rf`'d
+/// mid-session, a directory sitting at the file's path) or a corrupt/truncated
+/// JSON payload was silently treated the same as "no prior session", handing
+/// back a fresh window and an `Allowed` decision with zero telemetry. That is
+/// asymmetric with the write side's fail-toward-deny posture
+/// ([`persist_and_verify`]) — a read-side failure must fail the same way, not
+/// quietly grant a new budget.
+/// What: `Ok(None)` only when the read fails with
+/// [`std::io::ErrorKind::NotFound`] (no prior state — genuinely fresh).
+/// `Ok(Some(state))` when the file reads and parses cleanly. `Err(_)` for
+/// every other read error (permission denied, is-a-directory, …) or a JSON
+/// parse failure — the caller must treat this as budget-exhausted, never as a
+/// fresh window.
+/// Test: `record_file_change_denies_on_corrupt_state_json`,
+/// `record_file_change_denies_on_unreadable_state_file`,
+/// `record_file_change_allows_fresh_window_when_file_absent`.
+fn read_prev_state(file: &Path) -> Result<Option<BudgetState>, String> {
+    match std::fs::read_to_string(file) {
+        Ok(s) => serde_json::from_str::<BudgetState>(&s)
+            .map(Some)
+            .map_err(|e| format!("parse({}): {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read({}): {e}", file.display())),
+    }
 }
 
 /// Persist `state` to `file` and read it back to confirm the write actually
@@ -352,17 +414,19 @@ impl Drop for SessionLock {
 /// window. `O_EXCL`-create (`create_new(true)`) needs no extra crate — the
 /// file's very existence IS the lock.
 /// What: loops attempting `OpenOptions::new().write(true).create_new(true)`
-/// on `lock_path`; on `AlreadyExists`, force-clears the lock file first if its
-/// mtime is older than [`STALE_LOCK_SECS`] (a `tm hook --pm-guard` process is
-/// short-lived and per-invocation — it can never itself hold a lock past its
-/// own exit, so a stale file only means a prior holder crashed/was killed
-/// mid-critical-section), then sleeps [`LOCK_RETRY_SLEEP_MS`] and retries.
-/// Gives up once the elapsed time exceeds [`LOCK_ACQUIRE_BUDGET_MS`], returning
-/// `None`. A directory-creation failure (parent dir missing/unwritable) also
-/// yields `None` immediately rather than retrying.
+/// on `lock_path`; on `AlreadyExists`, attempts to atomically clear the lock
+/// via [`try_clear_if_stale`] if its mtime is older than [`STALE_LOCK_SECS`] (a
+/// `tm hook --pm-guard` process is short-lived and per-invocation — it can
+/// never itself hold a lock past its own exit, so a stale file only means a
+/// prior holder crashed/was killed mid-critical-section), then sleeps
+/// [`LOCK_RETRY_SLEEP_MS`] and retries. Gives up once the elapsed time exceeds
+/// [`LOCK_ACQUIRE_BUDGET_MS`], returning `None`. A directory-creation failure
+/// (parent dir missing/unwritable) also yields `None` immediately rather than
+/// retrying.
 /// Test: `with_session_lock_acquires_when_free`,
 /// `with_session_lock_serializes_against_a_held_lock`,
-/// `with_session_lock_clears_a_stale_lock`.
+/// `with_session_lock_clears_a_stale_lock`,
+/// `with_session_lock_concurrent_stale_clear_is_race_free`.
 fn with_session_lock(lock_path: &Path) -> Option<SessionLock> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).ok()?;
@@ -380,7 +444,7 @@ fn with_session_lock(lock_path: &Path) -> Option<SessionLock> {
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                clear_if_stale(lock_path);
+                try_clear_if_stale(lock_path);
             }
             Err(_) => return None,
         }
@@ -391,10 +455,41 @@ fn with_session_lock(lock_path: &Path) -> Option<SessionLock> {
     }
 }
 
-/// Force-remove `lock_path` if its last-modified time is older than
-/// [`STALE_LOCK_SECS`] — see [`with_session_lock`]'s doc for why this is safe
-/// (a `tm hook --pm-guard` process cannot outlive its own single invocation).
-fn clear_if_stale(lock_path: &Path) {
+/// Attempt to atomically clear `lock_path` if — and only if — it looks stale,
+/// claiming the clear via `rename` rather than a `metadata`-check +
+/// unconditional `remove_file` pair.
+///
+/// Why (MEDIUM, code-critic PR #2928): a `metadata` snapshot followed by an
+/// unconditional `remove_file` is a classic TOCTOU race. Two racers can both
+/// observe the same lock as stale via `metadata` and both decide to clear it;
+/// if racer A's `remove_file` executes only AFTER racer A (or a third racer)
+/// has already looped back around and created a FRESH lock at the same path,
+/// that `remove_file` deletes the live, currently-held lock out from under its
+/// holder purely by path — a later racer's `create_new` then succeeds too,
+/// so two callers both believe they hold the lock simultaneously. `rename` on
+/// a POSIX filesystem is atomic with respect to concurrent access to the same
+/// source path: of any number of racers concurrently calling
+/// `rename(lock_path, <unique per-racer path>)`, at most one can observe
+/// `lock_path` and succeed — every other racer's `rename` fails (the source
+/// is already gone) and that racer does nothing further this attempt, simply
+/// falling through to the next `create_new` retry in [`with_session_lock`]'s
+/// loop. Only the winning racer — the one whose `rename` succeeded — is
+/// permitted to remove the file it privately renamed to (no other racer has
+/// that path) and retry acquisition.
+/// What: re-checks staleness via a fresh `metadata` call as the
+/// *precondition* for even attempting the rename (an unstale/live lock is left
+/// alone — this metadata read can itself be racy against a concurrent
+/// clear/recreate, but that's fine: it only gates whether to ATTEMPT the
+/// atomic claim, never grants the claim itself). If stale, renames
+/// `lock_path` to a process+thread+time-unique sibling path via
+/// [`unique_claim_path`] and, only on rename success, removes that renamed
+/// file. A failed rename (the file was already moved/removed by another
+/// racer, or recreated fresh by the true holder in between) is treated as
+/// "someone else is handling it" — this function simply returns and the
+/// caller's normal retry loop takes over.
+/// Test: `with_session_lock_clears_a_stale_lock`,
+/// `with_session_lock_concurrent_stale_clear_is_race_free`.
+fn try_clear_if_stale(lock_path: &Path) {
     let Ok(metadata) = std::fs::metadata(lock_path) else {
         return;
     };
@@ -404,9 +499,32 @@ fn clear_if_stale(lock_path: &Path) {
     let age = SystemTime::now()
         .duration_since(modified)
         .unwrap_or(Duration::ZERO);
-    if age >= Duration::from_secs(STALE_LOCK_SECS) {
-        let _ = std::fs::remove_file(lock_path);
+    if age < Duration::from_secs(STALE_LOCK_SECS) {
+        return;
     }
+    let claim_path = unique_claim_path(lock_path);
+    if std::fs::rename(lock_path, &claim_path).is_ok() {
+        let _ = std::fs::remove_file(&claim_path);
+    }
+}
+
+/// Build a sibling path for `lock_path` that is unique to this process,
+/// thread, and instant — used by [`try_clear_if_stale`] as the atomic-rename
+/// claim target so no two racers can collide on the same claim path.
+fn unique_claim_path(lock_path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let base = lock_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("lock");
+    lock_path.with_file_name(format!(
+        "{base}.stale-{}-{:?}-{nanos}",
+        std::process::id(),
+        std::thread::current().id()
+    ))
 }
 
 /// Current unix time in seconds, saturating to 0 on a pre-epoch clock (never

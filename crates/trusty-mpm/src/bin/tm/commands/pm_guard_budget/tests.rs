@@ -135,6 +135,70 @@ fn record_file_change_denies_on_persist_failure() {
     assert_eq!(decision2, BudgetDecision::Exhausted { budget: 3 });
 }
 
+// ---- code-critic PR #2928 HIGH (round 2): read-side fails toward DENY ----
+
+#[test]
+fn record_file_change_denies_on_corrupt_state_json() {
+    // Pre-write garbage (not valid JSON) at the exact path
+    // record_file_change_at will try to read the state from. Before the fix,
+    // `.ok()` collapsed a parse failure into `prev = None`, silently granting
+    // a fresh window (Allowed) with zero telemetry.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = 5000;
+    let sanitized = sanitize_session_id("sess-corrupt");
+    std::fs::write(
+        dir.path().join(format!("{sanitized}.json")),
+        b"not valid json{{{",
+    )
+    .expect("pre-write corrupt state");
+
+    let decision = record_file_change_at(dir.path(), "sess-corrupt", 3, now);
+    assert_eq!(
+        decision,
+        BudgetDecision::Exhausted { budget: 3 },
+        "a corrupt/unparseable state file must fail toward deny, not be treated as fresh"
+    );
+}
+
+#[test]
+fn record_file_change_denies_on_unreadable_state_file() {
+    // Pre-create a DIRECTORY at the state-file path so the read
+    // (`std::fs::read_to_string`) fails with a non-NotFound error ("Is a
+    // directory"), not the legitimate "file doesn't exist yet" case.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = 5000;
+    let sanitized = sanitize_session_id("sess-unreadable");
+    std::fs::create_dir_all(dir.path().join(format!("{sanitized}.json")))
+        .expect("pre-create collision dir at state-file path");
+
+    let decision = record_file_change_at(dir.path(), "sess-unreadable", 3, now);
+    assert_eq!(
+        decision,
+        BudgetDecision::Exhausted { budget: 3 },
+        "an unreadable (non-NotFound) state file must fail toward deny"
+    );
+}
+
+#[test]
+fn record_file_change_allows_fresh_window_when_file_absent() {
+    // The legitimate case `read_prev_state` must still short-circuit to
+    // `Ok(None)` for: no state file has ever been written for this session.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let now = 5000;
+    assert!(
+        !dir.path()
+            .join(format!("{}.json", sanitize_session_id("sess-fresh")))
+            .exists()
+    );
+
+    let decision = record_file_change_at(dir.path(), "sess-fresh", 3, now);
+    assert_eq!(
+        decision,
+        BudgetDecision::Allowed { used: 1, budget: 3 },
+        "an absent state file (never-seen session) must still start a fresh, allowed window"
+    );
+}
+
 // ---- persist_and_verify / verify_roundtrip --------------------------------
 
 #[test]
@@ -238,5 +302,55 @@ fn with_session_lock_clears_a_stale_lock() {
     assert!(
         guard.is_some(),
         "a stale lock must be cleared and re-acquired, not treated as held forever"
+    );
+}
+
+#[test]
+fn with_session_lock_concurrent_stale_clear_is_race_free() {
+    // Reproduces the TOCTOU race code-critic flagged (PR #2928 MEDIUM, round
+    // 2): multiple racers observing the SAME stale lock must not both end up
+    // believing they hold it. With the metadata-check + unconditional
+    // remove_file version, a losing racer's remove_file could delete a
+    // winner's freshly-recreated lock file purely by path, letting a THIRD
+    // racer also acquire — a double acquisition. The atomic rename-based claim
+    // guarantees at most one racer ever wins the clear-and-reacquire.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let lock_path = std::sync::Arc::new(dir.path().join("sess.lock"));
+
+    // Pre-stale the lock: simulate an abandoned lock left by a crashed/killed
+    // `tm hook --pm-guard` process.
+    let file = std::fs::File::create(lock_path.as_path()).expect("create lock");
+    let stale_time = SystemTime::now() - Duration::from_secs(STALE_LOCK_SECS + 1);
+    file.set_modified(stale_time).expect("set_modified");
+    drop(file);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let lock_path = std::sync::Arc::clone(&lock_path);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                with_session_lock(&lock_path)
+            })
+        })
+        .collect();
+
+    let results: Vec<Option<SessionLock>> = handles
+        .into_iter()
+        .map(|h| h.join().expect("racer thread panicked"))
+        .collect();
+
+    let acquired = results.iter().filter(|r| r.is_some()).count();
+    assert_eq!(
+        acquired, 1,
+        "exactly one racer must win the stale-lock clear + re-acquire, got {acquired} winners"
+    );
+    // The winner's guard (still alive in `results`) proves the fresh lock
+    // survived the race — a losing racer must never have deleted it out from
+    // under the live holder.
+    assert!(
+        lock_path.exists(),
+        "the winner's freshly-acquired lock must still exist after the race settles"
     );
 }

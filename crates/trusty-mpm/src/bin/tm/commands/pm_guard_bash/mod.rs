@@ -31,7 +31,7 @@ use shell_lex::QuoteScan;
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).
 pub(crate) const SHELL_EDIT_REASON: &str = "PM must not edit files via shell tools \
-     (sed/awk/patch/git apply/redirection) (prohibitions P1–P3). \
+     (sed/awk/patch/git apply/redirection) (prohibitions P1/P5). \
      Delegate the change to rust-engineer via the Task/Agent tool.";
 
 /// Deny reason for running builds/tests directly (make/pytest/npm test).
