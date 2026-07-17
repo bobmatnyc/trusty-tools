@@ -1,19 +1,36 @@
 //! End-to-end acceptance proof for DOC-39 AC-13.1/13.2 (stable per-spawn
 //! `agent_id`) — the mandatory API-driven e2e gate for this slice.
 //!
-//! Why: the bug this slice fixes is that two concurrently-delegated
-//! sub-agents sharing one `agent_name` (e.g. two `python-engineer`
-//! delegations) were indistinguishable on the `session.attach` event stream —
+//! Why: the bug this slice fixes is that two delegated sub-agents sharing
+//! one `agent_name` (e.g. two `python-engineer` delegations within one PM
+//! fan-out) were indistinguishable on the `session.attach` event stream —
 //! `tools::delegate` spawned purely by `agent_name`, with no per-spawn
 //! identity. Unit tests already pin this at the `agent_loop`/`runner` layers
-//! (`agent_loop::tests::sink_events::concurrently_spawned_same_named_loops_get_distinct_agent_ids`,
-//! `runner::tests::concurrently_delegated_same_named_agents_get_distinct_ids`),
-//! but Bob's standing testability directive requires the capability also be
+//! — `agent_loop::tests::sink_events::sequentially_spawned_same_named_loops_get_distinct_agent_ids`
+//! and `runner::tests::sequential_delegations_to_same_named_agent_get_distinct_ids`
+//! prove it for STRICTLY ORDERED spawns, and
+//! `runner::tests::concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`
+//! proves it for GENUINELY overlapping (`tokio::join!`-raced) ones — but
+//! Bob's standing testability directive requires the capability also be
 //! proven reachable over the REAL wire, against the real (subprocess) daemon
 //! — this is that proof. Uses `TCODE_MOCK_LLM=echo-fanout`
 //! ([`trusty_code::task::mock_llm::FanoutEchoLlmClient`]) for a deterministic,
 //! key-free run that scripts the PM fanning out to `python-engineer` TWICE in
 //! one turn.
+//!
+//! NOTE (code-critic MEDIUM, honesty about what this specific test exercises):
+//! the PM's own `agent_loop::dispatch_all` dispatches the two
+//! `delegate_to_agent` tool calls from that one turn SEQUENTIALLY (a `for`
+//! loop over `tool_calls`, each fully `.await`ed before the next starts) —
+//! there is no concurrent-execution primitive in the loop itself, so this
+//! e2e test does NOT exercise a wall-clock race between the two engineer
+//! spawns. What it DOES prove, which the in-process unit tests cannot,
+//! is that the fix is wired correctly end-to-end over the real JSON-RPC
+//! wire: the daemon, the session registry, and the SSE/stdio event
+//! plumbing all carry `agent_id` through untouched from mint to wire. The
+//! wall-clock-race property is what
+//! `runner::tests::concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`
+//! proves instead.
 //! What: spawns the real `tcode serve --stdio` binary, runs `task.run` +
 //! `session.attach`, drains the replay + live event stream to
 //! `session_done`, then asserts the two `tool_started` events for tool
@@ -85,12 +102,17 @@ async fn run_fanout_task_to_completion(daemon: &mut StdioSession) -> Vec<Value> 
     envelopes
 }
 
-/// AC-13's direct acceptance proof: two delegations to the SAME
-/// `agent_name` must carry DISTINCT `agent_id`s on the real event stream.
+/// AC-13's direct acceptance proof: two SEQUENTIALLY-DISPATCHED delegations
+/// (from one PM fan-out turn) to the SAME `agent_name` must carry DISTINCT
+/// `agent_id`s on the real event stream, over the real wire.
 ///
 /// Why: this is the exact regression #2862 left open, proven over the real
 /// JSON-RPC wire against a real (subprocess) daemon — not just in-process
-/// unit tests — per the mandatory API-driven e2e gate.
+/// unit tests — per the mandatory API-driven e2e gate. See the module docs'
+/// NOTE for why this specific test is sequential (the PM's own
+/// `dispatch_all` dispatches one delegation at a time) rather than a
+/// wall-clock race — that race property is proven separately at the
+/// `runner` layer.
 /// What: spawns the daemon with `TCODE_MOCK_LLM=echo-fanout`, runs the
 /// scripted fan-out task to completion, filters the merged replay+live event
 /// stream to `tool_started` events for tool `"bash"` (the delegated
@@ -100,7 +122,7 @@ async fn run_fanout_task_to_completion(daemon: &mut StdioSession) -> Vec<Value> 
 /// values.
 /// Test: this test.
 #[tokio::test]
-async fn two_same_named_delegations_get_distinct_agent_ids() {
+async fn fanned_out_same_named_delegations_get_distinct_agent_ids_over_the_wire() {
     let project = project_with_agents();
     let mut daemon = StdioSession::spawn_with_mock_llm_variant(
         project.path(),

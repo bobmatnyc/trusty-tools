@@ -990,8 +990,9 @@ async fn sink_reaches_delegated_loop() {
     );
 }
 
-/// Two SEPARATE delegations to the SAME `agent_name` must mint DISTINCT
-/// `agent_id`s, even though `agent` is identical on both (DOC-39 AC-13.1/13.2).
+/// Two SEPARATE, SEQUENTIAL delegations to the SAME `agent_name` must mint
+/// DISTINCT `agent_id`s, even though `agent` is identical on both (DOC-39
+/// AC-13.1/13.2).
 ///
 /// Why: this is the exact regression #2862 left open — `tools::delegate`
 /// spawns a delegated agent purely by `agent_name`, so two delegations to
@@ -1001,13 +1002,21 @@ async fn sink_reaches_delegated_loop() {
 /// SAME shared sink, mirroring how one `Arc<dyn ToolEventSink>` is shared
 /// across every delegation in production) twice and asserts the two
 /// `agent_id`s differ while `agent` stays `"python-engineer"` both times.
+/// NOTE (code-critic MEDIUM): this test awaits the FIRST `run()` call to
+/// completion before starting the SECOND — it is SEQUENTIAL, not concurrent,
+/// and the name says so deliberately. It still matters (it proves per-spawn
+/// minting, not per-runner-instance caching), but the genuinely-concurrent
+/// claim — two spawns racing under `tokio::join!` against one shared sink —
+/// is a SEPARATE property, proven by
+/// [`concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`]
+/// below.
 /// What: scripts `[tool_call, stop, tool_call, stop]` on one `ScriptedLlm` so
 /// one runner + one llm serves both sequential `run()` calls; asserts both
 /// recorded `(agent, agent_id)` pairs share `agent` but differ in `agent_id`,
 /// and neither is empty/the unattributed sentinel.
 /// Test: this test.
 #[tokio::test]
-async fn concurrently_delegated_same_named_agents_get_distinct_ids() {
+async fn sequential_delegations_to_same_named_agent_get_distinct_ids() {
     let llm = Arc::new(ScriptedLlm::from_json(&[
         tool_call_response("call-1", "mytool"),
         stop_response("engineer done 1"),
@@ -1046,8 +1055,131 @@ async fn concurrently_delegated_same_named_agents_get_distinct_ids() {
     assert_ne!(
         id_a, id_b,
         "two delegations to the SAME agent_name must mint DISTINCT agent_ids \
-         (DOC-39 AC-13) — otherwise concurrently-delegated same-named agents \
-         stay indistinguishable on the event stream"
+         (DOC-39 AC-13) — otherwise same-named delegated agents stay \
+         indistinguishable on the event stream"
+    );
+    assert!(!id_a.is_empty() && id_a != crate::events::UNATTRIBUTED_AGENT_ID);
+    assert!(!id_b.is_empty() && id_b != crate::events::UNATTRIBUTED_AGENT_ID);
+}
+
+/// An `LlmClientTrait` whose response depends ONLY on the given request's
+/// OWN transcript (whether its last message is a tool result) — NEVER a
+/// shared cross-call cursor/counter.
+///
+/// Why: [`ScriptedLlm`] is a fixed-position cursor shared across every
+/// `chat()` call; if two independent conversations issued `chat()` calls
+/// that genuinely interleaved (as
+/// [`concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`]
+/// requires), a shared cursor would hand conversation A's turn-2 response to
+/// conversation B's turn-1 call (or vice versa), corrupting both scripts
+/// unpredictably. Keying the response off each REQUEST's own message history
+/// instead makes the mock correct under ARBITRARY interleaving, because two
+/// independent conversations never share transcript state — exactly how a
+/// real LLM endpoint behaves (its response depends on what YOU sent it, not
+/// on a global call counter).
+/// What: returns a `bash`-tool-call fixture when the request's last message
+/// is not yet a tool result, and a `stop` fixture once it is — i.e. "call
+/// the tool once, then finish", regardless of how many OTHER conversations
+/// are calling `chat()` concurrently against this SAME shared instance.
+/// Calls `tokio::task::yield_now()` first so `tokio::join!`'s cooperative
+/// scheduler actually interleaves the two conversations' polls instead of
+/// silently running one to completion before ever polling the other (which
+/// would degrade the concurrent test back into the sequential case it is
+/// meant to rule out — see that test's own doc for why a synchronous mock
+/// with no real `Pending` state cannot, by itself, prove interleaving-safety).
+/// Test: `concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`.
+struct ConversationAwareLlm;
+
+#[async_trait]
+impl LlmClientTrait for ConversationAwareLlm {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        // Force a genuine yield point: without this, `tokio::join!` could
+        // run one conversation's entire `AgentLoop::run` to completion (chat
+        // -> dispatch -> chat -> stop, none of which are ever `Pending`
+        // here) before the executor ever polls the other future, which
+        // would make this test accidentally-sequential despite the
+        // `tokio::join!` syntax.
+        tokio::task::yield_now().await;
+
+        let last_was_tool_result = req
+            .messages
+            .last()
+            .map(|m| m.role == "tool")
+            .unwrap_or(false);
+        let fixture = if last_was_tool_result {
+            stop_response("engineer done")
+        } else {
+            tool_call_response("call-1", "mytool")
+        };
+        serde_json::from_value(fixture).map_err(|e| {
+            LlmError::MissingConfig(format!("ConversationAwareLlm: invalid fixture: {e}"))
+        })
+    }
+}
+
+/// The GENUINELY CONCURRENT proof for DOC-39 AC-13 (code-critic MEDIUM
+/// finding): two same-named delegations raced against ONE shared runner and
+/// ONE shared sink via `tokio::join!` must still mint DISTINCT `agent_id`s.
+///
+/// Why: [`sequential_delegations_to_same_named_agent_get_distinct_ids`]
+/// (above) only proves the property when the two delegations are strictly
+/// ordered — it cannot rule out a race between two spawns whose execution
+/// genuinely overlaps. `run_pipeline` mints its `agent_id` via a bare
+/// `uuid::Uuid::new_v4()` call — no shared mutable counter, no `&mut self`
+/// state on the runner — so no race is EXPECTED, but that safety claim was
+/// previously asserted only by construction/inspection. This test drives
+/// both delegations through `tokio::join!(runner.run(...), runner.run(...))`
+/// against the SAME `runner` (hence the SAME shared `llm` and `sink` fields)
+/// using [`ConversationAwareLlm`] — a stateless mock safe under arbitrary
+/// interleaving — to empirically exercise the race rather than only assert
+/// its absence by reading the code.
+/// What: runs `runner.run("python-engineer", "task A")` concurrently with
+/// `runner.run("python-engineer", "task B")`; asserts both `tool_started`
+/// events recorded on the shared sink carry `agent == "python-engineer"`
+/// with two DISTINCT, non-empty `agent_id`s.
+/// Test: this test.
+#[tokio::test]
+async fn concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join() {
+    let llm = Arc::new(ConversationAwareLlm);
+    let tmp = agents_dir_with(
+        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "python-engineer",
+    );
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
+    let sink = Arc::new(RecordingSink {
+        calls: Mutex::new(Vec::new()),
+        started_ids: Mutex::new(Vec::new()),
+    });
+
+    let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
+        .with_tool_event_sink(sink.clone());
+
+    let (result_a, result_b) = tokio::join!(
+        runner.run("python-engineer", "task A"),
+        runner.run("python-engineer", "task B"),
+    );
+    result_a.expect("delegation A completes");
+    result_b.expect("delegation B completes");
+
+    let ids = sink.started_ids.lock().expect("lock poisoned").clone();
+    assert_eq!(
+        ids.len(),
+        2,
+        "expected one tool_started per concurrently-run delegation: {ids:?}"
+    );
+    assert!(
+        ids.iter().all(|(agent, _)| agent == "python-engineer"),
+        "both concurrent delegations must attribute to the SAME agent name: {ids:?}"
+    );
+    let (_, id_a) = &ids[0];
+    let (_, id_b) = &ids[1];
+    assert_ne!(
+        id_a, id_b,
+        "two GENUINELY CONCURRENT delegations to the SAME agent_name must \
+         still mint DISTINCT agent_ids (DOC-39 AC-13) — this empirically \
+         exercises the per-spawn UUID mint under an actual race, not just a \
+         by-construction argument"
     );
     assert!(!id_a.is_empty() && id_a != crate::events::UNATTRIBUTED_AGENT_ID);
     assert!(!id_b.is_empty() && id_b != crate::events::UNATTRIBUTED_AGENT_ID);

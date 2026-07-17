@@ -16,8 +16,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   two `python-engineer` delegations) were indistinguishable. Every
   agent-attributed event (`ToolStarted`/`ToolFinished`/`ToolError`,
   `SearchPerformed`, `MemoryRecalled`, `AgentSpawned`/`AgentStarted`/
-  `AgentDone`/`AgentFailed`) now also carries `agent_id`: a UUID v4 minted
-  once per delegation spawn (`runner::in_process::InProcessAgentRunner::run_pipeline`)
+  `AgentDone`/`AgentFailed` — the latter four have the field defined now but
+  are not yet emitted by any production call site) now also carries
+  `agent_id`: a UUID v4 minted once per delegation spawn
+  (`runner::in_process::InProcessAgentRunner::run_pipeline`)
   and a stable, session-scoped id for the PM/root agent
   (`task::executor::run_and_record`). Additive and non-breaking — `agent`
   is unchanged and unremoved; `#[serde(default)]` on `agent_id` keeps old

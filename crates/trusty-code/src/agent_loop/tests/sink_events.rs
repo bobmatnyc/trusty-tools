@@ -30,7 +30,7 @@ struct RecordingSink {
     /// (DOC-39 AC-13) `(agent, agent_id)` pairs seen by `tool_started`, in
     /// call order — kept separate from `calls` so every pre-existing
     /// assertion against `calls`'s string format is untouched; only
-    /// `concurrently_spawned_same_named_loops_get_distinct_agent_ids` reads
+    /// `sequentially_spawned_same_named_loops_get_distinct_agent_ids` reads
     /// this.
     started_ids: Mutex<Vec<(String, String)>>,
 }
@@ -349,18 +349,24 @@ async fn unattributed_loop_emits_unknown_agent() {
 /// must stay distinguishable on one shared sink (DOC-39 AC-13.1/13.2).
 ///
 /// Why: this is the direct regression proof for the gap #2862 left open —
-/// `agent` alone cannot distinguish two concurrently-delegated sub-agents of
-/// the same kind (e.g. two `python-engineer` delegations); `agent_id` is the
-/// stable per-spawn correlation key production mints once per delegation
+/// `agent` alone cannot distinguish two delegated sub-agents of the same
+/// kind (e.g. two `python-engineer` delegations); `agent_id` is the stable
+/// per-spawn correlation key production mints once per delegation
 /// (`runner::in_process::InProcessAgentRunner::run_pipeline`). This test
 /// pins that same contract at the `AgentLoop`/sink layer directly, without
 /// needing the full runner.
 /// What: run two loops both declared `with_agent("python-engineer")` but with
 /// distinct `with_agent_id(...)` values against one shared sink; assert both
 /// recorded `(agent, agent_id)` pairs share `agent` but differ in `agent_id`.
+/// NOTE (code-critic MEDIUM): the two loops here run SEQUENTIALLY (this test
+/// awaits the first `.run()` to completion before starting the second) — the
+/// name deliberately says "sequentially", not "concurrently", to be honest
+/// about that. The genuinely-concurrent claim (two spawns racing under
+/// `tokio::join!` against one shared sink) is proven separately by
+/// `runner::tests::concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join`.
 /// Test: this test.
 #[tokio::test]
-async fn concurrently_spawned_same_named_loops_get_distinct_agent_ids() {
+async fn sequentially_spawned_same_named_loops_get_distinct_agent_ids() {
     let sink = Arc::new(RecordingSink::new());
 
     for agent_id in ["spawn-a", "spawn-b"] {

@@ -322,7 +322,7 @@ impl AgentLoop {
     /// emit `events::UNATTRIBUTED_AGENT_ID`. Additive alongside `agent`:
     /// callers that never opt in keep emitting the pre-existing sentinel,
     /// same as `agent` itself.
-    /// Test: `agent_loop::tests::sink_events::concurrently_spawned_same_named_loops_get_distinct_agent_ids`.
+    /// Test: `agent_loop::tests::sink_events::sequentially_spawned_same_named_loops_get_distinct_agent_ids`.
     pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
         self.agent_id = Some(id.into());
         self
