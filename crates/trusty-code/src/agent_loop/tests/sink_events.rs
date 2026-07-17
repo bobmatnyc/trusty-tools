@@ -27,32 +27,55 @@ use super::*;
 /// comparison.
 struct RecordingSink {
     calls: Mutex<Vec<String>>,
+    /// (DOC-39 AC-13) `(agent, agent_id)` pairs seen by `tool_started`, in
+    /// call order — kept separate from `calls` so every pre-existing
+    /// assertion against `calls`'s string format is untouched; only
+    /// `concurrently_spawned_same_named_loops_get_distinct_agent_ids` reads
+    /// this.
+    started_ids: Mutex<Vec<(String, String)>>,
 }
 
 impl RecordingSink {
     fn new() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            started_ids: Mutex::new(Vec::new()),
         }
     }
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("lock poisoned").clone()
     }
+
+    fn started_ids(&self) -> Vec<(String, String)> {
+        self.started_ids.lock().expect("lock poisoned").clone()
+    }
 }
 
 #[async_trait]
 impl ToolEventSink for RecordingSink {
-    async fn tool_started(&self, agent: &str, call_id: &str, tool: &str, _args_preview: &str) {
+    async fn tool_started(
+        &self,
+        agent: &str,
+        agent_id: &str,
+        call_id: &str,
+        tool: &str,
+        _args_preview: &str,
+    ) {
         self.calls
             .lock()
             .expect("lock poisoned")
             .push(format!("started:{agent}:{tool}:{call_id}"));
+        self.started_ids
+            .lock()
+            .expect("lock poisoned")
+            .push((agent.to_string(), agent_id.to_string()));
     }
 
     async fn tool_finished(
         &self,
         agent: &str,
+        _agent_id: &str,
         call_id: &str,
         tool: &str,
         success: bool,
@@ -64,7 +87,14 @@ impl ToolEventSink for RecordingSink {
             .push(format!("finished:{agent}:{tool}:{call_id}:{success}"));
     }
 
-    async fn tool_error(&self, agent: &str, call_id: &str, tool: &str, _error: &str) {
+    async fn tool_error(
+        &self,
+        agent: &str,
+        _agent_id: &str,
+        call_id: &str,
+        tool: &str,
+        _error: &str,
+    ) {
         self.calls
             .lock()
             .expect("lock poisoned")
@@ -74,6 +104,7 @@ impl ToolEventSink for RecordingSink {
     async fn tool_telemetry(
         &self,
         agent: &str,
+        _agent_id: &str,
         call_id: &str,
         tool: &str,
         telemetry: &crate::tools::telemetry::ToolTelemetry,
@@ -303,6 +334,59 @@ async fn unattributed_loop_emits_unknown_agent() {
             .all(|c| c.contains(crate::events::UNATTRIBUTED_AGENT)),
         "unattributed loops must emit the sentinel: {:?}",
         sink.calls()
+    );
+    assert!(
+        sink.started_ids()
+            .iter()
+            .all(|(_, id)| id == crate::events::UNATTRIBUTED_AGENT_ID),
+        "a loop with no declared agent_id must emit the documented sentinel \
+         (DOC-39 AC-13), never an empty string: {:?}",
+        sink.started_ids()
+    );
+}
+
+/// Two loops declared with the SAME `agent` name but DIFFERENT `agent_id`s
+/// must stay distinguishable on one shared sink (DOC-39 AC-13.1/13.2).
+///
+/// Why: this is the direct regression proof for the gap #2862 left open —
+/// `agent` alone cannot distinguish two concurrently-delegated sub-agents of
+/// the same kind (e.g. two `python-engineer` delegations); `agent_id` is the
+/// stable per-spawn correlation key production mints once per delegation
+/// (`runner::in_process::InProcessAgentRunner::run_pipeline`). This test
+/// pins that same contract at the `AgentLoop`/sink layer directly, without
+/// needing the full runner.
+/// What: run two loops both declared `with_agent("python-engineer")` but with
+/// distinct `with_agent_id(...)` values against one shared sink; assert both
+/// recorded `(agent, agent_id)` pairs share `agent` but differ in `agent_id`.
+/// Test: this test.
+#[tokio::test]
+async fn concurrently_spawned_same_named_loops_get_distinct_agent_ids() {
+    let sink = Arc::new(RecordingSink::new());
+
+    for agent_id in ["spawn-a", "spawn-b"] {
+        let llm = Arc::new(ScriptedLlm::from_json(&[
+            tool_call_response("call-1", "echo"),
+            stop_response("done"),
+        ]));
+        make_loop(llm, registry_with_echo(false), AgentLoopConfig::default())
+            .with_tool_event_sink(sink.clone())
+            .with_agent("python-engineer")
+            .with_agent_id(agent_id)
+            .run("sys", "task")
+            .await
+            .expect("loop should complete");
+    }
+
+    let ids = sink.started_ids();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0].0, "python-engineer");
+    assert_eq!(ids[1].0, "python-engineer");
+    assert_eq!(ids[0].1, "spawn-a");
+    assert_eq!(ids[1].1, "spawn-b");
+    assert_ne!(
+        ids[0].1, ids[1].1,
+        "two same-named delegated loops must carry DISTINCT agent_ids \
+         (DOC-39 AC-13)"
     );
 }
 

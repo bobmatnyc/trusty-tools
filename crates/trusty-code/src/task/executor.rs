@@ -442,6 +442,17 @@ async fn run_and_record(
     // from each other. `params.agent_name` (default `"pm"`) is the name the
     // rest of the taxonomy already uses for this agent.
     .with_agent(params.agent_name.clone())
+    // (DOC-39 AC-13) The PM/root agent also needs a STABLE id so its
+    // root-attributed events correlate — unlike a delegated engineer (a
+    // fresh UUID per `delegate_to_agent` spawn, see
+    // `runner::in_process::InProcessAgentRunner::run_pipeline`), the PM's
+    // loop is re-entered on EVERY `task.run` against this same session
+    // (`AgentLoop::run_with_transcript` against the persistent
+    // `pm_transcript`), so its id must be SESSION-scoped, not re-minted per
+    // call — otherwise the PM's own tool events would spuriously look like a
+    // new "spawn" on every run. Namespaced with a `pm-` prefix so it reads
+    // distinctly from an engineer's bare UUID in a raw event dump.
+    .with_agent_id(format!("pm-{session_id}"))
     .with_cancel_flag(Arc::clone(&cancel))
     // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
     // never calls `bash` itself, so its verify-before-finish gate scans the

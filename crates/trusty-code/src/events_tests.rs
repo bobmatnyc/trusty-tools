@@ -110,6 +110,7 @@ fn kind_matches_serde_tag_for_every_variant() {
         Event::ToolStarted {
             session_id: "s".into(),
             agent: "pm".into(),
+            agent_id: "pm-1".into(),
             tool: "bash".into(),
             call_id: "c1".into(),
             args_preview: "ls".into(),
@@ -117,6 +118,7 @@ fn kind_matches_serde_tag_for_every_variant() {
         Event::ToolFinished {
             session_id: "s".into(),
             agent: "pm".into(),
+            agent_id: "pm-1".into(),
             tool: "bash".into(),
             call_id: "c1".into(),
             success: true,
@@ -125,6 +127,7 @@ fn kind_matches_serde_tag_for_every_variant() {
         Event::ToolError {
             session_id: "s".into(),
             agent: "pm".into(),
+            agent_id: "pm-1".into(),
             tool: "bash".into(),
             call_id: "c1".into(),
             error: "boom".into(),
@@ -132,6 +135,7 @@ fn kind_matches_serde_tag_for_every_variant() {
         Event::SearchPerformed {
             session_id: "s".into(),
             agent: "python-engineer".into(),
+            agent_id: "eng-1".into(),
             lane: "semantic".into(),
             query: "where is auth".into(),
             hit_count: Some(3),
@@ -140,6 +144,7 @@ fn kind_matches_serde_tag_for_every_variant() {
         Event::MemoryRecalled {
             session_id: "s".into(),
             agent: "pm".into(),
+            agent_id: "pm-1".into(),
             query: "pkce".into(),
             results: vec![RecalledMemory {
                 score: 0.41,
@@ -210,6 +215,7 @@ fn recalled_memory_round_trips_through_json() {
     let event = Event::MemoryRecalled {
         session_id: "s1".into(),
         agent: "pm".into(),
+        agent_id: "pm-1".into(),
         query: "pkce".into(),
         results: vec![
             RecalledMemory {
@@ -227,14 +233,22 @@ fn recalled_memory_round_trips_through_json() {
 
     assert_eq!(value["kind"], "memory_recalled");
     assert_eq!(value["event"]["agent"], "pm");
+    assert_eq!(value["event"]["agent_id"], "pm-1");
     assert_eq!(value["event"]["results"][1]["injected"], false);
     assert_eq!(value["event"]["results"][1]["score"], 0.41);
 
     let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
-    let Event::MemoryRecalled { results, agent, .. } = back.event else {
+    let Event::MemoryRecalled {
+        results,
+        agent,
+        agent_id,
+        ..
+    } = back.event
+    else {
         panic!("expected MemoryRecalled");
     };
     assert_eq!(agent, "pm");
+    assert_eq!(agent_id, "pm-1", "agent_id must round-trip (DOC-39 AC-13)");
     assert_eq!(
         results,
         vec![
@@ -258,6 +272,7 @@ fn search_performed_round_trips_through_json() {
     let event = Event::SearchPerformed {
         session_id: "s1".into(),
         agent: "python-engineer".into(),
+        agent_id: "eng-1".into(),
         lane: "lexical".into(),
         query: "where is auth".into(),
         hit_count: None,
@@ -279,6 +294,44 @@ fn search_performed_round_trips_through_json() {
         Event::SearchPerformed { hit_count, latency_ms, lane, .. }
             if hit_count.is_none() && latency_ms == 17 && lane == "lexical"
     ));
+}
+
+/// A `ToolStarted` transcript recorded BEFORE `agent_id` existed (DOC-39
+/// AC-13) must still deserialize — the whole point of `#[serde(default)]`.
+///
+/// Why: `session.get_transcript`/`session.attach` replay reads durably
+/// stored JSON that may predate this field. A hard deserialization failure
+/// here would break every pre-existing recorded session the moment this
+/// crate upgrades, which is exactly what additive schema evolution must
+/// avoid.
+/// What: hand-builds the pre-#2862-successor wire shape (no `agent_id` key
+/// at all) and asserts it still parses, defaulting `agent_id` to `""` (NOT
+/// [`UNATTRIBUTED_AGENT_ID`]'s sentinel text — `#[serde(default)]` calls
+/// `String::default()`, which is empty, not the sentinel).
+/// Test: this test.
+#[test]
+fn tool_started_without_agent_id_field_still_deserializes() {
+    let legacy_json = serde_json::json!({
+        "type": "tool_started",
+        "session_id": "s1",
+        "agent": "pm",
+        "tool": "bash",
+        "call_id": "c1",
+        "args_preview": "ls"
+    });
+    let event: Event = serde_json::from_value(legacy_json)
+        .expect("a ToolStarted payload recorded before agent_id existed must still deserialize");
+    let Event::ToolStarted {
+        agent, agent_id, ..
+    } = event
+    else {
+        panic!("expected ToolStarted");
+    };
+    assert_eq!(agent, "pm");
+    assert_eq!(
+        agent_id, "",
+        "serde(default) yields an empty string for a pre-existing record, not the sentinel"
+    );
 }
 
 /// `SessionEventEnvelope` must round-trip through JSON with every field

@@ -345,6 +345,12 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // moment a sink ever is attached here, rather than silently emitting
     // `UNATTRIBUTED_AGENT`.
     .with_agent("pm")
+    // (DOC-39 AC-13) Same reasoning as `agent`: inert today (no sink on this
+    // path), set anyway so the PM has a stable identity the moment a sink is
+    // ever attached. Unlike `task::executor`'s session-scoped id, this
+    // one-shot CLI invocation has no session — a fresh UUID per invocation is
+    // the natural equivalent (this whole run IS the "session").
+    .with_agent_id(uuid::Uuid::new_v4().to_string())
     // #2279: the PM never calls `bash` itself (its registry above is
     // `delegate_to_agent` + `finish_task` only), so its verify-before-finish
     // gate must scan the delegated engineer's transcript instead of its

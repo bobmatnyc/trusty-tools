@@ -141,12 +141,14 @@ impl SessionRegistry {
     /// is truncated via `crate::events::preview` before emission so a large
     /// argument payload can't blow the ring buffer / wire size. `agent`
     /// (UI Phase 1) is the dispatching agent's name — see
-    /// [`crate::events::Event::ToolStarted`].
+    /// [`crate::events::Event::ToolStarted`]. `agent_id` (DOC-39 AC-13) is
+    /// that same agent's stable per-spawn id.
     /// Test: `registry_tests::record_tool_started_publishes_event`.
     pub fn record_tool_started(
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         tool: &str,
         call_id: &str,
         args: &str,
@@ -157,6 +159,7 @@ impl SessionRegistry {
             Event::ToolStarted {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 args_preview: crate::events::preview(args, 500),
@@ -168,10 +171,17 @@ impl SessionRegistry {
     /// Record a tool invocation finishing (#2055 emission plumbing for
     /// #2056's agent loop). See [`Self::record_tool_started`].
     /// Test: `registry_tests::record_tool_finished_publishes_event`.
+    /// (DOC-39 AC-13) `agent_id` pushed this past clippy's
+    /// `too_many_arguments` gate; every parameter is a plain, independent
+    /// piece of the event and none pair naturally into a sub-struct, so the
+    /// attribute is the pragmatic choice here (mirrors
+    /// `serve::transport::run_loop`'s same allowance).
+    #[allow(clippy::too_many_arguments)]
     pub fn record_tool_finished(
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         tool: &str,
         call_id: &str,
         success: bool,
@@ -183,6 +193,7 @@ impl SessionRegistry {
             Event::ToolFinished {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 success,
@@ -199,6 +210,7 @@ impl SessionRegistry {
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         tool: &str,
         call_id: &str,
         error: &str,
@@ -209,6 +221,7 @@ impl SessionRegistry {
             Event::ToolError {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 error: error.to_string(),
@@ -230,6 +243,7 @@ impl SessionRegistry {
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         telemetry: &SearchTelemetry,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
@@ -238,6 +252,7 @@ impl SessionRegistry {
             Event::SearchPerformed {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 lane: telemetry.lane.clone(),
                 query: telemetry.query.clone(),
                 hit_count: telemetry.hit_count,
@@ -258,6 +273,7 @@ impl SessionRegistry {
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         telemetry: &RecallTelemetry,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
@@ -266,6 +282,7 @@ impl SessionRegistry {
             Event::MemoryRecalled {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 query: telemetry.query.clone(),
                 results: telemetry.results.clone(),
             },
