@@ -32,6 +32,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- bundled `rust-build-performance` skill: a single-file guide covering practical Rust build-performance discipline for the inner dev loop — `cargo check` first, measure with `cargo build --timings` before tuning, trim the dependency/feature graph (`cargo tree --duplicates`/`--edges features`), preserve incremental compilation, and use `sccache` across this project's multi-worktree pattern. Declared in the `skills:` frontmatter of `rust-engineer` and `tauri-engineer` — the two Rust-family agents — rather than `BASE-ENGINEER`, since not every engineer compiles Rust (per Bob directive 2026-07-17)
 - adopt DOC-38 policy + sld-lint gate (closes #2853, #2854) ([#2863](https://github.com/bobmatnyc/trusty-tools/pull/2863)) ([`580c9a7`](https://github.com/bobmatnyc/trusty-tools/commit/580c9a7d08e873d9706c6b05cfe83eafb2befbfa))
 
 ### Fixed

@@ -129,9 +129,12 @@ approval; it affects every contributor's build and debugging experience.
 **Worktree-lifecycle note:** this project's parallel-worktree discipline
 means every fresh `git worktree add` is a cold build — there is no shared
 `target/` to inherit. Don't delete a *live* worktree's `target/` mid-task
-expecting a quick rebuild; merged-PR worktrees have their `target/` reclaimed
-separately by hygiene policy (#2919), so cleanup is handled for you once the
-worktree's PR lands — you don't need to do it manually.
+expecting a quick rebuild. Cleanup today is **manual**, per the project
+`CLAUDE.md`'s Worktree Discipline section: once a worktree's PR merges, remove
+it with `git worktree remove --force <path>` (its `target/` goes with it).
+Automatic reclamation of merged-PR worktree `target/` dirs is a proposed
+follow-up (#2919) — it is not yet shipped; don't rely on it happening for
+you.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html#incremental>
 
@@ -158,17 +161,29 @@ export RUSTC_WRAPPER=sccache
 rustc-wrapper = "sccache"
 ```
 
-**Where it earns its keep:** across branches, across the multiple
-`.claude/worktrees/*` this project routinely runs in parallel, and on clean
-checkouts — exactly this workspace's multi-worktree development pattern. Two
-worktrees building the same shared crate (e.g. `trusty-common`) at the same
-version hit the sccache hit-rate hard, avoiding a redundant compile per
-worktree.
+**Incremental-compilation caveat — read before expecting a workspace-crate
+win:** sccache caches whole-unit compiler *outputs*; it cannot cache
+*incremental* compilation artifacts. This project's dev profile is
+incremental by default, and every workspace-member/path crate (e.g.
+`trusty-common`, `trusty-search`) builds incrementally under it — so by
+default sccache gets **no hit** across worktrees for those crates, because
+each worktree's incremental build produces incremental (not cacheable)
+output. To get cross-worktree hits on path crates, the sccache-wrapped build
+must run with `CARGO_INCREMENTAL=0` (trading away the incremental win to gain
+the cross-worktree cache win instead — a real tradeoff, not a free lunch).
 
-**Where it helps less:** inside a single tree doing normal incremental
-edit-check-edit cycles — cargo's own incremental cache already covers that
-case, so sccache adds overhead (hashing, cache lookup) without a
-corresponding win.
+**Where sccache earns its keep unconditionally:** external, non-path
+dependencies — `tokio`, the `aws-smithy-*` family, and the rest of the
+`[workspace.dependencies]` graph. These build non-incrementally by default
+and are byte-identical across every worktree building the same
+`Cargo.lock`-pinned version, so two worktrees compiling the same dependency
+graph hit the sccache cache hard on that (large) portion of the build without
+any `CARGO_INCREMENTAL` tradeoff.
+
+**Where it helps least:** inside a single tree doing normal incremental
+edit-check-edit cycles on a path crate — cargo's own incremental cache
+already covers that case, so sccache adds overhead (hashing, cache lookup)
+without a corresponding win.
 
 Adopting `sccache` machine-wide (e.g. in shell rc files, CI images) is an
 ops decision with tradeoffs (disk usage, cache invalidation, shared-cache
