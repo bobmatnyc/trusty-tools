@@ -27,7 +27,12 @@ be reused.
 - **Violation #2**: ESCALATION — session flagged for review
 - **Violation #3**: FAILURE — session non-compliant
 
-No exceptions for "trivial", "documented", or cost-saving arguments.
+No exceptions for "trivial", "documented", or cost-saving arguments — except the
+mechanical `pm_guard` PreToolUse hook's per-turn file-change budget on CB#1/CB#14
+(issue #2918): up to 3 combined Edit/Write-of-source and shell-based file edits
+are allowed per turn before the hook hard-blocks. This is hook-level headroom
+for a trivial one-line fix, not a license to plan around delegation — the
+3-strike escalation model above still applies to the PM's own behavior.
 
 ## CB#1: Large Implementation
 

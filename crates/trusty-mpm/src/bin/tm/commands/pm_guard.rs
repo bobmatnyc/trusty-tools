@@ -40,6 +40,17 @@
 //! change, and only when the operator explicitly opts in — see that module's
 //! doc comment for the full #2172-lesson rationale. Unset (the default),
 //! Guard 4 is byte-for-byte identical to the pre-#2231 unconditional exemption.
+//! **Per-turn file-change budget (issue #2918):** a "file change" deny
+//! (source-code Edit/Write/MultiEdit/NotebookEdit, or a shell-based file edit
+//! — [`SOURCE_EDIT_REASON`] / [`crate::commands::pm_guard_bash::SHELL_EDIT_REASON`])
+//! is no longer an absolute prohibition. [`pm_guard`] now allows up to
+//! [`crate::commands::pm_guard_budget::DEFAULT_FILE_CHANGE_BUDGET`] such
+//! changes per turn-window (see that module for the turn-window heuristic)
+//! before hard-blocking with a budget-exhausted message that names the count
+//! and, via [`crate::commands::pm_guard_routing::delegation_hint_for_path`],
+//! the specialist matching the target file's content type instead of a
+//! hardcoded `rust-engineer`.
+//! Build/test and network denials are NOT budget-eligible and stay absolute.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -50,8 +61,12 @@
 //! exemption / fail-open) end to end through the real binary.
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
-use crate::commands::pm_guard_bash::evaluate_bash_command;
+use crate::commands::pm_guard_bash::{
+    SHELL_EDIT_REASON, evaluate_bash_command, extract_shell_edit_target,
+};
+use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
+use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
 /// enforcement for the invocation.
@@ -85,6 +100,14 @@ pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
 const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// Deny reason for a PM direct write to a *source-code* file (prohibition P1).
+///
+/// Why (issue #2918): this text is the pure classifier's internal deny
+/// signal — `pm_guard` compares a returned reason against this constant to
+/// decide budget-eligibility, then (once the per-turn budget is exhausted)
+/// builds a fresh, content-routed message rather than printing this one
+/// verbatim. It is retained (rather than inlined) so `evaluate_tool`/
+/// `evaluate_edit_tool` stay pure and their existing unit tests need no
+/// budget/routing awareness.
 const SOURCE_EDIT_REASON: &str = "PM must not implement source code directly (prohibition P1). \
      Delegate the change to rust-engineer via the Task/Agent tool. Single-file writes to \
      non-source files (docs, config, and `.trusty-mpm/` orchestration state) are permitted.";
@@ -191,7 +214,46 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    // DENY. Record the enforcement action (best-effort, never gating), then
+    // Budget gate (issue #2918): a file-change deny (source-code Edit/Write or
+    // a shell-based file edit) is no longer an absolute prohibition — it is
+    // allowed up to DEFAULT_FILE_CHANGE_BUDGET times per turn-window before
+    // hard-blocking. Build/test and network denials are NOT budget-eligible
+    // and fall through to the unconditional deny below unchanged.
+    if reason == SOURCE_EDIT_REASON || reason == SHELL_EDIT_REASON {
+        let target_path = if EDIT_TOOLS.contains(&tool_name) {
+            edit_tool_target_path(tool_input).map(str::to_owned)
+        } else {
+            let command = tool_input
+                .and_then(|v| v.get("command"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            extract_shell_edit_target(command)
+        };
+        let hint = target_path
+            .as_deref()
+            .map(delegation_hint_for_path)
+            .unwrap_or(GENERIC_ENGINEER_HINT);
+
+        return match pm_guard_budget::record_file_change(session_id, DEFAULT_FILE_CHANGE_BUDGET) {
+            BudgetDecision::Allowed { .. } => {
+                // Within budget: ALLOW, exactly like any other allowed call —
+                // no stdout, no audit POST (keeps the common path fast).
+                Ok(())
+            }
+            BudgetDecision::Exhausted { budget } => {
+                let exhausted_reason = format!(
+                    "PM file-change budget {budget}/{budget} used this turn (prohibitions P1/P5). \
+                     Delegate further changes to {hint} via the Task/Agent tool."
+                );
+                audit_denied_tool(url, session_id, tool_name, &exhausted_reason).await;
+                println!("{}", build_pretooluse_deny_response(&exhausted_reason));
+                Ok(())
+            }
+        };
+    }
+
+    // DENY (non-budget-eligible: build/test, network, or the opt-in persona
+    // gate). Record the enforcement action (best-effort, never gating), then
     // emit the block. The audit POST is intentionally the *only* daemon call
     // and fires solely on the rare deny path, so the common ALLOW path adds
     // zero latency to every tool invocation.

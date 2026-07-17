@@ -22,9 +22,27 @@
 //! `tool_input`, `agent_id`, `agent_type`) are confirmed against the live
 //! Claude Code hooks reference
 //! (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03).
+//!
+//! Per-turn file-change budget (issue #2918): a "file change" deny
+//! (source-code Edit/Write, or a shell-based file edit) is no longer an
+//! absolute single-call prohibition — it is allowed up to 3 times per
+//! turn-window (`pm_guard_budget::DEFAULT_FILE_CHANGE_BUDGET`) before hard-
+//! blocking. The budget counter is a file under `<HOME>/.trusty-mpm/state/
+//! pm_guard_turn_budget/`, so every test that exercises budget-eligible
+//! denials spawns its `tm hook --pm-guard` calls with an isolated per-test
+//! `HOME` (via [`isolated_home`]) — otherwise parallel test threads would
+//! share (and race on) the same counter file, and would also pollute the
+//! real developer `$HOME`.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+
+/// A fresh, isolated `$HOME` for a test that exercises the per-turn
+/// file-change budget (issue #2918) — see the module doc for why this is
+/// required (shared/racy counter file otherwise).
+fn isolated_home() -> tempfile::TempDir {
+    tempfile::tempdir().expect("tempdir")
+}
 
 /// Spawn `tm hook --pm-guard` with the given stdin JSON and optional extra env,
 /// returning stdout as a string. Asserts a clean `exit 0` (fail-open contract).
@@ -91,21 +109,97 @@ fn assert_denied(stdout: &str) {
 }
 
 #[test]
-fn pm_guard_denies_edit_tool() {
-    let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
-        &[],
-    );
+fn pm_guard_allows_edit_tool_within_budget_then_denies() {
+    // Issue #2918: a source-code Edit is no longer an absolute single-call
+    // prohibition — it is allowed up to the 3-per-turn budget, then denied.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#;
+    for n in 1..=3 {
+        let stdout = run_pm_guard(payload, &[("HOME", &home_s)]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "call {n} of 3 should be within budget and allowed"
+        );
+    }
+    let stdout = run_pm_guard(payload, &[("HOME", &home_s)]);
     assert_denied(&stdout);
+    assert!(
+        stdout.contains("budget 3/3"),
+        "exhausted deny must state the budget count: {stdout}"
+    );
+    assert!(
+        stdout.contains("rust-engineer"),
+        "a .rs target must route to rust-engineer: {stdout}"
+    );
 }
 
 #[test]
-fn pm_guard_denies_write_tool() {
-    let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/x/a.rs","content":"x"}}"#,
-        &[],
-    );
+fn pm_guard_allows_write_tool_within_budget_then_denies() {
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/x/a.rs","content":"x"}}"#;
+    for n in 1..=3 {
+        let stdout = run_pm_guard(payload, &[("HOME", &home_s)]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "call {n} of 3 should be within budget and allowed"
+        );
+    }
+    let stdout = run_pm_guard(payload, &[("HOME", &home_s)]);
     assert_denied(&stdout);
+    assert!(
+        stdout.contains("budget 3/3"),
+        "must state the count: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_file_change_budget_shared_across_edit_and_bash() {
+    // The budget counts ALL budget-eligible file changes together, whether
+    // via an Edit-tool call or a shell-based edit (Bash sed/redirect) — not
+    // a separate 3-per-tool allowance.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let edit = r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#;
+    let sed = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ app/main.py"}}"#;
+
+    assert_eq!(run_pm_guard(edit, &[("HOME", &home_s)]).trim(), "");
+    assert_eq!(run_pm_guard(sed, &[("HOME", &home_s)]).trim(), "");
+    assert_eq!(run_pm_guard(edit, &[("HOME", &home_s)]).trim(), "");
+    // 4th combined file change denies, routed by the 4th call's own target
+    // (the sed's app/main.py -> python-engineer).
+    let stdout = run_pm_guard(sed, &[("HOME", &home_s)]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("budget 3/3"),
+        "must state the count: {stdout}"
+    );
+    assert!(
+        stdout.contains("python-engineer"),
+        "a .py target must route to python-engineer: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_budget_exhausted_routes_docs_target_to_documentation_agent() {
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    // .md writes are always allowed (non-source), so exhaust the budget via
+    // three shell-based edits, then trip a shell-based edit on a docs file.
+    let sed_rs = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ src/lib.rs"}}"#;
+    let redirect_md = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo x > docs/reference/notes.md"}}"#;
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(sed_rs, &[("HOME", &home_s)]).trim(), "");
+    }
+    let stdout = run_pm_guard(redirect_md, &[("HOME", &home_s)]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("documentation agent"),
+        "a docs/ .md target must route to the documentation agent: {stdout}"
+    );
 }
 
 #[test]
@@ -141,12 +235,16 @@ fn pm_guard_allows_non_source_single_file_write() {
 }
 
 #[test]
-fn pm_guard_denies_forbidden_bash_verb() {
-    // `sed -i` edits a file in place — a P1 circumvention via Bash.
-    let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ src/lib.rs"}}"#,
-        &[],
-    );
+fn pm_guard_denies_forbidden_bash_verb_after_budget_exhausted() {
+    // `sed -i` edits a file in place — a P1/P5 circumvention via Bash. It
+    // is budget-eligible (issue #2918): allowed up to 3 times, then denied.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ src/lib.rs"}}"#;
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(payload, &[("HOME", &home_s)]).trim(), "");
+    }
+    let stdout = run_pm_guard(payload, &[("HOME", &home_s)]);
     assert_denied(&stdout);
 }
 
@@ -302,23 +400,34 @@ fn pm_guard_deny_by_default_allows_subagent_edit_when_daemon_unreachable() {
 
 #[test]
 fn pm_guard_empty_agent_id_does_not_exempt() {
-    // Defensive: an empty agent_id string must not count as a dispatch signal.
-    let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
-        &[],
-    );
-    assert_denied(&stdout);
+    // Defensive: an empty agent_id string must not count as a dispatch
+    // signal — the call goes through the SAME budgeted policy as the
+    // top-level PM (issue #2918), so it eventually denies once the budget is
+    // exhausted. A genuinely exempted call would never deny, no matter how
+    // many times it is repeated — that's what distinguishes "not exempted"
+    // from "exempted" now that a single call alone always allows.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#;
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(payload, &[("HOME", &home_s)]).trim(), "");
+    }
+    assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
 }
 
 #[test]
 fn pm_guard_agent_type_alone_does_not_exempt() {
     // `agent_type` alone (e.g. a top-level session launched with `--agent`)
-    // must NOT be treated as a sub-agent dispatch — only `agent_id` does.
-    let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
-        &[],
-    );
-    assert_denied(&stdout);
+    // must NOT be treated as a sub-agent dispatch — only `agent_id` does. See
+    // the previous test's comment for why exhausting the budget is now the
+    // way to prove "not exempted".
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#;
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(payload, &[("HOME", &home_s)]).trim(), "");
+    }
+    assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
 }
 
 #[test]
@@ -340,23 +449,31 @@ fn pm_guard_disable_hooks_env_allows_all() {
 fn pm_guard_denies_composition_hidden_verb() {
     // Shell composition must not let a benign leading verb hide a forbidden one
     // in a later segment (the composition bypass fixed with PR #1985).
-    let sed = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd repo && sed -i s/a/b/ f"}}"#,
-        &[],
-    );
-    assert_denied(&sed);
-
+    // `make build` (BUILD_TEST_REASON) is NOT budget-eligible (issue #2918) —
+    // it stays an absolute, single-call prohibition.
     let make = run_pm_guard(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"true; make build"}}"#,
         &[],
     );
     assert_denied(&make);
 
-    let redirect = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi > out.txt"}}"#,
-        &[],
-    );
-    assert_denied(&redirect);
+    // `sed -i` and a real file-write redirect are budget-eligible — allowed
+    // up to 3 times, then denied.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let sed = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd repo && sed -i s/a/b/ f"}}"#;
+    let redirect = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi > out.txt"}}"#;
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(sed, &[("HOME", &home_s)]).trim(), "");
+    }
+    assert_denied(&run_pm_guard(sed, &[("HOME", &home_s)]));
+
+    let home2 = isolated_home();
+    let home2_s = home2.path().to_string_lossy().to_string();
+    for _ in 1..=3 {
+        assert_eq!(run_pm_guard(redirect, &[("HOME", &home2_s)]).trim(), "");
+    }
+    assert_denied(&run_pm_guard(redirect, &[("HOME", &home2_s)]));
 }
 
 #[test]
