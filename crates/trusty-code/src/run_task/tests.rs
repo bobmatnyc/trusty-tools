@@ -1562,9 +1562,44 @@ fn spawns_indexing_thread_for_non_git_project_path() {
     // No `.git` anywhere under `tmp` — exactly the scratch/bake-off case the
     // old guard used to skip.
     let start = std::time::Instant::now();
-    super::ensure_project_indexed_in_background(tmp.path().to_path_buf());
+    super::ensure_project_indexed_in_background(tmp.path().to_path_buf(), None);
     assert!(
         start.elapsed() < std::time::Duration::from_millis(500),
         "must return immediately (spawn-and-detach), never block on the network"
     );
+}
+
+/// The readiness observer must be invoked exactly once, on the detached
+/// thread, even when nothing is probeable.
+///
+/// Why: the daemon path publishes `Event::IndexReadiness` from this observer.
+/// If it were skipped whenever the probe returned `None`, a session with no
+/// reachable trusty-search daemon would emit NO readiness event at all — and
+/// the UI would silently fall back to rendering "no results found" for an
+/// index it cannot even see, which is the precise confusion #2784 exists to
+/// remove. `None` is a reportable state, not a reason to stay silent.
+/// What: calls the function against a `.git`-less tempdir with an observer
+/// that latches into a channel; asserts the observer ran. It deliberately does
+/// NOT assert WHICH state was observed — that depends on whether a
+/// trusty-search daemon happens to be up on the machine running the tests, and
+/// the contract under test is "the observer is always invoked, whatever the
+/// probe found", not the probe's result (which
+/// `trusty_common::search_readiness`'s own tests already pin).
+/// Test: this test.
+#[test]
+fn background_indexing_invokes_readiness_observer() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    super::ensure_project_indexed_in_background(
+        tmp.path().to_path_buf(),
+        Some(Box::new(move |readiness| {
+            let _ = tx.send(readiness.is_some());
+        })),
+    );
+
+    // The detached thread does one short-timeout probe; 10s is far beyond its
+    // ~1.5s cap while still failing fast on a genuine "never called" bug.
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the readiness observer must be invoked, even when nothing is probeable");
 }

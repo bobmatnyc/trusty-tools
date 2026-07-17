@@ -91,20 +91,58 @@ const ENGINEER_AGENT_NAME: &str = "python-engineer";
 /// lanes are ready — `warn` while semantic is still warming, `info` once it is
 /// ready. Same fail-open contract: no daemon ⇒ no log, never a block.
 ///
+/// The readiness is ALSO handed to the optional `on_readiness` observer, which
+/// is how the daemon path (`task::executor`) turns it into a
+/// `session.attach`able `Event::IndexReadiness` for the UI — the stderr log
+/// alone is unreachable to any API consumer. The observer is passed the raw
+/// `Option`: `None` (no daemon / undrivable id) is itself meaningful — it means
+/// an empty search result is not evidence of absence — so it is reported rather
+/// than swallowed. `run_task`'s own CLI path passes `None` and keeps the
+/// pre-existing log-only behaviour exactly. Taking a callback (rather than a
+/// `SessionRegistry`) is what keeps this module free of a dependency on the
+/// higher-level session layer, mirroring `agent_loop::sink`'s layering rule.
+///
 /// Test: the promoted helper's fail-open + no-daemon + non-git-root behaviour is
 /// unit-tested in `trusty_common::search_index::tests`; the readiness probe/parse
 /// in `trusty_common::search_readiness::tests`. This thin spawn wrapper is
 /// side-effect-only (detached thread) and has no return to assert; see
 /// `spawns_indexing_thread_for_non_git_project_path` for the one thing it IS
-/// mechanically checked for here — that it never short-circuits before spawning.
-pub(crate) fn ensure_project_indexed_in_background(project: PathBuf) {
+/// mechanically checked for here — that it never short-circuits before spawning,
+/// and `background_indexing_invokes_readiness_observer` for the observer
+/// contract.
+pub(crate) fn ensure_project_indexed_in_background(
+    project: PathBuf,
+    on_readiness: Option<ReadinessObserver>,
+) {
     std::thread::spawn(move || {
         // Warm first, then surface the readiness the warm produced so the
         // session knows whether a semantic search is trustworthy yet (#2784).
         let _ = trusty_common::search_index::ensure_project_indexed(&project);
-        trusty_common::search_readiness::log_index_readiness(&project);
+        // Probe ONCE and use that single snapshot for both surfaces — probing
+        // again for the observer would double the HTTP cost and could report a
+        // lane that flipped between the two reads.
+        let readiness = trusty_common::search_readiness::probe_index_readiness(&project);
+        if let Some(r) = &readiness {
+            trusty_common::search_readiness::log_readiness(r);
+        }
+        if let Some(observe) = on_readiness {
+            observe(readiness);
+        }
     });
 }
+
+/// Observer handed the result of the background index-readiness probe.
+///
+/// Why: lets the daemon path publish readiness as a session event without
+/// `run_task` (the low-level CLI execution module) taking a dependency on the
+/// `session` layer — the same layering rule `agent_loop::sink` documents.
+/// What: called at most once, on the detached indexing thread, with the probe's
+/// raw fail-open `Option` (`None` == nothing probeable, which is itself a
+/// reportable state). Boxed `FnOnce + Send` because it runs on that thread and
+/// typically carries an `Arc<SessionRegistry>` and a session id.
+/// Test: `run_task::tests::background_indexing_invokes_readiness_observer`.
+pub(crate) type ReadinessObserver =
+    Box<dyn FnOnce(Option<trusty_common::search_readiness::IndexReadiness>) + Send>;
 
 /// Inputs to a single `run-task` invocation, parsed from the CLI.
 ///
@@ -160,7 +198,9 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
     // the loop below proceeds. Fail-open, git-optional — see the helper's docs.
-    ensure_project_indexed_in_background(params.project.clone());
+    // CLI path: no session to publish an event to, so readiness stays
+    // log-only exactly as before.
+    ensure_project_indexed_in_background(params.project.clone(), None);
 
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 

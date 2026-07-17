@@ -340,6 +340,94 @@ pub enum Event {
         table_rows: Vec<(String, String)>,
     },
 
+    // -- Search-index readiness (#2784 follow-up: UI Phase-1) --
+    /// The project's trusty-search index readiness, probed once at task start.
+    ///
+    /// Why: cold-indexing a large repo has a real semantic warm-up window —
+    /// lexical (BM25) is queryable in seconds while semantic embedding can stay
+    /// `InProgress` for minutes. During that window a search returns EMPTY, and
+    /// an empty result is indistinguishable from "this index is fully ready and
+    /// the code genuinely isn't here" — two states that mean OPPOSITE things.
+    /// `trusty_common::search_readiness` already computes this per-lane, but
+    /// only ever logged it to stderr, so no UI (and no consumer of the daemon
+    /// API at all) could see it. This variant is that value escaping.
+    /// `state` is the field that resolves the ambiguity: a UI must NOT render
+    /// "no results found" while `state == "warming"`, and a `"unavailable"`
+    /// index means an empty search is likewise not evidence of absence.
+    /// What: `state` is the single coarse discriminant — `"ready"` (the
+    /// semantic lane is queryable; an empty search IS evidence of absence),
+    /// `"warming"` (at least the semantic lane is still building; an empty
+    /// search is NOT evidence of absence), or `"unavailable"` (the probe found
+    /// no reachable daemon / no derivable index id — likewise not evidence of
+    /// absence). It keys off `IndexReadiness::semantic_search_ready`, the
+    /// module's canonical "is a search trustworthy yet" predicate, rather than
+    /// requiring all three lanes — the graph/KG lane is legitimately absent on
+    /// many indexes (`TRUSTY_NO_KG`), and gating `"ready"` on it would report
+    /// `"warming"` forever. The per-lane `lexical_ready`/`semantic_ready`/
+    /// `graph_ready` flags ship alongside so a UI can still render each lane
+    /// individually. `index_id`/`lifecycle_status`/`chunk_count` are `None`
+    /// exactly when `state == "unavailable"` (nothing was probed). `summary` is
+    /// the same human-readable line the stderr log carries.
+    /// Test: `session::registry::registry_tests::record_index_readiness_*`,
+    /// `session::registry::registry_tests::warming_index_is_distinguishable_from_ready_with_zero_hits`.
+    IndexReadiness {
+        session_id: String,
+        /// `"ready"` | `"warming"` | `"unavailable"` — see the variant docs.
+        state: String,
+        index_id: Option<String>,
+        lifecycle_status: Option<String>,
+        chunk_count: Option<u64>,
+        lexical_ready: bool,
+        semantic_ready: bool,
+        graph_ready: bool,
+        summary: String,
+    },
+
+    // -- Working-context budget (epic #2343 "Infinite Sessions"; UI Phase-1) --
+    /// The working-context budget after one cadence/enforcement turn boundary.
+    ///
+    /// Why: the Infinite Sessions guarantee — working context >= 60% of the
+    /// model's window, session overhead <= 40%, at ALL times — is what makes
+    /// "the workstream never ends" true. `agent_loop::cadence` recomputed that
+    /// budget every single turn and then DISCARDED the result: `CadenceOutcome`
+    /// was documented "for observability/tests" and observability never
+    /// consumed it. Nothing could render the guarantee it enforces. This
+    /// variant is that already-computed value escaping, so a UI can show a live
+    /// context-budget indicator instead of the user flying blind into a
+    /// compaction.
+    /// What: `overhead_tokens` is the REAL measured `estimate_total_tokens` of
+    /// the model-facing transcript after enforcement settled (not a
+    /// projection); `overhead_cap_tokens` is the hard cap
+    /// (`context_window * max_overhead_fraction_pct / 100`); `working_context_pct`
+    /// and `overhead_pct` are the two derived percentages a budget meter renders
+    /// (they sum to 100). `within_budget` is `false` only on cadence's one
+    /// documented floor — pinned/system/user content alone exceeds the cap.
+    /// `compaction_fired` marks the turns where history was actually
+    /// compressed: that content was removed from the model-facing CONTEXT, never
+    /// from the durable record (the summary left in its place points at
+    /// `recall_session`), which is the distinction a UI should make legible
+    /// rather than rendering compaction as data loss. `compaction_rounds`
+    /// counts the cadence round plus every continuous-enforcement round.
+    /// Emitted ONLY by the PM's persistent-session loop — cadence is PM-only by
+    /// construction (`AgentLoopConfig.cadence` defaults `None`), so a delegated
+    /// engineer loop never emits this.
+    /// Test: `agent_loop::tests::cadence_emits_context_budget_snapshot`,
+    /// `agent_loop::tests::no_context_budget_event_when_cadence_disabled`.
+    ContextBudget {
+        session_id: String,
+        context_window_tokens: usize,
+        overhead_tokens: usize,
+        overhead_cap_tokens: usize,
+        /// Percentage of the window left for real work. The Infinite Sessions
+        /// guarantee is that this stays >= 60.
+        working_context_pct: u8,
+        /// Percentage of the window consumed by session overhead (<= 40).
+        overhead_pct: u8,
+        within_budget: bool,
+        compaction_fired: bool,
+        compaction_rounds: usize,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -382,7 +470,9 @@ impl Event {
             | Event::LlmResponded { session_id, .. }
             | Event::AgentStarted { session_id, .. }
             | Event::ReportGenerated { session_id, .. }
-            | Event::RecapGenerated { session_id, .. } => Some(session_id),
+            | Event::RecapGenerated { session_id, .. }
+            | Event::IndexReadiness { session_id, .. }
+            | Event::ContextBudget { session_id, .. } => Some(session_id),
             Event::Ping => None,
         }
     }
@@ -430,6 +520,8 @@ impl Event {
             Event::AgentStarted { .. } => "agent_started",
             Event::ReportGenerated { .. } => "report_generated",
             Event::RecapGenerated { .. } => "recap_generated",
+            Event::IndexReadiness { .. } => "index_readiness",
+            Event::ContextBudget { .. } => "context_budget",
             Event::Ping => "ping",
         }
     }
@@ -705,6 +797,28 @@ mod tests {
             Event::Message {
                 session_id: "s".into(),
                 text: "hi".into(),
+            },
+            Event::IndexReadiness {
+                session_id: "s".into(),
+                state: "warming".into(),
+                index_id: Some("repo".into()),
+                lifecycle_status: Some("indexed_lexical".into()),
+                chunk_count: Some(7),
+                lexical_ready: true,
+                semantic_ready: false,
+                graph_ready: false,
+                summary: "warming".into(),
+            },
+            Event::ContextBudget {
+                session_id: "s".into(),
+                context_window_tokens: 200_000,
+                overhead_tokens: 1_000,
+                overhead_cap_tokens: 80_000,
+                working_context_pct: 99,
+                overhead_pct: 1,
+                within_budget: true,
+                compaction_fired: false,
+                compaction_rounds: 0,
             },
             Event::Ping,
         ];

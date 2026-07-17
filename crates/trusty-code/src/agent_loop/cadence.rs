@@ -213,13 +213,52 @@ fn read_settings_json_cadence(project_root: &Path) -> Option<CadenceConfig> {
 /// if any, plus every continuous-enforcement round); `within_budget` —
 /// whether the transcript ended at/under the overhead cap (`false` only on
 /// the documented floor: the active zone alone, after full compaction,
-/// still exceeds the cap).
+/// still exceeds the cap); `overhead_tokens` — the REAL
+/// [`estimate_total_tokens`] measurement of the model-facing transcript as
+/// [`enforce_budget`] last observed it (i.e. after enforcement settled), which
+/// is what makes a working-context indicator renderable from a measured value
+/// rather than a projection.
 /// Test: `cadence::tests::*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CadenceOutcome {
     pub fired: bool,
     pub rounds: usize,
     pub within_budget: bool,
+    /// Measured model-facing transcript size, in estimated tokens, after this
+    /// call's enforcement settled.
+    pub overhead_tokens: usize,
+}
+
+impl CadenceOutcome {
+    /// Percentage of `context_window` consumed by session overhead.
+    ///
+    /// Why: the Infinite Sessions guarantee is stated as a ratio ("overhead
+    /// <= 40%, working context >= 60%"), but this outcome measures ABSOLUTE
+    /// tokens — a consumer rendering a budget meter needs the ratio, and
+    /// deriving it in one place keeps every consumer's arithmetic identical.
+    /// What: `overhead_tokens / context_window * 100`, saturating at 100 and
+    /// returning 100 for a zero `context_window` (treat an unknown window as
+    /// fully consumed — the conservative reading, and never a divide-by-zero).
+    /// Test: `cadence::tests::overhead_pct_is_ratio_of_window`,
+    /// `cadence::tests::pct_helpers_saturate_and_never_divide_by_zero`.
+    pub fn overhead_pct(&self, context_window: usize) -> u8 {
+        if context_window == 0 {
+            return 100;
+        }
+        let pct = self.overhead_tokens.saturating_mul(100) / context_window;
+        pct.min(100) as u8
+    }
+
+    /// Percentage of `context_window` still available for real work — the
+    /// figure the Infinite Sessions guarantee requires to stay `>= 60`.
+    ///
+    /// Why: the headline number a UI budget indicator renders.
+    /// What: `100 - overhead_pct(context_window)`, so the two always sum to
+    /// exactly 100.
+    /// Test: `cadence::tests::working_and_overhead_pct_sum_to_100`.
+    pub fn working_context_pct(&self, context_window: usize) -> u8 {
+        100 - self.overhead_pct(context_window)
+    }
 }
 
 /// The turn-boundary entry point: tick the cadence counter, compress on
@@ -263,12 +302,14 @@ pub fn maybe_cadence_compress(
     }
 
     let cap = cfg.overhead_cap_tokens(context_window);
-    let (enforcement_rounds, within_budget) = enforce_budget(transcript, cap, keep_last_messages);
+    let (enforcement_rounds, within_budget, overhead_tokens) =
+        enforce_budget(transcript, cap, keep_last_messages);
 
     CadenceOutcome {
         fired,
         rounds: rounds + enforcement_rounds,
         within_budget,
+        overhead_tokens,
     }
 }
 
@@ -281,29 +322,38 @@ pub fn maybe_cadence_compress(
 /// compacts them. Requirement 3 of #2346 ("continuous budget enforcement")
 /// is this loop: shrink the protected active zone one message at a time and
 /// re-compact (group-safely) until the budget is satisfied.
-/// What: Starting at `keep_last = active_zone`, loop: if already under
-/// `cap_tokens`, return `(rounds, true)`. Otherwise compact tagged with the
-/// transcript's current cadence range, then either shrink `keep_last` by one
-/// (more rounds to go) or, once `keep_last == 0`, either loop back (that
-/// round newly compacted something — recheck the budget) or return
-/// `(rounds, false)` with a `tracing::warn!` (nothing left to compact and
-/// still over budget — the documented floor: pinned/system/user content
-/// alone exceeds the cap). Bounded by `active_zone + 2` iterations — never an
+/// What: Starting at `keep_last = active_zone`, loop: measure the model-facing
+/// transcript once per iteration; if already under `cap_tokens`, return
+/// `(rounds, true, measured)`. Otherwise compact tagged with the transcript's
+/// current cadence range, then either shrink `keep_last` by one (more rounds
+/// to go) or, once `keep_last == 0`, either loop back (that round newly
+/// compacted something — recheck the budget) or return `(rounds, false,
+/// measured)` with a `tracing::warn!` (nothing left to compact and still over
+/// budget — the documented floor: pinned/system/user content alone exceeds the
+/// cap; the measurement is still accurate there precisely BECAUSE that round
+/// compacted nothing). Bounded by `active_zone + 2` iterations — never an
 /// unbounded loop.
+///
+/// The third return element is the token measurement this loop already had to
+/// compute for its own budget check — returning it rather than dropping it is
+/// what lets a caller report a REAL working-context figure without paying for a
+/// second `estimate_total_tokens` pass over the whole transcript.
 /// Test: `cadence::tests::stays_under_budget_every_turn`,
 /// `cadence::tests::single_oversized_turn_still_ends_under_budget`,
-/// `cadence::tests::floor_exceeded_warns_not_panics`.
+/// `cadence::tests::floor_exceeded_warns_not_panics`,
+/// `cadence::tests::outcome_reports_measured_overhead_tokens`.
 fn enforce_budget(
     transcript: &mut Transcript,
     cap_tokens: usize,
     active_zone: usize,
-) -> (usize, bool) {
+) -> (usize, bool, usize) {
     let mut keep_last = active_zone;
     let mut rounds = 0;
 
     loop {
-        if estimate_total_tokens(&transcript.to_messages()) <= cap_tokens {
-            return (rounds, true);
+        let measured = estimate_total_tokens(&transcript.to_messages());
+        if measured <= cap_tokens {
+            return (rounds, true, measured);
         }
 
         let range = transcript.begin_cadence_range();
@@ -317,11 +367,12 @@ fn enforce_budget(
             if !compacted {
                 tracing::warn!(
                     cap_tokens,
+                    measured,
                     "cadence: overhead cap still exceeded after compacting every eligible \
                      entry — the active zone (pinned + system/user turns) alone exceeds \
                      budget; this is a documented floor, not an error"
                 );
-                return (rounds, false);
+                return (rounds, false, measured);
             }
             continue;
         }

@@ -208,17 +208,38 @@ pub fn probe_index_readiness(project_root: &Path) -> Option<IndexReadiness> {
 /// `tracing`, which the daemons route to stderr, keeping stdout clean for MCP
 /// JSON-RPC framing.
 /// Test: side-effect-only (emits a log, no return to assert); its logic is
-/// [`probe_index_readiness`] + [`IndexReadiness::summary`], both unit-tested.
+/// [`probe_index_readiness`] + [`log_readiness`], both unit-tested.
 pub fn log_index_readiness(project_root: &Path) {
     if let Some(readiness) = probe_index_readiness(project_root) {
-        if readiness.semantic_search_ready() {
-            tracing::info!("{}", readiness.summary());
-        } else {
-            tracing::warn!(
-                "{} — semantic search still warming; expect lexical-only results until it is ready",
-                readiness.summary()
-            );
-        }
+        log_readiness(&readiness);
+    }
+}
+
+/// Emit the session-facing readiness log line for an ALREADY-probed
+/// [`IndexReadiness`].
+///
+/// Why: [`log_index_readiness`] probes and logs in one step, which is all a
+/// log-only caller needs — but a caller that must ALSO forward the readiness
+/// somewhere else (e.g. `trusty-code` publishing it as a daemon API event for
+/// its UI) would otherwise have to probe a second time, doubling the HTTP cost
+/// and risking the two observations disagreeing about a lane that flipped
+/// between them. Splitting the log step out lets such a caller probe ONCE via
+/// [`probe_index_readiness`] and then both log and forward the same snapshot.
+/// What: logs [`IndexReadiness::summary`] at `info` when the semantic lane is
+/// ready and at `warn` while it is still warming (so the warm-up window is the
+/// one that stands out), via `tracing` — which the daemons route to stderr,
+/// keeping stdout clean for MCP JSON-RPC framing. Pure side effect; never
+/// fails.
+/// Test: `log_readiness_does_not_panic_for_either_lane_state`; the message
+/// content it formats is covered by [`IndexReadiness::summary`]'s own tests.
+pub fn log_readiness(readiness: &IndexReadiness) {
+    if readiness.semantic_search_ready() {
+        tracing::info!("{}", readiness.summary());
+    } else {
+        tracing::warn!(
+            "{} — semantic search still warming; expect lexical-only results until it is ready",
+            readiness.summary()
+        );
     }
 }
 
@@ -302,6 +323,24 @@ mod tests {
         let s = r.summary();
         assert!(s.contains("lexical ready"));
         assert!(s.contains("semantic pending"));
+    }
+
+    /// `log_readiness` is pure side effect; assert only that BOTH lane states
+    /// (the `info` ready branch and the `warn` warm-up branch) execute without
+    /// panicking. The message content is `summary`'s contract, tested above.
+    #[test]
+    fn log_readiness_does_not_panic_for_either_lane_state() {
+        let mut r = IndexReadiness {
+            index_id: "repo".into(),
+            lifecycle_status: "indexed_lexical".into(),
+            chunk_count: 7,
+            lexical_ready: true,
+            semantic_ready: false,
+            graph_ready: false,
+        };
+        log_readiness(&r); // warm-up branch
+        r.semantic_ready = true;
+        log_readiness(&r); // ready branch
     }
 
     #[test]
