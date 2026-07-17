@@ -248,6 +248,22 @@ tree-sitter-kotlin-ng = "1.1"
 tree-sitter-swift = "=0.7.0"
 tree-sitter-scala = "0.24"
 
+# ── Document extraction (trusty-search native pdf/docx/xlsx indexing, #2923) ──
+# pdf-extract: pure-Rust PDF text extraction (MIT). No system deps (no poppler/
+# pdfium); scanned/image-only PDFs yield empty text, which the extractor layer
+# turns into an explicit "no extractable text" warning rather than a silent
+# empty index (OCR is out of scope for v1).
+pdf-extract = "0.9"
+# calamine: pure-Rust xls/xlsx/xlsm/ods reader (MIT), used to read spreadsheet
+# rows per sheet.
+calamine = "0.26"
+# zip + quick-xml: OOXML (.docx) is a zip container around XML parts. Parsing
+# `word/document.xml` ourselves (rather than pulling in docx-rs) matches this
+# repo's own-the-parsing style and avoids a much larger dependency surface for
+# a single-purpose paragraph-text extraction need.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+
 # ── [patch.crates-io] ──────────────────────────────────────────────────────
 # trusty-search and a handful of other crates depend on trusty-common by
 # version (because it was previously published from a separate repo). In the

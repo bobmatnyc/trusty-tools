@@ -145,6 +145,12 @@ rayon = "1"
 sha2 = "0.10"
 regex = "1"
 
+# ── Document extraction (native pdf/docx/xlsx indexing, issue #2923) ────────
+pdf-extract = { workspace = true }
+calamine = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+
 # ── Tree-sitter grammars (ABI 15) ──────────────────────────────────────────
 # Upgraded to tree-sitter 0.26 to align with open-mpm (issue #116) so that
 # trusty-search can be directly linked as an rlib without violating Cargo's

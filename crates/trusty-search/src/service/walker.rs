@@ -30,6 +30,10 @@ pub const SOURCE_EXTS: &[&str] = &[
     "yaml", "yml", "toml", "json", "xml",
     // Plaintext / logs
     "txt", "log",
+    // Office documents — routed through crate::core::extract, never
+    // tree-sitter (issue #2923). Subject to the larger MAX_OFFICE_FILE_BYTES
+    // cap in should_skip_path, not the global MAX_FILE_BYTES cap.
+    "pdf", "docx", "xls", "xlsx", "xlsm",
 ];
 
 /// Directory names to skip when walking. Matched on basename only.
@@ -306,10 +310,13 @@ pub fn is_default_doc_excluded(path: &Path) -> bool {
 
 /// File extensions that are always binary or non-parseable. These are skipped
 /// before the file is opened, so the walker never reads their bytes.
+///
+/// `pdf` was removed from this list by issue #2923 — PDFs are now routed
+/// through `crate::core::extract` instead of being hard-skipped.
 const BINARY_EXTS: &[&str] = &[
-    "wasm", "so", "dylib", "dll", "exe", "pdf", "png", "jpg", "jpeg", "gif", "ico", "webp", "zip",
-    "tar", "gz", "bz2", "xz", "7z", "rar", "ttf", "otf", "woff", "woff2", "mp3", "mp4", "mov",
-    "avi", "mkv", "db", "sqlite", "lock", "pyc", "class", "o", "a",
+    "wasm", "so", "dylib", "dll", "exe", "png", "jpg", "jpeg", "gif", "ico", "webp", "zip", "tar",
+    "gz", "bz2", "xz", "7z", "rar", "ttf", "otf", "woff", "woff2", "mp3", "mp4", "mov", "avi",
+    "mkv", "db", "sqlite", "lock", "pyc", "class", "o", "a",
 ];
 
 /// Files larger than this are silently skipped. 1 MiB is generous for a source
@@ -469,9 +476,17 @@ pub fn should_skip_path(path: &Path) -> bool {
         }
     }
 
-    // File size guard — avoids reading giant generated files.
+    // File size guard — avoids reading giant generated files. Office
+    // documents (issue #2923) get the larger MAX_OFFICE_FILE_BYTES cap since
+    // real PDFs/spreadsheets routinely exceed the 1 MiB source-file cap from
+    // embedded fonts/images even when their extractable text is small.
+    let size_cap = if crate::core::extract::is_extractable_ext(&ext) {
+        crate::core::extract::MAX_OFFICE_FILE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    };
     if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > MAX_FILE_BYTES {
+        if meta.len() > size_cap {
             return true;
         }
     }
@@ -1799,6 +1814,67 @@ mod tests {
         assert!(
             !names.iter().any(|n| n == "blob.rs"),
             ".git/ leaked into walk: {names:?}"
+        );
+    }
+
+    // --- Issue #2923: office document (pdf/docx/xlsx) walker wiring ---
+
+    /// PDFs are no longer hard-skipped (removed from `BINARY_EXTS`) and
+    /// docx/xls/xlsx/xlsm are now in `SOURCE_EXTS`, so all five enter the
+    /// walk output — the extraction dispatch itself happens downstream in
+    /// `service::reindex::batch` / `service::watch_loop`, not here.
+    #[test]
+    fn test_walker_includes_office_documents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::write(root.join("report.pdf"), b"%PDF-1.4 fake").unwrap();
+        fs::write(root.join("memo.docx"), b"PK fake docx").unwrap();
+        fs::write(root.join("budget.xlsx"), b"PK fake xlsx").unwrap();
+        fs::write(root.join("legacy.xls"), b"fake xls").unwrap();
+        fs::write(root.join("macro.xlsm"), b"PK fake xlsm").unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let names: Vec<String> = walk_source_files(root)
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        for expected in [
+            "report.pdf",
+            "memo.docx",
+            "budget.xlsx",
+            "legacy.xls",
+            "macro.xlsm",
+            "main.rs",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} must be walked: {names:?}"
+            );
+        }
+    }
+
+    /// An office document over the 1 MiB global `MAX_FILE_BYTES` cap but
+    /// under the 10 MiB `MAX_OFFICE_FILE_BYTES` cap stays indexable — proving
+    /// the walker applies the larger office-document cap rather than the
+    /// global source-file cap.
+    #[test]
+    fn test_walker_applies_larger_office_file_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pdf_path = tmp.path().join("big.pdf");
+        // 2 MiB — over the 1 MiB global cap, under the 10 MiB office cap.
+        fs::write(&pdf_path, vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        assert!(
+            !should_skip_path(&pdf_path),
+            "a 2 MiB pdf must stay under the office-document cap"
+        );
+
+        // A non-office file of the same size is still pruned by the global cap.
+        let rs_path = tmp.path().join("big.rs");
+        fs::write(&rs_path, vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        assert!(
+            should_skip_path(&rs_path),
+            "a 2 MiB .rs file must still hit the global 1 MiB cap"
         );
     }
 }
