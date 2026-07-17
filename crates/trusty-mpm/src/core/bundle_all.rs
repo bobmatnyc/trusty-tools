@@ -466,4 +466,32 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("skills/artifacts-builder.md", ARTIFACTS_BUILDER),
     overwrite("skills/model-context-builder.md", MODEL_CONTEXT_BUILDER),
     overwrite("skills/xlsx.md", XLSX),
+    // --- BEGIN issue #2911: documentation-style bundled skill (append-only;
+    // sibling PR #2913 owns the ALL table above this marker) ---
+    overwrite("skills/documentation-style.md", DOCUMENTATION_STYLE),
+    overwrite(
+        "skills/documentation-style/references/spec.md",
+        DOCUMENTATION_STYLE_SPEC,
+    ),
+    overwrite(
+        "skills/documentation-style/references/readme.md",
+        DOCUMENTATION_STYLE_README,
+    ),
+    overwrite(
+        "skills/documentation-style/references/file-level.md",
+        DOCUMENTATION_STYLE_FILE_LEVEL,
+    ),
+    overwrite(
+        "skills/documentation-style/references/class.md",
+        DOCUMENTATION_STYLE_CLASS,
+    ),
+    overwrite(
+        "skills/documentation-style/references/method-function.md",
+        DOCUMENTATION_STYLE_METHOD_FUNCTION,
+    ),
+    overwrite(
+        "skills/documentation-style/references/block-inline.md",
+        DOCUMENTATION_STYLE_BLOCK_INLINE,
+    ),
+    // --- END issue #2911 ---
 ];

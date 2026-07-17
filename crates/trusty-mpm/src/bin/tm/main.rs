@@ -76,6 +76,10 @@ mod tests_behavior_2890_skills;
 mod tests_behavior_2903_skills;
 
 #[cfg(test)]
+#[path = "tests_behavior_2911_documentation_style_tests.rs"]
+mod tests_behavior_2911_documentation_style;
+
+#[cfg(test)]
 #[path = "tests_projects.rs"]
 mod tests_projects;
 
