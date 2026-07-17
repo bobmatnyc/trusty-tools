@@ -139,6 +139,7 @@ fn kind_matches_serde_tag_for_every_variant() {
             lane: "semantic".into(),
             query: "where is auth".into(),
             hit_count: Some(3),
+            hits: vec![],
             latency_ms: 42,
         },
         Event::MemoryRecalled {
@@ -309,7 +310,7 @@ fn recalled_memory_deserializes_without_text_or_run_id() {
 }
 
 /// `SearchPerformed` must round-trip, including an uncountable
-/// (`hit_count: None`) result.
+/// (`hit_count: None`) result and its (empty, in the uncountable case) `hits`.
 #[test]
 fn search_performed_round_trips_through_json() {
     let event = Event::SearchPerformed {
@@ -319,6 +320,7 @@ fn search_performed_round_trips_through_json() {
         lane: "lexical".into(),
         query: "where is auth".into(),
         hit_count: None,
+        hits: vec![],
         latency_ms: 17,
     };
     let envelope = SessionEventEnvelope::new("s1".into(), 5, Utc::now(), event);
@@ -330,13 +332,109 @@ fn search_performed_round_trips_through_json() {
         value["event"]["hit_count"].is_null(),
         "an uncountable hit count must stay null, never coerce to 0"
     );
+    assert_eq!(value["event"]["hits"], serde_json::json!([]));
 
     let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
     assert!(matches!(
         back.event,
-        Event::SearchPerformed { hit_count, latency_ms, lane, .. }
-            if hit_count.is_none() && latency_ms == 17 && lane == "lexical"
+        Event::SearchPerformed { hit_count, latency_ms, lane, hits, .. }
+            if hit_count.is_none() && latency_ms == 17 && lane == "lexical" && hits.is_empty()
     ));
+}
+
+/// `SearchPerformed.hits` must round-trip each hit's `path` AND `score`
+/// (DOC-39 Slice B) — the search-audit UI's whole point is telling hits
+/// apart by both fields, not just knowing how many there were.
+#[test]
+fn search_performed_hits_round_trip_through_json() {
+    let event = Event::SearchPerformed {
+        session_id: "s1".into(),
+        agent: "python-engineer".into(),
+        agent_id: "eng-1".into(),
+        lane: "semantic".into(),
+        query: "where is auth".into(),
+        hit_count: Some(2),
+        hits: vec![
+            SearchHit {
+                path: "src/auth.rs".into(),
+                score: 0.87,
+            },
+            SearchHit {
+                path: "src/session/session.rs".into(),
+                score: 0.52,
+            },
+        ],
+        latency_ms: 9,
+    };
+    let envelope = SessionEventEnvelope::new("s1".into(), 6, Utc::now(), event);
+    let value = serde_json::to_value(&envelope).unwrap();
+
+    assert_eq!(value["event"]["hits"][0]["path"], "src/auth.rs");
+    assert_eq!(value["event"]["hits"][0]["score"], 0.87);
+    assert_eq!(value["event"]["hits"][1]["path"], "src/session/session.rs");
+    assert_eq!(value["event"]["hits"][1]["score"], 0.52);
+
+    let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
+    let Event::SearchPerformed { hits, .. } = back.event else {
+        panic!("expected SearchPerformed");
+    };
+    assert_eq!(
+        hits,
+        vec![
+            SearchHit {
+                path: "src/auth.rs".into(),
+                score: 0.87,
+            },
+            SearchHit {
+                path: "src/session/session.rs".into(),
+                score: 0.52,
+            },
+        ]
+    );
+}
+
+/// A `SearchPerformed` transcript recorded BEFORE `hits` existed (DOC-39
+/// Slice B) must still deserialize — the whole point of `#[serde(default)]`,
+/// mirroring `tool_started_without_agent_id_field_still_deserializes`.
+#[test]
+fn search_performed_without_hits_field_still_deserializes() {
+    let legacy_json = serde_json::json!({
+        "type": "search_performed",
+        "session_id": "s1",
+        "agent": "python-engineer",
+        "agent_id": "eng-1",
+        "lane": "grep",
+        "query": "where is auth",
+        "hit_count": 3,
+        "latency_ms": 12
+    });
+    let event: Event = serde_json::from_value(legacy_json)
+        .expect("a SearchPerformed payload recorded before `hits` existed must still deserialize");
+    let Event::SearchPerformed {
+        hits, hit_count, ..
+    } = event
+    else {
+        panic!("expected SearchPerformed");
+    };
+    assert!(
+        hits.is_empty(),
+        "serde(default) yields an empty Vec for a pre-existing record"
+    );
+    assert_eq!(hit_count, Some(3));
+}
+
+/// `SearchHit` itself must round-trip through JSON with `path`/`score` intact.
+#[test]
+fn search_hit_round_trips_through_json() {
+    let hit = SearchHit {
+        path: "src/auth.rs".into(),
+        score: 0.87,
+    };
+    let value = serde_json::to_value(&hit).unwrap();
+    assert_eq!(value["path"], "src/auth.rs");
+    assert_eq!(value["score"], 0.87);
+    let back: SearchHit = serde_json::from_value(value).unwrap();
+    assert_eq!(back, hit);
 }
 
 /// A `ToolStarted` transcript recorded BEFORE `agent_id` existed (DOC-39

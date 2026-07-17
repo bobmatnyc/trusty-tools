@@ -23,7 +23,7 @@
 //! Test: `crate::agent_loop::tests::sink_events::sink_receives_tool_telemetry_with_agent`
 //! (forwarding), plus each tool's own `telemetry_*` tests (production).
 
-use crate::events::RecalledMemory;
+use crate::events::{RecalledMemory, SearchHit};
 
 /// Structured data a tool reports about what it actually did (UI Phase 1).
 ///
@@ -49,7 +49,9 @@ pub enum ToolTelemetry {
 /// differ whenever a not-yet-built index forces a lexical retry (#2783).
 /// What: `lane` is the lane that served the results; `hit_count` is `None`
 /// when the result shape could not be counted (never a misleading `0`);
-/// `latency_ms` covers the whole call including any retry.
+/// `hits` carries each result's path + score from that SAME parse (DOC-39
+/// Slice B — `[]` in the uncountable case); `latency_ms` covers the whole
+/// call including any retry.
 /// Test: `tools::trusty_search_tests::resolved_lane_reports_lexical_when_the_retry_served_it`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchTelemetry {
@@ -59,6 +61,9 @@ pub struct SearchTelemetry {
     pub query: String,
     /// Hits returned, or `None` when uncountable.
     pub hit_count: Option<usize>,
+    /// Per-hit path + score, in the order the lane returned them (DOC-39
+    /// Slice B). Empty when `hit_count` is `None` (uncountable payload).
+    pub hits: Vec<SearchHit>,
     /// Wall-clock duration of the whole tool call.
     pub latency_ms: u64,
 }

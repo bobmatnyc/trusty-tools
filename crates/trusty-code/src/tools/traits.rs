@@ -559,6 +559,7 @@ mod tests {
             lane: "semantic".to_string(),
             query: "q".to_string(),
             hit_count: Some(3),
+            hits: vec![],
             latency_ms: 7,
         });
         let result = ToolResult::ok("hits").with_telemetry(telemetry.clone());
@@ -581,6 +582,7 @@ mod tests {
                 lane: "semantic".to_string(),
                 query: "q".to_string(),
                 hit_count: None,
+                hits: vec![],
                 latency_ms: 1,
             }));
         assert!(result.is_error());
