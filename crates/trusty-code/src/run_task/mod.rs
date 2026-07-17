@@ -289,12 +289,16 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     let skills_catalog = daily_driver_skills_catalog(&params.project);
 
     // Build the engineer runner, scoped to the project working dir, sharing the
-    // transcript (engineer turns are tagged "python-engineer").
+    // transcript (engineer turns are tagged "python-engineer"). The full
+    // `(catalog, resolver)` pair is threaded through (rather than just the
+    // catalog string) so `ProjectToolFactory` can register `use_skill` against
+    // the SAME resolver instance the catalog was rendered from (experimental,
+    // refs #2892).
     let engineer_runner = build_engineer_runner(
         wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
         project_context.clone(),
-        skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
+        skills_catalog.clone(),
         Arc::clone(&transcript),
         deadline_secs,
         redelegation_signal.clone(),
@@ -462,19 +466,23 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 /// What: Returns an `Arc<dyn AgentRunner>` the `DelegateToAgentTool` dispatches
 /// to. The engineer's own LLM turns are recorded under the "python-engineer" role.
 /// `redelegation_signal` is shared with `assemble_report` via the caller.
-/// `skills_catalog` (#2924) is the same rendered metadata catalog the PM's own
-/// prompt gets, threaded through so the delegated engineer's DailyDriver
-/// prompt also sees it — mirrors `task::executor::build_engineer_runner`,
-/// including that wiring the `use_skill` *tool* into the engineer's own
-/// per-delegation registry (`ProjectToolFactory::build`) is deliberately
-/// deferred, exactly as the daemon path defers it.
+/// `skills_catalog` (#2924) is the same rendered `(catalog, resolver)` pair the
+/// PM's own prompt/registry are built from, threaded through so the delegated
+/// engineer's DailyDriver prompt also sees the catalog text AND — as of this
+/// experimental change (refs #2892) — so `ProjectToolFactory` can register
+/// `use_skill` against the SAME resolver instance, rather than a second,
+/// independently-constructed one. This is a deliberate divergence from
+/// `task::executor::build_engineer_runner`, which still defers wiring
+/// `use_skill` into the engineer's own per-delegation registry; see that
+/// function's docs for the daemon path's reasoning.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
-/// `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`.
+/// `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`,
+/// `run_task::tests::use_skill_on_legacy_path_reaches_engineer_and_transcript`.
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
     params: &RunTaskParams,
     project_context: Option<String>,
-    skills_catalog: Option<String>,
+    skills_catalog: Option<(String, Arc<dyn SkillResolver>)>,
     transcript: SharedTranscript,
     deadline_secs: u64,
     redelegation_signal: RedelegationCapSignal,
@@ -487,6 +495,9 @@ fn build_engineer_runner(
 
     let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
         project: params.project.clone(),
+        skill_resolver: skills_catalog
+            .as_ref()
+            .map(|(_, resolver)| Arc::clone(resolver)),
     });
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
@@ -498,7 +509,7 @@ fn build_engineer_runner(
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }
-    if let Some(catalog) = skills_catalog {
+    if let Some((catalog, _)) = skills_catalog {
         runner = runner.with_skills_catalog(catalog);
     }
     let pinned = apply_engineer_model_override(Arc::new(runner), params);
@@ -517,14 +528,23 @@ fn build_engineer_runner(
 /// `write_files` (#2681 batch write), `edit`, the `glob`/`grep`/`list_dir`
 /// exploration tools (#1027), and `bash` all scoped to `self.project`, so the
 /// engineer operates only inside the project working tree; `finish_task` has no
-/// filesystem footprint and needs no scoping.
+/// filesystem footprint and needs no scoping. `skill_resolver` (experimental,
+/// refs #2892) is the SAME `Arc<dyn SkillResolver>` the PM's own `use_skill`
+/// tool and the rendered catalog were built from — `None` when
+/// `daily_driver_skills_catalog` found no project skills, mirroring the PM's
+/// own conditional registration in `execute_run_task`.
 /// What: Implements `RegistryFactory::build`, returning an `Arc<ToolRegistry>`
 /// with every tool; the runner then gates them by the engineer's
-/// `tools.allowed`.
+/// `tools.allowed`. When `skill_resolver` is `Some`, `use_skill` is registered
+/// too, so the delegated engineer can lazily fetch a skill's full body on
+/// demand, the same way the PM already can (#2924).
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer` (the engineer's
-/// `write_file` actually writes into the project).
+/// `write_file` actually writes into the project);
+/// `run_task::tests::use_skill_on_legacy_path_reaches_engineer_and_transcript`
+/// (the engineer's `use_skill` registration and invocation).
 struct ProjectToolFactory {
     project: PathBuf,
+    skill_resolver: Option<Arc<dyn SkillResolver>>,
 }
 
 #[async_trait]
@@ -558,6 +578,12 @@ impl RegistryFactory for ProjectToolFactory {
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),
         )));
         reg.register(Arc::new(FinishTaskTool::new()));
+        // Experimental (refs #2892): mirrors the PM's own conditional
+        // `use_skill` registration in `execute_run_task` — only when a skill
+        // catalog actually resolved for this project.
+        if let Some(resolver) = &self.skill_resolver {
+            reg.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
+        }
         Arc::new(reg)
     }
 }

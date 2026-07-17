@@ -10,6 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Engineer receives `use_skill` on the `--legacy-in-process`/`run_task` path (#2942).** The `python-engineer` role's tool registry (`ProjectToolFactory` in `run_task/mod.rs`) now conditionally registers `UseSkillTool` alongside its other project tools when a `SkillResolver` is available, so the engineer can fetch a skill's full body mid-turn instead of relying solely on the catalog summary baked into its system prompt.
 - **Native skill discovery on the `--legacy-in-process`/bake-off `run-task` path (#2924).** The `use_skill` tool and the `.claude/skills/` catalog now reach the PM's prompt and tool registry on `run_task::execute_run_task`, not just the daemon/thin-client path — a PM run through `run-task` can now discover and load project skills the same way a daemon session already could.
 - **Embedded default agents & skills, disk-first with embedded fallback
   (#2895).** A project with no `.claude/agents/` and/or `.claude/skills/`
