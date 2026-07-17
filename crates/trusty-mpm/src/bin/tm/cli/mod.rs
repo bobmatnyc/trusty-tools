@@ -266,6 +266,26 @@ pub(crate) enum Command {
         #[arg(long)]
         repair: bool,
     },
+    /// Project-settings hook hygiene: detect and remove tm hook contamination
+    /// (issue #2940).
+    ///
+    /// Why: `tm install` used to wire tm hooks into every discovered
+    /// project's `.claude/settings.json`/`settings.local.json` on the
+    /// machine, which was a one-way street away from other harnesses and
+    /// could conflict with a project's own claude-mpm hooks. Hooks now live
+    /// solely in the tm-owned `CLAUDE_CONFIG_DIR`
+    /// (see [`trusty_mpm::core::trusty_tools_config::managed_claude_config_dir`]);
+    /// this command reverses damage a pre-fix `tm install` already did.
+    /// What: `clean` scans (dry-run by default) for tm-owned hook entries in
+    /// project settings files and removes them with `--force` (backing up
+    /// each modified file first). See [`HooksAction::Clean`]'s doc comment
+    /// for the full behavior.
+    /// Test: `cli_parses_hooks_clean`, `cli_parses_hooks_clean_with_path_and_force`.
+    Hooks {
+        /// Hooks action to perform.
+        #[command(subcommand)]
+        action: HooksAction,
+    },
     /// Inspect the deployed agent roster's declared skills (DOC-42, issue #2889).
     ///
     /// Why: `skills:` frontmatter declares which skills an agent depends on

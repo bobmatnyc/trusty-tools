@@ -2,7 +2,7 @@
 
 Generated from a maintained literal list cross-checked against `run_doctor`'s actual check names (see this module's `doctor_checks_match_run_doctor_names` test — an added, removed, or renamed check fails the test suite). Source: `crates/trusty-mpm/src/daemon/doctor.rs` and its five sibling `doctor_*.rs` files. Regenerate with `tm generate capabilities`.
 
-15 checks, in execution order.
+17 checks, in execution order.
 
 | # | Check | What it probes |
 |---|---|---|
@@ -21,3 +21,5 @@ Generated from a maintained literal list cross-checked against `run_doctor`'s ac
 | 13 | `worktrees` | No orphaned git worktrees under the managed workspace root (Fix 1b, #1840). |
 | 14 | `gh_account` | Active `gh` CLI identity is unambiguous — warns on multi-account ambiguity. |
 | 15 | `oauth_token` | Warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop (issue #2246). |
+| 16 | `hooks_contamination` | Warns when a project's `.claude/settings*.json` still carries tm hook entries from a pre-fix `tm install` — suggests `tm hooks clean` (issue #2940). |
+| 17 | `hooks_foreign_conflict` | Informational: warns when a project's `.claude/settings*.json` carries foreign (claude-mpm) hook entries that would fire inside a tm session — never auto-removed (issue #2940). |

@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// `doctor_checks_match_run_doctor_names`, which fails the test suite the
 /// moment `run_doctor`'s actual check set diverges from this list.
 /// Test: `doctor_checks_match_run_doctor_names`.
-pub(crate) const DOCTOR_CHECKS: [(&str, &str); 15] = [
+pub(crate) const DOCTOR_CHECKS: [(&str, &str); 17] = [
     (
         "instructions",
         "Framework instructions deployed and non-empty for the target project.",
@@ -90,6 +90,14 @@ pub(crate) const DOCTOR_CHECKS: [(&str, &str); 15] = [
     (
         "oauth_token",
         "Warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop (issue #2246).",
+    ),
+    (
+        "hooks_contamination",
+        "Warns when a project's `.claude/settings*.json` still carries tm hook entries from a pre-fix `tm install` — suggests `tm hooks clean` (issue #2940).",
+    ),
+    (
+        "hooks_foreign_conflict",
+        "Informational: warns when a project's `.claude/settings*.json` carries foreign (claude-mpm) hook entries that would fire inside a tm session — never auto-removed (issue #2940).",
     ),
 ];
 

@@ -23,6 +23,7 @@ pub(crate) mod guided_inplace;
 pub(crate) mod guided_launch;
 pub(crate) mod guided_resume;
 pub(crate) mod hook_rewrite;
+pub(crate) mod hooks;
 pub(crate) mod install;
 pub(crate) mod issue;
 pub(crate) mod launch;

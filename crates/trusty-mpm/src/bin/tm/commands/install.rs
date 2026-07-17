@@ -3,11 +3,15 @@
 //! Why: the install handler is self-contained — it writes bundled artifacts,
 //! assembles the PM prompt, deploys agents and skills, and wires Claude Code
 //! hooks — and benefits from its own file so it stays reviewable.
-//! What: `install`, `install_claude_hooks`, `mpm_hook_additions`, `install_to`,
-//! `deploy_report_lines`, `reset_report_lines`, `skill_report_lines`,
-//! `remove_global_trusty_mpm_hooks`, `write_project_hooks_for_dir`.
+//! What: `install`, `install_claude_hooks` / `install_claude_hooks_at`,
+//! `mpm_hook_additions`, `install_to`, `deploy_report_lines`,
+//! `reset_report_lines`, `skill_report_lines`, `remove_global_trusty_mpm_hooks`,
+//! `write_project_hooks_for_dir`.
 //! Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
-//! `install_claude_hooks_is_idempotent`, `install_then_deploy_deploys_skills`.
+//! `install_claude_hooks_at_writes_only_the_managed_config_dir`,
+//! `install_claude_hooks_at_is_idempotent`,
+//! `install_claude_hooks_at_never_touches_a_sibling_project_dir`,
+//! `install_then_deploy_deploys_skills`.
 
 /// `install` subcommand — deploy the bundled framework artifacts and wire
 /// MPM lifecycle hooks into every Claude Code settings file.
@@ -202,112 +206,81 @@ pub(crate) async fn install(
 }
 
 /// Idempotently install the MPM `PreToolUse` / `PostToolUse` / `Stop` hook
-/// block into every Claude Code settings file on the machine.
+/// triad into the tm-owned managed `CLAUDE_CONFIG_DIR` settings file — and
+/// ONLY there.
 ///
-/// Why: without these hooks the daemon never receives Claude Code lifecycle
-/// events, so the circuit breaker, audit log, and dashboard all sit blind.
-/// `tm install` is the canonical point to wire them up — running it twice
-/// must produce identical files (idempotency requirement). The hook command
-/// is emitted as an absolute path to the running binary so it fires even in
-/// build shells where `~/.cargo/bin` is not on `$PATH`.
-/// What: discovers every `.claude/settings*.json` under `$HOME` via
-/// [`trusty_common::claude_config::discover_claude_settings`], loads each
-/// one, deep-merges the MPM hook block (with absolute binary path) using
-/// [`trusty_common::claude_config::merge_hook_entries`], and writes the
-/// result back atomically when it differs from disk. Falls back to creating
-/// `~/.claude/settings.json` when no settings files exist. Returns a count
-/// of files modified for the caller to report.
-/// Test: `install_claude_hooks_is_idempotent`,
-/// `install_claude_hooks_creates_fallback`.
+/// Why (issue #2940): before this fix, `tm install` discovered and mutated
+/// EVERY `.claude/settings.json` / `settings.local.json` reachable under
+/// `$HOME` (via `discover_claude_settings`'s depth-8 walk), wiring tm hooks
+/// into every project it found on the machine — including projects never
+/// launched via tm. That was a one-way street (a contaminated project could
+/// no longer cleanly go back to claude-mpm, since the tm entries lived in a
+/// file the project itself owns) and could silently start firing tm hooks
+/// alongside a project's own pre-existing claude-mpm hooks. Per the DOC-34
+/// managed-session launch model, every daemon-managed spawn already points
+/// `CLAUDE_CONFIG_DIR` at `managed_claude_config_dir()` — that is the ONE
+/// place tm hooks belong. (`tm hooks clean`, in `commands::hooks`, is the
+/// cleanup path for settings files a pre-fix `tm install` already
+/// contaminated.)
+/// What: resolves [`trusty_mpm::core::trusty_tools_config::managed_claude_config_dir`],
+/// deep-merges the MPM hook triad into `<that dir>/settings.json` via
+/// [`trusty_mpm::core::standalone::hooks::write_project_hooks`] (idempotent —
+/// running it twice produces an identical file), and reports whether it
+/// changed. Returns `1` when the file was created/updated, `0` when already
+/// current. Errors only when the home directory cannot be resolved at all.
+/// Test: `install_claude_hooks_at_writes_only_the_managed_config_dir`,
+/// `install_claude_hooks_at_is_idempotent`,
+/// `install_claude_hooks_at_never_touches_a_sibling_project_dir`.
 pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
-    use colored::Colorize;
-    use trusty_common::claude_config::{
-        default_settings_max_depth, discover_claude_settings, merge_hook_entries, write_json_atomic,
-    };
+    let config_dir = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+    install_claude_hooks_at(&config_dir)
+}
 
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+/// Hermetic worker behind [`install_claude_hooks`] — writes the MPM hook
+/// triad into `<config_dir>/settings.json`.
+///
+/// Why: separated so tests can point `config_dir` at a `tempfile::TempDir`
+/// instead of the real tm-owned config home, and so the caller's home-
+/// resolution failure is the only thing [`install_claude_hooks`] adds.
+/// What: resolves the absolute running-binary path once, calls
+/// [`trusty_mpm::core::standalone::hooks::write_project_hooks`] against
+/// `<config_dir>/settings.json`, and prints a status line.
+/// Test: see [`install_claude_hooks`]'s test list.
+fn install_claude_hooks_at(config_dir: &std::path::Path) -> anyhow::Result<usize> {
+    use colored::Colorize;
+
+    let settings_path = config_dir.join("settings.json");
     println!(
-        "Wiring MPM hooks into Claude Code settings under {}…",
-        home.display()
+        "Wiring MPM hooks into the tm-owned settings at {}…",
+        settings_path.display()
     );
 
-    // Resolve the absolute binary path once at install time.
     let exe = trusty_mpm::core::standalone::hooks::resolve_current_exe();
-    let additions = mpm_hook_additions_with_exe(exe.as_deref());
-    let files = discover_claude_settings(&home, default_settings_max_depth());
-
-    let target_files: Vec<std::path::PathBuf> = if files.is_empty() {
-        let fallback = home.join(".claude").join("settings.json");
-        println!("  no settings files found; creating {}", fallback.display());
-        vec![fallback]
-    } else {
-        files
-    };
-
-    let mut changed = 0usize;
-    for path in &target_files {
-        let original: serde_json::Value = match std::fs::read_to_string(path) {
-            Ok(s) if s.trim().is_empty() => serde_json::Value::Object(serde_json::Map::new()),
-            Ok(s) => match serde_json::from_str(&s) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "  {} {} {}",
-                        "✗".red(),
-                        path.display(),
-                        format!("(parse error: {e})").red()
-                    );
-                    continue;
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                serde_json::Value::Object(serde_json::Map::new())
-            }
-            Err(e) => {
-                eprintln!(
-                    "  {} {} {}",
-                    "✗".red(),
-                    path.display(),
-                    format!("(read error: {e})").red()
-                );
-                continue;
-            }
-        };
-        let merged = merge_hook_entries(&original, &additions);
-        if merged == original {
+    match trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref()) {
+        Ok(true) => {
+            println!("  {} {}", "✓".green(), settings_path.display());
+            Ok(1)
+        }
+        Ok(false) => {
             println!(
                 "  {} {} {}",
                 "↻".cyan(),
-                path.display().to_string().dimmed(),
+                settings_path.display().to_string().dimmed(),
                 "(already configured)".dimmed()
             );
-            continue;
+            Ok(0)
         }
-        match write_json_atomic(path, &merged) {
-            Ok(()) => {
-                changed += 1;
-                println!("  {} {}", "✓".green(), path.display());
-            }
-            Err(e) => {
-                eprintln!(
-                    "  {} {} {}",
-                    "✗".red(),
-                    path.display(),
-                    format!("({e})").red()
-                );
-            }
+        Err(e) => {
+            eprintln!(
+                "  {} {} {}",
+                "✗".red(),
+                settings_path.display(),
+                format!("({e})").red()
+            );
+            Err(e)
         }
     }
-
-    if changed > 0 {
-        println!(
-            "  installed MPM hooks in {} settings file{}.",
-            changed,
-            if changed == 1 { "" } else { "s" }
-        );
-    }
-    Ok(changed)
 }
 
 /// Strip trusty-mpm global hook entries from all discovered Claude settings files.
@@ -359,19 +332,6 @@ pub(crate) fn write_project_hooks_for_dir(project_dir: &std::path::Path) -> anyh
 #[cfg(test)]
 pub(crate) fn mpm_hook_additions() -> serde_json::Value {
     trusty_mpm::core::standalone::hooks::mpm_hook_additions()
-}
-
-/// Build the MPM hook additions block with an explicit exe path.
-///
-/// Why: `install_claude_hooks` resolves the binary path once and passes it
-/// through so every settings file receives the same absolute command.
-/// What: delegates to
-/// [`trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe`].
-/// Test: covered by `install_claude_hooks_is_idempotent`.
-pub(crate) fn mpm_hook_additions_with_exe(
-    exe_override: Option<&std::path::Path>,
-) -> serde_json::Value {
-    trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe(exe_override)
 }
 
 /// Render per-file status lines for an agent [`DeployResult`].
@@ -539,3 +499,8 @@ pub(crate) fn install_to(
     }
     Ok(report)
 }
+
+// Unit tests live in install_tests.rs (test-file budget: 1500 SLOC).
+#[cfg(test)]
+#[path = "install_tests.rs"]
+mod tests;

@@ -433,6 +433,95 @@ fn test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants() {
     );
 }
 
+/// Why (#2940 review round 1, MEDIUM): `is_mpm_hook_command` drives
+/// `tm hooks clean --force`'s DESTRUCTIVE deletion path. Before this test's
+/// fix, a foreign binary that happened to be named `<stem>-<hexhash>`
+/// anywhere on disk (e.g. an unrelated tool at `/usr/local/bin/tm-a1b2c3d4`)
+/// would be silently deleted from a project's settings even though it has
+/// nothing to do with tm — `resolve_stable_hook_exe`/`current_exe()` can only
+/// ever produce a hash-suffixed path under a Cargo `deps/` build-artifact
+/// directory, so the predicate must never trust the hash-suffixed shape
+/// outside one.
+/// What: asserts a `<stem>-<hexhash>` command whose path has NO `deps`
+/// component is rejected, while the same stem+hash under a `deps/` directory
+/// (any depth) still matches.
+#[test]
+fn test_is_mpm_hook_command_rejects_hash_suffixed_binary_outside_deps_dir() {
+    assert!(
+        !is_mpm_hook_command("/usr/local/bin/tm-a1b2c3d4 hook"),
+        "hash-suffixed binary outside any deps/ dir must NOT be treated as tm-owned"
+    );
+    assert!(
+        !is_mpm_hook_command("/opt/foreign-tool/trusty_mpm-deadbeef hook"),
+        "coincidental stem+hash match outside deps/ must NOT be treated as tm-owned"
+    );
+    // Sanity: the same hash-suffixed shape under ANY deps/ directory still matches.
+    assert!(
+        is_mpm_hook_command("/some/other/deps/tm-a1b2c3d4 hook"),
+        "hash-suffixed binary under a deps/ dir must still match"
+    );
+}
+
+/// Why (issue #2940): `tm doctor` and `tm hooks clean` must recognise a
+/// project's pre-existing claude-mpm hook wiring so they can warn about the
+/// conflict without mistaking it for a tm entry (which would delete someone
+/// else's hooks) or missing it entirely (which would under-report a real
+/// conflict).
+/// What: asserts a bare `claude-mpm hooks fire ...` command, an absolute
+/// `.claude-mpm/`-rooted script path, and an underscore-spelled `claude_mpm`
+/// variant are all recognised, case-insensitively, while an unrelated
+/// command (and any tm-owned command) is not.
+#[test]
+fn test_is_claude_mpm_hook_command_recognises_foreign_signatures() {
+    assert!(is_claude_mpm_hook_command(
+        "claude-mpm hooks fire PreToolUse"
+    ));
+    assert!(is_claude_mpm_hook_command(
+        "/Users/x/.claude-mpm/scripts/hook_handler.sh PreToolUse"
+    ));
+    assert!(is_claude_mpm_hook_command("claude_mpm hooks fire Stop"));
+    assert!(is_claude_mpm_hook_command("CLAUDE-MPM HOOKS FIRE STOP"));
+    assert!(!is_claude_mpm_hook_command("trusty-memory prompt-context"));
+    assert!(!is_claude_mpm_hook_command("some-other-tool run"));
+}
+
+/// Why (issue #2940): the two predicates gate mutually exclusive actions
+/// (strip vs. warn-only) — if they ever overlapped, `tm hooks clean` could
+/// delete a foreign harness's hooks, which is strictly the operator's call.
+/// What: for every command string [`is_mpm_hook_command`] recognises, asserts
+/// [`is_claude_mpm_hook_command`] does NOT also recognise it, and vice versa.
+#[test]
+fn test_is_claude_mpm_hook_command_never_overlaps_tm() {
+    let tm_commands = [
+        "tm hook",
+        "/opt/bin/trusty-mpm hook",
+        "/x/target/debug/deps/trusty_mpm-1a2b3c4d5e6f7a8b hook",
+        "session_manager_mvp hook",
+    ];
+    for cmd in tm_commands {
+        assert!(is_mpm_hook_command(cmd), "sanity: {cmd} must be tm-owned");
+        assert!(
+            !is_claude_mpm_hook_command(cmd),
+            "tm-owned command {cmd} must never also be classified as claude-mpm"
+        );
+    }
+
+    let foreign_commands = [
+        "claude-mpm hooks fire PreToolUse",
+        "/Users/x/.claude-mpm/scripts/hook_handler.sh PreToolUse",
+    ];
+    for cmd in foreign_commands {
+        assert!(
+            is_claude_mpm_hook_command(cmd),
+            "sanity: {cmd} must be claude-mpm-owned"
+        );
+        assert!(
+            !is_mpm_hook_command(cmd),
+            "claude-mpm command {cmd} must never also be classified as tm-owned"
+        );
+    }
+}
+
 /// Why (#2235): the durable fix must make provisioning self-compacting — a
 /// config pre-seeded with duplicate managed entries from stale binary paths
 /// (hash-suffixed worktree builds AND the defunct `session_manager_mvp` name)
