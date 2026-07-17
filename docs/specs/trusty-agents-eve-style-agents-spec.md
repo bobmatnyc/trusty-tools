@@ -1,10 +1,10 @@
-# DOC-41 — Eve-Style Agent Framework for trusty-agents
+# DOC-37 — Eve-Style Agent Framework for trusty-agents
 
 **Status:** Draft
 **Subsystem:** trusty-agents — agent definition / runtime / tool-calling / memory
 **Owner:** Engineering (trusty-agents)
 **Last-updated:** 2026-07-16
-**Spec ID:** `SPEC-AGENTFW-01~draft` … `SPEC-AGENTFW-06~draft` (DOC-41)
+**Spec ID:** `SPEC-AGENTFW-01~draft` … `SPEC-AGENTFW-06~draft` (DOC-37)
 **Builds on:** the existing `.toml` and `.md`+YAML-frontmatter agent-definition
 loaders (`crates/trusty-agents/src/agents/registry/mod.rs`,
 `crates/trusty-agents/src/agents/registry/md_agent.rs`,
@@ -12,10 +12,9 @@ loaders (`crates/trusty-agents/src/agents/registry/mod.rs`,
 (#171/#172), the ctrl-plane split (#170), the trusty-memory Palace integration
 (issue #379, `crates/trusty-agents/src/memory/trusty_backed.rs`), the
 concurrency-safe state writer (issue #198,
-`crates/trusty-agents/src/state_writer.rs`), and the existing unified
-inference-provider adapter layer (`trusty_common::inference::InferenceAdapter`,
-`crates/trusty-common/src/inference/adapter.rs:39` — `OpenAiCompatAdapter`,
-`BedrockAdapter`, `AnthropicAdapter`, `providers/fireworks.rs`; see §7.2).
+`crates/trusty-agents/src/state_writer.rs`), and the planned unified
+inference-provider adapter layer (fireworks.ai + more, landing in
+`trusty-common`).
 **Cross-ref:** `crates/trusty-agents/src/workflow/engine/executor/run.rs`,
 `crates/trusty-agents/src/workflow/engine/state.rs`,
 `crates/trusty-agents/src/workflow/config/mod.rs`,
@@ -44,8 +43,8 @@ standalone agent runtime). This spec is scoped entirely to **trusty-agents**
 (bin `tagent`) as a standalone, separately-installable, non-coding
 personal-productivity agent product competing with OpenClaw-class frameworks.
 
-> **Scope note (v2 rewrite).** The v1 revision of this document (the initial
-> commit on this PR) was a comparative review of Vercel's Eve agent framework plus
+> **Scope note (v2 rewrite).** The v1 revision of this document (merged as
+> PR #2792) was a comparative review of Vercel's Eve agent framework plus
 > design *directions* for a Rust equivalent — not a spec. Bob rejected it:
 > "the eve research is NOT a spec, it refers to one but doesn't actually
 > contain one." This revision makes every `SPEC-AGENTFW-NN` section
@@ -203,10 +202,7 @@ below and corrected from the v2 draft:
   one bot per **project**, never a specific named agent
   (`runtime/mode_dispatch.rs:309,326,424`). (b) **`crates/trusty-channels`**
   (epic #2636, ADR-0014) is a *separate* crate — native MCP servers
-  (`slack-mcp`/`telegram-mcp` binaries, both registered as `[[bin]]` entries
-  in `crates/trusty-channels/Cargo.toml:12-18`, and both already implemented —
-  `crates/trusty-channels/src/lib.rs`'s module-doc, at :1-15, is stale where it
-  describes `telegram` as a "future" module not yet slotted in)
+  (`slack-mcp`/`telegram-mcp` binaries, `crates/trusty-channels/src/lib.rs:1-18`)
   exposing send/read/list/react as **callable tools** over stdio JSON-RPC.
   `trusty-agents` does **not** currently depend on `trusty-channels` (confirmed
   by grep — no such line in `crates/trusty-agents/Cargo.toml`). §2.3.7 binds
@@ -420,7 +416,7 @@ inventing a fourth ad hoc payload shape per trigger type.
   - **Auth/secret validation:** HMAC-SHA256 over the raw request body,
     verified against the signature in `signature_header`. **No new crate** —
     `hmac = "0.12"` and `sha2 = "0.10"` are **already** workspace
-    dependencies (`Cargo.toml:110,221`), and this workspace already has a
+    dependencies (`Cargo.toml:105,216`), and this workspace already has a
     proven, near-identical implementation to mirror:
     `crates/trusty-review/src/integrations/github/webhook.rs::
     verify_webhook_signature(secret: &str, body: &[u8], signature_header:
@@ -561,18 +557,16 @@ trusty-agents gets its **own** analogous implementation (trusty-agents does
 not depend on trusty-mpm as a library — `agent_builder.rs` is an internal
 module of a different binary crate) but mirrors it precisely:
 
-- Same constant: **`MAX_DEPTH = 8`** (`agent_builder.rs:34`) — coincidentally
+- Same constant: **`MAX_DEPTH = 8`** (`agent_builder.rs:31`) — coincidentally
   the same ceiling this spec's v2 draft already proposed independently.
 - Same case-insensitive resolution discipline: agent names are matched via a
-  lowercased lookup key (mirroring the `SourceMap` type alias,
-  `agent_builder.rs:99`, and `build_source_map`, `agent_builder.rs:110`, whose
-  rationale is described in the module-doc comment at `agent_builder.rs:12-22`),
-  so `extends: engineer` resolves consistently on case-sensitive (Linux) and
-  case-insensitive (macOS) filesystems.
+  lowercased lookup key (mirroring `build_source_map`'s `SourceMap`,
+  `agent_builder.rs:16-22`), so `extends: engineer` resolves consistently on
+  case-sensitive (Linux) and case-insensitive (macOS) filesystems.
 - Same default merge semantics for prose: **`instructions.md`/persona content
   concatenates base-first** — the parent's instructions, then the child's,
-  joined the same way `compose_agent`'s `joined.join("\n\n")` does
-  (`agent_builder.rs:515`) — **not** "child replaces parent," which v2 of
+  joined the same way `compose_agent`'s `bodies.join("\n\n")` does
+  (`agent_builder.rs:519`) — **not** "child replaces parent," which v2 of
   this spec had proposed independently before this decision. This is a
   correction: adopt base-first concatenation unconditionally, matching the
   proven mechanism, with no opt-in token.
@@ -736,8 +730,8 @@ Two existing on-disk conventions must not be conflated:
 
 - `docs/performance/runs/<stamp>.json` + `runs.log`
   (`crates/trusty-agents/src/perf/mod.rs:254-263`, schema in
-  `crates/trusty-agents-common/src/perf.rs:32-171` — `TokenUsage` at :32,
-  `PhaseRecord` at :78, `PerfTotals` at :94, `PerfRecord` at :112) — a **developer-facing analytics
+  `crates/trusty-agents-common/src/perf.rs:111-171`, `PerfRecord`/
+  `PhaseRecord`/`PerfTotals`/`TokenUsage`) — a **developer-facing analytics
   artifact**, `out_dir`-relative (typically `<cwd>/docs/performance`),
   written via plain `tokio::fs::write` (not the atomic-write primitive
   below). This stays as-is; the new checkpoint journal is **not** colocated
@@ -1612,10 +1606,10 @@ not a speculative extension.
 
 ## 13. Change Log
 
-- **2026-07-15 (v1)** — Initial draft (the initial commit on this PR).
-  Comparative review of Vercel's Eve spec plus design *directions* for a Rust
-  equivalent — no normative content. **Rejected by Bob:** "the eve research is
-  NOT a spec, it refers to one but doesn't actually contain one."
+- **2026-07-15 (v1)** — Initial draft merged as PR #2792. Comparative review
+  of Vercel's Eve spec plus design *directions* for a Rust equivalent — no
+  normative content. **Rejected by Bob:** "the eve research is NOT a spec,
+  it refers to one but doesn't actually contain one."
 - **2026-07-15 (v2)** — Full rewrite. Every `SPEC-AGENTFW-01..06` section
   made normative: exact frontmatter schema + `extends` resolution algorithm
   and error cases (§2), an explicit `RunState` machine + `CheckpointRecord`
@@ -1680,32 +1674,6 @@ not a speculative extension.
   scheduling is a confirmed real gap, not hypothetical), and a new §10 item
   11 (webhook public-reachability story — a tunnel/reverse-proxy question
   distinct from the already-specified HMAC auth).
-- **2026-07-16 (v3.2)** — Review-fix pass (code-critic BLOCK on this PR) +
-  rebase onto `origin/main`. **Renumbered `DOC-37` → `DOC-41` everywhere**
-  (H1, `Spec ID:` line, `docs/specs/README.md` catalog row) — `DOC-37` was
-  already self-claimed by `trusty-search-managed-repo-awareness.md` on
-  `main`; scan-before-claim (DOC-38 §4.1) confirms `DOC-41` is now unique
-  across the `docs/` tree. Rebased onto `origin/main` @ `580c9a7d`, resolving
-  a `docs/specs/README.md` catalog conflict from DOC-38/DOC-39/DOC-40 landing
-  concurrently; updated the catalog's "next free `DOC-N`" note from `DOC-41`
-  to `DOC-42`. Header **"Builds on"** corrected: the unified inference-provider
-  adapter layer is **existing**, not planned (matches §7.2, which already had
-  this right). Reworded the two "v1 … merged as PR #2792" references (§ scope
-  note, §13) — PR #2792 never merged; v1/v2/v3/v3.1 are commits on this same
-  open PR, not separate merges. Re-verified every §2.5 `agent_builder.rs`
-  citation against post-rebase `origin/main`: `MAX_DEPTH = 8` is at line 34
-  (not 31); `SourceMap`/`build_source_map` cited precisely at lines 99/110
-  (the prior 16-22 citation was the module-doc prose describing them, now
-  labeled as such); the base-first join call is `joined.join("\n\n")` at
-  line 515 (not `bodies.join` at 519). Also refreshed three drifted citations:
-  §2.3.6's `sha2`/`hmac` workspace-dependency lines (`Cargo.toml:110,221`,
-  drifted via PR #2782); §2.1's stale `trusty-channels/src/lib.rs:1-18`
-  doc-comment citation (which still described `telegram` as a future module)
-  augmented with the `[[bin]]` entries in `trusty-channels/Cargo.toml:12-18`
-  proving both `slack-mcp` and `telegram-mcp` already exist; §3.1's
-  `perf.rs` citation widened from `111-171` (which only covered `PerfRecord`)
-  to `32-171` with each struct's line cited individually (`TokenUsage`:32,
-  `PhaseRecord`:78, `PerfTotals`:94, `PerfRecord`:112).
 
 [gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
