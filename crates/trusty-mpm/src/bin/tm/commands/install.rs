@@ -164,6 +164,31 @@ pub(crate) async fn install(
         println!("  {line}");
     }
 
+    // DOC-42 (issue #2889): a full `tm install` already deploys every bundled
+    // skill (`|_| true` above), so no co-deploy `select` override is needed —
+    // but a `skills:` entry declared by an agent that resolves in NO tier at
+    // all is still a real gap worth surfacing, so run the same resolution
+    // logging `session_launch` uses.
+    let bundled_stems = trusty_mpm::core::skill_tiers::list_source_stems(&paths.skill_source_dir())
+        .unwrap_or_default();
+    let user_stems =
+        trusty_mpm::core::skill_tiers::list_source_stems(&paths.user_skill_source_dir())
+            .unwrap_or_default();
+    let project_stems =
+        trusty_mpm::core::skill_tiers::list_project_custom_stems(&paths.claude_skills_dir())
+            .unwrap_or_default();
+    let dangling = trusty_mpm::core::agent_skill_codeploy::log_declared_skills(
+        &deploy.declared_skills,
+        &project_stems,
+        &user_stems,
+        &bundled_stems,
+    );
+    for (agent, skill) in &dangling {
+        println!(
+            "  warning: agent `{agent}` declares skill `{skill}`, but it was not found in any tier"
+        );
+    }
+
     // Wire the MPM lifecycle hooks into every Claude settings file on the
     // machine. Per-file failures are non-fatal so one bad file does not sink
     // the whole install. Uses absolute-path hook commands resolved from the

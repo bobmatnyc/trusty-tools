@@ -15,6 +15,7 @@
 //! `tests_projects.rs` / `tests_projects_config_tests.rs` / `tests_manager.rs`
 //! still exercises these types through the same `crate::cli::<Type>` paths.
 
+mod agent;
 mod auth;
 mod catalog;
 mod coordinator;
@@ -34,6 +35,7 @@ mod slack;
 mod telegram;
 mod watch;
 
+pub(crate) use agent::AgentAction;
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
 pub(crate) use coordinator::CoordinatorAction;

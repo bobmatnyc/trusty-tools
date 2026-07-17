@@ -14,12 +14,14 @@
 //! skipped user-modified file, an unchanged file, a user-owned file, atomic
 //! writes, and corrupt manifest detection.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::core::agent_builder::{AgentBuildError, compose_agent, source_chain};
 use crate::core::agent_manifest::{
     AgentManifest, ManifestEntry, ManifestLoad, Origin, atomic_write, checksum,
 };
+use crate::core::agent_metadata::agent_metadata_from_str;
 
 /// Summary of one [`deploy_agents`] run.
 ///
@@ -50,6 +52,20 @@ pub struct DeployResult {
     /// operator knows `tm install --reset-agents` is available to reconcile
     /// them. Always a subset of `skipped`.
     pub untracked_modified: Vec<String>,
+    /// Declared `skills:` per processed agent, keyed by agent name (stem, not
+    /// filename) — DOC-42, issue #2889.
+    ///
+    /// Why: co-deployment (§SPEC-AGENTSKILLS-02) needs every selected agent's
+    /// declared skill dependencies to fold into the skill deployer's `select`
+    /// predicate, regardless of whether THIS run wrote/skipped/adopted the
+    /// agent file — the declaration is a property of the agent's composed
+    /// definition, not of this run's write outcome.
+    /// What: populated for every agent name this run processed (i.e. every
+    /// selected source agent), from the freshly composed content's `skills:`
+    /// frontmatter (empty `Vec` when the agent declares none).
+    /// Test: `declared_skills_populated_for_every_processed_agent`,
+    /// `declared_skills_empty_when_agent_declares_none`.
+    pub declared_skills: HashMap<String, Vec<String>>,
 }
 
 /// Whether a source filename names a trusty-mpm agent to compose.
@@ -153,6 +169,14 @@ pub fn deploy_agents_filtered(
         let filename = format!("{name}.md");
         let composed = compose_agent(&name, source_dir)?;
         let target_path = target_dir.join(&filename);
+
+        // DOC-42: record declared skills for EVERY processed agent, before
+        // any of the branches below `continue` — the declaration is a
+        // property of the composed definition, independent of whether this
+        // run actually rewrites the target file.
+        result
+            .declared_skills
+            .insert(name.clone(), agent_metadata_from_str(&composed).skills);
 
         // Classify the existing target file, if any.
         if target_path.exists() {
@@ -560,6 +584,65 @@ mod tests {
         assert!(!result.deployed.contains(&"base-agent.md".to_string()));
         assert!(tgt.path().join("engineer.md").exists());
         assert!(!tgt.path().join("base-agent.md").exists());
+    }
+
+    #[test]
+    fn declared_skills_populated_for_every_processed_agent() {
+        // DOC-42: an agent declaring `skills:` must have that list recorded
+        // in `declared_skills`, keyed by agent name (stem).
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        fs::write(
+            src.path().join("code-critic.md"),
+            "---\nname: code-critic\nrole: qa\nskills: [code-review-standards, systematic-debugging]\n---\n\n# Critic\n",
+        )
+        .unwrap();
+
+        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert_eq!(
+            result.declared_skills.get("code-critic"),
+            Some(&vec![
+                "code-review-standards".to_string(),
+                "systematic-debugging".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn declared_skills_empty_when_agent_declares_none() {
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path()); // base-agent.md + engineer.md, neither declares skills
+
+        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert_eq!(result.declared_skills.get("engineer"), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn declared_skills_populated_even_when_deploy_is_skipped() {
+        // The declaration is a property of the SOURCE composition, not of
+        // this run's write outcome — even a user-modified (skipped) agent's
+        // declared skills must still surface for co-deployment purposes.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        fs::write(
+            src.path().join("code-critic.md"),
+            "---\nname: code-critic\nrole: qa\nskills: [code-review-standards]\n---\n\n# Critic\n",
+        )
+        .unwrap();
+        deploy_agents(src.path(), tgt.path()).unwrap();
+        fs::write(
+            tgt.path().join("code-critic.md"),
+            "---\nname: code-critic\n---\n\nUSER HAND-EDIT\n",
+        )
+        .unwrap();
+
+        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert!(result.skipped.contains(&"code-critic.md".to_string()));
+        assert_eq!(
+            result.declared_skills.get("code-critic"),
+            Some(&vec!["code-review-standards".to_string()])
+        );
     }
 
     #[test]
