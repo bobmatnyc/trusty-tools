@@ -19,10 +19,13 @@
 //! `registry_tests::record_progress_publishes_event`,
 //! `registry_tests::record_message_publishes_event`.
 
+use serde::Serialize;
+
 use super::*;
 use crate::tools::telemetry::{RecallTelemetry, SearchTelemetry};
 
 use crate::agent_loop::ContextBudgetSnapshot;
+use crate::events::IndexReadinessSnapshot;
 
 /// `Event::IndexReadiness.state` when the semantic lane is queryable — an
 /// empty search result IS evidence of absence.
@@ -33,6 +36,33 @@ const READINESS_STATE_WARMING: &str = "warming";
 /// `Event::IndexReadiness.state` when no index could be probed at all (no
 /// daemon / no derivable id) — likewise not evidence of absence.
 const READINESS_STATE_UNAVAILABLE: &str = "unavailable";
+
+/// `session.get_readiness`'s response payload (DOC-39 §5.6 Slice D).
+///
+/// Why: a session's readiness is a single cached value, not a collection —
+/// `session.get_goals`'s "empty array means nothing yet" convention doesn't
+/// fit here, and a bare `Option` serialising to `null` would be exactly the
+/// kind of untyped "nothing yet" signal the design explicitly rules out (a
+/// consumer can't tell "never probed" from "probed, and every field happens
+/// to be absent" without a discriminant). This is a thin, tagged wrapper
+/// around [`IndexReadinessSnapshot`] — the SAME struct
+/// `SessionRegistry::record_index_readiness` caches and `Event::IndexReadiness`
+/// derives from — so the query and event surfaces can never independently
+/// drift on field names.
+/// What: `#[serde(tag = "status")]` (internally tagged, matching `Event`'s own
+/// `tag = "type"` convention) so the wire shape is
+/// `{"status":"probed","state":...,"index_id":...,...}` for a session with a
+/// recorded snapshot, or `{"status":"never_probed"}` for one with none.
+/// Test: `registry_tests::record_index_readiness_caches_snapshot_for_late_query`,
+/// `protocol_readiness::tests::get_readiness_never_probed_session_returns_never_probed`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReadinessQuery {
+    /// A probe has landed for this session; wraps the last-recorded snapshot.
+    Probed(IndexReadinessSnapshot),
+    /// No `record_index_readiness` call has ever landed for this session.
+    NeverProbed,
+}
 
 impl SessionRegistry {
     /// Record a project's trusty-search index readiness (issue #2784's
@@ -53,9 +83,14 @@ impl SessionRegistry {
     /// `semantic_search_ready()` and `"warming"` otherwise, carrying the
     /// per-lane flags through verbatim. Errors with `session_not_found` if `id`
     /// is unknown.
+    /// (DOC-39 §5.6 Slice D) Also caches the resulting [`IndexReadinessSnapshot`]
+    /// on the session (last-writer-wins), so a client that attaches AFTER this
+    /// one-time event fires can still retrieve it via
+    /// [`Self::get_readiness`]/`session.get_readiness`.
     /// Test: `registry_tests::record_index_readiness_warming_publishes_event`,
     /// `registry_tests::record_index_readiness_ready_publishes_event`,
-    /// `registry_tests::record_index_readiness_unavailable_publishes_event`.
+    /// `registry_tests::record_index_readiness_unavailable_publishes_event`,
+    /// `registry_tests::record_index_readiness_caches_snapshot_for_late_query`.
     pub fn record_index_readiness(
         &self,
         id: &str,
@@ -63,9 +98,8 @@ impl SessionRegistry {
         summary: &str,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
-        let event = match readiness {
-            Some(r) => Event::IndexReadiness {
-                session_id: id.to_string(),
+        let snapshot = match readiness {
+            Some(r) => IndexReadinessSnapshot {
                 state: if r.semantic_search_ready() {
                     READINESS_STATE_READY
                 } else {
@@ -80,8 +114,7 @@ impl SessionRegistry {
                 graph_ready: r.graph_ready,
                 summary: summary.to_string(),
             },
-            None => Event::IndexReadiness {
-                session_id: id.to_string(),
+            None => IndexReadinessSnapshot {
                 state: READINESS_STATE_UNAVAILABLE.to_string(),
                 index_id: None,
                 lifecycle_status: None,
@@ -92,8 +125,56 @@ impl SessionRegistry {
                 summary: summary.to_string(),
             },
         };
-        self.record(id, event);
+        {
+            let mut sessions = self.lock();
+            if let Some(entry) = sessions.get_mut(id) {
+                entry.readiness = Some(snapshot.clone());
+            }
+        }
+        self.record(
+            id,
+            Event::IndexReadiness {
+                session_id: id.to_string(),
+                state: snapshot.state,
+                index_id: snapshot.index_id,
+                lifecycle_status: snapshot.lifecycle_status,
+                chunk_count: snapshot.chunk_count,
+                lexical_ready: snapshot.lexical_ready,
+                semantic_ready: snapshot.semantic_ready,
+                graph_ready: snapshot.graph_ready,
+                summary: snapshot.summary,
+            },
+        );
         Ok(())
+    }
+
+    /// `session.get_readiness`: return the last-recorded index-readiness
+    /// probe for a session, for clients that attach after the one-time
+    /// `Event::IndexReadiness` already fired (DOC-39 §5.6 Slice D).
+    ///
+    /// Why: [`Self::record_index_readiness`] emits its event exactly once, at
+    /// task start (see `run_task::ensure_project_indexed_in_background`'s
+    /// call site in `task::executor`). A UI that connects even a moment later
+    /// has no query surface to ask "what is the readiness state right now" —
+    /// only a stream it may have missed. This is that query surface.
+    /// What: `Err(session_not_found)` if `id` is unknown. Otherwise
+    /// [`ReadinessQuery::Probed`] wrapping the cached [`IndexReadinessSnapshot`]
+    /// if a probe has ever landed for this session, or
+    /// [`ReadinessQuery::NeverProbed`] — a distinct, clearly-typed state,
+    /// never a bare `null` — if no `record_index_readiness` call has happened
+    /// yet (e.g. a projectless session, or one queried before its background
+    /// indexing probe completes).
+    /// Test: `registry_tests::record_index_readiness_caches_snapshot_for_late_query`,
+    /// `protocol_readiness::tests::get_readiness_never_probed_session_returns_never_probed`,
+    /// `registry_tests::get_readiness_unknown_session_errors`.
+    pub fn get_readiness(&self, id: &str) -> Result<ReadinessQuery, RpcError> {
+        self.ensure_exists(id)?;
+        Ok(self
+            .lock()
+            .get(id)
+            .and_then(|e| e.readiness.clone())
+            .map(ReadinessQuery::Probed)
+            .unwrap_or(ReadinessQuery::NeverProbed))
     }
 
     /// Record one turn's working-context budget measurement (epic #2343).
@@ -141,12 +222,14 @@ impl SessionRegistry {
     /// is truncated via `crate::events::preview` before emission so a large
     /// argument payload can't blow the ring buffer / wire size. `agent`
     /// (UI Phase 1) is the dispatching agent's name — see
-    /// [`crate::events::Event::ToolStarted`].
+    /// [`crate::events::Event::ToolStarted`]. `agent_id` (DOC-39 AC-13) is
+    /// that same agent's stable per-spawn id.
     /// Test: `registry_tests::record_tool_started_publishes_event`.
     pub fn record_tool_started(
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         tool: &str,
         call_id: &str,
         args: &str,
@@ -157,6 +240,7 @@ impl SessionRegistry {
             Event::ToolStarted {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 args_preview: crate::events::preview(args, 500),
@@ -168,10 +252,17 @@ impl SessionRegistry {
     /// Record a tool invocation finishing (#2055 emission plumbing for
     /// #2056's agent loop). See [`Self::record_tool_started`].
     /// Test: `registry_tests::record_tool_finished_publishes_event`.
+    /// (DOC-39 AC-13) `agent_id` pushed this past clippy's
+    /// `too_many_arguments` gate; every parameter is a plain, independent
+    /// piece of the event and none pair naturally into a sub-struct, so the
+    /// attribute is the pragmatic choice here (mirrors
+    /// `serve::transport::run_loop`'s same allowance).
+    #[allow(clippy::too_many_arguments)]
     pub fn record_tool_finished(
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         tool: &str,
         call_id: &str,
         success: bool,
@@ -183,6 +274,7 @@ impl SessionRegistry {
             Event::ToolFinished {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 success,
@@ -199,6 +291,7 @@ impl SessionRegistry {
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         tool: &str,
         call_id: &str,
         error: &str,
@@ -209,6 +302,7 @@ impl SessionRegistry {
             Event::ToolError {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 call_id: call_id.to_string(),
                 error: error.to_string(),
@@ -230,6 +324,7 @@ impl SessionRegistry {
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         telemetry: &SearchTelemetry,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
@@ -238,6 +333,7 @@ impl SessionRegistry {
             Event::SearchPerformed {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 lane: telemetry.lane.clone(),
                 query: telemetry.query.clone(),
                 hit_count: telemetry.hit_count,
@@ -258,6 +354,7 @@ impl SessionRegistry {
         &self,
         id: &str,
         agent: &str,
+        agent_id: &str,
         telemetry: &RecallTelemetry,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
@@ -266,6 +363,7 @@ impl SessionRegistry {
             Event::MemoryRecalled {
                 session_id: id.to_string(),
                 agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
                 query: telemetry.query.clone(),
                 results: telemetry.results.clone(),
             },

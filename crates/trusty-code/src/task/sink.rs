@@ -48,18 +48,30 @@ impl SessionToolEventSink {
 
 #[async_trait]
 impl ToolEventSink for SessionToolEventSink {
-    async fn tool_started(&self, agent: &str, call_id: &str, tool: &str, args_preview: &str) {
-        if let Err(e) =
-            self.registry
-                .record_tool_started(&self.session_id, agent, tool, call_id, args_preview)
-        {
-            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record_tool_started failed: {e}");
+    async fn tool_started(
+        &self,
+        agent: &str,
+        agent_id: &str,
+        call_id: &str,
+        tool: &str,
+        args_preview: &str,
+    ) {
+        if let Err(e) = self.registry.record_tool_started(
+            &self.session_id,
+            agent,
+            agent_id,
+            tool,
+            call_id,
+            args_preview,
+        ) {
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, tool, call_id, "record_tool_started failed: {e}");
         }
     }
 
     async fn tool_finished(
         &self,
         agent: &str,
+        agent_id: &str,
         call_id: &str,
         tool: &str,
         success: bool,
@@ -68,21 +80,29 @@ impl ToolEventSink for SessionToolEventSink {
         if let Err(e) = self.registry.record_tool_finished(
             &self.session_id,
             agent,
+            agent_id,
             tool,
             call_id,
             success,
             result_preview,
         ) {
-            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record_tool_finished failed: {e}");
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, tool, call_id, "record_tool_finished failed: {e}");
         }
     }
 
-    async fn tool_error(&self, agent: &str, call_id: &str, tool: &str, error: &str) {
+    async fn tool_error(
+        &self,
+        agent: &str,
+        agent_id: &str,
+        call_id: &str,
+        tool: &str,
+        error: &str,
+    ) {
         if let Err(e) =
             self.registry
-                .record_tool_error(&self.session_id, agent, tool, call_id, error)
+                .record_tool_error(&self.session_id, agent, agent_id, tool, call_id, error)
         {
-            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record_tool_error failed: {e}");
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, tool, call_id, "record_tool_error failed: {e}");
         }
     }
 
@@ -99,6 +119,7 @@ impl ToolEventSink for SessionToolEventSink {
     async fn tool_telemetry(
         &self,
         agent: &str,
+        agent_id: &str,
         call_id: &str,
         tool: &str,
         telemetry: &ToolTelemetry,
@@ -106,15 +127,15 @@ impl ToolEventSink for SessionToolEventSink {
         let recorded = match telemetry {
             ToolTelemetry::Search(t) => {
                 self.registry
-                    .record_search_performed(&self.session_id, agent, t)
+                    .record_search_performed(&self.session_id, agent, agent_id, t)
             }
             ToolTelemetry::Recall(t) => {
                 self.registry
-                    .record_memory_recalled(&self.session_id, agent, t)
+                    .record_memory_recalled(&self.session_id, agent, agent_id, t)
             }
         };
         if let Err(e) = recorded {
-            tracing::warn!(session_id = %self.session_id, agent, tool, call_id, "record tool telemetry failed: {e}");
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, tool, call_id, "record tool telemetry failed: {e}");
         }
     }
 
@@ -166,18 +187,23 @@ mod tests {
         let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
         let mut events = crate::events::subscribe();
 
-        sink.tool_started("pm", "call-1", "bash", "echo hi").await;
+        sink.tool_started("pm", "pm-1", "call-1", "bash", "echo hi")
+            .await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_started");
-        assert!(
-            matches!(ev.event, crate::events::Event::ToolStarted { agent, .. } if agent == "pm")
-        );
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::ToolStarted { agent, agent_id, .. }
+                if agent == "pm" && agent_id == "pm-1"
+        ));
 
-        sink.tool_finished("pm", "call-1", "bash", true, "hi").await;
+        sink.tool_finished("pm", "pm-1", "call-1", "bash", true, "hi")
+            .await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_finished");
 
-        sink.tool_error("pm", "call-1", "bash", "boom").await;
+        sink.tool_error("pm", "pm-1", "call-1", "bash", "boom")
+            .await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_error");
     }
@@ -204,21 +230,24 @@ mod tests {
         let mut events = crate::events::subscribe();
 
         pm_view
-            .tool_started("pm", "c1", "delegate_to_agent", "{}")
+            .tool_started("pm", "pm-session-1", "c1", "delegate_to_agent", "{}")
             .await;
         let ev = next_event_for(&mut events, &session.id).await;
-        assert!(
-            matches!(ev.event, crate::events::Event::ToolStarted { agent, .. } if agent == "pm")
-        );
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::ToolStarted { agent, agent_id, .. }
+                if agent == "pm" && agent_id == "pm-session-1"
+        ));
 
         engineer_view
-            .tool_started("python-engineer", "c2", "bash", "cargo test")
+            .tool_started("python-engineer", "eng-spawn-7", "c2", "bash", "cargo test")
             .await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert!(
-            matches!(ev.event, crate::events::Event::ToolStarted { agent, .. }
-                if agent == "python-engineer"),
-            "a shared sink must report the CALLER's agent, not one fixed name"
+            matches!(ev.event, crate::events::Event::ToolStarted { agent, agent_id, .. }
+                if agent == "python-engineer" && agent_id == "eng-spawn-7"),
+            "a shared sink must report the CALLER's agent AND agent_id, not one fixed pair \
+             (DOC-39 AC-13)"
         );
     }
 
@@ -233,6 +262,7 @@ mod tests {
 
         sink.tool_telemetry(
             "python-engineer",
+            "eng-1",
             "c1",
             "search_code",
             &ToolTelemetry::Search(crate::tools::SearchTelemetry {
@@ -246,12 +276,13 @@ mod tests {
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "search_performed");
         assert!(
-            matches!(ev.event, crate::events::Event::SearchPerformed { agent, lane, .. }
-                if agent == "python-engineer" && lane == "lexical")
+            matches!(ev.event, crate::events::Event::SearchPerformed { agent, agent_id, lane, .. }
+                if agent == "python-engineer" && agent_id == "eng-1" && lane == "lexical")
         );
 
         sink.tool_telemetry(
             "pm",
+            "pm-1",
             "c2",
             "recall_session",
             &ToolTelemetry::Recall(crate::tools::RecallTelemetry {
@@ -265,9 +296,11 @@ mod tests {
         .await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "memory_recalled");
-        assert!(
-            matches!(ev.event, crate::events::Event::MemoryRecalled { agent, .. } if agent == "pm")
-        );
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::MemoryRecalled { agent, agent_id, .. }
+                if agent == "pm" && agent_id == "pm-1"
+        ));
     }
 
     /// Hooks against an unknown session must not panic (they log and
@@ -276,11 +309,13 @@ mod tests {
     async fn unknown_session_does_not_panic() {
         let registry = Arc::new(SessionRegistry::new());
         let sink = SessionToolEventSink::new(registry, "does-not-exist".to_string());
-        sink.tool_started("pm", "c", "bash", "x").await;
-        sink.tool_finished("pm", "c", "bash", true, "x").await;
-        sink.tool_error("pm", "c", "bash", "x").await;
+        sink.tool_started("pm", "pm-1", "c", "bash", "x").await;
+        sink.tool_finished("pm", "pm-1", "c", "bash", true, "x")
+            .await;
+        sink.tool_error("pm", "pm-1", "c", "bash", "x").await;
         sink.tool_telemetry(
             "pm",
+            "pm-1",
             "c",
             "search_code",
             &ToolTelemetry::Search(crate::tools::SearchTelemetry {

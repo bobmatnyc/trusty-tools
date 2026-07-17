@@ -53,6 +53,8 @@ fn constants_are_non_empty() {
     assert!(!REFACTORING_ENGINEER_AGENT.trim().is_empty());
     assert!(!PROMPT_ENGINEER_AGENT.trim().is_empty());
     assert!(!CODE_CRITIC_AGENT.trim().is_empty());
+    assert!(!CODE_REVIEW_STANDARDS.trim().is_empty());
+    assert!(!CONTRACT_DRIVEN_TESTING.trim().is_empty());
     assert!(!GCP_OPS_AGENT.trim().is_empty());
     assert!(!VERCEL_OPS_AGENT.trim().is_empty());
     assert!(!LOCAL_OPS_AGENT.trim().is_empty());
@@ -299,8 +301,8 @@ fn optimizer_toml_is_parseable() {
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
     // Count: 4 hooks/instructions + 5 base agents + 37 concrete agents +
-    // 21 /tm- skills + 1 DOC-28 self-description doc + 1 issue #2034
-    // bundled architecture doc = 69
+    // 2 code-critic bundled skills (#2890) + 21 /tm- skills + 1 DOC-28
+    // self-description doc + 1 issue #2034 bundled architecture doc = 71
     // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
     // removed — it shipped to every user with no real content. A3: the
     // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
@@ -317,6 +319,12 @@ fn bundle_table_is_complete() {
     //   code-critic, gcp-ops, vercel-ops, local-ops,
     //   memory-manager, mpm-agent-manager, mpm-skills-manager
     // Increment 4 (1): dotnet-engineer (#2831 — C#/.NET 8+ with VB.NET awareness)
+    // Issue #2890 (2): code-review-standards, contract-driven-testing — the
+    //   `skills:` dependencies code-critic declares in its frontmatter (DOC-42).
+    //   Registration here (not just the asset file existing) is what makes
+    //   `deploy_all_skill_tiers` actually ship them — the historical
+    //   orphaned-tm-doctor.md bug this mirrors is documented in
+    //   `bundle_tm_skills.rs`'s module doc.
     // /tm- portfolio (tm-skills-portfolio epic + issues #2185/#2321) (21): tm-doctor,
     //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
     //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
@@ -327,11 +335,11 @@ fn bundle_table_is_complete() {
     //   tm-cli-operations (#2321: tm CLI operation incl. MCP setup/management)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
     // Issue #2034 (1): docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md
-    assert_eq!(ALL.len(), 69);
+    assert_eq!(ALL.len(), 71);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 69, "artifact paths must be unique");
+    assert_eq!(paths.len(), 71, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -683,6 +691,37 @@ fn tm_doctor_skill_is_wired_into_bundle() {
     );
     assert!(TM_DOCTOR.starts_with("---\n"));
     assert!(TM_DOCTOR.contains("name: tm-doctor"));
+}
+
+#[test]
+fn code_critic_declared_skills_are_in_bundle() {
+    // Issue #2890: code-critic's `skills:` frontmatter declares
+    // `code-review-standards` and `contract-driven-testing`. Both asset files
+    // existed under `src/assets/skills/` but were not wired into a const or
+    // the `ALL` table on first cut — the exact historical tm-doctor.md bug
+    // (see `tm_doctor_skill_is_wired_into_bundle` above and
+    // `bundle_tm_skills.rs`'s module doc): a file existing on disk is not
+    // sufficient for `deploy_all_skill_tiers` to ever see it, since that
+    // function reads from the framework-root `skills/` directory, which is
+    // populated exclusively from `ALL` entries at `tm install` time.
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/code-review-standards.md"),
+        "code-review-standards.md must be present in the ALL bundle table"
+    );
+    assert!(
+        ALL.iter()
+            .any(|a| a.rel_path == "skills/contract-driven-testing.md"),
+        "contract-driven-testing.md must be present in the ALL bundle table"
+    );
+    assert!(CODE_REVIEW_STANDARDS.starts_with("---\n"));
+    assert!(CODE_REVIEW_STANDARDS.contains("name: code-review-standards"));
+    assert!(CONTRACT_DRIVEN_TESTING.starts_with("---\n"));
+    assert!(CONTRACT_DRIVEN_TESTING.contains("name: contract-driven-testing"));
+    // The agent's declared `skills:` frontmatter must name exactly these two
+    // skills, so the (future, #2889) co-deployment mechanism has something
+    // real to resolve.
+    assert!(CODE_CRITIC_AGENT.contains("skills: [code-review-standards, contract-driven-testing]"));
 }
 
 #[test]

@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::agent_loop::Transcript;
 use crate::binding::ProjectBinding;
-use crate::events::{Event, SessionEventEnvelope};
+use crate::events::{Event, IndexReadinessSnapshot, SessionEventEnvelope};
 use crate::jsonrpc::{NotifySender, RpcError};
 use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
@@ -106,6 +106,14 @@ struct SessionEntry {
     /// reused for the life of the session (see `memory_sink` module docs for
     /// why its background drain task must outlive any single run).
     memory_sink: Option<Arc<super::memory_sink::TurnMemorySink>>,
+    /// (DOC-39 §5.6 Slice D) The most recently recorded `IndexReadiness`
+    /// probe for this session — last-writer-wins, overwritten by every new
+    /// `record_index_readiness` call. `None` until the session's first probe
+    /// lands (or forever, for a session whose `task.run` never indexes —
+    /// e.g. projectless). This is the storage `session.get_readiness` reads
+    /// so a client that attaches AFTER the one-time `Event::IndexReadiness`
+    /// fired can still retrieve the current state.
+    readiness: Option<IndexReadinessSnapshot>,
 }
 
 /// #2056: bookkeeping for one in-flight background task execution.
@@ -205,6 +213,7 @@ impl SessionRegistry {
                     cost_usd: None,
                     pm_transcript: None,
                     memory_sink: None,
+                    readiness: None,
                 },
             );
         }

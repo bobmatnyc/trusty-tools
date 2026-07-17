@@ -68,11 +68,27 @@ pub struct ContextBudgetSnapshot {
 /// report one of them. The calling `AgentLoop` is the only layer that knows
 /// which agent it is, so it passes its identity per call — see
 /// `AgentLoop::with_agent`.
+/// (DOC-39 AC-13.1/13.2) Every hook ALSO takes `agent_id` — the dispatching
+/// loop's STABLE per-spawn id (see `AgentLoop::with_agent_id`). `agent`
+/// alone cannot distinguish two concurrently-delegated sub-agents that
+/// share one name (e.g. two `python-engineer` delegations): both attribute
+/// as `"python-engineer"` on this stream, and prior to `agent_id` a client's
+/// only recourse was fragile `AgentSpawned`/`AgentDone` stream-ordering
+/// inference. `agent_id` is minted once per delegation
+/// (`runner::in_process::InProcessAgentRunner::run_pipeline`) and threaded
+/// through unchanged for that whole sub-agent run.
 /// Test: `crate::task::sink::tests::*`.
 #[async_trait]
 pub trait ToolEventSink: Send + Sync {
     /// A tool invocation is about to run.
-    async fn tool_started(&self, agent: &str, call_id: &str, tool: &str, args_preview: &str);
+    async fn tool_started(
+        &self,
+        agent: &str,
+        agent_id: &str,
+        call_id: &str,
+        tool: &str,
+        args_preview: &str,
+    );
 
     /// A tool invocation completed (successfully or with a recoverable error —
     /// `success` distinguishes the two). Use [`Self::tool_error`] instead for an
@@ -80,6 +96,7 @@ pub trait ToolEventSink: Send + Sync {
     async fn tool_finished(
         &self,
         agent: &str,
+        agent_id: &str,
         call_id: &str,
         tool: &str,
         success: bool,
@@ -87,7 +104,7 @@ pub trait ToolEventSink: Send + Sync {
     );
 
     /// A tool invocation raised an exceptional (non-recoverable) error.
-    async fn tool_error(&self, agent: &str, call_id: &str, tool: &str, error: &str);
+    async fn tool_error(&self, agent: &str, agent_id: &str, call_id: &str, tool: &str, error: &str);
 
     /// The working-context budget was measured at a turn boundary (epic
     /// #2343).
@@ -121,6 +138,7 @@ pub trait ToolEventSink: Send + Sync {
     async fn tool_telemetry(
         &self,
         _agent: &str,
+        _agent_id: &str,
         _call_id: &str,
         _tool: &str,
         _telemetry: &ToolTelemetry,
