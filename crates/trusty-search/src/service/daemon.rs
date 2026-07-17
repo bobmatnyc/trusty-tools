@@ -531,7 +531,7 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
 
 // Shutdown-flush helpers extracted to `service::shutdown_flush` (issue #874 split).
 pub use crate::service::shutdown_flush::{
-    flush_all_indexes_on_shutdown, shutdown_flush_timeout_secs,
+    flush_all_indexes_on_shutdown, shutdown_flush_timeout_override,
 };
 
 /// Write the canonical `host:port` discovery line to `~/.trusty-search/http_addr`.

@@ -110,9 +110,14 @@ pub(crate) async fn restore_index_on_demand(
         .corpus_store()
         .and_then(|c| c.chunk_count().ok())
         .unwrap_or(0);
-    let hnsw_snapshot_ready = crate::service::persistence::hnsw_path_for_entry(&entry)
-        .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
-        .unwrap_or(false);
+    // Issue #2922: fold in `hnsw_load_failed` so a truncated/corrupt on-disk
+    // snapshot (still detected as "exists" by `has_persisted_hnsw`) doesn't
+    // report semantic search as ready when the store actually fell back to
+    // fresh/empty. See the matching comment in `commands/start_restore.rs`.
+    let hnsw_snapshot_ready = !indexer.hnsw_load_failed
+        && crate::service::persistence::hnsw_path_for_entry(&entry)
+            .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
+            .unwrap_or(false);
     let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
     let stages = derive_warm_boot_stages(WarmBootInputs {
         chunk_count,

@@ -180,6 +180,32 @@ pub struct CodeIndexer {
     /// classifier emit `StageStatus::Failed` with an actionable message instead
     /// of the misleading `InProgress` / "walking" state (closes #1158).
     pub corpus_open_failed: bool,
+
+    /// Issue #2922: `true` when a persisted HNSW snapshot existed on disk at
+    /// warm-boot/lazy-load time but could NOT be restored (missing/corrupt
+    /// sidecar, `Index::view` failure, dim mismatch, or the #2922 zero-vector-
+    /// vs-populated-sidecar corruption guard in `UsearchStore::load_from`) —
+    /// so `self.store` was wired to a *fresh empty* store instead of the
+    /// restored one.
+    ///
+    /// Why: before this flag, warm-boot's `hnsw_snapshot_ready` signal (fed
+    /// into `derive_warm_boot_stages`) was computed purely from
+    /// `has_persisted_hnsw(path)` — a `path.exists()` check — entirely
+    /// independent of whether the load actually succeeded. A truncated/
+    /// corrupt `.usearch` file (e.g. left behind by a timed-out shutdown
+    /// flush before atomic-write hardening) still exists on disk, so
+    /// `semantic` was classified `Ready` and `/health` reported semantic
+    /// search ready while the wired store silently held 0 vectors — exactly
+    /// the "health reports ready while silently BM25-only" failure mode this
+    /// issue describes. `build_store_for_entry` now sets this flag whenever
+    /// it falls back to a fresh store despite the file existing, and the
+    /// warm-boot / lazy-load call sites fold it into `hnsw_snapshot_ready` so
+    /// the stage classifier only reports `Ready` for a load that actually
+    /// succeeded.
+    /// What: read by `commands/start_restore.rs` and `service/lazy_restore.rs`
+    /// immediately after `build_indexer_from_entry` returns.
+    /// Test: `service::persistence_loader::tests::build_store_for_entry_flags_load_failure_on_corrupt_snapshot`.
+    pub hnsw_load_failed: bool,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -237,6 +263,7 @@ impl CodeIndexer {
             chunks_evicted: Arc::new(AtomicBool::new(false)),
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
             corpus_open_failed: false,
+            hnsw_load_failed: false,
         }
     }
 

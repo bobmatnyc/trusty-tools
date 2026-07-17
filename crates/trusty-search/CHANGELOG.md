@@ -14,6 +14,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- shutdown-flush no longer truncates HNSW on timeout: `UsearchStore::save` now serializes concurrent savers of the same store, the graceful-shutdown flush deadline scales with each index's on-disk snapshot size (was a flat 10s) and flushes indexes with bounded concurrency instead of strictly sequentially, and a truncated/corrupt on-disk HNSW snapshot is now detected on load (via a pre-`view()` size floor plus a post-view zero-vector-vs-populated-sidecar guard) so `/health` no longer reports semantic search ready when it silently fell back to BM25-only (closes #2922)
 - default max fan-out + --serial flag (closes concurrency-limiter 503s) ([#2850](https://github.com/bobmatnyc/trusty-tools/pull/2850)) ([`7571f2c`](https://github.com/bobmatnyc/trusty-tools/commit/7571f2c65d5d07369d724b7d659871656a851b14))
 - enforce rss_limit_mb — bound RSS growth (closes #2846) ([#2849](https://github.com/bobmatnyc/trusty-tools/pull/2849)) ([`4ea29ef`](https://github.com/bobmatnyc/trusty-tools/commit/4ea29ef6b971c40fa88b5972114a40e7af6d56bd))
 - bound graceful-stop flush so it can't hang until SIGKILL ([#1746](https://github.com/bobmatnyc/trusty-tools/pull/1746)) ([#2830](https://github.com/bobmatnyc/trusty-tools/pull/2830)) ([`9e56faf`](https://github.com/bobmatnyc/trusty-tools/commit/9e56fafe21a707c3accf4dba993496891ad23b69))
