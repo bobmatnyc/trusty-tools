@@ -28,7 +28,9 @@
 //! highest-first, so this is a simple prefix take. Unreachable daemon /
 //! malformed response is fail-open: a successful (non-error) `ToolResult`
 //! carrying an explicit "unavailable" message plus a `tracing::warn!`, so a
-//! flaky trusty-memory never derails the agent loop.
+//! flaky trusty-memory never derails the agent loop. (#2857) Dropping
+//! lowest-scored results for the token budget also logs, at `tracing::info!`
+//! — a degradation the model silently acts on (see [`render_results`]).
 //! Test: `recall_session::tests::*`.
 
 use async_trait::async_trait;
@@ -146,7 +148,12 @@ fn filter_and_cap(results: &[Value], tag: &str, top_k: usize) -> Vec<Value> {
 /// What: `results` must already be capped/ordered (highest-score first,
 /// per [`filter_and_cap`]). The first result is always included even if it
 /// alone exceeds the budget — an over-budget single result is still more
-/// useful than an empty response.
+/// useful than an empty response. (#2857) When one or more lowest-scored
+/// results are dropped for budget, emits `tracing::info!` with the dropped/
+/// included counts — the model silently receives fewer memories than it
+/// asked for, so an operator diagnosing "the model missed a fact it should
+/// have recalled" needs this visible from stderr, not just inferable from
+/// the rendered text length.
 /// Test: `tests::render_drops_whole_lowest_scored_entries_over_budget`.
 fn render_results(query: &str, results: &[Value]) -> String {
     let mut entries: Vec<String> = Vec::new();
@@ -159,6 +166,15 @@ fn render_results(query: &str, results: &[Value]) -> String {
         }
         budget_used += entry_tokens;
         entries.push(content.to_string());
+    }
+    let dropped = results.len() - entries.len();
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            included = entries.len(),
+            budget_tokens = TOKEN_BUDGET,
+            "recall_session: token budget exceeded — dropping lowest-scored result(s)"
+        );
     }
     format!(
         "Session memory results for \"{query}\":\n\n{}",
@@ -377,6 +393,36 @@ mod tests {
         let rendered = render_results("q", &results);
         assert!(rendered.contains("first"));
         assert!(rendered.contains("second"));
+    }
+
+    /// Dropping a lowest-scored result for budget emits an INFO-level log
+    /// naming the dropped/included counts (#2857).
+    ///
+    /// Why: the budget truncation this module implements is exactly the
+    /// "recall_session: token-budget truncation dropping lowest-scored
+    /// results" site this ticket names as audited — the model silently
+    /// receives fewer memories than requested, which must be diagnosable
+    /// from stderr.
+    /// What: Same over-budget scenario as
+    /// `render_drops_whole_lowest_scored_entries_over_budget`, captured via
+    /// `crate::test_support::begin_capture`/`captured_at_least`.
+    /// Test: this test.
+    #[test]
+    fn render_drop_logs_info() {
+        crate::test_support::begin_capture();
+
+        let huge = "x".repeat((TOKEN_BUDGET + 100) * 4);
+        let results = vec![
+            result_entry(&huge, 0.9, &["session:s1"]),
+            result_entry("small tail entry", 0.8, &["session:s1"]),
+        ];
+        render_results("q", &results);
+
+        let captured = crate::test_support::captured_at_least(tracing::Level::INFO);
+        assert!(
+            captured.iter().any(|m| m.contains("token budget exceeded")),
+            "expected an info-level budget-drop log, got: {captured:?}"
+        );
     }
 
     // ── schema ───────────────────────────────────────────────────────────

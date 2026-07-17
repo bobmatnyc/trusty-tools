@@ -14,7 +14,8 @@
 //! command is `echo cargo test` — it matches `verify_gate::is_test_command`
 //! (it contains the `cargo test` shape) yet, unlike a real `cargo test`, exits
 //! 0 deterministically with no dependency on an installed test runner.
-//! Test: this module is itself the test surface.
+//! Test: this module is itself the test surface (includes
+//! `redundant_rerun_suppression_logs_info`, the #2857 observability guard).
 
 use super::*;
 
@@ -105,6 +106,46 @@ async fn redundant_test_rerun_is_suppressed() {
     assert!(
         !tool_result_matches(&requests, "b2", |c| c.contains("exit_code:")),
         "the suppressed run must NOT carry a real exit_code line"
+    );
+}
+
+/// The suppression short-circuit fires an INFO-level log naming the
+/// suppressed call (#2857).
+///
+/// Why: A suppressed rerun is a decision that silently changes the run's
+/// outcome (a test invocation the model requested did NOT happen); it is the
+/// exact "#2682 suppression sentinel: a test run that did NOT happen" case
+/// this ticket names as an audited site. `info` (not `warn`) because
+/// suppression is the expected, by-design outcome, not an anomaly.
+/// What: Same redundant script as `redundant_test_rerun_is_suppressed`,
+/// captured via `crate::test_support::begin_capture`/`captured_at_least` at
+/// `Level::INFO`; asserts at least one captured message names the
+/// suppression.
+/// Test: this test.
+#[tokio::test]
+async fn redundant_rerun_suppression_logs_info() {
+    crate::test_support::begin_capture();
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        bash_call_response("b1", "echo cargo test"),
+        bash_call_response("b2", "echo cargo test"),
+        finish_task_call_response("f1", r#"{"status": "completed", "summary": "done"}"#),
+    ]));
+    let registry = registry_with_finish_task_and_bash();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
+        .with_redundant_run_suppression();
+
+    agent
+        .run("system prompt", "run cargo test, then finish")
+        .await
+        .expect("loop terminates on finish_task");
+
+    let messages = crate::test_support::captured_at_least(tracing::Level::INFO);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("suppressing redundant full-suite re-run")),
+        "expected an info-level suppression log, got: {messages:?}"
     );
 }
 

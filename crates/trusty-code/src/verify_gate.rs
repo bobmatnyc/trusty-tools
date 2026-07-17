@@ -209,20 +209,36 @@ pub fn default_finish_gate() -> FinishGate {
 /// [`seed_text`] [`names_test_command`]; when it does, trips (returning
 /// [`GATE_REASON_PM`]) unless any `TurnRecord` in `shared` has
 /// `ran_test_command == true`. A poisoned lock is treated as "not run" —
-/// fail toward asking the model to verify, not toward silently finishing.
+/// fail toward asking the model to verify, not toward silently finishing —
+/// and (#2857) logs `tracing::warn!` when this happens, since a poisoned
+/// lock means some other turn's code already panicked; silently folding
+/// that into an ordinary gate trip would hide the real failure.
 /// Test: `tests::pm_gate_trips_when_engineer_never_ran_tests`,
 /// `tests::pm_gate_satisfied_when_engineer_ran_tests`,
-/// `tests::pm_gate_inert_when_not_named`.
+/// `tests::pm_gate_inert_when_not_named`,
+/// `tests::pm_gate_poisoned_lock_warns_and_trips`.
 pub fn pm_finish_gate(shared: SharedTranscript) -> FinishGate {
     Arc::new(move |transcript: &Transcript| {
         let messages = transcript.messages();
         if !names_test_command(&seed_text(&messages)) {
             return None;
         }
+        // (#2857) A poisoned lock (some other turn's code panicked while
+        // holding it) is treated as "tests not run" — fail toward asking the
+        // model to verify, per this function's own doc. That fallback is
+        // itself a decision worth surfacing: silently swallowing the
+        // poisoning would hide a real prior panic behind an ordinary-looking
+        // gate trip.
         let ran = shared
             .lock()
             .map(|turns| turns.iter().any(|t| t.ran_test_command))
-            .unwrap_or(false);
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    "verify_gate: shared transcript lock poisoned (a prior turn likely \
+                     panicked) — treating as tests-not-run and tripping the PM finish gate"
+                );
+                false
+            });
         if ran {
             return None;
         }
@@ -502,6 +518,50 @@ mod tests {
         let transcript = Transcript::seed("pm system prompt", "run pytest tests/ -v");
         let gate = pm_finish_gate(shared);
         assert!(gate(&transcript).is_none());
+    }
+
+    /// [`pm_finish_gate`] treats a poisoned shared-transcript lock as
+    /// "tests not run" (fail toward verify) AND logs a WARN naming why
+    /// (#2857) — a poisoned lock means some other turn's code already
+    /// panicked, which must not be silently folded into an ordinary gate
+    /// trip.
+    ///
+    /// Why: This is the audited #2857 site: `unwrap_or(false)` previously
+    /// swallowed the poisoning distinction entirely.
+    /// What: Poison `shared`'s mutex by panicking on another thread while
+    /// holding the lock, then call the gate under
+    /// `crate::test_support::begin_capture`; assert the gate still trips
+    /// AND a warning naming "lock poisoned" was captured via
+    /// `captured_at_least`.
+    /// Test: this test.
+    #[test]
+    fn pm_gate_poisoned_lock_warns_and_trips() {
+        let shared: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
+        {
+            let shared = shared.clone();
+            let _ = std::thread::spawn(move || {
+                let _guard = shared.lock().expect("lock for poisoning");
+                panic!("intentional poison for pm_gate_poisoned_lock_warns_and_trips");
+            })
+            .join();
+        }
+        assert!(shared.is_poisoned(), "setup must actually poison the lock");
+
+        crate::test_support::begin_capture();
+
+        let transcript = Transcript::seed("pm system prompt", "run pytest tests/ -v");
+        let gate = pm_finish_gate(shared);
+        let result = gate(&transcript);
+
+        assert!(
+            result.is_some(),
+            "a poisoned lock must still trip the gate (fail toward verify)"
+        );
+        let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
+        assert!(
+            captured.iter().any(|m| m.contains("lock poisoned")),
+            "expected a warn-level poisoned-lock log, got: {captured:?}"
+        );
     }
 
     /// [`pm_finish_gate`] is inert when the PM's own task never names a test

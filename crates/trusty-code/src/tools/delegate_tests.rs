@@ -575,3 +575,36 @@ async fn delegate_refused_once_engineer_completed() {
         "the runner must never be invoked once the engineer has completed"
     );
 }
+
+/// The #2683 completion-latch refusal fires a WARN-level log naming the
+/// mechanism (#2857).
+///
+/// Why: This is the exact site #2857 names as unobserved — the refusal
+/// silently drops a delegation attempt the model made without ever
+/// invoking the runner; an operator reading stderr must be able to tell
+/// this happened.
+/// What: Same latch-then-refuse scenario as
+/// `delegate_refused_once_engineer_completed`, captured via
+/// `crate::test_support::begin_capture`/`captured_at_least`.
+/// Test: this test.
+#[tokio::test]
+async fn delegate_refusal_logs_warn() {
+    crate::test_support::begin_capture();
+
+    let runner = Arc::new(FinishingRunner {
+        finish_status: Some(FinishStatus::Completed),
+        invoked: std::sync::Mutex::new(0),
+    });
+    let signal = EngineerCompletionSignal::new();
+    signal.mark_completed();
+    let tool = DelegateToAgentTool::new(runner).with_completion_signal(signal);
+
+    tool.execute(json!({"agent_name": "engineer", "task": "re-verify the work"}))
+        .await;
+
+    let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
+    assert!(
+        captured.iter().any(|m| m.contains("completion latch")),
+        "expected a warn-level refusal log, got: {captured:?}"
+    );
+}

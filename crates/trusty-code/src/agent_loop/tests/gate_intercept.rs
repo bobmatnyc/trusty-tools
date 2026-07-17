@@ -15,7 +15,8 @@
 //! trip-then-recover path (with an explicit assertion that the nudge is fed
 //! back to the model), the "no test command named" inert case, and the
 //! "tests already ran" first-attempt-pass negative control.
-//! Test: this module is itself the test surface.
+//! Test: this module is itself the test surface (includes
+//! `finish_gate_trip_logs_warn`, the #2857 observability guard).
 
 use super::*;
 
@@ -94,6 +95,54 @@ async fn finish_gate_trips_and_recovers() {
     assert_ne!(out.summary.as_deref(), Some("done (premature)"));
     assert_eq!(out.summary.as_deref(), Some("done (verified)"));
     assert_eq!(out.content, "Task completed: done (verified)");
+}
+
+/// The gate's rejection (#2279) fires a WARN-level log naming the rejection
+/// reason (#2857).
+///
+/// Why: A gate-rejected `finish_task` silently changes the run's outcome — an
+/// extra turn is forced the model didn't ask for — so it must be diagnosable
+/// from a single run's stderr, matching the ticket's organising principle
+/// (an outcome-changing decision is at minimum `warn`).
+/// What: Same premature-finish script as `finish_gate_trips_and_recovers`,
+/// captured via `crate::test_support::begin_capture`/`captured_at_least` at
+/// `Level::WARN`; asserts at least one captured message names the gate
+/// interception.
+/// Test: this test.
+#[tokio::test]
+async fn finish_gate_trip_logs_warn() {
+    crate::test_support::begin_capture();
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        finish_task_call_response(
+            "call-premature",
+            r#"{"status": "completed", "summary": "done (premature)"}"#,
+        ),
+        bash_call_response("call-bash", "pytest tests/ -v"),
+        finish_task_call_response(
+            "call-verified",
+            r#"{"status": "completed", "summary": "done (verified)"}"#,
+        ),
+    ]));
+    let registry = registry_with_finish_task_and_bash();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
+        .with_finish_gate(crate::verify_gate::default_finish_gate());
+
+    agent
+        .run(
+            "system prompt",
+            "implement the parser; run `pytest tests/ -v` before finishing",
+        )
+        .await
+        .expect("loop should recover and terminate on the verified finish call");
+
+    let messages = crate::test_support::captured_at_least(tracing::Level::WARN);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("gate intercepted finish_task")),
+        "expected a warn-level gate-intercept log, got: {messages:?}"
+    );
 }
 
 /// An attached [`crate::verify_gate::default_finish_gate`] is INERT — the
