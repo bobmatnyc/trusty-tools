@@ -1,0 +1,40 @@
+# SLD-lint gate for the trusty-tools workspace (DOC-38, issue #2854).
+#
+# Enforces the Spec-Linked Documentation standard mechanically: every declared
+# spec reference (inline `# Spec References` blocks across crates/**, and
+# `spec_refs:` frontmatter in docs/specs/**/*.md) must resolve, and opted-in
+# specs must satisfy the DOC-38 §4 conventions. Runs in DEFAULT (grandfathering)
+# mode — reference resolution everywhere + full checks only on frontmatter-bearing
+# specs — so it passes on the current tree while the retrofit (§10 F5/F6) lands.
+name: SLD lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches ci.yml).
+concurrency:
+  group: sld-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sld-lint:
+    name: SLD (DOC-38) reference + spec-doc lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # MSRV floor is 1.91 (root Cargo.toml rust-version), matching ci.yml.
+      - name: Install Rust toolchain (1.91)
+        uses: dtolnay/rust-toolchain@1.91
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sld-lint
+
+      - name: Run SLD linter (default / grandfathering mode)
+        run: bash scripts/check_sld.sh

@@ -19,6 +19,18 @@ link to it via the [Spec-Linked Documentation (SLD)][sld] standard (canonical:
 trusty-common's `intent_source`) can resolve a changed file back to the section
 that governs it.
 
+## Policy
+
+**New documentation in this repository follows [DOC-38 — Spec-Linked
+Documentation (SLD)](./spec-linked-documentation.md).** New specs use scan-before-claim
+`DOC-N` numbering, the bold-field header block, and `{#SPEC-…}` anchors (DOC-38 §4);
+a source artifact that links to a spec declares it in its native idiom — `spec_refs:`
+YAML frontmatter for Markdown (§2.5), a `# Spec References` comment/docstring block for
+code (§3). The `sld-lint` gate (`scripts/check_sld.sh`, run in CI and as a pre-commit
+hook) enforces that every declared reference resolves and that opted-in specs conform;
+existing specs are grandfathered while the retrofit lands (§10 F5/F6). See DOC-38 for the
+normative grammar — this note does not restate it.
+
 ## Spec catalog
 
 | DOC | Spec ID | Title | Subsystem |

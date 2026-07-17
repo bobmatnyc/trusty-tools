@@ -1,0 +1,37 @@
+[package]
+name = "trusty-sld-lint"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SLD (DOC-38) documentation linter: validates Spec-Linked Documentation reference grammar, frontmatter, anchors, and spec-doc conventions across a repository."
+keywords = ["documentation", "linter", "spec", "sld"]
+categories = ["command-line-utilities", "development-tools"]
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+
+# Library half: the pure, unit-testable check engine. Reuses the single SLD
+# grammar from trusty-common's lightweight `sld` feature (DOC-38 §10 F1) rather
+# than re-implementing a parser.
+[lib]
+name = "trusty_sld_lint"
+path = "src/lib.rs"
+
+# Binary half: the thin `anyhow`/clap CLI wrapper.
+[[bin]]
+name = "sld-lint"
+path = "src/main.rs"
+
+[dependencies]
+# The one SLD grammar (reference regex, frontmatter, comment table, anchors) —
+# reused, never re-implemented. Only the lightweight `sld` feature, so this
+# linter does NOT pull the heavy `tickets`/git2/rusqlite stack `intent-source`
+# drags in.
+trusty-common = { workspace = true, features = ["sld"] }
+anyhow = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

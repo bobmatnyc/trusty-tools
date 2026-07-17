@@ -80,6 +80,21 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Spec-Linked Documentation (DOC-38) lint (issue #2854). Fails the commit when
+  # a declared spec reference does not resolve (inline `# Spec References` blocks
+  # across crates/**, or `spec_refs:` frontmatter in docs/specs/**/*.md), or when
+  # an opted-in spec violates the DOC-38 §4 conventions. Runs against the whole
+  # tree (pass_filenames: false), matching the line-cap hook's holistic scan.
+  # Grandfathered exceptions live in .sld-lint-allowlist.tsv (ratchet).
+  - repo: local
+    hooks:
+      - id: sld-lint
+        name: "SLD (DOC-38) reference + spec-doc lint"
+        entry: scripts/check_sld.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Empirical commit-effort scoring — appends Effort/Effort-Score/
   # Effort-Breakdown trailers to commit messages. Non-destructive: never
   # blocks a commit; computation failures log a warning and exit 0.

@@ -73,6 +73,21 @@ When asked to reorganise documentation thoroughly:
 - **Completeness**: Cover all essential aspects
 - **Discoverability**: Clear file names and cross-references
 
+## Spec-Linked Documentation (SLD)
+
+Where the repository adopts **DOC-38 (SLD)** — check for a `docs/specs/` directory
+and the "Policy" note in its README — follow it when writing or editing docs:
+
+- **Markdown links go in `spec_refs:` frontmatter.** When a document is governed by
+  a spec, declare the link as YAML frontmatter (`id`/`path`/`anchor`, with a
+  repo-root-relative `path`), not only in prose. Never invent a link where none exists.
+- **Specs carry the header field block + anchors.** A new spec opens with the
+  bold-field block (Status, Subsystem, Owner, Last-updated, Spec ID) and anchors each
+  governed section with `{#SPEC-…}` equal to that section's ID.
+- **Don't restate the grammar** — link to DOC-38 so there is one source of truth.
+- **Run the gate before handoff.** `scripts/check_sld.sh` must pass; existing
+  pre-DOC-38 specs are grandfathered via `.sld-lint-allowlist.tsv`.
+
 ## Commit Discipline
 
 - Use `git mv` for renames and moves (preserves history)
