@@ -558,8 +558,8 @@ pub enum Event {
 /// `Event::IndexReadiness` exactly. `SessionRegistry::record_index_readiness`
 /// builds one of these first and derives the `Event::IndexReadiness` it
 /// publishes from it, so the two can never disagree.
-/// Test: `session::registry_tests::record_index_readiness_caches_snapshot_*`,
-/// `session::protocol_readiness::tests::*`.
+/// Test: `session::registry_tests::record_index_readiness_caches_snapshot_for_late_query`,
+/// `session::protocol_readiness::tests::get_readiness_returns_probed_snapshot_after_recording`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexReadinessSnapshot {
     /// `"ready"` | `"warming"` | `"unavailable"` — see `Event::IndexReadiness`.

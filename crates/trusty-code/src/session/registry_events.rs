@@ -53,8 +53,8 @@ const READINESS_STATE_UNAVAILABLE: &str = "unavailable";
 /// `tag = "type"` convention) so the wire shape is
 /// `{"status":"probed","state":...,"index_id":...,...}` for a session with a
 /// recorded snapshot, or `{"status":"never_probed"}` for one with none.
-/// Test: `registry_tests::get_readiness_returns_cached_snapshot`,
-/// `registry_tests::get_readiness_never_probed_session_returns_never_probed`.
+/// Test: `registry_tests::record_index_readiness_caches_snapshot_for_late_query`,
+/// `protocol_readiness::tests::get_readiness_never_probed_session_returns_never_probed`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReadinessQuery {
@@ -164,8 +164,8 @@ impl SessionRegistry {
     /// never a bare `null` — if no `record_index_readiness` call has happened
     /// yet (e.g. a projectless session, or one queried before its background
     /// indexing probe completes).
-    /// Test: `registry_tests::get_readiness_returns_cached_snapshot`,
-    /// `registry_tests::get_readiness_never_probed_session_returns_never_probed`,
+    /// Test: `registry_tests::record_index_readiness_caches_snapshot_for_late_query`,
+    /// `protocol_readiness::tests::get_readiness_never_probed_session_returns_never_probed`,
     /// `registry_tests::get_readiness_unknown_session_errors`.
     pub fn get_readiness(&self, id: &str) -> Result<ReadinessQuery, RpcError> {
         self.ensure_exists(id)?;
