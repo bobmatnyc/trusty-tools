@@ -26,6 +26,7 @@ crates/trusty-agents-common/src/perf.rs	test_run_record_serializes_test_counts
 crates/trusty-agents-common/src/runner.rs	collector_records_phases
 crates/trusty-agents-common/src/runner.rs	run_with_config_ctx
 crates/trusty-agents-common/src/session_registry.rs	list_returns_all_entries
+crates/trusty-agents-common/src/skills/manifest.rs	skill_manifest_save_is_atomic
 crates/trusty-agents/src/agents/claude_code_runner/dispatcher.rs	dispatcher_routes_claude_code
 crates/trusty-agents/src/agents/claude_code_runner/dispatcher.rs	dispatcher_routes_in_process
 crates/trusty-agents/src/agents/config.rs	compress_config_defaults_disabled
@@ -459,7 +460,6 @@ crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_returns_none_at_eof
 crates/trusty-mpm/src/core/output_style.rs	detect_from_output_unparseable
 crates/trusty-mpm/src/core/session_launch/mod.rs	prepare_session_repo_url_pins_palace
 crates/trusty-mpm/src/core/session_launch/settings.rs	deploy_output_style_writes_under_project_root
-crates/trusty-mpm/src/core/skill_manifest.rs	skill_manifest_save_is_atomic
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_defaults_to_enter
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_interrupt
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_no_submit
