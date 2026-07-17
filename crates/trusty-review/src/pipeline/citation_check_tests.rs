@@ -216,8 +216,8 @@ fn ignores_non_diff_grounded_findings() {
 #[test]
 fn downgrades_code_citation_to_unverifiable_content() {
     // A `code:`-cited finding whose quote is not in the cited file is downgraded,
-    // and the fabricated code citation is stripped (spec/ticket citations would be
-    // kept — see `apply_downgrade_clears_provability_and_code_citation`).
+    // and its citation is stripped (see
+    // `apply_downgrade_clears_provability_and_all_citations`).
     let idx = repro_index();
     let mut f = Finding::new(
         "api/chat.js",
@@ -254,7 +254,7 @@ fn is_diff_grounded_detects_code_provable_and_code_citation() {
 }
 
 #[test]
-fn apply_downgrade_clears_provability_and_code_citation() {
+fn apply_downgrade_clears_provability_and_all_citations() {
     let mut f = code_provable_finding("f", "d");
     f.source_citation = Some("code:f:1".to_string());
     f.confidence = 0.9;
@@ -263,11 +263,85 @@ fn apply_downgrade_clears_provability_and_code_citation() {
     assert!(f.source_citation.is_none());
     assert!(f.confidence <= DOWNGRADED_CITATION_CONFIDENCE);
 
-    // A non-code citation is preserved (only the code claim is refuted).
+    // A non-code citation is ALSO cleared: the finding's factual basis was
+    // disproven, and leaving it would keep the finding escalation-eligible.
     let mut g = code_provable_finding("f", "d");
     g.source_citation = Some("jira:X-1".to_string());
     apply_downgrade(&mut g);
-    assert_eq!(g.source_citation.as_deref(), Some("jira:X-1"));
+    assert!(g.source_citation.is_none());
+}
+
+#[test]
+fn downgrade_neutralizes_surviving_non_code_citation() {
+    // A fabricated code_provable finding that ALSO carries a spec/ticket citation
+    // must fully lose block-floor eligibility after downgrade — otherwise the
+    // surviving citation keeps `drives_block_floor` true (code-critic WARN).
+    let idx = repro_index();
+    let mut f = code_provable_finding(
+        "api/chat.js",
+        "Bundle embeds `import { describe, it, expect } from 'vitest';` from the test file.",
+    );
+    f.source_citation = Some("jira:PROJ-123".to_string());
+    assert!(
+        crate::pipeline::grade::drives_block_floor(&f),
+        "precondition: forces floor"
+    );
+
+    let mut findings = vec![f];
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
+    assert_eq!(n, 1);
+    assert!(
+        findings[0].source_citation.is_none(),
+        "surviving citation must be cleared"
+    );
+    assert!(
+        !crate::pipeline::grade::drives_block_floor(&findings[0]),
+        "downgraded finding must no longer drive the BLOCK floor"
+    );
+}
+
+#[test]
+fn keeps_finding_using_only_bracket_citation_grammar() {
+    // A correctly-grounded code_provable finding that cites via the prompt-mandated
+    // `[code: `path:line` — "excerpt"]` grammar (whose path:line + paraphrased
+    // excerpt never appear verbatim in diff content) must NOT be false-downgraded.
+    let idx = repro_index();
+    let mut f = code_provable_finding(
+        "api/chat.js",
+        "The bundle symbol is unsafe [code: `api/chat.js:35271` — \"a paraphrased summary \
+         of the concern that is not a literal diff line\"].",
+    );
+    f.line = Some(35271);
+    let n = downgrade_uncitable_findings(&mut findings_of(f), &idx);
+    assert_eq!(
+        n, 0,
+        "a bracket-cited finding with no standalone diff quote must survive"
+    );
+}
+
+/// Helper: wrap a single finding into a `Vec` (kept local to avoid churn).
+fn findings_of(f: Finding) -> Vec<Finding> {
+    vec![f]
+}
+
+#[test]
+fn extract_spans_skips_prompt_mandated_citation_grammar() {
+    // The four bracket-citation forms are stripped before quote extraction, so
+    // their inner path:line token and excerpt are never treated as verifiable.
+    let f = Finding::new(
+        "f",
+        "k",
+        "See [code: `src/big/File.ts:4242` — \"brief excerpt from the file here\"] and \
+         [jira: PROJ-9 — \"ticket paraphrase text goes here\"].",
+        "s",
+        0.5,
+        Effort::Low,
+    );
+    let spans = extract_quoted_spans(&f);
+    assert!(
+        spans.is_empty(),
+        "bracket-citation contents must not be treated as quotes: {spans:?}"
+    );
 }
 
 #[test]

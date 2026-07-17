@@ -27,11 +27,32 @@
 //! Test: `citation_check_tests.rs`.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use tracing::warn;
 
 use crate::models::Finding;
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
+
+/// The four inline bracket-citation forms the system prompt mandates
+/// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`).
+///
+/// Why: the reviewer prompt REQUIRES a finding to cite grounding context with one
+/// of these bracket forms (see `assets/prompts/system_prompt_stock.md`), and the
+/// `[code: `path:line` — "brief excerpt"]` form carries a `path:line` token plus a
+/// deliberately-paraphrased excerpt — neither appears verbatim in diff content.
+/// Treating those as verifiable quotes would FALSE-downgrade a correctly-cited
+/// `code_provable` finding; stripping the whole bracket before quote extraction
+/// keeps only the finding's standalone code quotes (raw diff lines) for grounding.
+/// What: matches a bracket beginning with one of the four labels through its
+/// closing `]`, case-insensitively.
+/// Test: `extract_spans_skips_prompt_mandated_citation_grammar`,
+/// `keeps_finding_using_only_bracket_citation_grammar`.
+static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\[(?:code|jira|gh|apex):[^\]]*\]")
+        .expect("bracket-citation regex is a valid literal")
+});
 
 /// Confidence a downgraded finding is clamped to — mirrors the verifier-refuted
 /// floor so a citation-refuted finding is treated as the noise it is by every
@@ -150,7 +171,7 @@ impl DiffContentIndex {
 /// than dropped.  FAIL-OPEN: findings with no verifiable quote, or whose quote is
 /// grounded, are left exactly as-is.
 /// Test: `downgrades_cross_file_misattribution`, `keeps_grounded_code_provable`,
-/// `downgrades_finding_citing_absent_file`, `fail_open_when_no_quote`.
+/// `fail_open_when_cited_file_not_indexed`, `fail_open_when_no_quote`.
 pub fn downgrade_uncitable_findings(findings: &mut [Finding], index: &DiffContentIndex) -> usize {
     let mut downgraded = 0usize;
     for f in findings.iter_mut() {
@@ -243,15 +264,19 @@ fn has_code_citation(f: &Finding) -> bool {
 /// dropping it outright would hide a possible (unproven) concern from the author —
 /// so we downgrade to advisory instead (honest partial signal, mirroring the
 /// verifier-refuted treatment).
-/// What: clears `code_provable`; removes a `code:` citation (leaving spec/ticket
-/// citations intact); and lowers confidence to the refuted floor so every verdict
-/// floor treats it as non-evidence.
-/// Test: `apply_downgrade_clears_provability_and_code_citation`.
+/// What: clears `code_provable`; removes ANY `source_citation` (not just a `code:`
+/// one); and lowers confidence to the refuted floor so every verdict floor treats
+/// it as non-evidence.  Stripping the whole citation is deliberate: a finding whose
+/// diff-provable factual basis was just disproven cannot be trusted to have
+/// correctly grounded a co-attached spec/ticket citation either, and leaving a
+/// non-`code:` citation in place would keep `grade::is_escalation_eligible` true
+/// (the citation-grammar shape check) — so `drives_block_floor` would still fire
+/// and the downgrade would be a no-op (code-critic WARN, #2881).
+/// Test: `apply_downgrade_clears_provability_and_all_citations`,
+/// `downgrade_neutralizes_surviving_non_code_citation`.
 fn apply_downgrade(f: &mut Finding) {
     f.code_provable = false;
-    if has_code_citation(f) {
-        f.source_citation = None;
-    }
+    f.source_citation = None;
     f.confidence = f.confidence.min(DOWNGRADED_CITATION_CONFIDENCE);
 }
 
@@ -264,16 +289,21 @@ fn apply_downgrade(f: &mut Finding) {
 /// cited file is what catches the confabulation.  Only the model's OWN explicit
 /// quotes are used (never paraphrase) to keep the check high-precision.
 /// What: pulls backtick-, double-quote-, and single-quote-delimited spans from the
-/// finding's `description` and `consequence`, normalizes each, and keeps those of
-/// at least [`MIN_SPAN_LEN`] chars.  `suggested_replacement` is deliberately
-/// excluded — it is the PROPOSED fix, which by design need not appear in the diff.
-/// Test: `extract_spans_pulls_backtick_and_quotes`, `extract_spans_skips_short`.
+/// finding's `description` and `consequence` AFTER stripping the prompt-mandated
+/// bracket citations (via [`BRACKET_CITATION_RE`]) so a `path:line` token or a
+/// paraphrased excerpt inside a `[code: … ]` citation is never mistaken for a
+/// verifiable diff quote.  Each span is normalized and kept only if at least
+/// [`MIN_SPAN_LEN`] chars.  `suggested_replacement` is deliberately excluded — it
+/// is the PROPOSED fix, which by design need not appear in the diff.
+/// Test: `extract_spans_pulls_backtick_and_quotes`, `extract_spans_skips_short`,
+/// `extract_spans_skips_prompt_mandated_citation_grammar`.
 fn extract_quoted_spans(f: &Finding) -> Vec<String> {
     let mut out = Vec::new();
     for text in [f.description.as_str(), f.consequence.as_str()] {
-        collect_delimited(text, '`', &mut out);
-        collect_delimited(text, '"', &mut out);
-        collect_delimited(text, '\'', &mut out);
+        let stripped = BRACKET_CITATION_RE.replace_all(text, " ");
+        collect_delimited(&stripped, '`', &mut out);
+        collect_delimited(&stripped, '"', &mut out);
+        collect_delimited(&stripped, '\'', &mut out);
     }
     out.retain(|s| s.len() >= MIN_SPAN_LEN);
     out
