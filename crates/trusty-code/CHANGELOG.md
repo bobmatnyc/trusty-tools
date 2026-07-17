@@ -10,6 +10,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Embedded default agents converted from TOML to `.md`+frontmatter (#2897,
+  epic #2892, Slice C).** The three bundled default agents
+  (`engineer`/`qa-agent`/`code-reviewer`, #2895) are now authored as
+  `crates/trusty-code/src/assets/agents/*.md` instead of `*.toml`; the retired
+  TOML files are deleted. The embedded fallback in `agents::load_all_agents`
+  now projects each `.md` string via a new
+  `agents::md_loader::project_embedded_md`, which shares the exact same
+  frontmatter -> `AgentConfig` mapping (`project_to_agent_config`) that the
+  disk `.md` loader (`load_md_agent`) uses — the only difference is that the
+  embedded path skips `compose_agent`'s `extends:`-chain resolution (there is
+  no source directory for a compiled-in `&'static str` to resolve against,
+  and none of the three defaults declare `extends:`), calling
+  `agent_metadata_from_str`/`extract_body` directly on the raw string
+  instead. Every default's projected `AgentConfig` is field-identical to what
+  the retired TOML produced — same `name`, `model` (`None`), `max_tokens`,
+  `tools.allowed` (exact allowlist), and `system_prompt.content` (the prose
+  body is byte-identical modulo the shared `.md` body-extraction path's
+  pre-existing trailing-whitespace trim). Purely additive/non-breaking: the
+  TOML loader for user `.claude/agents/*.toml` configs (`AgentConfig::load`,
+  `AgentConfig::from_toml_str`) is untouched; TOML retirement there is a
+  later slice (D).
 - **Markdown+frontmatter `.md` agent loader, dark-launched alongside TOML
   (#2897, epic #2892, Slice B).** `agents::md_loader::load_md_agent` composes
   a `.md` agent source file's `extends:` chain via

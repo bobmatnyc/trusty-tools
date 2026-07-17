@@ -157,9 +157,9 @@ pub mod llm;
 /// bundling a working default set at compile time (mirroring, not sharing,
 /// `trusty-mpm`'s embed pattern) gives every project a usable harness before
 /// any project-level config exists. Disk-based config always wins when present.
-/// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (three native-TOML tcode agents);
-/// `EmbeddedSkill`/`DEFAULT_SKILLS` (trusty-mpm's universal skill set, minus
-/// the `tm-*` orchestration skills).
+/// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (three tcode agents, authored as
+/// Markdown+frontmatter as of #2897 Slice C); `EmbeddedSkill`/`DEFAULT_SKILLS`
+/// (trusty-mpm's universal skill set, minus the `tm-*` orchestration skills).
 /// Test: `assets::tests::*`.
 pub mod assets;
 

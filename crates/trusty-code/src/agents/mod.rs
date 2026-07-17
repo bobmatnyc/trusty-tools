@@ -159,25 +159,25 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
     parsed
 }
 
-/// Parse `crate::assets::DEFAULT_AGENTS` in-memory, skipping parse errors.
+/// Project `crate::assets::DEFAULT_AGENTS` in-memory into `AgentConfig`s.
 ///
 /// Why: The embedded fallback path for `load_all_agents` — no disk I/O, no
-/// materialization step (unlike trusty-mpm's install-time embed pattern);
-/// the bundled TOML is parsed directly from the compiled-in `&'static str`.
-/// What: Calls `AgentConfig::from_toml_str` on every `EmbeddedAgent::toml`;
-/// a parse failure (should not happen for a bundled asset, but must not
-/// panic) is logged at WARN and skipped.
-/// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`.
+/// materialization step (unlike trusty-mpm's install-time embed pattern); the
+/// bundled `.md` source is projected directly from the compiled-in
+/// `&'static str` (#2897 Slice C — previously native TOML, parsed via
+/// `AgentConfig::from_toml_str`; the format changed, the embedded-fallback
+/// behavior did not).
+/// What: Calls [`md_loader::project_embedded_md`] on every
+/// `EmbeddedAgent::md`. Unlike the retired TOML path this projection is
+/// infallible (`agent_metadata_from_str` degrades to an empty default on a
+/// malformed document rather than erroring — see its doc comment), so there
+/// is nothing to skip; every bundled default always yields a config.
+/// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`,
+/// `assets::tests::default_agents_field_identical_to_retired_toml`.
 fn load_embedded_default_agents() -> Vec<AgentConfig> {
     crate::assets::DEFAULT_AGENTS
         .iter()
-        .filter_map(|embedded| match AgentConfig::from_toml_str(embedded.toml) {
-            Ok(cfg) => Some(cfg),
-            Err(e) => {
-                tracing::warn!("skipping embedded default agent '{}': {e}", embedded.name);
-                None
-            }
-        })
+        .map(|embedded| md_loader::project_embedded_md(embedded.name, embedded.md))
         .collect()
 }
 
