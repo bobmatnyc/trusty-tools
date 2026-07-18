@@ -84,6 +84,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   #3043):** the wire types match the shipped Rust field names
   (`working_context_pct`, `compaction_fired`) verbatim, not DOC-39 §5.6's
   stale `working_pct`/`fired` prose — the code is the source of truth.
+  **Known gap (issue #3050):** AC-5.9 requires a distinct "not applicable"
+  state for non-PM sessions (cadence is PM-only); `ContextBudgetQuery` has
+  no PM/cadence discriminant on the wire yet, so non-PM sessions render as
+  "no data yet" rather than "not applicable" until #3050 lands the
+  discriminant.
 - Phase-1 status bar: readiness + budget chrome per DOC-39 §6.2 (refs #2983).
   `StatusBar.svelte` polls `GET /sessions` then `GET /sessions/{id}/readiness`
   (REST Slice 2, squash 15156b42) every 5s via a Svelte 5 `$effect` whose

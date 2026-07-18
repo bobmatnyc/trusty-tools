@@ -21,6 +21,12 @@
 // `never_recorded` — the status bar has nothing honest to say about a budget
 // it hasn't queried, so the two states render the same "no data yet" cue
 // rather than a silently-different third label.
+//
+// Known gap (issue #3050, see `classifyBudget`/`budgetLabel` docstrings):
+// DOC-39 §4.5 AC-5.9 requires a distinct "not applicable" state for non-PM
+// sessions (cadence is PM-only). `ContextBudgetQuery` carries no PM/cadence
+// discriminant on the wire today, so non-PM sessions render as "no data
+// yet" rather than "not applicable" until #3050 adds that discriminant.
 // Test: `context-budget.test.ts`.
 
 /** Mirrors `crate::events::ContextBudgetSnapshot` field-for-field. */
@@ -56,6 +62,15 @@ export type BudgetVisualState = 'ok' | 'warn' | 'no-data';
  * this is the one threshold decision the status bar makes.
  * What: `null` or `{status: 'never_recorded'}` -> `'no-data'`;
  * `within_budget === false` -> `'warn'`; otherwise `'ok'`.
+ *
+ * **Known gap (issue #3050):** AC-5.9 requires a distinct "not applicable"
+ * treatment for non-PM sessions (cadence is PM-only —
+ * `AgentLoopConfig.cadence` defaults `None`; only `task/executor.rs:327`
+ * sets `Some`), rather than implying an unmanaged context. `ContextBudgetQuery`
+ * carries no PM/cadence discriminant on the wire today, so this function
+ * cannot tell "non-PM session, will never record" from "PM session, hasn't
+ * completed a turn yet" — both collapse to `'no-data'` until #3050 adds the
+ * discriminant. Do not paper over this with client-side PM heuristics.
  * Test: `context-budget.test.ts::classifyBudget`.
  */
 export function classifyBudget(query: ContextBudgetQuery | null): BudgetVisualState {
@@ -96,6 +111,11 @@ export function budgetDotClass(query: ContextBudgetQuery | null): string {
  * What: `null`/`never_recorded` -> `"no data yet"`;
  * `recorded` -> `"NN% working"`, `", compacted"` appended when
  * `compaction_fired`.
+ *
+ * **Known gap (issue #3050):** AC-5.9's "not applicable" state for non-PM
+ * sessions requires a wire discriminant that doesn't exist yet — tracked
+ * #3050; until then non-PM sessions render as `"no data yet"`, same as a PM
+ * session that simply hasn't completed a turn.
  * Test: `context-budget.test.ts::budgetLabel`.
  */
 export function budgetLabel(query: ContextBudgetQuery | null): string {
