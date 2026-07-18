@@ -69,6 +69,13 @@ pub struct CompareArgs {
     /// Provider backend for bare model ids: `bedrock` (default) or `openrouter`.
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
+
+    /// Name of a review template to append as a prompt addendum (issue #2995).
+    /// See `RunArgs::review_template` for the resolution and layering details;
+    /// applied identically here — highest-precedence override for every model
+    /// run in the compare set.
+    #[arg(long, value_name = "NAME")]
+    pub review_template: Option<String>,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -88,6 +95,14 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     let search_for_resolve = HttpSearchClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
     config.resolve_index(&search_for_resolve).await;
+
+    // `--review-template` is the highest-precedence override (issue #2995);
+    // apply it directly to the already-resolved config, matching how
+    // `--provider` is handled locally below rather than re-deriving the whole
+    // config (compare, unlike `run`, does not rebuild `config` from scratch).
+    if let Some(name) = args.review_template.clone() {
+        config.review_template = Some(name);
+    }
 
     let models: Vec<String> = args.models.clone().unwrap_or_else(|| {
         COMPARE_CANDIDATE_MODELS

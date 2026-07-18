@@ -5,30 +5,39 @@
 //! (no I/O, no config reading) and lets tests exercise resolution in isolation.
 //!
 //! What: `build_voice_config` maps a `ReviewConfig` to a `VoiceConfig` by
-//! loading the configured voice package (if any) via `VoiceLoader` and enabling
-//! the principles layer per the config flag.
+//! loading the configured voice package (if any) via `VoiceLoader`, enabling
+//! the principles layer per the config flag, and loading the named review
+//! template (if any, issue #2995) via `ReviewTemplateLoader`.
 //!
 //! Test: `build_voice_config_no_voice`, `build_voice_config_principles_on`,
 //! `build_voice_config_principles_off`, `build_voice_config_duetto_bundled`,
-//! `build_voice_config_unknown_voice_degrades`.
+//! `build_voice_config_unknown_voice_degrades`,
+//! `build_voice_config_review_template_bundled`,
+//! `build_voice_config_unknown_review_template_degrades`.
 
 use crate::{
     config::ReviewConfig,
+    review_template::ReviewTemplateLoader,
     voice::{VoiceConfig, VoiceLoader, principles::principles_addendum},
 };
 
 /// Build the resolved `VoiceConfig` from `ReviewConfig` for the prompt builder.
 ///
 /// Why: the runner is the single place that knows both the config (which voice
-/// package is selected, whether principles are on) and the loader (which
-/// discovers and parses voice.toml files).  Centralising resolution here keeps
-/// the prompt builder pure (no I/O, no config reading).
+/// package / review template is selected, whether principles are on) and the
+/// loaders (which discover and parse `voice.toml` / template `.md` files).
+/// Centralising resolution here keeps the prompt builder pure (no I/O, no
+/// config reading).
 /// What: enables/disables the principles layer per `config.voice_principles`;
 /// loads the named voice package (if any) via `VoiceLoader`, falling back to
 /// the bundled fixture for `"duetto"` or degrading silently to no-voice for
-/// unknown packages.  A missing voice package is not fatal — the review proceeds
-/// with the stock + principles layers.
-/// Test: `build_voice_config_no_voice`, `build_voice_config_duetto_bundled`.
+/// unknown packages; loads the named review template (if any, issue #2995) via
+/// `ReviewTemplateLoader`, degrading silently to no-template on an unknown
+/// name. Neither a missing voice package nor a missing review template is
+/// fatal — the review proceeds with whichever earlier layers are present.
+/// Test: `build_voice_config_no_voice`, `build_voice_config_duetto_bundled`,
+/// `build_voice_config_review_template_bundled`,
+/// `build_voice_config_unknown_review_template_degrades`.
 pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
     let principles = if config.voice_principles {
         Some(principles_addendum().to_string())
@@ -71,10 +80,41 @@ pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
         }
     };
 
+    let (review_template, review_template_name) = match config.review_template.as_deref() {
+        None | Some("") => (None, None),
+        Some(name) => {
+            let loader = ReviewTemplateLoader::new();
+            match loader.load(name) {
+                Ok(text) if text.trim().is_empty() => {
+                    // Same rationale as the empty-voice-addendum branch above: an
+                    // empty template contributes nothing, so treat it as absent
+                    // rather than misleadingly reporting a template as active.
+                    tracing::warn!(
+                        review_template = name,
+                        "review template loaded but content is empty; \
+                         treating as no-template (review_template_name=None)"
+                    );
+                    (None, None)
+                }
+                Ok(text) => (Some(text), Some(name.to_string())),
+                Err(e) => {
+                    tracing::warn!(
+                        review_template = name,
+                        error = %e,
+                        "review template not found; proceeding without review-template layer"
+                    );
+                    (None, None)
+                }
+            }
+        }
+    };
+
     VoiceConfig {
         principles,
         voice_addendum,
         voice_name,
+        review_template,
+        review_template_name,
     }
 }
 
@@ -84,21 +124,24 @@ pub fn build_voice_config(config: &ReviewConfig) -> VoiceConfig {
 mod tests {
     use super::*;
 
-    /// Helper: minimal ReviewConfig with voice defaults, isolated from ambient env.
+    /// Helper: minimal ReviewConfig with voice/template defaults, isolated from
+    /// ambient env.
     ///
-    /// Why: `ReviewConfig::from_env_and_file` reads `TRUSTY_REVIEW_VOICE_PACKAGE`
-    /// and `TRUSTY_REVIEW_PRINCIPLES` from the process environment; a developer or
-    /// CI shell that has those vars set would silently inject unexpected values into
-    /// tests that call this helper.  Clearing them here makes every test in this
-    /// module deterministic regardless of the ambient environment.
-    /// What: removes the two voice-related env vars then calls `from_env_and_file`.
-    /// Test: callers assert on specific voice fields.
+    /// Why: `ReviewConfig::from_env_and_file` reads `TRUSTY_REVIEW_VOICE_PACKAGE`,
+    /// `TRUSTY_REVIEW_PRINCIPLES`, and `TRUSTY_REVIEW_TEMPLATE` (#2995) from the
+    /// process environment; a developer or CI shell that has those vars set
+    /// would silently inject unexpected values into tests that call this
+    /// helper.  Clearing them here makes every test in this module
+    /// deterministic regardless of the ambient environment.
+    /// What: removes the three env vars then calls `from_env_and_file`.
+    /// Test: callers assert on specific voice/template fields.
     fn config_default_voice() -> ReviewConfig {
         // SAFETY: tests in this module are run with #[serial] to prevent races
         // when multiple threads manipulate the process environment.
         unsafe {
             std::env::remove_var("TRUSTY_REVIEW_VOICE_PACKAGE");
             std::env::remove_var("TRUSTY_REVIEW_PRINCIPLES");
+            std::env::remove_var("TRUSTY_REVIEW_TEMPLATE");
         }
         crate::config::ReviewConfig::from_env_and_file(None, None)
     }
@@ -314,5 +357,79 @@ system_addendum = ""
             voice_name.is_none(),
             "empty addendum must produce None voice_name (not misleading Some)"
         );
+    }
+
+    // ── Review template resolution (#2995) ──────────────────────────────────
+
+    /// build_voice_config loads the bundled `strict-security` review template.
+    ///
+    /// Why: the bundled template must be discoverable without external files,
+    /// mirroring `build_voice_config_duetto_bundled` for voice packages.
+    /// What: sets `review_template` to `"strict-security"`; asserts
+    /// `review_template`/`review_template_name` are populated and the addendum
+    /// composes into `combined_addendum` after voice/principles.
+    /// Test: uses bundled fixture; no network.
+    #[test]
+    #[serial_test::serial]
+    fn build_voice_config_review_template_bundled() {
+        let mut config = config_default_voice();
+        config.review_template = Some("strict-security".to_string());
+        let vc = build_voice_config(&config);
+        assert!(
+            vc.review_template.is_some(),
+            "strict-security template must produce a non-None addendum"
+        );
+        assert_eq!(vc.review_template_name.as_deref(), Some("strict-security"));
+        assert!(
+            vc.combined_addendum().contains("strict-security"),
+            "combined_addendum must include the review-template content"
+        );
+    }
+
+    /// build_voice_config degrades silently for an unknown review-template name.
+    ///
+    /// Why: a typo in the template name must not block reviews; the pipeline
+    /// must degrade to whichever earlier layers are present (no panic, no
+    /// error propagation) — mirrors `build_voice_config_unknown_voice_degrades`.
+    /// What: sets `review_template` to a non-existent name; asserts both
+    /// `review_template` and `review_template_name` are `None`, while
+    /// principles remains active.
+    /// Test: no filesystem writes.
+    #[test]
+    #[serial_test::serial]
+    fn build_voice_config_unknown_review_template_degrades() {
+        let mut config = config_default_voice();
+        config.review_template = Some("nonexistent-template-xyz".to_string());
+        config.voice_principles = true;
+        let vc = build_voice_config(&config);
+        assert!(
+            vc.review_template.is_none(),
+            "unknown review template must degrade to None (not panic)"
+        );
+        assert!(
+            vc.review_template_name.is_none(),
+            "unknown review template must produce None review_template_name"
+        );
+        assert!(
+            vc.principles.is_some(),
+            "principles must remain active even when the review template is missing"
+        );
+    }
+
+    /// No `review_template` configured → both fields stay `None`.
+    ///
+    /// Why: opt-in guard — the common case (no `--review-template` flag) must
+    /// not accidentally activate a template.
+    /// What: leaves `config.review_template` at its default (`None`); asserts
+    /// no template layer is active.
+    /// Test: no filesystem writes.
+    #[test]
+    #[serial_test::serial]
+    fn build_voice_config_no_review_template() {
+        let mut config = config_default_voice();
+        config.review_template = None;
+        let vc = build_voice_config(&config);
+        assert!(vc.review_template.is_none());
+        assert!(vc.review_template_name.is_none());
     }
 }

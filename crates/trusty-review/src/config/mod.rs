@@ -25,12 +25,20 @@ pub mod voice;
 // Why: outcome-polling configuration extracted to keep config/mod.rs under the
 // 500-line cap — mirrors the verification module pattern.
 pub mod outcome;
+// Why: per-project `.trusty-review.toml` discovery (issue #2995) — separated
+// so the pure/impure git-root-walk split mirrors `index_resolver`.
+pub mod repo_config;
+// Why: `[review]` config-file section + named review-template precedence
+// resolution (issue #2995) — mirrors the `voice` submodule's pattern.
+pub mod review_template;
 
 pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
 pub use context::{ContextConfig, ContextFileConfig};
 pub use outcome::{OutcomeConfig, OutcomeFileConfig};
+pub use repo_config::find_repo_config_path;
+pub use review_template::ReviewFileConfig;
 pub use role_models::{
     FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleModels,
 };
@@ -106,6 +114,10 @@ struct TomlFile {
     coverage: crate::coverage::CoverageFileConfig,
     #[serde(default)]
     outcome: outcome::OutcomeFileConfig,
+    // Why: `[review] template = "<name>"` (issue #2995) — resolved by
+    // `review_template::load_review_template`.
+    #[serde(default)]
+    review: review_template::ReviewFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -247,6 +259,18 @@ pub struct ReviewConfig {
     /// The config file key is `[voice] principles = false`.
     pub voice_principles: bool,
 
+    // ── Named review template (issue #2995) ────────────────────────────────
+    /// Name of the review template appended as a prompt addendum, composing
+    /// with (never replacing) the stock rubric and the voice/principles
+    /// layers above — see `pipeline::voice_config::build_voice_config` for the
+    /// full layering order (stock → principles → voice → review template).
+    ///
+    /// Resolved via `--review-template <name>` (highest), a repo-scoped
+    /// `.trusty-review.toml` `[review] template` key, `TRUSTY_REVIEW_TEMPLATE`,
+    /// then the caller-selected config file's `[review] template` key.
+    /// `None` = no review template (opt-in, stock rubric unchanged).
+    pub review_template: Option<String>,
+
     // ── Coverage gating (issue #1014) ─────────────────────────────────────
     /// Resolved coverage-gating policy.
     ///
@@ -263,27 +287,66 @@ pub struct ReviewConfig {
 }
 
 impl ReviewConfig {
-    /// Load config from env vars merged over an optional TOML file.
+    /// Load config from env vars merged over an optional TOML file, plus an
+    /// auto-discovered repo-scoped `.trusty-review.toml` (issue #2995).
     ///
     /// Why: provides the single, authoritative config-loading path; callers
     /// do not need to know the env-var names or file location.
-    /// What: reads the TOML file (if it exists) for the `[models]` table,
-    /// then applies env-var overrides.  Missing files are not errors.
-    /// `cli_overrides` carries any parsed CLI flags.
+    /// What: when `config_path` is `None` (no explicit `--config` flag), looks
+    /// for `.trusty-review.toml` at the git root of the current working
+    /// directory via `repo_config::find_repo_config_path` — an explicit
+    /// `config_path` always wins and skips repo discovery entirely (CLI
+    /// `--config` > repo file).  Delegates to `from_env_and_file_inner`, the
+    /// injectable core used directly by tests to avoid mutating the real
+    /// process CWD.
     /// Test: `test_config_from_env` exercises env-var loading; a TOML file
-    /// path can be injected for config-file testing.
+    /// path can be injected for config-file testing; repo-file precedence is
+    /// covered in `config_tests.rs` via `from_env_and_file_inner`.
     pub fn from_env_and_file(
         config_path: Option<&std::path::Path>,
         cli_overrides: Option<&RoleCliOverrides>,
+    ) -> Self {
+        let repo_config_path = resolve_repo_config_path(config_path);
+        Self::from_env_and_file_inner(config_path, cli_overrides, repo_config_path.as_deref())
+    }
+
+    /// Injectable core of `from_env_and_file` — takes the repo-scoped config
+    /// path explicitly instead of discovering it from the real process CWD.
+    ///
+    /// Why: process CWD is a global OS-level resource; mutating it from a test
+    /// is unsafe under Rust's default parallel test execution (other,
+    /// unrelated tests may run concurrently in the same binary).  Splitting
+    /// out this core lets tests pass a tempdir-rooted `.trusty-review.toml`
+    /// path directly, exercising the full repo-file precedence chain with zero
+    /// CWD mutation — mirrors the pure/impure split in `repo_config`.
+    /// What: identical to the pre-#2995 `from_env_and_file` body, except every
+    /// field that supports repo-file precedence (`voice_package`,
+    /// `voice_principles`, `review_template`) also consults `repo_toml_file`
+    /// ahead of the env var.  When `repo_config_path` is `None` (the common
+    /// case — no repo file discovered, or an explicit `--config` was given),
+    /// behaviour is byte-for-byte identical to pre-#2995 (zero regression).
+    /// Test: `config_tests.rs::{repo_config_voice_overrides_env,
+    /// repo_config_review_template_overrides_env,
+    /// explicit_config_path_skips_repo_discovery}`.
+    fn from_env_and_file_inner(
+        config_path: Option<&std::path::Path>,
+        cli_overrides: Option<&RoleCliOverrides>,
+        repo_config_path: Option<&std::path::Path>,
     ) -> Self {
         // Try to load the config file; silently fall back to defaults.  Parse
         // it once so both the `[models]` and `[verification]` tables come from
         // the same read.
         let toml_file = load_toml_file(config_path);
+        let repo_toml_file = repo_config_path.and_then(|p| load_toml_file(Some(p)));
         let file_models = toml_file.as_ref().map(|f| f.models.clone());
         let file_verification = toml_file.as_ref().map(|f| f.verification.clone());
         let file_context = toml_file.as_ref().map(|f| f.context.clone());
         let file_voice: Option<&voice::VoiceFileConfig> = toml_file.as_ref().map(|f| &f.voice);
+        let repo_voice: Option<&voice::VoiceFileConfig> = repo_toml_file.as_ref().map(|f| &f.voice);
+        let file_review: Option<&review_template::ReviewFileConfig> =
+            toml_file.as_ref().map(|f| &f.review);
+        let repo_review: Option<&review_template::ReviewFileConfig> =
+            repo_toml_file.as_ref().map(|f| &f.review);
         let file_coverage: Option<&crate::coverage::CoverageFileConfig> =
             toml_file.as_ref().map(|f| &f.coverage);
         let file_outcome: Option<&outcome::OutcomeFileConfig> =
@@ -350,8 +413,13 @@ impl ReviewConfig {
             context_sources,
             apex_index: std::env::var("TRUSTY_SEARCH_APEX_INDEX").unwrap_or_default(),
             apex_path_prefixes: load_apex_path_prefixes(),
-            voice_package: voice::load_voice_package(file_voice),
-            voice_principles: voice::load_voice_principles(file_voice),
+            voice_package: voice::load_voice_package(repo_voice, file_voice),
+            voice_principles: voice::load_voice_principles(repo_voice, file_voice),
+            review_template: review_template::load_review_template(
+                cli_overrides.and_then(|c| c.review_template.as_deref()),
+                repo_review,
+                file_review,
+            ),
             coverage: crate::coverage::CoveragePolicy::from_env_and_file(file_coverage),
             outcome: OutcomeConfig::from_env_and_file(file_outcome),
         }
@@ -506,6 +574,23 @@ fn load_toml_file(path: Option<&std::path::Path>) -> Option<TomlFile> {
             }
         },
     }
+}
+
+/// Decide whether repo-scoped `.trusty-review.toml` discovery should run.
+///
+/// Why: split out as a pure, CWD-independent gate so "an explicit `--config`
+/// path always skips repo discovery" (issue #2995's stated precedence, CLI
+/// `--config` > repo file) is unit-testable without touching the real process
+/// CWD — `config_path.is_some()` short-circuits before any filesystem I/O.
+/// What: returns `None` immediately when `config_path` is `Some` (explicit
+/// config always wins); otherwise delegates to
+/// `repo_config::find_repo_config_path` (real CWD discovery).
+/// Test: `explicit_config_path_skips_repo_discovery` in `config_tests.rs`.
+fn resolve_repo_config_path(config_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    if config_path.is_some() {
+        return None;
+    }
+    repo_config::find_repo_config_path()
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

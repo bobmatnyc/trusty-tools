@@ -60,6 +60,7 @@ fn build_system_prompt_with_principles_only() {
         principles: Some(principles_addendum().to_string()),
         voice_addendum: None,
         voice_name: None,
+        ..Default::default()
     };
     let result = build_system_prompt(&vc);
     // Must start with stock base.
@@ -91,6 +92,7 @@ fn build_system_prompt_full_pipeline_ordering() {
         principles: Some("## PRINCIPLES_MARKER".to_string()),
         voice_addendum: Some("## VOICE_MARKER".to_string()),
         voice_name: Some("test".to_string()),
+        ..Default::default()
     };
     let result = build_system_prompt(&vc);
     let stock_pos = result.find("senior software engineer").unwrap();
@@ -103,6 +105,48 @@ fn build_system_prompt_full_pipeline_ordering() {
     assert!(
         principles_pos < voice_pos,
         "principles must precede voice addendum"
+    );
+}
+
+/// build_system_prompt with all four layers produces stock < principles <
+/// voice < review_template document order (#2995).
+///
+/// Why: end-to-end guard for the full layering order documented on
+/// `VoiceConfig::combined_addendum` — the review template is the most
+/// project-specific layer and must land LAST, after the broader
+/// principles/voice guidance, never replacing the stock rubric.
+/// What: uses synthetic markers for all four layers; asserts strict ordering.
+/// Test: no network.
+#[test]
+fn build_system_prompt_full_pipeline_with_review_template_ordering() {
+    let vc = VoiceConfig {
+        principles: Some("## PRINCIPLES_MARKER".to_string()),
+        voice_addendum: Some("## VOICE_MARKER".to_string()),
+        voice_name: Some("test".to_string()),
+        review_template: Some("## TEMPLATE_MARKER".to_string()),
+        review_template_name: Some("strict-security".to_string()),
+    };
+    let result = build_system_prompt(&vc);
+    let stock_pos = result.find("senior software engineer").unwrap();
+    let principles_pos = result.find("PRINCIPLES_MARKER").unwrap();
+    let voice_pos = result.find("VOICE_MARKER").unwrap();
+    let template_pos = result.find("TEMPLATE_MARKER").unwrap();
+    assert!(
+        stock_pos < principles_pos,
+        "stock base must precede principles"
+    );
+    assert!(
+        principles_pos < voice_pos,
+        "principles must precede voice addendum"
+    );
+    assert!(
+        voice_pos < template_pos,
+        "voice addendum must precede the review template"
+    );
+    // The stock rubric is never replaced — it remains a full substring.
+    assert!(
+        result.contains(reviewer_system_prompt()),
+        "the stock base prompt must remain intact (wholesale replacement is out of scope)"
     );
 }
 
@@ -119,6 +163,7 @@ fn build_review_prompt_with_voice_config_principles() {
         principles: Some("## UNIQUE_PRINCIPLES_42".to_string()),
         voice_addendum: None,
         voice_name: None,
+        ..Default::default()
     };
     let req = build_review_prompt(
         "o",
@@ -153,6 +198,7 @@ fn build_review_prompt_with_voice_config_full() {
         principles: Some("PRINCIPLES_TEXT_XYZ".to_string()),
         voice_addendum: Some("VOICE_TEXT_XYZ".to_string()),
         voice_name: Some("testvoice".to_string()),
+        ..Default::default()
     };
     let req = build_review_prompt(
         "o",
