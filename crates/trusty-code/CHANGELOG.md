@@ -39,6 +39,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `catchup::tests::*` no longer mutates the process-global `TRUSTY_MEMORY_URL`
+  env var to point at a fixed, unreachable `127.0.0.1:19999` — under
+  `cargo test`'s default parallelism, that unguarded `unsafe { set_var(..) }`
+  (with no matching cleanup) leaked into every other test in the same lib
+  binary that resolves a trusty-memory URL via `pm_catchup_context`
+  (e.g. `run_task::tests::repeated_llm_errors_trigger_redelegation_cap_not_pm_turn_cap`),
+  producing false-red gates on unrelated PRs. `pm_catchup_context` is now
+  split into a thin env-resolving wrapper and a testable
+  `pm_catchup_context_with_memory_url(project_dir, memory_url)` that takes the
+  target URL as a parameter, so tests thread in a guaranteed-unreachable
+  address directly with no shared mutable global, no lock, and no cleanup
+  required (closes #3003).
 - the unified-diff applier (`tools/fs/edit_format/diff.rs`) no longer errors
   on a `git diff`-style `\ No newline at end of file` footer marker inside a
   hunk body — the marker is metadata, not content, so it no longer fails the
