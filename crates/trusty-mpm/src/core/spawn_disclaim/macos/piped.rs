@@ -287,8 +287,12 @@ mod tests {
     #[tokio::test]
     async fn spawn_piped_disclaimed_reports_spawn_error_for_missing_binary() {
         let cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary-2997");
+        // `PipedSpawn` holds `Box<dyn AsyncWrite/AsyncRead>` trait objects, so
+        // it isn't `Debug` and can't go through `expect_err`; `.err()` avoids
+        // needing a `Debug` bound on the `Ok` side entirely.
         let err = disclaimed_piped_spawn(cmd)
-            .expect_err("spawning a missing binary must error, not hang or panic");
+            .err()
+            .expect("spawning a missing binary must error, not hang or panic");
         assert!(matches!(
             err.kind(),
             std::io::ErrorKind::NotFound | std::io::ErrorKind::Other
