@@ -191,6 +191,26 @@ fn grade_model_approve_solo_high_confidence_medium_still_escalates() {
     );
 }
 
+/// Lower-boundary companion (mirrors the inclusive upper-edge test below): a
+/// single Medium finding EXACTLY at `FLOOR_MIN_CONFIDENCE` (0.80) never even
+/// reaches Tier 2 — `correctness_floor`'s `has_confident_medium` gate is a
+/// STRICT `confidence > medium_floor`, so 0.80 does not count as a confident
+/// Medium at all.  The floor stays APPROVE and the #1897 cap never engages
+/// (there is nothing to cap — this is not the marginal-band case, it is the
+/// pre-existing #1015 advisory-tier exclusion).
+#[test]
+fn grade_model_approve_solo_medium_at_floor_min_boundary_stays_approve() {
+    let findings = vec![finding(Effort::Medium, 0.80)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "a single Medium finding exactly at FLOOR_MIN_CONFIDENCE (0.80) must \
+         NOT count toward the floor at all — the gate is strictly `>` 0.80 \
+         (#1015), so this never reaches Tier 2 / the #1897 cap"
+    );
+}
+
 /// Boundary companion: a single Medium finding EXACTLY at the solo-escalation
 /// bar (`confidence == SOLO_MEDIUM_ESCALATION_CONFIDENCE`, 0.90) still
 /// escalates uncapped — the bar is inclusive (`>=`), matching the inclusive
