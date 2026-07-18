@@ -39,15 +39,19 @@
 //! `GET /sessions/{id}`, `GET /sessions/{id}/transcript`,
 //! `GET /sessions/{id}/readiness`, `GET /sessions/{id}/goals`, each a thin
 //! handler calling [`respond`] against its `session.*` JSON-RPC twin.
-//! Further resource groups (`task.*`, `POST /sessions`, …) land in S3-S6,
-//! each its own sibling module reusing [`respond`]/[`throwaway_ctx`] rather
-//! than reimplementing the glue.
+//! Slice 3 ([`sessions_write`]) adds the `session.*` WRITE routes:
+//! `POST /sessions`, `POST /sessions/{id}/messages`,
+//! `POST /sessions/{id}/cancel`, `PUT /sessions/{id}/goal`,
+//! `DELETE /sessions/{id}/goal`. Further resource groups (`task.*`, …) land
+//! in S4-S6, each its own sibling module reusing
+//! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
 //! assertion per `rpc_error_to_status` mapping. See `sessions::tests` for
 //! the Slice 2 route-level coverage.
 
 pub mod sessions;
+pub mod sessions_write;
 
 use axum::Json;
 use axum::http::StatusCode;

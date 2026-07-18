@@ -77,8 +77,8 @@ struct HttpState {
 }
 
 /// Build the pure axum router (no listener bound) exposing `POST /rpc`,
-/// `GET /health`, `GET /sessions/{id}/events`, and (#2983 Slice 2) the
-/// `GET /sessions*` REST resource group.
+/// `GET /health`, `GET /sessions/{id}/events`, and (#2983 Slice 2 + Slice 3)
+/// the full `/sessions*` REST resource group.
 ///
 /// Why: kept separate from [`run_http`] so unit tests exercise routing and
 /// dispatch via `tower::util::ServiceExt::oneshot` without opening a real
@@ -89,13 +89,17 @@ struct HttpState {
 /// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
 /// session's ring-buffer replay then live events as SSE; `crate::serve::rest`
 /// merges in the `session.*` REST read routes (`GET /sessions`,
-/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`) —
-/// none of which collide with the paths registered directly on this router.
+/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`) and
+/// (Slice 3) the write routes (`POST /sessions`,
+/// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
+/// `PUT`/`DELETE /sessions/{id}/goal`) — none of which collide with the
+/// paths registered directly on this router.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
 /// `http_session_events_sse_streams_replay_then_live_event`,
-/// `http_rest_sessions_route_is_merged_in`.
+/// `http_rest_sessions_route_is_merged_in`,
+/// `http_rest_post_sessions_route_is_merged_in`.
 pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
@@ -106,7 +110,9 @@ pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) ->
         .route("/health", get(health_handler))
         .route("/sessions/{id}/events", get(session_events_sse))
         .with_state(state);
-    let app = core.merge(rest::sessions::routes(router));
+    let app = core
+        .merge(rest::sessions::routes(router.clone()))
+        .merge(rest::sessions_write::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
@@ -371,6 +377,82 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert!(v["sessions"].is_array());
+    }
+
+    /// `POST /sessions` (the #2983 Slice 3 REST write route group, merged in
+    /// by `build_axum_router` via `rest::sessions_write::routes`) must be
+    /// reachable on the SAME router `GET /sessions` is (the previous test) —
+    /// proving axum's `.merge()` doesn't silently drop one side when two
+    /// sub-routers register the SAME literal path under different HTTP
+    /// methods. `GET`+`POST` both claim `/sessions`; `PUT`+`DELETE` both
+    /// claim `/sessions/{id}/goal` — this test pins both same-literal-path
+    /// pairs in one pass, driving the created session's id through a real
+    /// `PUT` then `DELETE` on `/goal` and asserting a clean `200` round trip
+    /// (seeding a `pm_transcript` first via the registry so `set_goal`/
+    /// `clear_goal`'s "has a transcript" precondition passes — otherwise a
+    /// merge bug that silently 404'd the route would be indistinguishable
+    /// from a legitimate `400 invalid_argument`). Per-route error/malformed-
+    /// body behaviour is already covered by `rest::sessions_write::tests`;
+    /// this test only pins the merge itself.
+    #[tokio::test]
+    async fn http_rest_post_sessions_route_is_merged_in() {
+        let (router, sessions) = router_and_sessions();
+        let sessions_for_seeding = sessions.clone();
+        let app = build_axum_router(router, sessions);
+
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"task": "do it"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        assert_eq!(created["status"], "running");
+        assert_eq!(created["task"], "do it");
+        let session_id = created["id"].as_str().unwrap().to_string();
+
+        let transcript = sessions_for_seeding
+            .begin_pm_transcript(&session_id, "you are the pm", "first task")
+            .unwrap();
+        sessions_for_seeding.store_pm_transcript(&session_id, transcript);
+
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/sessions/{session_id}/goal"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"slot": 1, "text": "ship it"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_resp.status(), StatusCode::OK);
+        assert_eq!(body_json(put_resp).await, json!({}));
+
+        let delete_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/sessions/{session_id}/goal"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"slot": 1}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_resp.status(), StatusCode::OK);
+        assert_eq!(body_json(delete_resp).await, json!({}));
     }
 
     /// `GET /sessions/{id}/events` on an unknown session must 404 with a
