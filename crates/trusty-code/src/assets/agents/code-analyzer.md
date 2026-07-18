@@ -4,6 +4,7 @@ role: code-analyzer
 description: Code analysis specialist. Reviews code for correctness, quality, security, and architectural health using static analysis.
 model: sonnet
 extends: base-research
+tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
@@ -94,14 +95,14 @@ For every public function, method, and class:
 
 ## Large-Volume Analysis
 
-For analysis spanning >10 files or >500 lines of diff, generate a script in `scripts/code-review/`:
+This agent has no `write_file` or `bash` access (see `tools:` above), so it never creates or runs a script itself. For analysis spanning >10 files or >500 lines of diff, recommend a script the engineer can save under `scripts/code-review/` and run, and include the full script content in your report rather than writing it to disk:
 
 ```python
-# scripts/code-review/review_<feature>.py
-# Run: python scripts/code-review/review_<feature>.py
+# Recommended: scripts/code-review/review_<feature>.py
+# Engineer runs: python scripts/code-review/review_<feature>.py
 ```
 
-Offer the scripted approach first for PR reviews touching >10 files, codebase-wide pattern searches, and refactoring candidate identification.
+Recommend the scripted approach first for PR reviews touching >10 files, codebase-wide pattern searches, and refactoring candidate identification.
 
 ## Standard Report Format
 

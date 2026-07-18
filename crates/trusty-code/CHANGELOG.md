@@ -99,6 +99,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   filesystem access. Not yet wired into `assets::DEFAULT_AGENTS` or
   `agents::load_all_agents`'s dispatchable fallback; that roster expansion is
   a separate, later slice (E3).
+- **31-agent embedded roster wired into the composition layer (refs #2958,
+  epic #2892 Slice E3).** `assets::DEFAULT_AGENTS` grows from 3 to 31
+  entries: the original `engineer`/`qa-agent`/`code-reviewer` plus the 28
+  coding-relevant tm agents Slice E2 bundled. `agents::load_embedded_default_agents`
+  now routes each of the 28 through the new `EmbeddedAgent::Composed`
+  variant, resolving `extends:` chains via `agents::md_loader::project_embedded_md_with_extends`
+  against `assets::EMBEDDED_TM_AGENT_SOURCES`; the original 3 keep the
+  existing flat `EmbeddedAgent::Direct` path. The 5 `BASE-*` templates remain
+  extends-sources only — never dispatchable (`assets::tests::base_templates_are_never_dispatchable`).
+  mpm's own `engineer` agent stays excluded from the roster (upstream #2958
+  decision) specifically to avoid colliding with tcode's own `engineer`
+  default; `assets::tests::no_name_collisions_across_the_31_agent_roster`
+  pins that no collision exists across the final 31.
+  **Known gap, NOT fixed in this slice (#3046):** the embedded fallback this
+  roster feeds (`agents::load_all_agents`'s empty/invalid-disk branch) has no
+  reachable production caller today — a live CLI reproduction on a fresh
+  project showed `tcode run-task rust-engineer` AND `tcode run-task engineer`
+  (one of the original 3, predating this slice) both fail with "agent source
+  not found". The composition layer and the 31-agent roster definition are
+  complete and covered by `assets::tests::*`/`agents::tests::*` (which call
+  `load_all_agents`/`load_embedded_default_agents` directly), but the CLI
+  wiring that would let a fresh project actually dispatch one of these 31
+  names end-to-end is tracked separately as #3046 and intentionally out of
+  scope here.
+  **Tools-restriction deviation (Bob's 2026-07-18 ruling):** four
+  reviewer-intent roster agents — `qa`, `code-critic`, `code-analyzer`,
+  `web-qa` — now carry an explicit restrictive `tools:` frontmatter override
+  in their tcode copy (`read_file`, `grep`, `glob`, `list_dir`,
+  `search_code`, `use_skill`, `finish_task` — no `write_file`/`edit`/`bash`,
+  mirroring tcode's own `code-reviewer` default), deliberately deviating
+  those four files from byte-parity with trusty-mpm's source. A code-critic
+  review round on the same PR additionally found the prose in `web-qa.md`,
+  `qa.md`, and `code-analyzer.md` still instructed write/bash actions the new
+  allowlist denies (creating test scripts, running `CI=true npm test`,
+  `ps aux` monitoring, generating-and-running a review script); all three
+  were reworded in this slice to a genuinely read-only frame — findings plus
+  concrete, ready-to-run recommendations handed off to an engineer/ops/CI to
+  execute, never executed by the agent itself. `documentation` and `research`
+  stay byte-identical and unrestricted per the same ruling — a future E4 CI
+  staleness guard (diffing tcode's copies against trusty-mpm's source) must
+  whitelist the `tools:` line AND the reworded prose sections in these files.
 - **REST resource gateway — `session.*` write routes (#2983, #587, Slice 3).**
   New `POST`/`PUT`/`DELETE` routes on `tcode serve --http`, each a thin
   `axum` handler calling `rest::respond` (or the new `respond_created` for

@@ -125,11 +125,14 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> AgentConfig 
 /// on-disk `.md` agents share one frontmatter -> `AgentConfig` mapping. Any
 /// `AgentBuildError` (unknown name, cycle, depth exceeded, malformed
 /// frontmatter anywhere in the chain) is surfaced as a descriptive
-/// `anyhow::Error`, never a panic. Not yet called from
-/// `crate::assets::DEFAULT_AGENTS` / `load_all_agents`'s fallback --
-/// wiring the 28 roster agents in as dispatchable defaults is Slice E3.
+/// `anyhow::Error`, never a panic. Called from
+/// `crate::agents::load_embedded_default_agents` for every
+/// `crate::assets::EmbeddedAgent::Composed` entry in `DEFAULT_AGENTS` (Slice
+/// E3, #2958) -- the 28 roster agents are dispatchable defaults as of this
+/// slice.
 /// Test: `project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`,
-/// `project_embedded_md_with_extends_unknown_name_errors`.
+/// `project_embedded_md_with_extends_unknown_name_errors`,
+/// `assets::tests::default_agents_parse_and_names_match`.
 pub fn project_embedded_md_with_extends(name: &str) -> anyhow::Result<AgentConfig> {
     let sources =
         build_in_memory_source_map(crate::assets::EMBEDDED_TM_AGENT_SOURCES.iter().copied());
