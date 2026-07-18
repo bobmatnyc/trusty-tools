@@ -9,114 +9,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- `tmux` module: the shared, pure tmux command-construction layer (`TmuxTarget`, `TmuxCommand`, `tmux_argv`, `scrollback_option_commands`, `managed_session_commands`, `DEFAULT_TMUX_HISTORY_LIMIT`/`DEFAULT_TMUX_MOUSE`) — single workspace-wide source of truth for the history-limit/mouse-before-`new-session` ordering guarantee, so trusty-mpm and trusty-agents no longer maintain two independent tmux implementations (closes [#3004](https://github.com/bobmatnyc/trusty-tools/issues/3004), refs #2398, #2399)
+- surface index readiness + working-context budget as events (UI Phase-1) ([#2861](https://github.com/bobmatnyc/trusty-tools/pull/2861)) ([`c5d75fc`](https://github.com/bobmatnyc/trusty-tools/commit/c5d75fc86259ac370a07504efd34671c70db9de7))
+- adopt DOC-38 policy + sld-lint gate (closes #2853, #2854) ([#2863](https://github.com/bobmatnyc/trusty-tools/pull/2863)) ([`580c9a7`](https://github.com/bobmatnyc/trusty-tools/commit/580c9a7d08e873d9706c6b05cfe83eafb2befbfa))
+
+### Fixed
+
+- EmbedderSupervisor shutdown reachable + no respawn on intentional shutdown ([#3023](https://github.com/bobmatnyc/trusty-tools/pull/3023)) ([`dd5f212`](https://github.com/bobmatnyc/trusty-tools/commit/dd5f212900abff69573121e826028e941188b79a))
+- embedder reader-death detection + wedged-sidecar restart ([#2978](https://github.com/bobmatnyc/trusty-tools/pull/2978)) ([`25c56d0`](https://github.com/bobmatnyc/trusty-tools/commit/25c56d0564a281e42719cdd0ea18f03099c47749))
+- validate consolidation model at startup, fail loud once instead of per-cycle retry ([#2977](https://github.com/bobmatnyc/trusty-tools/pull/2977)) ([`afcbfce`](https://github.com/bobmatnyc/trusty-tools/commit/afcbfce4638e68d660c2ce21b926051da645b2ff))
+
+### Changed
+
+- single shared tmux library; route trusty-mpm + trusty-agents through it ([#3017](https://github.com/bobmatnyc/trusty-tools/pull/3017)) ([`383b9f4`](https://github.com/bobmatnyc/trusty-tools/commit/383b9f475e781ef6049900f1630875e8ebf68264))
 - `sld` module (behind the new lightweight `sld` feature — `regex` + `serde_yaml` + `thiserror`, deliberately NOT the heavy `intent-source`/`tickets` stack): the language-agnostic **Spec-Linked Documentation (DOC-38)** reference grammar — the `SPEC-{SUBSYSTEM}-{NN}~{rev}` id grammar + §2.2 reference regex, the per-extension comment-syntax table, fenced-code-aware inline `# Spec References` block parsing, `spec_refs:` YAML-frontmatter parsing, and `{#SPEC-…}` heading-anchor scanning/resolution. Consolidates `revision_of`/`base_id` here as the single source both this grammar and `intent_source::spec_resolve` share (the `intent-source` feature now enables `sld`), so the new `trusty-sld-lint` gate and the ISR parse ONE grammar (DOC-38 §10 F1) ([#2854](https://github.com/bobmatnyc/trusty-tools/issues/2854))
-- `search_readiness::log_readiness`: emits the session-facing readiness log line for an ALREADY-probed `IndexReadiness`. `log_index_readiness` now delegates to it (identical behaviour), so a caller that must both log the readiness AND forward it elsewhere — e.g. `trusty-code` publishing it as a daemon API event for its UI — can probe ONCE rather than paying for a second HTTP probe that might disagree about a lane that flipped in between ([#2784](https://github.com/bobmatnyc/trusty-tools/issues/2784))
-- `search_readiness` module (behind the `search-index` feature): a shared trusty-search index readiness probe so a daily-driver session can *surface* whether a project's index is ready per lane (lexical/semantic/graph) instead of silently querying a not-yet-warm index — `parse_readiness` (pure status→snapshot map), `probe_index_readiness` (fail-open `GET /indexes/{id}/status`), and `log_index_readiness` (one stderr line) ([#2784](https://github.com/bobmatnyc/trusty-tools/issues/2784))
-- incremental re-index of files written during a task ([#2758](https://github.com/bobmatnyc/trusty-tools/pull/2758)) ([`a68e4c4`](https://github.com/bobmatnyc/trusty-tools/commit/a68e4c45f6be1662e09380bb335d586ea45afdfd))
-
-### Fixed
-
-- `embedder_client::supervisor`: `EmbedderSupervisor::start_supervisor_task` now returns a `SupervisorHandle` whose `shutdown()` cooperatively stops the supervised sidecar — `shutdown()` on the supervisor itself became unreachable the moment a caller detached the background task (the only way trusty-search ever used it), forcing an out-of-band raw SIGTERM/SIGKILL-by-PID workaround that the supervision loop's `child.wait()` could misclassify as a crash and respawn ([#2979](https://github.com/bobmatnyc/trusty-tools/issues/2979))
-- `embedder_client::supervisor::supervision_loop`: stop busy-spinning a tokio worker when a `SupervisorHandle` is dropped without ever calling `.shutdown()` — `shutdown_rx.changed()` resolves `Ready(Err(_))` on every poll once its sender closes, and the loop's two `select!` branches raced against it now permanently disable that branch on `Err` (continuing supervision via `child.wait()`/`unhealthy_signal` only) instead of looping straight back into an immediately-ready `Err` forever; the respawn back-off branch additionally now honors the full back-off delay on a closed channel instead of skipping it and respawning immediately (follow-up to [#2979](https://github.com/bobmatnyc/trusty-tools/issues/2979))
-- semantic-consolidation dream job: validate the configured model against the resolved provider (Ollama vs OpenRouter) before building the inference backend; a misconfigured model (e.g. the OpenRouter-style default resolved against a local Ollama server) now logs one loud, actionable error and disables the phase for that palace's `Dreamer` lifetime instead of retrying every dream cycle ([#2593](https://github.com/bobmatnyc/trusty-tools/issues/2593))
-- `embedder_client::stdio`/`supervisor`: retain the sidecar reader task's `JoinHandle` so a panic (not just EOF/IO-error) drains pending `embed_batch` requests immediately instead of hanging until their individual timeout, and track consecutive reader-task call timeouts so a wedged-but-alive sidecar (process running, not responding) triggers the same supervisor restart path as a process crash ([#1448](https://github.com/bobmatnyc/trusty-tools/issues/1448), [#1450](https://github.com/bobmatnyc/trusty-tools/issues/1450))
-- `embedder_client::stdio::embed_batch`: close a post-death registration-window hang — a request registered during the kill/respawn window (reader already dead, process possibly still alive) now fails fast against the client's own unhealthy signal instead of hanging forever on `reply_rx.await` (`await_reply_or_unhealthy`) ([#1448](https://github.com/bobmatnyc/trusty-tools/issues/1448))
-- `embedder_client::supervisor`: fix a restart-storm gap where a workload-deterministic wedge (recurs after every respawn because the workload, not the process, triggers the stall) never escalated — `consecutive_wedge_restarts` now tracks wedge-triggered restarts separately from ordinary crash restarts and resets only after sustained health (`wedge_reset_secs`, default 300s), so a genuine storm now trips `max_restarts` instead of cycling forever ([#1450](https://github.com/bobmatnyc/trusty-tools/issues/1450))
-- harden mid-task incremental index-file updates against transient send failures ([#2796](https://github.com/bobmatnyc/trusty-tools/pull/2796)) ([`1f8b569`](https://github.com/bobmatnyc/trusty-tools/commit/1f8b56924db6534d6b67811c39d8862dc53cc606))
-- bump lru and jsonwebtoken to patched versions ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
-
-### Changed
-
-- collapse stacked Unreleased headings (trusty-mpm, trusty-common) ([`95b16c8`](https://github.com/bobmatnyc/trusty-tools/commit/95b16c8c468084ce0e2a46eac8a4acf99cfab823))
-
-### Added
-
-- telegram module (rebase) ([#2729](https://github.com/bobmatnyc/trusty-tools/pull/2729)) ([`142675f`](https://github.com/bobmatnyc/trusty-tools/commit/142675fe01cc83b63497578611581921192a850b))
-- implement Slack search + reactions with two-token model ([#2726](https://github.com/bobmatnyc/trusty-tools/pull/2726)) ([`6e4e7d9`](https://github.com/bobmatnyc/trusty-tools/commit/6e4e7d9d8b18ba602f588e700142032789018142))
-- implement Slack send + read tools; extract SlackFormatter to trusty-common ([#2722](https://github.com/bobmatnyc/trusty-tools/pull/2722)) ([`847a0c3`](https://github.com/bobmatnyc/trusty-tools/commit/847a0c334e1a8822a7d31696b48946e538aca7cc))
-- establish channels crate topology + wire Slack auth ([#2638](https://github.com/bobmatnyc/trusty-tools/pull/2638)) ([#2706](https://github.com/bobmatnyc/trusty-tools/pull/2706)) ([`9f2275b`](https://github.com/bobmatnyc/trusty-tools/commit/9f2275b6487296a08fc99de469e6b641992bc46d))
-
-### Fixed
-
-- harden mid-task incremental index-file updates against transient send failures under sustained load: reuse one pooled HTTP client per write batch (connection keep-alive) and retry transport-level `send()` failures with bounded exponential backoff ([#2785](https://github.com/bobmatnyc/trusty-tools/issues/2785))
-- bump `lru` 0.12 → 0.16, fixing RUSTSEC-2026-0002 (`IterMut` violates Stacked Borrows, GHSA-rhfx-m35p-ff5j); no call-site changes needed ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`e62b454`](https://github.com/bobmatnyc/trusty-tools/commit/e62b4540d39c5a442d05e849197157932f37e664))
-- framework workflow conventions — per-session session log, issue/PR assignee+label defaults, trusty-mpm attribution footer ([#2737](https://github.com/bobmatnyc/trusty-tools/pull/2737)) ([`3089600`](https://github.com/bobmatnyc/trusty-tools/commit/3089600b475cc464329132e5f7523536bb730797))
-
-### Added
-
-- shared ensure-project-indexed helper; wire tcode task start ([#2701](https://github.com/bobmatnyc/trusty-tools/pull/2701)) ([`28a8d11`](https://github.com/bobmatnyc/trusty-tools/commit/28a8d11d4a5eac21921c3ceeef8707f71cf35459))
-- enable tickets-mcp + port gh-CLI fallback to trusty-common (ticketing quick-wins) ([#2646](https://github.com/bobmatnyc/trusty-tools/pull/2646)) ([`4c5a027`](https://github.com/bobmatnyc/trusty-tools/commit/4c5a027df778410bf350b03fd3e278b334253481))
-- DOC-37 MVP — RepoIdentity join key + identity-filtered listing + grouped prune-orphans ([#2617](https://github.com/bobmatnyc/trusty-tools/pull/2617)) ([`2c51047`](https://github.com/bobmatnyc/trusty-tools/commit/2c510472cb1c5a23526f81881a8bcaf415468016))
-
-### Changed
-
-- convert closed-set literals to typed constructs (PR 1: zero-behavior batch) ([#2704](https://github.com/bobmatnyc/trusty-tools/pull/2704)) ([`3b65103`](https://github.com/bobmatnyc/trusty-tools/commit/3b651033f92e619c65bb1aaa77168213e3306b4b))
-
-### Added
-
-- turnkey launchd bootstrap for the shared daemon set (closes #2557, #2556) ([#2566](https://github.com/bobmatnyc/trusty-tools/pull/2566)) ([`f47b428`](https://github.com/bobmatnyc/trusty-tools/commit/f47b4286aeb42d0a5871939edf0019a70cdfab78))
-- move Bedrock Converse adapter into commons inference layer (closes #2407) ([#2541](https://github.com/bobmatnyc/trusty-tools/pull/2541)) ([`b14ea97`](https://github.com/bobmatnyc/trusty-tools/commit/b14ea9779d68f2ec24b88f6f18b62dca2bed938a))
-- Anthropic-direct + OpenAI-direct inference adapters ([#2540](https://github.com/bobmatnyc/trusty-tools/pull/2540)) ([`2f07eb1`](https://github.com/bobmatnyc/trusty-tools/commit/2f07eb14d0bd24e24ed03632c86e569d1cd5c5ec))
-- add AtlasCloud direct inference provider (openai/gpt-5.6-sol) ([#2537](https://github.com/bobmatnyc/trusty-tools/pull/2537)) ([`64c7857`](https://github.com/bobmatnyc/trusty-tools/commit/64c785711922765b7b73395ed4bb38069a99aab7))
-
-### Fixed
-
-- credential hardening + registry default-model errors (closes #2474, #2475, #2510) ([#2539](https://github.com/bobmatnyc/trusty-tools/pull/2539)) ([`58f36ca`](https://github.com/bobmatnyc/trusty-tools/commit/58f36cadef0fa1d38e0f15ed1984a956b21131c5))
-
-### Added
-
-- universal config keys CLI module (set/list/test/unset) ([#2518](https://github.com/bobmatnyc/trusty-tools/pull/2518)) ([`17f0aa9`](https://github.com/bobmatnyc/trusty-tools/commit/17f0aa950bb0ed71c5364e1b55b1dc0503e4c0b2))
-- route together/* models through the shared Together adapter ([#2495](https://github.com/bobmatnyc/trusty-tools/pull/2495)) ([`2bdfccf`](https://github.com/bobmatnyc/trusty-tools/commit/2bdfccfa65c7a5c34cd325b88e3ce78ba4c3c427))
-- add Together.ai as an OpenAI-compat inference provider ([#2490](https://github.com/bobmatnyc/trusty-tools/pull/2490)) ([`98405bb`](https://github.com/bobmatnyc/trusty-tools/commit/98405bbaada82f62bb59805d54f3a9cd0f35236e))
-- OpenAI-compat adapter core + OpenRouter + Fireworks adapters ([#2482](https://github.com/bobmatnyc/trusty-tools/pull/2482)) ([`3101b36`](https://github.com/bobmatnyc/trusty-tools/commit/3101b36e452fca82a275368a1eb0a2a9e9b1c5fe))
-- inference foundation — types, InferenceAdapter trait, capability registry, configurator ([#2478](https://github.com/bobmatnyc/trusty-tools/pull/2478)) ([`e5d71f0`](https://github.com/bobmatnyc/trusty-tools/commit/e5d71f075e480c6714a39bd6bec8212e22c70347))
-- credential resolver + secure KeyStore (closes #2401) ([#2427](https://github.com/bobmatnyc/trusty-tools/pull/2427)) ([`98d0eb9`](https://github.com/bobmatnyc/trusty-tools/commit/98d0eb993cdaf640842761aaf9299d7013d2ee01))
-- fading-memories resurface pass in dream cycle ([#2353](https://github.com/bobmatnyc/trusty-tools/pull/2353)) ([`4dbc0c2`](https://github.com/bobmatnyc/trusty-tools/commit/4dbc0c235043b78159b4a24960259242dc215651))
-
-### Fixed
-
-- force:true honors its contract + secret/blocklist heuristics stop over-matching (closes #2442) ([#2520](https://github.com/bobmatnyc/trusty-tools/pull/2520)) ([`2671f10`](https://github.com/bobmatnyc/trusty-tools/commit/2671f107b256c353940e793e65eb947b99acb4d1))
-- launchd-aware bridge no-spawn + /health supervised flag (closes #2486) ([#2491](https://github.com/bobmatnyc/trusty-tools/pull/2491)) ([`e993c18`](https://github.com/bobmatnyc/trusty-tools/commit/e993c18ace1fe9a86f4b5315be7887ed767da710))
-
-### Changed
-
-- mount config command on all 10 primary binaries ([#2528](https://github.com/bobmatnyc/trusty-tools/pull/2528)) ([`a58ea52`](https://github.com/bobmatnyc/trusty-tools/commit/a58ea5223167553f0d90fb5258d582d510dca316))
-
-### Fixed
-
-- idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
-
-### Added
-
-- capture tmux window id at session pause and reattach on resume ([#2269](https://github.com/bobmatnyc/trusty-tools/pull/2269)) ([`1959738`](https://github.com/bobmatnyc/trusty-tools/commit/1959738450d9a1b7adaf707d9d5980d6365fe4a7))
-
-### Added
-
-- `is_ephemeral_build_path` bin-resolve helper, detecting `target/debug|release`
-  and worktree binary paths so callers can fall back to a PATH-resolved
-  installed binary instead of baking in an ephemeral path (consumed by
-  trusty-mpm's hooks/statusLine binary resolution, closes #2229) ([#2234](https://github.com/bobmatnyc/trusty-tools/pull/2234))
-
-### Fixed
-
-- resolve stable binary for hooks/statusLine + self-heal stale paths (closes #2229) ([#2234](https://github.com/bobmatnyc/trusty-tools/pull/2234)) ([`ae87bbb`](https://github.com/bobmatnyc/trusty-tools/commit/ae87bbb3827b9dfc9fccae4732c66104af6912b7))
-- harden chat-session consolidation, atomic turns, and force= authz ([#2221](https://github.com/bobmatnyc/trusty-tools/pull/2221)) ([`14ab3b7`](https://github.com/bobmatnyc/trusty-tools/commit/14ab3b7202ff98ef72a75ba69b8c9153ac6b5a17))
-
-### Changed
-
-- re-cut common 0.22.1 / embedderd 0.3.6 / search 0.32.2 to escape #2209 crates.io version collision ([#2236](https://github.com/bobmatnyc/trusty-tools/pull/2236)) ([`805a458`](https://github.com/bobmatnyc/trusty-tools/commit/805a458a67a69983b84ec4012436dc00b0e22e35))
-
-### Added
-
-- manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
-
-
-### Added
-
-- extract managed-session naming to trusty-common; trusty-agents adopts it (DOC-33 Phase 1, SPEC-ONESM-01) ([#1989](https://github.com/bobmatnyc/trusty-tools/pull/1989)) ([`025941d`](https://github.com/bobmatnyc/trusty-tools/commit/025941dfe68b7806f1f7f6b82bc06923d1cd5b9e))
-## [0.22.1] — 2026-07-08
-
 ### Changed
 
 - re-cut to escape crates.io collision with PR #2209's source-deficient 0.22.0; carries PR #2221's chat-session/consolidation hardening (#1712/#1713/#1714)
