@@ -2,19 +2,22 @@
 #
 # This is the REFERENCE EXAMPLE of the Eve §2.5.1 `extends` pattern: Izzie is
 # not a base agent, she is one user's (Masa's) personalization of the nameless
-# base `assistant`. Everything generic — the curated Google Workspace tool
-# surface, the productivity scopes, the generic gworkspace/memory skills, and
-# the base "helpful assistant" instructions — is INHERITED from `assistant`.
-# Only the personal deltas live here: the display name "Izzie", the warm/witty
-# persona and Masa-identity binding (persona.md), and the user-specific skills
-# (weather for a home city, a personal transit line, a personal writing voice).
+# base `assistant`. The intent is that everything generic — the curated Google
+# Workspace tool surface, the productivity scopes, the generic gworkspace/memory
+# skills, and the base "helpful assistant" instructions — is INHERITED from
+# `assistant`, leaving only the personal deltas here (display name, warm/witty
+# Masa-bound persona, and the user-specific skills).
 #
-# IMPORTANT: the `extends` resolver is NOT implemented yet (#3055). Until it
-# lands, this overlay does NOT auto-inherit the base's `[tools]`/scopes/generic
-# skills — so it will not fully resolve on its own. The working Izzie the REPL /
-# Telegram persona paths load today is the standalone `../izzie.toml`; once
-# #3055 merges and persona dispatch migrates to the package loader, that flat
-# file is superseded by this overlay + `../assistant/`.
+# ⚠️ TEMPORARY REDUNDANCY (until #3055): the `extends` resolver is NOT
+# implemented yet, so an overlay carrying ONLY deltas would resolve — via
+# `AgentConfig::by_name("izzie")` (this directory package shadows the flat
+# `../izzie.toml`) — to an Izzie with NO `[tools]` restriction (absent = all
+# tools UNRESTRICTED) and no inherited guardrails. That is a live safety
+# regression the moment this merges, independent of #3055. To keep the overlay
+# SAFE STANDALONE, the `[tools]` block and the safety-critical guardrail
+# sections in persona.md are duplicated verbatim from the base for now. Once
+# #3055 lands the inheritance resolver, DELETE this redundant `[tools]` block
+# (and the redundant persona guardrails) so the overlay is deltas-only again.
 
 # Inherit the base productivity assistant (resolved by #3055).
 extends = "assistant"
@@ -34,6 +37,96 @@ prompt_label = "Izzie"
 # under #3055; kept here so the overlay is also valid standalone.
 temperature = 0.7
 max_tokens = 1024
+# Conversational mode: block markdown headers and divider rules mid-response.
+stop_sequences = ["\n##", "\n* * *"]
+
+[tools]
+# ⚠️ TEMPORARY REDUNDANCY (until #3055) — see the header note. This is the SAME
+# curated allowlist as `../assistant/agent.toml`, duplicated so the overlay is
+# safe standalone (absent `allow` = UNRESTRICTED, which we must not ship). Once
+# the `extends` resolver lands, delete this block and inherit from the base.
+allow = [
+  # management
+  "mcp_list", "mcp_enable", "mcp_disable",
+  # git
+  "git_log", "git_status",
+  # meeting notes
+  "granola_*",
+  # web search
+  "web_search",
+  # gworkspace — Gmail
+  "compose_email",
+  "download_gmail_attachment",
+  "format_email_content",
+  "get_gmail_message_content",
+  "list_message_attachments",
+  "manage_gmail_filters",
+  "manage_gmail_labels",
+  "manage_gmail_settings",
+  "modify_gmail_messages",
+  "search_gmail_messages",
+  # gworkspace — Calendar
+  "manage_calendars",
+  "manage_events",
+  "query_free_busy",
+  # gworkspace — Drive
+  "get_drive_file_content",
+  "list_drive_contents",
+  "list_shared_drives",
+  "manage_drive_file",
+  "manage_file_permissions",
+  "search_drive_files",
+  "sync_drive",
+  # gworkspace — Docs
+  "append_to_document",
+  "apply_table_style",
+  "convert_document",
+  "create_document",
+  "create_document_from_template",
+  "create_document_tab",
+  "create_list_in_document",
+  "delete_range_in_document",
+  "find_tables_in_document",
+  "format_document_range",
+  "format_paragraph_in_document",
+  "get_document",
+  "get_document_named_styles",
+  "get_document_structure",
+  "insert_image_in_document",
+  "insert_table_in_document",
+  "insert_text_in_document",
+  "manage_document_comments",
+  "manage_document_header_footer",
+  "manage_document_tabs",
+  "manage_table_structure",
+  "move_paragraph_in_document",
+  "publish_markdown_to_doc",
+  "render_mermaid_to_doc",
+  "replace_text_in_document",
+  "set_document_style",
+  "update_document_named_styles",
+  # gworkspace — Sheets
+  "format_sheet",
+  "get_spreadsheet",
+  "manage_spreadsheet",
+  "modify_sheet_values",
+  "set_table_column_widths",
+  # gworkspace — Slides
+  "add_slide_content",
+  "format_slide",
+  "get_slides",
+  "manage_slides",
+  # gworkspace — Tasks
+  "manage_task_lists",
+  "manage_tasks",
+  # gworkspace — misc
+  "create_chart",
+  "list_accounts",
+]
+# Izzie opts INTO Google write (`google.*`) — a personalization decision on top
+# of the base template's read-only `google.read` default (§5.5). The rest of the
+# scope list matches the base and is redundant until #3055 (see header note).
+scopes = ["memory.read", "memory.write", "search.read", "google.*"]
 
 [system_prompt]
 # Personal skills only — these are Masa-specific and MERGE with the base's

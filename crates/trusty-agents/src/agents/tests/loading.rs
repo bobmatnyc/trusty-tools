@@ -431,8 +431,17 @@ fn base_assistant_package_is_nameless_and_curated() {
         "base assistant must expose the gworkspace surface"
     );
     let scopes = cfg.tools.scopes.expect("base assistant declares scopes");
-    assert!(scopes.iter().any(|s| s == "google.*"));
     assert!(scopes.iter().any(|s| s == "memory.write"));
+    // §5.5: the generic base template defaults to READ-ONLY Google access.
+    // Write (`google.*`) is opted into by a personalization overlay, not the base.
+    assert!(
+        scopes.iter().any(|s| s == "google.read"),
+        "base assistant must default to read-only Google (google.read)"
+    );
+    assert!(
+        !scopes.iter().any(|s| s == "google.*"),
+        "base assistant must NOT grant Google write by default"
+    );
     // Generic productivity skills only — NO user-specific skills on the base.
     let skills = cfg.system_prompt.skills.expect("base declares skills");
     assert!(skills.iter().any(|s| s == "gworkspace-gmail"));
@@ -454,7 +463,7 @@ fn base_assistant_package_is_nameless_and_curated() {
 #[test]
 fn izzie_overlay_package_parses_with_personal_deltas() {
     // #3054: The Izzie overlay package must parse (its `extends = "assistant"`
-    // key is ignored until #3055 lands) and carry ONLY personal deltas — the
+    // key is ignored until #3055 lands) and carry the personal deltas — the
     // display name, the personal skills, and the Masa-bound persona body.
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("izzie");
@@ -480,4 +489,39 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
         "overlay must not duplicate the base's generic skills"
     );
     assert!(cfg.system_prompt.content.contains("Masa"));
+
+    // SAFE-STANDALONE regression tripwire (critic BLOCK #3094): `by_name("izzie")`
+    // resolves to THIS package (it shadows the flat izzie.toml), and an absent
+    // `[tools].allow` means UNRESTRICTED tools. Until the #3055 extends resolver
+    // lands, the overlay must carry the curated allowlist + scopes itself so the
+    // dispatch surface is restricted. Do NOT relax these asserts by dropping the
+    // block — drop it only together with the #3055 inheritance change.
+    let allow = cfg
+        .tools
+        .allow
+        .expect("izzie overlay must restrict tools (absent = UNRESTRICTED)");
+    assert!(
+        allow.iter().any(|t| t == "search_gmail_messages"),
+        "overlay must carry the curated gworkspace surface until #3055"
+    );
+    assert!(
+        allow.iter().any(|t| t == "granola_*"),
+        "overlay must carry the curated tool surface until #3055"
+    );
+    let scopes = cfg.tools.scopes.expect("izzie overlay must declare scopes");
+    assert!(scopes.iter().any(|s| s == "memory.write"));
+    // Izzie opts into Google WRITE on top of the base's read-only default.
+    assert!(
+        scopes.iter().any(|s| s == "google.*"),
+        "izzie overlay opts into Google write (google.*)"
+    );
+    // Safety-critical guardrails must be present in the standalone persona body.
+    assert!(
+        cfg.system_prompt.content.contains("Approval Framing"),
+        "overlay persona must carry the approval-framing guardrail standalone"
+    );
+    assert!(
+        cfg.system_prompt.content.contains("Anti-Hallucination"),
+        "overlay persona must carry the anti-hallucination guardrail standalone"
+    );
 }

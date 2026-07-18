@@ -115,9 +115,12 @@ allow = [
 ]
 # OpenRPC (https://spec.open-rpc.org/) over stdio scopes (#455, #454). The base
 # assistant remembers facts across sessions (memory.write), recalls them
-# (memory.read), reads notes/snippets via search (search.read), and uses
-# google.* for Gmail/Calendar/Drive when the gworkspace endpoint is enabled.
-scopes = ["memory.read", "memory.write", "search.read", "google.*"]
+# (memory.read), and reads notes/snippets via search (search.read). Google
+# access defaults to READ-ONLY (`google.read`) on the base template per §5.5 —
+# a generic, un-personalized assistant should not mutate a user's mailbox /
+# calendar / drive by default. A personalization overlay opts into write
+# (`google.*`) explicitly (see `../izzie/agent.toml`).
+scopes = ["memory.read", "memory.write", "search.read", "google.read"]
 
 [system_prompt]
 # Generic productivity skills only — resolved by name from the skill registry.
