@@ -52,6 +52,7 @@ fn main() {
 fn dispatch(cli: Cli) {
     let json = cli.json;
     let yes = cli.yes;
+    let verbose = cli.verbose > 0;
 
     // TODO(#920 / Phase 1): forward `cli.scope` to every handler so commands
     // can honour the DOC-3 §3 scope contract.  In Phase 0 the field is parsed
@@ -178,7 +179,7 @@ fn dispatch(cli: Cli) {
         }
 
         Commands::Sign { target, dir } => {
-            std::process::exit(sign::run(target.as_set_name(), dir, json));
+            std::process::exit(sign::run(target.as_set_name(), dir, json, verbose));
         }
 
         Commands::Passthrough(args) => {

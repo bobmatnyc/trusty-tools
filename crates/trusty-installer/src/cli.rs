@@ -366,6 +366,10 @@ pub enum Commands {
     /// no Developer ID Application certificate is available or signing fails —
     /// unlike the fail-soft `tctl install` hook, this command is the operator
     /// explicitly asking for signing to happen.
+    ///
+    /// The raw identity-probe output and which identity was selected can be
+    /// printed via the global `-v`/`--verbose` flag (#2939) — a diagnostic aid
+    /// for "no identity found" failures despite a valid keychain cert.
     Sign {
         /// Which signable set to sign.
         #[arg(value_enum)]

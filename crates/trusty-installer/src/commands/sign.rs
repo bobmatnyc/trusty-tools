@@ -35,12 +35,15 @@ use super::macos_signing;
 ///
 /// What: Validates `target` against `macos_signing::binaries_for_set`
 /// (non-empty = known), resolves `dir` (or the default cargo bin dir), and on
-/// macOS calls `sign_set_strict`. Returns the process exit code: `0` on
-/// success, `1` on a signing/verification/no-cert failure, `2` for an unknown
-/// target. On non-macOS this is always a `0` no-op.
+/// macOS calls `sign_set_strict`. `verbose` (#2939) is forwarded to the macOS
+/// path, printing the raw identity-probe output and selected identity to
+/// stderr — a diagnostic aid for "no identity found" failures despite a valid
+/// keychain cert. Returns the process exit code: `0` on success, `1` on a
+/// signing/verification/no-cert failure, `2` for an unknown target. On
+/// non-macOS this is always a `0` no-op.
 ///
 /// Test: `tests::run_unknown_target_is_error`.
-pub fn run(target: &str, dir: Option<PathBuf>, json: bool) -> i32 {
+pub fn run(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     if macos_signing::binaries_for_set(target).is_empty() {
         eprintln!(
             "tctl sign: unknown target '{target}' (expected 'trusty-search' or 'trusty-mpm')"
@@ -50,11 +53,11 @@ pub fn run(target: &str, dir: Option<PathBuf>, json: bool) -> i32 {
 
     #[cfg(target_os = "macos")]
     {
-        run_macos(target, dir, json)
+        run_macos(target, dir, json, verbose)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (dir, json);
+        let _ = (dir, json, verbose);
         eprintln!("tctl sign: macOS-only (codesign/TCC are Apple-specific) — no-op.");
         0
     }
@@ -66,16 +69,16 @@ pub fn run(target: &str, dir: Option<PathBuf>, json: bool) -> i32 {
 /// Why: Keeps the always-available "unknown target" check in `run` shared
 /// across platforms while isolating the real `codesign` interaction.
 ///
-/// What: Resolves the install dir, calls `sign_set_strict`, and maps the
-/// result to an exit code + human message (cert-setup guidance on failure,
-/// success note otherwise).
+/// What: Resolves the install dir, calls `sign_set_strict` (forwarding
+/// `verbose`), and maps the result to an exit code + human message
+/// (cert-setup guidance on failure, success note otherwise).
 ///
 /// Test: Side-effecting (real `codesign`); not invoked in the test suite.
 #[cfg(target_os = "macos")]
-fn run_macos(target: &str, dir: Option<PathBuf>, json: bool) -> i32 {
+fn run_macos(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     let install_dir = dir.unwrap_or_else(default_bin_dir);
 
-    match macos_signing::sign_set_strict(&install_dir, target) {
+    match macos_signing::sign_set_strict(&install_dir, target, verbose) {
         Ok(signed) => {
             if !json {
                 for path in &signed {
@@ -135,7 +138,7 @@ mod tests {
     /// Test: This is the test.
     #[test]
     fn run_unknown_target_is_error() {
-        let code = run("not-a-real-target", None, true);
+        let code = run("not-a-real-target", None, true, false);
         assert_eq!(code, 2);
     }
 
@@ -152,7 +155,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn run_known_target_is_noop_on_non_macos() {
-        let code = run("trusty-search", None, false);
+        let code = run("trusty-search", None, false, false);
         assert_eq!(code, 0);
     }
 }
