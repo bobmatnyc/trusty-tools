@@ -62,6 +62,8 @@ gh pr checks <pr> --watch --fail-fast    # blocks until checks settle; run it an
   wrong (#2833). `--watch` blocks silently and prints once; keep using it. If you
   ever must sleep-poll, size the sleep to the CI wall-clock (minutes, not
   seconds) and only print when a check's state actually changes.
+- **When checks settle**, immediately disarm any monitors or re-issue timers you
+  armed — do not let stale monitors re-fire after your goal is done.
 
 ## Memory Management for Git Operations
 
