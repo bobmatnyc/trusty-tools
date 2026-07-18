@@ -97,3 +97,18 @@ honors it in place of the config value (confirmed against the Tauri v2
 `-` pseudo-identity), or set it to a Developer ID string you do have. `cargo
 build -p trusty-mpm-gui` / `cargo check -p trusty-mpm-gui` (no bundling) are
 unaffected — this only matters for `cargo tauri build`/`tauri build`.
+
+🟡 **`trusty-code-gui` mirrors the `trusty-mpm-gui` signing pattern above** —
+same stable Developer ID identity (`Developer ID Application: Bob Matsuoka
+(4JH68XUHC5)`) pinned in `crates/trusty-code-gui/tauri.conf.json`'s
+`bundle.macOS.signingIdentity`, same `APPLE_SIGNING_IDENTITY` env-var
+override for machines without that cert, and it is likewise excluded from
+`default-members` (a bare `cargo build`/`test`/`check` skips it; use
+`cargo build -p trusty-code-gui` or `--workspace`). `trusty-code-gui` is a
+second, independent Tauri crate (`crates/trusty-code-gui`, for the
+`trusty-code`/tcode daemon) — it does not join `trusty-mpm-gui`'s
+`SIGNABLE_BINARIES` set, and as of this writing `trusty-code`/`tcode` has no
+`tctl sign`-style fallback install path of its own for either the CLI or the
+GUI binary (no `install-trusty-code-signed.sh` script or `CODE_SET` exists);
+the Tauri `bundle.macOS.signingIdentity` config is the only signing path for
+`trusty-code-gui` today.

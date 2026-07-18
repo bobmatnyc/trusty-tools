@@ -21,5 +21,10 @@
     "security": {
       "csp": null
     }
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Bob Matsuoka (4JH68XUHC5)"
+    }
   }
 }
