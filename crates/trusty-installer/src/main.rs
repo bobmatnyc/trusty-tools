@@ -126,8 +126,9 @@ fn dispatch(cli: Cli) {
         Commands::Install {
             members,
             no_service,
+            dry_run,
         } => {
-            std::process::exit(install::run(&members, yes, json, no_service));
+            std::process::exit(install::run(&members, yes, json, no_service, dry_run));
         }
 
         Commands::Ensure { wait } => {

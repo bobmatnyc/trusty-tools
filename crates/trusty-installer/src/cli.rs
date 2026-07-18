@@ -213,6 +213,12 @@ pub enum Commands {
         /// bootstrap (#2556). Also settable via `TCTL_NO_SERVICE_BOOTSTRAP`.
         #[arg(long)]
         no_service: bool,
+
+        /// Preview what would be installed (members, binaries, planned service
+        /// actions) without installing anything (#2112). Exits 0. Safe to run
+        /// in any context — TTY, non-TTY, or `--json` — and never prompts.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Upgrade the stack (or named members) to the BOM-pinned versions, then restart. (DOC-9)
