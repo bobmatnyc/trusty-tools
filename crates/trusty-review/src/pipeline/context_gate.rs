@@ -59,8 +59,17 @@ pub enum GateOutcome {
 /// returns `Degraded`; otherwise `Proceed`.  Note: when `deps.analyze` is `None`
 /// (analyze client not wired in at all, e.g. the CLI compare path) the analyze
 /// requirement is treated as unmet exactly as if the daemon were down.
+///
+/// The search Degraded reason prefers the health probe's own
+/// `SearchClientError::Unavailable(reason)` text over the generic template
+/// when the probe returned an error (rather than a non-"ok" status): this is
+/// how a `NullSearchClient`'s `--source-root`-specific notice (issue #2994's
+/// diff-only fallback) reaches the persisted review body via
+/// `degraded_banner` — a generic "trusty-search unavailable at {url}" message
+/// would otherwise discard that actionable text (re-review finding #2).
 /// Test: `gate_tests::{skips_when_search_down, degraded_when_search_down_optout,
-/// skips_when_analyze_down, proceeds_when_both_healthy}`.
+/// skips_when_analyze_down, proceeds_when_both_healthy,
+/// degraded_reason_prefers_health_error_detail}`.
 pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> GateOutcome {
     let search_url = &config.search_url;
     let analyzer_url = &config.analyzer_url;
@@ -78,6 +87,10 @@ pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> Gate
     };
     let (search_health, analyze_ready) = tokio::join!(search_fut, analyze_fut);
 
+    // Captures the health probe's own error text (e.g. a `NullSearchClient`'s
+    // `--source-root` notice) so the Degraded branch below can surface it
+    // verbatim instead of a generic message that discards it.
+    let mut search_error_detail: Option<String> = None;
     let search_ok = match &search_health {
         Ok(h) if h.is_healthy() => true,
         Ok(h) => {
@@ -86,6 +99,7 @@ pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> Gate
         }
         Err(e) => {
             warn!("trusty-search health probe failed: {e}");
+            search_error_detail = Some(e.to_string());
             false
         }
     };
@@ -103,9 +117,13 @@ pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> Gate
         info!(
             "trusty-search unavailable but require_search=false — proceeding DEGRADED (non-authoritative)"
         );
-        return GateOutcome::Degraded(format!(
-            "trusty-search unavailable at {search_url}; review produced WITHOUT code context"
-        ));
+        let reason = match search_error_detail {
+            Some(detail) => format!("trusty-search unavailable at {search_url} — {detail}"),
+            None => format!(
+                "trusty-search unavailable at {search_url}; review produced WITHOUT code context"
+            ),
+        };
+        return GateOutcome::Degraded(reason);
     }
 
     // ── trusty-analyze gate ────────────────────────────────────────────────

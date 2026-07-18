@@ -221,3 +221,65 @@ fn degraded_banner_contains_warning() {
     assert!(banner.contains("NOT AUTHORITATIVE"));
     assert!(banner.contains("trusty-search unavailable at http://x"));
 }
+
+/// #2994 re-review, finding #2: the Degraded reason must surface the health
+/// probe's OWN error text (e.g. a `NullSearchClient`'s `--source-root`-specific
+/// notice) rather than a hardcoded generic message that discards it.
+///
+/// Why: previously `preflight_context` only `warn!`-logged the health error
+/// and built a fixed "trusty-search unavailable at {url}" string for the
+/// Degraded reason, so the actionable `--source-root` notice (e.g. "Run
+/// `trusty-search index <dir>`") never reached `degraded_banner` / the
+/// persisted review body — contradicting README.md's claim that the notice is
+/// prepended as a banner.
+/// What: uses a search stub whose `health()` fails with a distinctive,
+/// source-root-shaped error message; asserts the Degraded reason contains
+/// that exact text.
+/// Test: this test.
+#[tokio::test]
+async fn degraded_reason_prefers_health_error_detail() {
+    struct SourceRootNoticeSearch;
+
+    #[async_trait]
+    impl SearchClient for SourceRootNoticeSearch {
+        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+            Err(SearchClientError::Unavailable(
+                "--source-root /tmp/proj has no registered trusty-search index — proceeding in \
+                 diff-only mode. Run `trusty-search index /tmp/proj` to enable full context"
+                    .to_string(),
+            ))
+        }
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Ok(vec![])
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Ok(vec![])
+        }
+    }
+
+    let mut cfg = config();
+    cfg.context.require_search = false; // the --source-root diff-only fallback clears this
+    let d = ReviewDeps {
+        llm: Arc::new(StubLlm),
+        verifier: None,
+        search: Arc::new(SourceRootNoticeSearch),
+        analyze: Some(Arc::new(StubAnalyze { ready: true })),
+        dedup: None,
+    };
+
+    match preflight_context(&cfg, &d).await {
+        GateOutcome::Degraded(msg) => {
+            assert!(
+                msg.contains("Run `trusty-search index /tmp/proj`"),
+                "Degraded reason must carry the source-root-specific notice text, not a \
+                 generic message: {msg}"
+            );
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+}

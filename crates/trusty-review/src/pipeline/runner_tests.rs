@@ -1055,6 +1055,61 @@ async fn run_review_search_down_degraded_when_optout() {
     assert!(err.contains("degraded"), "reason must say degraded: {err}");
 }
 
+/// #2994 re-review, finding #2: the persisted (degraded) review body must
+/// contain the `--source-root`-specific notice text — e.g. the actionable
+/// "Run `trusty-search index <dir>`" hint — not just a generic "trusty-search
+/// unavailable" banner, matching README.md's documented behaviour that the
+/// notice is prepended as a banner.
+///
+/// Why: this is the actual end-to-end path exercised by `cmd_run`/`cmd_compare`
+/// when `--source-root` doesn't match a registered index: `deps.search` is a
+/// `NullSearchClient` built from the notice, and `context.require_search` is
+/// cleared so the gate degrades instead of skipping.
+/// What: drives `run_review` with a real `NullSearchClient` carrying a
+/// source-root-shaped notice; asserts the notice's actionable text appears in
+/// `result.review_body` (via `degraded_banner`), not merely in `result.error`.
+/// Test: this test.
+#[tokio::test]
+async fn run_review_source_root_fallback_banner_carries_notice_text() {
+    use crate::integrations::NullSearchClient;
+
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let mut config = default_config();
+    config.context.require_search = false; // set by resolve_source_root's DiffOnly branch
+    let notice = "--source-root /tmp/proj-2994 has no registered trusty-search index — \
+                  proceeding in diff-only mode (no code-context retrieval). Run \
+                  `trusty-search index /tmp/proj-2994` to enable full context, or omit \
+                  --source-root to use the auto-derived/TRUSTY_SEARCH_INDEX index.";
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
+        search: Arc::new(NullSearchClient::new(notice)),
+        analyze: Some(Arc::new(ReadyAnalyze)),
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(result.status, ReviewStatus::Degraded);
+    assert!(
+        result
+            .review_body
+            .contains("Run `trusty-search index /tmp/proj-2994`"),
+        "persisted review body must carry the --source-root-specific notice text, not a \
+         generic banner: {:?}",
+        result.review_body
+    );
+}
+
 /// REGRESSION GUARD (#590): both deps healthy → a normal, authoritative review.
 #[tokio::test]
 async fn run_review_both_healthy_completes_authoritative() {

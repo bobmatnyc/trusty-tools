@@ -22,7 +22,7 @@ use trusty_review::{
 };
 
 use crate::commands::diff_source::{LocalDiffFlags, resolve_local_diff_source};
-use crate::commands::run::build_deps_async;
+use crate::commands::run::{apply_source_root_fallback, build_deps_async, resolve_source_root_arg};
 
 // ─── compare args ────────────────────────────────────────────────────────────
 
@@ -70,6 +70,12 @@ pub struct CompareArgs {
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
 
+    /// Explicit source-root directory for code-context retrieval (issue #2994).
+    /// See `RunArgs::source_root` for full semantics; applies to every model
+    /// compared in this run.
+    #[arg(long, value_name = "DIR")]
+    pub source_root: Option<std::path::PathBuf>,
+
     /// Name of a review template to append as a prompt addendum (issue #2995).
     /// See `RunArgs::review_template` for the resolution and layering details;
     /// applied identically here — highest-precedence override for every model
@@ -85,15 +91,31 @@ pub struct CompareArgs {
 /// Why: side-by-side model comparison lets operators pick the best model for
 /// their repo's cost/quality trade-off.  Also resolves the search index before
 /// the per-model loop so all model runs share the correct index (issue #670 /
-/// auto-derive #661).
+/// auto-derive #661), and resolves `--source-root` (issue #2994) and
+/// `--review-template` (issue #2995) once so every model shares the same
+/// diff-only-or-matched context and template overrides.
 /// What: runs the same review for each model in the compare set (sequentially),
 /// collects the results, and prints a comparison table to STDOUT.
-/// Test: integration via `cargo run -p trusty-review -- compare --help`.
+/// Test: integration via `cargo run -p trusty-review -- compare --help`;
+/// `--source-root` clap wiring covered by `compare_args_source_root_parses`;
+/// `--review-template` covered by clap args parsing.
 pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<()> {
-    // Resolve the search index from the daemon once before the per-model loop.
-    // When TRUSTY_SEARCH_INDEX is explicitly set, resolve_index is a no-op.
     let search_for_resolve = HttpSearchClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
+
+    // ── --source-root (issue #2994) ────────────────────────────────────────
+    // Resolved BEFORE the CWD/env auto-derive below, once for the whole
+    // compare run — see `resolve_source_root_arg`'s doc comment for the exact
+    // precedence rule (TRUSTY_SEARCH_INDEX always wins).
+    let source_root_notice = resolve_source_root_arg(
+        &mut config,
+        &search_for_resolve,
+        args.source_root.as_deref(),
+    )
+    .await;
+
+    // Resolve the search index from the daemon once before the per-model loop.
+    // When TRUSTY_SEARCH_INDEX is explicitly set, resolve_index is a no-op.
     config.resolve_index(&search_for_resolve).await;
 
     // `--review-template` is the highest-precedence override (issue #2995);
@@ -139,7 +161,8 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     let (diff_source, _stdin_tmp) = materialize_stdin_if_needed(diff_source)?;
 
     for model in &models {
-        let deps = build_deps_async(&config, model, default_provider).await?;
+        let mut deps = build_deps_async(&config, model, default_provider).await?;
+        apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
         let input = ReviewInput {
             diff_source: diff_source.clone(),
             reviewer_model: model.clone(),
@@ -350,6 +373,37 @@ mod tests {
             .expect("parse");
         assert_eq!(args.base.as_deref(), Some("main"));
         assert_eq!(args.head.as_deref(), Some("feature"));
+    }
+
+    /// `--source-root <dir>` must parse on `compare` the same way it does on
+    /// `run` (issue #2994).
+    /// Why: guards the clap wiring; a typo'd `#[arg]` attribute would only
+    /// otherwise surface as a runtime "unrecognised flag" error.
+    /// What: parses `compare --source-root /tmp/proj` and asserts the field.
+    /// Test: this test.
+    #[test]
+    fn compare_args_source_root_parses() {
+        let args =
+            CompareArgs::try_parse_from(["compare", "--source-root", "/tmp/proj"]).expect("parse");
+        assert_eq!(
+            args.source_root.as_deref(),
+            Some(std::path::Path::new("/tmp/proj"))
+        );
+    }
+
+    /// `--source-root` must default to `None` when absent (zero-regression).
+    /// Why: proves adding the flag does not change parsing of any existing
+    /// `compare` invocation.
+    /// What: parses `compare --base main` (no `--source-root`) and asserts
+    /// `None`.
+    /// Test: this test.
+    #[test]
+    fn compare_args_source_root_absent_is_none() {
+        let args = CompareArgs::try_parse_from(["compare", "--base", "main"]).expect("parse");
+        assert!(
+            args.source_root.is_none(),
+            "--source-root must default to None when not passed"
+        );
     }
 
     fn make_result(model: &str, verdict: Verdict, findings: usize, cost: f64) -> ReviewResult {

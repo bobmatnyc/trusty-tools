@@ -9,6 +9,8 @@
 
 use super::*;
 
+use std::path::Path;
+
 use crate::integrations::{
     health::{EmbedderState, HealthResponse},
     search_client::{IndexInfo, SearchClient, SearchClientError, SearchResult},
@@ -289,4 +291,193 @@ async fn wiring_cmd_compare_resolve_index_applies_to_all_model_runs() {
             "compare wiring: all model runs must see the resolved index"
         );
     }
+}
+
+// ─── resolve_source_root tests (issue #2994) ─────────────────────────────────
+
+/// `--source-root <dir>` that maps to a registered index must use it, mark
+/// the index explicit (so later `resolve_index` is a no-op), and leave
+/// `require_search` untouched.
+///
+/// Why: proves the "same resolution as today, just explicit" half of #2994 —
+/// a matched source-root behaves exactly like today's CWD/env-derived index.
+/// What: registers an index whose `root_path` equals a temp dir, resolves
+/// `--source-root <that dir>`, asserts the match and the explicit flag.
+/// Test: this test.
+#[tokio::test]
+async fn source_root_matches_registered_index() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().canonicalize().unwrap();
+    let root_path_str = canonical.to_str().unwrap().to_string();
+
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+
+    let indexes = vec![make_index_info("explicit-project", Some(&root_path_str))];
+    let client = FixedIndexSearch(indexes);
+
+    let outcome = config.resolve_source_root(&client, &canonical).await;
+
+    assert_eq!(
+        outcome,
+        SourceRootOutcome::Matched("explicit-project".to_string())
+    );
+    assert_eq!(config.search_index, "explicit-project");
+    assert!(
+        config.search_index_explicit,
+        "a matched --source-root must be marked explicit so CWD auto-derive never overwrites it"
+    );
+    assert!(
+        config.context.require_search,
+        "a matched --source-root must not force the diff-only degradation"
+    );
+}
+
+/// `--source-root <dir>` with NO matching registered index must force the
+/// diff-only fallback: `require_search = false`, `search_index_explicit =
+/// true`, and a notice naming both the fallback and the source root.
+///
+/// Why: proves the graceful (b) diff-only-with-notice path chosen for #2994 —
+/// see `ReviewConfig::resolve_source_root`'s doc comment for why the
+/// ephemeral-index alternative was deferred.
+/// What: registers an unrelated index, resolves a `--source-root` that
+/// doesn't match, asserts the `DiffOnly` outcome and the config mutations.
+/// Test: this test.
+#[tokio::test]
+async fn source_root_no_match_forces_diff_only() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().canonicalize().unwrap();
+
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+
+    let indexes = vec![make_index_info("unrelated", Some("/srv/totally-different"))];
+    let client = FixedIndexSearch(indexes);
+
+    let outcome = config.resolve_source_root(&client, &canonical).await;
+
+    match outcome {
+        SourceRootOutcome::DiffOnly(notice) => {
+            assert!(
+                notice.contains("diff-only"),
+                "notice must name the diff-only fallback: {notice}"
+            );
+            assert!(
+                notice.contains(&canonical.display().to_string()),
+                "notice must name the source root: {notice}"
+            );
+        }
+        other => panic!("expected DiffOnly, got {other:?}"),
+    }
+    assert!(
+        !config.context.require_search,
+        "no-match must relax require_search so the gate degrades instead of skipping"
+    );
+    assert!(
+        !config.context.require_analyze,
+        "no-match must ALSO relax require_analyze — leaving it required would let a healthy \
+         trusty-analyze daemon silently query the stale index (finding #1, #2994 re-review)"
+    );
+    assert!(
+        config.search_index_explicit,
+        "no-match must prevent CWD auto-derive from later overwriting the diff-only intent"
+    );
+}
+
+/// `source_root_no_match_forces_diff_only` already asserts `require_analyze`
+/// is cleared alongside `require_search`; this test names that assertion
+/// explicitly per the doc-comment cross-reference so a future reader can find
+/// it without re-deriving which test covers which flag.
+///
+/// Why: the #1 re-review finding was specifically that `require_analyze` was
+/// left untouched while `require_search` was correctly cleared — a dedicated,
+/// explicitly-named test prevents that asymmetry from silently regressing.
+/// What: identical setup to `source_root_no_match_forces_diff_only`, asserting
+/// only the `require_analyze` flag.
+/// Test: this test.
+#[tokio::test]
+async fn source_root_no_match_also_disables_require_analyze() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().canonicalize().unwrap();
+
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+    assert!(
+        config.context.require_analyze,
+        "precondition: require_analyze must default to true"
+    );
+
+    let indexes = vec![make_index_info("unrelated", Some("/srv/totally-different"))];
+    let client = FixedIndexSearch(indexes);
+
+    let outcome = config.resolve_source_root(&client, &canonical).await;
+
+    assert!(matches!(outcome, SourceRootOutcome::DiffOnly(_)));
+    assert!(
+        !config.context.require_analyze,
+        "no-match must relax require_analyze, mirroring require_search"
+    );
+}
+
+/// When the daemon is unreachable while resolving `--source-root`, the same
+/// diff-only fallback must apply (never a hard error / crash).
+///
+/// Why: `--source-root` resolution is best-effort exactly like CWD
+/// auto-derive; a daemon outage must degrade gracefully, not break the CLI.
+/// What: uses `FailListSearch` (list_indexes always errors), asserts
+/// `DiffOnly` with an "unreachable" notice.
+/// Test: this test.
+#[tokio::test]
+async fn source_root_daemon_unreachable_forces_diff_only() {
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+
+    let client = FailListSearch;
+    let outcome = config
+        .resolve_source_root(&client, Path::new("/tmp/whatever-2994"))
+        .await;
+
+    match outcome {
+        SourceRootOutcome::DiffOnly(notice) => {
+            assert!(
+                notice.contains("unreachable"),
+                "notice must explain the daemon is unreachable: {notice}"
+            );
+        }
+        other => panic!("expected DiffOnly, got {other:?}"),
+    }
+    assert!(!config.context.require_search);
+    assert!(
+        !config.context.require_analyze,
+        "daemon-unreachable must ALSO relax require_analyze, mirroring require_search"
+    );
+    assert!(config.search_index_explicit);
+}
+
+/// `source_root_daemon_unreachable_forces_diff_only` already asserts
+/// `require_analyze` is cleared; this test names that assertion explicitly
+/// per the doc-comment cross-reference (see
+/// `source_root_no_match_also_disables_require_analyze` for the rationale).
+/// Test: this test.
+#[tokio::test]
+async fn source_root_daemon_unreachable_also_disables_require_analyze() {
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+    assert!(config.context.require_analyze, "precondition");
+
+    let client = FailListSearch;
+    let outcome = config
+        .resolve_source_root(&client, Path::new("/tmp/whatever-2994-analyze"))
+        .await;
+
+    assert!(matches!(outcome, SourceRootOutcome::DiffOnly(_)));
+    assert!(
+        !config.context.require_analyze,
+        "daemon-unreachable must relax require_analyze, mirroring require_search"
+    );
 }
