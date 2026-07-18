@@ -25,6 +25,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **REST resource gateway bridge, no routes yet (#2983, #587, Slice 1).** New
+  `crate::serve::rest` module: `rest::call(router, method, params, ctx)` drives
+  a synthetic JSON-RPC `Request` through the existing `Router::dispatch` seam
+  and unwraps the `Response` envelope into `Result<Value, RpcError>`, and
+  `rest::rpc_error_to_status(&RpcError) -> StatusCode` maps `RpcError` codes
+  onto real HTTP statuses (`not_found`/`session_not_found` -> 404,
+  `permission_denied` -> 403, `invalid_argument`/`invalid_params` -> 400,
+  `internal` -> 500, anything unmapped -> 500). This reuses trusty-memory's
+  "Pattern C" (one shared handler, many transports) so a future REST route and
+  its JSON-RPC method twin always run the exact same handler — zero business-
+  logic duplication. `serve::mod` now declares `mod rest;` but wires no axum
+  routes; concrete resource routes land in S2-S6.
 - **`session.get_agents` — live, eviction-safe agent-roster RPC (DOC-39 §5.4,
   closes #2962).** New JSON-RPC method `session.get_agents(session_id) ->
   { agents: [{agent_id, name, model, state, task, todos, files_changed}] }`,
