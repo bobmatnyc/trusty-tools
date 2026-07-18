@@ -424,8 +424,7 @@ mod tests {
 
     #[test]
     fn disclaimed_status_reports_spawn_error_for_missing_binary() {
-        let mut cmd =
-            std::process::Command::new("/nonexistent/definitely-not-a-real-binary-2997");
+        let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary-2997");
         let err = disclaimed_status(&mut cmd)
             .expect_err("spawning a missing binary must error, not hang or panic");
         assert!(matches!(

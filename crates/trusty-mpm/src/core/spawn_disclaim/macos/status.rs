@@ -44,8 +44,9 @@ pub(crate) fn spawn_status_inherit_disclaimed(cmd: &mut Command) -> io::Result<E
     argv_c.push(prog_c.clone());
     for a in cmd.get_args() {
         argv_c.push(
-            CString::new(a.as_bytes())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))?,
+            CString::new(a.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL")
+            })?,
         );
     }
     let mut argv_ptr: Vec<*mut libc::c_char> = argv_c
@@ -76,7 +77,10 @@ pub(crate) fn spawn_status_inherit_disclaimed(cmd: &mut Command) -> io::Result<E
         buf.push(b'=');
         buf.extend_from_slice(v.as_bytes());
         envp_c.push(CString::new(buf).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "environment variable contains NUL")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "environment variable contains NUL",
+            )
         })?);
     }
     let mut envp_ptr: Vec<*mut libc::c_char> = envp_c

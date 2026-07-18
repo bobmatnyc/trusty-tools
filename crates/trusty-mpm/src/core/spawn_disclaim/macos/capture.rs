@@ -21,7 +21,7 @@ use std::io::{self, Read};
 use std::os::unix::io::FromRawFd;
 use std::process::Output;
 
-use super::{environ, pipe_cloexec, resolve_disclaim_fn, wait_for, OwnedFd};
+use super::{OwnedFd, environ, pipe_cloexec, resolve_disclaim_fn, wait_for};
 
 /// Spawn with stdout/stderr captured and TCC responsibility disclaimed.
 ///
@@ -35,8 +35,9 @@ pub(crate) fn spawn_capture_disclaimed(program: &str, args: &[String]) -> io::Re
     argv_c.push(prog_c.clone());
     for a in args {
         argv_c.push(
-            CString::new(a.as_str())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))?,
+            CString::new(a.as_str()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL")
+            })?,
         );
     }
     // Null-terminated `char *const []`. posix_spawn does not mutate these.

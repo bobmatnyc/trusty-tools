@@ -37,7 +37,9 @@ use tracing::{debug, warn};
 
 use crate::control::event::{SessionEvent, StreamJsonEvent};
 use crate::control::id::ControlSessionId;
-use crate::core::spawn_disclaim::{disclaimed_piped_spawn, ChildHandle, DynChildStdin, DynChildStdout};
+use crate::core::spawn_disclaim::{
+    ChildHandle, DynChildStdin, DynChildStdout, disclaimed_piped_spawn,
+};
 
 use super::{SessionBackend, SessionInput};
 

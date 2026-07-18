@@ -43,7 +43,9 @@ use std::os::fd::{FromRawFd, OwnedFd as StdOwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
 use super::super::{ChildHandle, PipedSpawn};
-use super::{pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn, wait_for, OwnedFd};
+use super::{
+    OwnedFd, pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn, wait_for,
+};
 
 /// Spawn `cmd` with piped stdin/stdout/stderr and TCC responsibility
 /// disclaimed, wiring the parent's pipe ends into async tokio I/O.
@@ -57,8 +59,9 @@ pub(crate) fn spawn_piped_disclaimed(cmd: std::process::Command) -> io::Result<P
     let mut argv_c: Vec<CString> = vec![prog_c.clone()];
     for a in cmd.get_args() {
         argv_c.push(
-            CString::new(a.as_bytes())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))?,
+            CString::new(a.as_bytes()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL")
+            })?,
         );
     }
     let mut argv_ptr: Vec<*mut libc::c_char> = argv_c
@@ -88,8 +91,9 @@ pub(crate) fn spawn_piped_disclaimed(cmd: std::process::Command) -> io::Result<P
         entry.push(b'=');
         entry.extend_from_slice(v.as_bytes());
         envp_c.push(
-            CString::new(entry)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "env entry contains NUL"))?,
+            CString::new(entry).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "env entry contains NUL")
+            })?,
         );
     }
     let mut envp_ptr: Vec<*mut libc::c_char> = envp_c
@@ -227,7 +231,11 @@ mod tests {
     async fn spawn_piped_disclaimed_writes_and_reads_via_cat() {
         let cmd = std::process::Command::new("/bin/cat");
         let mut spawned = disclaimed_piped_spawn(cmd).unwrap();
-        spawned.stdin.write_all(b"hello disclaimed\n").await.unwrap();
+        spawned
+            .stdin
+            .write_all(b"hello disclaimed\n")
+            .await
+            .unwrap();
         drop(spawned.stdin); // EOF so `cat` exits
         let mut reader = BufReader::new(spawned.stdout);
         let mut line = String::new();
