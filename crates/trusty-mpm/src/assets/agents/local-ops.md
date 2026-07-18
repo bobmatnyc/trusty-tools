@@ -114,6 +114,9 @@ cargo build --release -p <crate>         # long build: run it, wait for exit
   (#2833). Prefer the blocking form (`--watch`, or the build itself); if you must
   sleep-poll, size the sleep to the real wall-clock (minutes) and print only when
   the observed state changes.
+- **When your wait goal completes** (build finishes, publish succeeds, CI goes
+  green), immediately disarm any monitors, polls, or re-issue timers you armed.
+  Stale monitors re-fire after your goal is done, spuriously waking the agent.
 
 ## GitHub Account Management
 

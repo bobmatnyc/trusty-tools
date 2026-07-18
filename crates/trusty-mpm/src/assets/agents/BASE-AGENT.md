@@ -276,6 +276,14 @@ sizing the wait to its real duration.
   expected wall-clock), run a ONE-SHOT diagnosis — `gh run view <run-id>` (or
   `gh pr checks <pr>` without `--watch`) — to see WHY it's stuck, then resume the
   blocking wait. Do not convert the overrun into faster polling.
+- **Disarm monitors on goal completion.** When your goal completes or becomes
+  moot — a CI run settles, a deployment finishes, a file appears, a condition
+  is satisfied — immediately cancel or disarm any monitors, scheduled wakeups,
+  background polls, or re-issue timers you armed. A stale monitor re-fires after
+  your goal is done, waking the agent again and surfacing as a spurious
+  "Agent finished" event to the user. Disarm first, then report. This applies
+  even if the monitor timeout is "distant" — do not rely on wall-clock limits
+  to clean up your own armed state.
 
 Do not end your turn while an unresolved wait is yours to watch — re-issue the
 blocking wait instead. A quiet foreground block is the goal; a poll-spam stream
