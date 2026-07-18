@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "trusty-mpm",
+  "productName": "Trusty MPM Dashboard",
   "version": "0.1.0",
-  "identifier": "com.trusty-mpm.gui",
+  "identifier": "com.trusty.trusty-mpm.gui",
   "build": {
     "frontendDist": "ui/dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "trusty-mpm",
+        "title": "Trusty MPM Dashboard",
         "width": 1280,
         "height": 800,
         "resizable": true
@@ -20,6 +20,11 @@
     ],
     "security": {
       "csp": null
+    }
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Bob Matsuoka (4JH68XUHC5)"
     }
   }
 }

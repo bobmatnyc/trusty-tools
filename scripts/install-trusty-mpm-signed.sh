@@ -30,6 +30,17 @@
 # installs and can, if desired, be reduced to a delegation to
 # `tctl sign trusty-mpm` now that the table is complete.
 #
+# GUI NOTE (#2951): `trusty-mpm-gui` (`com.trusty.trusty-mpm.gui`) also joined
+# the `SIGNABLE_BINARIES` table's `trusty-mpm` set. This script's Step 1 only
+# `cargo install`s `crates/trusty-mpm` (the CLI/daemon), so the GUI binary is
+# NOT built here — the GUI's primary fix is its own `bundle.macOS.
+# signingIdentity` in `crates/trusty-mpm-gui/tauri.conf.json`, applied whenever
+# `cargo tauri build` runs. Step 2b below is a best-effort fallback: IF
+# `~/.cargo/bin/trusty-mpm-gui` already exists (e.g. from a separate `cargo
+# install --path crates/trusty-mpm-gui`), sign it with the same stable
+# identifier too; otherwise it is skipped gracefully, matching
+# `post_install_signed_set`'s "skip if the path doesn't exist" behavior.
+#
 # Hardened Runtime: `--options runtime --timestamp` is applied to both binaries.
 # Unlike trusty-search/trusty-embedderd (which load an ONNX runtime dylib and so
 # gate Hardened Runtime carefully — see #2663 / the tctl `use_hardened_runtime`
@@ -71,11 +82,15 @@ set -euo pipefail
 CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 readonly MPM_BIN="$CARGO_BIN_DIR/trusty-mpm"
 readonly TM_BIN="$CARGO_BIN_DIR/tm"
+# Optional: only present if the operator separately ran
+# `cargo install --path crates/trusty-mpm-gui` (#2951 — see GUI NOTE above).
+readonly GUI_BIN="$CARGO_BIN_DIR/trusty-mpm-gui"
 
 # Fixed codesign identifiers — MUST match the canonical scheme (macos_signing.rs)
 # so the designated requirement stays stable across every reinstall.
 readonly MPM_IDENTIFIER="com.trusty.trusty-mpm"
 readonly TM_IDENTIFIER="com.trusty.tm"
+readonly GUI_IDENTIFIER="com.trusty.trusty-mpm.gui"
 
 # Sign identity: auto-detected from the keychain if not overridden.
 TRUSTY_SIGN_IDENTITY="${TRUSTY_SIGN_IDENTITY:-}"
@@ -252,6 +267,20 @@ run_sign() {
         error "The two binaries now have different identities (trusty-mpm has the new stable DR; tm is unchanged)."
         error "Re-run this script to retry — signing trusty-mpm again is idempotent (--force overwrites the existing signature)."
         return 1
+    fi
+
+    # trusty-mpm-gui (#2951): best-effort, gracefully skipped when absent — see
+    # the GUI NOTE above. This script never builds it, so a missing binary here
+    # is the expected common case, not an error. Checked directly (not via
+    # sign_binary's own not-found check, which is an error path for the
+    # required MPM_BIN/TM_BIN) so a missing GUI binary stays a skip, not a
+    # failure.
+    if [[ -f "$GUI_BIN" ]]; then
+        if ! sign_binary "$GUI_BIN" "$GUI_IDENTIFIER" "$identity" || ! verify_binary "$GUI_BIN"; then
+            warn "trusty-mpm-gui signing failed; trusty-mpm and tm are still correctly signed."
+        fi
+    else
+        info "trusty-mpm-gui not found at $GUI_BIN — skipping (only built via a separate 'cargo install --path crates/trusty-mpm-gui')."
     fi
 }
 

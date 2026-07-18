@@ -7,6 +7,53 @@ resolver = "2"
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
 # scratch dir; trusty-mpm-gui's `src-tauri` is included via its parent crate.
 exclude = []
+# `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
+# `--workspace`, no `-p`, run from this root) actually targets. Everything
+# except `trusty-mpm-gui` (#2951).
+#
+# Why: CI already runs the workspace-wide gates with
+# `--workspace --exclude trusty-mpm-gui` (`.github/workflows/ci.yml`) because
+# the GUI needs the pnpm/Svelte UI toolchain — a bare `cargo build`/`test`/
+# `check` had no equivalent exclusion, so every agent worktree (which routinely
+# runs the bare form per this repo's own documented workflow) silently
+# rebuilt the GUI too. Seven stray ad-hoc-signed `trusty-mpm-gui` debug
+# binaries were found across worktrees this way (forensics in #2951) — each a
+# brand-new identity to macOS TCC, and each a wasted UI-toolchain-dependent
+# build for anyone not actually touching the GUI. `--workspace` and `-p
+# trusty-mpm-gui` are UNAFFECTED by `default-members` and keep working exactly
+# as before (`cargo build --workspace`, `cargo test -p trusty-mpm-gui`, etc.),
+# so this only changes what the bare, no-flag form does — it does not remove
+# `trusty-mpm-gui` from the workspace.
+#
+# Maintenance note: Cargo has no "members minus one" glob for
+# `default-members`, so this list must be updated by hand when a new crate
+# lands under `crates/` (it is already a member via the `members` glob above
+# either way — only the bare-command default is affected, so forgetting to add
+# a new crate here is a mildly stale default, not a build break).
+default-members = [
+    "crates/cto-assistant",
+    "crates/tc-services",
+    "crates/trusty-agents",
+    "crates/trusty-agents-common",
+    "crates/trusty-agents-local",
+    "crates/trusty-analyze",
+    "crates/trusty-bm25-daemon",
+    "crates/trusty-channels",
+    "crates/trusty-code",
+    "crates/trusty-common",
+    "crates/trusty-console",
+    "crates/trusty-cto-db",
+    "crates/trusty-embedderd",
+    "crates/trusty-git-analytics",
+    "crates/trusty-gworkspace",
+    "crates/trusty-installer",
+    "crates/trusty-memory",
+    "crates/trusty-mpm",
+    "crates/trusty-progress",
+    "crates/trusty-review",
+    "crates/trusty-search",
+    "crates/trusty-sld-lint",
+]
 
 [workspace.package]
 edition = "2024"
