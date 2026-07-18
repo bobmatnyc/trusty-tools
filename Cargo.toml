@@ -110,16 +110,20 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # YAML (de)serialisation. PINNED to the 0.9.x line — and ONLY 0.9.x — on
-# purpose (#1220 acceptance criterion #4): the 0.8 line pulls the unmaintained
-# `unsafe-libyaml` C-binding, whereas 0.9.x parses via the pure-Rust
-# `libyaml-safer` fork, so 0.9 is the floor for any new YAML-consuming code in
-# this workspace (e.g. the `~/.trusty-tools/<crate>/config.yaml` convention added
-# in #1220). `serde_yaml` is the workspace-wide standard for all YAML-consuming
-# code: `serde_yml` (a fork once considered as a "maintained successor" per the
-# old #1250 direction) turned out to be archived upstream and unsound
-# (GHSA-hhw4-xg65-fp2x / GHSA-gfxp-f68g-8x78, Dependabot #42/#43) — trusty-agents
-# and trusty-search were migrated back onto `serde_yaml` in #2991. Do not
-# reintroduce `serde_yml` or `libyml`.
+# purpose (#1220 acceptance criterion #4): the 0.8 line has known parsing
+# soundness issues that were fixed in 0.9, so 0.9 is the floor for any new
+# YAML-consuming code in this workspace (e.g. the
+# `~/.trusty-tools/<crate>/config.yaml` convention added in #1220). Note:
+# `serde_yaml` 0.9 itself still resolves to the `unsafe-libyaml` C-transliteration
+# backend (dtolnay's c2rust port of libyaml, unsafe pointer code) — it is NOT the
+# pure-Rust `libyaml-safer` backend; do not claim otherwise in docs. There are no
+# open advisories against `unsafe-libyaml` today, which is why this pin is still
+# the safe choice. `serde_yaml` is the workspace-wide standard for all
+# YAML-consuming code: `serde_yml` (a fork once considered as a "maintained
+# successor" per the old #1250 direction) turned out to be archived upstream and
+# unsound (GHSA-hhw4-xg65-fp2x / GHSA-gfxp-f68g-8x78, Dependabot #42/#43) —
+# trusty-agents and trusty-search were migrated back onto `serde_yaml` in #2991.
+# Do not reintroduce `serde_yml` or `libyml`.
 serde_yaml = "0.9"
 # Jaro-Winkler / Levenshtein similarity helpers used by the
 # `trusty_common::help` "did you mean?" suggester behind the `cli-help`

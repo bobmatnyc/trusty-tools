@@ -242,8 +242,8 @@ marked **NEW** rather than invented as green-field:
 One schema, two surfaces (§2.4): embedded as `MdAgentFrontmatter` fields for
 single-file agents, or as the top-level keys of a sibling `agent.yaml` for
 directory-package agents. Both parse via the crate's **existing** YAML
-dependency — `serde_yml` (`crates/trusty-agents/Cargo.toml:94`,
-`serde_yml::from_str`, already used by `parse_md_agent`, `md_agent.rs:84`) —
+dependency — `serde_yaml` (`crates/trusty-agents/Cargo.toml:94`,
+`serde_yaml::from_str`, already used by `parse_md_agent`, `md_agent.rs:84`) —
 no new YAML crate is introduced.
 
 ```yaml

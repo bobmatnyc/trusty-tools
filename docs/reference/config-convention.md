@@ -24,9 +24,12 @@ Examples:
 
 ## YAML dependency
 
-The convention is parsed by `serde_yaml` **0.9.x** (pure-Rust `libyaml-safer`
-backend), pinned in the workspace `[workspace.dependencies]` table. The 0.8 line
-(which pulls the unmaintained `unsafe-libyaml` C binding) is explicitly excluded.
+The convention is parsed by `serde_yaml` **0.9.x**, pinned in the workspace
+`[workspace.dependencies]` table. `serde_yaml` 0.9 resolves to the
+`unsafe-libyaml` backend (dtolnay's c2rust transliteration of libyaml, not the
+pure-Rust `libyaml-safer` fork) — there are no open advisories against it
+today, but the 0.8 line (which has known parsing soundness issues fixed in
+0.9) is explicitly excluded.
 
 `serde_yaml` 0.9 is itself in upstream maintenance mode. `serde_yml` — once
 considered a "maintained successor" per the old #1250 direction — turned out to
