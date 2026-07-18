@@ -176,6 +176,38 @@ run_sign() {
 }
 
 # ---------------------------------------------------------------------------
+# Post-install guidance
+# ---------------------------------------------------------------------------
+
+# Why: the printed restart hint must name the plist launchd actually has
+# installed. The real daemon launchd label is `com.trusty.trusty-search`
+# (crates/trusty-search/src/commands/service.rs, LAUNCHD_LABEL) — this script
+# already printed the correct name, but the sibling README and the Makefile's
+# `deploy` target had drifted to two OTHER names (`com.trusty.search` and
+# `com.bobmatnyc.trusty-search` respectively), the same class of bug as #2827.
+# What: prefers the canonical `com.trusty.trusty-search.plist` when it exists
+# on disk; otherwise globs LaunchAgents for any other `com.trusty.*search*
+# .plist` / `com.bobmatnyc.*search*.plist` so the hint still finds a drifted
+# label, and falls back to the canonical name if nothing is installed yet.
+# Test: `bash -n` syntax check; manually verified against a real
+# ~/Library/LaunchAgents/com.trusty.trusty-search.plist during #2834 triage.
+resolve_search_plist() {
+    local agents_dir="$HOME/Library/LaunchAgents"
+    local canonical="$agents_dir/com.trusty.trusty-search.plist"
+    if [[ -f "$canonical" ]]; then
+        printf '%s' "$canonical"
+        return 0
+    fi
+    local candidate
+    for candidate in "$agents_dir"/com.trusty.*search*.plist "$agents_dir"/com.bobmatnyc.*search*.plist; do
+        [[ -f "$candidate" ]] || continue
+        printf '%s' "$candidate"
+        return 0
+    done
+    printf '%s' "$canonical"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -194,10 +226,12 @@ main() {
     if [[ "$TRUSTY_CODESIGN_DRY_RUN" != "1" ]]; then
         section "Done — next steps"
         printf '\nRESTART the daemon to pick up the newly signed binary:\n'
+        local plist_path
+        plist_path="$(resolve_search_plist)"
+        # shellcheck disable=SC2016  # literal "$(id -u)" is narration for the reader to run, not expansion here
+        printf '  launchctl bootout  gui/$(id -u) %s\n' "$plist_path"
         # shellcheck disable=SC2016
-        printf '  launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist\n'
-        # shellcheck disable=SC2016
-        printf '  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist\n'
+        printf '  launchctl bootstrap gui/$(id -u) %s\n' "$plist_path"
         printf '\nVerify the daemon loaded all indexes:\n'
         printf '  trusty-search status\n'
         printf '\nOPTIONAL — notarize for distribution to OTHER machines:\n'
