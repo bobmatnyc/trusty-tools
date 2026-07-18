@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- daemon startup version banner (`v<CARGO_PKG_VERSION> pid <pid>`) plus a `tm doctor` stale-daemon check (`daemon_version`) that compares the freshly-installed `tm` binary's version against the running daemon's self-reported `/health` `version` field, warning when the daemon predates the installed binary and needs a restart (closes #2332)
 - pm_guard — 3-per-turn file-change budget, read-only-redirection fix, content-aware routing hints ([#2928](https://github.com/bobmatnyc/trusty-tools/pull/2928)) ([`95b69c8`](https://github.com/bobmatnyc/trusty-tools/commit/95b69c80e08e396de8da7fe606d329e8360835a3))
 - rust-build-performance bundled skill — dev-loop + dependency-graph build hygiene ([#2929](https://github.com/bobmatnyc/trusty-tools/pull/2929)) ([`c278874`](https://github.com/bobmatnyc/trusty-tools/commit/c278874db20e017323de27129f59647682de643f))
 

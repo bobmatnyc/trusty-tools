@@ -731,21 +731,25 @@ fn managed_session_urls_use_managed_route_family() {
 #[test]
 fn health_snapshot_deserializes() {
     // The `/health` body deserializes into HealthSnapshot; the catalog flags
-    // default when absent so an older daemon returning only `status` still parses.
+    // and `version` (issue #2332) default when absent so an older daemon
+    // returning only `status` still parses.
     let full: HealthSnapshot = serde_json::from_value(serde_json::json!({
         "status": "ok",
         "catalog_stale": true,
         "catalog_unknown": false,
         "catalog_changes": ["agents/foo"],
+        "version": "0.42.0",
     }))
     .expect("full health body parses");
     assert_eq!(full.status, "ok");
     assert!(full.catalog_stale);
     assert!(!full.catalog_unknown);
+    assert_eq!(full.version, "0.42.0");
 
     let minimal: HealthSnapshot =
         serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
     assert_eq!(minimal.status, "ok");
     assert!(!minimal.catalog_stale);
     assert!(!minimal.catalog_unknown);
+    assert_eq!(minimal.version, "", "older daemon omitting version → empty");
 }

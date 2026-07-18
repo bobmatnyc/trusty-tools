@@ -395,13 +395,17 @@ pub fn router(state: Arc<DaemonState>) -> Router {
 /// (never `stale`, never an error) per the spec's "never block" rule. Also
 /// surfaces the #2486 `supervised` restart-race signal — a 200 response here
 /// does NOT by itself prove launchd owns this process; check `supervised` too.
+/// Also surfaces the #2332 `version` field so `tm doctor` can detect a
+/// stale, unrestarted daemon running older code than the installed binary.
 /// What: returns `status: "ok"` with `catalog_stale`/`catalog_unknown` flags, a
 /// small `catalog_changes` summary computed via
 /// [`crate::core::update_check::detect_for_framework`] anchored at the daemon's
-/// framework root, and `supervised` read from `state` (set once at daemon
-/// startup by `daemon_run::run_daemon`).
+/// framework root, `supervised` read from `state` (set once at daemon startup
+/// by `daemon_run::run_daemon`), and `version` (this process's
+/// `CARGO_PKG_VERSION`, a compile-time constant).
 /// Test: `health_reports_ok_status`, `health_reports_catalog_unknown_without_catalog`,
-/// `health_response_serializes_supervised_field`.
+/// `health_response_serializes_supervised_field`,
+/// `health_response_serializes_version_field`.
 #[utoipa::path(
     get,
     path = "/health",
@@ -419,6 +423,7 @@ pub async fn health(State(state): State<Arc<DaemonState>>) -> Json<HealthRespons
         catalog_unknown: report.unknown,
         catalog_changes: report.summary_lines(),
         supervised: state.supervised(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
     })
 }
 

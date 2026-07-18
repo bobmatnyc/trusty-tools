@@ -91,6 +91,24 @@ async fn health_response_serializes_supervised_field() {
 }
 
 #[tokio::test]
+async fn health_response_serializes_version_field() {
+    // Issue #2332: `/health` must carry this process's build version so a
+    // client can detect a stale daemon that predates the installed binary.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.version, env!("CARGO_PKG_VERSION"));
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("version"),
+        Some(&serde_json::Value::String(
+            env!("CARGO_PKG_VERSION").to_owned()
+        )),
+        "wire shape must carry `version`: {value}"
+    );
+}
+
+#[tokio::test]
 async fn current_project_found_and_missing() {
     // `GET /projects/current` returns the project for a registered path
     // and `404` for an unregistered one.

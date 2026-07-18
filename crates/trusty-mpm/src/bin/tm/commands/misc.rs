@@ -117,19 +117,21 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// operator can confirm — or fix — a broken install at a glance.
 /// What: runs [`TrustyCommand::Doctor`] through the shared [`CommandExecutor`]
 /// (which calls `GET /api/v1/doctor`), then prints one status-tagged line per
-/// check plus an overall verdict. An unreachable daemon prints an error line.
-/// When `prune_stale_skills` is set (hidden `--prune-stale-skills` flag),
-/// also runs [`prune_stale_skills_locally`] as a manual troubleshooting
-/// escape hatch — normal operation cleans up pre-rename `mpm-*` skill
-/// directories automatically and silently via the one-time
-/// `core::stale_skills::run_stale_mpm_skills_migration_once` migration at
-/// `tm` startup (#1905), so this flag should rarely be needed.
+/// check plus the client-side #2332 stale-daemon check (see
+/// [`super::doctor_stale::stale_daemon_check`]) and an overall verdict that
+/// folds both. When `prune_stale_skills` is set (hidden
+/// `--prune-stale-skills` flag), also runs [`prune_stale_skills_locally`] as a
+/// manual troubleshooting escape hatch — normal operation cleans up
+/// pre-rename `mpm-*` skill directories automatically and silently via the
+/// one-time `core::stale_skills::run_stale_mpm_skills_migration_once`
+/// migration at `tm` startup (#1905), so this flag should rarely be needed.
 /// Test: `cli_parses_doctor` / `cli_parses_doctor_prune_stale_skills` cover
 /// parsing; the report path is covered by the executor's
 /// `execute_doctor_against_test_daemon` test; the prune path is covered by
-/// `core::stale_skills`'s own unit tests.
+/// `core::stale_skills`'s own unit tests; the stale-daemon comparison logic
+/// is covered by `core::version_staleness`'s own unit tests.
 pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Result<()> {
-    use trusty_mpm::client::{CommandExecutor, CommandResult, TrustyCommand};
+    use trusty_mpm::client::{CommandExecutor, CommandResult, DaemonClient, TrustyCommand};
     use trusty_mpm::core::doctor::CheckStatus;
 
     let executor = CommandExecutor::new(url.to_string());
@@ -144,10 +146,27 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
                     check.message,
                 );
             }
+
+            // #2332: this check runs HERE (client-side) rather than inside the
+            // daemon's own `run_doctor` because it needs THIS process's own
+            // `CARGO_PKG_VERSION` — `tm doctor` always executes as the
+            // just-installed binary, so its compiled-in version is the
+            // "installed" side of the comparison. The daemon can only ever
+            // report on itself.
+            let daemon = DaemonClient::new(url.to_string());
+            let stale_check = super::doctor_stale::stale_daemon_check(&daemon).await;
+            println!(
+                "  {} {:<13} {}",
+                status_icon(stale_check.status),
+                stale_check.name,
+                stale_check.message,
+            );
+            let overall = report.overall.worst(stale_check.status);
+
             println!(
                 "\noverall: {} {}",
-                status_icon(report.overall),
-                match report.overall {
+                status_icon(overall),
+                match overall {
                     CheckStatus::Ok => "all checks passed",
                     CheckStatus::Warn => "passed with warnings",
                     CheckStatus::Fail => "one or more checks failed",

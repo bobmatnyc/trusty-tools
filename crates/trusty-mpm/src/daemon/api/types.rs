@@ -66,6 +66,25 @@ pub struct HealthResponse {
     /// `compute_supervised_*` in `commands::launchd_probe::tests`.
     #[serde(default = "default_supervised")]
     pub supervised: bool,
+    /// This running daemon process's build version (issue #2332).
+    ///
+    /// Why: the #2332 incident traced a 46.8h-stale daemon only by
+    /// correlating tmux timestamps against stderr log lines by hand — nothing
+    /// in `/health` or the startup banner identified WHICH build was actually
+    /// serving. Surfacing `CARGO_PKG_VERSION` here lets `tm doctor` (and any
+    /// operator) compare the running daemon against the installed `tm`
+    /// binary's own version and flag drift.
+    /// What: `env!("CARGO_PKG_VERSION")` of the daemon binary, set once at
+    /// `/health` handler time (it is a compile-time constant, so it never
+    /// changes across the process's lifetime). `#[serde(default)]` keeps an
+    /// older client parsing a newer daemon's response tolerant of the field,
+    /// and — the case that matters here — keeps a newer client parsing an
+    /// OLDER daemon's response (one built before this field existed)
+    /// tolerant too: it deserializes to `""`, which the staleness check
+    /// treats as "daemon predates version reporting — restart it".
+    /// Test: `health_response_serializes_version_field`.
+    #[serde(default)]
+    pub version: String,
 }
 
 /// Default for [`HealthResponse::supervised`] on deserialize — matches the

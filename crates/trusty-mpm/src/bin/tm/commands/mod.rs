@@ -15,6 +15,7 @@ pub(crate) mod banner;
 pub(crate) mod compress;
 pub(crate) mod daemon;
 pub(crate) mod delete;
+pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
 pub(crate) mod generate;
 pub(crate) mod guided;
