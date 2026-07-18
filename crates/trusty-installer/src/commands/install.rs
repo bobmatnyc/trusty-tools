@@ -20,10 +20,12 @@
 //! `--dry-run` (#2112) previews the same blast-radius summary the confirmation
 //! prompt shows — members, binaries, and planned service actions — and exits 0
 //! without installing anything; it behaves identically in TTY, non-TTY, and
-//! `--json` contexts. When `--dry-run` is not passed and confirmation cannot be
-//! obtained (non-TTY, no `--yes`), `run` refuses to install (see
-//! [`super::install_gate::decide_install_gate`]) rather than silently
-//! proceeding — the exact gap #2112 reported.
+//! `--json` contexts. It always bypasses the interactive component picker for
+//! determinism — a no-members `--dry-run` previews the FULL stable set, never
+//! a TTY-driven subset (see `run`'s doc). When `--dry-run` is not passed and
+//! confirmation cannot be obtained (non-TTY, no `--yes`), `run` refuses to
+//! install (see [`super::install_gate::decide_install_gate`]) rather than
+//! silently proceeding — the exact gap #2112 reported.
 //!
 //! Test: `tests` covers the JSON envelope shaping (`build_report`), the
 //! unknown-member handling, and the dry-run report shaping; the network /
@@ -183,12 +185,28 @@ pub struct DryRunReport {
     pub service_bootstrap_enabled: bool,
 }
 
+/// Whether an install (real or previewed) would attempt a launchd service
+/// bootstrap for `m`.
+///
+/// Why: The `--dry-run` preview (`build_dry_run_report`) and the real install
+/// loop (`install_all`) must never drift on this decision — a preview that
+/// disagrees with reality is worse than no preview at all. A single shared
+/// predicate is the only way to guarantee that.
+/// What: `true` when the post-install service-bootstrap step is enabled AND
+/// `m` is a [`ManageStrategy::Launchd`]-managed member.
+/// Test: `tests::dry_run_report_shape` (via `build_dry_run_report`);
+/// `install_all`'s use is exercised indirectly by the (side-effecting) install
+/// path.
+fn plans_service_bootstrap(m: &StableMember, service_enabled: bool) -> bool {
+    service_enabled && m.manage == ManageStrategy::Launchd
+}
+
 /// Build the `--dry-run` preview report from the resolved member set.
 ///
 /// Why: Extracted so the report's shaping is unit-testable without stdout.
 /// What: Maps each [`StableMember`] to a [`DryRunMember`], computing
-/// `service_bootstrap` the same way `install_all` decides whether to bootstrap
-/// (`service_enabled && m.manage == ManageStrategy::Launchd`).
+/// `service_bootstrap` via the shared [`plans_service_bootstrap`] predicate so
+/// the preview can never drift from what `install_all` actually does.
 /// Test: `tests::dry_run_report_shape`.
 fn build_dry_run_report(selected: &[StableMember], service_enabled: bool) -> DryRunReport {
     let members = selected
@@ -196,7 +214,7 @@ fn build_dry_run_report(selected: &[StableMember], service_enabled: bool) -> Dry
         .map(|m| DryRunMember {
             member: m.crate_name.clone(),
             binary: m.binary.clone(),
-            service_bootstrap: service_enabled && m.manage == ManageStrategy::Launchd,
+            service_bootstrap: plans_service_bootstrap(m, service_enabled),
         })
         .collect();
     DryRunReport {
@@ -207,13 +225,15 @@ fn build_dry_run_report(selected: &[StableMember], service_enabled: bool) -> Dry
     }
 }
 
-/// Print the `--dry-run` preview and return the process exit code (always 0).
+/// Print the `--dry-run` preview and return the process exit code.
 ///
 /// Why: A dry run never fails on its own account — it only reports what WOULD
 /// happen; a resolution error (unknown member) is caught earlier in `run`.
 /// What: `--json` emits [`DryRunReport`] via `render_json`; otherwise prints a
 /// human blast-radius summary matching the wording the confirmation prompt
 /// used, one line per member noting whether it would bootstrap a service.
+/// Returns `0` unless the `--json` write itself fails, in which case `1`
+/// (mirrors the real install path's failed-JSON-write handling below).
 /// Test: Side-effect-only (stdout); the data it prints is covered by
 /// `tests::dry_run_report_shape`.
 fn print_dry_run(selected: &[StableMember], service_enabled: bool, json: bool) -> i32 {
@@ -251,8 +271,11 @@ fn print_dry_run(selected: &[StableMember], service_enabled: bool, json: bool) -
 /// members are given AND stdin is a TTY AND `--json` is not set AND not
 /// `--dry-run`, presents the Phase-4 interactive component picker so the
 /// operator can choose a subset without needing to know crate names.
-/// `--dry-run` (#2112) then prints the blast-radius preview and returns 0
-/// without installing. Otherwise, the pre-install confirmation gate
+/// `--dry-run` (#2112) ALWAYS skips the picker — even on a TTY with no
+/// members named — so a no-members preview deterministically covers the FULL
+/// stable set rather than a TTY-driven subset; it then prints the
+/// blast-radius preview and returns 0 without installing. Otherwise, the
+/// pre-install confirmation gate
 /// ([`super::install_gate::decide_install_gate`]) either proceeds (`--yes`),
 /// prompts (TTY available), or REFUSES to install (non-TTY, no `--yes` — the
 /// #2112 default-safe fix: previously this silently proceeded). Installs each
@@ -266,8 +289,11 @@ fn print_dry_run(selected: &[StableMember], service_enabled: bool, json: bool) -
 /// only.
 ///
 /// Test: `tests::run_unknown_member_is_error`, `tests::run_dry_run_exits_zero`,
-/// `tests::run_non_tty_no_yes_refuses`; the install path itself is
-/// side-effecting (`cargo install`) and validated manually.
+/// `tests::dry_run_full_set_when_no_members_named`. The non-TTY refusal gate
+/// itself is TTY-independent and exhaustively covered by
+/// `super::install_gate::tests` (see that module's doc for why a `run()`-level
+/// refusal test is unsound — it would block forever on a real terminal). The
+/// install path is side-effecting (`cargo install`) and validated manually.
 pub fn run(members: &[String], yes: bool, json: bool, no_service: bool, dry_run: bool) -> i32 {
     // Phase 4: interactive component picker.
     // Only activates when: no explicit members, stdin is a TTY, not --json,
@@ -497,22 +523,21 @@ async fn install_all(
                 // folds into `service_ok` / `all_ok` / the exit code (#2566
                 // review — `--json` previously reported `all_ok: true` even
                 // when every daemon's service bootstrap had failed).
-                let (service_ok, service_detail) =
-                    if service_enabled && m.manage == ManageStrategy::Launchd {
-                        let action = bootstrap_member_service(&m.binary);
-                        let note = action.note(&m.binary);
-                        match &action {
-                            BootstrapAction::Failed(_) => {
-                                let _ = narr.error(&note);
-                            }
-                            BootstrapAction::Skipped(_) | BootstrapAction::Installed => {
-                                let _ = narr.info(&note);
-                            }
+                let (service_ok, service_detail) = if plans_service_bootstrap(m, service_enabled) {
+                    let action = bootstrap_member_service(&m.binary);
+                    let note = action.note(&m.binary);
+                    match &action {
+                        BootstrapAction::Failed(_) => {
+                            let _ = narr.error(&note);
                         }
-                        (!matches!(action, BootstrapAction::Failed(_)), note)
-                    } else {
-                        InstallOutcome::service_not_attempted()
-                    };
+                        BootstrapAction::Skipped(_) | BootstrapAction::Installed => {
+                            let _ = narr.info(&note);
+                        }
+                    }
+                    (!matches!(action, BootstrapAction::Failed(_)), note)
+                } else {
+                    InstallOutcome::service_not_attempted()
+                };
                 outcomes.push(InstallOutcome {
                     member: m.crate_name.clone(),
                     ok: true,
@@ -797,21 +822,17 @@ mod tests {
         assert_eq!(code, 0);
     }
 
-    /// Why: #2112's exact regression — a non-interactive `run()` invocation
-    /// (no `--yes`, no `--dry-run`) must REFUSE rather than silently install.
-    /// The test harness's stdin is not a TTY (matches every CI / piped /
-    /// agent-driven invocation #2112 was reported from), so this exercises the
-    /// real `run()` path end-to-end, not just the pure `install_gate` gate.
-    /// `--json` keeps output machine-parseable; "tga" is the cheapest real
-    /// member (non-daemon, single "git" prereq check, no network).
-    /// What: Calls `run` with a real member, `yes: false`, `dry_run: false`;
-    /// asserts exit code 3 (refuse).
-    /// Test: This is the test.
-    #[test]
-    fn run_non_tty_no_yes_refuses() {
-        let code = run(&["tga".to_owned()], false, true, false, false);
-        assert_eq!(code, 3);
-    }
+    // #2112 review (HIGH): a `run_non_tty_no_yes_refuses` test previously
+    // called the real `run()` relying on the test harness's ambient stdin not
+    // being a TTY. That is unsound: on a developer's interactive terminal
+    // `is_tty()` returns true → `InstallGate::NeedsPrompt` → `prompt_yes_no`
+    // blocks forever on `stdin().read_line()`, hanging the test suite. The
+    // #2112 regression this was meant to guard — non-TTY + no `--yes` must
+    // REFUSE — is already exhaustively covered, TTY-independent, by
+    // `super::install_gate::tests::decide_non_tty_refuses` (mirrors the
+    // established `upgrade.rs`/`update_engine.rs` split: `resolve_and_apply`
+    // is side-effecting and validated manually, `decide_apply` is the unit-
+    // tested pure gate). No `run()`-level replacement is added here.
 
     /// Why: The `--dry-run` JSON envelope is a public contract; pin its shape
     /// and the `service_bootstrap` derivation (enabled AND launchd-managed).
@@ -842,6 +863,36 @@ mod tests {
         assert!(
             !disabled.members[0].service_bootstrap,
             "disabled service bootstrap must suppress every member"
+        );
+    }
+
+    /// Why: #2112 review (MEDIUM) — `--dry-run` always bypasses the
+    /// interactive picker (`run`'s picker gate requires `!dry_run`), so a
+    /// no-members `--dry-run` must preview the FULL stable set, not whatever
+    /// subset a TTY-driven picker might otherwise offer. `run()`'s exit code
+    /// can't be inspected for the resolved set without capturing stdout, so
+    /// this pins the composition `run()` itself uses:
+    /// `select_members_transitive(&[])` (what an empty `members` slice
+    /// resolves to) fed into `build_dry_run_report`.
+    /// What: Resolving `&[]` yields every [`stable_set`] member, in order,
+    /// and the dry-run report carries them all.
+    /// Test: This is the test.
+    #[test]
+    fn dry_run_full_set_when_no_members_named() {
+        let resolved = select_members_transitive(&[]);
+        let all = super::super::stable_set::stable_set();
+        assert_eq!(
+            resolved.members.len(),
+            all.len(),
+            "empty members must resolve to the full stable set"
+        );
+
+        let report = build_dry_run_report(&resolved.members, true);
+        let names: Vec<&str> = report.members.iter().map(|m| m.member.as_str()).collect();
+        let expected: Vec<&str> = all.iter().map(|m| m.crate_name.as_str()).collect();
+        assert_eq!(
+            names, expected,
+            "dry-run preview must list every stable-set member, in order, when none are named"
         );
     }
 

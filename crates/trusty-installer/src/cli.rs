@@ -217,6 +217,10 @@ pub enum Commands {
         /// Preview what would be installed (members, binaries, planned service
         /// actions) without installing anything (#2112). Exits 0. Safe to run
         /// in any context — TTY, non-TTY, or `--json` — and never prompts.
+        /// Always bypasses the interactive component picker for determinism:
+        /// with no members named, previews the FULL stable set (not a
+        /// TTY-driven subset) — same as omitting `--dry-run` in a non-TTY
+        /// context.
         #[arg(long)]
         dry_run: bool,
     },
