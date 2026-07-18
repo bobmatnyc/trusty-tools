@@ -24,7 +24,22 @@
 //! `output_style_prefers_project_over_global`,
 //! `output_style_falls_back_to_global_when_project_silent`,
 //! `output_style_falls_back_to_global_when_project_missing`.
+//!
+//! [`check_output_style_staleness`] closes a second gap (issue #2333): even
+//! when [`check_output_style`] reports `Ok` (the configured id resolves to a
+//! non-empty file), that file's CONTENT can still have drifted from the
+//! bundled asset — exactly what happened after PR #2328 corrected the PM
+//! identity string but the deployed `~/.claude/output-styles/*.md` copies
+//! were never refreshed. It mirrors the content-checksum approach
+//! `skill_staleness` (issue #2876) already uses for skills, plus an
+//! orphan-file scan for foreign/dormant files sitting in the same directory
+//! (e.g. a pre-rebrand `claude-mpm.md`).
+//! Test: `staleness_ok_when_in_sync`, `staleness_warns_on_drift`,
+//! `staleness_warns_on_orphan`, `staleness_ok_when_dir_missing`,
+//! `staleness_ok_when_file_never_deployed`,
+//! `staleness_orphan_exempts_configured_custom_id`.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::core::bundle::OUTPUT_STYLES;
@@ -190,6 +205,124 @@ fn evaluate_style(style_id: &str, home: &Path, source_path: &Path, source: &str)
     }
 }
 
+/// Best-effort resolution of the effective `outputStyle` id, ignoring any
+/// error/malformed states — those are already reported by
+/// [`check_output_style`] itself. Used only to exempt the currently
+/// configured style's file from orphan detection below.
+///
+/// Why: [`check_output_style_staleness`] must not flag the file backing a
+/// deliberately configured custom style id (one that resolves to no
+/// [`OUTPUT_STYLES`] entry — already `Fail`ed by [`evaluate_style`], but the
+/// operator's own file, not a foreign leftover) as an orphan.
+/// What: project scope first (when `project_dir` is given and sets the key),
+/// else global scope; any unreadable/malformed/absent file at either scope
+/// resolves to `None` rather than propagating an error, since this helper
+/// only narrows an advisory scan.
+/// Test: `staleness_orphan_exempts_configured_custom_id`.
+fn resolve_effective_style_id(project_dir: Option<&Path>, home: &Path) -> Option<String> {
+    if let Some(dir) = project_dir
+        && let Ok(StyleKey::Present(id)) =
+            read_style_key(&dir.join(".claude").join("settings.json"))
+    {
+        return Some(id);
+    }
+    match read_style_key(&home.join(".claude").join("settings.json")) {
+        Ok(StyleKey::Present(id)) => Some(id),
+        _ => None,
+    }
+}
+
+/// Probe deployed output-style files for content drift against the bundled
+/// catalog, and flag orphaned files under `output-styles/` (issue #2333).
+///
+/// Why: [`check_output_style`] only validates that the configured id
+/// RESOLVES to a non-empty file — it never compares content, so a stale
+/// on-disk copy reports a clean `Ok` even though the deployed text is out of
+/// date (the exact gap that let the PR #2328 identity-string fix sit
+/// undeployed through an install + daemon restart). A dormant foreign file
+/// (e.g. a pre-rebrand `claude-mpm.md`) beside the current styles is also
+/// invisible today and is a landmine if `outputStyle` is ever mis-set to it.
+/// What: for every [`OUTPUT_STYLES`] entry, byte-compares the deployed
+/// `<home>/.claude/output-styles/<file_name>` against the bundled `content`;
+/// a mismatch is reported as drifted (a missing file is skipped here — that
+/// state is already `Fail`ed by [`check_output_style`], so it is not
+/// double-reported as drift). Separately scans `output-styles/` for `.md`
+/// files whose name matches no bundled `file_name` and is not
+/// `<configured_id>.md` (via [`resolve_effective_style_id`]) — those are
+/// orphans, named but NEVER deleted (issue #2333: a foreign file may belong
+/// to a separately-installed tool). `Warn` when either set is non-empty,
+/// naming what was found and `tm install` as the drift remediation; `Ok`
+/// when the directory is fully in sync (including when it does not exist
+/// yet — nothing has been deployed there, a state [`check_output_style`]
+/// already reports on).
+/// Test: `staleness_ok_when_in_sync`, `staleness_warns_on_drift`,
+/// `staleness_warns_on_orphan`, `staleness_ok_when_dir_missing`,
+/// `staleness_ok_when_file_never_deployed`,
+/// `staleness_orphan_exempts_configured_custom_id`.
+pub(crate) fn check_output_style_staleness(project_dir: Option<&Path>, home: &Path) -> DoctorCheck {
+    let styles_dir = home.join(".claude").join("output-styles");
+    let known_names: HashSet<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
+
+    let mut drifted: Vec<&str> = Vec::new();
+    for style in OUTPUT_STYLES {
+        match std::fs::read(styles_dir.join(style.file_name)) {
+            Ok(bytes) if bytes != style.content.as_bytes() => drifted.push(style.file_name),
+            _ => {} // in sync, missing (not this probe's concern), or unreadable (skip)
+        }
+    }
+
+    let mut orphans: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&styles_dir) {
+        let exempt_custom =
+            resolve_effective_style_id(project_dir, home).map(|id| format!("{id}.md"));
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !name.ends_with(".md") || known_names.contains(name) {
+                continue;
+            }
+            if exempt_custom.as_deref() == Some(name) {
+                continue;
+            }
+            orphans.push(name.to_string());
+        }
+    }
+    orphans.sort_unstable();
+
+    if drifted.is_empty() && orphans.is_empty() {
+        return DoctorCheck::new(
+            "output_style_staleness",
+            CheckStatus::Ok,
+            "deployed output styles match the installed binary's bundled assets",
+        );
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if !drifted.is_empty() {
+        parts.push(format!(
+            "{} drifted from bundled content ({}) — run `tm install` to redeploy",
+            drifted.len(),
+            drifted.join(", ")
+        ));
+    }
+    if !orphans.is_empty() {
+        parts.push(format!(
+            "{} unrecognized file(s) present ({}) — not removed automatically; confirm they \
+             are not referenced by outputStyle before deleting",
+            orphans.len(),
+            orphans.join(", ")
+        ));
+    }
+
+    DoctorCheck::new(
+        "output_style_staleness",
+        CheckStatus::Warn,
+        parts.join("; "),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +340,15 @@ mod tests {
         std::fs::create_dir_all(&styles_dir).unwrap();
         let default = OUTPUT_STYLES[0];
         std::fs::write(styles_dir.join(default.file_name), default.content).unwrap();
+    }
+
+    /// Deploy every bundled style, byte-exact, under `<home>/.claude/output-styles/`.
+    fn deploy_all_styles(home: &Path) {
+        let styles_dir = home.join(".claude").join("output-styles");
+        std::fs::create_dir_all(&styles_dir).unwrap();
+        for style in OUTPUT_STYLES {
+            std::fs::write(styles_dir.join(style.file_name), style.content).unwrap();
+        }
     }
 
     #[test]
@@ -329,5 +471,93 @@ mod tests {
             "message must name the resolved scope: {}",
             check.message
         );
+    }
+
+    #[test]
+    fn staleness_ok_when_in_sync() {
+        // All three bundled styles deployed byte-exact must be Ok.
+        let home = tempfile::tempdir().unwrap();
+        deploy_all_styles(home.path());
+        let check = check_output_style_staleness(None, home.path());
+        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+    }
+
+    #[test]
+    fn staleness_warns_on_drift() {
+        // This is the exact incident condition (issue #2333): PR #2328
+        // corrected the bundled content, but the deployed copy never got
+        // refreshed. A byte-level mismatch must Warn and point at `tm install`.
+        let home = tempfile::tempdir().unwrap();
+        deploy_all_styles(home.path());
+        let styles_dir = home.path().join(".claude").join("output-styles");
+        let first = &OUTPUT_STYLES[0];
+        std::fs::write(
+            styles_dir.join(first.file_name),
+            "stale pre-#2328 identity text",
+        )
+        .unwrap();
+
+        let check = check_output_style_staleness(None, home.path());
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains(first.file_name));
+        assert!(check.message.contains("tm install"));
+    }
+
+    #[test]
+    fn staleness_warns_on_orphan() {
+        // A dormant foreign file (issue #2333's `claude-mpm.md` example) must
+        // be flagged, but never deleted.
+        let home = tempfile::tempdir().unwrap();
+        deploy_all_styles(home.path());
+        let styles_dir = home.path().join(".claude").join("output-styles");
+        std::fs::write(styles_dir.join("claude-mpm.md"), "pre-rebrand lineage").unwrap();
+
+        let check = check_output_style_staleness(None, home.path());
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("claude-mpm.md"));
+        assert!(
+            styles_dir.join("claude-mpm.md").exists(),
+            "orphan detection must never delete the foreign file"
+        );
+    }
+
+    #[test]
+    fn staleness_ok_when_dir_missing() {
+        // Nothing deployed yet is not staleness — `check_output_style` already
+        // reports on that state (Warn/Fail depending on configuration).
+        let home = tempfile::tempdir().unwrap();
+        let check = check_output_style_staleness(None, home.path());
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn staleness_ok_when_file_never_deployed() {
+        // A style present in the bundle but never written to disk (a subset
+        // deploy, or a deletion) must be skipped, not reported as drift —
+        // that state is `check_output_style`'s Fail, not this probe's Warn.
+        let home = tempfile::tempdir().unwrap();
+        deploy_default_style(home.path()); // only OUTPUT_STYLES[0]
+        let check = check_output_style_staleness(None, home.path());
+        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+    }
+
+    #[test]
+    fn staleness_orphan_exempts_configured_custom_id() {
+        // A deliberately configured custom style id (unknown to OUTPUT_STYLES,
+        // already `Fail`ed by `check_output_style` itself) is the operator's
+        // own file, not a foreign leftover — orphan detection must not also
+        // flag it.
+        let home = tempfile::tempdir().unwrap();
+        deploy_all_styles(home.path());
+        write_settings(home.path(), r#"{"outputStyle": "my-custom-style"}"#);
+        let styles_dir = home.path().join(".claude").join("output-styles");
+        std::fs::write(
+            styles_dir.join("my-custom-style.md"),
+            "operator's own style",
+        )
+        .unwrap();
+
+        let check = check_output_style_staleness(None, home.path());
+        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
     }
 }
