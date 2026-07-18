@@ -19,12 +19,17 @@
   //
   // What: Polls `GET /sessions` then `GET /sessions/{id}/readiness` for the
   // session `pickActiveSession` selects, every `POLL_MS`, via a Svelte 5
-  // `$effect` that returns its own teardown (clears the interval and marks
-  // in-flight polls stale on unmount — no `onMount`/`onDestroy`). Renders one
-  // of four states: `daemon-unreachable` (the `/sessions` fetch itself
-  // failed), `no-session` (daemon reachable, zero sessions), `ready`
-  // (readiness + the budget placeholder), each as a `.statusbar` child —
-  // never hidden, per DOC-39 §4.4 AC-4.2's "locked, not hidden" chrome rule.
+  // `$effect` that returns its own teardown — no `onMount`/`onDestroy`. The
+  // teardown clears the interval AND aborts one `AbortController` shared by
+  // every poll's `fetch()` calls; `refresh()` also re-checks `signal.aborted`
+  // after each `await` before writing `phase`/`session`/`readiness`/`error`,
+  // so an in-flight poll genuinely abandons its result on unmount (the
+  // network request is cancelled, not merely ignored) rather than racing a
+  // disposed effect scope. Renders one of four states: `daemon-unreachable`
+  // (the `/sessions` fetch itself failed), `no-session` (daemon reachable,
+  // zero sessions), `ready` (readiness + the budget placeholder), each as a
+  // `.statusbar` child — never hidden, per DOC-39 §4.4 AC-4.2's "locked, not
+  // hidden" chrome rule.
   //
   // Test: `session-status.test.ts` covers `pickActiveSession`;
   // `App.test.ts` asserts the DOC-39 §8.1 AC-18.1 DOM invariant
@@ -47,29 +52,35 @@
   let readiness = $state<ReadinessQuery | null>(null);
   let error = $state<string | null>(null);
 
-  async function refresh() {
+  async function refresh(signal: AbortSignal) {
     let base: string;
     try {
       base = await apiBase();
     } catch (e) {
-      phase = 'daemon-unreachable';
-      error = e instanceof Error ? e.message : String(e);
+      if (!signal.aborted) {
+        phase = 'daemon-unreachable';
+        error = e instanceof Error ? e.message : String(e);
+      }
       return;
     }
+    if (signal.aborted) return;
 
     let sessions: SessionSummary[];
     try {
-      const res = await fetch(`${base}/sessions`);
+      const res = await fetch(`${base}/sessions`, { signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as SessionListResponse;
       sessions = body.sessions;
     } catch (e) {
-      phase = 'daemon-unreachable';
-      session = null;
-      readiness = null;
-      error = e instanceof Error ? e.message : String(e);
+      if (!signal.aborted) {
+        phase = 'daemon-unreachable';
+        session = null;
+        readiness = null;
+        error = e instanceof Error ? e.message : String(e);
+      }
       return;
     }
+    if (signal.aborted) return;
 
     const active = pickActiveSession(sessions);
     if (!active) {
@@ -82,30 +93,34 @@
     session = active;
 
     try {
-      const res = await fetch(`${base}/sessions/${active.id}/readiness`);
+      const res = await fetch(`${base}/sessions/${active.id}/readiness`, { signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      readiness = (await res.json()) as ReadinessQuery;
+      const body = (await res.json()) as ReadinessQuery;
+      if (signal.aborted) return;
+      readiness = body;
       phase = 'ready';
       error = null;
     } catch (e) {
       // The session itself is reachable (we just listed it) — a readiness
       // fetch failure here is a transient/partial error, not "no daemon".
-      phase = 'ready';
-      readiness = null;
-      error = e instanceof Error ? e.message : String(e);
+      if (!signal.aborted) {
+        phase = 'ready';
+        readiness = null;
+        error = e instanceof Error ? e.message : String(e);
+      }
     }
   }
 
   $effect(() => {
-    let cancelled = false;
-    void (async () => {
-      if (!cancelled) await refresh();
-    })();
-    const timer = setInterval(() => {
-      if (!cancelled) void refresh();
-    }, POLL_MS);
+    // One controller for the whole mounted lifetime: every poll's two
+    // `fetch()` calls share it, and aborting it once on teardown both
+    // cancels any in-flight request AND flips every `signal.aborted` guard
+    // inside `refresh()` — real cancellation, not a flag nothing reads.
+    const controller = new AbortController();
+    void refresh(controller.signal);
+    const timer = setInterval(() => void refresh(controller.signal), POLL_MS);
     return () => {
-      cancelled = true;
+      controller.abort();
       clearInterval(timer);
     };
   });

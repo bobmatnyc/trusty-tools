@@ -30,8 +30,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Phase-1 status bar: readiness + budget chrome per DOC-39 §6.2 (refs #2983).
   `StatusBar.svelte` polls `GET /sessions` then `GET /sessions/{id}/readiness`
-  (REST Slice 2, squash 15156b42) every 5s via a Svelte 5 `$effect` with its
-  own interval-clearing teardown, and renders a `daemon-unreachable` /
+  (REST Slice 2, squash 15156b42) every 5s via a Svelte 5 `$effect` whose
+  teardown clears the interval and aborts a shared `AbortController` (every
+  poll's `fetch()` calls carry its signal, and `refresh()` re-checks
+  `signal.aborted` after each `await`), so an in-flight poll is genuinely
+  cancelled on unmount rather than merely ignored; renders a `daemon-unreachable` /
   `no-session` / `ready` state — same thin-client, no-Rust-proxying pattern as
   the existing `HealthPanel`. `pickActiveSession` (`lib/session-status.ts`)
   is the one piece of client-side logic: with no session picker yet (Phase
