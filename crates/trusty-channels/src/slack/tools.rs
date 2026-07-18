@@ -91,26 +91,70 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_read_channel",
-            "Read recent messages from a Slack channel. Returns a single page \
-             (no cursor pagination); a busy channel may truncate at `limit`.",
+            "Read messages from a Slack channel, newest-first. Supports cursor \
+             pagination: pass the previous call's `next_cursor` back as `cursor` \
+             to walk further into history, or bound the window with `oldest`/ \
+             `latest`. `next_cursor` is null once there are no more pages.",
             json!({
                 "channel": channel_prop(),
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of messages to return (default 50).",
+                    "description": "Maximum number of messages to return per page \
+                        (default 50, max 999).",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous \
+                        call's `next_cursor`; fetches the next page.",
+                },
+                "oldest": {
+                    "type": "string",
+                    "description": "Only messages after this Slack ts \
+                        (seconds.microseconds, e.g. '1616703000.216300').",
+                },
+                "latest": {
+                    "type": "string",
+                    "description": "Only messages before this Slack ts \
+                        (seconds.microseconds).",
                 },
             }),
             &["channel"],
         ),
         tool(
             "slack_read_thread",
-            "Read replies in a Slack thread. Returns a single page (no cursor \
-             pagination); a very long thread may truncate.",
+            "Read replies in a Slack thread. Supports cursor pagination for long \
+             threads: pass the previous call's `next_cursor` back as `cursor` to \
+             fetch the next page, or bound the window with `oldest`/`latest`; \
+             `next_cursor` is null once there are no more.",
             json!({
                 "channel": channel_prop(),
                 "thread_ts": {
                     "type": "string",
-                    "description": "The ts of the thread's parent message.",
+                    "description": "The ts of the thread's parent message, as an \
+                        exact Slack timestamp string 'seconds.microseconds' \
+                        (e.g. '1616703000.216300'). Pass it through unchanged — \
+                        reformatting it as a number can silently drop trailing- \
+                        zero precision and Slack will reject the call.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of replies to return per page \
+                        (default 50, max 999).",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous \
+                        call's `next_cursor`; fetches the next page.",
+                },
+                "oldest": {
+                    "type": "string",
+                    "description": "Only replies after this Slack ts \
+                        (seconds.microseconds, e.g. '1616703000.216300').",
+                },
+                "latest": {
+                    "type": "string",
+                    "description": "Only replies before this Slack ts \
+                        (seconds.microseconds).",
                 },
             }),
             &["channel", "thread_ts"],
@@ -241,5 +285,56 @@ mod tests {
             assert!(is_known_tool(name), "{name} must be a known tool");
         }
         assert!(!is_known_tool("slack_not_a_tool"));
+    }
+
+    #[test]
+    fn read_thread_schema_advertises_full_pagination_shape() {
+        // read::read_thread actually forwards cursor/oldest/latest to
+        // conversations.replies (via apply_pagination_args, shared with
+        // read_channel) — the schema must advertise every param the handler
+        // accepts, not just cursor (issue #2996 review).
+        let v = tool_list_response();
+        let read_thread = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "slack_read_thread")
+            .expect("slack_read_thread is a known tool");
+        let props = &read_thread["inputSchema"]["properties"];
+        for key in ["thread_ts", "limit", "cursor", "oldest", "latest"] {
+            assert!(
+                props.get(key).is_some(),
+                "slack_read_thread schema must declare '{key}'"
+            );
+        }
+    }
+
+    #[test]
+    fn read_channel_and_read_thread_share_the_same_pagination_property_names() {
+        // Both tools are backed by the same apply_pagination_args helper, so
+        // their pagination-related schema properties must match exactly.
+        let v = tool_list_response();
+        let props_for = |name: &str| {
+            v["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap()["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+        let pagination_keys: HashSet<&str> = ["cursor", "oldest", "latest"].into_iter().collect();
+        let channel_props = props_for("slack_read_channel");
+        let thread_props = props_for("slack_read_thread");
+        for key in pagination_keys {
+            assert!(
+                channel_props.contains(key) && thread_props.contains(key),
+                "'{key}' must be declared on both slack_read_channel and slack_read_thread"
+            );
+        }
     }
 }

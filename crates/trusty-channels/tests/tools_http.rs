@@ -15,7 +15,7 @@ use serde_json::json;
 use trusty_channels::slack::api::client::BaseClient;
 use trusty_channels::slack::handlers::dispatch;
 use trusty_channels::slack::server::ToolCallError;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A client wired to the mock server with a fixed bot token (no user token).
@@ -101,6 +101,75 @@ async fn read_channel_escapes_message_text() {
 }
 
 #[tokio::test]
+async fn read_channel_paginates_with_cursor() {
+    // A caller walking full history passes `cursor`/`oldest`/`latest` through
+    // to conversations.history and reads back `next_cursor`/`has_more` to
+    // decide whether to fetch another page (issue #2996).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.history"))
+        .and(body_partial_json(json!({
+            "channel": "C1",
+            "cursor": "dXNlcjpVMDYxTkZUVDI=",
+            "oldest": "1600000000.000000",
+            "latest": "1700000000.000000",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "messages": [ { "user": "U1", "ts": "1650000000.000100", "text": "older" } ],
+            "has_more": true,
+            "response_metadata": { "next_cursor": "bmV4dC1wYWdl" },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_read_channel",
+        json!({
+            "channel": "C1",
+            "cursor": "dXNlcjpVMDYxTkZUVDI=",
+            "oldest": "1600000000.000000",
+            "latest": "1700000000.000000",
+        }),
+    )
+    .await
+    .expect("paginated read should succeed");
+
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["next_cursor"], "bmV4dC1wYWdl");
+    assert_eq!(out["has_more"], true);
+}
+
+#[tokio::test]
+async fn read_channel_last_page_has_null_next_cursor() {
+    // Slack signals "no more pages" with an empty-string next_cursor; the
+    // handler must surface that as `null`, not an empty-string cursor a naive
+    // caller might try to replay.
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.history",
+        json!({
+            "ok": true,
+            "messages": [ { "user": "U1", "ts": "1.1", "text": "last" } ],
+            "has_more": false,
+            "response_metadata": { "next_cursor": "" },
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_read_channel", json!({ "channel": "C1" }))
+        .await
+        .expect("read should succeed");
+
+    assert!(out["next_cursor"].is_null());
+    assert_eq!(out["has_more"], false);
+}
+
+#[tokio::test]
 async fn read_thread_returns_replies() {
     let server = MockServer::start().await;
     mount_ok(
@@ -128,6 +197,191 @@ async fn read_thread_returns_replies() {
     assert_eq!(out["thread_ts"], "1.1");
     assert_eq!(out["count"], 2);
     assert_eq!(out["messages"][1]["text"], "reply");
+    // A single-page thread with no response_metadata still shapes a clean
+    // null next_cursor / false has_more rather than erroring or defaulting.
+    assert!(out["next_cursor"].is_null());
+    assert_eq!(out["has_more"], false);
+}
+
+#[tokio::test]
+async fn read_thread_paginates_with_cursor() {
+    // A long thread walked page-by-page: `cursor` is forwarded to
+    // conversations.replies and `next_cursor`/`has_more` come back so the
+    // caller knows to fetch another page (issue #2996).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.replies"))
+        .and(body_partial_json(json!({
+            "channel": "C1",
+            "ts": "1616703000.216300",
+            "cursor": "dGhyZWFkLXBhZ2Uy",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "messages": [ { "user": "U3", "ts": "1616703100.000200", "text": "later reply" } ],
+            "has_more": true,
+            "response_metadata": { "next_cursor": "dGhyZWFkLXBhZ2Uz" },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "cursor": "dGhyZWFkLXBhZ2Uy",
+        }),
+    )
+    .await
+    .expect("paginated thread read should succeed");
+
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["next_cursor"], "dGhyZWFkLXBhZ2Uz");
+    assert_eq!(out["has_more"], true);
+}
+
+#[tokio::test]
+async fn read_thread_rejects_malformed_thread_ts() {
+    // A `thread_ts` that lost precision (e.g. round-tripped through a float)
+    // or is otherwise not `seconds.microseconds` fails fast with a clear
+    // InvalidArgs message instead of reaching Slack and coming back with an
+    // opaque `invalid_arguments` (issue #2996, item 2b).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.replies"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({ "channel": "C1", "thread_ts": "1616703000" }),
+    )
+    .await
+    .expect_err("malformed thread_ts must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => {
+            assert!(msg.contains("thread_ts"), "names the field: {msg}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_thread_rejects_malformed_oldest_or_latest() {
+    // slack_read_thread now advertises + forwards oldest/latest (issue #2996
+    // review); a malformed value must fail fast pre-network exactly like
+    // thread_ts, never reach conversations.replies.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.replies"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+
+    let err = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "oldest": "1616703000",
+        }),
+    )
+    .await
+    .expect_err("malformed oldest must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => assert!(msg.contains("oldest"), "{msg}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let err = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "latest": "not-a-ts",
+        }),
+    )
+    .await
+    .expect_err("malformed latest must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => assert!(msg.contains("latest"), "{msg}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_channel_rejects_malformed_oldest_or_latest() {
+    // Same pre-network validation applies to slack_read_channel, which shares
+    // apply_pagination_args with slack_read_thread.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.history"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_read_channel",
+        json!({ "channel": "C1", "oldest": "1616703000" }),
+    )
+    .await
+    .expect_err("malformed oldest must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => assert!(msg.contains("oldest"), "{msg}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_thread_forwards_oldest_and_latest_to_conversations_replies() {
+    // The tool schema advertises oldest/latest on read_thread; this pins that
+    // the handler actually forwards them (not just accepts and drops them).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.replies"))
+        .and(body_partial_json(json!({
+            "channel": "C1",
+            "ts": "1616703000.216300",
+            "oldest": "1600000000.000000",
+            "latest": "1700000000.000000",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "messages": [ { "user": "U1", "ts": "1650000000.000100", "text": "windowed reply" } ],
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "oldest": "1600000000.000000",
+            "latest": "1700000000.000000",
+        }),
+    )
+    .await
+    .expect("windowed thread read should succeed");
+
+    assert_eq!(out["count"], 1);
 }
 
 #[tokio::test]
