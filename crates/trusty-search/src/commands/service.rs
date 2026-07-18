@@ -98,16 +98,31 @@ fn launchd_env_vars() -> Vec<(String, String)> {
 ///
 /// Why: install/uninstall/status all need the same plist label, log paths,
 /// and env-var set. Building it in one place keeps them in sync.
+///
+/// 🔴 fd limits: macOS launchd's default soft fd ceiling for user agents is
+/// 256. trusty-search warm-boots one index per registered directory, each
+/// holding multiple on-disk segment files plus sockets and log descriptors;
+/// at ~450 indexes (observed during the 0.34.0 release install, issue #2947)
+/// the process hit EMFILE mid warm-boot and needed a manual local plist
+/// patch to recover. The generated plist always sets both
+/// `SoftResourceLimits` and `HardResourceLimits` to
+/// [`trusty_common::launchd::LAUNCHD_FD_LIMIT`] (8192), matching the
+/// trusty-memory convention, so the limit is permanent and survives
+/// `service install` regeneration instead of requiring hand-patching.
+///
 /// What: assembles a [`trusty_common::launchd::LaunchdConfig`] using
 /// `start --foreground` as the entry point and `KeepAlive::OnSuccess` so the
 /// daemon's idempotent `start` exit isn't crash-looped.
-/// Test: exercised via service install/uninstall.
+/// Test: `build_launchd_config_sets_fd_limit` and
+/// `build_launchd_config_plist_includes_fd_limit` assert the fd ceiling is
+/// wired into both the config struct and the rendered plist XML (issue
+/// #2947 regression guard). Also exercised via service install/uninstall.
 #[cfg(target_os = "macos")]
 fn build_launchd_config(
     exe: std::path::PathBuf,
     log_dir: std::path::PathBuf,
 ) -> trusty_common::launchd::LaunchdConfig {
-    use trusty_common::launchd::{KeepAlive, LaunchdConfig};
+    use trusty_common::launchd::{KeepAlive, LaunchdConfig, LAUNCHD_FD_LIMIT};
     LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),
         exe_path: exe,
@@ -116,7 +131,10 @@ fn build_launchd_config(
         keep_alive: KeepAlive::OnSuccess,
         throttle_interval: 30,
         env_vars: launchd_env_vars(),
-        fd_limit: None,
+        // Fix fd exhaustion during large-fleet warm-boot (issue #2947):
+        // raise both soft and hard limits to 8192 so the daemon can hold
+        // thousands of open index files before hitting EMFILE.
+        fd_limit: Some(LAUNCHD_FD_LIMIT),
     }
 }
 
@@ -256,4 +274,71 @@ fn service_logs() -> Result<()> {
         anyhow::bail!("tail exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: the LaunchdConfig handed to `trusty_common::launchd` must always
+    /// carry the fd-limit fix — dropping it silently reintroduces the
+    /// large-fleet warm-boot EMFILE crash (issue #2947).
+    /// What: builds the config with dummy paths and asserts `fd_limit` is
+    /// `Some(LAUNCHD_FD_LIMIT)`.
+    /// Test: pure construction, no fs side effects.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_launchd_config_sets_fd_limit() {
+        use std::path::PathBuf;
+        use trusty_common::launchd::LAUNCHD_FD_LIMIT;
+
+        let cfg = build_launchd_config(
+            PathBuf::from("/usr/local/bin/trusty-search"),
+            PathBuf::from("/tmp/trusty-search/logs"),
+        );
+        assert_eq!(
+            cfg.fd_limit,
+            Some(LAUNCHD_FD_LIMIT),
+            "fd_limit must be Some(LAUNCHD_FD_LIMIT) so the generated plist \
+             raises both soft and hard NumberOfFiles limits to \
+             {LAUNCHD_FD_LIMIT}, preventing EMFILE during large-fleet \
+             warm-boot (issue #2947)"
+        );
+    }
+
+    /// Why: the generated plist XML (what launchd actually reads from disk)
+    /// must contain both resource-limit dicts with the canonical fd value —
+    /// asserting on `render_plist()` output catches regressions where the
+    /// config struct is correct but the renderer drops the dicts.
+    /// What: renders the plist with a dummy exe/log dir and checks that the
+    /// `SoftResourceLimits` / `HardResourceLimits` / `NumberOfFiles` keys
+    /// appear with the right integer value.
+    /// Test: pure string generation, no fs side effects.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_launchd_config_plist_includes_fd_limit() {
+        use std::path::PathBuf;
+        use trusty_common::launchd::LAUNCHD_FD_LIMIT;
+
+        let cfg = build_launchd_config(
+            PathBuf::from("/usr/local/bin/trusty-search"),
+            PathBuf::from("/tmp/trusty-search/logs"),
+        );
+        let xml = cfg.render_plist().expect("render_plist must succeed");
+
+        assert!(
+            xml.contains("<key>SoftResourceLimits</key>"),
+            "plist must contain SoftResourceLimits to raise the fd ceiling"
+        );
+        assert!(
+            xml.contains("<key>HardResourceLimits</key>"),
+            "plist must contain HardResourceLimits so the soft limit is not \
+             clamped below it"
+        );
+        let fd_str = format!("<integer>{LAUNCHD_FD_LIMIT}</integer>");
+        assert!(
+            xml.contains(&fd_str),
+            "plist NumberOfFiles must equal {LAUNCHD_FD_LIMIT}, got xml: {xml}"
+        );
+    }
 }
