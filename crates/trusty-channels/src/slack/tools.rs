@@ -91,26 +91,59 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_read_channel",
-            "Read recent messages from a Slack channel. Returns a single page \
-             (no cursor pagination); a busy channel may truncate at `limit`.",
+            "Read messages from a Slack channel, newest-first. Supports cursor \
+             pagination: pass the previous call's `next_cursor` back as `cursor` \
+             to walk further into history, or bound the window with `oldest`/ \
+             `latest`. `next_cursor` is null once there are no more pages.",
             json!({
                 "channel": channel_prop(),
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of messages to return (default 50).",
+                    "description": "Maximum number of messages to return per page \
+                        (default 50, max 999).",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous \
+                        call's `next_cursor`; fetches the next page.",
+                },
+                "oldest": {
+                    "type": "string",
+                    "description": "Only messages after this Slack ts \
+                        (seconds.microseconds, e.g. '1616703000.216300').",
+                },
+                "latest": {
+                    "type": "string",
+                    "description": "Only messages before this Slack ts \
+                        (seconds.microseconds).",
                 },
             }),
             &["channel"],
         ),
         tool(
             "slack_read_thread",
-            "Read replies in a Slack thread. Returns a single page (no cursor \
-             pagination); a very long thread may truncate.",
+            "Read replies in a Slack thread. Supports cursor pagination for long \
+             threads: pass the previous call's `next_cursor` back as `cursor` to \
+             fetch the next page; `next_cursor` is null once there are no more.",
             json!({
                 "channel": channel_prop(),
                 "thread_ts": {
                     "type": "string",
-                    "description": "The ts of the thread's parent message.",
+                    "description": "The ts of the thread's parent message, as an \
+                        exact Slack timestamp string 'seconds.microseconds' \
+                        (e.g. '1616703000.216300'). Pass it through unchanged — \
+                        reformatting it as a number can silently drop trailing- \
+                        zero precision and Slack will reject the call.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of replies to return per page \
+                        (default 50, max 999).",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous \
+                        call's `next_cursor`; fetches the next page.",
                 },
             }),
             &["channel", "thread_ts"],
