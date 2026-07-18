@@ -288,6 +288,39 @@ run_sign() {
 # Post-install guidance
 # ---------------------------------------------------------------------------
 
+# Why: the printed restart hint must name the plist launchd actually has
+# installed, not a guessed name derived from the codesign `--identifier`
+# (`com.trusty.trusty-mpm`, a DIFFERENT namespace). The real daemon launchd
+# label is `com.trusty.mpm` (crates/trusty-mpm/src/bin/tm/commands/
+# guided_autostart.rs, MAIN_DAEMON_PLIST_LABEL) — a stale hardcoded
+# `com.trusty.trusty-mpm.plist` here sent every reader into two failing
+# `launchctl` calls (#2827).
+# What: prefers the canonical `com.trusty.mpm.plist` when it exists on disk;
+# otherwise globs LaunchAgents for any other `com.trusty.*mpm*.plist`
+# (excluding the supervisor/GUI plists, which are distinct services) so the
+# hint still finds a drifted label, and falls back to the canonical name if
+# nothing is installed yet.
+# Test: `bash -n` syntax check; manually verified against a real
+# ~/Library/LaunchAgents/com.trusty.mpm.plist during #2827 triage.
+resolve_mpm_plist() {
+    local agents_dir="$HOME/Library/LaunchAgents"
+    local canonical="$agents_dir/com.trusty.mpm.plist"
+    if [[ -f "$canonical" ]]; then
+        printf '%s' "$canonical"
+        return 0
+    fi
+    local candidate
+    for candidate in "$agents_dir"/com.trusty.*mpm*.plist; do
+        [[ -f "$candidate" ]] || continue
+        case "$candidate" in
+            *supervisor*|*gui*) continue ;;
+        esac
+        printf '%s' "$candidate"
+        return 0
+    done
+    printf '%s' "$canonical"
+}
+
 print_next_steps() {
     section "Done — next steps"
     # shellcheck disable=SC2016  # literal "$HOME" is intended narration, not expansion
@@ -299,10 +332,12 @@ print_next_steps() {
     printf 'approval persist across every future cargo install.\n\n'
     printf 'RESTART the tm daemon gracefully to pick up the newly signed binaries\n'
     printf '(SIGTERM drains in-flight requests; do NOT use kickstart -k / SIGKILL):\n'
+    local plist_path
+    plist_path="$(resolve_mpm_plist)"
+    # shellcheck disable=SC2016  # literal "$(id -u)" is narration for the reader to run, not expansion here
+    printf '  launchctl bootout   gui/$(id -u) %s\n' "$plist_path"
     # shellcheck disable=SC2016
-    printf '  launchctl bootout   gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-mpm.plist\n'
-    # shellcheck disable=SC2016
-    printf '  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-mpm.plist\n'
+    printf '  launchctl bootstrap gui/$(id -u) %s\n' "$plist_path"
 }
 
 # ---------------------------------------------------------------------------

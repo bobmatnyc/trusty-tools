@@ -693,7 +693,7 @@ To fix:
    filesystem access as your user account, without the launchd TCC restriction.
    ```bash
    # Stop the launchd agent first, then start manually:
-   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.search.plist
+   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist
    trusty-search start --foreground
    ```
    Note: indexes restored when running manually will NOT be available when the
