@@ -35,16 +35,55 @@ use crate::formatters::info_box::DaemonInfo;
 /// the guided default derives the project identity, shows existing sessions,
 /// and lets them resume or launch in one step. The live checkout is NEVER
 /// written to; all managed sessions run in the protected base-clone workspace.
-/// What: (1) tries the rich picker UX when the daemon is reachable and the
-/// CWD is a GitHub-backed git project; (2) falls through to
+/// What: (0) an operator-supplied `--url` / `TRUSTY_MPM_URL` that is
+/// unreachable errors out immediately (issue #1737 — see below) before any
+/// of the following runs; (1) tries the rich picker UX when the daemon is
+/// reachable and the CWD is a GitHub-backed git project; (2) falls through to
 /// [`fallback_protected`] for every other case (daemon unreachable, non-GitHub
 /// remote, non-git directory). Non-TTY piped invocations print project + session
 /// info and exit 0 without hanging for input (#1705 AC-7). Subdir launches
 /// pass the git root as `repo_url` so the daemon sets `source_id` correctly.
+///
+/// #1737: `url` is the already-resolved string every caller downstream of
+/// here uses (unchanged); `explicit` carries the ORIGINAL `Option::is_some`
+/// signal — `Some` iff the operator actually supplied `--url` /
+/// `TRUSTY_MPM_URL` (never a clap default, per the #2487 discipline — see
+/// `core::discovery`'s module doc). This function is the one LIVE,
+/// empirically-confirmed instance of the #1737 silent-fallback bug:
+/// [`super::guided_autostart::ensure_daemon_started`]'s auto-start step
+/// intentionally ignores whatever URL it is handed and always re-resolves
+/// IMPLICITLY (lock file → default) once *some* daemon is confirmed healthy
+/// — exactly right for the ordinary "daemon not started yet" first-run UX
+/// this function exists to smooth over, but it means an unreachable EXPLICIT
+/// `--url` silently ended up auto-starting (or reconnecting to) a completely
+/// different, real daemon and showing ITS live session list instead of
+/// erroring. Probing `explicit` up front — before in-place relaunch, the
+/// nested-session guard, the picker, or auto-start ever run — closes that
+/// gap without touching the implicit (unset URL) path at all.
 /// Test: `guided_derive_project_returns_none_for_non_git_dir`,
 /// `guided_non_tty_gate_returns_false_skips_stdin`,
-/// `guided_fallback_never_pollutes_github_git_checkout` (#1724).
-pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+/// `guided_fallback_never_pollutes_github_git_checkout` (#1724);
+/// `tests/tm_guided_default_explicit_url.rs` end-to-end (#1737).
+pub(crate) async fn run_guided_default(
+    client: &reqwest::Client,
+    url: &str,
+    explicit: Option<&str>,
+) -> anyhow::Result<()> {
+    // #1737: verify an EXPLICIT URL's own reachability before anything below
+    // gets a chance to silently auto-start or reconnect to a DIFFERENT
+    // daemon. `resolve_daemon_url_for_cli` is a no-op passthrough to `Ok`
+    // when `explicit` is `None`/empty (implicit resolution, unaffected). The
+    // failure message is printed here (mirroring
+    // `commands::prune::prune_idle`'s `PruneError::SmUnavailable` handling)
+    // so `main`'s top-level exit-code translation only needs to downcast and
+    // `process::exit` — no double-print.
+    if explicit.is_some_and(|u| !u.is_empty())
+        && let Err(err) = trusty_mpm::core::resolve_daemon_url_for_cli(client, explicit).await
+    {
+        eprintln!("tm: {err}");
+        return Err(err.into());
+    }
+
     // #2023 component C: an in-pane relaunch takes priority over EVERYTHING
     // below — project detection, the picker, the daemon-unreachable fallback.
     // `TM_MANAGED_SESSION_ID` (exported by #2023 component B into the pane's

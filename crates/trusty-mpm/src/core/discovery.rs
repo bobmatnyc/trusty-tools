@@ -27,6 +27,29 @@
 //! Test: The unit tests below cover all resolution paths, including the
 //! gateway probe, explicit-override bypass (including a value equal to the
 //! default), and direct fallback.
+//!
+//! Issue #1737: probing and fallback are two SEPARATE concerns that must not
+//! be conflated. An IMPLICIT URL (nothing passed, or a stale env var) may
+//! fall back through the lock file to the default — that is the existing,
+//! desired #1731 behaviour. An EXPLICIT URL (operator supplied `--url` /
+//! `TRUSTY_MPM_URL`) must never silently fall back: if it is unreachable, the
+//! caller must be told, not redirected to a different daemon.
+//! [`resolve_daemon_url_probing`] now returns `Result<String, DaemonUrlError>`
+//! — `Err` only for an explicit, probed, unreachable URL; every implicit path
+//! still returns `Ok`. [`resolve_daemon_url_for_cli`] wraps that policy for a
+//! caller that wants it.
+//!
+//! `main.rs`'s top-level dispatch and `commands::projects::launch_bare_tui`
+//! deliberately keep calling the INFALLIBLE `resolve_daemon_url_via_gateway`
+//! directly, unchanged — several dispatch targets reached through that
+//! shared top-level `url` (the bare `tm` guided default's OTHER code paths,
+//! `tm hook`) have an intentional fail-open contract that must survive an
+//! unreachable URL (see `tests/tm_hook_idle_parking.rs`). The one confirmed
+//! LIVE instance of the #1737 bug — `commands::guided::run_guided_default`
+//! silently auto-starting/reconnecting to a completely different, real
+//! daemon when an explicit `--url` was unreachable — calls
+//! [`resolve_daemon_url_for_cli`] directly, itself, before any of its
+//! fail-open fallback logic runs; see that function's module for the guard.
 
 use std::path::PathBuf;
 
@@ -166,50 +189,145 @@ pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
     DEFAULT_DAEMON_URL.to_string()
 }
 
+/// Error returned when an operator-supplied daemon URL cannot be reached.
+///
+/// Why (issue #1737): an explicit `--url` / `TRUSTY_MPM_URL` is a deliberate,
+/// specific choice — often used to target a non-default or intentionally
+/// isolated daemon (e.g. in tests: `--url http://127.0.0.1:1`). Silently
+/// falling back to the lock file or compiled-in default on probe failure
+/// means `tm` can end up operating against a DIFFERENT daemon than the one
+/// the operator named, which is surprising and potentially dangerous for
+/// destructive operations (e.g. `tm session prune-idle`). This error type
+/// lets callers stop instead of guessing.
+/// What: a single `Unreachable` variant carrying the URL that failed the
+/// health probe, formatted into a message that names the URL and states
+/// plainly that no fallback was attempted.
+/// Test: `probing_resolver_errors_when_explicit_unreachable`,
+/// `resolve_for_cli_explicit_unreachable_errors`.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DaemonUrlError {
+    /// The explicitly-supplied URL failed a `GET {url}/health` probe.
+    #[error(
+        "daemon unreachable at explicitly configured URL {url} (probed GET {url}/health); \
+         refusing to fall back to a different daemon — check the address or drop --url/TRUSTY_MPM_URL \
+         to use automatic discovery"
+    )]
+    Unreachable {
+        /// The URL that was probed and found unreachable.
+        url: String,
+    },
+}
+
+/// Process exit code for a [`DaemonUrlError::Unreachable`] at the CLI boundary.
+///
+/// Why (issue #1737): shares the exact same value as the pre-existing
+/// `commands::prune::EXIT_SM_UNAVAILABLE` (#1313) — both mean "the thing you
+/// asked for is unavailable, not a generic failure" and want callers/skills
+/// to branch on one stable, non-1 code instead of parsing stderr. Sourced
+/// from [`crate::core::exit_codes::EXIT_UNAVAILABLE`], the single shared
+/// constant, rather than redefining the literal `75` a second time —
+/// `commands::prune::EXIT_SM_UNAVAILABLE` sources from the same constant, so
+/// the two can never drift apart.
+/// What: `75`.
+/// Test: `exit_code_matches_sm_unavailable_convention`.
+pub const EXIT_DAEMON_URL_UNREACHABLE: i32 = crate::core::exit_codes::EXIT_UNAVAILABLE;
+
 /// Resolve the daemon URL with reachability probing for explicit overrides.
 ///
-/// Why: `resolve_daemon_url` treats an explicit non-default URL (e.g. a stale
-/// `TRUSTY_MPM_URL=http://127.0.0.1:7881`) as unconditionally winning, even
-/// when the daemon is no longer listening there. A stale env var therefore
-/// permanently breaks `tm` guided-default until the env is corrected, because
-/// the lock file (which records the daemon's actual bound address) is never
-/// consulted (#1731). This async variant probes the explicit URL before
-/// committing to it; on failure it falls through to the lock file and then
-/// the compiled-in default — exactly the fallback chain users expect.
-/// What: follows the same three-step priority order as `resolve_daemon_url`,
-/// but step 1 is gated on a 500 ms health probe.
+/// Why: `resolve_daemon_url` treats an explicit non-default URL as
+/// unconditionally winning without ever checking it is actually reachable.
+/// That is correct for a stale, IMPLICIT `TRUSTY_MPM_URL` picked up from the
+/// environment (#1731) — the lock file (which records the daemon's actual
+/// bound address) should still be consulted so a forgotten env var does not
+/// permanently break `tm`. It is WRONG for an explicit, operator-supplied
+/// `--url` / `TRUSTY_MPM_URL`: silently retargeting a different daemon on
+/// probe failure means a deliberately-unreachable address (used, for example,
+/// to assert "no daemon is running" in a test) instead connects to whatever
+/// daemon the lock file or default happens to point at (#1737). This function
+/// therefore probes the explicit URL and, on failure, ERRORS rather than
+/// falling back — there is no implicit/explicit ambiguity to resolve because
+/// every caller of this function is expected to pass `explicit` only when the
+/// operator truly supplied `--url`/`TRUSTY_MPM_URL` (the `Option::is_some`
+/// discipline established by #2487).
+/// What:
 ///
-/// 1. `explicit` (non-empty) — accepted only if reachable
-/// 2. Lock file `~/.trusty-mpm/daemon.lock` (if present and PID alive)
-/// 3. `DEFAULT_DAEMON_URL`
+/// 1. `explicit` (non-empty) — probed; `Ok(url)` if reachable, otherwise
+///    `Err(DaemonUrlError::Unreachable)`. No fallback is attempted.
+/// 2. No explicit override (`None` or empty) — delegates to the synchronous
+///    [`resolve_daemon_url`], preserving the full implicit fallback chain
+///    (lock file → [`DEFAULT_DAEMON_URL`]) exactly as before.
 ///
-/// A reachable explicit URL wins immediately without consulting the lock file
-/// so a deliberately non-default daemon address (`--url http://…:9999`) still
-/// works. As of #2487, "explicit" is `Some` if and only if the operator
-/// actually supplied `--url` or `TRUSTY_MPM_URL` — there is no equality check
-/// against [`DEFAULT_DAEMON_URL`] to second-guess that.
-/// Test: `probing_resolver_falls_back_when_explicit_unreachable` and
+/// Test: `probing_resolver_errors_when_explicit_unreachable` and
 /// `probing_resolver_wins_when_explicit_reachable` below.
 pub async fn resolve_daemon_url_probing(
     client: &reqwest::Client,
     explicit: Option<&str>,
-) -> String {
+) -> Result<String, DaemonUrlError> {
     // Step 1: if the caller supplied a real override (non-empty), probe it.
+    // On failure, error out immediately — no fallback to lock file / default.
     if let Some(url) = explicit
         && !url.is_empty()
     {
-        if probe_url(client, url).await {
-            return url.to_string();
-        }
-        // Probe failed: fall through to lock file, then hard default.
-        if let Some(lock_url) = read_lock_file_url() {
-            return lock_url;
-        }
-        return DEFAULT_DAEMON_URL.to_string();
+        return if probe_url(client, url).await {
+            Ok(url.to_string())
+        } else {
+            Err(DaemonUrlError::Unreachable {
+                url: url.to_string(),
+            })
+        };
     }
 
     // No explicit override: delegate to the sync resolver (lock file → default).
-    resolve_daemon_url(explicit)
+    Ok(resolve_daemon_url(explicit))
+}
+
+/// Resolve the daemon URL for a CLI command that wants strict
+/// explicit-URL-must-be-reachable semantics (issue #1737).
+///
+/// Why: a command that operates against a SPECIFIC daemon on the operator's
+/// behalf (destructive session-management ops are the concrete #1737
+/// example) should never silently retarget a different daemon when the
+/// address it was told to use turns out to be unreachable — that risks
+/// operating against the wrong fleet. This helper gives such a command a
+/// single call combining the two-tier policy: an operator-supplied `--url` /
+/// `TRUSTY_MPM_URL` is verified reachable and used verbatim, erroring rather
+/// than falling back on failure; an unset URL keeps the full implicit
+/// fallback chain (trusty-console gateway → lock file → default) that #1731
+/// and #1849 built.
+///
+/// NOT wired into `main.rs`'s blanket top-level dispatch — `cli.url` is
+/// still resolved once, unconditionally, via the infallible
+/// `resolve_daemon_url_via_gateway` (main.rs, right before the big command
+/// `match`), because `tm hook` has an intentional FAIL-OPEN contract that
+/// must survive an unreachable explicit URL (a Claude Code hook must never
+/// fail the user's turn over a best-effort daemon POST — see
+/// `tests/tm_hook_idle_parking.rs`, which asserts exit 0 even for
+/// `--url http://127.0.0.1:1`). A command that wants the strict contract
+/// calls this itself, on top of that shared resolution, before running its
+/// own fallback-prone logic — `commands::guided::run_guided_default` does
+/// exactly this: it was the one LIVE, empirically-confirmed instance of the
+/// #1737 bug (its `ensure_daemon_started` auto-start step ignores whatever
+/// URL it is handed and always re-resolves IMPLICITLY once some daemon is
+/// up, so an unreachable EXPLICIT `--url` silently ended up auto-starting/
+/// reconnecting to a completely different, real daemon and showing ITS live
+/// session list). See that function's guard at its top for the wiring.
+/// What: when `explicit` is `Some` and non-empty, probes it alone via
+/// [`resolve_daemon_url_probing`] and returns its `Result` untouched (`Err`
+/// on unreachable, no fallback). Otherwise delegates to the infallible
+/// [`resolve_daemon_url_via_gateway`] (gateway probe → lock file → default),
+/// wrapped in `Ok`.
+/// Test: `resolve_for_cli_explicit_unreachable_errors`,
+/// `resolve_for_cli_implicit_falls_back`; end-to-end wiring covered by
+/// `tests/tm_guided_default_explicit_url.rs`.
+pub async fn resolve_daemon_url_for_cli(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+) -> Result<String, DaemonUrlError> {
+    if explicit.is_some_and(|url| !url.is_empty()) {
+        resolve_daemon_url_probing(client, explicit).await
+    } else {
+        Ok(resolve_daemon_url_via_gateway(client, explicit).await)
+    }
 }
 
 /// Resolve the daemon URL routing through the trusty-console gateway when
@@ -310,8 +428,15 @@ async fn resolve_daemon_url_via_gateway_inner(
 
     // c) Direct fallback — console absent or gateway probe failed. Delegate to
     //    the direct-daemon resolver chain (lock file → DEFAULT_DAEMON_URL) so
-    //    `tm` still works when only the daemon is running.
-    resolve_daemon_url_probing(client, explicit).await
+    //    `tm` still works when only the daemon is running. `explicit` is
+    //    always `None`/empty by this point (step (a) already returned for any
+    //    real override), so `resolve_daemon_url_probing` can never produce
+    //    `Err(DaemonUrlError::Unreachable)` here (#1737) — that variant is
+    //    only reachable via its explicit-URL probe branch.
+    resolve_daemon_url_probing(client, explicit).await.expect(
+        "explicit is None/empty at this call site (step (a) already returned \
+         otherwise), so resolve_daemon_url_probing cannot error here",
+    )
 }
 
 /// Probe a URL for reachability with a short timeout.
@@ -322,7 +447,7 @@ async fn resolve_daemon_url_via_gateway_inner(
 /// What: sends `GET <url>/health` (trailing slash on `url` is stripped first
 /// to avoid the double-slash path `//health`); returns `true` if the response
 /// has any 2xx status, `false` on error (connection refused, timeout, etc.).
-/// Test: `probing_resolver_falls_back_when_explicit_unreachable`,
+/// Test: `probing_resolver_errors_when_explicit_unreachable`,
 /// `probing_resolver_wins_when_explicit_reachable`,
 /// `probe_url_trims_trailing_slash`.
 async fn probe_url(client: &reqwest::Client, url: &str) -> bool {
@@ -453,34 +578,35 @@ mod tests {
         );
     }
 
-    // ── resolve_daemon_url_probing tests (#1731) ─────────────────────────────
+    // ── resolve_daemon_url_probing tests (#1731, #1737) ──────────────────────
 
-    /// Stale explicit URL (unreachable) falls back to lock file or default (#1731).
+    /// Stale EXPLICIT URL (unreachable) errors — no fallback (#1737).
     ///
-    /// Why: `TRUSTY_MPM_URL=http://127.0.0.1:1` is never reachable (port 1 is
-    /// reserved and never listening). The probing resolver must skip it and
-    /// return either the lock-file URL (if the daemon is running and has written
-    /// one) or `DEFAULT_DAEMON_URL` — never the unreachable stale value.
+    /// Why: `TRUSTY_MPM_URL=http://127.0.0.1:1` (or `--url http://127.0.0.1:1`)
+    /// is a deliberate, operator-supplied override — port 1 is reserved and
+    /// always refused. Prior to #1737 the probing resolver silently fell back
+    /// to the lock file or `DEFAULT_DAEMON_URL` on probe failure, which could
+    /// retarget a destructive command (e.g. `tm session prune-idle`) at a
+    /// DIFFERENT daemon than the one the operator named. It must now error
+    /// instead, naming the URL that failed.
     /// What: calls `resolve_daemon_url_probing` with the reserved port; asserts
-    /// the result is a valid HTTP URL that is NOT the stale value.
+    /// `Err(DaemonUrlError::Unreachable { url })` with the stale URL echoed
+    /// back verbatim.
     /// Test: this test.
     #[tokio::test]
-    async fn probing_resolver_falls_back_when_explicit_unreachable() {
+    async fn probing_resolver_errors_when_explicit_unreachable() {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(200))
             .build()
             .expect("build client");
         let stale = "http://127.0.0.1:1"; // port 1 is reserved, always refused
         let result = resolve_daemon_url_probing(&client, Some(stale)).await;
-        // Must return a valid HTTP URL.
-        assert!(
-            result.starts_with("http"),
-            "expected HTTP URL, got: {result}"
-        );
-        // Must NOT lock onto the unreachable stale URL.
-        assert_ne!(
-            result, stale,
-            "probing resolver must not return the unreachable stale URL"
+        assert_eq!(
+            result,
+            Err(DaemonUrlError::Unreachable {
+                url: stale.to_string()
+            }),
+            "explicit unreachable URL must error, not fall back to a different daemon"
         );
     }
 
@@ -491,7 +617,7 @@ mod tests {
     /// cause a regression for the `tm --url <custom>` workflow.
     /// What: binds a minimal TCP listener that responds with HTTP 200 on any
     /// connection, calls `resolve_daemon_url_probing` with that address, and
-    /// asserts the result equals the listener's address.
+    /// asserts the result is `Ok` with the listener's address.
     /// Test: this test.
     #[tokio::test]
     async fn probing_resolver_wins_when_explicit_reachable() {
@@ -517,9 +643,76 @@ mod tests {
         let client = reqwest::Client::new();
         let result = resolve_daemon_url_probing(&client, Some(&url)).await;
         assert_eq!(
-            result, url,
+            result,
+            Ok(url),
             "reachable explicit URL must win over lock file / default"
         );
+    }
+
+    /// Implicit resolution (no explicit override) still returns `Ok` and
+    /// preserves the lock-file → default fallback chain untouched by #1737.
+    ///
+    /// Why: #1737 must NOT change behaviour when the operator did not supply
+    /// `--url`/`TRUSTY_MPM_URL` at all — only the explicit-and-unreachable
+    /// case gains the new error path.
+    /// What: calls `resolve_daemon_url_probing(&client, None)`; asserts the
+    /// result is `Ok` and a valid HTTP URL (lock file or `DEFAULT_DAEMON_URL`
+    /// depending on local state, which the test does not control).
+    /// Test: this test.
+    #[tokio::test]
+    async fn probing_resolver_implicit_none_falls_back_ok() {
+        let client = reqwest::Client::new();
+        let result = resolve_daemon_url_probing(&client, None).await;
+        let url = result.expect("implicit resolution must never error");
+        assert!(url.starts_with("http"), "expected HTTP URL, got: {url}");
+    }
+
+    /// The exit code documented for [`DaemonUrlError::Unreachable`] matches the
+    /// established `EX_TEMPFAIL`-adjacent convention (75) already used by
+    /// `commands::prune::EXIT_SM_UNAVAILABLE` (#1737).
+    #[test]
+    fn exit_code_matches_sm_unavailable_convention() {
+        assert_eq!(EXIT_DAEMON_URL_UNREACHABLE, 75);
+    }
+
+    // ── resolve_daemon_url_for_cli tests (#1737) ──────────────────────────────
+
+    /// An explicit, unreachable `--url` errors through the CLI-facing resolver
+    /// too — the gateway/lock-file/default chain must never be consulted.
+    ///
+    /// Why: this is the exact end-to-end contract `main.rs` and
+    /// `commands::projects::launch_bare_tui` rely on.
+    /// What: calls `resolve_daemon_url_for_cli` with the reserved port 1;
+    /// asserts `Err(DaemonUrlError::Unreachable { url })`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_for_cli_explicit_unreachable_errors() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("build client");
+        let stale = "http://127.0.0.1:1";
+        let result = resolve_daemon_url_for_cli(&client, Some(stale)).await;
+        assert_eq!(
+            result,
+            Err(DaemonUrlError::Unreachable {
+                url: stale.to_string()
+            })
+        );
+    }
+
+    /// No explicit URL still resolves successfully through the full implicit
+    /// fallback chain (gateway → lock file → default), unchanged by #1737.
+    ///
+    /// What: calls `resolve_daemon_url_for_cli(&client, None)`; asserts `Ok`
+    /// with a valid HTTP URL.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_for_cli_implicit_falls_back() {
+        let client = reqwest::Client::new();
+        let result = resolve_daemon_url_for_cli(&client, None).await;
+        let url = result.expect("implicit resolution must never error");
+        assert!(url.starts_with("http"), "expected HTTP URL, got: {url}");
     }
 
     // ── resolve_daemon_url_via_gateway tests (#1849 Phase 2) ─────────────────

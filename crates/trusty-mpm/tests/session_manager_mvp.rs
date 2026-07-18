@@ -1230,6 +1230,21 @@ async fn front_gate_answer_unblocks_spawn() {
 /// A hermetic HOME is planted with a lock file that anchors the lock-file
 /// fallback in `resolve_daemon_url_probing` (#1731) to the same dead port,
 /// preventing a live daemon on the default port from intercepting resolution.
+///
+/// #1737 note: `main.rs`'s top-level `resolve_daemon_url_via_gateway` call
+/// treats a non-empty explicit `--url` as winning outright without probing it
+/// (see that function's doc, step (a)) — so this `--url` is used verbatim and
+/// never falls back to the fake lock file below regardless; the lock file
+/// exists only as a belt-and-suspenders guard in case that ever changes. The
+/// actual explicit-vs-implicit fallback bug #1737 fixes lives one level
+/// deeper, in `resolve_daemon_url_probing` itself — see
+/// `core::discovery::tests::probing_resolver_errors_when_explicit_unreachable`
+/// and `resolve_for_cli_explicit_unreachable_errors` in
+/// `crates/trusty-mpm/src/core/discovery.rs` for the unit-level regression
+/// coverage of that fix (that function is not on `main.rs`'s dispatch path
+/// today — see `resolve_daemon_url_for_cli`'s doc for why a blanket top-level
+/// gate would regress `tm hook`'s and the guided default's fail-open
+/// contracts).
 /// Test: this test.
 #[test]
 fn cli_prune_idle_unreachable_exit_code() {
