@@ -278,6 +278,12 @@ fn service_logs() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // `super::*` (in particular `build_launchd_config`) is only referenced by
+    // the macOS-only tests below; on other platforms the whole module body
+    // compiles out to nothing, so gate the import to avoid an
+    // `unused_imports` -D warnings failure on non-macOS CI runners (#2947
+    // follow-up).
+    #[cfg(target_os = "macos")]
     use super::*;
 
     /// Why: the LaunchdConfig handed to `trusty_common::launchd` must always
