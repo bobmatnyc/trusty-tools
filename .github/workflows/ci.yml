@@ -275,6 +275,22 @@ jobs:
       #       cargo test never needs HuggingFace network access — this step
       #       is a best-effort latency/flake optimisation, not a correctness
       #       dependency, and must not be allowed to fail the job.
+      #
+      #       PR #2981 code-critic fix: fail-soft MUST NOT invoke seed_models
+      #       directly as an `if`/`while` condition. Bash disables `errexit`
+      #       for the entire compound command being tested as a conditional,
+      #       and — per the bash manual — "this behavior applies even when
+      #       the failing command is ... contained within a shell function
+      #       called by a command in the list", so a `set -e` re-declared
+      #       INSIDE the function does not help: a mid-download curl failure
+      #       is silently swallowed, execution falls through to the final
+      #       `du -sh ... || true` (always exit 0), the function reports
+      #       success, the ::warning:: never fires, and a PARTIAL/corrupt
+      #       cache dir gets persisted by actions/cache's post-step and
+      #       served as a false "hit" on every run until the cache key
+      #       rotates. Empirically reproduced during review. Fix: invoke
+      #       seed_models as a plain statement in a subshell (never as a
+      #       conditional's test) and capture its exit status via $?.
       - name: Pre-seed fastembed models (cache miss only)
         if: steps.fastembed-cache.outputs.cache-hit != 'true'
         env:
@@ -313,11 +329,12 @@ jobs:
 
           # The substantive pre-seed logic runs strict (its own set -e) inside
           # this function so any failure anywhere inside it — a 403, a
-          # transient network error, anything — is caught by the `if
-          # seed_models; then … else …` below rather than propagating past
-          # this step (issue #2554 fail-soft requirement). Bash functions
-          # share the enclosing shell's variables/other functions, so
-          # CURL_AUTH and curl_retry are visible here without re-declaration.
+          # transient network error, anything — aborts the function
+          # immediately instead of silently continuing. Bash functions share
+          # the enclosing shell's variables/other functions, so CURL_AUTH and
+          # curl_retry are visible here without re-declaration. See the
+          # PR #2981 code-critic note above the step name for why this MUST
+          # be invoked in a subshell below, never as an `if`/`while` test.
           seed_models() {
             set -euo pipefail
 
@@ -375,10 +392,23 @@ jobs:
             du -sh "${CACHE_DIR}" || true
           }
 
-          if seed_models; then
-            :
-          else
-            echo "::warning::fastembed model pre-seed failed (HuggingFace rate-limit/403 or network issue) — continuing WITHOUT a pre-seeded cache. This is non-fatal: cargo test --workspace never needs the real model (non-ignored tests use a MockEmbedder via seed_shared_embedder_with_mock(), issue #850; the tests that need the real model are #[ignore]-gated and are not run in this job). See issue #2554 for details."
+          # Invoke as a plain statement in a subshell — NOT as an `if`/`while`
+          # test — so seed_models' own `set -e` is actually honored (see the
+          # PR #2981 code-critic note above). `set +e` around the call stops
+          # THIS failure from tripping the outer script's own errexit; it is
+          # restored immediately after the status is captured.
+          set +e
+          ( seed_models )
+          rc=$?
+          set -e
+
+          if [ "${rc}" -ne 0 ]; then
+            # Do not let actions/cache persist a partial/corrupt download
+            # tree under this run's key: an absent cache is a safe "miss"
+            # next run; a partial one would look like a permanent false
+            # "hit" until the key rotates (issue #2554/#2981).
+            rm -rf "${CACHE_DIR}"
+            echo "::warning::fastembed model pre-seed failed (rc=${rc}; HuggingFace rate-limit/403 or network issue) — continuing WITHOUT a pre-seeded cache. This is non-fatal: cargo test --workspace never needs the real model (non-ignored tests use a MockEmbedder via seed_shared_embedder_with_mock(), issue #850; the tests that need the real model are #[ignore]-gated and are not run in this job). See issue #2554 for details."
           fi
 
       - name: cargo test --workspace
