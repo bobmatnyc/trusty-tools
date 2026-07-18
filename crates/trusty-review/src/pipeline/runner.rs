@@ -21,7 +21,9 @@ use super::runner_helpers::{
     fetch_github_pr_meta, finalize_run, resolve_diff_token,
 };
 use crate::{
-    config::{DiffStats, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode},
+    config::{
+        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode,
+    },
     coverage::{CoverageVerdictContrib, apply_coverage_floor},
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
@@ -109,6 +111,19 @@ pub struct ReviewInput {
     /// referenced code.  `CallerContext::default()` (all `None`) for callers that
     /// have no extra context — unaffected behaviour.
     pub caller_context: CallerContext,
+    /// Which kind of caller triggered this review (search-unreachable semantics
+    /// fix) — decides the safe DEFAULT for `require_search` when the operator
+    /// has not set an explicit override.
+    ///
+    /// `InvocationSurface::Hosted` (the type's `#[default]`) is the SAFE choice
+    /// for any call site that is not explicitly known to be interactive: the
+    /// webhook bot and CLI GitHub-PR runs, which CAN post to a real PR, must
+    /// never silently degrade.  `InvocationSurface::Interactive` is set
+    /// explicitly by the MCP tool handlers (`mcp::tools`) and by `run
+    /// --local-diff`/`--base`/`--source-root` local reviews — surfaces that can
+    /// never post to a real PR, so a diff-only DEGRADED review is safe and
+    /// still useful when search is down.
+    pub surface: InvocationSurface,
 }
 
 /// Injected service dependencies (trait objects for testability).
@@ -351,24 +366,31 @@ pub async fn run_review(
     // unreachable, SKIP the review loudly (no LLM call, no post) instead of
     // producing a context-free, false-confidence verdict.  An operator who
     // explicitly opted a dependency out gets a DEGRADED, non-authoritative run.
-    let degraded_reason: Option<String> = match preflight_context(config, &deps).await {
-        GateOutcome::Proceed => None,
-        GateOutcome::Skip(reason) => {
-            warn!("required-context gate: skipping review — {reason}");
-            result.status = ReviewStatus::Skipped;
-            result.verdict = Verdict::Unknown;
-            result.error = Some(reason);
-            result.dry_run = true;
-            // Return WITHOUT finalize_review so a skipped review is never posted.
-            // Release any dedup claim so a retry (once the dep recovers) can re-run.
-            return abort_dry(result, config, &input, &deps);
-        }
-        GateOutcome::Degraded(reason) => {
-            warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
-            result.status = ReviewStatus::Degraded;
-            Some(reason)
-        }
-    };
+    let degraded_reason: Option<String> =
+        match preflight_context(config, &deps, input.surface).await {
+            GateOutcome::Proceed => None,
+            GateOutcome::Skip(reason) => {
+                warn!("required-context gate: skipping review — {reason}");
+                result.status = ReviewStatus::Skipped;
+                // Search-unreachable semantics fix: this is the SOLE producer of
+                // ReviewStatus::Skipped, so this Skip is always a genuine infra
+                // outage, never a policy skip — mark it so the MCP layer can be
+                // loud (isError:true + sentinel) without guessing from `status`
+                // alone (see `ReviewResult::infra_unavailable`).
+                result.infra_unavailable = true;
+                result.verdict = Verdict::Unknown;
+                result.error = Some(reason);
+                result.dry_run = true;
+                // Return WITHOUT finalize_review so a skipped review is never posted.
+                // Release any dedup claim so a retry (once the dep recovers) can re-run.
+                return abort_dry(result, config, &input, &deps);
+            }
+            GateOutcome::Degraded(reason) => {
+                warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
+                result.status = ReviewStatus::Degraded;
+                Some(reason)
+            }
+        };
 
     // ── Step 5: gather context in parallel (search/analyze/APEX + external) ──
     // All sources are FAIL-OPEN: errors contribute nothing, never block the review

@@ -9,6 +9,7 @@
 //! global-hook cleanup.
 //! Test: each public(super) function is covered by a dedicated test in `tests.rs`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::PrepError;
@@ -582,13 +583,22 @@ fn mcp_server_names(workspace: &Path) -> Vec<String> {
 /// project ships none), then writes it back pretty-printed preserving every
 /// other key. Idempotent. The OAuth fields elsewhere in the file are never
 /// touched.
+/// `exclude_mcp_names` (issue #2739 follow-up security fix) removes names from
+/// the auto-approved `enabledMcpjsonServers` list even though they are present
+/// in `.mcp.json` — used to keep project-scope-bridged custom MCP servers
+/// (which ship with the cloned repo, not the operator's own registry) behind
+/// Claude Code's normal "new MCP servers found" consent dialog rather than
+/// silently pre-approved. Pass an empty set to preserve the pre-#2739-fix
+/// behaviour of approving every name in `.mcp.json`.
 /// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
 /// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`,
 /// `preseed_trust_enables_mcp_servers_from_mcp_json`,
-/// `preseed_trust_enables_empty_when_no_mcp_json`.
+/// `preseed_trust_enables_empty_when_no_mcp_json`,
+/// `preseed_trust_excludes_project_scope_names_from_approval`.
 pub(super) fn preseed_workspace_trust(
     claude_json: &Path,
     workspace: &Path,
+    exclude_mcp_names: &BTreeSet<String>,
 ) -> Result<(), PrepError> {
     use serde_json::Value;
 
@@ -639,10 +649,16 @@ pub(super) fn preseed_workspace_trust(
     let entry = entry.as_object_mut().expect("project entry is an object");
 
     // Derive the set of MCP servers the project ships so we can pre-approve them
-    // (issue #1296). Sorted for a deterministic, idempotency-friendly result.
+    // (issue #1296), EXCLUDING any name in `exclude_mcp_names` (issue #2739
+    // follow-up security fix) — a project-scope custom MCP bridge target ships
+    // with the cloned repo, so it must still surface Claude Code's own "new
+    // MCP servers found" consent dialog rather than being silently
+    // pre-approved. Sorted (via `mcp_server_names`) for a deterministic,
+    // idempotency-friendly result.
     let enabled_mcp = Value::Array(
         mcp_server_names(workspace)
             .into_iter()
+            .filter(|name| !exclude_mcp_names.contains(name))
             .map(Value::String)
             .collect(),
     );
@@ -685,15 +701,20 @@ pub(super) fn preseed_workspace_trust(
 /// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
 /// `prepare_session` can call it without knowing the config-dir layout; tests
 /// target a temp file via the inner function directly.
-/// What: resolves `~/.claude.json` and delegates. A missing home directory is a
-/// soft failure (logged, non-fatal) so launch still proceeds.
+/// What: resolves `~/.claude.json` and delegates, forwarding `exclude_mcp_names`
+/// unchanged (see [`preseed_workspace_trust`]'s doc — issue #2739 follow-up
+/// security fix). A missing home directory is a soft failure (logged,
+/// non-fatal) so launch still proceeds.
 /// Test: covered by the inner `preseed_trust_*` tests.
-pub(super) fn preseed_workspace_trust_home(workspace: &Path) -> Result<(), PrepError> {
+pub(super) fn preseed_workspace_trust_home(
+    workspace: &Path,
+    exclude_mcp_names: &BTreeSet<String>,
+) -> Result<(), PrepError> {
     let Some(home) = dirs::home_dir() else {
         tracing::warn!("skipping trust pre-seed: home directory unresolved");
         return Ok(());
     };
-    preseed_workspace_trust(&home.join(".claude.json"), workspace)
+    preseed_workspace_trust(&home.join(".claude.json"), workspace, exclude_mcp_names)
 }
 
 /// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.

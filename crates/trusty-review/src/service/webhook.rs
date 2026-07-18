@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::{
+    config::InvocationSurface,
     integrations::github::{RunMode, webhook::verify_webhook_signature},
     pipeline::{DiffSource, ReviewDeps, ReviewInput, classify_review_request, run_review},
     service::handlers::AppState,
@@ -289,6 +290,11 @@ pub async fn handle_github_webhook(
             run_mode: RunMode::Serve,
             allow_posting: true,
             caller_context: crate::pipeline::runner::CallerContext::default(),
+            // The hosted GitHub webhook bot — CAN post a real review to a real
+            // PR, so it MUST keep the strict `Hosted` default (never silently
+            // degrade; #590 binding premise, spec REV-011/431). Unchanged
+            // behaviour (zero regression for the gate use case).
+            surface: InvocationSurface::Hosted,
         };
 
         let result = run_review(&state_clone.config, input, deps).await;

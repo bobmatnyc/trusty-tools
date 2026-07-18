@@ -165,8 +165,16 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     }
 
     let embedder_present = handle.indexer.read().await.has_embedder();
+    // Issue #2984 Phase 1: `skip_vector` never embeds, exactly like
+    // `lexical_only` — zero vectors is the expected, healthy outcome for the
+    // #601 zero-vector-embed-failure gate, not a crash. Combining the two
+    // flags here (rather than threading a new parameter through
+    // `validate::reindex_outcome`) keeps that pure function's signature
+    // focused on "does this index ever embed" without conflating it with
+    // `skip_vector`'s KG-independence, which `reindex_outcome` doesn't touch.
+    let never_embeds = handle.lexical_only || handle.skip_vector;
     let reindex_outcome = validate::reindex_outcome(
-        handle.lexical_only,
+        never_embeds,
         defer_embed,
         embedder_present,
         total,
@@ -421,8 +429,10 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     refresh_context_embedding(&handle).await;
 
     // Issue #923: spawn the background embedding job if deferred.
+    // Issue #2984 Phase 1: never spawn it for a skip_vector index — the
+    // embedder must never run, not just be deferred.
     let has_embedder = handle.indexer.read().await.has_embedder();
-    if defer_embed && !aborted_memory && has_embedder {
+    if defer_embed && !aborted_memory && has_embedder && !handle.skip_vector {
         spawn_deferred_embed_pass(handle, progress.clone());
     }
 

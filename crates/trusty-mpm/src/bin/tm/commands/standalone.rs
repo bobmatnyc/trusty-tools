@@ -347,9 +347,13 @@ pub(crate) fn login_cmd(paths: &ManagedPaths) -> anyhow::Result<()> {
         cfg_dir.display()
     );
 
-    let status = trusty_mpm::core::standalone::run::build_login_command(cfg_dir)
-        .status()
-        .context("failed to spawn 'claude auth login'; is `claude` installed and on PATH?")?;
+    // Routed through the disclaim-aware spawn (issue #2997): on macOS this
+    // disclaims TCC responsibility for the child so consent prompts
+    // attribute to `claude` rather than the signed `trusty-mpm`/`tm` binary.
+    let status = trusty_mpm::core::spawn_disclaim::disclaimed_status(
+        &mut trusty_mpm::core::standalone::run::build_login_command(cfg_dir),
+    )
+    .context("failed to spawn 'claude auth login'; is `claude` installed and on PATH?")?;
 
     if status.success() {
         eprintln!(

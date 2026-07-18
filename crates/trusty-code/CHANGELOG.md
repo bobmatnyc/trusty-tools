@@ -8,8 +8,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Pollable context-budget snapshot — cache + `session.get_context_budget`
+  RPC + `GET /sessions/{id}/budget` REST route (#3015).** Closes the gap
+  behind PR #3014's GUI status bar rendering "budget: unavailable":
+  `record_context_budget` now caches a `ContextBudgetSnapshot`
+  (`crate::events`) on the session entry, mirroring how `record_index_readiness`
+  caches `IndexReadinessSnapshot`, so a client that attaches or reconnects
+  after a turn's `Event::ContextBudget` already fired can still retrieve it.
+  New `session.get_context_budget` JSON-RPC method (`session::protocol_budget`)
+  returns a tagged `ContextBudgetQuery` — `{"status":"recorded", ...}` or
+  `{"status":"never_recorded"}`, never a bare `null` — and a thin
+  `GET /sessions/{id}/budget` REST route in `serve::rest::sessions` forwards
+  to it, following the exact `session.get_readiness`/`GET .../readiness`
+  precedent.
+
+- **REST resource gateway — `task.run`/`fs.list_dir`/`session.get_agents`
+  routes (#2983, #587, Slices 4-6).** Three more thin `axum` route groups on
+  `tcode serve --http`, each calling `rest::respond` (or the new
+  `tasks::respond_accepted` for the one route with a non-`200` success
+  status) against its JSON-RPC twin — zero duplicated business logic:
+  - `POST /tasks` -> `task.run` (`202 Accepted` — this route is
+    deliberately asynchronous: it reserves the execution slot synchronously
+    and returns before the LLM run itself completes, and unlike `POST
+    /sessions` it does not always mint a brand-new resource — a
+    `session_id` in the body reuses an existing one — so `201`'s framing
+    does not fit uniformly)
+  - `GET /fs?path=..&include_hidden=..` -> `fs.list_dir` (the daemon-side
+    folder picker; error mapping already distinguishes `404 not_found`,
+    `400 invalid_argument` for a non-directory path, `403
+    permission_denied`, and `500 internal` via the existing
+    `rpc_error_to_status`, no new mapping needed)
+  - `GET /sessions/{id}/agents` -> `session.get_agents` (nested under
+    `/sessions/{id}`, not a bare `GET /agents`, because the RPC method
+    requires a `session_id` — there is no roster independent of a session;
+    this slots into the same family as Slice 2's other session-scoped read
+    routes)
+
+  New `crate::serve::rest::tasks`/`rest::fs`/`rest::agents` modules, merged
+  into `crate::serve::http::build_axum_router` alongside `POST /rpc`,
+  `GET /health`, `GET /sessions/{id}/events`, and the Slice 2/3 `session.*`
+  REST routes.
+
 ### Fixed
 
+- `catchup::tests::*` no longer mutates the process-global `TRUSTY_MEMORY_URL`
+  env var to point at a fixed, unreachable `127.0.0.1:19999` — under
+  `cargo test`'s default parallelism, that unguarded `unsafe { set_var(..) }`
+  (with no matching cleanup) leaked into every other test in the same lib
+  binary that resolves a trusty-memory URL via `pm_catchup_context`
+  (e.g. `run_task::tests::repeated_llm_errors_trigger_redelegation_cap_not_pm_turn_cap`),
+  producing false-red gates on unrelated PRs. `pm_catchup_context` is now
+  split into a thin env-resolving wrapper and a testable
+  `pm_catchup_context_with_memory_url(project_dir, memory_url)` that takes the
+  target URL as a parameter, so tests thread in a guaranteed-unreachable
+  address directly with no shared mutable global, no lock, and no cleanup
+  required (closes #3003).
 - the unified-diff applier (`tools/fs/edit_format/diff.rs`) no longer errors
   on a `git diff`-style `\ No newline at end of file` footer marker inside a
   hunk body — the marker is metadata, not content, so it no longer fails the
@@ -25,6 +80,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Embedded tm agent catalog as in-memory assets (#2958, epic #2892 Slice
+  E2).** Bundled 33 `.md` assets byte-for-byte from trusty-mpm's agent
+  catalog under `assets/agents/`: the 5 `BASE-*` extends templates
+  (`BASE-AGENT`, `BASE-ENGINEER`, `BASE-OPS`, `BASE-QA`, `BASE-RESEARCH`) and
+  28 coding-relevant roster agents (`api-qa`, `code-analyzer`, `code-critic`,
+  `dart-engineer`, `data-engineer`, `documentation`, `golang-engineer`,
+  `java-engineer`, `javascript-engineer`, `local-ops`, `nextjs-engineer`,
+  `ops`, `phoenix-engineer`, `php-engineer`, `prompt-engineer`,
+  `python-engineer`, `qa`, `react-engineer`, `refactoring-engineer`,
+  `research`, `ruby-engineer`, `rust-engineer`, `security`, `svelte-engineer`,
+  `tauri-engineer`, `typescript-engineer`, `web-qa`, `web-ui-engineer`),
+  exposed via the new `assets::EMBEDDED_TM_AGENT_SOURCES` name->content
+  table. New `agents::md_loader::project_embedded_md_with_extends` resolves
+  an agent's `extends:` chain entirely against that table (e.g.
+  `rust-engineer` -> `base-engineer` -> `base-agent`) using
+  `trusty_agents_common::agents::builder_in_memory` (Slice E1, #3013) — no
+  filesystem access. Not yet wired into `assets::DEFAULT_AGENTS` or
+  `agents::load_all_agents`'s dispatchable fallback; that roster expansion is
+  a separate, later slice (E3).
+- **31-agent embedded roster wired into the composition layer (refs #2958,
+  epic #2892 Slice E3).** `assets::DEFAULT_AGENTS` grows from 3 to 31
+  entries: the original `engineer`/`qa-agent`/`code-reviewer` plus the 28
+  coding-relevant tm agents Slice E2 bundled. `agents::load_embedded_default_agents`
+  now routes each of the 28 through the new `EmbeddedAgent::Composed`
+  variant, resolving `extends:` chains via `agents::md_loader::project_embedded_md_with_extends`
+  against `assets::EMBEDDED_TM_AGENT_SOURCES`; the original 3 keep the
+  existing flat `EmbeddedAgent::Direct` path. The 5 `BASE-*` templates remain
+  extends-sources only — never dispatchable (`assets::tests::base_templates_are_never_dispatchable`).
+  mpm's own `engineer` agent stays excluded from the roster (upstream #2958
+  decision) specifically to avoid colliding with tcode's own `engineer`
+  default; `assets::tests::no_name_collisions_across_the_31_agent_roster`
+  pins that no collision exists across the final 31.
+  **Known gap, NOT fixed in this slice (#3046):** the embedded fallback this
+  roster feeds (`agents::load_all_agents`'s empty/invalid-disk branch) has no
+  reachable production caller today — a live CLI reproduction on a fresh
+  project showed `tcode run-task rust-engineer` AND `tcode run-task engineer`
+  (one of the original 3, predating this slice) both fail with "agent source
+  not found". The composition layer and the 31-agent roster definition are
+  complete and covered by `assets::tests::*`/`agents::tests::*` (which call
+  `load_all_agents`/`load_embedded_default_agents` directly), but the CLI
+  wiring that would let a fresh project actually dispatch one of these 31
+  names end-to-end is tracked separately as #3046 and intentionally out of
+  scope here.
+  **Tools-restriction deviation (Bob's 2026-07-18 ruling):** four
+  reviewer-intent roster agents — `qa`, `code-critic`, `code-analyzer`,
+  `web-qa` — now carry an explicit restrictive `tools:` frontmatter override
+  in their tcode copy (`read_file`, `grep`, `glob`, `list_dir`,
+  `search_code`, `use_skill`, `finish_task` — no `write_file`/`edit`/`bash`,
+  mirroring tcode's own `code-reviewer` default), deliberately deviating
+  those four files from byte-parity with trusty-mpm's source. A code-critic
+  review round on the same PR additionally found the prose in `web-qa.md`,
+  `qa.md`, and `code-analyzer.md` still instructed write/bash actions the new
+  allowlist denies (creating test scripts, running `CI=true npm test`,
+  `ps aux` monitoring, generating-and-running a review script); all three
+  were reworded in this slice to a genuinely read-only frame — findings plus
+  concrete, ready-to-run recommendations handed off to an engineer/ops/CI to
+  execute, never executed by the agent itself. `documentation` and `research`
+  stay byte-identical and unrestricted per the same ruling — a future E4 CI
+  staleness guard (diffing tcode's copies against trusty-mpm's source) must
+  whitelist the `tools:` line AND the reworded prose sections in these files.
 - **REST resource gateway — `session.*` write routes (#2983, #587, Slice 3).**
   New `POST`/`PUT`/`DELETE` routes on `tcode serve --http`, each a thin
   `axum` handler calling `rest::respond` (or the new `respond_created` for

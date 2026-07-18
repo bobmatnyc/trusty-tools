@@ -363,6 +363,7 @@ async fn run_review_with_fake_provider_approves() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -397,6 +398,7 @@ async fn run_review_request_changes_parsed_correctly() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::request_changes()), None);
 
@@ -425,6 +427,7 @@ async fn findings_count_matches_len_on_abort() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::errors("boom")), None);
 
@@ -461,6 +464,7 @@ async fn run_review_flags_shallow_clean_review_on_large_diff() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     // Zero-findings APPROVE with only 10 output tokens — implausibly cheap for
     // a diff this size (mirrors the reported `pricerator#637` regression).
@@ -514,6 +518,7 @@ async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     // Model self-grades A+, but the shallow-review cap lowers the top-level grade.
     let deps = ready_deps(
@@ -577,6 +582,7 @@ async fn run_review_large_diff_with_sufficient_tokens_not_flagged_shallow() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -602,6 +608,7 @@ async fn run_review_fail_safe_on_llm_error() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::errors("simulated transport error")), None);
 
@@ -635,6 +642,7 @@ async fn run_review_truncated_output_is_unknown() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::truncated_at_ceiling()), None);
 
@@ -701,6 +709,7 @@ async fn run_review_oversized_single_hunk_fails_closed_to_unknown() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     // FakeLlm would APPROVE the chunk if it were ever consulted — proving the
     // backstop fires (the chunk is failed-closed before any partial APPROVE).
@@ -749,6 +758,7 @@ async fn run_review_under_cap_diff_is_not_flagged_truncated() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -923,12 +933,19 @@ fn truncation_ratio_env_invalid_falls_back() {
 ///
 /// Why: a review without code context gives false confidence; the old
 /// graceful-degrade behaviour (which this test replaces) was actively harmful.
-/// What: a failing search + default `require_search=true` must yield
-/// `status = Skipped`, an actionable error, and NO LLM-derived APPROVE.
+/// This ALSO doubles as the "hosted CI/webhook mode is unchanged" regression
+/// guard for the search-unreachable semantics fix (problem B, scenario c):
+/// `InvocationSurface::default()` is `Hosted` (the type used by the webhook bot
+/// and CLI GitHub-PR runs) and `require_search` is left unconfigured, so this
+/// exercises exactly the "hosted, no explicit override" combination that must
+/// keep hard-Skipping.
+/// What: a failing search + `Hosted` surface + unconfigured `require_search`
+/// must yield `status = Skipped`, `infra_unavailable = true`, an actionable
+/// error, and NO LLM-derived APPROVE.
 #[tokio::test]
 async fn run_review_search_down_skips_when_required() {
     let (source, _tmp) = local_diff_source("+fn x() {}\n");
-    let config = default_config(); // require_search defaults true
+    let config = default_config(); // require_search unconfigured (None)
     let input = ReviewInput {
         diff_source: source,
         reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
@@ -938,6 +955,7 @@ async fn run_review_search_down_skips_when_required() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::Hosted, // hosted CI/webhook default
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()), // would APPROVE if ever consulted
@@ -951,7 +969,12 @@ async fn run_review_search_down_skips_when_required() {
     assert_eq!(
         result.status,
         ReviewStatus::Skipped,
-        "search down + required must SKIP, not silently APPROVE"
+        "search down + Hosted surface must SKIP, not silently APPROVE"
+    );
+    assert!(
+        result.infra_unavailable,
+        "a genuine infra outage must set infra_unavailable so the MCP layer \
+         (when this path is reached via MCP) can be loud about it"
     );
     assert!(!result.posted, "a skipped review must never be posted live");
     assert!(result.dry_run, "a skipped review is dry-run");
@@ -986,6 +1009,7 @@ async fn run_review_analyze_down_skips_when_required() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
@@ -1015,7 +1039,7 @@ async fn run_review_analyze_down_skips_when_required() {
 async fn run_review_search_down_degraded_when_optout() {
     let (source, _tmp) = local_diff_source("+fn x() {}\n");
     let mut config = default_config();
-    config.context.require_search = false; // explicit opt-out
+    config.context.require_search = Some(false); // explicit opt-out
     let input = ReviewInput {
         diff_source: source,
         reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
@@ -1025,6 +1049,7 @@ async fn run_review_search_down_degraded_when_optout() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
@@ -1055,6 +1080,129 @@ async fn run_review_search_down_degraded_when_optout() {
     assert!(err.contains("degraded"), "reason must say degraded: {err}");
 }
 
+/// #2994 re-review, finding #2: the persisted (degraded) review body must
+/// contain the `--source-root`-specific notice text — e.g. the actionable
+/// "Run `trusty-search index <dir>`" hint — not just a generic "trusty-search
+/// unavailable" banner, matching README.md's documented behaviour that the
+/// notice is prepended as a banner.
+///
+/// Why: this is the actual end-to-end path exercised by `cmd_run`/`cmd_compare`
+/// when `--source-root` doesn't match a registered index: `deps.search` is a
+/// `NullSearchClient` built from the notice, and `context.require_search` is
+/// cleared so the gate degrades instead of skipping. The diff source is a
+/// local diff (never GitHub), so `cmd_run` computes `InvocationSurface::Interactive`
+/// for it — matched here so the test exercises the composed real path rather
+/// than the (irrelevant, since `require_search` is an explicit override here)
+/// `Hosted` default.
+/// What: drives `run_review` with a real `NullSearchClient` carrying a
+/// source-root-shaped notice; asserts the notice's actionable text appears in
+/// `result.review_body` (via `degraded_banner`), not merely in `result.error`.
+/// Test: this test.
+#[tokio::test]
+async fn run_review_source_root_fallback_banner_carries_notice_text() {
+    use crate::integrations::NullSearchClient;
+
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let mut config = default_config();
+    config.context.require_search = Some(false); // set by resolve_source_root's DiffOnly branch
+    let notice = "--source-root /tmp/proj-2994 has no registered trusty-search index — \
+                  proceeding in diff-only mode (no code-context retrieval). Run \
+                  `trusty-search index /tmp/proj-2994` to enable full context, or omit \
+                  --source-root to use the auto-derived/TRUSTY_SEARCH_INDEX index.";
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::Interactive,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
+        search: Arc::new(NullSearchClient::new(notice)),
+        analyze: Some(Arc::new(ReadyAnalyze)),
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(result.status, ReviewStatus::Degraded);
+    assert!(
+        !result.infra_unavailable,
+        "source-root diff-only fallback is a real (degraded) review, not the loud infra-Skip path"
+    );
+    assert!(
+        result
+            .review_body
+            .contains("Run `trusty-search index /tmp/proj-2994`"),
+        "persisted review body must carry the --source-root-specific notice text, not a \
+         generic banner: {:?}",
+        result.review_body
+    );
+}
+
+/// SEARCH-UNREACHABLE SEMANTICS FIX (problem B, scenario b): an
+/// `InvocationSurface::Interactive` caller (MCP tool call / CLI
+/// `--local-diff`/`--base`/`--source-root`) with search down and NO explicit
+/// `require_search` override DEGRADES — it does NOT hard-Skip — and the LLM is
+/// actually called, producing a real (non-`Unknown`) verdict on the diff.
+///
+/// Why: this is the "interactive/local surfaces should degrade instead of
+/// hard-skip" half of the fix; unlike `run_review_search_down_degraded_when_optout`
+/// above (which tests an EXPLICIT opt-out), this exercises the NEW per-surface
+/// DEFAULT with no config override at all.
+/// What: `Interactive` surface + failing search + unconfigured `require_search`
+/// must yield `status = Degraded`, `infra_unavailable = false` (it is not the
+/// loud infra-Skip path), a loud non-authoritative banner, AND a real verdict
+/// (proving the LLM ran on the diff rather than being skipped).
+#[tokio::test]
+async fn run_review_interactive_surface_search_down_degrades_by_default() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let config = default_config(); // require_search unconfigured (None)
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::Interactive,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
+        search: Arc::new(FailingSearch), // search down, no override
+        analyze: Some(Arc::new(ReadyAnalyze)),
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.status,
+        ReviewStatus::Degraded,
+        "Interactive surface + search down + unconfigured must DEGRADE by default, not Skip"
+    );
+    assert!(
+        !result.infra_unavailable,
+        "a Degraded outcome is not the loud infra-Skip path"
+    );
+    assert!(
+        result.review_body.contains("NOT AUTHORITATIVE"),
+        "degraded body must carry a loud banner: {:?}",
+        result.review_body
+    );
+    assert_ne!(
+        result.verdict,
+        Verdict::Unknown,
+        "the LLM must actually have run and produced a real verdict on the diff"
+    );
+}
+
 /// REGRESSION GUARD (#590): both deps healthy → a normal, authoritative review.
 #[tokio::test]
 async fn run_review_both_healthy_completes_authoritative() {
@@ -1069,6 +1217,7 @@ async fn run_review_both_healthy_completes_authoritative() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1103,6 +1252,7 @@ async fn run_review_local_diff_skips_github() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1125,6 +1275,7 @@ async fn run_review_missing_diff_file_sets_error() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
@@ -1172,6 +1323,7 @@ async fn run_review_serve_mode_empty_token_fails_closed_with_actionable_error() 
         run_mode: RunMode::Serve,
         allow_posting: true,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1210,6 +1362,7 @@ async fn run_review_local_diff_is_dry_run_and_not_posted() {
         run_mode: RunMode::Serve,
         allow_posting: true,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1239,6 +1392,7 @@ async fn run_review_git_range_is_dry_run_and_not_posted() {
         run_mode: RunMode::Serve,
         allow_posting: true,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1269,6 +1423,7 @@ async fn run_review_stdin_is_dry_run_and_not_posted() {
         run_mode: RunMode::Serve,
         allow_posting: true,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1297,6 +1452,7 @@ async fn run_review_writes_dry_run_log_on_log_only_path() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -1328,6 +1484,7 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm::request_changes()), // 1 medium finding → REQUEST_CHANGES
@@ -1374,6 +1531,7 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm::request_changes()),
@@ -1410,6 +1568,7 @@ async fn run_review_verification_disabled_skips_round() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     // A REFUTED verifier is wired in but must NOT be consulted when disabled.
     let deps = ready_deps(
@@ -1480,6 +1639,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm {
@@ -1548,6 +1708,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm {

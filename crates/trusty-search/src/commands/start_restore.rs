@@ -296,6 +296,9 @@ pub(crate) async fn restore_one_index(
     // graph stage is forced to Skipped at warm-boot regardless of on-disk
     // state (config intent wins over stale on-disk graph data).
     let skip_kg = entry.skip_kg;
+    // Issue #2984 Phase 1: read skip_vector from the persisted entry —
+    // mirrors skip_kg but forces the semantic (not graph) stage to Skipped.
+    let skip_vector = entry.skip_vector;
     // Issue #923: read defer_embed from the persisted entry. Default `true`.
     let defer_embed = entry.defer_embed;
     // Issue #135: inspect the on-disk artifacts that
@@ -335,11 +338,12 @@ pub(crate) async fn restore_one_index(
         graph_node_count,
         lexical_only,
         skip_kg,
+        skip_vector,
         corpus_open_failed,
     });
     tracing::info!(
         "warm-boot: index '{}' restored (colocated={}) — chunks={} hnsw_snapshot={} \
-         graph_nodes={} lexical_only={} skip_kg={} corpus_open_failed={} → \
+         graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failed={} → \
          stages(lexical={:?}, semantic={:?}, graph={:?})",
         entry.id,
         entry.colocated,
@@ -348,6 +352,7 @@ pub(crate) async fn restore_one_index(
         graph_node_count,
         lexical_only,
         skip_kg,
+        skip_vector,
         corpus_open_failed,
         stages.lexical.status,
         stages.semantic.status,
@@ -375,6 +380,7 @@ pub(crate) async fn restore_one_index(
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
+        skip_vector,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

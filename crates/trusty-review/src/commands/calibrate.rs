@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use trusty_review::{
-    config::ReviewConfig,
+    config::{InvocationSurface, ReviewConfig},
     integrations::{
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
@@ -381,6 +381,10 @@ async fn run_pipeline_for_entry(
         run_mode: RunMode::Cli,
         allow_posting: false, // NEVER post during calibration — always dry-run
         caller_context: CallerContext::default(),
+        // Calibration replays real GitHub PRs against ground truth — keep the
+        // strict `Hosted` default (out of scope for the interactive-degrade
+        // fix); unchanged behaviour.
+        surface: InvocationSurface::default(),
     };
 
     let result = run_review(config, input, deps).await;

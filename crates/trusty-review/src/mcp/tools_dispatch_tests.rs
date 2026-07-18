@@ -129,6 +129,36 @@ impl AnalyzeClient for ReadyAnalyzeDispatch {
     }
 }
 
+/// Search stub whose `health()` always fails — simulates trusty-search being
+/// unreachable (search-unreachable semantics fix scenarios).
+///
+/// Why: exercises the required-context gate's search-down branch through the
+/// real MCP `call_tool` dispatch path.
+/// What: `health()` returns `SearchClientError::Unavailable`; other methods are
+/// unused by the gate and return empty results.
+/// Test: `call_tool_review_diff_search_down_interactive_default_degrades`.
+struct FailingSearchDispatch;
+
+#[async_trait]
+impl SearchClient for FailingSearchDispatch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".into()))
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
 /// Build an `AppState` with the required-context gate bypassed and healthy
 /// stubs, suitable for fully offline `review_diff` pipeline tests.
 ///
@@ -140,13 +170,34 @@ impl AnalyzeClient for ReadyAnalyzeDispatch {
 /// Test: `call_tool_review_diff_returns_non_empty_verdict`.
 fn offline_state() -> AppState {
     let mut config = ReviewConfig::load(None);
-    config.context.require_search = false;
+    config.context.require_search = Some(false);
     config.context.require_analyze = false;
     AppState::new(
         config,
         Arc::new(ApproveLlm),
         Arc::new(FakeSearchDispatch),
         Some(Arc::new(ReadyAnalyzeDispatch)),
+    )
+}
+
+/// Build an `AppState` with search UNREACHABLE and NO explicit
+/// `require_search` override — the MCP tool surface's `InvocationSurface::
+/// Interactive` default then applies (search-unreachable semantics fix).
+///
+/// Why: `require_analyze` still needs an explicit opt-out (it has no
+/// per-surface default, out of scope for this fix) so only the search branch
+/// of the gate is under test.
+/// What: constructs `AppState` with `ApproveLlm` + `FailingSearchDispatch`,
+/// `require_search` left at its default `None`, `require_analyze = false`.
+/// Test: `call_tool_review_diff_search_down_interactive_default_degrades`.
+fn offline_state_search_down_unconfigured() -> AppState {
+    let mut config = ReviewConfig::load(None);
+    config.context.require_analyze = false;
+    AppState::new(
+        config,
+        Arc::new(ApproveLlm),
+        Arc::new(FailingSearchDispatch),
+        None,
     )
 }
 
@@ -192,6 +243,116 @@ async fn call_tool_review_diff_returns_non_empty_verdict() {
     );
 }
 
+/// `call_tool("review_diff", ...)` with search UNREACHABLE and no explicit
+/// `require_search` override DEGRADES to a diff-only review — the LLM is
+/// still called and a real verdict comes back — rather than hard-Skipping
+/// (search-unreachable semantics fix, problem B).
+///
+/// Why: the MCP tool path is `InvocationSurface::Interactive` (set in
+/// `call_review_diff`), which can never post to a real PR
+/// (`allow_posting: false`), so a diff-only DEGRADED review is safe and useful
+/// instead of wasting the developer's time with a hard-Skip.
+/// What: builds `offline_state_search_down_unconfigured()` (search down,
+/// `require_search` unconfigured); calls `call_tool("review_diff", ...)`;
+/// asserts `isError: false`, no infra sentinel, `status == "degraded"` (NOT
+/// `"skipped"`), and a real non-Unknown verdict — proving the LLM actually ran.
+/// Test: this test itself; no network, no credentials needed.
+#[tokio::test]
+async fn call_tool_review_diff_search_down_interactive_default_degrades() {
+    let state = offline_state_search_down_unconfigured();
+    let args = json!({
+        "diff": "+fn hello() { println!(\"hi\"); }\n",
+        "context": "test: search down, interactive surface"
+    });
+    let result = call_tool("review_diff", &args, &state)
+        .await
+        .expect("call_tool must not return ToolError");
+
+    assert_eq!(
+        result["isError"],
+        json!(false),
+        "a Degraded (not Skipped) outcome must NOT set isError:true"
+    );
+    assert!(
+        result.get("mcp_status").is_none(),
+        "a Degraded outcome must not carry the infra-unavailable sentinel"
+    );
+
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text must be a string");
+    let review: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+    assert_eq!(
+        review["status"], "degraded",
+        "interactive surface + search down + unconfigured must DEGRADE, not Skip"
+    );
+    let verdict = review["verdict"]
+        .as_str()
+        .expect("verdict field must be a string");
+    assert_ne!(
+        verdict, "UNKNOWN",
+        "the LLM must actually have run and produced a real verdict on the diff, \
+         got: {verdict:?}"
+    );
+}
+
+/// `call_tool("review_diff", ...)` with search UNREACHABLE and an EXPLICIT
+/// `require_search = true` override (winning even on the MCP tool's
+/// `Interactive` surface) returns the LOUD infra-unavailable envelope —
+/// `isError: true` + `mcp_status: "infrastructure_unavailable"` — never a
+/// normal-looking `isError: false` result (search-unreachable semantics fix,
+/// problem A: the core bug).
+///
+/// Why: proves the fix end-to-end through the REAL MCP dispatch path (not just
+/// the `wrap_result` unit tests in `tools_tests.rs`): an operator who
+/// explicitly requires search even for interactive use gets an unmistakable
+/// signal when it is down, rather than a payload whose `status: "skipped"`
+/// field a naive caller could miss.
+/// What: builds an `AppState` with `require_search = Some(true)` and a failing
+/// search client; calls `call_tool("review_diff", ...)`; asserts `isError:
+/// true`, the `mcp_status` sentinel, and that the payload's own `status` field
+/// reads `"skipped"` (both signals agree).
+/// Test: this test itself; no network, no credentials needed.
+#[tokio::test]
+async fn call_tool_review_diff_infra_unavailable_is_loud_even_via_mcp() {
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = Some(true); // explicit override wins
+    config.context.require_analyze = false;
+    let state = AppState::new(
+        config,
+        Arc::new(ApproveLlm),
+        Arc::new(FailingSearchDispatch),
+        None,
+    );
+
+    let args = json!({
+        "diff": "+fn hello() { println!(\"hi\"); }\n",
+        "context": "test: explicit require_search=true, search down"
+    });
+    let result = call_tool("review_diff", &args, &state)
+        .await
+        .expect("call_tool must not return ToolError");
+
+    assert_eq!(
+        result["isError"],
+        json!(true),
+        "an infra-unavailable Skip must never look like a successful tool call"
+    );
+    assert_eq!(
+        result["mcp_status"], "infrastructure_unavailable",
+        "the envelope must carry the loud machine-readable sentinel"
+    );
+
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text must be a string");
+    let review: Value = serde_json::from_str(text).expect("content text must be valid JSON");
+    assert_eq!(
+        review["status"], "skipped",
+        "the payload's own status field must also read skipped (both signals agree)"
+    );
+}
+
 /// `call_tool("review_pr", ...)` with no resolvable token returns an error
 /// indicating auth / token failure.
 ///
@@ -220,7 +381,7 @@ async fn call_tool_review_pr_no_token_returns_error() {
     config.github_token = String::new();
     config.github_app_id = None;
     config.github_app_private_key = None;
-    config.context.require_search = false;
+    config.context.require_search = Some(false);
     config.context.require_analyze = false;
 
     let state = AppState::new(
@@ -287,7 +448,7 @@ async fn call_tool_review_pr_no_token_returns_error() {
 fn bedrock_startup_state() -> AppState {
     use crate::config::Provider;
     let mut config = ReviewConfig::load(None);
-    config.context.require_search = false;
+    config.context.require_search = Some(false);
     config.context.require_analyze = false;
     config.role_models.reviewer.provider = Provider::Bedrock;
     // Non-empty dummy keys so build_provider's empty-key guards pass; not real

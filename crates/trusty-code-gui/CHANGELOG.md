@@ -8,6 +8,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Phase-1 session monitor card: an active-session summary — status, task,
+  elapsed time, a recent transcript tail, and a cancel action — per DOC-39
+  §4.6 (the 8b UI surface, refs #2983). `SessionMonitor.svelte` polls
+  `GET /sessions` then `GET /sessions/{id}` + `GET /sessions/{id}/transcript`
+  every 5s using the identical `$effect`/`AbortController`/`setInterval`
+  shape `StatusBar.svelte` established, plus an independent 1s local tick
+  (no network call) that redisplays elapsed time via the new
+  `lib/transcript.ts::formatElapsed`. Reuses `pickActiveSession`
+  (`lib/session-status.ts`) rather than re-deriving session selection; a new
+  `SessionDetail` type and exported `TERMINAL_SESSION_STATUSES` constant
+  were added there to support it. `lib/transcript.ts::selectTranscriptTail`
+  reduces `TranscriptRecord.turns` to the last 5, truncating prose previews
+  at 160 chars (mirroring `crate::events::preview`'s convention) and
+  rendering tool-only turns as `"ran: toolA, toolB"` rather than a blank
+  line. Cancelling requires a two-step in-card confirm (no
+  `window.confirm()`) and forces an immediate re-poll on success rather than
+  waiting for the next tick. Mounted in `App.svelte` inside `.body`,
+  replacing `ActivityPlaceholder` (whose stated purpose — "coming once
+  GET /sessions lands" — this card now supersedes); `App.test.ts` gained a
+  new assertion pinning that it renders inside `.body`, alongside the
+  existing DOC-39 §8.1 AC-18.1 `.statusbar`-is-a-sibling invariant. **Scope
+  gap:** DOC-39 §4.6 AC-6.3 literally describes 8b as a live
+  search/memory-recall monitor (docked rail → inline settle, preserving
+  `lane`/`query`/`hit_count`/`latency_ms`, backed by
+  `Event::SearchPerformed`/`Event::MemoryRecalled`). Those events exist in
+  `crates/trusty-code/src/events.rs` but are emitted ONLY on the SSE stream
+  (`GET /sessions/{id}/events`) with no REST snapshot route and no prior
+  SSE-consumption pattern in this client — building that in this slice would
+  mean buffering an unbounded per-session event log client-side, which is
+  out of scope for a Phase-1 cut. This PR ships the session-activity card
+  described above instead and renders a labeled, non-hidden gap notice (same
+  treatment as the status bar's `budget: unavailable` span); the true AC-6.3
+  gap is tracked in issue #3027.
+
 ### Fixed
 
 - Restored the macOS Developer-ID signing config that was intentionally
@@ -28,6 +64,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Status bar renders the real context budget instead of the "unavailable"
+  placeholder described below (refs #3015, DOC-39 §4.5/§6.2).
+  `StatusBar.svelte` polls the now-shipped `GET /sessions/{id}/budget`
+  (PR #3042, squash `0bec593f`) in the same `refresh()` cycle, sharing the
+  existing `AbortController` and post-`await` `signal.aborted` guards, and
+  degrades a budget-route failure to a "no data yet" label rather than
+  dropping the whole status bar to `daemon-unreachable` — the same
+  partial-failure discipline already applied to the readiness fetch. Renders
+  `recorded` as `"NN% working"` (appending `", compacted"` when
+  `compaction_fired`, DOC-39 §4.5 AC-5.8) and `never_recorded` as a labeled
+  `"no data yet"` — never a fabricated `0%`. `within_budget === false` gets a
+  distinct red (`bg-status-error`/`text-status-error`) treatment per
+  AC-5.7's "red `--gap`" requirement. New `lib/context-budget.ts`
+  (`ContextBudgetQuery`/`ContextBudgetSnapshot` wire types plus
+  `classifyBudget`/`budgetLabel`/`budgetDotClass`/`budgetTitle`, covered by
+  `context-budget.test.ts`) holds the pure formatting/threshold logic,
+  mirroring the `lib/session-status.ts` split. **Naming note (issue
+  #3043):** the wire types match the shipped Rust field names
+  (`working_context_pct`, `compaction_fired`) verbatim, not DOC-39 §5.6's
+  stale `working_pct`/`fired` prose — the code is the source of truth.
+  **Known gap (issue #3050):** AC-5.9 requires a distinct "not applicable"
+  state for non-PM sessions (cadence is PM-only); `ContextBudgetQuery` has
+  no PM/cadence discriminant on the wire yet, so non-PM sessions render as
+  "no data yet" rather than "not applicable" until #3050 lands the
+  discriminant.
 - Phase-1 status bar: readiness + budget chrome per DOC-39 §6.2 (refs #2983).
   `StatusBar.svelte` polls `GET /sessions` then `GET /sessions/{id}/readiness`
   (REST Slice 2, squash 15156b42) every 5s via a Svelte 5 `$effect` whose
@@ -42,12 +103,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   session to reflect. Mounted as `<StatusBar>` in `App.svelte`, structurally
   a **sibling of `.body`**, never nested inside it, per DOC-39 §8.1 /
   AC-18.1 — pinned by a new `App.test.ts` DOM-structure test (`pnpm test`,
-  vitest + jsdom, new devDependencies). **Data gap:** the budget half of the
-  status bar renders a labeled "unavailable" placeholder — `Event::ContextBudget`
-  is emitted on the SSE stream but never cached on the session the way
-  `IndexReadinessSnapshot` is, so there is no `session.get_context_budget`
-  RPC or `GET /sessions/{id}/budget` REST route to poll yet; tracked as a
-  REST-slice follow-up rather than adding a new daemon endpoint in this PR.
+  vitest + jsdom, new devDependencies). **Data gap (RESOLVED, see the Added
+  entry above this one):** at the time this PR shipped, the budget half of
+  the status bar rendered a labeled "unavailable" placeholder —
+  `Event::ContextBudget` was emitted on the SSE stream but never cached on
+  the session the way `IndexReadinessSnapshot` is, so there was no
+  `session.get_context_budget` RPC or `GET /sessions/{id}/budget` REST route
+  to poll; tracked as a REST-slice follow-up rather than adding a new daemon
+  endpoint in this PR. That follow-up (issue #3015) landed in PR #3042 and
+  the placeholder was swapped for live data in this same [Unreleased]
+  window.
 - Initial scaffold: Tauri 2 + Svelte 5 desktop shell for the `trusty-code`
   (tcode) daemon, mirroring `crates/trusty-mpm-gui`'s structure (refs #2983,
   `docs/specs/trusty-code-harness-ui.md`). A single `get_daemon_url` IPC

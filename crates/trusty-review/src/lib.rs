@@ -14,6 +14,11 @@
 //! Test: each public module carries its own unit tests; see each submodule.
 
 pub mod config;
+// Why: strict bare-identifier validation shared by the config-resolution
+// layer and the voice/review-template loaders (security fix, issue #2995) —
+// a dependency-free leaf module so it can be used by both without a cyclic
+// module relationship. Always compiled — no feature gate.
+pub mod identifier;
 pub mod integrations;
 pub mod llm;
 pub mod models;
@@ -27,6 +32,10 @@ pub mod coverage;
 // (stock → principles → voice).  Always compiled — no feature gate — because
 // VoiceConfig is a pure data type used by the prompt builder in all modes.
 pub mod voice;
+// Why: named review-template loading for the PR-review pipeline (#2995) —
+// composes with (never replaces) the voice/principles layers above. Always
+// compiled — no feature gate — for the same reason as `voice`.
+pub mod review_template;
 // Why: Phase 1 (#582) adds live posting, which needs a durable cross-process
 // dedup claim store (redb) and an in-process in-flight guard.  These storage
 // and concurrency concerns live in their own module, separate from the

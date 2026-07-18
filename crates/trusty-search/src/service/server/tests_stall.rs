@@ -152,6 +152,9 @@ fn health_response_contains_stall_fields() {
         embedderd_rss_mb: None,
         background_reindex_queue_depth: 0,
         update_available: None,
+        indexes_kg_disabled: 0,
+        indexes_vector_disabled: 0,
+        indexes_component_catch_up_in_progress: 0,
         warmboot_summary: WarmBootSummary::default(),
         boot_reconcile: None,
     };
@@ -204,6 +207,9 @@ fn health_response_omits_last_ok_when_none() {
         embedderd_rss_mb: None,
         background_reindex_queue_depth: 0,
         update_available: None,
+        indexes_kg_disabled: 0,
+        indexes_vector_disabled: 0,
+        indexes_component_catch_up_in_progress: 0,
         warmboot_summary: WarmBootSummary::default(),
         boot_reconcile: None,
     };

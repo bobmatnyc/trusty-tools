@@ -512,6 +512,7 @@ async fn lazy_handle_idle_shutdown_waits_for_inflight_request() {
     let inner_pid_slot = Arc::new(AtomicU32::new(0));
     let state_cell = Arc::new(Mutex::new(Some(SpawnedState {
         client_slot,
+        supervisor_handle: None,
         shutdown_tx,
         pid_slot: inner_pid_slot,
     })));
@@ -607,6 +608,7 @@ async fn embed_via_defers_watchdog_eviction_while_request_in_flight() {
         let mut guard = handle.state.lock().await;
         *guard = Some(SpawnedState {
             client_slot: Arc::new(RwLock::new(client)),
+            supervisor_handle: None,
             shutdown_tx,
             pid_slot: Arc::new(AtomicU32::new(0)),
         });

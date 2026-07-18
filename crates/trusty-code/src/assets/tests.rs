@@ -11,22 +11,31 @@
 //! Test: this file — self-describing.
 
 use super::*;
-use crate::agents::md_loader::project_embedded_md;
+use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_extends};
 
-/// Every embedded agent `.md` parses, and its frontmatter `name:` matches the
-/// table key it is filed under.
+/// Every embedded agent `.md` parses (directly for the 3 originals, via the
+/// in-memory extends composer for the 28 roster agents), and its frontmatter
+/// `name:` matches the table key it is filed under.
 ///
 /// Why: A typo in either the `.md` frontmatter or the table entry would
 /// silently break `agents::load_all_agents`'s embedded-fallback at runtime
-/// instead of failing fast in CI.
+/// instead of failing fast in CI. This is also the acceptance test for Slice
+/// E3 (#2958): every one of the 31 entries must actually compose (a `Composed`
+/// variant that panics here rather than resolving would otherwise only be
+/// caught at runtime by `load_embedded_default_agents`'s log-and-skip path).
 /// Test: this test.
 #[test]
 fn default_agents_parse_and_names_match() {
-    assert_eq!(DEFAULT_AGENTS.len(), 3);
+    assert_eq!(DEFAULT_AGENTS.len(), 31, "3 originals + 28 roster agents");
     for agent in DEFAULT_AGENTS {
-        let cfg = project_embedded_md(agent.name, agent.md);
+        let cfg = match agent {
+            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md),
+            EmbeddedAgent::Composed { name } => project_embedded_md_with_extends(name)
+                .unwrap_or_else(|e| panic!("roster agent '{name}' failed to compose: {e}")),
+        };
         assert_eq!(
-            cfg.agent.name, agent.name,
+            cfg.agent.name,
+            agent.name(),
             "table key must match frontmatter name:"
         );
     }
@@ -129,20 +138,212 @@ fn default_agents_field_identical_to_retired_toml() {
 }
 
 /// The embedded fallback still fires when the disk `.claude/agents` dir is
-/// empty, and still yields exactly the three default agent names — proving
-/// the `.md` conversion did not break `load_all_agents`'s fallback wiring.
+/// empty, and yields the full 31-agent roster with the original 3 defaults
+/// intact as the first three entries — proving Slice E3's roster expansion
+/// did not disturb the original fallback wiring `.md` (#2897 Slice C)
+/// established.
 ///
 /// Why: #2897 Slice C's non-breaking claim rests on this: a fresh project
 /// with no `.claude/agents/` must still boot with `engineer`/`qa-agent`/
-/// `code-reviewer` available, exactly as it did when the defaults were TOML.
-/// What: calls `crate::agents::load_all_agents` on a nonexistent directory
-/// and asserts the three names come back.
+/// `code-reviewer` available, exactly as it did when the defaults were TOML
+/// — Slice E3 only ADDS the 28 roster agents after them, never replaces or
+/// reorders the original 3.
+/// What: calls `crate::agents::load_all_agents` on a nonexistent directory;
+/// asserts the returned names' first three entries are exactly
+/// `["engineer", "qa-agent", "code-reviewer"]` and the full 31-name list
+/// matches `crate::assets::DEFAULT_AGENTS`'s declared order with no
+/// duplicates.
 /// Test: this test.
 #[test]
-fn embedded_fallback_still_fires_and_yields_same_three_names() {
+fn embedded_fallback_still_fires_and_yields_31_agents_with_original_3_intact() {
     let agents = crate::agents::load_all_agents(std::path::Path::new("/nonexistent/agents/dir"));
     let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
-    assert_eq!(names, vec!["engineer", "qa-agent", "code-reviewer"]);
+
+    assert_eq!(names.len(), 31, "31-agent roster: 3 originals + 28 roster");
+    assert_eq!(
+        &names[..3],
+        &["engineer", "qa-agent", "code-reviewer"],
+        "the original 3 defaults must remain first and intact"
+    );
+
+    let expected: Vec<&str> = DEFAULT_AGENTS.iter().map(|a| a.name()).collect();
+    assert_eq!(
+        names, expected,
+        "fallback order must match DEFAULT_AGENTS's declared order exactly"
+    );
+
+    let mut deduped = names.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(deduped.len(), names.len(), "no duplicate agent names");
+}
+
+/// The 5 `BASE-*` extends templates are NEVER dispatchable — they must not
+/// appear anywhere in `DEFAULT_AGENTS` or the fallback roster it produces.
+///
+/// Why: #2958's roster decision is explicit that `BASE-AGENT`, `BASE-ENGINEER`,
+/// `BASE-OPS`, `BASE-QA`, and `BASE-RESEARCH` are extends-sources ONLY. A
+/// `BASE-*` entry leaking into the dispatchable roster would let a caller
+/// invoke a template fragment (no concrete role, designed to be composed
+/// into a leaf agent, not run standalone) as if it were a real agent.
+/// What: asserts none of the 31 `DEFAULT_AGENTS` names matches any of the 5
+/// base template names (case-insensitive, since the source table keys them
+/// `BASE-QA.md` while `extends:` references use `base-qa`).
+/// Test: this test.
+#[test]
+fn base_templates_are_never_dispatchable() {
+    const BASE_NAMES: &[&str] = &[
+        "base-agent",
+        "base-engineer",
+        "base-ops",
+        "base-qa",
+        "base-research",
+    ];
+    for agent in DEFAULT_AGENTS {
+        let lower = agent.name().to_ascii_lowercase();
+        assert!(
+            !BASE_NAMES.contains(&lower.as_str()),
+            "BASE template '{}' must never be dispatchable",
+            agent.name()
+        );
+    }
+}
+
+/// No two entries in the 31-agent `DEFAULT_AGENTS` roster share a dispatch
+/// name — in particular, trusty-mpm's own `engineer` agent (excluded from
+/// the roster upstream specifically because it collides with tcode's
+/// `engineer` default) does not sneak back in under any composed entry.
+///
+/// Why: the #2958 roster decision explicitly calls out `engineer` as
+/// EXCLUDEd from the 28-agent import "(name-collides with tcode's own
+/// default)" — this test is the regression pin for that exclusion, and a
+/// general guard against any future roster addition silently shadowing an
+/// existing dispatch name.
+/// What: collects all 31 names, dedupes, asserts the length is unchanged;
+/// separately asserts `"engineer"` appears exactly once.
+/// Test: this test.
+#[test]
+fn no_name_collisions_across_the_31_agent_roster() {
+    let names: Vec<&str> = DEFAULT_AGENTS.iter().map(|a| a.name()).collect();
+    assert_eq!(names.len(), 31);
+
+    let mut deduped = names.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(
+        deduped.len(),
+        names.len(),
+        "no name collisions across the 31-agent roster: {names:?}"
+    );
+
+    assert_eq!(
+        names.iter().filter(|&&n| n == "engineer").count(),
+        1,
+        "tcode's own 'engineer' must be the only 'engineer' entry -- mpm's \
+         'engineer' agent is excluded from the roster upstream precisely to \
+         avoid this collision"
+    );
+}
+
+/// The four reviewer-intent roster agents Bob designated for restrictive
+/// read-only tooling (2026-07-18, Slice E3, #2958) — `qa`, `code-critic`,
+/// `code-analyzer`, `web-qa` — compose to an `AgentConfig` carrying exactly
+/// the read-only tool allowlist, mirroring tcode's own `code-reviewer`
+/// default (no `write_file`/`edit`/`bash`).
+///
+/// Why: this is the acceptance test for the E3 tools-restriction decision —
+/// a frontmatter typo or a dropped `tools:` line would silently leave these
+/// "reviewer" agents with full read/write/bash access, defeating the whole
+/// point of the restriction.
+/// What: composes each of the four via `project_embedded_md_with_extends`
+/// (exercising the SAME path `load_embedded_default_agents` uses) and
+/// asserts `cfg.tools.allowed` equals the read-only list, with no
+/// `write_file`, `edit`, or `bash` entry.
+/// Test: this test.
+#[test]
+fn restricted_reviewer_agents_carry_read_only_tools() {
+    let expected_read_only: Vec<String> = vec![
+        "read_file".to_string(),
+        "grep".to_string(),
+        "glob".to_string(),
+        "list_dir".to_string(),
+        "search_code".to_string(),
+        "use_skill".to_string(),
+        "finish_task".to_string(),
+    ];
+
+    for name in ["qa", "code-critic", "code-analyzer", "web-qa"] {
+        let cfg = project_embedded_md_with_extends(name)
+            .unwrap_or_else(|e| panic!("failed to compose '{name}': {e}"));
+        let allowed = cfg.tools.and_then(|t| t.allowed);
+        assert_eq!(
+            allowed,
+            Some(expected_read_only.clone()),
+            "'{name}' must carry the restrictive read-only tools: override"
+        );
+        assert!(
+            !allowed
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|t| t == "write_file" || t == "edit" || t == "bash"),
+            "'{name}' must not carry any write/edit/bash-mutation tool"
+        );
+    }
+}
+
+/// `documentation` and `research` remain byte-identical to trusty-mpm's
+/// source and unrestricted (`tools: None` — all tools allowed), per Bob's
+/// explicit 2026-07-18 ruling that they build docs and research reports
+/// rather than issue verdicts.
+///
+/// Why: distinguishes "no override was accidentally added" from "an override
+/// was added but with the wrong value" — the previous test only pins the
+/// four restricted agents; this one pins that the two agents Bob explicitly
+/// exempted were NOT swept up by the same change.
+/// What: composes both via `project_embedded_md_with_extends` and asserts
+/// `cfg.tools.allowed` is `None`.
+/// Test: this test.
+#[test]
+fn documentation_and_research_remain_unrestricted() {
+    for name in ["documentation", "research"] {
+        let cfg = project_embedded_md_with_extends(name)
+            .unwrap_or_else(|e| panic!("failed to compose '{name}': {e}"));
+        assert_eq!(
+            cfg.tools.and_then(|t| t.allowed),
+            None,
+            "'{name}' must remain unrestricted (no tools: override)"
+        );
+    }
+}
+
+/// `crate::assets::DEFAULT_AGENTS`'s 28 `EmbeddedAgent::Composed` entries
+/// every resolve to a real key in `EMBEDDED_TM_AGENT_SOURCES` — no typo'd
+/// roster name that would silently degrade to a skipped agent at runtime.
+///
+/// Why: `load_embedded_default_agents` logs-and-skips a `Composed` entry
+/// whose name isn't found in `EMBEDDED_TM_AGENT_SOURCES` rather than
+/// panicking (see that function's doc) — a typo there would silently shrink
+/// the roster below 31 with only a log line as evidence. This test fails
+/// loudly in CI instead.
+/// What: for every `Composed` entry, asserts its (lowercased) name matches
+/// some `EMBEDDED_TM_AGENT_SOURCES` key with the `.md` suffix stripped.
+/// Test: this test.
+#[test]
+fn every_composed_roster_name_resolves_in_embedded_tm_agent_sources() {
+    let source_keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
+        .iter()
+        .map(|(name, _)| name.trim_end_matches(".md").to_ascii_lowercase())
+        .collect();
+
+    for agent in DEFAULT_AGENTS {
+        if let EmbeddedAgent::Composed { name } = agent {
+            assert!(
+                source_keys.iter().any(|k| k == name),
+                "roster name '{name}' has no matching EMBEDDED_TM_AGENT_SOURCES key"
+            );
+        }
+    }
 }
 
 /// Every embedded skill name is unique and non-empty.
@@ -164,6 +365,38 @@ fn default_skills_names_are_unique() {
             skill.skill_md.trim_start().starts_with("---"),
             "embedded skill '{}' must open with a frontmatter fence",
             skill.name
+        );
+    }
+}
+
+/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 33 entries (5
+/// `BASE-*` templates + 28 roster agents), every key is unique, and every
+/// entry's raw content opens with a frontmatter fence.
+///
+/// Why: `agents::md_loader::project_embedded_md_with_extends` builds an
+/// `InMemorySources` map from this table via `build_in_memory_source_map`
+/// -- a duplicate key would silently shadow one agent's real content, and a
+/// wrong count would mean a roster entry was dropped or double-copied
+/// during the byte-for-byte copy from trusty-mpm's bundled assets.
+/// What: asserts the length, dedupes the (case-folded, per
+/// `InMemorySources::insert`'s own normalisation) keys, and checks every
+/// content string opens with `---`.
+/// Test: this test.
+#[test]
+fn embedded_tm_agent_sources_has_33_entries_and_unique_keys() {
+    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 33);
+    let mut keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
+        .iter()
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    let before = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), before, "no duplicate embedded tm agent keys");
+    for (name, content) in EMBEDDED_TM_AGENT_SOURCES {
+        assert!(
+            content.trim_start().starts_with("---"),
+            "embedded tm agent source '{name}' must open with a frontmatter fence"
         );
     }
 }

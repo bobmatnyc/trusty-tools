@@ -106,6 +106,10 @@ mod tests_projects_config_tests;
 #[path = "tests_manager.rs"]
 mod tests_manager;
 
+#[cfg(test)]
+#[path = "tests_project_trust_tests.rs"]
+mod tests_project_trust;
+
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
 /// Why: the YAML help bundle is checked in as a string literal; loading it

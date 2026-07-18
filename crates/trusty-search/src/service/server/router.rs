@@ -147,6 +147,22 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     pub skip_kg: Option<bool>,
 
+    /// Vector/semantic-suppression flag (issue #2984 Phase 1): when `true`,
+    /// the embedder is never invoked for this index — the semantic stage is
+    /// permanently `Skipped`. Orthogonal to `skip_kg` and `lexical_only`:
+    /// `skip_kg: false, skip_vector: true` is the "KG-on, vector-off"
+    /// quadrant. Default `None` (treated as `false` — vector lane built as
+    /// normal).
+    ///
+    /// Why: mirrors `skip_kg` end-to-end so callers can register a
+    /// vector-off index in one `POST /indexes` call, enabling per-component
+    /// operational control (embedder wedges, EMFILE/FD pressure).
+    /// What: `None` maps to `false`; `true` is stored in `indexes.toml` and
+    /// survives daemon restarts.
+    /// Test: `skip_vector_index_never_embeds` in `service::reindex::tests`.
+    #[serde(default)]
+    pub skip_vector: Option<bool>,
+
     /// Deferred-embedding opt-out (issue #923). When `None` or `Some(true)`
     /// (the default), the fast pass runs synchronously and marks lexical + graph
     /// `Ready` within seconds; semantic embedding is deferred to a background

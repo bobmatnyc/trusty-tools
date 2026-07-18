@@ -13,12 +13,12 @@
 //! provides `discover_agents` for scanning an agents directory (`*.md`
 //! only — a coexisting `*.toml` is warned about and skipped, never parsed),
 //! and `load_all_agents` for loading every discovered `.md` config.
-//! `load_all_agents` falls back to `crate::assets::DEFAULT_AGENTS` (#2895)
-//! when the *parsed* result is empty — not merely when no paths were
-//! discovered — so a `.claude/agents/` dir that exists but holds only
-//! unparseable (or exclusively orphaned-`.toml`) configs still yields a
-//! usable `engineer`/`qa-agent`/`code-reviewer` set instead of silently
-//! starting with zero agents. A disk directory with even one
+//! `load_all_agents` falls back to `crate::assets::DEFAULT_AGENTS` (#2895;
+//! expanded from 3 to 31 agents in Slice E3, #2958) when the *parsed* result
+//! is empty — not merely when no paths were discovered — so a
+//! `.claude/agents/` dir that exists but holds only unparseable (or
+//! exclusively orphaned-`.toml`) configs still yields a usable roster instead
+//! of silently starting with zero agents. A disk directory with even one
 //! successfully-parsed config is treated as the project opting in to its own
 //! catalog, so it is used as-is and the embedded defaults are not merged in.
 //! Test: `discover_agents` tests place `.md` (and, for the orphan-warning
@@ -153,22 +153,49 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// Project `crate::assets::DEFAULT_AGENTS` in-memory into `AgentConfig`s.
 ///
 /// Why: The embedded fallback path for `load_all_agents` — no disk I/O, no
-/// materialization step (unlike trusty-mpm's install-time embed pattern); the
-/// bundled `.md` source is projected directly from the compiled-in
-/// `&'static str` (#2897 Slice C — previously native TOML, parsed via
-/// `AgentConfig::from_toml_str`; the format changed, the embedded-fallback
-/// behavior did not).
-/// What: Calls [`md_loader::project_embedded_md`] on every
-/// `EmbeddedAgent::md`. Unlike the retired TOML path this projection is
-/// infallible (`agent_metadata_from_str` degrades to an empty default on a
-/// malformed document rather than erroring — see its doc comment), so there
-/// is nothing to skip; every bundled default always yields a config.
+/// materialization step (unlike trusty-mpm's install-time embed pattern). As
+/// of Slice E3 (#2958) `DEFAULT_AGENTS` mixes two projection strategies:
+/// tcode's original 3 defaults are flat `.md` strings (#2897 Slice C —
+/// previously native TOML, parsed via `AgentConfig::from_toml_str`; the
+/// format changed, the embedded-fallback behavior did not), while the 28 tm
+/// roster agents inherit from `BASE-*` templates and must be composed
+/// in-memory first.
+/// What: For each `EmbeddedAgent::Direct { name, md }`, calls
+/// [`md_loader::project_embedded_md`] directly — infallible, same as before
+/// Slice E3 (`agent_metadata_from_str` degrades to an empty default on a
+/// malformed document rather than erroring). For each
+/// `EmbeddedAgent::Composed { name }`, calls
+/// [`md_loader::project_embedded_md_with_extends`], which IS fallible (an
+/// unresolvable `extends:` chain returns `Err`); a failure is logged at
+/// ERROR level and the agent is skipped rather than panicking — this should
+/// be unreachable in practice (every roster name is pinned against
+/// `EMBEDDED_TM_AGENT_SOURCES` by `assets::tests::default_agents_parse_and_names_match`),
+/// but a compiled-in asset table defect must degrade gracefully, not crash
+/// the harness, exactly like the disk-parsing path in [`load_all_agents`]
+/// does for a malformed on-disk config.
 /// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`,
-/// `assets::tests::default_agents_field_identical_to_retired_toml`.
+/// `assets::tests::default_agents_field_identical_to_retired_toml`,
+/// `assets::tests::default_agents_parse_and_names_match`.
 fn load_embedded_default_agents() -> Vec<AgentConfig> {
     crate::assets::DEFAULT_AGENTS
         .iter()
-        .map(|embedded| md_loader::project_embedded_md(embedded.name, embedded.md))
+        .filter_map(|embedded| match embedded {
+            crate::assets::EmbeddedAgent::Direct { name, md } => {
+                Some(md_loader::project_embedded_md(name, md))
+            }
+            crate::assets::EmbeddedAgent::Composed { name } => {
+                match md_loader::project_embedded_md_with_extends(name) {
+                    Ok(cfg) => Some(cfg),
+                    Err(e) => {
+                        tracing::error!(
+                            "embedded roster agent '{name}' failed to compose \
+                             (build-time asset defect, not a runtime condition): {e}"
+                        );
+                        None
+                    }
+                }
+            }
+        })
         .collect()
 }
 
@@ -202,6 +229,55 @@ pub fn locate_agents_dir(project_root: &Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 31-name default embedded roster, in `crate::assets::DEFAULT_AGENTS`'s
+    /// declared order (Slice E3, #2958) — shared by every fallback test in
+    /// this module so the expected list is written once, not duplicated
+    /// per-test with the risk of one copy drifting from another.
+    ///
+    /// Why: three separate fallback scenarios (empty dir, all-invalid dir,
+    /// only-orphaned-toml dir) all assert the identical 31-name outcome; a
+    /// single source avoids a silent typo in one copy passing review
+    /// unnoticed.
+    /// What: tcode's original 3 (`engineer`, `qa-agent`, `code-reviewer`)
+    /// followed by the 28 roster names, alphabetical, matching
+    /// `DEFAULT_AGENTS`'s literal declaration order.
+    /// Test: every `load_all_agents_falls_back_*` test below.
+    fn expected_default_agent_names() -> Vec<&'static str> {
+        vec![
+            "engineer",
+            "qa-agent",
+            "code-reviewer",
+            "api-qa",
+            "code-analyzer",
+            "code-critic",
+            "dart-engineer",
+            "data-engineer",
+            "documentation",
+            "golang-engineer",
+            "java-engineer",
+            "javascript-engineer",
+            "local-ops",
+            "nextjs-engineer",
+            "ops",
+            "phoenix-engineer",
+            "php-engineer",
+            "prompt-engineer",
+            "python-engineer",
+            "qa",
+            "react-engineer",
+            "refactoring-engineer",
+            "research",
+            "ruby-engineer",
+            "rust-engineer",
+            "security",
+            "svelte-engineer",
+            "tauri-engineer",
+            "typescript-engineer",
+            "web-qa",
+            "web-ui-engineer",
+        ]
+    }
 
     /// `discover_agents` finds `.md` files and returns sorted (name, path)
     /// pairs.
@@ -346,16 +422,17 @@ mod tests {
     /// both hit this branch, since `discover_agents` returns `[]` for both).
     ///
     /// Why: This is the whole point of #2895 — a fresh project must not
-    /// start with zero agents.
-    /// What: Load from a nonexistent dir; expect exactly the three bundled
-    /// defaults (`engineer`, `qa-agent`, `code-reviewer`), sorted by name
-    /// via `crate::assets::DEFAULT_AGENTS`'s declared order.
+    /// start with zero agents. As of Slice E3 (#2958) the bundled roster is
+    /// 31 agents, not 3.
+    /// What: Load from a nonexistent dir; expect exactly the 31-agent
+    /// embedded roster, in `crate::assets::DEFAULT_AGENTS`'s declared order —
+    /// the original 3 defaults intact, followed by the 28 roster agents.
     /// Test: this test.
     #[test]
     fn load_all_agents_falls_back_to_embedded_when_disk_empty() {
         let agents = load_all_agents(std::path::Path::new("/nonexistent/agents/dir"));
         let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
-        assert_eq!(names, vec!["engineer", "qa-agent", "code-reviewer"]);
+        assert_eq!(names, expected_default_agent_names());
     }
 
     /// A `.claude/agents/` dir that exists and holds `.md` files, but every
@@ -368,8 +445,8 @@ mod tests {
     /// alone would defeat the "never zero agents" goal for a directory that
     /// exists but is entirely malformed.
     /// What: One `broken.md` (an `extends:` cycle — a real `compose_agent`
-    /// failure) on disk, nothing else; `load_all_agents` returns the three
-    /// bundled defaults, not `[]`.
+    /// failure) on disk, nothing else; `load_all_agents` returns the
+    /// 31-agent bundled roster, not `[]`.
     /// Test: this test.
     #[test]
     fn load_all_agents_falls_back_to_embedded_when_disk_all_invalid() {
@@ -382,7 +459,7 @@ mod tests {
 
         let agents = load_all_agents(tmp.path());
         let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
-        assert_eq!(names, vec!["engineer", "qa-agent", "code-reviewer"]);
+        assert_eq!(names, expected_default_agent_names());
     }
 
     /// A directory holding ONLY orphaned `.toml` agents (no `.md` at all)
@@ -394,7 +471,7 @@ mod tests {
     /// fallback compose correctly: warning is a side effect, not a
     /// substitute for a real agent.
     /// What: one `legacy.toml` on disk, no `.md`; `load_all_agents` returns
-    /// the three bundled defaults.
+    /// the 31-agent bundled roster.
     /// Test: this test.
     #[test]
     fn load_all_agents_falls_back_when_disk_has_only_orphaned_toml() {
@@ -404,7 +481,7 @@ mod tests {
 
         let agents = load_all_agents(tmp.path());
         let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
-        assert_eq!(names, vec!["engineer", "qa-agent", "code-reviewer"]);
+        assert_eq!(names, expected_default_agent_names());
     }
 
     /// A disk directory with even one valid config is used as-is; the

@@ -125,4 +125,38 @@ pub trait VectorStore: Send + Sync {
     async fn demote_to_view(&self) -> Result<bool> {
         Ok(false)
     }
+
+    /// Returns `true` when `id` already has a stored vector.
+    ///
+    /// Why (issue #2984 Phase 1 HIGH finding 3): the runtime vector-component
+    /// re-enable catch-up must be genuinely incremental — the locked design
+    /// decision is "incremental catch-up, never a forced full rebuild" — so
+    /// `CodeIndexer::embed_deferred_chunks` needs a cheap "is this chunk
+    /// already embedded?" membership test to skip content that was embedded
+    /// before the vector component was disabled.
+    /// What: default `false` (safe but non-incremental fallback for stores
+    /// that can't answer cheaply); `UsearchStore` overrides via `id_to_key`.
+    /// Prefer [`Self::contains_many`] for bulk membership checks — the
+    /// default here is a single-id convenience wrapper.
+    /// Test: `UsearchStore` tests — `test_contains_reports_membership`.
+    async fn contains(&self, _id: &str) -> bool {
+        false
+    }
+
+    /// Bulk membership check: returns which of `ids` already have a stored
+    /// vector, same length/order as `ids` (issue #2984 Phase 1 HIGH finding 3).
+    ///
+    /// Why: a per-id `contains` call on a 100k-chunk corpus is 100k lock
+    /// acquisitions; a single bulk pass avoids that.
+    /// What: default implementation loops over [`Self::contains`] (correct
+    /// but O(n) lock acquisitions); `UsearchStore` overrides with a single
+    /// read-lock pass over `id_to_key`.
+    /// Test: `UsearchStore` tests — `test_contains_many_reports_membership`.
+    async fn contains_many(&self, ids: &[String]) -> Vec<bool> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(self.contains(id).await);
+        }
+        out
+    }
 }

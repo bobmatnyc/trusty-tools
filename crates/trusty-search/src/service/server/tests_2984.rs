@@ -58,6 +58,7 @@ fn create_req_with_skip_kg(
         follow_links: None,
         lexical_only: None,
         skip_kg,
+        skip_vector: None,
         defer_embed: None,
         extra_skip_dirs: None,
         data_file_max_bytes: None,

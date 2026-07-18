@@ -159,11 +159,16 @@ pub fn check_credentials(claude_config_dir: &Path, api_key: Option<&str>) -> Aut
 /// What: (1) `load_alias` — idempotent, (2) reads `ANTHROPIC_API_KEY` and
 /// calls `check_credentials` for a hint, (3) builds the command with
 /// `build_launch_command` (which adds `--bare` when the key is set), (4)
-/// spawns and waits. The attended session's non-zero exit code is not treated
-/// as a tm error (Ctrl-C → 130, typing `exit` → 0/1, etc. are all normal).
+/// spawns via `crate::core::spawn_disclaim::disclaimed_status` (macOS:
+/// disclaims TCC responsibility for the child so consent prompts attribute to
+/// `claude` rather than the signed `trusty-mpm`/`tm` binary, issue #2997;
+/// elsewhere: plain `Command::status()`) and waits. The attended session's
+/// non-zero exit code is not treated as a tm error (Ctrl-C → 130, typing
+/// `exit` → 0/1, etc. are all normal).
 /// Test: end-to-end requires a real `claude` binary; auth-path logic is covered
 /// by `test_build_launch_command_adds_bare_with_api_key` and
-/// `test_build_launch_command_no_bare_without_api_key`.
+/// `test_build_launch_command_no_bare_without_api_key`; the disclaim spawn
+/// itself is covered by `disclaimed_status_*` in `crate::core::spawn_disclaim`.
 pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> anyhow::Result<()> {
     let repo_path = load_alias(alias, managed_root, claude_config_dir)
         .with_context(|| format!("failed to load alias '{alias}'"))?;
@@ -194,7 +199,13 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     }
 
     let mut cmd = build_launch_command(&repo_path, claude_config_dir, api_key.as_deref());
-    cmd.status()
+    // Routed through the disclaim-aware spawn (issue #2997) rather than
+    // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
+    // the child, so mis-attributed consent prompts (media library, App-Data,
+    // and anything a `cargo build` the session runs touches) are attributed
+    // to `claude`'s own stable code identity instead of the signed
+    // `trusty-mpm`/`tm` binary. See `crate::core::spawn_disclaim` module docs.
+    crate::core::spawn_disclaim::disclaimed_status(&mut cmd)
         .context("failed to spawn 'claude'; is it installed and on PATH?")?;
 
     // A non-zero exit from an attended interactive session (Ctrl-C → 130,

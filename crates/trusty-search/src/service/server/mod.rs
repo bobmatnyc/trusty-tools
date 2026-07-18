@@ -12,6 +12,7 @@
 //! registry and exercises each endpoint.
 
 mod admin;
+mod components;
 mod contrib_graph;
 mod fanout;
 mod files;
@@ -44,6 +45,8 @@ mod tests_2984;
 mod tests_829;
 #[cfg(test)]
 mod tests_chunks;
+#[cfg(test)]
+mod tests_components;
 #[cfg(test)]
 mod tests_contrib_graph;
 #[cfg(test)]

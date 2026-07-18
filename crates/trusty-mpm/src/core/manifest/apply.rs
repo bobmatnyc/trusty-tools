@@ -13,9 +13,10 @@
 //! Test: `plan_default_uses_bundled_sources`, `plan_catalog_source_paths`,
 //! `plan_selection_filters`, `plan_mcp_toggles`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::schema::{ContentSource, HarnessManifest, selection_matches};
+use super::schema::{ContentSource, CustomMcpServer, HarnessManifest, selection_matches};
 use crate::core::paths::FrameworkPaths;
 
 /// A materialized provisioning plan derived from a resolved manifest.
@@ -52,6 +53,14 @@ pub struct HarnessPlan {
     pub inject_trusty_memory: bool,
     /// Whether to inject the `trusty-search` MCP server.
     pub inject_trusty_search: bool,
+    /// PROJECT-scope custom MCP server definitions (issue #2739 follow-up), the
+    /// resolved (project > user > catalog > default) `[mcp.custom]` table.
+    ///
+    /// `session_launch::custom_mcp::inject_custom_trusty_mcps` bridges these
+    /// into the workspace `.mcp.json` AFTER the USER-scope `tm mcp add` registry
+    /// (a separate, non-manifest source — see that module), so a name declared
+    /// here overrides a same-named entry from the user registry.
+    pub custom_mcp_servers: BTreeMap<String, CustomMcpServer>,
     /// The manifest's default output-style id, if it sets one.
     ///
     /// This is the LOWEST-precedence style input: an explicit `--style` flag and
@@ -112,12 +121,13 @@ impl HarnessPlan {
         };
 
         // MCP toggles: absent section or absent flag → on (today's behavior).
-        let (inject_trusty_memory, inject_trusty_search) = match &manifest.mcp {
+        let (inject_trusty_memory, inject_trusty_search, custom_mcp_servers) = match &manifest.mcp {
             Some(mcp) => (
                 mcp.trusty_memory.unwrap_or(true),
                 mcp.trusty_search.unwrap_or(true),
+                mcp.custom.clone(),
             ),
-            None => (true, true),
+            None => (true, true, BTreeMap::new()),
         };
 
         let style = manifest.style.as_ref().and_then(|s| s.active.clone());
@@ -132,6 +142,7 @@ impl HarnessPlan {
             skill_exclude,
             inject_trusty_memory,
             inject_trusty_search,
+            custom_mcp_servers,
             style,
         }
     }
@@ -284,12 +295,44 @@ mod tests {
             mcp: Some(McpServers {
                 trusty_memory: Some(false),
                 trusty_search: Some(true),
+                ..McpServers::default()
             }),
             ..default_manifest()
         };
         let plan = HarnessPlan::from_manifest(&manifest, &fw, std::path::Path::new("/c"));
         assert!(!plan.inject_trusty_memory);
         assert!(plan.inject_trusty_search);
+    }
+
+    #[test]
+    fn plan_custom_mcp_servers_propagate() {
+        // A `[mcp.custom.<name>]` table in the resolved manifest must reach the
+        // plan verbatim so `session_launch::custom_mcp` can bridge it.
+        use super::super::schema::CustomMcpServer;
+        let fw = FrameworkPaths::under("/base");
+        let manifest = HarnessManifest {
+            mcp: Some(McpServers {
+                custom: std::collections::BTreeMap::from([(
+                    "duetto-memory".to_string(),
+                    CustomMcpServer::Http {
+                        url: "https://mcp-services.dev.duettosystems.com/memory/mcp".to_string(),
+                        headers: std::collections::BTreeMap::new(),
+                    },
+                )]),
+                ..McpServers::default()
+            }),
+            ..default_manifest()
+        };
+        let plan = HarnessPlan::from_manifest(&manifest, &fw, std::path::Path::new("/c"));
+        assert!(plan.custom_mcp_servers.contains_key("duetto-memory"));
+
+        // An absent [mcp] section yields an empty custom map (today's behavior).
+        let none_plan = HarnessPlan::from_manifest(
+            &HarnessManifest::default(),
+            &fw,
+            std::path::Path::new("/c"),
+        );
+        assert!(none_plan.custom_mcp_servers.is_empty());
     }
 
     #[test]

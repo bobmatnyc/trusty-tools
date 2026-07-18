@@ -15,6 +15,8 @@
 //! Test: `manifest_roundtrip`, `manifest_partial_parse`,
 //! `manifest_merge_overrides`, `selection_matches` in this module's tests.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The manifest schema version this build understands.
@@ -221,9 +223,19 @@ pub struct StyleSelection {
 /// Why: DOC-17 lists "MCP servers (static and dynamic)" as part of provisioning.
 /// Today `prepare_session` unconditionally injects `trusty-memory` and
 /// `trusty-search`; the manifest makes those toggleable so a harness can opt out.
-/// What: boolean toggles for the two built-in servers. Absent → inherit; the
-/// default enables both, reproducing today's behavior.
-/// Test: `mcp_servers_roundtrip`, `default_manifest_enables_both_mcp`.
+/// `custom` (issue #2739 follow-up) is the PROJECT-scope half of custom MCP
+/// bridging: a project's `<project>/.trusty-mpm/manifest.toml` is trusty-mpm's
+/// established per-project override file (the same layer `[agents]`/`[skills]`
+/// already use), so declaring `[mcp.custom.<name>]` there is the natural project
+/// config surface — no new config file invented. This is DISTINCT from the
+/// USER-scope custom registry (`tm mcp add`, the managed `.claude.json`
+/// `mcpServers` map): that registry is read directly by
+/// `session_launch::custom_mcp`, not through this manifest.
+/// What: boolean toggles for the two built-in servers (Absent → inherit; the
+/// default enables both, reproducing today's behavior), plus `custom` — a map of
+/// server name to its full [`CustomMcpServer`] definition.
+/// Test: `mcp_servers_roundtrip`, `default_manifest_enables_both_mcp`,
+/// `custom_mcp_server_stdio_roundtrip`, `custom_mcp_server_remote_roundtrip`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct McpServers {
     /// Inject the `trusty-memory` MCP server.
@@ -232,25 +244,88 @@ pub struct McpServers {
     /// Inject the `trusty-search` MCP server (pinned to the project index).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusty_search: Option<bool>,
+    /// `[mcp.custom.<name>]` — project-scope custom MCP server definitions.
+    /// Empty when the layer declares none.
+    #[serde(default)]
+    pub custom: BTreeMap<String, CustomMcpServer>,
 }
 
 impl McpServers {
-    /// Field-by-field merge: each `Some` toggle in `higher` wins, `None` inherits.
+    /// Field-by-field merge: each `Some` toggle in `higher` wins, `None` inherits;
+    /// `custom` unions by name with `higher` winning a name collision.
     ///
-    /// Why: `[mcp]` is a struct of independent toggles. The old whole-section
-    /// replacement meant a partial override like `[mcp] trusty_search = false`
-    /// reset `trusty_memory` back to `None` (losing a lower layer's explicit
-    /// `true`). Merging per field keeps the unmentioned toggle's lower-layer value.
+    /// Why: `[mcp]` is a struct of independent toggles plus a name-keyed map. The
+    /// old whole-section replacement meant a partial override like `[mcp]
+    /// trusty_search = false` reset `trusty_memory` back to `None` (losing a
+    /// lower layer's explicit `true`). Merging per field keeps the unmentioned
+    /// toggle's lower-layer value; unioning `custom` by key means a higher layer
+    /// can add or override one named server without having to repeat every
+    /// server a lower layer already declared.
     /// What: for each of `trusty_memory`/`trusty_search`, takes `higher`'s value
-    /// when it is `Some`, else falls through to `self`'s value.
-    /// Test: `manifest_merge_mcp_field_level`.
+    /// when it is `Some`, else falls through to `self`'s value. `custom` starts
+    /// from `self`'s map and applies `higher`'s entries on top, so a shared name
+    /// takes `higher`'s definition.
+    /// Test: `manifest_merge_mcp_field_level`, `mcp_servers_merge_unions_custom`.
     #[must_use]
     pub fn merge(self, higher: McpServers) -> McpServers {
+        let mut custom = self.custom;
+        custom.extend(higher.custom);
         McpServers {
             trusty_memory: higher.trusty_memory.or(self.trusty_memory),
             trusty_search: higher.trusty_search.or(self.trusty_search),
+            custom,
         }
     }
+}
+
+/// A single project-scope custom MCP server definition (issue #2739 follow-up).
+///
+/// Why: `tm mcp add` (the USER-scope registry) already models a stdio-vs-remote
+/// server as `{type, command/url, args/headers, env}` JSON
+/// (see [`crate::core::mcp_config`]); this is the TOML-native equivalent for the
+/// project-scope manifest layer, using an internally-tagged enum (`type =
+/// "stdio"|"http"|"sse"`) so the two representations stay conceptually aligned
+/// even though one is JSON and the other TOML.
+/// What: `Stdio` (local subprocess: `command`, optional `args`/`env`) or `Http`
+/// / `Sse` (remote endpoint: `url`, optional `headers`). `session_launch::custom_mcp`
+/// converts this into the same `.mcp.json`-entry shape `tm mcp add` produces
+/// before applying the SAME secret-routing/validation rules (stdio `env` routed
+/// to `.env.local`; a remote entry carrying `headers` is rejected — see that
+/// module's docs for the full security rationale).
+/// Test: `custom_mcp_server_stdio_roundtrip`, `custom_mcp_server_remote_roundtrip`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum CustomMcpServer {
+    /// A local subprocess speaking MCP over stdio.
+    Stdio {
+        /// The binary to spawn.
+        command: String,
+        /// Command-line arguments.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Environment variables — routed to the workspace `.env.local`, NEVER
+        /// written into the git-tracked `.mcp.json` (see `session_launch::custom_mcp`).
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+    /// A remote streamable-HTTP endpoint.
+    Http {
+        /// The server URL.
+        url: String,
+        /// HTTP headers. Non-empty `headers` are REJECTED at injection time —
+        /// see `session_launch::custom_mcp::validate_custom_remote_server`.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+    /// A remote SSE endpoint.
+    Sse {
+        /// The server URL.
+        url: String,
+        /// HTTP headers. Non-empty `headers` are REJECTED at injection time —
+        /// see `session_launch::custom_mcp::validate_custom_remote_server`.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
 }
 
 /// `[models]` — model-tier defaults for the harness.
@@ -449,284 +524,5 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn manifest_roundtrip() {
-        // A fully-populated manifest must survive a serialize → parse round-trip
-        // unchanged, proving the schema is self-consistent.
-        let manifest = HarnessManifest {
-            version: Some(MANIFEST_VERSION),
-            agents: Some(AgentSet {
-                include: vec!["rust-engineer".into(), "qa".into()],
-                exclude: vec!["*-ops".into()],
-                ignore_staleness: vec!["engineer".into()],
-                source: ContentSource::Catalog,
-            }),
-            skills: Some(SkillSet {
-                include: vec!["example-skill".into()],
-                exclude: vec![],
-                source: ContentSource::Bundled,
-            }),
-            instructions: Some(InstructionLayers {
-                system: Some(true),
-                contextual: Some(true),
-                domain: Some(false),
-            }),
-            style: Some(StyleSelection {
-                active: Some("trusty-mpm-teacher".into()),
-            }),
-            mcp: Some(McpServers {
-                trusty_memory: Some(true),
-                trusty_search: Some(false),
-            }),
-            models: Some(ModelTiers {
-                lightweight: Some("haiku".into()),
-                standard: None,
-                high: None,
-                intensive: Some("opus".into()),
-            }),
-        };
-
-        let toml = manifest.to_toml().expect("serialize");
-        let parsed = HarnessManifest::from_toml(&toml).expect("parse");
-        assert_eq!(manifest, parsed);
-    }
-
-    #[test]
-    fn manifest_partial_parse() {
-        // A manifest that sets only one section must parse, with every other
-        // section left `None` so the merge keeps the lower layer's values.
-        let toml = r#"
-version = 1
-
-[style]
-active = "trusty-mpm-research"
-"#;
-        let parsed = HarnessManifest::from_toml(toml).expect("partial parse");
-        assert_eq!(parsed.version, Some(1));
-        assert_eq!(
-            parsed.style.as_ref().and_then(|s| s.active.as_deref()),
-            Some("trusty-mpm-research")
-        );
-        assert!(parsed.agents.is_none());
-        assert!(parsed.skills.is_none());
-        assert!(parsed.mcp.is_none());
-    }
-
-    #[test]
-    fn manifest_merge_overrides() {
-        // A higher-precedence layer must replace only the sections it sets and
-        // leave the rest of the lower layer intact.
-        let lower = HarnessManifest {
-            version: Some(1),
-            agents: Some(AgentSet {
-                include: vec!["a".into()],
-                ..AgentSet::default()
-            }),
-            style: Some(StyleSelection {
-                active: Some("trusty-mpm".into()),
-            }),
-            mcp: Some(McpServers {
-                trusty_memory: Some(true),
-                trusty_search: Some(true),
-            }),
-            ..HarnessManifest::default()
-        };
-        let higher = HarnessManifest {
-            style: Some(StyleSelection {
-                active: Some("trusty-mpm-teacher".into()),
-            }),
-            ..HarnessManifest::default()
-        };
-
-        let merged = lower.merge(higher);
-        // style replaced by the higher layer
-        assert_eq!(
-            merged.style.as_ref().and_then(|s| s.active.as_deref()),
-            Some("trusty-mpm-teacher")
-        );
-        // agents + mcp kept from the lower layer (higher left them None)
-        assert_eq!(
-            merged.agents.as_ref().map(|a| a.include.clone()),
-            Some(vec!["a".to_string()])
-        );
-        assert_eq!(
-            merged.mcp.as_ref().and_then(|m| m.trusty_search),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn manifest_merge_keeps_lower_when_absent() {
-        // Merging an all-None higher layer is the identity on the lower layer.
-        let lower = HarnessManifest {
-            version: Some(1),
-            style: Some(StyleSelection {
-                active: Some("trusty-mpm".into()),
-            }),
-            ..HarnessManifest::default()
-        };
-        let merged = lower.clone().merge(HarnessManifest::default());
-        assert_eq!(lower, merged);
-    }
-
-    #[test]
-    fn manifest_merge_mcp_field_level() {
-        // A partial `[mcp]` override (only trusty_search) must NOT discard the
-        // lower layer's other toggle (trusty_memory) — field-level merge.
-        let lower = HarnessManifest {
-            mcp: Some(McpServers {
-                trusty_memory: Some(true),
-                trusty_search: Some(true),
-            }),
-            ..HarnessManifest::default()
-        };
-        let higher = HarnessManifest {
-            mcp: Some(McpServers {
-                trusty_memory: None,
-                trusty_search: Some(false),
-            }),
-            ..HarnessManifest::default()
-        };
-
-        let merged = lower.merge(higher);
-        let mcp = merged.mcp.expect("mcp section present");
-        assert_eq!(
-            mcp.trusty_memory,
-            Some(true),
-            "the unmentioned toggle must survive the partial override"
-        );
-        assert_eq!(
-            mcp.trusty_search,
-            Some(false),
-            "the overridden toggle must take the higher layer's value"
-        );
-    }
-
-    #[test]
-    fn instruction_layers_field_merge() {
-        // A partial `[instructions]` override must merge field-by-field too.
-        let lower = HarnessManifest {
-            instructions: Some(InstructionLayers {
-                system: Some(true),
-                contextual: Some(true),
-                domain: Some(true),
-            }),
-            ..HarnessManifest::default()
-        };
-        let higher = HarnessManifest {
-            instructions: Some(InstructionLayers {
-                system: None,
-                contextual: None,
-                domain: Some(false),
-            }),
-            ..HarnessManifest::default()
-        };
-
-        let layers = lower.merge(higher).instructions.expect("layers present");
-        assert_eq!(layers.system, Some(true), "system inherited from lower");
-        assert_eq!(
-            layers.contextual,
-            Some(true),
-            "contextual inherited from lower"
-        );
-        assert_eq!(layers.domain, Some(false), "domain overridden by higher");
-    }
-
-    #[test]
-    fn selection_matches() {
-        // Empty include → match all; exclude wins over include.
-        assert!(super::selection_matches("anything", &[], &[]));
-        // Exact include.
-        let inc = vec!["rust-engineer".to_string()];
-        assert!(super::selection_matches("rust-engineer", &inc, &[]));
-        assert!(!super::selection_matches("qa", &inc, &[]));
-        // Glob include.
-        let glob_inc = vec!["*-engineer".to_string()];
-        assert!(super::selection_matches("rust-engineer", &glob_inc, &[]));
-        assert!(!super::selection_matches("rust-ops", &glob_inc, &[]));
-        // Multi-`*` glob include (regression: was mis-matched by split_once).
-        let multi_inc = vec!["*-engineer-*".to_string()];
-        assert!(super::selection_matches(
-            "rust-engineer-ops",
-            &multi_inc,
-            &[]
-        ));
-        assert!(!super::selection_matches("rust-engineer", &multi_inc, &[]));
-        // Exclude wins.
-        let exc = vec!["rust-engineer".to_string()];
-        assert!(!super::selection_matches("rust-engineer", &[], &exc));
-        let inc_and_exc = ["rust-engineer".to_string()];
-        assert!(!super::selection_matches(
-            "rust-engineer",
-            &inc_and_exc,
-            &exc
-        ));
-    }
-
-    #[test]
-    fn glob_matching() {
-        // Bare `*` matches everything.
-        assert!(super::glob_matches("*", "anything"));
-        assert!(super::glob_matches("*", ""));
-
-        // Exact (no wildcard) is equality.
-        assert!(super::glob_matches("rust-engineer", "rust-engineer"));
-        assert!(!super::glob_matches("rust-engineer", "qa"));
-        assert!(!super::glob_matches("rust-engineer", "rust-engineer-2"));
-
-        // Trailing `*` = prefix; leading `*` = suffix.
-        assert!(super::glob_matches("*-engineer", "rust-engineer"));
-        assert!(!super::glob_matches("*-engineer", "rust-engineer-ops"));
-        assert!(super::glob_matches("engineer-*", "engineer-rust"));
-        assert!(!super::glob_matches("engineer-*", "rust-engineer"));
-        assert!(super::glob_matches("rust-*", "rust-engineer"));
-
-        // Single interior `*` = prefix + suffix.
-        assert!(super::glob_matches("a*b", "axxb"));
-        assert!(super::glob_matches("a*b", "ab"), "interior * matches empty");
-        assert!(!super::glob_matches("a*b", "axx"));
-
-        // Multi-`*` patterns: the previously-broken cases.
-        // `*-engineer-*` = "contains -engineer-".
-        assert!(super::glob_matches("*-engineer-*", "rust-engineer-ops"));
-        assert!(super::glob_matches("*-engineer-*", "x-engineer-y"));
-        assert!(
-            !super::glob_matches("*-engineer-*", "rust-engineer"),
-            "no trailing segment after -engineer- → no match"
-        );
-        // `a*b*c` = a-prefix, then b, then c-suffix in order.
-        assert!(super::glob_matches("a*b*c", "aXbYc"));
-        assert!(super::glob_matches("a*b*c", "abc"));
-        assert!(
-            !super::glob_matches("a*b*c", "acb"),
-            "segments must appear in order"
-        );
-        assert!(
-            !super::glob_matches("a*b*c", "aXbY"),
-            "missing the trailing c suffix"
-        );
-    }
-
-    #[test]
-    fn content_source_roundtrip() {
-        // ContentSource serializes lowercase and round-trips.
-        let serialized = toml::to_string(&AgentSet {
-            source: ContentSource::Catalog,
-            ..AgentSet::default()
-        })
-        .unwrap();
-        assert!(serialized.contains("catalog"));
-    }
-
-    #[test]
-    fn agent_set_source_default_is_bundled() {
-        // An [agents] section that omits `source` must default to Bundled, so
-        // the default manifest reproduces today's bundled-asset behavior.
-        let toml = "[agents]\ninclude = []\n";
-        let parsed = HarnessManifest::from_toml(toml).unwrap();
-        assert_eq!(parsed.agents.unwrap().source, ContentSource::Bundled);
-    }
-}
+#[path = "schema_tests.rs"]
+mod tests;

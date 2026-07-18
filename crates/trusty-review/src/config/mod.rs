@@ -25,12 +25,23 @@ pub mod voice;
 // Why: outcome-polling configuration extracted to keep config/mod.rs under the
 // 500-line cap — mirrors the verification module pattern.
 pub mod outcome;
+// Why: per-project `.trusty-review.toml` discovery (issue #2995) — separated
+// so the pure/impure git-root-walk split mirrors `index_resolver`.
+pub mod repo_config;
+// Why: `[review]` config-file section + named review-template precedence
+// resolution (issue #2995) — mirrors the `voice` submodule's pattern.
+pub mod review_template;
 
-pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
+pub use index_resolver::{
+    SourceRootResolution, canonical_source_root, find_git_root, repo_root_from_cwd,
+    resolve_index_from_list, resolve_source_root,
+};
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
-pub use context::{ContextConfig, ContextFileConfig};
+pub use context::{ContextConfig, ContextFileConfig, InvocationSurface};
 pub use outcome::{OutcomeConfig, OutcomeFileConfig};
+pub use repo_config::find_repo_config_path;
+pub use review_template::ReviewFileConfig;
 pub use role_models::{
     FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleModels,
 };
@@ -84,6 +95,29 @@ impl std::str::FromStr for Provider {
     }
 }
 
+// ─── --source-root outcome (#2994) ────────────────────────────────────────────
+
+/// Outcome of `ReviewConfig::resolve_source_root`.
+///
+/// Why: the caller (`cmd_run`/`cmd_compare`) needs to know whether an explicit
+/// `--source-root <dir>` resolved to a real index (nothing further to do) or
+/// forced a diff-only fallback that also requires swapping in a
+/// `NullSearchClient` AND a `NullAnalyzeClient` and surfacing the notice to
+/// the operator.
+/// What: `Matched` carries the resolved index id (already applied to
+/// `search_index` by the time this is returned — informational only);
+/// `DiffOnly` carries the human-readable notice to print/log.
+/// Test: `source_root_matches_registered_index`,
+/// `source_root_no_match_forces_diff_only`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceRootOutcome {
+    /// `--source-root` mapped to this registered index id.
+    Matched(String),
+    /// No registered index matched (or the daemon was unreachable) — diff-only
+    /// review with this notice.
+    DiffOnly(String),
+}
+
 // ─── Global ReviewConfig ──────────────────────────────────────────────────────
 
 /// Top-level TOML file shape.
@@ -106,6 +140,10 @@ struct TomlFile {
     coverage: crate::coverage::CoverageFileConfig,
     #[serde(default)]
     outcome: outcome::OutcomeFileConfig,
+    // Why: `[review] template = "<name>"` (issue #2995) — resolved by
+    // `review_template::load_review_template`.
+    #[serde(default)]
+    review: review_template::ReviewFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -204,8 +242,17 @@ pub struct ReviewConfig {
 
     // ── Required-context gate (#590) ───────────────────────────────────────
     /// Resolved required-context settings (`require_search`, `require_analyze`).
-    /// Both default to `true`: a missing dependency skips the review rather than
-    /// degrading to a context-free verdict.
+    /// `require_analyze` defaults to `true`: a missing trusty-analyze skips the
+    /// review rather than degrading to a context-free verdict. `require_search`
+    /// defaults to `None` (no explicit operator override) and is instead
+    /// resolved PER CALL by `ContextConfig::effective_require_search` from the
+    /// caller's `InvocationSurface` (search-unreachable semantics fix, #3030):
+    /// `Hosted` surfaces (the webhook bot, CLI GitHub-PR `run`) stay strict
+    /// (effectively `true`); `Interactive` surfaces (MCP tool calls, CLI
+    /// `--local-diff`/`--base`/`--source-root` local reviews) default to
+    /// `false` and degrade instead of hard-skipping. An explicit
+    /// `require_search` override (env or TOML) always wins regardless of
+    /// surface.
     pub context: ContextConfig,
 
     // ── External context sources (Phase 6, #550) ───────────────────────────
@@ -247,6 +294,18 @@ pub struct ReviewConfig {
     /// The config file key is `[voice] principles = false`.
     pub voice_principles: bool,
 
+    // ── Named review template (issue #2995) ────────────────────────────────
+    /// Name of the review template appended as a prompt addendum, composing
+    /// with (never replacing) the stock rubric and the voice/principles
+    /// layers above — see `pipeline::voice_config::build_voice_config` for the
+    /// full layering order (stock → principles → voice → review template).
+    ///
+    /// Resolved via `--review-template <name>` (highest), a repo-scoped
+    /// `.trusty-review.toml` `[review] template` key, `TRUSTY_REVIEW_TEMPLATE`,
+    /// then the caller-selected config file's `[review] template` key.
+    /// `None` = no review template (opt-in, stock rubric unchanged).
+    pub review_template: Option<String>,
+
     // ── Coverage gating (issue #1014) ─────────────────────────────────────
     /// Resolved coverage-gating policy.
     ///
@@ -263,27 +322,66 @@ pub struct ReviewConfig {
 }
 
 impl ReviewConfig {
-    /// Load config from env vars merged over an optional TOML file.
+    /// Load config from env vars merged over an optional TOML file, plus an
+    /// auto-discovered repo-scoped `.trusty-review.toml` (issue #2995).
     ///
     /// Why: provides the single, authoritative config-loading path; callers
     /// do not need to know the env-var names or file location.
-    /// What: reads the TOML file (if it exists) for the `[models]` table,
-    /// then applies env-var overrides.  Missing files are not errors.
-    /// `cli_overrides` carries any parsed CLI flags.
+    /// What: when `config_path` is `None` (no explicit `--config` flag), looks
+    /// for `.trusty-review.toml` at the git root of the current working
+    /// directory via `repo_config::find_repo_config_path` — an explicit
+    /// `config_path` always wins and skips repo discovery entirely (CLI
+    /// `--config` > repo file).  Delegates to `from_env_and_file_inner`, the
+    /// injectable core used directly by tests to avoid mutating the real
+    /// process CWD.
     /// Test: `test_config_from_env` exercises env-var loading; a TOML file
-    /// path can be injected for config-file testing.
+    /// path can be injected for config-file testing; repo-file precedence is
+    /// covered in `config_tests.rs` via `from_env_and_file_inner`.
     pub fn from_env_and_file(
         config_path: Option<&std::path::Path>,
         cli_overrides: Option<&RoleCliOverrides>,
+    ) -> Self {
+        let repo_config_path = resolve_repo_config_path(config_path);
+        Self::from_env_and_file_inner(config_path, cli_overrides, repo_config_path.as_deref())
+    }
+
+    /// Injectable core of `from_env_and_file` — takes the repo-scoped config
+    /// path explicitly instead of discovering it from the real process CWD.
+    ///
+    /// Why: process CWD is a global OS-level resource; mutating it from a test
+    /// is unsafe under Rust's default parallel test execution (other,
+    /// unrelated tests may run concurrently in the same binary).  Splitting
+    /// out this core lets tests pass a tempdir-rooted `.trusty-review.toml`
+    /// path directly, exercising the full repo-file precedence chain with zero
+    /// CWD mutation — mirrors the pure/impure split in `repo_config`.
+    /// What: identical to the pre-#2995 `from_env_and_file` body, except every
+    /// field that supports repo-file precedence (`voice_package`,
+    /// `voice_principles`, `review_template`) also consults `repo_toml_file`
+    /// ahead of the env var.  When `repo_config_path` is `None` (the common
+    /// case — no repo file discovered, or an explicit `--config` was given),
+    /// behaviour is byte-for-byte identical to pre-#2995 (zero regression).
+    /// Test: `config_tests.rs::{repo_config_voice_overrides_env,
+    /// repo_config_review_template_overrides_env,
+    /// explicit_config_path_skips_repo_discovery}`.
+    fn from_env_and_file_inner(
+        config_path: Option<&std::path::Path>,
+        cli_overrides: Option<&RoleCliOverrides>,
+        repo_config_path: Option<&std::path::Path>,
     ) -> Self {
         // Try to load the config file; silently fall back to defaults.  Parse
         // it once so both the `[models]` and `[verification]` tables come from
         // the same read.
         let toml_file = load_toml_file(config_path);
+        let repo_toml_file = repo_config_path.and_then(|p| load_toml_file(Some(p)));
         let file_models = toml_file.as_ref().map(|f| f.models.clone());
         let file_verification = toml_file.as_ref().map(|f| f.verification.clone());
         let file_context = toml_file.as_ref().map(|f| f.context.clone());
         let file_voice: Option<&voice::VoiceFileConfig> = toml_file.as_ref().map(|f| &f.voice);
+        let repo_voice: Option<&voice::VoiceFileConfig> = repo_toml_file.as_ref().map(|f| &f.voice);
+        let file_review: Option<&review_template::ReviewFileConfig> =
+            toml_file.as_ref().map(|f| &f.review);
+        let repo_review: Option<&review_template::ReviewFileConfig> =
+            repo_toml_file.as_ref().map(|f| &f.review);
         let file_coverage: Option<&crate::coverage::CoverageFileConfig> =
             toml_file.as_ref().map(|f| &f.coverage);
         let file_outcome: Option<&outcome::OutcomeFileConfig> =
@@ -350,8 +448,13 @@ impl ReviewConfig {
             context_sources,
             apex_index: std::env::var("TRUSTY_SEARCH_APEX_INDEX").unwrap_or_default(),
             apex_path_prefixes: load_apex_path_prefixes(),
-            voice_package: voice::load_voice_package(file_voice),
-            voice_principles: voice::load_voice_principles(file_voice),
+            voice_package: voice::load_voice_package(repo_voice, file_voice),
+            voice_principles: voice::load_voice_principles(repo_voice, file_voice),
+            review_template: review_template::load_review_template(
+                cli_overrides.and_then(|c| c.review_template.as_deref()),
+                repo_review,
+                file_review,
+            ),
             coverage: crate::coverage::CoveragePolicy::from_env_and_file(file_coverage),
             outcome: OutcomeConfig::from_env_and_file(file_outcome),
         }
@@ -413,6 +516,92 @@ impl ReviewConfig {
                     "trusty-review: index auto-derive failed (daemon unreachable?): {e}; \
                      using fallback \"main\""
                 );
+            }
+        }
+    }
+
+    /// Resolve the trusty-search index for an explicit `--source-root <dir>`
+    /// (issue #2994).
+    ///
+    /// Why: `resolve_index` (env / CWD auto-derive) cannot point a review at an
+    /// arbitrary checkout without first running `trusty-search index <dir>`
+    /// out of band. `--source-root` gives an ergonomic, explicit one-off path:
+    /// if `dir` already maps to a registered index, use it (same
+    /// longest-root-path matching as `resolve_index`, just against an
+    /// explicit dir instead of the CWD). If it does not, this method chooses
+    /// the SAFE fallback — diff-only review with a clear, actionable notice —
+    /// rather than triggering an ephemeral index. An ephemeral/ad-hoc index
+    /// was considered (per the #2994 proposal) but rejected for this pass:
+    /// it interacts with the #2914 ephemeral-index-leak investigation, and
+    /// reliable cleanup is not trivially safe from this crate alone, so
+    /// diff-only-with-notice is the shipped default; ephemeral indexing
+    /// remains a documented follow-up.
+    /// What: canonicalises `dir`, lists indexes on `client`, and matches via
+    /// `index_resolver::resolve_source_root`. On a match: sets `search_index`
+    /// to the matched id and `search_index_explicit = true` (so `resolve_index`
+    /// becomes a no-op and this choice is never clobbered by CWD auto-derive),
+    /// returning `SourceRootOutcome::Matched`. On no match, or when the daemon
+    /// is unreachable: sets `search_index_explicit = true` AND clears BOTH
+    /// `context.require_search = Some(false)` and `context.require_analyze = false`
+    /// so the required-context gate (`pipeline::context_gate::preflight_context`)
+    /// degrades instead of skipping either dependency, and returns
+    /// `SourceRootOutcome::DiffOnly` with a notice the caller must surface
+    /// (stderr/log) and use to swap BOTH `deps.search` for a `NullSearchClient`
+    /// AND `deps.analyze` for a `NullAnalyzeClient` — relaxing the `require_*`
+    /// flags alone is not sufficient because a healthy daemon would otherwise
+    /// silently be queried against whatever index `search_index` still holds.
+    /// Test: `source_root_matches_registered_index`,
+    /// `source_root_no_match_forces_diff_only`,
+    /// `source_root_daemon_unreachable_forces_diff_only`,
+    /// `source_root_no_match_also_disables_require_analyze`,
+    /// `source_root_daemon_unreachable_also_disables_require_analyze`.
+    pub async fn resolve_source_root(
+        &mut self,
+        client: &dyn crate::integrations::search_client::SearchClient,
+        dir: &std::path::Path,
+    ) -> SourceRootOutcome {
+        let canonical = index_resolver::canonical_source_root(dir);
+        let indexes = match client.list_indexes().await {
+            Ok(indexes) => indexes,
+            Err(e) => {
+                self.search_index_explicit = true;
+                self.context.require_search = Some(false);
+                self.context.require_analyze = false;
+                let notice = format!(
+                    "--source-root {}: trusty-search unreachable while resolving an index \
+                     ({e}) — proceeding in diff-only mode (no code-context retrieval)",
+                    canonical.display()
+                );
+                warn!("{notice}");
+                return SourceRootOutcome::DiffOnly(notice);
+            }
+        };
+
+        match index_resolver::resolve_source_root(&indexes, &canonical) {
+            SourceRootResolution::Matched(id) => {
+                tracing::info!(
+                    index = %id,
+                    source_root = %canonical.display(),
+                    "trusty-review: --source-root resolved to a registered index"
+                );
+                self.search_index = id.clone();
+                self.search_index_explicit = true;
+                SourceRootOutcome::Matched(id)
+            }
+            SourceRootResolution::NoIndex => {
+                self.search_index_explicit = true;
+                self.context.require_search = Some(false);
+                self.context.require_analyze = false;
+                let notice = format!(
+                    "--source-root {} has no registered trusty-search index — proceeding in \
+                     diff-only mode (no code-context retrieval). Run `trusty-search index {}` \
+                     to enable full context, or omit --source-root to use the \
+                     auto-derived/TRUSTY_SEARCH_INDEX index.",
+                    canonical.display(),
+                    canonical.display()
+                );
+                warn!("{notice}");
+                SourceRootOutcome::DiffOnly(notice)
             }
         }
     }
@@ -506,6 +695,23 @@ fn load_toml_file(path: Option<&std::path::Path>) -> Option<TomlFile> {
             }
         },
     }
+}
+
+/// Decide whether repo-scoped `.trusty-review.toml` discovery should run.
+///
+/// Why: split out as a pure, CWD-independent gate so "an explicit `--config`
+/// path always skips repo discovery" (issue #2995's stated precedence, CLI
+/// `--config` > repo file) is unit-testable without touching the real process
+/// CWD — `config_path.is_some()` short-circuits before any filesystem I/O.
+/// What: returns `None` immediately when `config_path` is `Some` (explicit
+/// config always wins); otherwise delegates to
+/// `repo_config::find_repo_config_path` (real CWD discovery).
+/// Test: `explicit_config_path_skips_repo_discovery` in `config_tests.rs`.
+fn resolve_repo_config_path(config_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    if config_path.is_some() {
+        return None;
+    }
+    repo_config::find_repo_config_path()
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

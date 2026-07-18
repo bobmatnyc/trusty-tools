@@ -33,6 +33,9 @@
 use std::path::Path;
 
 use trusty_agents_common::agents::builder::compose_agent;
+use trusty_agents_common::agents::builder_in_memory::{
+    build_in_memory_source_map, compose_agent_in_memory,
+};
 use trusty_agents_common::agents::metadata::{AgentMetadata, agent_metadata_from_str};
 
 use super::config::{AgentConfig, AgentInfo, LlmParams, SystemPrompt, ToolsConfig};
@@ -96,6 +99,52 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> AgentConfig 
     let metadata = agent_metadata_from_str(raw);
     let body = extract_body(raw);
     project_to_agent_config(default_name, metadata, body)
+}
+
+/// Project an embedded tm-catalog agent onto tcode's [`AgentConfig`],
+/// resolving its `extends:` chain entirely against
+/// `crate::assets::EMBEDDED_TM_AGENT_SOURCES` -- no filesystem access
+/// (Slice E2, #2958).
+///
+/// Why: [`project_embedded_md`] handles tcode's own 3 defaults, none of
+/// which declare `extends:`. The bundled tm agent catalog (5 `BASE-*`
+/// templates + 28 coding-relevant roster agents) DOES use `extends:`
+/// chains -- e.g. `rust-engineer` extends `base-engineer` extends
+/// `base-agent` -- and [`compose_agent`] can't resolve those because it
+/// requires a real `source_dir` to scan, which embedded `&'static str`
+/// constants don't have. `trusty_agents_common::agents::builder_in_memory`
+/// (Slice E1, PR #3013) supplies the disk-free counterpart: an
+/// `InMemorySources` map plus `compose_agent_in_memory`, built here from
+/// `crate::assets::EMBEDDED_TM_AGENT_SOURCES` and passed the requested
+/// `name`.
+/// What: builds an `InMemorySources` map from the embedded catalog table,
+/// resolves `name`'s `extends:` chain via `compose_agent_in_memory`, then
+/// projects the composed document through the same
+/// `agent_metadata_from_str` + `extract_body` + [`project_to_agent_config`]
+/// pipeline [`load_md_agent`] uses for the disk path -- so embedded and
+/// on-disk `.md` agents share one frontmatter -> `AgentConfig` mapping. Any
+/// `AgentBuildError` (unknown name, cycle, depth exceeded, malformed
+/// frontmatter anywhere in the chain) is surfaced as a descriptive
+/// `anyhow::Error`, never a panic. Called from
+/// `crate::agents::load_embedded_default_agents` for every
+/// `crate::assets::EmbeddedAgent::Composed` entry in `DEFAULT_AGENTS` (Slice
+/// E3, #2958) -- the 28 roster agents are dispatchable defaults as of this
+/// slice.
+/// Test: `project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`,
+/// `project_embedded_md_with_extends_unknown_name_errors`,
+/// `assets::tests::default_agents_parse_and_names_match`.
+pub fn project_embedded_md_with_extends(name: &str) -> anyhow::Result<AgentConfig> {
+    let sources =
+        build_in_memory_source_map(crate::assets::EMBEDDED_TM_AGENT_SOURCES.iter().copied());
+
+    let composed = compose_agent_in_memory(name, &sources).map_err(|e| {
+        anyhow::anyhow!("failed to compose embedded tm-catalog agent '{name}': {e}")
+    })?;
+
+    let metadata = agent_metadata_from_str(&composed);
+    let body = extract_body(&composed);
+
+    Ok(project_to_agent_config(name, metadata, body))
 }
 
 /// Strip the leading YAML frontmatter block from a composed agent document.
@@ -460,5 +509,64 @@ mod tests {
             "frontmatter-only agent must project to an empty body, got: {:?}",
             cfg.system_prompt.content
         );
+    }
+
+    /// `project_embedded_md_with_extends` resolves a real 3-level
+    /// `extends:` chain (`rust-engineer` -> `base-engineer` -> `base-agent`)
+    /// entirely against the embedded tm catalog table, with no filesystem
+    /// access.
+    ///
+    /// Why: this is the acceptance criterion for Slice E2 (#2958) -- the
+    /// embedded-extends entry point must actually compose a chain, not just
+    /// parse a single flat document. `rust-engineer.md`'s frontmatter
+    /// declares `extends: base-engineer`, which itself declares
+    /// `extends: base-agent` (see `assets/agents/rust-engineer.md` and
+    /// `assets/agents/BASE-ENGINEER.md`), so a correct compose must pull
+    /// prose from all three tiers into the final body.
+    /// What: calls `project_embedded_md_with_extends("rust-engineer")` and
+    /// asserts the name/role/model project correctly and that the composed
+    /// body contains marker text unique to each of the three tiers
+    /// (BASE-AGENT's "Foundation for all trusty-mpm agents", BASE-ENGINEER's
+    /// "Foundation for all engineer agents", and rust-engineer's own
+    /// "toolchains-rust-core").
+    /// Test: this test.
+    #[test]
+    fn project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer() {
+        let cfg = project_embedded_md_with_extends("rust-engineer").expect("compose rust-engineer");
+
+        assert_eq!(cfg.agent.name, "rust-engineer");
+        assert_eq!(cfg.agent.role.as_deref(), Some("engineer"));
+        assert_eq!(cfg.agent.model.as_deref(), Some("sonnet"));
+        assert!(
+            cfg.system_prompt
+                .content
+                .contains("Foundation for all trusty-mpm agents"),
+            "composed body must include BASE-AGENT tier content"
+        );
+        assert!(
+            cfg.system_prompt
+                .content
+                .contains("Foundation for all engineer agents"),
+            "composed body must include BASE-ENGINEER tier content"
+        );
+        assert!(
+            cfg.system_prompt.content.contains("toolchains-rust-core"),
+            "composed body must include rust-engineer's own content"
+        );
+    }
+
+    /// `project_embedded_md_with_extends` surfaces an unknown agent name as
+    /// a descriptive `anyhow::Error`, never a panic.
+    ///
+    /// Why: mirrors `load_md_agent`'s error-surfacing contract for the fs
+    /// path -- a caller iterating the embedded catalog with a typo'd name
+    /// must get a message it can log, not an unwind.
+    /// What: requests a name absent from `EMBEDDED_TM_AGENT_SOURCES` and
+    /// asserts the call errors.
+    /// Test: this test.
+    #[test]
+    fn project_embedded_md_with_extends_unknown_name_errors() {
+        let result = project_embedded_md_with_extends("does-not-exist");
+        assert!(result.is_err(), "unknown embedded agent name must error");
     }
 }

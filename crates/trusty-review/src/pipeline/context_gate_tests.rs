@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::{
-    config::ReviewConfig,
+    config::{InvocationSurface, ReviewConfig},
     integrations::{
         analyze_client::{
             AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, ComplexityHotspot, Smell,
@@ -119,14 +119,17 @@ fn config() -> ReviewConfig {
 async fn proceeds_when_both_healthy() {
     let cfg = config(); // defaults: both required
     let d = deps(Some(true), Some(true));
-    assert_eq!(preflight_context(&cfg, &d).await, GateOutcome::Proceed);
+    assert_eq!(
+        preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
+        GateOutcome::Proceed
+    );
 }
 
 #[tokio::test]
 async fn skips_when_search_down_and_required() {
     let cfg = config();
     let d = deps(None, Some(true)); // search errors, analyze ready
-    match preflight_context(&cfg, &d).await {
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Skip(msg) => {
             assert!(msg.contains("trusty-search"), "msg: {msg}");
             assert!(msg.contains("start"), "msg must be actionable: {msg}");
@@ -140,7 +143,7 @@ async fn skips_when_search_unhealthy_and_required() {
     let cfg = config();
     let d = deps(Some(false), Some(true)); // search status != "ok"
     assert!(matches!(
-        preflight_context(&cfg, &d).await,
+        preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
         GateOutcome::Skip(_)
     ));
 }
@@ -148,9 +151,9 @@ async fn skips_when_search_unhealthy_and_required() {
 #[tokio::test]
 async fn degraded_when_search_down_and_opted_out() {
     let mut cfg = config();
-    cfg.context.require_search = false;
+    cfg.context.require_search = Some(false);
     let d = deps(None, Some(true));
-    match preflight_context(&cfg, &d).await {
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Degraded(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
         other => panic!("expected Degraded, got {other:?}"),
     }
@@ -160,7 +163,7 @@ async fn degraded_when_search_down_and_opted_out() {
 async fn skips_when_analyze_down_and_required() {
     let cfg = config();
     let d = deps(Some(true), Some(false)); // search ok, analyze not ready
-    match preflight_context(&cfg, &d).await {
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Skip(msg) => {
             assert!(msg.contains("trusty-analyze"), "msg: {msg}");
             assert!(msg.contains("start"), "msg must be actionable: {msg}");
@@ -174,7 +177,7 @@ async fn skips_when_analyze_absent_and_required() {
     let cfg = config();
     let d = deps(Some(true), None); // no analyze client at all
     assert!(matches!(
-        preflight_context(&cfg, &d).await,
+        preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
         GateOutcome::Skip(_)
     ));
 }
@@ -184,7 +187,7 @@ async fn degraded_when_analyze_down_and_opted_out() {
     let mut cfg = config();
     cfg.context.require_analyze = false;
     let d = deps(Some(true), Some(false));
-    match preflight_context(&cfg, &d).await {
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Degraded(msg) => assert!(msg.contains("trusty-analyze"), "msg: {msg}"),
         other => panic!("expected Degraded, got {other:?}"),
     }
@@ -195,7 +198,7 @@ async fn search_down_skip_takes_priority_over_analyze() {
     // Both down, both required → the search (more fundamental) skip wins.
     let cfg = config();
     let d = deps(None, Some(false));
-    match preflight_context(&cfg, &d).await {
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Skip(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
         other => panic!("expected search Skip, got {other:?}"),
     }
@@ -204,14 +207,70 @@ async fn search_down_skip_takes_priority_over_analyze() {
 #[tokio::test]
 async fn both_opted_out_and_down_proceeds_degraded() {
     let mut cfg = config();
-    cfg.context.require_search = false;
+    cfg.context.require_search = Some(false);
     cfg.context.require_analyze = false;
     let d = deps(None, Some(false));
     // Search degraded reason takes priority (checked first).
-    match preflight_context(&cfg, &d).await {
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
         GateOutcome::Degraded(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
         other => panic!("expected Degraded, got {other:?}"),
     }
+}
+
+// ── Per-surface default (search-unreachable semantics fix) ────────────────────
+
+/// Interactive surfaces (MCP tool calls, CLI local-diff/--base/--source-root
+/// reviews) default to DEGRADED rather than hard-Skip when search is down and
+/// the operator has not set an explicit `require_search` override — neither
+/// surface can post a context-free verdict to a real PR, so a diff-only review
+/// is still useful.
+#[tokio::test]
+async fn interactive_surface_defaults_to_degraded_when_search_down() {
+    let cfg = config(); // require_search: None (no explicit override)
+    let d = deps(None, Some(true)); // search down, analyze ready
+    match preflight_context(&cfg, &d, InvocationSurface::Interactive).await {
+        GateOutcome::Degraded(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
+        other => panic!("expected Degraded for Interactive surface, got {other:?}"),
+    }
+}
+
+/// Hosted surfaces (the webhook bot, CLI GitHub-PR runs) default to hard-Skip
+/// when search is down and unconfigured — unchanged from the pre-fix behaviour
+/// (zero regression for the gate use case).
+#[tokio::test]
+async fn hosted_surface_defaults_to_skip_when_search_down() {
+    let cfg = config(); // require_search: None (no explicit override)
+    let d = deps(None, Some(true));
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Skip(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
+        other => panic!("expected Skip for Hosted surface, got {other:?}"),
+    }
+}
+
+/// An explicit `require_search = false` override wins even on a `Hosted`
+/// surface — the operator's config always beats the surface default.
+#[tokio::test]
+async fn explicit_optout_degrades_even_hosted_surface() {
+    let mut cfg = config();
+    cfg.context.require_search = Some(false);
+    let d = deps(None, Some(true));
+    assert!(matches!(
+        preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
+        GateOutcome::Degraded(_)
+    ));
+}
+
+/// An explicit `require_search = true` override wins even on an `Interactive`
+/// surface — the operator's config always beats the surface default.
+#[tokio::test]
+async fn explicit_require_skips_even_interactive_surface() {
+    let mut cfg = config();
+    cfg.context.require_search = Some(true);
+    let d = deps(None, Some(true));
+    assert!(matches!(
+        preflight_context(&cfg, &d, InvocationSurface::Interactive).await,
+        GateOutcome::Skip(_)
+    ));
 }
 
 #[test]
@@ -220,4 +279,66 @@ fn degraded_banner_contains_warning() {
     assert!(banner.contains("DEGRADED"));
     assert!(banner.contains("NOT AUTHORITATIVE"));
     assert!(banner.contains("trusty-search unavailable at http://x"));
+}
+
+/// #2994 re-review, finding #2: the Degraded reason must surface the health
+/// probe's OWN error text (e.g. a `NullSearchClient`'s `--source-root`-specific
+/// notice) rather than a hardcoded generic message that discards it.
+///
+/// Why: previously `preflight_context` only `warn!`-logged the health error
+/// and built a fixed "trusty-search unavailable at {url}" string for the
+/// Degraded reason, so the actionable `--source-root` notice (e.g. "Run
+/// `trusty-search index <dir>`") never reached `degraded_banner` / the
+/// persisted review body — contradicting README.md's claim that the notice is
+/// prepended as a banner.
+/// What: uses a search stub whose `health()` fails with a distinctive,
+/// source-root-shaped error message; asserts the Degraded reason contains
+/// that exact text.
+/// Test: this test.
+#[tokio::test]
+async fn degraded_reason_prefers_health_error_detail() {
+    struct SourceRootNoticeSearch;
+
+    #[async_trait]
+    impl SearchClient for SourceRootNoticeSearch {
+        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+            Err(SearchClientError::Unavailable(
+                "--source-root /tmp/proj has no registered trusty-search index — proceeding in \
+                 diff-only mode. Run `trusty-search index /tmp/proj` to enable full context"
+                    .to_string(),
+            ))
+        }
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Ok(vec![])
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Ok(vec![])
+        }
+    }
+
+    let mut cfg = config();
+    cfg.context.require_search = Some(false); // the --source-root diff-only fallback clears this
+    let d = ReviewDeps {
+        llm: Arc::new(StubLlm),
+        verifier: None,
+        search: Arc::new(SourceRootNoticeSearch),
+        analyze: Some(Arc::new(StubAnalyze { ready: true })),
+        dedup: None,
+    };
+
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Degraded(msg) => {
+            assert!(
+                msg.contains("Run `trusty-search index /tmp/proj`"),
+                "Degraded reason must carry the source-root-specific notice text, not a \
+                 generic message: {msg}"
+            );
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
 }

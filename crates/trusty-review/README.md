@@ -98,6 +98,10 @@ git diff origin/main...HEAD | trusty-review run --local-diff -
 trusty-review run --base origin/main
 trusty-review run --base origin/main --head my-feature-branch
 
+# Point a review at a checkout the daemon has never indexed — no manual
+# `trusty-search index <dir>` needed first.
+trusty-review run --base origin/main --source-root ~/code/some-other-checkout
+
 # Override the reviewer model
 trusty-review run owner repo 123 --reviewer-model bedrock/us.anthropic.claude-haiku-4-5
 
@@ -110,6 +114,38 @@ trusty-review compare --base origin/main --models bedrock/us.anthropic.claude-ha
 > are always dry-run — like every non-GitHub source, they can never post a
 > live PR comment (issue #2993). `--base` and `--local-diff` are mutually
 > exclusive.
+
+### Explicit source context: `--source-root` (issue #2994)
+
+Code context normally flows through a trusty-search index keyed by
+`TRUSTY_SEARCH_INDEX` (explicit) or auto-derived from the current directory's
+git root against the daemon's index registry. That means reviewing an
+arbitrary checkout — a fresh worktree, a repo the daemon has never seen —
+required first running `trusty-search index <dir>` out of band.
+
+`--source-root <dir>` (on both `run` and `compare`) resolves this explicitly:
+
+- If `<dir>` already matches a registered trusty-search index (same
+  longest-root-path matching as the CWD/env auto-derive, just against an
+  explicit directory), that index is used — no behaviour change from today's
+  auto-derive, just an ergonomic override for a one-off review of a directory
+  other than the CWD.
+- If `<dir>` does **not** match a registered index, the review proceeds in
+  **diff-only mode**: no code-context retrieval, with a clear notice printed
+  to stderr and prepended as a banner in the review body. Reviews never
+  silently query the wrong project's index. (An ephemeral/ad-hoc index was
+  considered but deferred — it interacts with the ephemeral-index-leak
+  investigation (issue #2914) and reliable cleanup isn't trivially safe from
+  this crate alone; diff-only-with-notice is the safe default. Ephemeral
+  indexing remains a documented follow-up.)
+- An explicit `TRUSTY_SEARCH_INDEX` always wins over `--source-root` — it
+  remains the fully-explicit override; `--source-root` is the ergonomic
+  one-off path. Omitting `--source-root` entirely is a no-op: existing
+  `TRUSTY_SEARCH_INDEX`/CWD-derive behaviour is unchanged.
+
+`--context-path <glob>` (scoping which source paths are eligible as retrieved
+context) was proposed alongside `--source-root` but is **not** implemented in
+this pass — it is deferred to a follow-up issue.
 
 ## HTTP server
 
@@ -255,6 +291,42 @@ Returns a health status object:
 - `auth_error` — inference provider reachable but auth failed (bad API key).
 - `unknown` — inference probe could not determine status.
 
+#### Required context, infra outages, and interactive degrade
+
+trusty-review's value comes from the code (trusty-search) and static-analysis
+(trusty-analyze) context it injects into every review — a review produced
+WITHOUT that context is actively harmful (false confidence). By default both
+dependencies are **required**: if either is unreachable, the review is
+**skipped** rather than silently run context-free.
+
+**A Skip caused by a genuine infra outage is never mistaken for a real
+verdict.** When `review_pr`/`review_diff` skip because a required dependency
+is unreachable, the MCP response sets `"isError": true` and adds a top-level
+`"mcp_status": "infrastructure_unavailable"` sentinel — distinct from both a
+real verdict and any (hypothetical) policy-driven skip, which stay
+`isError: false`. A caller must handle this explicitly rather than reading a
+`verdict`/`status` field out of a payload that looks like a normal result.
+
+**`require_search` resolves per invocation surface** when you have not set an
+explicit override:
+
+| Surface | Examples | Default when search is down |
+|---------|----------|------------------------------|
+| `Interactive` | MCP `review_pr`/`review_diff` tool calls; CLI `run --local-diff`/`--base`/`--source-root` | **Degrade** — a loudly-labelled, non-authoritative diff-only review still runs (the LLM is still called) |
+| `Hosted` | The GitHub webhook bot (`serve`); CLI `run <owner> <repo> <pr>` | **Skip** — refuse to review without code context (unchanged) |
+
+Neither MCP tool call nor a local-diff CLI review can post to a real GitHub
+PR, so degrading them when search is down is safe and more useful than
+wasting a developer's time with a hard-Skip. The webhook bot and a
+GitHub-PR `run` invocation CAN post a live review, so they keep the strict
+default.
+
+An explicit override — `TRUSTY_REVIEW_REQUIRE_SEARCH=false`/`true` or
+`[context] require_search = false`/`true` in the config file — always wins
+regardless of surface. `require_analyze` has no per-surface default; it stays
+required (`true`) everywhere unless explicitly opted out via
+`TRUSTY_REVIEW_REQUIRE_ANALYZE`/`[context] require_analyze`.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -262,9 +334,14 @@ Returns a health status object:
 | `PR_INTELLIGENCE_DRY_RUN` | `true` | When `true`, no GitHub comments are posted |
 | `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon URL |
 | `PR_INTELLIGENCE_ANALYZER_URL` | `http://127.0.0.1:7879` | trusty-analyze daemon URL |
+| `TRUSTY_REVIEW_REQUIRE_SEARCH` | per-surface (see above) | Force search required (`true`) or allow degrade (`false`) regardless of invocation surface |
+| `TRUSTY_REVIEW_REQUIRE_ANALYZE` | `true` | Force analyze required (`true`) or allow degrade (`false`) |
 | `GITHUB_TOKEN` | — | GitHub personal access token for `review_pr` |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | AWS credentials for Bedrock |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key (when using OpenRouter provider) |
+| `TRUSTY_REVIEW_VOICE_PACKAGE` | — | Voice package name; see [Per-project config & review templates](#per-project-config--review-templates) |
+| `TRUSTY_REVIEW_PRINCIPLES` | `true` | Disable the universal principles layer (`false`) |
+| `TRUSTY_REVIEW_TEMPLATE` | — | Named review-template addendum (issue #2995); see [Per-project config & review templates](#per-project-config--review-templates) |
 | `RUST_LOG` | `warn` | Tracing filter (logs to stderr) |
 
 AWS credentials can also be supplied via `~/.aws/credentials`, IAM roles, or SSO.
@@ -329,6 +406,73 @@ Provider prefix convention:
 - `bedrock/<id>` — AWS Bedrock Converse API (no API key needed, uses AWS credential chain)
 - `openrouter/<id>` — OpenRouter (requires `OPENROUTER_API_KEY`)
 - Bare id — uses the configured default provider
+
+## Per-project config & review templates
+
+`run` and `compare` auto-discover a `.trusty-review.toml` at the git root of
+the code under review (the same git-root walk the trusty-search index
+auto-derive already uses, issue #661) — commit it alongside your source so
+every contributor and CI run picks up the project's review standards with no
+per-machine setup. Supported keys today are `[voice]` (`package`,
+`principles`) and `[review]` (`template`, see below); anything else in the
+global config schema is trivially addable following the same pattern in
+`crates/trusty-review/src/config/`.
+
+```toml
+# .trusty-review.toml — committed at the repo root
+[voice]
+package = "duetto"
+
+[review]
+template = "strict-security"
+```
+
+**Precedence** (highest to lowest): `--config <path>` (an explicit config file
+always wins and skips repo discovery entirely) → the repo `.trusty-review.toml`
+→ the relevant `TRUSTY_REVIEW_*` env var → the caller-selected config file
+(`$XDG_CONFIG_HOME/trusty-review/config.toml` by default). When no repo file
+exists, behavior is unchanged from before #2995 (env var still overrides the
+config file). `--review-template` on the CLI is the single highest-precedence
+override for the template name specifically.
+
+### Named review templates
+
+`--review-template <name>` (or `[review] template = "<name>"`) selects a
+named markdown addendum appended to the layered PR-review system prompt.
+Resolution mirrors the `report` subcommand's template UX: bundled defaults →
+`<config_dir>/trusty-review/templates/review/<name>.md` user override
+(checked before the bundled `include_str!()` default — same pattern as
+`VoiceLoader` and the report `TemplateLoader`), where `<config_dir>` is
+[`dirs::config_dir()`](https://docs.rs/dirs/latest/dirs/fn.config_dir.html) —
+concretely:
+
+- Linux: `~/.config/trusty-review/templates/review/<name>.md` (or under
+  `$XDG_CONFIG_HOME` if set)
+- macOS: `~/Library/Application Support/trusty-review/templates/review/<name>.md`
+
+One template ships bundled: `strict-security` (extra scrutiny on injection,
+authn/authz, secrets, crypto, input validation, and supply-chain risk).
+
+`name` (from any source — CLI, repo file, env var, or config file) must be a
+bare identifier: only ASCII letters, digits, `-`, and `_` — no path
+separators, `..`, or absolute paths. This is a deliberate security guard
+(issue #2995): a review-template or voice-package name can originate from a
+repo-scoped `.trusty-review.toml`, which is attacker-controlled (any PR
+author can add one), so a path-like value is rejected before it can ever be
+used in a filesystem path join.
+
+A review template only **appends** a structured addendum section — it never
+replaces the stock grade scale, verdict table, or severity anchors. It
+composes with (never replaces) the voice/principles layers, landing LAST in
+the layering order:
+
+```
+stock base prompt → principles → voice addendum → review template
+```
+
+The review template is the most project-specific layer, so it reads as the
+final word after the broader principles/voice guidance. Wholesale rubric
+replacement is intentionally out of scope.
 
 ## Report generation
 

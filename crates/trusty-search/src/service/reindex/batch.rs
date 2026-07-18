@@ -116,6 +116,10 @@ pub(super) struct BatchCtx {
     /// Issue #109, Phase 1: skip the embed step entirely when the index
     /// was created with `lexical_only: true`.
     pub lexical_only: bool,
+    /// Issue #2984 Phase 1: skip the embed step entirely when the index has
+    /// `skip_vector: true` — same effect as `lexical_only` on the embedder,
+    /// but the KG lane (Stage 3) is unaffected (orthogonal).
+    pub skip_vector: bool,
     /// Issue #923: skip embedding during the fast pass when `defer_embed=true`.
     pub defer_embed: bool,
     /// PID slot for the trusty-embedderd sidecar (issue #315 lazy-spawn).
@@ -259,6 +263,7 @@ pub(super) async fn prepare_and_parse_batch(
     // causing a spurious "Loading model…" flash. The flag prevents that.
     let first_batch_ever = ctx.progress.indexed.load(AtomicOrdering::Acquire) == 0;
     let needs_embedder_init = !ctx.lexical_only
+        && !ctx.skip_vector
         && !ctx.defer_embed
         && if let Some(slot) = ctx.embedder_pid_slot.as_ref() {
             // Sidecar mode: PID 0 = not yet spawned.
@@ -289,11 +294,15 @@ pub(super) async fn prepare_and_parse_batch(
     // Issue #923: `defer_embed` likewise skips embedding in the fast pass —
     // the same `parse_files_only` path is used.
     //
+    // Issue #2984 Phase 1: `skip_vector` also routes through
+    // `parse_files_only` — the embedder must never run for this index, not
+    // just be deferred. Orthogonal to `defer_embed`/`lexical_only`.
+    //
     // For full-pipeline indexes, use `parse_and_embed_files_tracked` so
     // that per-wave `chunk_progress` SSE events fire at ~32-chunk granularity.
     let parsed = {
         let indexer = ctx.handle.indexer.read().await;
-        let result = if ctx.lexical_only || ctx.defer_embed {
+        let result = if ctx.lexical_only || ctx.defer_embed || ctx.skip_vector {
             indexer.parse_files_only(to_index).await
         } else {
             use crate::core::indexer::PROGRESS_CHUNK_INTERVAL;

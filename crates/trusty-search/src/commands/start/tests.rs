@@ -24,6 +24,7 @@ fn inputs() -> WarmBootInputs {
         graph_node_count: 0,
         lexical_only: false,
         skip_kg: false,
+        skip_vector: false,
         corpus_open_failed: false,
     }
 }
@@ -97,6 +98,7 @@ fn warm_boot_respects_lexical_only_flag() {
         graph_node_count: 7_402,
         lexical_only: true,
         skip_kg: false,
+        skip_vector: false,
         corpus_open_failed: false,
     });
     assert_eq!(stages.lexical.status, StageStatus::Ready);
@@ -135,6 +137,7 @@ fn warm_boot_corpus_open_failure_fails_every_stage() {
         graph_node_count: 7_402,
         lexical_only: false,
         skip_kg: false,
+        skip_vector: false,
         corpus_open_failed: true,
     });
     assert_eq!(
@@ -195,6 +198,7 @@ fn warm_boot_respects_skip_kg_flag() {
         graph_node_count: 7_402,
         lexical_only: false,
         skip_kg: true,
+        skip_vector: false,
         corpus_open_failed: false,
     });
     assert_eq!(
@@ -224,6 +228,7 @@ fn warm_boot_respects_skip_kg_flag() {
         graph_node_count: 7_402,
         lexical_only: true,
         skip_kg: true,
+        skip_vector: false,
         corpus_open_failed: false,
     });
     assert_eq!(stages_both.semantic.status, StageStatus::Skipped);

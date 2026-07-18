@@ -1,20 +1,37 @@
-//! Context-dependency requirement configuration (#590).
+//! Context-dependency requirement configuration (#590, search-unreachable
+//! semantics fix).
 //!
 //! Why: trusty-review's entire value is the context it injects from
 //! trusty-search (code context) and trusty-analyze (static analysis).  A review
 //! produced WITHOUT that context is actively harmful — it gives false confidence
 //! from a verdict that never saw the project.  So both dependencies are REQUIRED
 //! by default; if either is unreachable the review must skip/fail loudly rather
-//! than silently degrade.  This struct holds the two opt-out knobs an operator
-//! can flip (to `false`) to explicitly allow a clearly-labelled degraded run.
+//! than silently degrade.  This struct holds the opt-out knobs an operator can
+//! flip to explicitly allow a clearly-labelled degraded run.
 //!
-//! What: exposes `ContextConfig` (`require_search`, `require_analyze`, both
-//! defaulting to `true`) and its TOML-deserialisable mirror
-//! `ContextFileConfig`.  `from_env_and_file` resolves env-over-file-over-default
-//! precedence, matching the rest of the config module.
+//! `require_search` additionally supports a PER-SURFACE safe default (the
+//! search-unreachable semantics fix): a caller that can post a real GitHub PR
+//! review (the hosted webhook bot, a CLI GitHub-PR run) must never silently
+//! degrade — search stays required unless the operator explicitly opts out. A
+//! caller that can never post (an MCP tool call from a developer's own
+//! session, a CLI `--local-diff`/`--base`/`--source-root` local review) is
+//! still useful with a diff-only, loudly-labelled DEGRADED review, so it
+//! defaults to NOT requiring search when the operator hasn't said otherwise.
+//! `require_analyze` is unaffected — it keeps the single always-required-
+//! unless-opted-out flag (out of scope for this fix).
+//!
+//! What: exposes `ContextConfig` (`require_search: Option<bool>` — `None` means
+//! "no explicit operator override, resolve per `InvocationSurface`";
+//! `require_analyze: bool`, defaulting to `true`) and its TOML-deserialisable
+//! mirror `ContextFileConfig`.  `from_env_and_file` resolves
+//! env-over-file-over-default precedence, matching the rest of the config
+//! module.  `effective_require_search` folds the override (if any) and the
+//! surface default into the single boolean the gate consults.
 //!
 //! Test: `context_defaults_required`, `context_env_relaxes_search`,
-//! `context_file_relaxes_analyze`, `context_env_beats_file` in this module.
+//! `context_file_relaxes_analyze`, `context_env_beats_file`,
+//! `require_search_surface_default_hosted_true_interactive_false`,
+//! `require_search_explicit_override_wins_regardless_of_surface` in this module.
 
 use serde::Deserialize;
 use tracing::warn;
@@ -35,34 +52,86 @@ const ENV_REQUIRE_SEARCH: &str = "TRUSTY_REVIEW_REQUIRE_SEARCH";
 /// What: same truthiness parsing as `ENV_REQUIRE_SEARCH`.
 const ENV_REQUIRE_ANALYZE: &str = "TRUSTY_REVIEW_REQUIRE_ANALYZE";
 
+/// Which kind of caller triggered a review — decides the SAFE DEFAULT for
+/// `require_search` when the operator has not explicitly configured it.
+///
+/// Why: an infra-down review that CAN post to a real GitHub PR (the hosted
+/// webhook bot) must never silently degrade — a context-free false-confidence
+/// verdict landing on a real PR is exactly the harm #590 exists to prevent. A
+/// review that CANNOT post (an MCP tool call the developer reads themselves, a
+/// local-diff/--base/--source-root CLI run that never leaves the terminal) is
+/// still useful as a loudly-labelled diff-only DEGRADED review, so hard-
+/// skipping it wastes the developer's time for no safety benefit.
+/// What: two variants; `Hosted` is the `#[default]` (fail-safe: an unlabelled
+/// call site stays strict) so only call sites that explicitly identify
+/// themselves as interactive get the relaxed default.
+/// Test: `require_search_surface_default_hosted_true_interactive_false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InvocationSurface {
+    /// Autonomous / postable surfaces: the GitHub webhook bot and any caller
+    /// that has not explicitly opted into `Interactive`.  Defaults to
+    /// `require_search = true`.
+    #[default]
+    Hosted,
+    /// Interactive/local surfaces that can never post to a real GitHub PR: MCP
+    /// tool calls (`review_pr`/`review_diff`, always `allow_posting = false`)
+    /// and CLI `run --local-diff`/`--base`/`--source-root` local reviews (the
+    /// `owner == "local"` sentinel forces log-only regardless of
+    /// `allow_posting`).  Defaults to `require_search = false` — degrade
+    /// instead of hard-skip.
+    Interactive,
+}
+
+impl InvocationSurface {
+    /// Return this surface's safe DEFAULT for `require_search`, used only when
+    /// the operator has not set an explicit override.
+    ///
+    /// Why: centralises the Hosted/Interactive → true/false mapping so
+    /// `ContextConfig::effective_require_search` and tests share one
+    /// definition.
+    /// What: `true` for `Hosted`, `false` for `Interactive`.
+    /// Test: `require_search_surface_default_hosted_true_interactive_false`.
+    pub fn requires_search_by_default(self) -> bool {
+        matches!(self, InvocationSurface::Hosted)
+    }
+}
+
 /// Resolved configuration for the required-context gate.
 ///
 /// Why: the runner reads these flags before gathering context to decide whether
 /// a missing dependency aborts the review (required) or merely tags it degraded
 /// (opted out).  A single owned struct keeps the decision logic free of scattered
 /// env lookups and makes the behaviour trivially testable (construct it directly).
-/// What: `require_search` / `require_analyze` each gate one dependency.  Both
-/// default to `true` (safe-by-default: refuse to review without context).
+/// What: `require_analyze` gates trusty-analyze and defaults to `true` (safe-
+/// by-default: refuse to review without context).  `require_search` is
+/// `Option<bool>`: `None` means "no explicit operator override" and defers to
+/// `InvocationSurface::requires_search_by_default`; `Some(v)` is an explicit
+/// override (from env or TOML) that always wins, regardless of surface.
 /// Test: `context_defaults_required`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextConfig {
-    /// When `true` (default), an unreachable/unhealthy trusty-search skips the
-    /// review instead of proceeding with no code context.
-    pub require_search: bool,
+    /// `None` (default) = no explicit operator override — the EFFECTIVE
+    /// requirement is resolved per-call by `effective_require_search` from the
+    /// caller's `InvocationSurface`.  `Some(true)`/`Some(false)` is an explicit
+    /// override that wins over the surface default either way.
+    pub require_search: Option<bool>,
     /// When `true` (default), an unreachable/unhealthy trusty-analyze skips the
-    /// review instead of proceeding with no static-analysis context.
+    /// review instead of proceeding with no static-analysis context.  Has no
+    /// per-surface default (unlike `require_search`) — out of scope for the
+    /// search-unreachable semantics fix.
     pub require_analyze: bool,
 }
 
 impl Default for ContextConfig {
-    /// Why: the safe default is "both required" so a missing dependency fails
-    /// loudly rather than silently producing a context-free, false-confidence
-    /// verdict (#590 binding premise).
-    /// What: both flags `true`.
+    /// Why: the safe default is "analyze required, search resolved per-surface"
+    /// so a missing dependency fails loudly rather than silently producing a
+    /// context-free, false-confidence verdict (#590 binding premise) UNLESS the
+    /// caller is a surface that can never post one.
+    /// What: `require_search: None` (defer to surface), `require_analyze: true`.
     /// Test: `context_defaults_required`.
     fn default() -> Self {
         Self {
-            require_search: true,
+            require_search: None,
             require_analyze: true,
         }
     }
@@ -73,24 +142,38 @@ impl ContextConfig {
     ///
     /// Why: matches the rest of the config module's env-over-file-over-default
     /// precedence so operators have one mental model for every knob.
-    /// What: starts from the file value (or default `true`), then applies env
-    /// overrides.  Unrecognised env values are ignored with a warning (fail
-    /// closed: keep the stricter file/default value rather than silently
-    /// relaxing a safety gate).
+    /// What: starts from the file value (`None` if absent — no override), then
+    /// applies env overrides.  Unrecognised env values are ignored with a
+    /// warning (fail closed: keep the stricter file/default value rather than
+    /// silently relaxing a safety gate).
     /// Test: `context_env_relaxes_search`, `context_file_relaxes_analyze`,
     /// `context_env_beats_file`.
     pub fn from_env_and_file(file: Option<&ContextFileConfig>) -> Self {
         let mut cfg = ContextConfig {
-            require_search: file.and_then(|f| f.require_search).unwrap_or(true),
+            require_search: file.and_then(|f| f.require_search),
             require_analyze: file.and_then(|f| f.require_analyze).unwrap_or(true),
         };
         if let Some(v) = parse_bool_env(ENV_REQUIRE_SEARCH) {
-            cfg.require_search = v;
+            cfg.require_search = Some(v);
         }
         if let Some(v) = parse_bool_env(ENV_REQUIRE_ANALYZE) {
             cfg.require_analyze = v;
         }
         cfg
+    }
+
+    /// Resolve the EFFECTIVE `require_search` flag for a given invocation surface.
+    ///
+    /// Why: the gate needs a single boolean; folding the explicit-override /
+    /// surface-default precedence here keeps that decision in one place instead
+    /// of re-derived at every call site.
+    /// What: an explicit operator override (`Some(v)`, from env or TOML) always
+    /// wins. When unconfigured (`None`) the surface's safe default applies.
+    /// Test: `require_search_surface_default_hosted_true_interactive_false`,
+    /// `require_search_explicit_override_wins_regardless_of_surface`.
+    pub fn effective_require_search(&self, surface: InvocationSurface) -> bool {
+        self.require_search
+            .unwrap_or_else(|| surface.requires_search_by_default())
     }
 }
 
@@ -157,8 +240,43 @@ mod tests {
     #[test]
     fn context_defaults_required() {
         let cfg = ContextConfig::default();
-        assert!(cfg.require_search, "search must default to REQUIRED");
+        assert_eq!(
+            cfg.require_search, None,
+            "search must default to NO explicit override — resolved per-surface"
+        );
         assert!(cfg.require_analyze, "analyze must default to REQUIRED");
+    }
+
+    #[test]
+    fn require_search_surface_default_hosted_true_interactive_false() {
+        let cfg = ContextConfig::default();
+        assert!(
+            cfg.effective_require_search(InvocationSurface::Hosted),
+            "Hosted (webhook bot / CLI GitHub-PR) must default to REQUIRED — \
+             never silently degrade a review that could post to a real PR"
+        );
+        assert!(
+            !cfg.effective_require_search(InvocationSurface::Interactive),
+            "Interactive (MCP tool calls / CLI local-diff) must default to NOT \
+             required — degrade instead of hard-skip"
+        );
+    }
+
+    #[test]
+    fn require_search_explicit_override_wins_regardless_of_surface() {
+        let mut cfg = ContextConfig {
+            require_search: Some(false),
+            ..Default::default()
+        };
+        assert!(
+            !cfg.effective_require_search(InvocationSurface::Hosted),
+            "explicit false must override even the strict Hosted default"
+        );
+        cfg.require_search = Some(true);
+        assert!(
+            cfg.effective_require_search(InvocationSurface::Interactive),
+            "explicit true must override even the relaxed Interactive default"
+        );
     }
 
     #[test]
@@ -169,9 +287,10 @@ mod tests {
             std::env::set_var(ENV_REQUIRE_SEARCH, "false");
         }
         let cfg = ContextConfig::from_env_and_file(None);
-        assert!(
-            !cfg.require_search,
-            "env false must relax search requirement"
+        assert_eq!(
+            cfg.require_search,
+            Some(false),
+            "env false must set an explicit override"
         );
         assert!(cfg.require_analyze, "analyze untouched by search var");
         clear_env();
@@ -187,7 +306,10 @@ mod tests {
             ..Default::default()
         };
         let cfg = ContextConfig::from_env_and_file(Some(&file));
-        assert!(cfg.require_search, "search stays required by default");
+        assert_eq!(
+            cfg.require_search, None,
+            "search stays unconfigured (per-surface default) absent a file value"
+        );
         assert!(
             !cfg.require_analyze,
             "file false must relax analyze requirement"
@@ -209,7 +331,11 @@ mod tests {
             ..Default::default()
         };
         let cfg = ContextConfig::from_env_and_file(Some(&file));
-        assert!(cfg.require_search, "env true must override file false");
+        assert_eq!(
+            cfg.require_search,
+            Some(true),
+            "env true must override file false"
+        );
         clear_env();
     }
 

@@ -108,6 +108,7 @@ async fn relocate_index_updates_root_path() {
             follow_links: None,
             lexical_only: None,
             skip_kg: None,
+            skip_vector: None,
             defer_embed: None,
             extra_skip_dirs: None,
             data_file_max_bytes: None,

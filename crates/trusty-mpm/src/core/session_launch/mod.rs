@@ -14,6 +14,7 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
+mod custom_mcp;
 mod native_mcp;
 mod palace_alias;
 mod project_hooks;
@@ -27,6 +28,10 @@ mod tests;
 #[cfg(test)]
 #[path = "native_mcp_tests.rs"]
 mod native_mcp_tests;
+// Mirrors the `native_mcp_tests.rs` split (issue #2739 follow-up).
+#[cfg(test)]
+#[path = "custom_mcp_tests.rs"]
+mod custom_mcp_tests;
 mod worktree_sync;
 // Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
 // (issue #2149 roster-deploy-failure-continues coverage) — mirrors the
@@ -35,6 +40,7 @@ mod worktree_sync;
 #[path = "tests_roster.rs"]
 mod tests_roster;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
@@ -45,6 +51,7 @@ use crate::core::skill_deployer::DeployStats;
 use crate::core::skill_tiers::{
     deploy_all_skill_tiers, list_project_custom_stems, list_source_stems,
 };
+use custom_mcp::inject_custom_trusty_mcps;
 use native_mcp::inject_native_trusty_mcps;
 use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
@@ -631,22 +638,48 @@ fn prepare_session_inner(
     // project,local`, which never reads the managed `.claude.json` `mcpServers`
     // map where `tm mcp` writes — so without this bridge those servers are
     // invisible to managed sessions. Scope is the native-trusty allowlist ONLY
-    // (third-party/HTTP managed servers are deliberately excluded); the memory
-    // and search injectors above already own their own pinned entries and are
-    // excluded from the allowlist. MUST run BEFORE the trust pre-seed below so
-    // the injected names flow into `enabledMcpjsonServers` and skip the "new MCP
-    // servers found" dialog. Non-fatal: a failure only means those extra tools
-    // are absent from this session.
+    // (third-party/HTTP managed servers are handled by the custom-server bridge
+    // just below); the memory and search injectors above already own their own
+    // pinned entries and are excluded from the allowlist. MUST run BEFORE the
+    // trust pre-seed below so the injected names flow into
+    // `enabledMcpjsonServers` and skip the "new MCP servers found" dialog.
+    // Non-fatal: a failure only means those extra tools are absent from this
+    // session.
     if let Err(err) = inject_native_trusty_mcps(project_dir) {
         tracing::warn!("failed to inject native trusty MCP servers: {err}");
     }
+
+    // Inject CUSTOM (non-native, non-builtin) MCP servers — issue #2739
+    // follow-up — from BOTH the user-scope managed registry (any `tm mcp add`
+    // entry not on the native allowlist) and the resolved project-scope
+    // manifest `[mcp.custom]` table (`plan.custom_mcp_servers`), project
+    // overriding user on a name collision. See `session_launch::custom_mcp`
+    // for the full scope/precedence/security model. MUST also run before the
+    // trust pre-seed below, same reasoning as the native injector. Non-fatal:
+    // a failure yields an empty project-scope-names set, which only means
+    // this run's project-scope servers (if any bridged before the failure)
+    // are conservatively left OUT of trust pre-approval rather than in it.
+    let project_scope_mcp_names =
+        match inject_custom_trusty_mcps(project_dir, &plan.custom_mcp_servers) {
+            Ok(names) => names,
+            Err(err) => {
+                tracing::warn!("failed to bridge custom MCP servers: {err}");
+                BTreeSet::new()
+            }
+        };
 
     // Pre-seed per-directory trust for this workspace in `~/.claude.json`
     // (issue #1269) so the interactive tmux Claude session does not stall on the
     // "Do you trust this folder?" dialog and the injected task prompt is
     // received. tm owns this workspace path, so marking it trusted is safe.
-    // Non-fatal: a trust-seed failure only means the operator may see the dialog.
-    if let Err(err) = preseed_workspace_trust_home(project_dir) {
+    // `project_scope_mcp_names` is excluded from the `enabledMcpjsonServers`
+    // auto-approval (issue #2739 follow-up security fix): a project-scope
+    // `[mcp.custom]` entry ships with the cloned repo itself, so silently
+    // pre-approving it would let an untrusted repo smuggle a live MCP server
+    // past Claude Code's own "new MCP servers found" consent dialog. See
+    // `session_launch::custom_mcp`'s "Consent gate" docs. Non-fatal: a
+    // trust-seed failure only means the operator may see the dialog.
+    if let Err(err) = preseed_workspace_trust_home(project_dir, &project_scope_mcp_names) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 

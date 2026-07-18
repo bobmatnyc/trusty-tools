@@ -21,7 +21,7 @@
 //! `SLACK_BOT_TOKEN`, `SLACK_USER_TOKEN`, `TELEGRAM_BOT_TOKEN`) is NEVER written
 //! into `.mcp.json` — see [`split_public_and_secret_env`]. Instead it is
 //! delivered out-of-band via a workspace-root `.env.local`
-//! ([`route_native_mcp_secrets`]), which the native binaries' own credential
+//! ([`route_mcp_secrets_to_env_local`]), which the native binaries' own credential
 //! resolver (`trusty_common::inference::credentials::resolve_key`, confirmed at
 //! `crates/trusty-channels/src/{slack,telegram}/api/client.rs`) already reads
 //! via env → `.env.local` → secure-store precedence
@@ -47,7 +47,7 @@
 //! including ones that already TRACK a file literally named `.env.local` (a
 //! second code-critic pass empirically reproduced exactly this: appending to
 //! `info/exclude` is a no-op for an already-tracked path). So
-//! [`route_native_mcp_secrets`] adds a second, independent gate AFTER the
+//! [`route_mcp_secrets_to_env_local`] adds a second, independent gate AFTER the
 //! exclude-file write: [`is_env_local_actually_ignored`] asks git itself —
 //! `git check-ignore -q -- .env.local` — whether the path would actually be
 //! staged, and skips secret delivery entirely (fail-closed, same "servers
@@ -66,7 +66,7 @@
 //! `env`-free command/args/type shape merges idempotently into
 //! `<workspace>/.mcp.json` via [`super::settings::inject_mcp_server`]; any `env`
 //! entries are collected and merged into `<workspace>/.env.local` via
-//! [`route_native_mcp_secrets`]. Because it runs BEFORE
+//! [`route_mcp_secrets_to_env_local`]. Because it runs BEFORE
 //! `preseed_workspace_trust_home`, the injected `.mcp.json` names still flow
 //! into the `enabledMcpjsonServers` trust list, so no "new MCP servers found"
 //! dialog fires.
@@ -189,7 +189,7 @@ pub(super) fn inject_native_trusty_mcps(project_path: &Path) -> Result<(), PrepE
 /// (collected across all matched servers); a registration that fails that
 /// validation (non-stdio `type`, missing `command`, or a non-allowlisted field
 /// like `url`/`headers`) is REJECTED wholesale — nothing is written for it.
-/// When any secrets were collected, [`route_native_mcp_secrets`]
+/// When any secrets were collected, [`route_mcp_secrets_to_env_local`]
 /// merges them into the workspace `.env.local`. Non-allowlisted
 /// (third-party/HTTP) servers are skipped, and `trusty-memory` / `trusty-search`
 /// are never touched here (their dedicated injectors own them). Injection order
@@ -226,7 +226,7 @@ pub(super) fn inject_native_trusty_mcps_from(
     }
 
     if !secret_env.is_empty() {
-        route_native_mcp_secrets(project_path, &secret_env)?;
+        route_mcp_secrets_to_env_local(project_path, &secret_env)?;
     }
     Ok(())
 }
@@ -249,11 +249,15 @@ pub(super) fn inject_native_trusty_mcps_from(
 /// `split_public_and_secret_env_rejects_unknown_field`.
 const INJECTABLE_STDIO_FIELDS: &[&str] = &["type", "command", "args", "env"];
 
-/// Validate an allowlisted registration as a stdio + env-auth server and split
-/// it into an `env`-free public shape plus its secret `env` map — or reject it.
+/// Validate a registration as a stdio + env-auth server and split it into an
+/// `env`-free public shape plus its secret `env` map — or reject it.
 ///
 /// Why (code-critic BLOCK + residual HIGH on #2739): two distinct leak classes
-/// are closed here.
+/// are closed here. Shared by [`inject_native_trusty_mcps_from`] (which calls
+/// this only for allowlist-matched entries) AND, as of the #2739 custom-server
+/// follow-up, `session_launch::custom_mcp` (which calls this for ANY
+/// non-native/non-builtin registered server, native or not — the validation
+/// rules below are name-agnostic).
 ///   (1) The managed registry's `env` block is where live secrets
 ///   (`SLACK_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, …) live. Every value there is
 ///   treated as a secret CATEGORICALLY — never split by a key-name heuristic
@@ -302,7 +306,7 @@ pub(super) fn split_public_and_secret_env(
     let Some(obj) = entry.as_object() else {
         tracing::warn!(
             server = server_name,
-            "refusing to inject native trusty MCP server: registration is not a JSON object \
+            "refusing to inject MCP server: registration is not a JSON object \
              (never routed to .mcp.json)"
         );
         return None;
@@ -318,7 +322,7 @@ pub(super) fn split_public_and_secret_env(
         tracing::warn!(
             server = server_name,
             field = %bad_field,
-            "refusing to inject native trusty MCP server: registration carries a field outside \
+            "refusing to inject MCP server: registration carries a field outside \
              the stdio+env-auth allowlist (e.g. url/headers) that could hold a secret; only \
              stdio command servers are injected (never routed to .mcp.json)"
         );
@@ -332,7 +336,7 @@ pub(super) fn split_public_and_secret_env(
     {
         tracing::warn!(
             server = server_name,
-            "refusing to inject native trusty MCP server: `type` is not `stdio` \
+            "refusing to inject MCP server: `type` is not `stdio` \
              (never routed to .mcp.json)"
         );
         return None;
@@ -343,7 +347,7 @@ pub(super) fn split_public_and_secret_env(
     let Some(command) = obj.get("command").filter(|c| c.is_string()) else {
         tracing::warn!(
             server = server_name,
-            "refusing to inject native trusty MCP server: no string `command` \
+            "refusing to inject MCP server: no string `command` \
              (never routed to .mcp.json)"
         );
         return None;
@@ -382,13 +386,17 @@ pub(super) fn split_public_and_secret_env(
     Some((Value::Object(public), secret_env))
 }
 
-/// Merge collected native-server secrets into the workspace `.env.local`,
-/// after confirming — via git itself, not just our own exclude-file write —
-/// that the file is genuinely ignored.
+/// Merge collected MCP-server secrets into the workspace `.env.local`, after
+/// confirming — via git itself, not just our own exclude-file write — that the
+/// file is genuinely ignored.
 ///
 /// Why: the delivery half of the #2739 secret-leak fix — this is the ONLY
 /// place a raw token value from the managed registry is ever written to disk
-/// inside the workspace, so it alone carries the exclusion guarantee.
+/// inside the workspace, so it alone carries the exclusion guarantee. `pub(super)`
+/// (rather than private) because the #2739 custom-server follow-up's
+/// `session_launch::custom_mcp` calls this too for custom stdio servers' `env`
+/// blocks — the guarantee (never write a secret into git-tracked `.mcp.json`)
+/// applies identically regardless of whether the server is native or custom.
 /// [`ensure_env_local_git_excluded`] appending a line to `info/exclude` is
 /// necessary but NOT sufficient: a code-critic re-review (residual HIGH,
 /// #2739) reproduced a second leak of the SAME class — if the target repo
@@ -415,7 +423,7 @@ pub(super) fn split_public_and_secret_env(
 /// `inject_native_env_local_routing_is_idempotent`,
 /// `inject_native_secrets_skipped_outside_git_repo`,
 /// `inject_native_skips_secrets_when_env_local_is_tracked`.
-fn route_native_mcp_secrets(
+pub(super) fn route_mcp_secrets_to_env_local(
     project_path: &Path,
     secrets: &BTreeMap<String, String>,
 ) -> Result<(), PrepError> {

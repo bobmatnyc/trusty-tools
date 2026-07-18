@@ -1,41 +1,47 @@
 <script lang="ts">
   // Why: DOC-39 §6.2 Phase 1 UI — "the status bar (readiness + budget)".
-  // Readiness is pure wiring: `GET /sessions` + `GET /sessions/{id}/readiness`
-  // landed with REST Slice 2 (#2983, squash 15156b42) and this component is
-  // a thin `fetch()` client over them, identically to `HealthPanel.svelte`
-  // (no Tauri command, no client-side computation of daemon state).
+  // Both halves are pure wiring: `GET /sessions` + `GET /sessions/{id}/readiness`
+  // landed with REST Slice 2 (#2983, squash 15156b42), and `GET
+  // /sessions/{id}/budget` (issue #3015, PR #3042, squash 0bec593f) closed
+  // the budget data gap this component previously called out — this is a
+  // thin `fetch()` client over both, identically to `HealthPanel.svelte`
+  // (no Tauri command, no client-side computation of daemon state beyond
+  // the DOC-39 §4.5 AC-5.7 threshold classification in
+  // `lib/context-budget.ts`).
   //
-  // Budget is a DATA GAP, not a rendering gap: `Event::ContextBudget`
-  // (`crates/trusty-code/src/events.rs`) is emitted on the SSE stream but
-  // never cached on the session the way `IndexReadinessSnapshot` is
-  // (`SessionRegistry::record_context_budget` calls `self.record(...)` only —
-  // compare `record_index_readiness`, which also writes `entry.readiness`).
-  // There is today no `session.get_context_budget` RPC and therefore no
-  // `GET /sessions/{id}/budget` REST route to poll. Per the layer-priority
-  // rule this PR does NOT add one; the budget slot renders a labeled
-  // "unavailable" state instead of being silently omitted (DOC-39 AC-5.1:
-  // "an invisible budget is not a budget") and the gap is called out in the
-  // PR body as a REST-slice follow-up.
-  //
-  // What: Polls `GET /sessions` then `GET /sessions/{id}/readiness` for the
-  // session `pickActiveSession` selects, every `POLL_MS`, via a Svelte 5
-  // `$effect` that returns its own teardown — no `onMount`/`onDestroy`. The
-  // teardown clears the interval AND aborts one `AbortController` shared by
-  // every poll's `fetch()` calls; `refresh()` also re-checks `signal.aborted`
-  // after each `await` before writing `phase`/`session`/`readiness`/`error`,
-  // so an in-flight poll genuinely abandons its result on unmount (the
-  // network request is cancelled, not merely ignored) rather than racing a
-  // disposed effect scope. Renders one of four states: `daemon-unreachable`
-  // (the `/sessions` fetch itself failed), `no-session` (daemon reachable,
-  // zero sessions), `ready` (readiness + the budget placeholder), each as a
-  // `.statusbar` child — never hidden, per DOC-39 §4.4 AC-4.2's "locked, not
-  // hidden" chrome rule.
+  // What: Polls `GET /sessions` then `GET /sessions/{id}/readiness` and
+  // `GET /sessions/{id}/budget` for the session `pickActiveSession` selects,
+  // every `POLL_MS`, via a Svelte 5 `$effect` that returns its own teardown
+  // — no `onMount`/`onDestroy`. The teardown clears the interval AND aborts
+  // one `AbortController` shared by every poll's `fetch()` calls;
+  // `refresh()` also re-checks `signal.aborted` after each `await` before
+  // writing `phase`/`session`/`readiness`/`budget`/`error`, so an in-flight
+  // poll genuinely abandons its result on unmount (the network request is
+  // cancelled, not merely ignored) rather than racing a disposed effect
+  // scope. Renders one of four states: `daemon-unreachable` (the
+  // `/sessions` fetch itself failed), `no-session` (daemon reachable, zero
+  // sessions), `ready` (readiness + the budget slot — `recorded` renders the
+  // real working-context %, `never_recorded` renders a labeled "no data
+  // yet" rather than a fabricated `0%`), each as a `.statusbar` child —
+  // never hidden, per DOC-39 §4.4 AC-4.2's "locked, not hidden" chrome
+  // rule. A budget fetch failure (session reachable, budget route errors)
+  // degrades the budget slot to "no data yet" without dropping the whole
+  // status bar to `daemon-unreachable`, mirroring the existing readiness
+  // partial-failure handling below.
   //
   // Test: `session-status.test.ts` covers `pickActiveSession`;
-  // `App.test.ts` asserts the DOC-39 §8.1 AC-18.1 DOM invariant
-  // (`.statusbar` is a sibling of `.body`, not a descendant) that this
-  // component's root class participates in.
+  // `context-budget.test.ts` covers `classifyBudget`/`budgetLabel`/
+  // `budgetDotClass`/`budgetTitle`; `App.test.ts` asserts the DOC-39 §8.1
+  // AC-18.1 DOM invariant (`.statusbar` is a sibling of `.body`, not a
+  // descendant) that this component's root class participates in.
   import { apiBase } from '../lib/api-config';
+  import {
+    budgetDotClass,
+    budgetLabel,
+    budgetTitle,
+    classifyBudget,
+    type ContextBudgetQuery,
+  } from '../lib/context-budget';
   import {
     pickActiveSession,
     type ReadinessQuery,
@@ -50,6 +56,7 @@
   let phase = $state<Phase>('connecting');
   let session = $state<SessionSummary | null>(null);
   let readiness = $state<ReadinessQuery | null>(null);
+  let budget = $state<ContextBudgetQuery | null>(null);
   let error = $state<string | null>(null);
 
   async function refresh(signal: AbortSignal) {
@@ -76,6 +83,7 @@
         phase = 'daemon-unreachable';
         session = null;
         readiness = null;
+        budget = null;
         error = e instanceof Error ? e.message : String(e);
       }
       return;
@@ -87,6 +95,7 @@
       phase = 'no-session';
       session = null;
       readiness = null;
+      budget = null;
       error = null;
       return;
     }
@@ -108,6 +117,21 @@
         readiness = null;
         error = e instanceof Error ? e.message : String(e);
       }
+    }
+    if (signal.aborted) return;
+
+    try {
+      const res = await fetch(`${base}/sessions/${active.id}/budget`, { signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as ContextBudgetQuery;
+      if (signal.aborted) return;
+      budget = body;
+    } catch {
+      // Same partial-failure discipline as readiness above: the session is
+      // reachable, so a budget-route error degrades to "no data yet"
+      // (`budget = null`) rather than dropping the whole status bar to
+      // `daemon-unreachable`.
+      if (!signal.aborted) budget = null;
     }
   }
 
@@ -165,8 +189,12 @@
         <span class={`h-1.5 w-1.5 rounded-full ${readinessDotClass()}`}></span>
         readiness: {readinessLabel()}
       </span>
-      <span class="text-trusty-text/40" title="Budget: no poll-able REST route yet (Event::ContextBudget is SSE-only and not cached on the session) — tracked as a REST-slice follow-up">
-        budget: unavailable
+      <span
+        class={`flex items-center gap-1.5 ${classifyBudget(budget) === 'warn' ? 'text-status-error' : ''}`}
+        title={budgetTitle(budget)}
+      >
+        <span class={`h-1.5 w-1.5 rounded-full ${budgetDotClass(budget)}`}></span>
+        budget: {budgetLabel(budget)}
       </span>
     </div>
     {#if session}

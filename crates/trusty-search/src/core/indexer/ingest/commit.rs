@@ -162,8 +162,31 @@ impl CodeIndexer {
     /// What: filters chunks without embeddings (BM25-only mode), validates each
     /// vector for NaN/all-zero content, then delegates to `store.upsert_batch`.
     /// No-op when no store is wired or no embeddings were computed.
+    ///
+    /// Issue #2984 Phase 1 delta-review HIGH finding (stale-embedding-on-
+    /// re-enable): a chunk committed here WITHOUT an embedding (vector lane
+    /// disabled via `skip_vector`/`lexical_only`/`defer_embed`, or simply a
+    /// deferred fast pass) may still have a STALE vector left over in `store`
+    /// from before the lane was disabled. Chunk ids are positional
+    /// (`{path}:{start}:{end}`), not content-addressed, so an edit that
+    /// preserves a chunk's line range keeps its id — `store.contains(id)`
+    /// would then report "embedded" forever even though the stored vector
+    /// describes the PRE-edit content. Every chunk that reaches this function
+    /// comes from a file that was actually (re-)parsed, so its content is the
+    /// current truth: we evict any pre-existing vector for an un-embedded
+    /// chunk's id so the invariant "id present in `store` ⇒ vector matches
+    /// CURRENT content" holds unconditionally, regardless of which caller or
+    /// mode routed this chunk through without an embedding. A later catch-up
+    /// pass (`CodeIndexer::embed_deferred_chunks`) then sees the evicted id as
+    /// needs-embedding and re-embeds it from the current content. Uses a
+    /// single bulk `contains_many` read pass so the common case (brand-new
+    /// chunks, or `lexical_only` indexes that never had a vector) pays no
+    /// extra write-lock acquisitions.
     /// Test: `nan_vector_rejected_loudly` and `zero_vector_rejected_loudly`
-    /// in `tests.rs`; `test_index_files_batch_*` covers the healthy path.
+    /// in `tests.rs`; `test_index_files_batch_*` covers the healthy path;
+    /// `stale_vector_evicted_when_chunk_recommitted_without_embedding` and
+    /// `stale_vector_eviction_then_catch_up_reembeds_current_content` in
+    /// `indexer::tests::branch_and_corpus` cover the eviction/re-embed cycle.
     pub(crate) async fn commit_vectors_batch(
         &self,
         chunks: &[RawChunk],
@@ -173,8 +196,12 @@ impl CodeIndexer {
             return Ok(());
         };
         let mut items: Vec<(String, Vec<f32>)> = Vec::new();
+        let mut unembedded_ids: Vec<String> = Vec::new();
         for (chunk, vec_opt) in chunks.iter().zip(embeddings.iter()) {
             let Some(v) = vec_opt.as_ref() else {
+                // No embedding was computed for this chunk in this batch —
+                // see the stale-embedding-eviction note above.
+                unembedded_ids.push(chunk.id.clone());
                 continue;
             };
             // Issue #764: reject NaN vectors loudly.
@@ -201,6 +228,24 @@ impl CodeIndexer {
             }
             items.push((chunk.id.clone(), v.clone()));
         }
+
+        if !unembedded_ids.is_empty() {
+            let already_present = store.contains_many(&unembedded_ids).await;
+            for (id, present) in unembedded_ids.iter().zip(already_present) {
+                if !present {
+                    continue;
+                }
+                if let Err(e) = store.remove(id).await {
+                    tracing::warn!(
+                        chunk_id = %id,
+                        "commit_vectors_batch: failed to evict stale vector entry \
+                         for a chunk committed without an embedding ({e}) — the \
+                         next catch-up pass will still attempt to re-embed it"
+                    );
+                }
+            }
+        }
+
         if items.is_empty() {
             return Ok(());
         }

@@ -611,6 +611,365 @@ async fn skip_kg_true_legacy_json_restore_skips_graph_rebuild() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #2984 Phase 1 — runtime KG component soft-toggle helpers.
+// ---------------------------------------------------------------------------
+
+/// `clear_symbol_graph_in_memory` must drop the in-memory symbol graph back
+/// to empty, without touching the durable corpus's persisted KG tables.
+///
+/// Why: pins D2 (soft-disable = keep-on-disk, drop-from-memory) at the
+/// `CodeIndexer` level — the `PATCH /indexes/:id/config { kg: false }`
+/// handler calls this directly.
+/// What: builds a real graph with a call edge, persists it to redb, calls
+/// `clear_symbol_graph_in_memory`, asserts the in-memory graph is empty, then
+/// proves the on-disk data survived by loading a FRESH indexer against the
+/// same redb path and confirming its warm-boot graph is non-empty.
+/// Test: this IS the test.
+#[tokio::test]
+async fn runtime_kg_disable_clears_symbol_graph_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    let idx = make_indexer_with_corpus(&redb_path);
+    idx.index_files_batch(&[
+        ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+        ("src/callee.rs".into(), "fn callee() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+    assert!(
+        idx.snapshot_symbol_graph().await.node_count() > 0,
+        "sanity: normal indexing must build a non-empty symbol graph"
+    );
+
+    idx.clear_symbol_graph_in_memory().await;
+    assert_eq!(
+        idx.snapshot_symbol_graph().await.node_count(),
+        0,
+        "clear_symbol_graph_in_memory must drop the in-memory graph"
+    );
+    drop(idx); // simulates the live index continuing to run after disable.
+
+    // On-disk KG tables must be untouched — a fresh warm-boot against the
+    // same redb path still finds the persisted graph.
+    let restored = make_indexer_with_corpus(&redb_path);
+    restored
+        .load_chunks_from_redb()
+        .await
+        .expect("warm-boot from redb");
+    assert!(
+        restored.snapshot_symbol_graph().await.node_count() > 0,
+        "on-disk KG tables must survive an in-memory-only clear"
+    );
+}
+
+/// `catch_up_symbol_graph` must prefer the cheap persisted-graph load over a
+/// full rebuild when a persisted graph exists in the corpus.
+///
+/// Why: pins D3's "attempt load_from_corpus (near-instant) … fall back to
+/// rebuild" catch-up contract for the runtime KG re-enable path
+/// (`PATCH /indexes/:id/config { kg: true }`).
+/// What: builds + persists a real graph, clears it in memory (simulating a
+/// prior soft-disable), calls `catch_up_symbol_graph`, and asserts the graph
+/// is restored to its original node/edge counts.
+/// Test: this IS the test.
+#[tokio::test]
+async fn runtime_kg_catch_up_prefers_load_from_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    let idx = make_indexer_with_corpus(&redb_path);
+    idx.index_files_batch(&[
+        ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+        ("src/callee.rs".into(), "fn callee() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+    let (orig_nodes, orig_edges) = {
+        let g = idx.snapshot_symbol_graph().await;
+        (g.node_count(), g.edge_count())
+    };
+    assert!(orig_nodes > 0, "sanity: graph must be non-empty");
+
+    idx.clear_symbol_graph_in_memory().await;
+    assert_eq!(idx.snapshot_symbol_graph().await.node_count(), 0);
+
+    idx.catch_up_symbol_graph().await;
+    let g = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        g.node_count(),
+        orig_nodes,
+        "catch-up must restore the exact persisted node count"
+    );
+    assert_eq!(
+        g.edge_count(),
+        orig_edges,
+        "catch-up must restore the exact persisted edge count"
+    );
+}
+
+/// `catch_up_symbol_graph` must fall back to a full rebuild-from-chunks when
+/// no corpus is wired (mirrors `load_or_rebuild_symbol_graph`'s existing
+/// fallback, exercised here through the new public entry point).
+///
+/// Why: the runtime re-enable path must work correctly even for legacy /
+/// corpus-less indexers, not just the redb-backed common case.
+/// What: plants a chunk with a call edge directly into the in-memory
+/// `chunks` map on a corpus-less indexer, calls `catch_up_symbol_graph`, and
+/// asserts the graph was rebuilt from those chunks (non-empty).
+/// Test: this IS the test.
+#[tokio::test]
+async fn runtime_kg_catch_up_falls_back_to_rebuild_without_corpus() {
+    let idx = make_indexer();
+    assert!(!idx.has_corpus_store(), "precondition: no corpus wired");
+
+    idx.chunks.write().await.insert(
+        "a:1".to_string(),
+        raw_with_kind(
+            "a:1",
+            "src/a.rs",
+            "fn a() { b(); }",
+            crate::core::chunker::ChunkType::Function,
+            Some("a"),
+        ),
+    );
+
+    idx.catch_up_symbol_graph().await;
+
+    let graph = idx.snapshot_symbol_graph().await;
+    assert!(
+        graph.node_count() > 0,
+        "catch-up must fall back to a from-chunks rebuild when no corpus is wired"
+    );
+}
+
+/// Issue #2984 Phase 1 HIGH finding 3: `embed_deferred_chunks` must skip
+/// chunks that already have a stored vector rather than blindly re-embedding
+/// the whole corpus — the locked design decision is "incremental catch-up,
+/// never a forced full rebuild".
+///
+/// Why: before this fix, `embed_deferred_chunks` always collected and
+/// re-embedded every corpus chunk unconditionally. That directly contradicted
+/// the design decision and made the runtime vector-component re-enable
+/// catch-up (`components::spawn_component_catch_up` via
+/// `service::reindex::run_embed_catch_up`) pay a full re-embed cost even for
+/// content that was embedded BEFORE the vector component was disabled.
+/// What: commits two chunks into the in-memory corpus, pre-seeds the vector
+/// store directly for ONE of them (simulating "embedded before vector was
+/// disabled"), then calls `embed_deferred_chunks` and asserts only the
+/// un-embedded chunk was processed (`embedded == 1`) while `total` still
+/// reflects the full corpus size.
+/// Test: this IS the test.
+#[tokio::test]
+async fn embed_deferred_chunks_skips_already_embedded_chunks() {
+    let idx = make_indexer();
+    let parsed = ParsedBatch {
+        chunks: vec![
+            raw("already-embedded", "src/a.rs", "fn a() {}"),
+            raw("needs-embedding", "src/b.rs", "fn b() {}"),
+        ],
+        embeddings: vec![None, None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit");
+
+    // Pre-seed the vector store directly for ONE chunk — simulating content
+    // that was embedded before the vector component was disabled.
+    idx.store
+        .as_ref()
+        .expect("store wired by make_indexer")
+        .upsert("already-embedded", vec![0.0; 32])
+        .await
+        .expect("pre-seed vector");
+
+    let (embedded, total) = idx
+        .embed_deferred_chunks(None)
+        .await
+        .expect("embed_deferred_chunks");
+    assert_eq!(total, 2, "total must reflect the full corpus");
+    assert_eq!(
+        embedded, 1,
+        "only the un-embedded chunk should have been processed \
+         (incremental catch-up, never a forced full re-embed)"
+    );
+    assert!(
+        idx.store
+            .as_ref()
+            .unwrap()
+            .contains("needs-embedding")
+            .await,
+        "the previously un-embedded chunk must now be in the store"
+    );
+}
+
+/// Issue #2984 Phase 1 delta-review HIGH finding (stale-embedding-on-
+/// re-enable): `commit_vectors_batch` must evict a chunk's existing
+/// vector-store entry the moment that chunk is (re-)committed WITHOUT a fresh
+/// embedding.
+///
+/// Why: chunk ids are positional (`{path}:{start}:{end}`), not
+/// content-addressed, so an edit that preserves a chunk's line range keeps
+/// its id. Before this fix, `commit_vectors_batch` silently skipped any
+/// chunk whose `vec_opt` was `None` (vector lane disabled/deferred), leaving
+/// whatever vector was already in the store completely untouched. A chunk
+/// embedded BEFORE the vector lane was disabled, then edited (same id) WHILE
+/// the lane stayed disabled, would keep its stale pre-edit vector forever —
+/// `contains_many` (the sole needs-embedding signal `embed_deferred_chunks`
+/// relies on) would never flag it for re-embedding once the lane is
+/// re-enabled.
+/// What: embeds a chunk normally (real vector in the store), then re-commits
+/// the SAME id with different content and no embedding — simulating an edit
+/// received while the vector lane is disabled. Asserts the stale vector is
+/// evicted immediately at commit time.
+/// Test: this IS the test.
+#[tokio::test]
+async fn stale_vector_evicted_when_chunk_recommitted_without_embedding() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+
+    let idx = make_indexer();
+    let dim = 32;
+
+    // Step 1: normal embed — chunk "shared-id" gets a real vector.
+    let original = raw("shared-id", "src/a.rs", "fn original_body() {}");
+    let original_vec = MockEmbedder::new(dim)
+        .embed(&original.content)
+        .await
+        .expect("mock embed");
+    let parsed = ParsedBatch {
+        chunks: vec![original],
+        embeddings: vec![Some(original_vec)],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 1,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit embedded chunk");
+    assert!(
+        idx.store.as_ref().unwrap().contains("shared-id").await,
+        "precondition: chunk must be embedded before the edit"
+    );
+
+    // Step 2: the vector lane is "disabled" (skip_vector-style) and the SAME
+    // chunk id is edited — same positional id, different content, no
+    // embedding computed for this commit (`vec_opt: None`), mirroring the
+    // `parse_files_only` path `service::reindex::batch` routes through when
+    // `skip_vector`/`lexical_only`/`defer_embed` is set.
+    let edited = raw(
+        "shared-id",
+        "src/a.rs",
+        "fn edited_body_totally_different() {}",
+    );
+    let parsed_edit = ParsedBatch {
+        chunks: vec![edited],
+        embeddings: vec![None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed_edit, false)
+        .await
+        .expect("commit edited chunk without embedding");
+
+    assert!(
+        !idx.store.as_ref().unwrap().contains("shared-id").await,
+        "the stale pre-edit vector must be evicted the moment the chunk is \
+         recommitted without a fresh embedding — otherwise it survives as a \
+         stale vector forever (issue #2984 Phase 1 delta-review HIGH finding)"
+    );
+}
+
+/// Issue #2984 Phase 1 delta-review HIGH finding: after the stale-vector
+/// eviction above, a later catch-up pass (`embed_deferred_chunks` — the core
+/// of the runtime vector re-enable path) must re-embed the chunk from its
+/// CURRENT content, not silently skip it.
+///
+/// Why: eviction alone isn't sufficient proof — this test closes the loop
+/// described in the finding end-to-end: embed → disable vector (no embedding
+/// on the next commit) → edit content under the SAME id → re-enable/catch-up
+/// → the chunk must be re-embedded, and the vector actually stored must
+/// match the NEW content's hash, not the stale pre-edit one.
+/// What: repeats the embed → edit-without-embedding sequence, then calls
+/// `embed_deferred_chunks` and asserts (1) the chunk was counted as newly
+/// embedded, (2) the store now contains its id again, and (3) the recovered
+/// vector matches `MockEmbedder`'s hash of the CURRENT (edited) content.
+/// Test: this IS the test.
+#[tokio::test]
+async fn stale_vector_eviction_then_catch_up_reembeds_current_content() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+
+    let idx = make_indexer();
+    let dim = 32;
+    let mock = MockEmbedder::new(dim);
+
+    let original = raw("shared-id-2", "src/b.rs", "fn original_two() {}");
+    let original_vec = mock.embed(&original.content).await.expect("mock embed");
+    let parsed = ParsedBatch {
+        chunks: vec![original],
+        embeddings: vec![Some(original_vec.clone())],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 1,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit embedded chunk");
+
+    let edited_content = "fn edited_two_with_new_body() {}";
+    let edited = raw("shared-id-2", "src/b.rs", edited_content);
+    let expected_new_vec = mock.embed(edited_content).await.expect("mock embed");
+    assert_ne!(
+        original_vec, expected_new_vec,
+        "test precondition: MockEmbedder must hash the edited content \
+         differently from the original — otherwise this test can't \
+         distinguish stale from current"
+    );
+    let parsed_edit = ParsedBatch {
+        chunks: vec![edited],
+        embeddings: vec![None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed_edit, false)
+        .await
+        .expect("commit edited chunk without embedding");
+
+    let (embedded, total) = idx
+        .embed_deferred_chunks(None)
+        .await
+        .expect("embed_deferred_chunks");
+    assert_eq!(total, 1);
+    assert_eq!(
+        embedded, 1,
+        "the edited chunk must be re-embedded once the vector lane's \
+         catch-up runs — the eviction made it visible as needs-embedding again"
+    );
+    assert!(
+        idx.store.as_ref().unwrap().contains("shared-id-2").await,
+        "chunk must be back in the store after catch-up"
+    );
+    let recovered_vec = idx
+        .get_embedding("shared-id-2")
+        .expect("embeddings cache must hold the freshly re-embedded vector");
+    assert_eq!(
+        recovered_vec, expected_new_vec,
+        "the re-embedded vector must reflect the CURRENT (edited) content, \
+         proving the stale pre-edit vector is truly gone rather than merely \
+         hidden"
+    );
+}
+
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]

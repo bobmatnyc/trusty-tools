@@ -514,6 +514,28 @@ pub struct ReviewResult {
     /// dep down; no verdict), or `Degraded` (opted-in context-free, #590).
     #[serde(default)]
     pub status: ReviewStatus,
+    /// `true` when `status == Skipped` because a REQUIRED context dependency
+    /// (trusty-search / trusty-analyze) was genuinely unreachable — as opposed
+    /// to some hypothetical future POLICY-driven skip (e.g. an empty diff, a
+    /// dedup short-circuit) that carries no infra outage.
+    ///
+    /// Why: the search-unreachable semantics fix (#590 follow-up) requires the
+    /// MCP layer to make an infra outage IMPOSSIBLE to mistake for a normal
+    /// tool result — `mcp::tools::wrap_result` sets `isError: true` and a
+    /// `mcp_status: "infrastructure_unavailable"` sentinel ONLY when this flag
+    /// is set, never for a policy skip.  Today the required-context gate
+    /// (`context_gate::preflight_context`) is the SOLE producer of
+    /// `ReviewStatus::Skipped`, so this is always `true` alongside `Skipped` —
+    /// but keeping it a distinct, explicitly-set field (rather than inferring
+    /// "Skipped implies infra-down") future-proofs against a policy-skip
+    /// producer being added later without silently becoming loud too.
+    /// What: set to `true` only in the `GateOutcome::Skip` branch of
+    /// `pipeline::runner::run_review`; `false` everywhere else (including the
+    /// dedup short-circuit, which never sets `status = Skipped` at all).
+    /// `#[serde(default)]` keeps every pre-existing serialised result
+    /// deserialising as `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub infra_unavailable: bool,
     /// True if this is a dry run (no GitHub comment posted).
     pub dry_run: bool,
     /// True if the review comment was posted to GitHub.
@@ -568,6 +590,7 @@ impl ReviewResult {
             cost_estimate_usd: 0.0,
             latency_ms: 0,
             status: ReviewStatus::Completed,
+            infra_unavailable: false,
             dry_run: true,
             posted: false,
             timestamp: chrono_now(),

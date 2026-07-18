@@ -45,19 +45,55 @@ This map is **user scope**. There is deliberately **no `--scope` flag**:
 `tm mcp` is inherently user scope. (Stock `claude mcp add` cannot target this
 relocated dir, which is why `tm mcp` exists.)
 
-**Where these servers actually reach (issue #2739):**
+**ANTI-PATTERN — do not hand-edit a project's `.mcp.json`.** When asked to
+"register the X MCP server" with no scope qualifier, that almost always means
+**user-wide** (available in every project/session), and the answer is always
+`tm mcp add` — never editing a project's `.mcp.json` directly. A project
+`.mcp.json` is **project scope**: visible only inside that one repo/worktree,
+invisible to every other project and to the standalone `tm run` driver, and
+(inside a fleet worktree) silently overwritten by `tm` on the next spawn
+anyway. If a PM delegates "register the duetto-memory MCP" and an agent edits
+`.mcp.json` in whatever worktree happens to be open, that is the wrong scope —
+route it through `tm mcp add` instead.
+
+**Where these servers actually reach (issue #2739, plus the custom-server follow-up):**
 
 - The **standalone `tm run` driver** reads this user-scope map directly, so it
   sees **every** server you add here.
 - **Daemon-managed / fleet sessions** (`tm session new`) launch
   `claude --setting-sources project,local`, which does NOT read the user tier.
-  For them, only **native trusty MCP servers** are bridged into each session's
-  workspace `.mcp.json` at spawn — currently the allowlist
-  `slack-mcp`, `telegram-mcp`, `gworkspace-mcp`, `trusty-analyze`
-  (plus the always-provisioned `trusty-memory` / `trusty-search`, which have
-  their own dedicated injectors). Non-native/third-party or HTTP servers you add
-  (e.g. `github`, remote endpoints) apply to the standalone driver only and are
-  **not** injected into fleet sessions.
+  Since the #2739 follow-up, this is bridged in TWO ways:
+  - **Native trusty MCP servers** — the allowlist `slack-mcp`, `telegram-mcp`,
+    `gworkspace-mcp`, `trusty-analyze` (plus the always-provisioned
+    `trusty-memory` / `trusty-search`, which have their own dedicated
+    injectors) — are bridged with `env` secrets routed to a workspace
+    `.env.local` (never the git-tracked `.mcp.json`).
+  - **Every other (custom, non-native) server you add** — stdio or remote
+    (http/sse) — is ALSO bridged now, with the same `env`-to-`.env.local`
+    routing for stdio servers. The one exception: a **remote server that
+    declares `headers`** (e.g. an `Authorization` bearer token) is **not**
+    bridged — there is no established out-of-band delivery channel for an
+    HTTP header secret into `.mcp.json` yet, so it fails closed rather than
+    leak the header into a git-tracked file. A remote server with a clean URL
+    and no `headers` bridges normally.
+  - **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
+    `[mcp.custom.<name>]` table (the same per-project override file
+    `[agents]`/`[skills]` already use) declares servers scoped to THAT
+    project's fleet sessions only, and — on a name collision — OVERRIDES the
+    user-scope registry entry of the same name. A `trusty-memory`/
+    `trusty-search`/native-allowlist name declared here is always REJECTED —
+    a project manifest can never override a reserved name (issue #3033).
+  - **Consent gate (issue #3033):** because a project-scope `[mcp.custom]`
+    entry ships with the cloned repo itself, it is honored ONLY after the
+    operator explicitly runs `tm project trust [--dir <path>]` for that
+    project — an untrusted project's `[mcp.custom]` table is skipped entirely
+    (a single warning names the project and hints the trust command). Trust
+    state lives in USER-scope config (`~/.trusty-tools/trusty-mpm/project-trust.json`),
+    never inside the repo, so a cloned repo can never self-trust. Revoke with
+    `tm project trust --revoke [--dir <path>]`; `tm project list`/`tm project
+    info` show an `[mcp-trusted]` marker / trust line for the current state.
+    User-scope registry entries (`tm mcp add`) are unaffected — you already
+    consented to those by registering them locally.
 
 ### The 3 auto-provisioned framework built-ins
 
@@ -100,6 +136,29 @@ tm mcp add events -t sse -H "X-Api-Key: $KEY" https://host/sse
 - `-H "Name: Value"` (repeatable) — HTTP headers. Splits on the **first** `:`,
   value trimmed. Only valid for http/sse.
 - `-e` and subprocess args are rejected for http/sse; `-H` is rejected for stdio.
+
+### Propagation caveat — an already-running session needs a relaunch
+
+`tm mcp add` writes the config immediately, but a **currently running**
+session does not hot-reload it: the workspace `.mcp.json` (and its trust seed)
+is only (re)built when a session **spawns or resumes**, never while the pane
+is live. Concretely:
+
+- **Standalone `tm run` driver** — sees the full user-scope map on its *next*
+  launch.
+- **Fleet sessions (`tm session new`)** — only the native-allowlist servers
+  (`slack-mcp`, `telegram-mcp`, `gworkspace-mcp`, `trusty-analyze`, plus the
+  always-provisioned `trusty-memory`/`trusty-search`) get bridged into the
+  workspace `.mcp.json`, and only at spawn/resume. A non-native/custom server
+  (e.g. an internal `duetto-memory`) reaches the standalone driver only — it
+  is not yet bridged into fleet sessions at all (tracked by #2739).
+
+So if a newly `tm mcp add`-ed server isn't showing up in `/mcp` inside a
+session that was already running when you added it, the fix is to **relaunch
+the session** (`tm session resume <id>`, or the in-pane `tm` relaunch hint) —
+not to hand-edit that session's project `.mcp.json` as a workaround. That
+edit both reintroduces the anti-pattern above and gets clobbered on the next
+spawn anyway.
 
 ### How added servers flow into the trust-seed
 
