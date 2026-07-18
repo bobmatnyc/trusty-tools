@@ -44,6 +44,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   filesystem access. Not yet wired into `assets::DEFAULT_AGENTS` or
   `agents::load_all_agents`'s dispatchable fallback; that roster expansion is
   a separate, later slice (E3).
+- **31-agent dispatchable default roster (closes #2958, epic #2892 Slice E3
+  — final slice).** `assets::DEFAULT_AGENTS` grows from 3 to 31 entries: the
+  original `engineer`/`qa-agent`/`code-reviewer` plus the 28 coding-relevant
+  tm agents Slice E2 bundled. `agents::load_embedded_default_agents` now
+  routes each of the 28 through the new `EmbeddedAgent::Composed` variant,
+  resolving `extends:` chains via `agents::md_loader::project_embedded_md_with_extends`
+  against `assets::EMBEDDED_TM_AGENT_SOURCES`; the original 3 keep the
+  existing flat `EmbeddedAgent::Direct` path. The 5 `BASE-*` templates remain
+  extends-sources only — never dispatchable (`assets::tests::base_templates_are_never_dispatchable`).
+  mpm's own `engineer` agent stays excluded from the roster (upstream #2958
+  decision) specifically to avoid colliding with tcode's own `engineer`
+  default; `assets::tests::no_name_collisions_across_the_31_agent_roster`
+  pins that no collision exists across the final 31.
+  **Tools-restriction deviation (Bob's 2026-07-18 ruling):** four
+  reviewer-intent roster agents — `qa`, `code-critic`, `code-analyzer`,
+  `web-qa` — now carry an explicit restrictive `tools:` frontmatter override
+  in their tcode copy (`read_file`, `grep`, `glob`, `list_dir`,
+  `search_code`, `use_skill`, `finish_task` — no `write_file`/`edit`/`bash`,
+  mirroring tcode's own `code-reviewer` default), deliberately deviating
+  those four files from byte-parity with trusty-mpm's source. `documentation`
+  and `research` stay byte-identical and unrestricted per the same ruling — a
+  future E4 CI staleness guard (diffing tcode's copies against trusty-mpm's
+  source) must whitelist the `tools:` line in exactly those four files.
 - **REST resource gateway — `session.*` write routes (#2983, #587, Slice 3).**
   New `POST`/`PUT`/`DELETE` routes on `tcode serve --http`, each a thin
   `axum` handler calling `rest::respond` (or the new `respond_created` for
