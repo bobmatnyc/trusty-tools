@@ -6,58 +6,66 @@
   // (AC-7.3/7.4), out of scope here.
   //
   // AC-7.2 requires every row to show lane badge, query, hit count, latency,
-  // **requesting agent**, and age. The underlying data exists —
-  // `Event::SearchPerformed`/`Event::MemoryRecalled`
-  // (`crates/trusty-code/src/events.rs`) already carry `lane`/`query`/
-  // `hit_count`/`hits`/`latency_ms`/`agent`/`agent_id` — but per this PR's
-  // architecture rule, this tab must be a thin REST client, never an SSE
-  // consumer buffering an unbounded per-session event log client-side, and
-  // never a direct `POST /rpc` caller (that would bypass the REST
-  // resource-gateway pattern `serve/rest/mod.rs` establishes). Both events
-  // are emitted ONLY on the SSE stream (`GET /sessions/{id}/events`) with no
-  // REST snapshot/list route and no persisted per-session accumulation
-  // anywhere in the registry — so there is no legal REST data source for
-  // AC-7.2's rows today. This is the SAME underlying gap `SessionMonitor.svelte`
-  // already calls out for the 8b inline monitor (issue #3027); the audit-list
-  // half (10d, this component) is tracked separately as issue #3072, which
-  // proposes the exact fix: a new `GET /sessions/{id}/search-audit` REST
-  // route backed by an always-retained `SessionEntry.search_audit` list
-  // (mirroring the #2962 agents-map precedent), appended from the same
-  // `SessionRegistry::record_search_performed`/`record_memory_recalled` path
-  // that already emits the SSE event.
+  // **requesting agent**, and age. PR #3085 shipped this tab as an honest
+  // shell — the column headers with a labeled gap notice in place of rows —
+  // because `Event::SearchPerformed`/`Event::MemoryRecalled` were SSE-only
+  // with no REST snapshot route (issue #3072). That route now exists
+  // (`GET /sessions/{id}/search-audit`, PR #3107) backed by an
+  // always-retained, 200-record-capped `SessionEntry.search_audit` list, so
+  // this slice replaces the gap notice with real rows polled the same way
+  // `StatusBar.svelte`/`SessionMonitor.svelte` poll their own REST routes —
+  // still a thin REST client, never an SSE consumer.
   //
-  // What: Ships the honest Phase-1 shell: the AC-7.1 explanatory banner (no
-  // input field — literally none is rendered, so AC-7.1 holds by
-  // construction), the AC-7.2 column headers (Lane / Query / Hits / Latency /
-  // Agent / Age) as static table structure, and a labeled, non-hidden gap
-  // notice in place of rows (same treatment as `StatusBar`'s `budget:
-  // unavailable` span and `SessionMonitor`'s AC-6.3 notice). Polls
-  // `GET /sessions` only (identical `$effect`/`AbortController`/
-  // `setInterval` shape to `StatusBar.svelte`/`SessionMonitor.svelte`) to
-  // distinguish `connecting`/`daemon-unreachable`/`no-session` from a real
-  // active session — once a session exists the gap notice explains why the
-  // table is empty (no data source) rather than implying zero searches ran.
+  // What: Polls `GET /sessions` to pick the active session
+  // (`pickActiveSession`), then `GET /sessions/{id}/search-audit` for that
+  // session, every `POLL_MS` — identical `$effect`/`AbortController`/
+  // `setInterval` shape to the sibling components. A `404` on the audit
+  // fetch (session vanished between the two calls in the same `refresh()`)
+  // is treated as `no-session`, same as `SessionMonitor.svelte`'s handling
+  // of its own chained fetches. A non-200 or malformed body degrades to an
+  // `audit unavailable` row rather than throwing — the fetched body's shape
+  // is verified with `isSearchAuditResponse`
+  // (`lib/search-audit.ts`, mirroring `create-session.ts::isDirListing`)
+  // before it becomes reactive state; no bare `as` assertion on
+  // network-derived data. Rows render in the order the daemon returns them
+  // (oldest first, newest last — the API doc's own ordering), so the most
+  // recent search lands where the eye naturally finishes reading, same
+  // convention as `transcript.ts::selectTranscriptTail`. `Recall` rows have
+  // no `lane`/`latency_ms` on the wire; `auditLaneLabel`/`auditLatencyLabel`
+  // (`lib/search-audit.ts`) normalize both variants onto the shared six
+  // columns without fabricating fields neither carries. A second, local
+  // `now` tick (no network call) redisplays each row's age every second via
+  // `transcript.ts::formatElapsed`, same pattern as `SessionMonitor.svelte`.
   //
-  // Test: `SearchTab.test.ts` covers the four phases and asserts no
-  // `<input>`/`<textarea>` renders (AC-7.1); `App.test.ts` pins that this
-  // component mounts inside `.body`.
+  // Test: `SearchTab.test.ts` covers the four connection phases, the
+  // populated/empty/malformed audit states, and asserts no `<input>`/
+  // `<textarea>` ever renders (AC-7.1).
   import { apiBase } from '../lib/api-config';
+  import {
+    auditHitsLabel,
+    auditLaneLabel,
+    auditLatencyLabel,
+    isSearchAuditResponse,
+    type SearchAuditRecord,
+  } from '../lib/search-audit';
   import {
     pickActiveSession,
     type SessionListResponse,
     type SessionSummary,
   } from '../lib/session-status';
+  import { formatElapsed } from '../lib/transcript';
 
   const POLL_MS = 5000; // matches StatusBar.svelte / SessionMonitor.svelte poll cadence
-
-  /** Tracks the REST-snapshot-route gap this tab cannot fill client-side. */
-  const SEARCH_AUDIT_GAP_ISSUE = 'https://github.com/bobmatnyc/trusty-tools/issues/3072';
+  const TICK_MS = 1000; // local age-redisplay tick only — no network call
 
   type Phase = 'connecting' | 'daemon-unreachable' | 'no-session' | 'active';
 
   let phase = $state<Phase>('connecting');
   let session = $state<SessionSummary | null>(null);
   let error = $state<string | null>(null);
+  let auditRows = $state<SearchAuditRecord[]>([]);
+  let auditError = $state<string | null>(null);
+  let now = $state(Date.now());
 
   async function refresh(signal: AbortSignal) {
     let base: string;
@@ -73,27 +81,62 @@
     }
     if (signal.aborted) return;
 
+    let sessions: SessionSummary[];
     try {
       const res = await fetch(`${base}/sessions`, { signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as SessionListResponse;
-      if (signal.aborted) return;
-
-      const active = pickActiveSession(body.sessions);
-      if (!active) {
-        phase = 'no-session';
-        session = null;
-        error = null;
-        return;
-      }
-      session = active;
-      phase = 'active';
-      error = null;
+      sessions = body.sessions;
     } catch (e) {
       if (!signal.aborted) {
         phase = 'daemon-unreachable';
         session = null;
         error = e instanceof Error ? e.message : String(e);
+      }
+      return;
+    }
+    if (signal.aborted) return;
+
+    const active = pickActiveSession(sessions);
+    if (!active) {
+      phase = 'no-session';
+      session = null;
+      auditRows = [];
+      auditError = null;
+      error = null;
+      return;
+    }
+    session = active;
+    phase = 'active';
+    error = null;
+
+    try {
+      const res = await fetch(`${base}/sessions/${active.id}/search-audit`, { signal });
+      if (res.status === 404) {
+        // Reachable daemon, just-listed session vanished mid-poll — same
+        // partial-case handling as SessionMonitor.svelte's chained fetches.
+        if (!signal.aborted) {
+          phase = 'no-session';
+          session = null;
+          auditRows = [];
+          auditError = null;
+        }
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body: unknown = await res.json();
+      if (signal.aborted) return;
+      if (!isSearchAuditResponse(body)) {
+        auditRows = [];
+        auditError = 'malformed response from daemon';
+        return;
+      }
+      auditRows = body.search_audit;
+      auditError = null;
+    } catch (e) {
+      if (!signal.aborted) {
+        auditRows = [];
+        auditError = e instanceof Error ? e.message : String(e);
       }
     }
   }
@@ -110,6 +153,17 @@
       controller.abort();
       clearInterval(timer);
     };
+  });
+
+  $effect(() => {
+    // Independent of the network poll: a pure local redisplay tick so each
+    // row's "age" column advances smoothly without waiting on POLL_MS. No
+    // fetch, no AbortController needed — clearing the interval is the whole
+    // teardown (mirrors SessionMonitor.svelte's elapsed-time tick).
+    const timer = setInterval(() => {
+      now = Date.now();
+    }, TICK_MS);
+    return () => clearInterval(timer);
   });
 </script>
 
@@ -146,20 +200,30 @@
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td colspan="6" class="pt-2 text-trusty-text/40">
-              no REST snapshot route yet — see the gap notice below
-            </td>
-          </tr>
+          {#if auditError}
+            <tr>
+              <td colspan="6" class="pt-2 text-status-error">
+                audit unavailable — {auditError}
+              </td>
+            </tr>
+          {:else if auditRows.length === 0}
+            <tr>
+              <td colspan="6" class="pt-2 text-trusty-text/40">no searches recorded yet</td>
+            </tr>
+          {:else}
+            {#each auditRows as record, i (`${record.at}-${record.agent_id}-${i}`)}
+              <tr class="text-trusty-text/80">
+                <td class="py-0.5 pr-3">{auditLaneLabel(record)}</td>
+                <td class="py-0.5 pr-3 truncate" title={record.query}>{record.query}</td>
+                <td class="py-0.5 pr-3">{auditHitsLabel(record)}</td>
+                <td class="py-0.5 pr-3">{auditLatencyLabel(record)}</td>
+                <td class="py-0.5 pr-3">{record.agent}</td>
+                <td class="py-0.5">{formatElapsed(record.at, now)}</td>
+              </tr>
+            {/each}
+          {/if}
         </tbody>
       </table>
     </div>
-
-    <p
-      class="mt-3 text-[11px] text-trusty-text/30"
-      title={`DOC-39 §4.7 AC-7.2's search/recall audit rows (lane, query, hit count, latency, requesting agent, age) are not renderable here — Event::SearchPerformed/Event::MemoryRecalled are SSE-only with no REST snapshot route and no persisted per-session history. Tracked at ${SEARCH_AUDIT_GAP_ISSUE}`}
-    >
-      search audit trail (AC-7.2): not yet implemented — see issue #3072
-    </p>
   {/if}
 </section>
