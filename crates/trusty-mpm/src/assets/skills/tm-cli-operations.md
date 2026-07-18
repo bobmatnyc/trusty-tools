@@ -45,6 +45,17 @@ This map is **user scope**. There is deliberately **no `--scope` flag**:
 `tm mcp` is inherently user scope. (Stock `claude mcp add` cannot target this
 relocated dir, which is why `tm mcp` exists.)
 
+**ANTI-PATTERN — do not hand-edit a project's `.mcp.json`.** When asked to
+"register the X MCP server" with no scope qualifier, that almost always means
+**user-wide** (available in every project/session), and the answer is always
+`tm mcp add` — never editing a project's `.mcp.json` directly. A project
+`.mcp.json` is **project scope**: visible only inside that one repo/worktree,
+invisible to every other project and to the standalone `tm run` driver, and
+(inside a fleet worktree) silently overwritten by `tm` on the next spawn
+anyway. If a PM delegates "register the duetto-memory MCP" and an agent edits
+`.mcp.json` in whatever worktree happens to be open, that is the wrong scope —
+route it through `tm mcp add` instead.
+
 **Where these servers actually reach (issue #2739):**
 
 - The **standalone `tm run` driver** reads this user-scope map directly, so it
@@ -100,6 +111,29 @@ tm mcp add events -t sse -H "X-Api-Key: $KEY" https://host/sse
 - `-H "Name: Value"` (repeatable) — HTTP headers. Splits on the **first** `:`,
   value trimmed. Only valid for http/sse.
 - `-e` and subprocess args are rejected for http/sse; `-H` is rejected for stdio.
+
+### Propagation caveat — an already-running session needs a relaunch
+
+`tm mcp add` writes the config immediately, but a **currently running**
+session does not hot-reload it: the workspace `.mcp.json` (and its trust seed)
+is only (re)built when a session **spawns or resumes**, never while the pane
+is live. Concretely:
+
+- **Standalone `tm run` driver** — sees the full user-scope map on its *next*
+  launch.
+- **Fleet sessions (`tm session new`)** — only the native-allowlist servers
+  (`slack-mcp`, `telegram-mcp`, `gworkspace-mcp`, `trusty-analyze`, plus the
+  always-provisioned `trusty-memory`/`trusty-search`) get bridged into the
+  workspace `.mcp.json`, and only at spawn/resume. A non-native/custom server
+  (e.g. an internal `duetto-memory`) reaches the standalone driver only — it
+  is not yet bridged into fleet sessions at all (tracked by #2739).
+
+So if a newly `tm mcp add`-ed server isn't showing up in `/mcp` inside a
+session that was already running when you added it, the fix is to **relaunch
+the session** (`tm session resume <id>`, or the in-pane `tm` relaunch hint) —
+not to hand-edit that session's project `.mcp.json` as a workaround. That
+edit both reintroduces the anti-pattern above and gets clobbered on the next
+spawn anyway.
 
 ### How added servers flow into the trust-seed
 
