@@ -137,6 +137,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn review_template_none_by_default() {
         assert_eq!(load_review_template(None, None, None), None);
     }
@@ -234,6 +235,7 @@ mod tests {
     /// file-tier value rather than being returned.
     /// Test: this test itself; no filesystem I/O.
     #[test]
+    #[serial_test::serial]
     fn review_template_cli_rejects_parent_traversal() {
         let file = file_with("file-template");
         let result = load_review_template(Some("../../etc/passwd"), None, Some(&file));
@@ -284,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn review_template_empty_cli_override_falls_through() {
         let file = file_with("file-template");
         let result = load_review_template(Some("   "), None, Some(&file));
