@@ -160,25 +160,191 @@ fn grade_model_approve_confident_medium_still_escalates_to_request_changes() {
     );
 }
 
-/// A SINGLE high-confidence Medium finding (confidence > 0.80) must floor to
-/// REQUEST_CHANGES (#1876 — supersedes the pre-#1876 APPROVE* result).
+/// A SINGLE Medium finding that clears the #1897 solo-escalation bar
+/// (`confidence >= SOLO_MEDIUM_ESCALATION_CONFIDENCE`, 0.90) must floor to
+/// REQUEST_CHANGES uncapped, even with a clean model APPROVE (#1876 —
+/// supersedes the pre-#1876 APPROVE* result; #1897 narrows this to the
+/// solo-escalation band specifically — see the marginal-band companion below
+/// for the confidence range #1897 now caps).
 ///
 /// Why: the #1876 shadow-eval (n=473) showed requiring a SECOND corroborating
 /// Medium before escalating (the old Tier 2/3 split) was the single largest
 /// source of the reviewer under-firing REQUEST_CHANGES (only 3 emissions
 /// against 119 reference-reviewer REQUEST_CHANGES cases). A finding that clears
-/// FLOOR_MIN_CONFIDENCE (0.80) is, by definition, well-evidenced — it now gets
-/// the same hard-floor treatment as a High-effort finding (Tier 1), matching
-/// the precedent set by `mapreduce::synthesis::apply_synthesis_floor`'s
-/// High-effort hard floor (PR #1674/#1675).
+/// the higher solo-escalation bar is well-evidenced enough to stand alone
+/// against a clean model APPROVE, matching the precedent set by
+/// `mapreduce::synthesis::apply_synthesis_floor`'s High-effort hard floor
+/// (PR #1674/#1675). A follow-up #1897 shadow-eval found the ORIGINAL 0.80
+/// gate too permissive for this specific case (a single marginal Medium
+/// overriding a clean APPROVE) — see
+/// `grade_model_approve_single_marginal_medium_caps_at_approve_star`.
 #[test]
-fn grade_one_medium_yields_request_changes() {
-    let findings = vec![finding(Effort::Medium, 0.85)];
+fn grade_model_approve_solo_high_confidence_medium_still_escalates() {
+    let findings = vec![finding(Effort::Medium, 0.92)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
-        "a single high-confidence Medium finding must floor to REQUEST_CHANGES (#1876)"
+        "a single Medium finding clearing the solo-escalation bar (0.90) must \
+         still floor to REQUEST_CHANGES even with a clean model APPROVE (#1876, \
+         narrowed by #1897)"
+    );
+}
+
+/// Boundary companion: a single Medium finding EXACTLY at the solo-escalation
+/// bar (`confidence == SOLO_MEDIUM_ESCALATION_CONFIDENCE`, 0.90) still
+/// escalates uncapped — the bar is inclusive (`>=`), matching the inclusive
+/// `>=` convention `conformance_floor` already uses for its own confidence gate.
+#[test]
+fn grade_model_approve_solo_medium_at_bar_boundary_escalates() {
+    let findings = vec![finding(Effort::Medium, 0.90)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "a single Medium finding exactly at the 0.90 solo-escalation bar must \
+         still escalate uncapped (#1897, inclusive boundary)"
+    );
+}
+
+/// #1897 RANK-1 FIX (the core regression this issue targets): a SINGLE Medium
+/// finding in the MARGINAL confidence band (`FLOOR_MIN_CONFIDENCE` < c <
+/// `SOLO_MEDIUM_ESCALATION_CONFIDENCE`, i.e. 0.80–0.90) must be CAPPED to
+/// APPROVE* rather than floored to REQUEST_CHANGES, when the model's own
+/// verdict is a clean APPROVE.
+///
+/// Why: the #1897 shadow-eval (26 paired PRs) found 47% of Bedrock-APPROVE PRs
+/// were newly over-flagged by 0.6.3 (up from 0% under 0.6.2), driven largely
+/// by a SINGLE Medium finding just above `FLOOR_MIN_CONFIDENCE` (e.g. 0.81)
+/// from a differently-calibrated reviewer model, on diffs the reference
+/// reviewer read as clean.  This is the exact "clean PR with a scattered
+/// marginal Medium" shape the narrowed reconciliation cap protects — NOT a
+/// revert of #1876 (a ≥2-Medium floor or a solo Medium ≥0.90 still escalates,
+/// see the companions above).
+/// What: model APPROVE, one Medium@0.85 (marginal band) → APPROVE* (capped),
+/// NOT REQUEST_CHANGES.
+#[test]
+fn grade_model_approve_single_marginal_medium_caps_at_approve_star() {
+    let findings = vec![finding(Effort::Medium, 0.85)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::ApproveWithReservations,
+        "#1897: a single marginal-confidence (0.80-0.90) Medium finding must be \
+         capped at APPROVE* rather than forcing REQUEST_CHANGES on a clean \
+         model APPROVE"
+    );
+}
+
+/// Control: the SAME marginal-confidence single Medium does NOT get capped
+/// when the model itself already signalled reservations (APPROVE*, not a
+/// clean APPROVE) — the #1897 cap protects ONLY a clean model APPROVE, exactly
+/// like its #1343 predecessor.
+#[test]
+fn grade_model_approve_with_reservations_marginal_medium_not_capped() {
+    let findings = vec![finding(Effort::Medium, 0.85)];
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "#1897: the reconciliation cap must only protect a CLEAN model \
+         APPROVE — a model that already flagged reservations (APPROVE*) gets \
+         no cap, matching the #1876/#1343 precedent"
+    );
+}
+
+/// Control: the marginal-band cap does NOT apply when ≥2 confident Medium
+/// findings independently justify the floor — the #1897 cap is narrowly
+/// scoped to the single-Medium case, not a reintroduction of the #1343
+/// count-based cap.
+#[test]
+fn grade_model_approve_two_marginal_mediums_not_capped() {
+    let findings = vec![finding(Effort::Medium, 0.82), finding(Effort::Medium, 0.83)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "#1897: two marginal-confidence Medium findings corroborate each other \
+         and must NOT be capped — the cap is scoped to exactly one Medium"
+    );
+}
+
+/// Control: a marginal-confidence Medium alongside a citable High-effort
+/// finding must still BLOCK — the cap must never interfere with a
+/// genuinely-bad PR backed by citable evidence.
+#[test]
+fn grade_model_approve_marginal_medium_with_high_effort_still_blocks() {
+    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::High, 0.90)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "#1897: a citable High-effort finding must still BLOCK regardless of \
+         any co-occurring marginal Medium — the cap never weakens a genuine \
+         BLOCK-driving finding"
+    );
+}
+
+/// Control: a marginal-confidence Medium alongside a DISQUALIFIED (uncited,
+/// non-diff-provable) High-effort finding must NOT be capped — the presence of
+/// ANY High-effort finding (disqualified or not) disqualifies the #1897 cap,
+/// because a disqualified High is still stronger self-reported evidence than
+/// an ordinary Medium even though citability keeps it out of the BLOCK floor.
+/// Duplicates `pr84_confident_uncited_high_caps_at_request_changes`'s
+/// expectation from the #1897 angle for clarity.
+#[test]
+fn grade_model_approve_marginal_medium_with_disqualified_high_not_capped() {
+    let findings = vec![
+        finding(Effort::Medium, 0.85),
+        speculative_finding(Effort::High, 0.85),
+    ];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "#1897: a co-occurring disqualified High rules out the reconciliation \
+         cap even though it cannot itself drive BLOCK"
+    );
+}
+
+/// Control: a marginal-confidence correctness Medium alongside a CONFIDENT
+/// conformance divergence must NOT be capped — a confident conformance
+/// finding is independent grounded evidence, mirroring the High-effort
+/// exemption (issue #1897's "no confident conformance finding" condition).
+#[test]
+fn grade_model_approve_marginal_medium_with_confident_conformance_not_capped() {
+    let findings = vec![
+        finding(Effort::Medium, 0.85),
+        conformance_finding(Effort::Medium, 0.85),
+    ];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "#1897: a confident conformance divergence rules out the \
+         reconciliation cap — it is independent grounded evidence"
+    );
+}
+
+/// End-to-end (grade-aware entry point): the #1897 cap also clamps the
+/// returned GRADE down to C+ (the ceiling of the APPROVE* band) instead of D+
+/// (the REQUEST_CHANGES ceiling) — confirms the cap flows through
+/// `derive_verdict_with_grade`, not just the bare `derive_verdict`.
+#[test]
+fn derive_verdict_with_grade_marginal_medium_caps_grade_to_c_plus() {
+    let findings = vec![finding(Effort::Medium, 0.85)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::ApproveWithReservations,
+        "#1897: marginal single Medium caps at APPROVE* through the grade-aware \
+         entry point too"
+    );
+    assert_eq!(
+        g,
+        Some(Grade::CPlus),
+        "#1897: grade clamps to C+ (APPROVE* ceiling), not D+ (REQUEST_CHANGES \
+         ceiling) — the grade must agree with the capped verdict"
     );
 }
 
@@ -305,13 +471,18 @@ fn grade_high_confidence_medium_beats_low_confidence_check() {
 /// Why: only the finding with confidence > 0.80 counts toward the floor (#1015).
 /// One floor-counting Medium is now (#1876) sufficient on its own →
 /// REQUEST_CHANGES.  The sub-0.80 finding contributes nothing either way;
-/// confidence 0.5 is well below the gate.
+/// confidence 0.5 is well below the gate.  The counting finding is pinned at
+/// 0.92 (above `SOLO_MEDIUM_ESCALATION_CONFIDENCE`, #1897) specifically so
+/// this test isolates the `FLOOR_MIN_CONFIDENCE` gate (which finding counts)
+/// from the separate #1897 marginal-band reconciliation cap — see
+/// `grade_model_approve_single_marginal_medium_caps_at_approve_star` for that.
 #[test]
 fn grade_mixed_confidence_two_medium_only_one_counts() {
-    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.5)];
+    let findings = vec![finding(Effort::Medium, 0.92), finding(Effort::Medium, 0.5)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
-    // Only the 0.85 finding counts (> 0.80); one floor-counting Medium is
-    // sufficient on its own → REQUEST_CHANGES (#1876).
+    // Only the 0.92 finding counts (> 0.80); one floor-counting Medium is
+    // sufficient on its own → REQUEST_CHANGES (#1876), and 0.92 clears the
+    // #1897 solo-escalation bar so it is not cap-eligible.
     assert_eq!(verdict, Verdict::RequestChanges);
 }
 
@@ -985,8 +1156,9 @@ fn approx(a: f32, b: f32) -> bool {
 /// Why: replaces the old env-mutating `env_override_defaults_when_unset`.  Any
 /// future refactor that accidentally changes a default value (calibrated over the
 /// duetto review board) is caught here — with zero process-env access.
-/// What: asserts the three `defaults()` fields equal `LOW_CONFIDENCE_THRESHOLD`
-/// (0.65), `FLOOR_MIN_CONFIDENCE` (0.80), `FLOOR_COUNT_MIN_CONFIDENCE` (0.50).
+/// What: asserts the four `defaults()` fields equal `LOW_CONFIDENCE_THRESHOLD`
+/// (0.65), `FLOOR_MIN_CONFIDENCE` (0.80), `SOLO_MEDIUM_ESCALATION_CONFIDENCE`
+/// (0.90, #1897), `FLOOR_COUNT_MIN_CONFIDENCE` (0.50).
 /// Test: this test itself.
 #[test]
 fn thresholds_defaults_match_constants() {
@@ -998,6 +1170,10 @@ fn thresholds_defaults_match_constants() {
     assert!(
         approx(d.floor_min, FLOOR_MIN_CONFIDENCE),
         "default floor_min must be {FLOOR_MIN_CONFIDENCE}"
+    );
+    assert!(
+        approx(d.solo_medium_escalation, SOLO_MEDIUM_ESCALATION_CONFIDENCE),
+        "default solo_medium_escalation must be {SOLO_MEDIUM_ESCALATION_CONFIDENCE}"
     );
     assert!(
         approx(d.floor_count_min, FLOOR_COUNT_MIN_CONFIDENCE),
@@ -1022,6 +1198,7 @@ fn thresholds_from_lookup_reads_each_env_key() {
     let t = Thresholds::from_lookup(|key| match key {
         TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV => Some("0.11".to_string()),
         TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV => Some("0.22".to_string()),
+        TRUSTY_REVIEW_SOLO_MEDIUM_ESCALATION_CONFIDENCE_ENV => Some("0.44".to_string()),
         TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV => Some("0.33".to_string()),
         _ => None,
     });
@@ -1034,15 +1211,59 @@ fn thresholds_from_lookup_reads_each_env_key() {
         "FLOOR_MIN env key must map to the floor_min field"
     );
     assert!(
+        approx(t.solo_medium_escalation, 0.44),
+        "SOLO_MEDIUM_ESCALATION env key must map to the solo_medium_escalation field (#1897)"
+    );
+    assert!(
         approx(t.floor_count_min, 0.33),
         "FLOOR_COUNT_MIN env key must map to the floor_count_min field"
     );
 
-    // Every key absent → all three fields fall back to the compile-time defaults.
+    // Every key absent → all four fields fall back to the compile-time defaults.
     let d = Thresholds::from_lookup(|_| None);
     assert!(approx(d.low_confidence, LOW_CONFIDENCE_THRESHOLD));
     assert!(approx(d.floor_min, FLOOR_MIN_CONFIDENCE));
+    assert!(approx(
+        d.solo_medium_escalation,
+        SOLO_MEDIUM_ESCALATION_CONFIDENCE
+    ));
     assert!(approx(d.floor_count_min, FLOOR_COUNT_MIN_CONFIDENCE));
+}
+
+/// #1597 + #1897: raising/lowering the solo-Medium escalation bar changes
+/// whether a single marginal-confidence Medium is cap-eligible.
+///
+/// Why: proves the `solo_medium_escalation` knob actually drives the #1897
+/// reconciliation cap decision, mirroring the injection pattern the other
+/// three calibration knobs already use (#2688 — no process-env mutation, so
+/// this can never race a parallel test).
+/// What: a single Medium@0.85 (model=APPROVE) is capped at APPROVE* under the
+/// default bar (0.90); lowering the bar to 0.80 (so 0.85 clears it) makes the
+/// SAME finding escalate uncapped to REQUEST_CHANGES instead.
+/// Test: this test itself.
+#[test]
+fn injected_solo_medium_escalation_changes_cap_eligibility() {
+    let findings = vec![finding(Effort::Medium, 0.85)];
+
+    // Default bar (0.90): 0.85 < 0.90 → marginal band → capped.
+    assert_eq!(
+        derive_verdict_with(Verdict::Approve, &findings, &Thresholds::defaults()),
+        Verdict::ApproveWithReservations,
+        "#1897: default solo_medium_escalation=0.90 leaves 0.85-conf Medium \
+         cap-eligible"
+    );
+
+    // Lowered bar (0.80): 0.85 >= 0.80 → clears the solo bar → uncapped.
+    let lowered = Thresholds {
+        solo_medium_escalation: 0.80,
+        ..Thresholds::defaults()
+    };
+    assert_eq!(
+        derive_verdict_with(Verdict::Approve, &findings, &lowered),
+        Verdict::RequestChanges,
+        "#1897: solo_medium_escalation=0.80 makes the 0.85-conf Medium clear \
+         the solo bar → uncapped REQUEST_CHANGES"
+    );
 }
 
 /// #1597: raising the low-confidence collapse line makes findings that were
@@ -1157,6 +1378,7 @@ fn injected_floor_count_min_confidence_changes_verdict() {
         low_confidence: 0.30,
         floor_min: 0.30,
         floor_count_min: 0.40,
+        ..Thresholds::defaults()
     };
     assert_eq!(
         derive_verdict_with(Verdict::RequestChanges, &findings, &lowered),
