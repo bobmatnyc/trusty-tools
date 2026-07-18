@@ -21,7 +21,7 @@
 //! value touches disk only for the instant between write and source. An
 //! empty `gh_env` slice writes nothing and yields an empty prefix, keeping an
 //! unconfigured project's spawn command byte-identical to pre-#3025 behaviour.
-//! Test: `write_gh_env_file_writes_export_lines`, `write_gh_env_file_empty_is_none`,
+//! Test: `write_gh_env_file_writes_export_lines_in_order`, `write_gh_env_file_empty_is_none`,
 //! `write_gh_env_file_is_mode_0600` (unix only), `gh_env_source_prefix_sources_and_deletes`,
 //! `gh_env_source_prefix_none_is_empty` (`claude_code_gh_env_tests.rs`).
 
@@ -62,7 +62,7 @@ fn secure_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// each value via the shared [`shell_single_quote`], to
 /// `<tmp>/trusty-mpm-gh-env-<uuid>.sh`; returns `None` (logged) on any write
 /// failure so the spawn proceeds without `GH_TOKEN` rather than failing.
-/// Test: `write_gh_env_file_writes_export_lines`, `write_gh_env_file_empty_is_none`,
+/// Test: `write_gh_env_file_writes_export_lines_in_order`, `write_gh_env_file_empty_is_none`,
 /// `write_gh_env_file_is_mode_0600`.
 pub(super) fn write_gh_env_file(gh_env: &[(String, String)]) -> Option<PathBuf> {
     if gh_env.is_empty() {
