@@ -14,22 +14,90 @@
 //!
 //! Crash/restart: EOF or IO error drains all pending oneshots with an error so
 //! callers return immediately; the supervisor swaps in a fresh client.
+//!
+//! Reader-task health (issues #1448/#1450): the reader task's `JoinHandle` is
+//! retained by a small monitor task rather than dropped on a bare
+//! fire-and-forget `tokio::spawn`. If the reader task dies unexpectedly
+//! (panics, or returns via its EOF/IO-error arms) the monitor drains any
+//! residual pending requests immediately and flips `unhealthy_signal` to
+//! `true` (#1448) — the client no longer relies on individual per-call
+//! timeouts to notice a dead reader. Separately, the reader task itself
+//! tracks *consecutive* call timeouts with no intervening successful reply;
+//! past `WEDGED_TIMEOUT_THRESHOLD` it flips the same `unhealthy_signal`,
+//! covering the "process alive but wedged" case (#1450) that a bare
+//! EOF/exit check can never see. `EmbedderSupervisor` observes
+//! `unhealthy_signal` alongside `child.wait()` and forces a kill + respawn
+//! either way.
+//!
 //! Test: unit tests cover wire format, error decoding, stalled-reader timeout,
-//! and the stale-frame misattribution proof. Multi-flight + correlation:
+//! the stale-frame misattribution proof, reader-task panic detection, and the
+//! wedged-timeout threshold. Multi-flight + correlation:
 //! `trusty-embedderd/tests/multiflight.rs`. End-to-end: `bit_identical --
 //! --include-ignored`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::{Mutex, Semaphore, oneshot};
+use tokio::sync::{Mutex, Semaphore, oneshot, watch};
 use tokio::time::Duration;
 
 use super::{EmbedderClient, EmbedderError};
 use crate::embedder::{ExecutionProvider, resolve_expected_provider};
+
+// ── Wedged-sidecar detection (#1450) ────────────────────────────────────────
+
+/// Number of consecutive reader-task call timeouts (each already gated by
+/// `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`, default 30s) with zero intervening
+/// successful replies, past which the sidecar is declared wedged rather than
+/// merely slow.
+///
+/// Why: a sidecar that is alive but stuck (e.g. the CUDA BFCArena stall from
+/// #1428, or the CoreML/ANE scheduling stall reported on #1450) never exits,
+/// so `EmbedderSupervisor`'s process-exit-based restart never fires. Three
+/// consecutive timeouts tolerates one or two genuinely slow/oversized batches
+/// while still declaring a truly wedged sidecar within a bounded window
+/// (3 x 30s = 90s minimum at the default timeout).
+/// What: compared against `TimeoutTracker`'s running count in `reader_task`.
+/// Test: `wedge_threshold_fires_after_consecutive_timeouts`,
+/// `wedge_threshold_resets_on_success` in `stdio_tests.rs`.
+const WEDGED_TIMEOUT_THRESHOLD: u32 = 3;
+
+/// Tracks consecutive reader-task call timeouts for wedge detection (#1450).
+///
+/// Why: needs to be shared between the reader task (which increments/resets
+/// it) and is otherwise process-local, so a plain `AtomicU32` behind an `Arc`
+/// is sufficient — no locking required.
+/// What: `record_timeout` increments and reports whether the threshold was
+/// just crossed (fires exactly once per accumulation); `record_success`
+/// resets the count to zero.
+/// Test: `wedge_threshold_*` in `stdio_tests.rs`.
+struct TimeoutTracker {
+    consecutive_timeouts: AtomicU32,
+}
+
+impl TimeoutTracker {
+    fn new() -> Self {
+        Self {
+            consecutive_timeouts: AtomicU32::new(0),
+        }
+    }
+
+    /// Record one real (non-idle) call timeout. Returns `true` exactly once,
+    /// on the call that makes the running count equal `WEDGED_TIMEOUT_THRESHOLD`.
+    fn record_timeout(&self) -> bool {
+        let n = self.consecutive_timeouts.fetch_add(1, Ordering::AcqRel) + 1;
+        n == WEDGED_TIMEOUT_THRESHOLD
+    }
+
+    /// Reset the consecutive-timeout count — called whenever the reader
+    /// receives any response frame, proving the sidecar is still talking.
+    fn record_success(&self) {
+        self.consecutive_timeouts.store(0, Ordering::Release);
+    }
+}
 
 // ── Per-call timeout ─────────────────────────────────────────────────────────
 
@@ -162,6 +230,20 @@ pub struct StdioEmbedderClient {
     inflight: Arc<Semaphore>,
     /// Monotonic counter for request ids.
     next_id: Arc<AtomicU64>,
+    /// Flips to `true` exactly once the reader task dies unexpectedly
+    /// (#1448) or the sidecar is judged wedged via accumulating call
+    /// timeouts (#1450). `EmbedderSupervisor` watches this alongside
+    /// `child.wait()` to force a restart even when the child process is
+    /// still alive. Retained here (rather than only inside the spawned
+    /// tasks) so `unhealthy_signal()` can hand out fresh receivers.
+    unhealthy_tx: watch::Sender<bool>,
+    /// Keeps `unhealthy_tx`'s receiver count above zero for the client's
+    /// whole lifetime. `watch::Sender::send` silently drops the value
+    /// (returns `Err` without updating the stored value) when the receiver
+    /// count is zero, so if every `unhealthy_signal()` receiver were dropped
+    /// before the monitor task's `send(true)` fires, that transition would be
+    /// lost for any receiver subscribed afterward. Never read directly.
+    _unhealthy_rx_keepalive: watch::Receiver<bool>,
 }
 
 impl StdioEmbedderClient {
@@ -170,27 +252,112 @@ impl StdioEmbedderClient {
     /// Why: the reader task must be running before any `embed_batch` calls so
     /// it can dispatch responses to waiting callers.
     /// What: wraps stdin in a `Mutex`; wraps stdout in a `BufReader` owned
-    /// exclusively by the reader task. Spawns `reader_task` as a detached
-    /// Tokio task. Returns the client handle immediately.
+    /// exclusively by the reader task. Spawns `reader_task` and a monitor
+    /// task that retains its `JoinHandle` (#1448). Returns the client handle
+    /// immediately.
     /// Test: indirectly covered by every test that constructs and calls the client.
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let inflight = Arc::new(Semaphore::new(embed_inflight()));
         let next_id = Arc::new(AtomicU64::new(1));
-
-        // Spawn the reader task — it owns stdout for its lifetime.
-        let pending_clone = Arc::clone(&pending);
         let timeout = embed_call_timeout();
-        tokio::spawn(reader_task(BufReader::new(stdout), pending_clone, timeout));
+
+        let (unhealthy_tx, unhealthy_rx_keepalive) =
+            spawn_reader_with_monitor(BufReader::new(stdout), Arc::clone(&pending), timeout);
 
         Self {
             stdin,
             pending,
             inflight,
             next_id,
+            unhealthy_tx,
+            _unhealthy_rx_keepalive: unhealthy_rx_keepalive,
         }
     }
+
+    /// Hand out a fresh receiver for the reader-health signal (#1448/#1450).
+    ///
+    /// Why: `EmbedderSupervisor` needs to detect a dead-but-not-exited reader
+    /// or a wedged sidecar without downcasting the `Arc<dyn EmbedderClient>`
+    /// trait object — it calls this directly on the concrete
+    /// `StdioEmbedderClient` right after `spawn_child` constructs one, before
+    /// erasing it to the trait object.
+    /// What: clones the `watch::Sender`'s receiver; the initial value is
+    /// `false` and `changed()`/`borrow()` observe the transition to `true`
+    /// exactly once, even if the receiver is created after the flip.
+    /// Test: `unhealthy_signal_fires_on_reader_panic`,
+    /// `wedge_threshold_fires_after_consecutive_timeouts` in `stdio_tests.rs`.
+    pub fn unhealthy_signal(&self) -> watch::Receiver<bool> {
+        self.unhealthy_tx.subscribe()
+    }
+}
+
+/// Spawn the reader task plus a monitor task that retains its `JoinHandle`
+/// (#1448) and returns the shared unhealthy-signal `(Sender, Receiver)` pair.
+///
+/// Why: extracted from `StdioEmbedderClient::new` and kept generic over the
+/// reader type so it is unit-testable with `tokio::io::duplex` (and a panic-
+/// injecting fake reader) without needing a real child process. The returned
+/// `Receiver` must be retained by the caller for the client's lifetime (see
+/// `_unhealthy_rx_keepalive` doc) — `watch::Sender::send` silently drops its
+/// value if the receiver count has reached zero.
+/// What: spawns `reader_task` (which also owns a fresh `TimeoutTracker` for
+/// #1450), then spawns a monitor task that awaits the reader's `JoinHandle`.
+/// On a panic (`Err(JoinError)`), the monitor drains any pending requests
+/// that the reader task's own EOF/IO-error arms never got to run — a bare
+/// `tokio::spawn` with the handle dropped would otherwise leave those oneshots
+/// (and therefore their `embed_batch` callers) hanging forever. Either way
+/// (panic or normal exit) the monitor flips the sender to `true`.
+/// Test: `unhealthy_signal_fires_on_reader_panic`,
+/// `reader_panic_drains_pending_requests_immediately` in `stdio_tests.rs`.
+fn spawn_reader_with_monitor<R>(
+    reader: R,
+    pending: PendingMap,
+    timeout: Duration,
+) -> (watch::Sender<bool>, watch::Receiver<bool>)
+where
+    R: AsyncBufRead + Unpin + Send + 'static,
+{
+    let (unhealthy_tx, unhealthy_rx) = watch::channel(false);
+    let timeout_tracker = Arc::new(TimeoutTracker::new());
+
+    let reader_handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(&pending),
+        timeout,
+        Arc::clone(&timeout_tracker),
+        unhealthy_tx.clone(),
+    ));
+
+    let monitor_pending = pending;
+    let monitor_unhealthy_tx = unhealthy_tx.clone();
+    tokio::spawn(async move {
+        match reader_handle.await {
+            Ok(()) => {
+                // Normal exit (EOF/IO-error arms already drained pending
+                // before returning) — nothing left to do beyond signalling.
+            }
+            Err(join_err) => {
+                tracing::error!(
+                    "StdioEmbedderClient: reader task panicked: {join_err} — \
+                     draining pending requests so callers fail fast instead \
+                     of hanging"
+                );
+                drain_pending_with_error(
+                    &monitor_pending,
+                    EmbedderError::Stdio(format!("embedder reader task panicked: {join_err}")),
+                )
+                .await;
+            }
+        }
+        // The reader is gone either way: mark the client unhealthy so the
+        // supervisor forces a restart even if the child process itself never
+        // exits (e.g. a panic that leaves the OS process running).
+        let _ = monitor_unhealthy_tx.send(true);
+    });
+
+    (unhealthy_tx, unhealthy_rx)
 }
 
 /// Why: issue #857 — former static "CUDA OOM/BFCArena stall?" text was emitted
@@ -211,14 +378,25 @@ fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
 ///
 /// Why: separating the read loop from the write path enables multi-flight; id-
 /// based dispatch prevents stale-frame misattribution after a timeout (fix #763).
+/// Tracks consecutive real (non-idle) timeouts via `timeout_tracker` and, past
+/// `WEDGED_TIMEOUT_THRESHOLD`, flips `unhealthy_tx` to declare the sidecar
+/// wedged (#1450) — the process may still be alive, so this is the only signal
+/// the supervisor gets in that case.
 /// What: reads newline-framed JSON-RPC responses, looks up each by echoed id,
 /// and dispatches to the caller's oneshot. On timeout, removes only the oldest
 /// stalled entry and CONTINUEs — MUST NOT exit (fix #763). On EOF, exits.
-/// Test: `reader_task_survives_timeout_and_serves_next_request` in stdio_tests.
+/// Every successfully read response frame (matched or stale) resets the
+/// timeout tracker, since receiving any frame proves the sidecar is still
+/// talking.
+/// Test: `reader_task_survives_timeout_and_serves_next_request`,
+/// `wedge_threshold_fires_after_consecutive_timeouts`,
+/// `wedge_threshold_resets_on_success` in stdio_tests.
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
     pending: PendingMap,
     timeout: Duration,
+    timeout_tracker: Arc<TimeoutTracker>,
+    unhealthy_tx: watch::Sender<bool>,
 ) {
     let mut line = String::new();
 
@@ -289,6 +467,23 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                             timeout.as_secs()
                         ))));
                     }
+
+                    // #1450: only a REAL in-flight timeout counts toward the
+                    // wedge threshold — an idle re-arm (oldest_id is None,
+                    // handled above) means there was nothing to time out and
+                    // is not evidence of a stuck sidecar.
+                    if timeout_tracker.record_timeout() {
+                        tracing::error!(
+                            consecutive_timeouts = WEDGED_TIMEOUT_THRESHOLD,
+                            "StdioEmbedderClient reader: {} consecutive call \
+                             timeouts with no successful reply — sidecar \
+                             appears wedged (process alive but not \
+                             responding); signalling supervisor to force a \
+                             restart",
+                            WEDGED_TIMEOUT_THRESHOLD,
+                        );
+                        let _ = unhealthy_tx.send(true);
+                    }
                 }
                 line.clear();
                 continue;
@@ -321,6 +516,10 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
             }
             Ok(Ok(_)) => {
                 // Got a line — dispatch to the matching pending entry by id.
+                // #1450: any received frame (even a stale/orphaned one)
+                // proves the sidecar is still talking, so reset the
+                // consecutive-timeout wedge counter.
+                timeout_tracker.record_success();
             }
         }
 
