@@ -75,6 +75,7 @@ fn voice_config_combined_addendum_ordering() {
         principles: Some("Principles text.".to_string()),
         voice_addendum: Some("Voice text.".to_string()),
         voice_name: Some("test".to_string()),
+        ..Default::default()
     };
     let combined = vc.combined_addendum();
     let p_pos = combined.find("Principles text").unwrap();
@@ -99,6 +100,7 @@ fn voice_config_combined_principles_only() {
         principles: Some("Only principles.".to_string()),
         voice_addendum: None,
         voice_name: None,
+        ..Default::default()
     };
     let combined = vc.combined_addendum();
     assert_eq!(
@@ -118,6 +120,7 @@ fn voice_config_combined_voice_only() {
         principles: None,
         voice_addendum: Some("Only voice.".to_string()),
         voice_name: Some("myvoice".to_string()),
+        ..Default::default()
     };
     let combined = vc.combined_addendum();
     assert_eq!(
@@ -169,5 +172,59 @@ fn voice_config_has_addendum_helpers() {
             ..Default::default()
         }
         .has_any_addendum()
+    );
+    // Review template only (#2995).
+    assert!(
+        VoiceConfig {
+            review_template: Some("t".to_string()),
+            ..Default::default()
+        }
+        .has_any_addendum()
+    );
+}
+
+/// combined_addendum() layers the review template LAST, after principles and
+/// voice (#2995).
+///
+/// Why: the review template is the most project-specific layer; it must read
+/// as the final word, composing with (not replacing) the broader layers above
+/// it — see `VoiceConfig::combined_addendum`'s doc for the rationale.
+/// What: sets all three layers with distinct markers; asserts the document
+/// order is principles < voice < review_template.
+/// Test: no filesystem.
+#[test]
+fn voice_config_review_template_layers_last() {
+    let vc = VoiceConfig {
+        principles: Some("PRINCIPLES_MARKER".to_string()),
+        voice_addendum: Some("VOICE_MARKER".to_string()),
+        voice_name: Some("test".to_string()),
+        review_template: Some("TEMPLATE_MARKER".to_string()),
+        review_template_name: Some("strict-security".to_string()),
+    };
+    let combined = vc.combined_addendum();
+    let p_pos = combined.find("PRINCIPLES_MARKER").unwrap();
+    let v_pos = combined.find("VOICE_MARKER").unwrap();
+    let t_pos = combined.find("TEMPLATE_MARKER").unwrap();
+    assert!(p_pos < v_pos, "principles must precede voice");
+    assert!(v_pos < t_pos, "voice must precede the review template");
+}
+
+/// combined_addendum() with only a review template omits the other sections.
+///
+/// Why: a project may select a review template without a voice package and
+/// with principles disabled.
+/// What: only review_template set; asserts combined == template text.
+/// Test: no filesystem.
+#[test]
+fn voice_config_combined_review_template_only() {
+    let vc = VoiceConfig {
+        review_template: Some("Only template.".to_string()),
+        review_template_name: Some("t".to_string()),
+        ..Default::default()
+    };
+    let combined = vc.combined_addendum();
+    assert_eq!(
+        combined, "Only template.",
+        "template-only combined must equal template text"
     );
 }

@@ -37,7 +37,11 @@ mod e2e {
         // its PID in the atomic slot).
         let initial_pid = pid_slot.load(std::sync::atomic::Ordering::Acquire);
         assert!(initial_pid > 0, "pid_slot should be non-zero after spawn");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
 
         let client: Arc<dyn EmbedderClient> = slot.read().await.clone();
         let vecs = client
@@ -94,7 +98,11 @@ mod e2e {
         )
         .await
         .expect("spawn_stdio failed");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
         let client = slot.read().await.clone();
         let sidecar_vecs = client
             .embed_batch(vec![text])
@@ -135,7 +143,11 @@ mod e2e {
         )
         .await
         .expect("spawn_stdio failed");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
         let client = slot.read().await.clone();
 
         let vecs = client.embed_batch(texts).await.expect("embed_batch failed");
@@ -173,7 +185,11 @@ mod e2e {
         // must be updated to the new child's PID.
         let pid_before_crash = pid_slot.load(std::sync::atomic::Ordering::Acquire);
         assert!(pid_before_crash > 0, "initial pid_slot should be non-zero");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
 
         // First embed succeeds.
         let client = slot.read().await.clone();
@@ -267,7 +283,11 @@ mod e2e {
                 .expect("spawn_stdio failed");
         let pid_before_wedge = pid_slot.load(std::sync::atomic::Ordering::Acquire);
         assert!(pid_before_wedge > 0, "initial pid_slot should be non-zero");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
 
         // Confirm the sidecar is healthy before wedging it.
         let client = slot.read().await.clone();
@@ -349,7 +369,11 @@ mod e2e {
         )
         .await
         .expect("spawn_stdio failed");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
         let client = slot.read().await.clone();
 
         let vecs = client
@@ -375,7 +399,11 @@ mod e2e {
         )
         .await
         .expect("spawn_stdio failed");
-        supervisor.start_supervisor_task();
+        // `SupervisorHandle` is `#[must_use]` (issue #2979) — bind it even
+        // though these lifecycle tests never call `.shutdown()` explicitly;
+        // the detached task and `kill_on_drop(true)` on the child still
+        // clean up when the test process exits.
+        let _handle = supervisor.start_supervisor_task();
 
         let slot = Arc::new(slot);
         let mut handles = Vec::new();

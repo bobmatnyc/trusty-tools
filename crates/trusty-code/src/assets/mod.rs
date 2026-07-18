@@ -89,6 +89,103 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     },
 ];
 
+// -- Slice E2 (#2958): embedded tm agent catalog, for `md_loader`'s in-memory
+// extends-composer. NOT wired into `DEFAULT_AGENTS`/`load_all_agents`'s
+// fallback yet -- that expansion is Slice E3. --
+
+const BASE_AGENT_MD: &str = include_str!("agents/BASE-AGENT.md");
+const BASE_ENGINEER_MD: &str = include_str!("agents/BASE-ENGINEER.md");
+const BASE_OPS_MD: &str = include_str!("agents/BASE-OPS.md");
+const BASE_QA_MD: &str = include_str!("agents/BASE-QA.md");
+const BASE_RESEARCH_MD: &str = include_str!("agents/BASE-RESEARCH.md");
+
+const API_QA_MD: &str = include_str!("agents/api-qa.md");
+const CODE_ANALYZER_MD: &str = include_str!("agents/code-analyzer.md");
+const CODE_CRITIC_MD: &str = include_str!("agents/code-critic.md");
+const DART_ENGINEER_MD: &str = include_str!("agents/dart-engineer.md");
+const DATA_ENGINEER_MD: &str = include_str!("agents/data-engineer.md");
+const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
+const GOLANG_ENGINEER_MD: &str = include_str!("agents/golang-engineer.md");
+const JAVA_ENGINEER_MD: &str = include_str!("agents/java-engineer.md");
+const JAVASCRIPT_ENGINEER_MD: &str = include_str!("agents/javascript-engineer.md");
+const LOCAL_OPS_MD: &str = include_str!("agents/local-ops.md");
+const NEXTJS_ENGINEER_MD: &str = include_str!("agents/nextjs-engineer.md");
+const OPS_MD: &str = include_str!("agents/ops.md");
+const PHOENIX_ENGINEER_MD: &str = include_str!("agents/phoenix-engineer.md");
+const PHP_ENGINEER_MD: &str = include_str!("agents/php-engineer.md");
+const PROMPT_ENGINEER_MD: &str = include_str!("agents/prompt-engineer.md");
+const PYTHON_ENGINEER_MD: &str = include_str!("agents/python-engineer.md");
+const QA_MD: &str = include_str!("agents/qa.md");
+const REACT_ENGINEER_MD: &str = include_str!("agents/react-engineer.md");
+const REFACTORING_ENGINEER_MD: &str = include_str!("agents/refactoring-engineer.md");
+const RESEARCH_MD: &str = include_str!("agents/research.md");
+const RUBY_ENGINEER_MD: &str = include_str!("agents/ruby-engineer.md");
+const RUST_ENGINEER_MD: &str = include_str!("agents/rust-engineer.md");
+const SECURITY_MD: &str = include_str!("agents/security.md");
+const SVELTE_ENGINEER_MD: &str = include_str!("agents/svelte-engineer.md");
+const TAURI_ENGINEER_MD: &str = include_str!("agents/tauri-engineer.md");
+const TYPESCRIPT_ENGINEER_MD: &str = include_str!("agents/typescript-engineer.md");
+const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
+const WEB_UI_ENGINEER_MD: &str = include_str!("agents/web-ui-engineer.md");
+
+/// The embedded tm agent catalog's raw sources (Slice E2, #2958): the 5
+/// `BASE-*` extends templates plus the 28 coding-relevant roster agents Bob
+/// selected in #2958 (mpm/memory/cloud-vendor agents excluded -- see the
+/// issue's roster decision). Keyed by each asset's ORIGINAL embedded
+/// filename (`"BASE-QA.md"`, `"rust-engineer.md"`, ...) rather than a
+/// pre-lowercased bare name, because
+/// `trusty_agents_common::agents::builder_in_memory::InMemorySources::insert`
+/// already lowercases and strips a trailing `.md` on both insert and lookup
+/// (Slice E1, PR #3013) -- so `("BASE-QA.md", ...)` resolves an
+/// `extends: base-qa` reference with no extra normalisation needed here.
+///
+/// Why: `agents::md_loader::project_embedded_md_with_extends` needs a single
+/// batch source for `build_in_memory_source_map` instead of 33 individual
+/// `insert` calls; this table is that source. Kept separate from
+/// [`DEFAULT_AGENTS`] so Slice E3 (roster expansion into the dispatchable
+/// fallback) can build on this table without disturbing the existing
+/// 3-agent fallback this slice does not touch.
+/// What: 33 `(original_filename, raw_md_content)` pairs. None of these are
+/// dispatchable agents yet -- wiring them into `DEFAULT_AGENTS` /
+/// `load_all_agents`'s fallback is deferred to Slice E3.
+/// Test: `assets::tests::embedded_tm_agent_sources_has_33_entries_and_unique_keys`,
+/// `md_loader::tests::project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`.
+pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
+    ("BASE-AGENT.md", BASE_AGENT_MD),
+    ("BASE-ENGINEER.md", BASE_ENGINEER_MD),
+    ("BASE-OPS.md", BASE_OPS_MD),
+    ("BASE-QA.md", BASE_QA_MD),
+    ("BASE-RESEARCH.md", BASE_RESEARCH_MD),
+    ("api-qa.md", API_QA_MD),
+    ("code-analyzer.md", CODE_ANALYZER_MD),
+    ("code-critic.md", CODE_CRITIC_MD),
+    ("dart-engineer.md", DART_ENGINEER_MD),
+    ("data-engineer.md", DATA_ENGINEER_MD),
+    ("documentation.md", DOCUMENTATION_MD),
+    ("golang-engineer.md", GOLANG_ENGINEER_MD),
+    ("java-engineer.md", JAVA_ENGINEER_MD),
+    ("javascript-engineer.md", JAVASCRIPT_ENGINEER_MD),
+    ("local-ops.md", LOCAL_OPS_MD),
+    ("nextjs-engineer.md", NEXTJS_ENGINEER_MD),
+    ("ops.md", OPS_MD),
+    ("phoenix-engineer.md", PHOENIX_ENGINEER_MD),
+    ("php-engineer.md", PHP_ENGINEER_MD),
+    ("prompt-engineer.md", PROMPT_ENGINEER_MD),
+    ("python-engineer.md", PYTHON_ENGINEER_MD),
+    ("qa.md", QA_MD),
+    ("react-engineer.md", REACT_ENGINEER_MD),
+    ("refactoring-engineer.md", REFACTORING_ENGINEER_MD),
+    ("research.md", RESEARCH_MD),
+    ("ruby-engineer.md", RUBY_ENGINEER_MD),
+    ("rust-engineer.md", RUST_ENGINEER_MD),
+    ("security.md", SECURITY_MD),
+    ("svelte-engineer.md", SVELTE_ENGINEER_MD),
+    ("tauri-engineer.md", TAURI_ENGINEER_MD),
+    ("typescript-engineer.md", TYPESCRIPT_ENGINEER_MD),
+    ("web-qa.md", WEB_QA_MD),
+    ("web-ui-engineer.md", WEB_UI_ENGINEER_MD),
+];
+
 const API_DESIGN_PATTERNS_SKILL: &str = include_str!("skills/api-design-patterns/SKILL.md");
 const API_DOCUMENTATION_SKILL: &str = include_str!("skills/api-documentation/SKILL.md");
 const ARTIFACTS_BUILDER_SKILL: &str = include_str!("skills/artifacts-builder/SKILL.md");

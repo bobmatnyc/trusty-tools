@@ -3,8 +3,9 @@
 //! Why: review personalisation via named, versioned, shareable voice packages
 //! synthesised from standout human reviewers.  Each package captures HOW a team
 //! reviews; the universal principles layer (#756) captures WHAT the field
-//! considers effective code review.  Together they compose the 3-layer pipeline:
-//!   stock base prompt → principles → voice addendum.
+//! considers effective code review.  Together with the named review-template
+//! addendum (#2995, `crate::review_template`) they compose the 4-layer pipeline:
+//!   stock base prompt → principles → voice addendum → review template.
 //!
 //! What: re-exports `VoicePackage` and related types (from `types`), the
 //! universal best-practices layer (from `principles`), and the voice loader
@@ -24,12 +25,13 @@ pub use types::{VoiceKnobs, VoiceMeta, VoicePackage, VoiceProvenance, VoiceSecti
 
 /// Configuration for the voice layer passed into the prompt builder.
 ///
-/// Why: the prompt builder needs to know (a) which principles/voice layers are
-/// enabled and (b) the resolved addendum strings, without carrying filesystem
-/// I/O dependencies into the prompt module.  This struct is cheaply cloneable
-/// and holds only the resolved text.
-/// What: holds optional principles and voice addendum strings; when absent the
-/// corresponding layer is omitted and the prompt is stock-only.
+/// Why: the prompt builder needs to know (a) which principles/voice/template
+/// layers are enabled and (b) the resolved addendum strings, without carrying
+/// filesystem I/O dependencies into the prompt module.  This struct is cheaply
+/// cloneable and holds only the resolved text.
+/// What: holds optional principles, voice, and review-template addendum
+/// strings; when absent the corresponding layer is omitted and the prompt
+/// falls back to whichever earlier layers are present (all-`None` = stock-only).
 /// Test: `voice_config_none_gives_stock_only` in voice/tests.rs.
 #[derive(Debug, Default, Clone)]
 pub struct VoiceConfig {
@@ -41,6 +43,13 @@ pub struct VoiceConfig {
     pub voice_addendum: Option<String>,
     /// Name of the loaded voice package for diagnostics / health reporting.
     pub voice_name: Option<String>,
+    /// Resolved named review-template addendum (#2995), appended LAST — the
+    /// most project-specific layer, composing with (never replacing) the
+    /// stock/principles/voice layers above it. `None` = no review template
+    /// selected (opt-in).
+    pub review_template: Option<String>,
+    /// Name of the loaded review template for diagnostics / health reporting.
+    pub review_template_name: Option<String>,
 }
 
 impl VoiceConfig {
@@ -55,6 +64,8 @@ impl VoiceConfig {
             principles: Some(principles_addendum().to_string()),
             voice_addendum: None,
             voice_name: None,
+            review_template: None,
+            review_template_name: None,
         }
     }
 
@@ -72,8 +83,8 @@ impl VoiceConfig {
     ///
     /// Why: the prompt builder uses this to decide whether to append a separator
     /// before the addendum section.
-    /// What: returns `true` if either `principles` or `voice_addendum` is `Some`
-    /// and non-empty.
+    /// What: returns `true` if `principles`, `voice_addendum`, or
+    /// `review_template` is `Some` and non-empty.
     /// Test: `voice_config_has_addendum_helpers`.
     pub fn has_any_addendum(&self) -> bool {
         self.principles
@@ -85,14 +96,24 @@ impl VoiceConfig {
                 .as_deref()
                 .map(|s| !s.is_empty())
                 .unwrap_or(false)
+            || self
+                .review_template
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
     }
 
-    /// Render the combined addendum text in layer order: principles → voice.
+    /// Render the combined addendum text in layer order: principles → voice →
+    /// review template.
     ///
-    /// Why: the prompt builder calls this once to get the final injectable text.
-    /// What: concatenates non-empty layers separated by a double newline; returns
-    /// an empty string when no layers are active.
-    /// Test: `voice_config_combined_addendum_ordering`.
+    /// Why: the prompt builder calls this once to get the final injectable
+    /// text. The review template lands LAST because it is the most
+    /// project-specific layer (issue #2995) — it should read as the final,
+    /// most-targeted word after the broader principles/voice guidance.
+    /// What: concatenates non-empty layers separated by a double newline;
+    /// returns an empty string when no layers are active.
+    /// Test: `voice_config_combined_addendum_ordering`,
+    /// `voice_config_review_template_layers_last` (voice/tests_voice_config.rs).
     pub fn combined_addendum(&self) -> String {
         let mut parts: Vec<&str> = Vec::new();
         if let Some(p) = self.principles.as_deref()
@@ -104,6 +125,11 @@ impl VoiceConfig {
             && !v.is_empty()
         {
             parts.push(v);
+        }
+        if let Some(t) = self.review_template.as_deref()
+            && !t.is_empty()
+        {
+            parts.push(t);
         }
         parts.join("\n\n")
     }

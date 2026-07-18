@@ -32,6 +32,7 @@ fn full_pipeline_with_duetto_voice() {
         principles: Some(principles_addendum().to_string()),
         voice_addendum: Some(addendum.clone()),
         voice_name: Some("duetto".to_string()),
+        ..Default::default()
     };
 
     let combined = vc.combined_addendum();

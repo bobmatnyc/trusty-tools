@@ -8,6 +8,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Phase-1 session monitor card: an active-session summary — status, task,
+  elapsed time, a recent transcript tail, and a cancel action — per DOC-39
+  §4.6 (the 8b UI surface, refs #2983). `SessionMonitor.svelte` polls
+  `GET /sessions` then `GET /sessions/{id}` + `GET /sessions/{id}/transcript`
+  every 5s using the identical `$effect`/`AbortController`/`setInterval`
+  shape `StatusBar.svelte` established, plus an independent 1s local tick
+  (no network call) that redisplays elapsed time via the new
+  `lib/transcript.ts::formatElapsed`. Reuses `pickActiveSession`
+  (`lib/session-status.ts`) rather than re-deriving session selection; a new
+  `SessionDetail` type and exported `TERMINAL_SESSION_STATUSES` constant
+  were added there to support it. `lib/transcript.ts::selectTranscriptTail`
+  reduces `TranscriptRecord.turns` to the last 5, truncating prose previews
+  at 160 chars (mirroring `crate::events::preview`'s convention) and
+  rendering tool-only turns as `"ran: toolA, toolB"` rather than a blank
+  line. Cancelling requires a two-step in-card confirm (no
+  `window.confirm()`) and forces an immediate re-poll on success rather than
+  waiting for the next tick. Mounted in `App.svelte` inside `.body`,
+  replacing `ActivityPlaceholder` (whose stated purpose — "coming once
+  GET /sessions lands" — this card now supersedes); `App.test.ts` gained a
+  new assertion pinning that it renders inside `.body`, alongside the
+  existing DOC-39 §8.1 AC-18.1 `.statusbar`-is-a-sibling invariant. **Scope
+  gap:** DOC-39 §4.6 AC-6.3 literally describes 8b as a live
+  search/memory-recall monitor (docked rail → inline settle, preserving
+  `lane`/`query`/`hit_count`/`latency_ms`, backed by
+  `Event::SearchPerformed`/`Event::MemoryRecalled`). Those events exist in
+  `crates/trusty-code/src/events.rs` but are emitted ONLY on the SSE stream
+  (`GET /sessions/{id}/events`) with no REST snapshot route and no prior
+  SSE-consumption pattern in this client — building that in this slice would
+  mean buffering an unbounded per-session event log client-side, which is
+  out of scope for a Phase-1 cut. This PR ships the session-activity card
+  described above instead and renders a labeled, non-hidden gap notice (same
+  treatment as the status bar's `budget: unavailable` span); the true AC-6.3
+  gap is tracked in issue #3027.
+
 ### Fixed
 
 - Restored the macOS Developer-ID signing config that was intentionally

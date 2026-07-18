@@ -66,6 +66,18 @@ pub struct RunArgs {
     #[arg(long, value_name = "PROVIDER")]
     pub provider: Option<String>,
 
+    /// Name of a review template to append as a prompt addendum (issue #2995).
+    /// Resolved bundled → `<config_dir>/trusty-review/templates/review/<name>.md`
+    /// user override, where `<config_dir>` is `dirs::config_dir()` — on Linux
+    /// `~/.config` (or `$XDG_CONFIG_HOME`), on macOS
+    /// `~/Library/Application Support` (see
+    /// `trusty_review::review_template::ReviewTemplateLoader`); composes with
+    /// (never replaces) the stock rubric and any active voice/principles
+    /// layers. Highest-precedence override — beats a repo `.trusty-review.toml`
+    /// `[review] template` key, `TRUSTY_REVIEW_TEMPLATE`, and the config file.
+    #[arg(long, value_name = "NAME")]
+    pub review_template: Option<String>,
+
     /// Read a local unified diff file instead of fetching from GitHub.
     /// Pass `-` to read the unified diff from stdin instead of a file.
     #[arg(long, value_name = "PATH", conflicts_with = "base")]
@@ -123,6 +135,7 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
     let overrides = RoleCliOverrides {
         reviewer_model: args.reviewer_model.clone(),
         provider: args.provider.clone(),
+        review_template: args.review_template.clone(),
         ..Default::default()
     };
     let mut config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));

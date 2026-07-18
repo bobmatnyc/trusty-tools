@@ -75,6 +75,13 @@ pub struct CompareArgs {
     /// compared in this run.
     #[arg(long, value_name = "DIR")]
     pub source_root: Option<std::path::PathBuf>,
+
+    /// Name of a review template to append as a prompt addendum (issue #2995).
+    /// See `RunArgs::review_template` for the resolution and layering details;
+    /// applied identically here — highest-precedence override for every model
+    /// run in the compare set.
+    #[arg(long, value_name = "NAME")]
+    pub review_template: Option<String>,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -84,12 +91,14 @@ pub struct CompareArgs {
 /// Why: side-by-side model comparison lets operators pick the best model for
 /// their repo's cost/quality trade-off.  Also resolves the search index before
 /// the per-model loop so all model runs share the correct index (issue #670 /
-/// auto-derive #661), and resolves `--source-root` (issue #2994) once so every
-/// model shares the same diff-only-or-matched context decision.
+/// auto-derive #661), and resolves `--source-root` (issue #2994) and
+/// `--review-template` (issue #2995) once so every model shares the same
+/// diff-only-or-matched context and template overrides.
 /// What: runs the same review for each model in the compare set (sequentially),
 /// collects the results, and prints a comparison table to STDOUT.
 /// Test: integration via `cargo run -p trusty-review -- compare --help`;
-/// `--source-root` clap wiring covered by `compare_args_source_root_parses`.
+/// `--source-root` clap wiring covered by `compare_args_source_root_parses`;
+/// `--review-template` covered by clap args parsing.
 pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<()> {
     let search_for_resolve = HttpSearchClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
@@ -108,6 +117,14 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     // Resolve the search index from the daemon once before the per-model loop.
     // When TRUSTY_SEARCH_INDEX is explicitly set, resolve_index is a no-op.
     config.resolve_index(&search_for_resolve).await;
+
+    // `--review-template` is the highest-precedence override (issue #2995);
+    // apply it directly to the already-resolved config, matching how
+    // `--provider` is handled locally below rather than re-deriving the whole
+    // config (compare, unlike `run`, does not rebuild `config` from scratch).
+    if let Some(name) = args.review_template.clone() {
+        config.review_template = Some(name);
+    }
 
     let models: Vec<String> = args.models.clone().unwrap_or_else(|| {
         COMPARE_CANDIDATE_MODELS
