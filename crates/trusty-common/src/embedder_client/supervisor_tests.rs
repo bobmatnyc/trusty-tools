@@ -402,6 +402,39 @@ done
         (dir, path)
     }
 
+    /// Like `write_mock_embedderd`, but answers exactly the one startup-probe
+    /// request and then exits non-zero — used to drive the supervisor into
+    /// its respawn back-off path deterministically.
+    ///
+    /// Why: `supervisor_shutdown_during_respawn_backoff_returns_promptly`
+    /// needs the mock child to actually crash (not merely idle) so
+    /// `supervision_loop` takes the `RestartTrigger::ProcessExit` branch,
+    /// increments `consecutive_failures`, and enters the exponential
+    /// back-off `tokio::select!` (supervisor.rs ~835-847) that races
+    /// `shutdown_rx.changed()` against the delay sleep.
+    /// What: identical wire protocol to `write_mock_embedderd` for the first
+    /// (and only) request, then `exit 1` instead of looping.
+    /// Test: `supervisor_shutdown_during_respawn_backoff_returns_promptly`.
+    fn write_mock_embedderd_crash_once() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-crash-once.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$id" ] || id=1
+printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+exit 1
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
     /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
     /// an existence probe): success means the process still exists, failure
     /// means it is gone.
@@ -536,6 +569,99 @@ done
             "pid_slot must STILL be 0 well past the first respawn back-off \
              window — a non-zero PID here would mean the shutdown was \
              misclassified as a crash and the sidecar was respawned"
+        );
+    }
+
+    /// Drives the OTHER race window the #2979 doc comments claim to close:
+    /// a shutdown requested while the respawn back-off sleep is already in
+    /// progress (supervisor.rs's `tokio::select!` at ~835-847, racing
+    /// `tokio::time::sleep(delay_secs)` against `shutdown_rx.changed()`).
+    /// The two existing shutdown tests above only ever shut down while the
+    /// child is idly alive, which never touches the backoff sleep at all.
+    ///
+    /// Why: before #2979, a shutdown requested mid-backoff would wait out
+    /// the delay and then respawn anyway — the whole point of racing
+    /// `shutdown_rx` inside that specific `select!` is to let `shutdown()`
+    /// win immediately instead of blocking for the remainder of the sleep.
+    /// What: the mock child answers the startup probe once and then exits
+    /// non-zero, so `supervision_loop` takes the `RestartTrigger::ProcessExit`
+    /// branch, clears `pid_slot` to 0, and enters its first back-off sleep
+    /// (2s, since `consecutive_failures` becomes 1 and delay = 1 << 1). The
+    /// test polls `pid_slot` for that 0 transition — a condition that can
+    /// only be observed once the loop has processed the crash and is about
+    /// to (or already does) race the backoff sleep — then calls
+    /// `handle.shutdown()` and asserts it returns in well under the 2s
+    /// delay, and that `pid_slot` never goes non-zero (no respawn) even
+    /// after waiting past what the full backoff + respawn would have taken.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_shutdown_during_respawn_backoff_returns_promptly() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 60,
+            max_restarts: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        let handle = supervisor.start_supervisor_task();
+
+        // Condition-based wait (no arbitrary sleep-then-hope): poll until the
+        // supervision loop has observed the mock child's non-zero exit and
+        // cleared `pid_slot` to 0. That clear happens synchronously in the
+        // `RestartTrigger::ProcessExit` arm, immediately before the loop
+        // enters the back-off `tokio::select!` — so this condition proves
+        // we're now racing (or about to race) the backoff sleep, without
+        // guessing at how long the crash takes to propagate.
+        let entered_backoff = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pid_slot.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            entered_backoff.is_ok(),
+            "supervisor never observed the mock child's non-zero exit within 5s"
+        );
+
+        // The first exponential back-off delay for a process-exit restart is
+        // 2s (1 << consecutive_failures, consecutive_failures == 1 here).
+        // `shutdown()` must win the race against that sleep by returning
+        // almost immediately, not block for (a large fraction of) the delay.
+        let before_shutdown = tokio::time::Instant::now();
+        handle.shutdown().await;
+        let shutdown_elapsed = before_shutdown.elapsed();
+
+        assert!(
+            shutdown_elapsed < Duration::from_millis(500),
+            "shutdown() took {shutdown_elapsed:?} — should return promptly by \
+             winning the tokio::select! against the 2s respawn back-off sleep, \
+             not wait it out"
+        );
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "pid_slot must stay 0 — shutdown() requested mid-backoff must not \
+             let the loop proceed to respawn"
+        );
+
+        // Wait past what the full 2s backoff + a respawn would have taken, to
+        // catch a delayed respawn a narrower race window might still allow.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "pid_slot must STILL be 0 well past the backoff window — a \
+             non-zero PID here would mean shutdown mid-backoff was still \
+             followed by a respawn"
         );
     }
 }
