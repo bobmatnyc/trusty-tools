@@ -203,22 +203,92 @@ pub fn use_hardened_runtime(set: &str, explicit: bool) -> bool {
     explicit || set == MPM_SET
 }
 
+/// Parse the Developer ID Application identity out of `security
+/// find-identity -v -p codesigning` stdout.
+///
+/// Why: Extracted as a pure function (no system calls) so the parsing logic —
+/// the #2937/#2939 root cause — is regression-tested against a realistic
+/// multi-line fixture without invoking `security`. The prior implementation
+/// used `line.split(") ").nth(1)`, which only strips the leading index token
+/// (`  1) `) and leaves the SHA1 fingerprint and surrounding quotes attached
+/// (e.g. `F03283D9...FB362 "Developer ID Application: Bob Matsuoka
+/// (4JH68XUHC5)"`); that garbage string was then passed straight to `codesign
+/// --sign`, which fails with "no identity found" even though the cert is
+/// valid and `security find-identity` lists it. Mirrors the working
+/// `detect_identity()` in `scripts/install-trusty-mpm-signed.sh`.
+///
+/// What: Scans `stdout` line by line for the first line containing
+/// "Developer ID Application"; on that line, extracts the substring between
+/// the first and last `"` (the quoted common name, e.g. `Developer ID
+/// Application: Bob Matsuoka (4JH68XUHC5)`). A matching line with fewer than
+/// two quotes is skipped (scan continues to the next line) rather than
+/// aborting the whole probe. Returns `None` when no well-formed match is
+/// found in the entire output.
+///
+/// Test: `tests::parse_developer_id_identity_strips_fingerprint_and_quotes`,
+/// `tests::parse_developer_id_identity_no_match`,
+/// `tests::parse_developer_id_identity_skips_malformed_line`.
+pub fn parse_developer_id_identity(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        if !line.contains("Developer ID Application") {
+            continue;
+        }
+        let Some(first) = line.find('"') else {
+            continue;
+        };
+        let Some(last) = line.rfind('"') else {
+            continue;
+        };
+        if last > first {
+            return Some(line[first + 1..last].to_owned());
+        }
+    }
+    None
+}
+
 /// Check whether a Developer ID Application certificate is available.
 ///
 /// Why: Signing is only possible when a suitable cert is present in the keychain;
 /// we check before attempting `codesign` to give a clear early message.
 ///
-/// What: Checks `TRUSTY_SIGN_IDENTITY` env first (user override); if absent,
-/// runs `security find-identity -v -p codesigning` and looks for
-/// "Developer ID Application" in the output. Returns `Some(identity)` when
-/// found, `None` when no cert is available.
+/// What: Thin wrapper over [`has_developer_id_cert_verbose`] with `verbose =
+/// false` — the default, silent probe used by the fail-soft `tctl install`
+/// post-install hooks.
 ///
 /// Test: `tests::has_developer_id_cert_respects_env` (macOS only).
 #[cfg(target_os = "macos")]
 pub fn has_developer_id_cert() -> Option<String> {
+    has_developer_id_cert_verbose(false)
+}
+
+/// Check whether a Developer ID Application certificate is available,
+/// optionally narrating the probe to stderr (#2939).
+///
+/// Why: `tctl sign --verbose` needs to show the raw `security find-identity`
+/// output and which identity was selected, so an operator hitting "no
+/// identity found" despite a valid cert (#2937/#2939) can see exactly what
+/// the probe saw instead of guessing.
+///
+/// What: Checks `TRUSTY_SIGN_IDENTITY` env first (user override); if absent,
+/// runs `security find-identity -v -p codesigning` and parses the result via
+/// [`parse_developer_id_identity`]. When `verbose` is `true`, prints the env
+/// override (if used), the raw probe stdout, and the selected identity (or a
+/// "not found" note) to stderr. Returns `Some(identity)` when found, `None`
+/// when no cert is available.
+///
+/// Test: `tests::has_developer_id_cert_respects_env` (macOS only, exercises
+/// `verbose = false` via [`has_developer_id_cert`]); the verbose narration
+/// itself is side-effecting (stderr) and not asserted directly — its content
+/// is composed entirely from the independently-tested
+/// [`parse_developer_id_identity`].
+#[cfg(target_os = "macos")]
+pub fn has_developer_id_cert_verbose(verbose: bool) -> Option<String> {
     // Environment override takes priority.
     if let Ok(identity) = std::env::var("TRUSTY_SIGN_IDENTITY") {
         if !identity.is_empty() {
+            if verbose {
+                eprintln!("tctl sign --verbose: using TRUSTY_SIGN_IDENTITY override: {identity}");
+            }
             return Some(identity);
         }
     }
@@ -228,15 +298,21 @@ pub fn has_developer_id_cert() -> Option<String> {
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains("Developer ID Application") {
-            // Extract the identity string: the part after the ") " token.
-            if let Some(ident) = line.split(") ").nth(1) {
-                return Some(ident.trim().to_owned());
-            }
+    if verbose {
+        eprintln!(
+            "tctl sign --verbose: raw `security find-identity -v -p codesigning` output:\n{stdout}"
+        );
+    }
+    let identity = parse_developer_id_identity(&stdout);
+    if verbose {
+        match &identity {
+            Some(id) => eprintln!("tctl sign --verbose: selected identity: {id}"),
+            None => eprintln!(
+                "tctl sign --verbose: no 'Developer ID Application' identity found in probe output"
+            ),
         }
     }
-    None
+    identity
 }
 
 /// Read a binary's CURRENT on-disk codesign identifier, if any.
@@ -468,7 +544,9 @@ impl std::error::Error for SignSetError {
 /// (always with Hardened Runtime — `explicit = true` per
 /// [`use_hardened_runtime`]) and verifies the signature — bailing out on the
 /// first failure. Returns the paths that were signed. Errors on an unknown
-/// set name or when no binary in the set was found on disk.
+/// set name or when no binary in the set was found on disk. `verbose` (#2939)
+/// is forwarded to [`has_developer_id_cert_verbose`] so `tctl sign --verbose`
+/// can show the raw identity-probe output and which identity was selected.
 ///
 /// Test: Not invoked in tests (side-effecting); the set/identifier resolution
 /// it composes is tested independently via `binaries_for_set` /
@@ -477,12 +555,13 @@ impl std::error::Error for SignSetError {
 pub fn sign_set_strict(
     install_dir: &std::path::Path,
     set: &str,
+    verbose: bool,
 ) -> Result<Vec<std::path::PathBuf>, SignSetError> {
     let binaries = binaries_for_set(set);
     if binaries.is_empty() {
         return Err(SignSetError::UnknownSet(set.to_owned()));
     }
-    let identity = has_developer_id_cert().ok_or(SignSetError::NoCertificate)?;
+    let identity = has_developer_id_cert_verbose(verbose).ok_or(SignSetError::NoCertificate)?;
     let hardened = use_hardened_runtime(set, true);
 
     let mut signed = Vec::new();
@@ -690,245 +769,4 @@ pub fn post_install_mpm(install_dir: &std::path::Path, json: bool) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Why: Both signable sets must resolve to their documented binaries. The
-    /// `trusty-mpm` set MUST include `tm` (#2721) — omitting it left the primary
-    /// `tm` binary ad-hoc and the App-Data TCC prompt kept recurring. Order
-    /// matters: `trusty-mpm` first so it stays the guidance/prompt "primary".
-    /// `trusty-mpm-gui` (#2951) joined the set after `tm` for the same reason.
-    /// What: Asserts `trusty-search` covers search+embedderd, `trusty-mpm` covers
-    /// `trusty-mpm`, `tm`, and `trusty-mpm-gui` in that order.
-    /// Test: This is the test.
-    #[test]
-    fn binaries_for_set_covers_search_and_mpm() {
-        assert_eq!(
-            binaries_for_set(SEARCH_SET),
-            vec!["trusty-search", "trusty-embedderd"]
-        );
-        assert_eq!(
-            binaries_for_set(MPM_SET),
-            vec!["trusty-mpm", "tm", "trusty-mpm-gui"]
-        );
-    }
-
-    /// Why: An unrecognised set name must not silently sign nothing without
-    /// signal — callers detect "unknown set" via an empty result.
-    /// What: Asserts a bogus name returns an empty `Vec`.
-    /// Test: This is the test.
-    #[test]
-    fn binaries_for_set_unknown_is_empty() {
-        assert!(binaries_for_set("not-a-set").is_empty());
-    }
-
-    /// Why: Every signable binary name must map to a stable identifier
-    /// (contract for the codesign `--identifier` flag), matching the
-    /// `com.trusty.trusty-<binary>` scheme used by `plist_label.rs` and the
-    /// release-workflow docs (the pre-#2558 short-form identifiers were the
-    /// drift this module fixes).
-    /// What: Asserts all five target binaries map to the expected IDs,
-    /// including the `tm` binary (`com.trusty.tm`, #2721) and `trusty-mpm-gui`
-    /// (`com.trusty.trusty-mpm.gui`, #2951) that share the trusty-mpm set.
-    /// Test: This is the test.
-    #[test]
-    fn identifier_map_covers_all_signable_binaries() {
-        assert_eq!(
-            codesign_identifier("trusty-search"),
-            "com.trusty.trusty-search"
-        );
-        assert_eq!(
-            codesign_identifier("trusty-embedderd"),
-            "com.trusty.trusty-embedderd"
-        );
-        assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
-        assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
-        assert_eq!(
-            codesign_identifier("trusty-mpm-gui"),
-            "com.trusty.trusty-mpm.gui"
-        );
-    }
-
-    /// Why: PR #2657 review MEDIUM — with set membership and identifier now
-    /// derived from one table, this regression-guards that every binary
-    /// produced by `binaries_for_set` for EVERY known set has a real
-    /// (non-fallback) identifier, i.e. the two views of the table can never
-    /// silently disagree.
-    /// What: For each of `SEARCH_SET`/`MPM_SET`, asserts every member binary's
-    /// identifier is not the `"com.trusty.unknown"` fallback.
-    /// Test: This is the test.
-    #[test]
-    fn every_set_member_has_a_real_identifier() {
-        for set in [SEARCH_SET, MPM_SET] {
-            for binary in binaries_for_set(set) {
-                assert_ne!(
-                    codesign_identifier(binary),
-                    "com.trusty.unknown",
-                    "{binary} in set {set} has no real identifier"
-                );
-            }
-        }
-    }
-
-    /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
-    /// per-context split — pin the truth table so a future edit cannot
-    /// silently flip either preserved pre-PR behavior.
-    /// What: explicit=true is always hardened (both sets); explicit=false is
-    /// hardened only for MPM_SET.
-    /// Test: This is the test.
-    #[test]
-    fn hardened_runtime_policy() {
-        assert!(use_hardened_runtime(SEARCH_SET, true));
-        assert!(use_hardened_runtime(MPM_SET, true));
-        assert!(!use_hardened_runtime(SEARCH_SET, false));
-        assert!(use_hardened_runtime(MPM_SET, false));
-    }
-
-    /// Why: The migration notice must actually fire when the on-disk
-    /// identifier differs from the canonical one — this is the #2657 review
-    /// HIGH fix; a silent no-op here would reproduce #873.
-    /// What: Asserts the pre-#2558 short-form identifier triggers a notice
-    /// naming both the old and new values.
-    /// Test: This is the test.
-    #[test]
-    fn identifier_migration_notice_warns_on_change() {
-        let notice = identifier_migration_notice("trusty-search", "com.trusty.search")
-            .expect("must warn on a real change");
-        assert!(notice.contains("com.trusty.search"));
-        assert!(notice.contains("com.trusty.trusty-search"));
-        assert!(notice.contains("Full Disk Access"));
-    }
-
-    /// Why: The notice must NOT fire for a fresh install (no prior identifier)
-    /// or when re-signing with the identifier unchanged — false-positive
-    /// alarms would train operators to ignore the real warning.
-    /// What: Asserts `None` for an empty old identifier and for a match.
-    /// Test: This is the test.
-    #[test]
-    fn identifier_migration_notice_silent_when_unchanged_or_absent() {
-        assert!(identifier_migration_notice("trusty-search", "").is_none());
-        assert!(identifier_migration_notice("trusty-search", "com.trusty.trusty-search").is_none());
-    }
-
-    /// Why: The FDA guidance must contain all 4 numbered steps and reference the
-    /// binary path so the operator knows which file to re-add.
-    /// What: Calls `fda_guidance` with a synthetic path and checks the output.
-    /// Test: This is the test.
-    #[test]
-    fn fda_guidance_contains_steps() {
-        let guidance = fda_guidance("/usr/local/bin/trusty-search");
-        assert!(guidance.contains("1."), "step 1 missing");
-        assert!(guidance.contains("2."), "step 2 missing");
-        assert!(guidance.contains("3."), "step 3 missing");
-        assert!(guidance.contains("4."), "step 4 missing");
-        assert!(
-            guidance.contains("/usr/local/bin/trusty-search"),
-            "binary path not in guidance"
-        );
-        assert!(
-            guidance.contains("Full Disk Access"),
-            "FDA label not in guidance"
-        );
-    }
-
-    /// Why: `TRUSTY_SIGN_IDENTITY` env var must override the keychain probe.
-    /// What: On macOS, sets the env var; asserts `has_developer_id_cert` returns
-    /// the env value. Restores env after the test.
-    /// Test: This is the test.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn has_developer_id_cert_respects_env() {
-        // We cannot modify env safely in parallel tests without a mutex, so we
-        // just verify the function is callable and returns an Option<String>.
-        // The env-override path is tested by setting the env var manually.
-        let prev = std::env::var("TRUSTY_SIGN_IDENTITY").ok();
-        // SAFETY: single-threaded test; environment mutation is process-global
-        // but safe to call in Rust 1.91 (not yet stabilized as unsafe).
-        unsafe {
-            std::env::set_var(
-                "TRUSTY_SIGN_IDENTITY",
-                "Test Developer ID: Foo Bar (TEAM123)",
-            );
-        }
-        let result = has_developer_id_cert();
-        // Restore.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("TRUSTY_SIGN_IDENTITY", v),
-                None => std::env::remove_var("TRUSTY_SIGN_IDENTITY"),
-            }
-        }
-        assert_eq!(
-            result.as_deref(),
-            Some("Test Developer ID: Foo Bar (TEAM123)")
-        );
-    }
-
-    /// Why: `fda_guidance` must mention Developer ID as the permanent fix tip.
-    /// What: Asserts the tip line is present.
-    /// Test: This is the test.
-    #[test]
-    fn fda_guidance_mentions_developer_id_tip() {
-        let g = fda_guidance("/some/path/trusty-search");
-        assert!(
-            g.contains("Developer ID"),
-            "tip about Developer ID cert missing"
-        );
-    }
-
-    /// Why: The App-Data TCC guidance must reference the binary path and the
-    /// actual macOS prompt wording so the operator recognises it.
-    /// What: Calls `app_data_guidance` and checks the output.
-    /// Test: This is the test.
-    #[test]
-    fn app_data_guidance_mentions_prompt() {
-        let g = app_data_guidance("/usr/local/bin/trusty-mpm");
-        assert!(
-            g.contains("access data from other apps"),
-            "TCC prompt wording missing"
-        );
-        assert!(
-            g.contains("/usr/local/bin/trusty-mpm"),
-            "binary path missing"
-        );
-        assert!(g.contains("Developer ID"), "Developer ID tip missing");
-    }
-
-    /// Why: The cert-setup guidance must reference the exact `tctl sign`
-    /// invocation the operator should re-run, parameterised by target.
-    /// What: Asserts all 5 steps are present and the target is interpolated.
-    /// Test: This is the test.
-    #[test]
-    fn cert_setup_guidance_contains_steps() {
-        let g = cert_setup_guidance("trusty-mpm");
-        for step in ["1.", "2.", "3.", "4.", "5."] {
-            assert!(g.contains(step), "{step} missing");
-        }
-        assert!(g.contains("tctl sign trusty-mpm"));
-    }
-
-    /// Why: `commands::sign::run_macos` matches on `SignSetError` variants
-    /// (PR #2657 review MEDIUM fix, replacing string-matching); the variants'
-    /// `Display` text must stay distinguishable from each other for any
-    /// fallback logging path that does print the message.
-    /// What: Asserts each variant's rendered message is non-empty and unique.
-    /// Test: This is the test.
-    #[test]
-    fn sign_set_error_display_is_distinct_per_variant() {
-        let variants: Vec<String> = vec![
-            SignSetError::UnknownSet("bogus".to_owned()).to_string(),
-            SignSetError::NoCertificate.to_string(),
-            SignSetError::NoBinariesFound {
-                set: "trusty-search".to_owned(),
-                dir: "/tmp".to_owned(),
-            }
-            .to_string(),
-            SignSetError::Sign(anyhow::anyhow!("boom")).to_string(),
-        ];
-        for v in &variants {
-            assert!(!v.is_empty());
-        }
-        let unique: std::collections::HashSet<&String> = variants.iter().collect();
-        assert_eq!(unique.len(), variants.len(), "variant messages collided");
-    }
-}
+mod tests;

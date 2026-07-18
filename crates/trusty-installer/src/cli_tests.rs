@@ -514,6 +514,17 @@ fn parse_sign() {
     }
 }
 
+/// `trusty-installer sign trusty-search --verbose` parses via the existing
+/// global `-v`/`--verbose` count flag (#2939) — `Commands::Sign` itself has no
+/// local `verbose` field; `main.rs::dispatch` forwards `cli.verbose > 0`.
+#[test]
+fn parse_sign_verbose() {
+    let cli = Cli::try_parse_from(["trusty-installer", "sign", "trusty-search", "--verbose"])
+        .expect("sign --verbose parses");
+    assert_eq!(cli.verbose, 1);
+    assert!(matches!(cli.command, Commands::Sign { .. }));
+}
+
 /// `trusty-installer sign trusty-search --dir <path>` parses the override.
 #[test]
 fn parse_sign_dir_override() {
