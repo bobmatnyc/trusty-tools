@@ -40,7 +40,9 @@ use uuid::Uuid;
 
 use crate::agent_loop::Transcript;
 use crate::binding::ProjectBinding;
-use crate::events::{ContextBudgetSnapshot, Event, IndexReadinessSnapshot, SessionEventEnvelope};
+use crate::events::{
+    ContextBudgetSnapshot, Event, IndexReadinessSnapshot, SearchAuditRecord, SessionEventEnvelope,
+};
 use crate::jsonrpc::{NotifySender, RpcError};
 use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
@@ -138,6 +140,13 @@ struct SessionEntry {
     /// distinct-agent cardinality is small, so `record`'s linear find-or-insert
     /// scan is cheap.
     agents: Vec<AgentRosterState>,
+    /// (issue #3072) Retained search/recall audit trail, oldest-first — see
+    /// `session::registry_search_audit` module docs for the cap and eviction
+    /// policy. Appended by `SessionRegistry::push_search_audit`, called from
+    /// `record_search_performed`/`record_memory_recalled` (`registry_events`)
+    /// alongside the existing SSE emission; unlike `ring`, capacity here is
+    /// its own bound (`SEARCH_AUDIT_CAP`), independent of `ring_capacity`.
+    search_audit: VecDeque<SearchAuditRecord>,
 }
 
 /// One agent's live roster state inside a [`SessionEntry`] (DOC-39 §5.4) —
@@ -325,6 +334,7 @@ impl SessionRegistry {
                     readiness: None,
                     context_budget: None,
                     agents: Vec::new(),
+                    search_audit: VecDeque::new(),
                 },
             );
         }
@@ -1060,6 +1070,12 @@ mod goal_ops;
 /// own file for the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_agents.rs"]
 mod agents;
+
+/// `session.get_search_audit`'s retained search/recall audit trail (issue
+/// #3072), split out into its own file for the same 500-SLOC-cap reason as
+/// `events` above.
+#[path = "registry_search_audit.rs"]
+mod search_audit;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]

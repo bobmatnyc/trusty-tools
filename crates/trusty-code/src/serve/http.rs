@@ -94,9 +94,9 @@ struct HttpState {
 /// (Slice 3) the write routes (`POST /sessions`,
 /// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
 /// `PUT`/`DELETE /sessions/{id}/goal`), (Slice 4) `POST /tasks`, (Slice 5)
-/// `GET /fs`, and (Slice 6) `GET /sessions/{id}/agents` — none of which
-/// collide with the paths registered directly on this router or with each
-/// other.
+/// `GET /fs`, (Slice 6) `GET /sessions/{id}/agents`, and (Slice 7, issue
+/// #3072) `GET /sessions/{id}/search-audit` — none of which collide with the
+/// paths registered directly on this router or with each other.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
@@ -106,7 +106,8 @@ struct HttpState {
 /// `http_rest_post_tasks_route_is_merged_in`,
 /// `http_rest_get_fs_route_is_merged_in`,
 /// `http_rest_get_session_agents_route_is_merged_in`,
-/// `http_rest_get_session_budget_route_is_merged_in`.
+/// `http_rest_get_session_budget_route_is_merged_in`,
+/// `http_rest_get_session_search_audit_route_is_merged_in`.
 pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
@@ -122,7 +123,8 @@ pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) ->
         .merge(rest::sessions_write::routes(router.clone()))
         .merge(rest::tasks::routes(router.clone()))
         .merge(rest::fs::routes(router.clone()))
-        .merge(rest::agents::routes(router));
+        .merge(rest::agents::routes(router.clone()))
+        .merge(rest::search_audit::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
@@ -617,6 +619,34 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["status"], "never_recorded");
+    }
+
+    /// `GET /sessions/{id}/search-audit` (issue #3072, `rest::search_audit`'s
+    /// route group `build_axum_router` merges above) must be reachable on
+    /// the SAME router `GET /sessions/{id}/events` is — proving the merge
+    /// actually wires `rest::search_audit::routes` rather than silently
+    /// dropping it. Per-route error/status-code behaviour is already covered
+    /// by `rest::search_audit::tests`; this test only pins the merge itself.
+    #[tokio::test]
+    async fn http_rest_get_session_search_audit_route_is_merged_in() {
+        let (router, sessions) = router_and_sessions();
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let app = build_axum_router(router, sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{}/search-audit", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["search_audit"].as_array().unwrap().len(), 0);
     }
 
     /// `GET /sessions/{id}/events` on an unknown session must 404 with a

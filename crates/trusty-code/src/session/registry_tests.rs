@@ -499,6 +499,80 @@ async fn record_memory_recalled_publishes_event() {
     );
 }
 
+/// (issue #3072) `record_search_performed` must ALSO append onto the
+/// session's retained search/recall audit trail, not just publish the SSE
+/// event — this is the wiring `session.get_search_audit` depends on.
+#[tokio::test]
+async fn record_search_performed_appends_to_search_audit() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    registry
+        .record_search_performed(
+            &session.id,
+            "python-engineer",
+            "eng-1",
+            &search_telemetry("grep", Some(7)),
+        )
+        .unwrap();
+
+    let audit = registry.get_search_audit(&session.id).unwrap();
+    assert_eq!(audit.len(), 1);
+    assert!(matches!(
+        &audit[0],
+        crate::events::SearchAuditRecord::Search {
+            agent,
+            agent_id,
+            lane,
+            query,
+            hit_count,
+            latency_ms,
+            ..
+        } if agent == "python-engineer"
+            && agent_id == "eng-1"
+            && lane == "grep"
+            && query == "where is auth"
+            && *hit_count == Some(7)
+            && *latency_ms == 12
+    ));
+}
+
+/// (issue #3072) `record_memory_recalled` must ALSO append onto the
+/// session's retained search/recall audit trail, folding `results` into
+/// `result_count`/`injected_count`.
+#[tokio::test]
+async fn record_memory_recalled_appends_to_search_audit() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    registry
+        .record_memory_recalled(
+            &session.id,
+            "pm",
+            "pm-1",
+            &recall_telemetry(&[(0.9, true), (0.41, false)]),
+        )
+        .unwrap();
+
+    let audit = registry.get_search_audit(&session.id).unwrap();
+    assert_eq!(audit.len(), 1);
+    assert!(matches!(
+        &audit[0],
+        crate::events::SearchAuditRecord::Recall {
+            agent,
+            agent_id,
+            query,
+            result_count,
+            injected_count,
+            ..
+        } if agent == "pm"
+            && agent_id == "pm-1"
+            && query == "pkce"
+            && *result_count == 2
+            && *injected_count == 1
+    ));
+}
+
 /// `record_tool_started` must publish a `ToolStarted` event with a
 /// truncated `args_preview`.
 #[tokio::test]

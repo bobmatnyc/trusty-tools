@@ -8,8 +8,8 @@
 //! `session.cancel`, (#2058) `session.get_transcript`, (#2350)
 //! `session.set_goal`/`session.clear_goal`/`session.get_goals`,
 //! (DOC-39 §5.6 Slice D) `session.get_readiness`, (DOC-39 §5.4)
-//! `session.get_agents`, and (issue #3015) `session.get_context_budget` onto
-//! a [`Router`], all
+//! `session.get_agents`, (issue #3015) `session.get_context_budget`, and
+//! (issue #3072) `session.get_search_audit` onto a [`Router`], all
 //! closed over the SAME `Arc<SessionRegistry>` so every method sees a
 //! consistent view. Each handler parses its typed `params`, forwards to the
 //! matching `SessionRegistry` method, and maps the result onto the JSON-RPC
@@ -174,6 +174,15 @@ pub fn register(router: &mut Router, registry: Arc<SessionRegistry>) {
         move |params: Value, ctx: ConnectionContext| {
             let r = r.clone();
             async move { protocol_budget::get_context_budget(&r, params, ctx).await }
+        },
+    );
+
+    let r = registry.clone();
+    router.register(
+        "session.get_search_audit",
+        move |params: Value, ctx: ConnectionContext| {
+            let r = r.clone();
+            async move { protocol_search_audit::get_search_audit(&r, params, ctx).await }
         },
     );
 }
@@ -429,6 +438,11 @@ mod protocol_agents;
 #[path = "protocol_budget.rs"]
 mod protocol_budget;
 
+/// `session.get_search_audit` (issue #3072), split into its own file for the
+/// same 500-SLOC-cap reason as `protocol_goals` above.
+#[path = "protocol_search_audit.rs"]
+mod protocol_search_audit;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +479,10 @@ mod tests {
             ("session.get_agents", json!({"session_id": session.id})),
             (
                 "session.get_context_budget",
+                json!({"session_id": session.id}),
+            ),
+            (
+                "session.get_search_audit",
                 json!({"session_id": session.id}),
             ),
         ];

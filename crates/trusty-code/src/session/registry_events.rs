@@ -397,7 +397,8 @@ impl SessionRegistry {
     /// What: same existence guard + ring-buffer/sequencing path as every
     /// other `record_*`, so a structured event replays on `session.attach`
     /// exactly like the generic ones.
-    /// Test: `registry_tests::record_search_performed_publishes_event`.
+    /// Test: `registry_tests::record_search_performed_publishes_event`,
+    /// `registry_search_audit::tests::get_search_audit_returns_records_after_recording`.
     pub fn record_search_performed(
         &self,
         id: &str,
@@ -406,6 +407,22 @@ impl SessionRegistry {
         telemetry: &SearchTelemetry,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
+        // (issue #3072) Append to the retained audit trail BEFORE emitting
+        // the SSE event, mirroring `record_context_budget`'s cache-then-emit
+        // ordering — a client that queries `session.get_search_audit` right
+        // after observing this event on the stream is guaranteed to see it.
+        self.push_search_audit(
+            id,
+            crate::events::SearchAuditRecord::Search {
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                lane: telemetry.lane.clone(),
+                query: telemetry.query.clone(),
+                hit_count: telemetry.hit_count,
+                latency_ms: telemetry.latency_ms,
+                at: Utc::now(),
+            },
+        );
         self.record(
             id,
             Event::SearchPerformed {
@@ -428,7 +445,8 @@ impl SessionRegistry {
     /// Why: the `injected` flag is the UI's differentiating surface —
     /// injected memories vs ones recalled and held back.
     /// What: as [`Self::record_search_performed`].
-    /// Test: `registry_tests::record_memory_recalled_publishes_event`.
+    /// Test: `registry_tests::record_memory_recalled_publishes_event`,
+    /// `registry_search_audit::tests::get_search_audit_returns_records_after_recording`.
     pub fn record_memory_recalled(
         &self,
         id: &str,
@@ -437,6 +455,19 @@ impl SessionRegistry {
         telemetry: &RecallTelemetry,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
+        // (issue #3072) Append to the retained audit trail BEFORE emitting
+        // the SSE event — see `record_search_performed`'s matching comment.
+        self.push_search_audit(
+            id,
+            crate::events::SearchAuditRecord::Recall {
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                query: telemetry.query.clone(),
+                result_count: telemetry.results.len(),
+                injected_count: telemetry.results.iter().filter(|r| r.injected).count(),
+                at: Utc::now(),
+            },
+        );
         self.record(
             id,
             Event::MemoryRecalled {
