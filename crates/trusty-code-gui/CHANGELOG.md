@@ -64,6 +64,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Status bar renders the real context budget instead of the "unavailable"
+  placeholder described below (refs #3015, DOC-39 §4.5/§6.2).
+  `StatusBar.svelte` polls the now-shipped `GET /sessions/{id}/budget`
+  (PR #3042, squash `0bec593f`) in the same `refresh()` cycle, sharing the
+  existing `AbortController` and post-`await` `signal.aborted` guards, and
+  degrades a budget-route failure to a "no data yet" label rather than
+  dropping the whole status bar to `daemon-unreachable` — the same
+  partial-failure discipline already applied to the readiness fetch. Renders
+  `recorded` as `"NN% working"` (appending `", compacted"` when
+  `compaction_fired`, DOC-39 §4.5 AC-5.8) and `never_recorded` as a labeled
+  `"no data yet"` — never a fabricated `0%`. `within_budget === false` gets a
+  distinct red (`bg-status-error`/`text-status-error`) treatment per
+  AC-5.7's "red `--gap`" requirement. New `lib/context-budget.ts`
+  (`ContextBudgetQuery`/`ContextBudgetSnapshot` wire types plus
+  `classifyBudget`/`budgetLabel`/`budgetDotClass`/`budgetTitle`, covered by
+  `context-budget.test.ts`) holds the pure formatting/threshold logic,
+  mirroring the `lib/session-status.ts` split. **Naming note (issue
+  #3043):** the wire types match the shipped Rust field names
+  (`working_context_pct`, `compaction_fired`) verbatim, not DOC-39 §5.6's
+  stale `working_pct`/`fired` prose — the code is the source of truth.
+  **Known gap (issue #3050):** AC-5.9 requires a distinct "not applicable"
+  state for non-PM sessions (cadence is PM-only); `ContextBudgetQuery` has
+  no PM/cadence discriminant on the wire yet, so non-PM sessions render as
+  "no data yet" rather than "not applicable" until #3050 lands the
+  discriminant.
 - Phase-1 status bar: readiness + budget chrome per DOC-39 §6.2 (refs #2983).
   `StatusBar.svelte` polls `GET /sessions` then `GET /sessions/{id}/readiness`
   (REST Slice 2, squash 15156b42) every 5s via a Svelte 5 `$effect` whose
@@ -78,12 +103,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   session to reflect. Mounted as `<StatusBar>` in `App.svelte`, structurally
   a **sibling of `.body`**, never nested inside it, per DOC-39 §8.1 /
   AC-18.1 — pinned by a new `App.test.ts` DOM-structure test (`pnpm test`,
-  vitest + jsdom, new devDependencies). **Data gap:** the budget half of the
-  status bar renders a labeled "unavailable" placeholder — `Event::ContextBudget`
-  is emitted on the SSE stream but never cached on the session the way
-  `IndexReadinessSnapshot` is, so there is no `session.get_context_budget`
-  RPC or `GET /sessions/{id}/budget` REST route to poll yet; tracked as a
-  REST-slice follow-up rather than adding a new daemon endpoint in this PR.
+  vitest + jsdom, new devDependencies). **Data gap (RESOLVED, see the Added
+  entry above this one):** at the time this PR shipped, the budget half of
+  the status bar rendered a labeled "unavailable" placeholder —
+  `Event::ContextBudget` was emitted on the SSE stream but never cached on
+  the session the way `IndexReadinessSnapshot` is, so there was no
+  `session.get_context_budget` RPC or `GET /sessions/{id}/budget` REST route
+  to poll; tracked as a REST-slice follow-up rather than adding a new daemon
+  endpoint in this PR. That follow-up (issue #3015) landed in PR #3042 and
+  the placeholder was swapped for live data in this same [Unreleased]
+  window.
 - Initial scaffold: Tauri 2 + Svelte 5 desktop shell for the `trusty-code`
   (tcode) daemon, mirroring `crates/trusty-mpm-gui`'s structure (refs #2983,
   `docs/specs/trusty-code-harness-ui.md`). A single `get_daemon_url` IPC
