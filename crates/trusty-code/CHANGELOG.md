@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **CI staleness guard for the embedded tm-agent copies (issue #2958 Slice
+  E4).** `scripts/check_agent_assets.sh` + `.github/workflows/agent-assets.yml`
+  diff `crates/trusty-code/src/assets/agents/*.md` against their source in
+  `crates/trusty-mpm/src/assets/agents/`: the 29 byte-parity files must stay
+  byte-identical to trusty-mpm's source, and the 4 Slice-E3 deliberate
+  deviations (`qa.md`, `code-critic.md`, `code-analyzer.md`, `web-qa.md` —
+  `tools:` restriction + reworded read-only prose) are pinned by trusty-mpm
+  SOURCE hash in `scripts/agent-asset-pins.tsv` instead of byte-compared, so
+  an upstream edit behind one of them fails the gate for deliberate
+  reconciliation rather than silently drifting. `--update`/`--force-add`
+  re-pin after an intentional reconciliation, mirroring
+  `scripts/check_line_cap.sh`'s ratchet ethos (refuses to add a new deviation
+  silently).
+
 ### Fixed
 
 - the embedded 31-agent `DEFAULT_AGENTS` roster (#2958) is now actually
