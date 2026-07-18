@@ -53,9 +53,13 @@ use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 /// `id` is `Some(_)` (see `Router::dispatch`'s notification rule) — calls
 /// `router.dispatch(req, ctx)`, and unwraps the `Response` envelope: `Ok`
 /// when `result` is set, `Err` reconstructing the `RpcError` from
-/// `Response::error` otherwise. Panics only if `dispatch` ever returns a
-/// `Response` with neither `result` nor `error` set, which would be a bug in
-/// `Router::dispatch` itself, not a condition a caller can trigger.
+/// `Response::error` otherwise. If `dispatch` ever returned a `Response`
+/// with neither `result` nor `error` set — a `Router::dispatch` bug, not a
+/// caller-triggerable condition, and provably unreachable through this
+/// bridge since `call` always sets a non-`None` `id`, so `dispatch` never
+/// returns `Response::suppressed()` — this falls back to `Ok(Value::Null)`
+/// rather than panicking (no `unwrap`/`expect` in library code). That would
+/// surface as a silently-wrong 200 response, not a panic.
 /// Test: `call_success_returns_handler_result`, `call_error_returns_rpc_error`.
 pub async fn call(
     router: &Router,
