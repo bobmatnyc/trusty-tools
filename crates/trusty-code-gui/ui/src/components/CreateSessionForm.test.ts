@@ -193,6 +193,59 @@ describe('CreateSessionForm submit gating', () => {
     expect(submitButton().disabled).toBe(false); // re-enabled after failure
   });
 
+  it('degrades to the error UI when GET /fs returns 200 with a shape-invalid body (PR #3103 HIGH finding)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          // 200 but no `entries` array — schema drift / interposed proxy.
+          return { ok: true, status: 200, json: async () => ({ ok: true }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('malformed response') ?? false);
+
+    // The shell survives: the form renders its own error line instead of the
+    // `listing.entries` $derived throwing out of the component tree.
+    expect(target.textContent).toContain('malformed response');
+    expect(submitButton().disabled).toBe(true); // no task entered yet
+  });
+
+  it('shows a generic success message when a 201 body lacks a valid id (PR #3103 MEDIUM finding)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          // 201 (session WAS created) but the body carries no `id`.
+          return { ok: true, status: 201, json: async () => ({ status: 'running' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('session created') ?? false);
+
+    expect(target.textContent).toContain('session created');
+    expect(target.textContent).not.toContain('session created —'); // no id prefix
+    expect(taskField().value).toBe(''); // 201 is authoritative — form still clears
+  });
+
   it('renders daemon-unreachable when the initial GET /fs fails', async () => {
     vi.stubGlobal(
       'fetch',

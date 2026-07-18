@@ -157,3 +157,54 @@ export function describeFsError(status: number): string {
       return `error (HTTP ${status})`;
   }
 }
+
+/**
+ * Runtime shape guard for a `GET /fs` 200 response body.
+ *
+ * Why: PR #3103 review finding (HIGH) — a bare `as DirListing` assertion let
+ * a 200 response missing `entries` (schema drift, an interposed proxy, a
+ * future daemon) flow into `listing.entries.filter(...)` and throw, and since
+ * `CreateSessionForm` is mounted unconditionally in `App.svelte` that
+ * TypeError took down the whole shell. A 200 status is a promise from THIS
+ * daemon version's handler, not from whatever actually answered the socket —
+ * the shape must be verified before it becomes reactive state.
+ * What: structural check of every field the UI dereferences: `path` and
+ * `display_path` are strings, `parent` is a string or null, `entries` is an
+ * array whose members each carry string `name`/`path` and boolean
+ * `is_dir`/`is_git_repo`.
+ * Test: `create-session.test.ts::isDirListing`.
+ */
+export function isDirListing(body: unknown): body is DirListing {
+  if (typeof body !== 'object' || body === null) return false;
+  const b = body as Record<string, unknown>;
+  if (typeof b.path !== 'string' || typeof b.display_path !== 'string') return false;
+  if (b.parent !== null && typeof b.parent !== 'string') return false;
+  if (!Array.isArray(b.entries)) return false;
+  return b.entries.every((e: unknown) => {
+    if (typeof e !== 'object' || e === null) return false;
+    const entry = e as Record<string, unknown>;
+    return (
+      typeof entry.name === 'string' &&
+      typeof entry.path === 'string' &&
+      typeof entry.is_dir === 'boolean' &&
+      typeof entry.is_git_repo === 'boolean'
+    );
+  });
+}
+
+/**
+ * Extract the created session id from a `POST /sessions` 201 body, if any.
+ *
+ * Why: PR #3103 review finding (MEDIUM, same root pattern as [`isDirListing`])
+ * — `(await res.json()) as { id: string }` followed by `.slice(0, 8)` in the
+ * template throws when a 201 body is missing or malformed. The 201 status is
+ * authoritative that the session WAS created; the id is only cosmetic, so its
+ * absence must degrade the success message, never crash the form.
+ * What: returns `body.id` when it is a non-empty string, else `null`.
+ * Test: `create-session.test.ts::extractSessionId`.
+ */
+export function extractSessionId(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const id = (body as Record<string, unknown>).id;
+  return typeof id === 'string' && id.length > 0 ? id : null;
+}

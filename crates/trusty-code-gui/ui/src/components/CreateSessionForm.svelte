@@ -36,7 +36,13 @@
   // binding is the only double-submit guard needed since there is no
   // separate confirm step for creation (unlike `SessionMonitor`'s cancel).
   // A successful `201` clears `task`/`selectedProject` and shows the new
-  // session's id; the session itself becomes visible through the existing
+  // session's id when the body carries one (a generic "session created"
+  // otherwise — the 201 status, not the body, is authoritative). Both
+  // response bodies pass runtime shape guards (`isDirListing` /
+  // `extractSessionId`) before touching reactive state, so a shape-invalid
+  // 200/201 degrades to an inline message instead of throwing out of this
+  // unconditionally-mounted component and crashing the shell.
+  // The session itself becomes visible through the existing
   // `GET /sessions` pollers (`StatusBar`/`SessionMonitor`'s `pickActiveSession`)
   // on their next tick — this component does not need its own poll.
   // Test: `create-session.test.ts` covers the pure gating/body-construction
@@ -48,6 +54,8 @@
     buildCreateBody,
     canSubmitCreate,
     describeFsError,
+    extractSessionId,
+    isDirListing,
     type DirEntryInfo,
     type DirListing,
     type ProjectSelection,
@@ -66,7 +74,7 @@
 
   let submitPhase = $state<SubmitPhase>('idle');
   let submitError = $state<string | null>(null);
-  let createdSessionId = $state<string | null>(null);
+  let successMessage = $state<string | null>(null);
 
   let submitController: AbortController | null = null;
 
@@ -94,8 +102,17 @@
         }
         return;
       }
-      const body = (await res.json()) as DirListing;
+      const body: unknown = await res.json();
       if (signal.aborted) return;
+      if (!isDirListing(body)) {
+        // A 200 with a shape-invalid body (schema drift, proxy, future
+        // daemon) must degrade to the error line, not reach the
+        // `listing.entries` $derived and throw — this component is mounted
+        // unconditionally, so an uncaught throw here takes down the shell.
+        listingPhase = 'error';
+        listingError = 'malformed response from daemon';
+        return;
+      }
       listing = body;
       listingPhase = 'ready';
       listingError = null;
@@ -128,7 +145,7 @@
     if (!canSubmitCreate(task, submitPhase)) return;
     submitPhase = 'submitting';
     submitError = null;
-    createdSessionId = null;
+    successMessage = null;
 
     const controller = new AbortController();
     submitController = controller;
@@ -153,9 +170,13 @@
         return;
       }
 
-      const created = (await res.json()) as { id: string };
+      // The 201 status is authoritative — the session exists even if the
+      // body is missing/malformed (same guard rationale as `isDirListing`),
+      // so a bad body degrades the message to a generic one, never an error.
+      const created: unknown = await res.json().catch(() => null);
       if (controller.signal.aborted) return;
-      createdSessionId = created.id;
+      const id = extractSessionId(created);
+      successMessage = id ? `session created — ${id.slice(0, 8)}` : 'session created';
       task = '';
       selectedProject = null;
     } catch (e) {
@@ -277,8 +298,8 @@
   {#if submitError}
     <p class="mt-2 text-xs text-status-error">{submitError}</p>
   {/if}
-  {#if createdSessionId}
-    <p class="mt-2 text-xs text-status-ok">session created — {createdSessionId.slice(0, 8)}</p>
+  {#if successMessage}
+    <p class="mt-2 text-xs text-status-ok">{successMessage}</p>
   {/if}
 
   <div class="mt-3">

@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Create-session flow response-shape hardening (PR #3103 review findings):
+  `GET /fs` 200 bodies and `POST /sessions` 201 bodies are now validated at
+  runtime (`lib/create-session.ts::isDirListing` / `extractSessionId`)
+  instead of bare `as` type assertions. Previously a 200 listing missing
+  `entries` threw a `TypeError` out of the `listing.entries.filter(...)`
+  derived — and since `CreateSessionForm` is mounted unconditionally, that
+  crashed the entire shell; a 201 missing `id` threw the same way from the
+  template's `.slice(0, 8)`. Now a shape-invalid listing degrades to the
+  existing picker error line ("malformed response from daemon") and a 201
+  without a usable id shows a generic "session created" message (the status
+  code, not the body, is authoritative that the session exists). Regression
+  tests for both live in `CreateSessionForm.test.ts`; guard unit tests in
+  `create-session.test.ts`.
+
 ### Added
 
 - Create-session flow: the 7a folder picker plus the minimal task-input form
