@@ -81,3 +81,19 @@ everything regardless of `default-members`) when you actually need it. This
 also stops every agent worktree from silently producing a fresh ad-hoc-signed
 GUI debug binary — and its own macOS "would like to access data from other
 apps" TCC prompt — on every bare `cargo build`.
+
+🟡 **`cargo tauri build` for `trusty-mpm-gui` needs Bob's Developer ID cert,
+or an env-var override** — `crates/trusty-mpm-gui/tauri.conf.json` pins
+`bundle.macOS.signingIdentity` to `"Developer ID Application: Bob Matsuoka
+(4JH68XUHC5)"` (#2951, stable TCC identity instead of a fresh ad-hoc one per
+rebuild — see the entry above). On a machine without that exact certificate
+in the login keychain, Tauri's bundler hard-fails the signing step. Override
+it with the `APPLE_SIGNING_IDENTITY` environment variable — Tauri's bundler
+honors it in place of the config value (confirmed against the Tauri v2
+[environment variables reference](https://v2.tauri.app/reference/environment-variables/):
+"`APPLE_SIGNING_IDENTITY` — The identity used to code sign. Overwrites
+`tauri.conf.json > bundle > macOS > signingIdentity`."):
+`APPLE_SIGNING_IDENTITY=- cargo tauri build` for a local ad-hoc build (the
+`-` pseudo-identity), or set it to a Developer ID string you do have. `cargo
+build -p trusty-mpm-gui` / `cargo check -p trusty-mpm-gui` (no bundling) are
+unaffected — this only matters for `cargo tauri build`/`tauri build`.

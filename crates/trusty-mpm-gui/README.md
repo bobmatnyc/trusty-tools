@@ -70,6 +70,22 @@ Builds optimized binaries for the current platform:
 - Linux: AppImage or deb package
 - Windows: `.msi` installer
 
+**macOS signing (#2951):** `tauri.conf.json` pins `bundle.macOS.signingIdentity`
+to Bob's Developer ID cert (`Developer ID Application: Bob Matsuoka
+(4JH68XUHC5)`) so the `.app` bundle gets a stable TCC identity instead of a
+fresh ad-hoc one per rebuild. On a machine without that exact certificate in
+the login keychain, `cargo tauri build` will fail to sign — override it with
+the `APPLE_SIGNING_IDENTITY` environment variable, which Tauri's bundler
+honors in place of the config value:
+
+```bash
+# Local ad-hoc build (no Developer ID cert required):
+APPLE_SIGNING_IDENTITY=- cargo tauri build
+
+# Or sign with a different Developer ID cert you do have:
+APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" cargo tauri build
+```
+
 ## Configuration
 
 ### Daemon Connection
