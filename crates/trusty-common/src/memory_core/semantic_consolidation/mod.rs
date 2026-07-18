@@ -21,7 +21,7 @@ pub use consolidator::SemanticConsolidator;
 pub use inference::{Inference, MockInference, OllamaInference, OpenRouterInference};
 pub use types::{
     CanonicalDrawer, ConsolidationAction, ConsolidationResult, SemanticConsolidationConfig,
-    inference_available, parse_consolidation_actions,
+    inference_available, parse_consolidation_actions, validate_ollama_model,
 };
 
 #[cfg(test)]
@@ -147,6 +147,29 @@ mod tests {
         let k1 = types::batch_cache_key(&batch);
         let k2 = types::batch_cache_key(&batch);
         assert_eq!(k1, k2);
+    }
+
+    /// Why (issue #2593): the exact failure — the Anthropic-style default
+    /// model resolved against a local Ollama backend — must be rejected with
+    /// an actionable message, not silently attempted and retried forever.
+    #[test]
+    fn validate_ollama_model_rejects_cloud_prefix() {
+        let err = validate_ollama_model("anthropic/claude-haiku-4-5").unwrap_err();
+        assert!(err.contains("anthropic/"), "message should name the model");
+        assert!(err.contains("Ollama"), "message should name the provider");
+        assert!(
+            err.contains("semantic.model") || err.contains("openrouter_api_key"),
+            "message should name a config knob to fix it"
+        );
+    }
+
+    /// Why: a real local model id (no vendor prefix) must pass validation so
+    /// a correctly-configured local-model deployment keeps working.
+    #[test]
+    fn validate_ollama_model_accepts_local_tag() {
+        assert!(validate_ollama_model("llama3.1").is_ok());
+        assert!(validate_ollama_model("llama3.1:8b").is_ok());
+        assert!(validate_ollama_model("qwen2.5:7b-instruct").is_ok());
     }
 
     /// Why: two different batches must have different keys so the cache

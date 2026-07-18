@@ -15,11 +15,14 @@ use super::helpers::{
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
-use crate::memory_core::semantic_consolidation::{SemanticConsolidator, inference_available};
+use crate::memory_core::semantic_consolidation::{
+    SemanticConsolidator, inference_available, validate_ollama_model,
+};
 use crate::memory_core::store::vector::VectorStore;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -309,20 +312,29 @@ pub struct RoomConsolidationStats {
 }
 
 /// Build the production semantic consolidator from config, gating on inference
-/// availability.
+/// availability and validating the model against the resolved provider.
 ///
 /// Why: both the idle dream pass and the on-demand room consolidation need the
 /// identical "is inference configured? then build a backend" logic; sharing it
-/// keeps the gate in one place.
-/// What: returns `None` when `config.semantic` is disabled or no inference
-/// backend is available; otherwise builds an `OllamaInference` (when a local
-/// model is enabled and no key is set) or `OpenRouterInference` and wraps it in
-/// a `SemanticConsolidator`.
-/// Test: exercised via `dream_cycle_semantic_consolidation_no_inference` (None
-/// path) and the production daemon.
-fn build_consolidator_from_config(config: &DreamConfig) -> Option<Arc<SemanticConsolidator>> {
+/// keeps the gate in one place. It is also the single place that validates the
+/// configured model against the resolved provider (issue #2593), so a
+/// misconfigured Ollama model id is caught before the first of many doomed
+/// network calls rather than retried every cycle.
+/// What: returns `Ok(None)` when `config.semantic` is disabled or no inference
+/// backend is available (a legitimate, silent no-op); returns `Err` with an
+/// actionable message when the resolved backend is Ollama and
+/// `config.semantic.model` cannot resolve there (see `validate_ollama_model`);
+/// otherwise builds an `OllamaInference` (when a local model is enabled and no
+/// key is set) or `OpenRouterInference` and wraps it in a
+/// `SemanticConsolidator`.
+/// Test: exercised via `dream_cycle_semantic_consolidation_no_inference`
+/// (`Ok(None)` path), `dream_cycle_semantic_consolidation_invalid_model_disables_once`
+/// (`Err` path), and the production daemon.
+fn build_consolidator_from_config(
+    config: &DreamConfig,
+) -> std::result::Result<Option<Arc<SemanticConsolidator>>, String> {
     if !config.semantic.enabled {
-        return None;
+        return Ok(None);
     }
     let api_key = if !config.openrouter_api_key.is_empty() {
         config.openrouter_api_key.clone()
@@ -330,11 +342,12 @@ fn build_consolidator_from_config(config: &DreamConfig) -> Option<Arc<SemanticCo
         std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
     };
     if !inference_available(&api_key, config.local_model_enabled) {
-        return None;
+        return Ok(None);
     }
     use crate::memory_core::semantic_consolidation::{OllamaInference, OpenRouterInference};
     let backend: Arc<dyn crate::memory_core::semantic_consolidation::Inference> =
         if config.local_model_enabled && api_key.is_empty() {
+            validate_ollama_model(&config.semantic.model)?;
             Arc::new(OllamaInference::new(
                 "http://localhost:11434",
                 &config.semantic.model,
@@ -342,10 +355,10 @@ fn build_consolidator_from_config(config: &DreamConfig) -> Option<Arc<SemanticCo
         } else {
             Arc::new(OpenRouterInference::new(api_key, &config.semantic.model))
         };
-    Some(Arc::new(SemanticConsolidator::new(
+    Ok(Some(Arc::new(SemanticConsolidator::new(
         backend,
         config.semantic.clone(),
-    )))
+    ))))
 }
 
 /// Apply a consolidation result: add canonical drawers + record KG provenance.
@@ -509,14 +522,21 @@ async fn apply_alias_and_flag_passes(
 /// injected via `Dreamer::with_consolidator`), runs consolidation on all
 /// current non-Task drawers, writes each canonical drawer via `handle.remember`,
 /// and records the `superseded_by` KG triple so the original drawers are
-/// traceable. Additive-only — originals are preserved.
+/// traceable. Additive-only — originals are preserved. When
+/// `build_consolidator_from_config` reports a misconfigured model/provider
+/// combination (issue #2593), logs ONE loud `error!` naming the model, the
+/// provider, and the config knob to fix, sets `disabled`, and returns
+/// `(0, 0, 0)`; every subsequent call with the same `disabled` flag short-
+/// circuits before rebuilding or retrying, instead of failing every cycle.
 /// Returns `(canonical_count, llm_calls, cache_hits)`.
 /// Test: `dream_cycle_semantic_consolidation_with_mock` (injected
-/// consolidator); `dream_cycle_semantic_consolidation_no_inference`.
+/// consolidator); `dream_cycle_semantic_consolidation_no_inference`;
+/// `dream_cycle_semantic_consolidation_invalid_model_disables_once`.
 pub(super) async fn semantic_consolidation_pass(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
     injected: Option<Arc<SemanticConsolidator>>,
+    disabled: &AtomicBool,
 ) -> (usize, usize, usize) {
     // The idle cycle honours the `semantic.enabled` switch even when a
     // consolidator is injected (tests rely on this): disabling the phase in
@@ -532,16 +552,33 @@ pub(super) async fn semantic_consolidation_pass(
     // Use the injected consolidator (test path) or build one from config.
     let consolidator: Arc<SemanticConsolidator> = match injected {
         Some(c) => c,
-        None => match build_consolidator_from_config(config) {
-            Some(c) => c,
-            None => {
-                tracing::debug!(
-                    palace = %handle.id,
-                    "skipping semantic consolidation: disabled or inference unavailable"
-                );
+        None => {
+            if disabled.load(Ordering::Relaxed) {
+                // Already failed loud once for this palace's Dreamer
+                // lifetime; skip without rebuilding or retrying the
+                // known-bad config every cycle (issue #2593).
                 return (0, 0, 0);
             }
-        },
+            match build_consolidator_from_config(config) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    tracing::debug!(
+                        palace = %handle.id,
+                        "skipping semantic consolidation: disabled or inference unavailable"
+                    );
+                    return (0, 0, 0);
+                }
+                Err(msg) => {
+                    tracing::error!(
+                        palace = %handle.id,
+                        model = %config.semantic.model,
+                        "semantic consolidation disabled for this palace: {msg}"
+                    );
+                    disabled.store(true, Ordering::Relaxed);
+                    return (0, 0, 0);
+                }
+            }
+        }
     };
 
     // spec-001: exclude protected Task drawers from consolidation entirely so
@@ -590,11 +627,15 @@ pub(super) async fn semantic_consolidation_pass(
 /// the guard a cutoff of `now` would make every drawer (even ones created this
 /// instant) eligible and evict the entire room.
 /// `injected` lets tests supply a `MockInference`-backed consolidator; in
-/// production it is `None` and the consolidator is built from `config`.
+/// production it is `None` and the consolidator is built from `config`. This
+/// is an on-demand, user-triggered call (not the recurring background dream
+/// loop), so a misconfigured model/provider combination (issue #2593) is
+/// surfaced as `Err` to the caller immediately rather than silently no-op'd.
 /// Test: `consolidate_scoped_filters_by_room`,
 /// `consolidate_scoped_skips_task_drawers`,
 /// `consolidate_scoped_no_inference_is_noop`,
-/// `consolidate_scoped_non_positive_age_is_noop` in `dream::tests`.
+/// `consolidate_scoped_non_positive_age_is_noop`,
+/// `consolidate_scoped_invalid_model_returns_err` in `dream::tests`.
 pub async fn consolidate_scoped(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
@@ -617,13 +658,24 @@ pub async fn consolidate_scoped(
     let consolidator: Arc<SemanticConsolidator> = match injected {
         Some(c) => c,
         None => match build_consolidator_from_config(config) {
-            Some(c) => c,
-            None => {
+            Ok(Some(c)) => c,
+            Ok(None) => {
                 tracing::debug!(
                     palace = %handle.id,
                     "dream_consolidate_room: inference unavailable; no-op"
                 );
                 return Ok(RoomConsolidationStats::default());
+            }
+            Err(msg) => {
+                // On-demand call (not a recurring background job): surface
+                // the misconfiguration to the caller immediately rather than
+                // silently no-op'ing or retrying (issue #2593).
+                tracing::error!(
+                    palace = %handle.id,
+                    model = %config.semantic.model,
+                    "dream_consolidate_room: semantic consolidation misconfigured: {msg}"
+                );
+                return Err(anyhow!(msg));
             }
         },
     };
