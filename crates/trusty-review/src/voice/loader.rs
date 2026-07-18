@@ -15,11 +15,25 @@
 //! Discovery order: user-config dir wins over bundled fixtures.
 //!
 //! Test: `load_bundled_duetto_voice`, `load_missing_voice_errors`,
-//! `load_from_custom_dir`, `list_includes_bundled_duetto` in voice/tests.rs.
+//! `load_from_custom_dir`, `list_includes_bundled_duetto` in voice/tests.rs;
+//! `load_rejects_absolute_path_before_any_io`,
+//! `load_rejects_parent_traversal_before_any_io` in this module.
+//!
+//! 🔴 Security (issue #2995): `name` may originate from an attacker-controlled
+//! repo-scoped `.trusty-review.toml` `[voice] package` key (any PR author can
+//! add one, and since #2995 it can outrank the operator's env var). `load`
+//! validates `name` via `crate::identifier::is_valid_identifier` BEFORE any
+//! path join or filesystem access — `Path::join` silently discards the base
+//! directory for an absolute component (`base.join("/etc/passwd")` ==
+//! `/etc/passwd`) and never collapses `..`, so an unsanitised name could read
+//! an arbitrary local file whose contents are then injected into the LLM
+//! system prompt. See `crate::identifier` for the full threat model.
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+
+use crate::identifier::is_valid_identifier;
 
 use super::types::VoicePackage;
 
@@ -27,14 +41,28 @@ use super::types::VoicePackage;
 ///
 /// Why: structured errors let callers decide whether to degrade silently
 /// (a missing voice package) or surface loudly (a corrupt TOML file).
-/// What: `NotFound` for absent packages; `ParseError` for bad TOML;
+/// `InvalidName` is distinct from `NotFound` so callers/logs can tell "typo"
+/// apart from "rejected as a path-traversal attempt" (security fix, #2995).
+/// What: `NotFound` for absent (but syntactically valid) packages;
+/// `InvalidName` for a name that fails `is_valid_identifier` — returned
+/// BEFORE any path join or filesystem access; `ParseError` for bad TOML;
 /// `Io` for filesystem failures.
-/// Test: `load_missing_voice_errors` in voice/tests.rs.
+/// Test: `load_missing_voice_errors` in voice/tests.rs;
+/// `load_rejects_absolute_path_before_any_io` in this module.
 #[derive(Debug, Error)]
 pub enum VoiceLoaderError {
     /// No voice package with the given name exists in any search directory.
     #[error("voice package '{name}' not found in any search directory")]
     NotFound { name: String },
+    /// `name` is not a bare alphanumeric/`-`/`_` identifier — rejected before
+    /// any path join to prevent path traversal / absolute-path file reads
+    /// (security fix, issue #2995).
+    #[error(
+        "voice package name '{name}' is invalid — only bare alphanumeric/-/_ identifiers are \
+         allowed (no path separators, '..', or absolute paths); check [voice].package in your \
+         config or .trusty-review.toml"
+    )]
+    InvalidName { name: String },
     /// The `voice.toml` file exists but could not be parsed.
     #[error("failed to parse voice.toml at {path}: {source}")]
     ParseError {
@@ -129,13 +157,24 @@ impl VoiceLoader {
     /// Load a voice package by name, searching directories in priority order.
     ///
     /// Why: production callers (prompt builder, health endpoint) call this with
-    /// the configured voice name and rely on graceful fallback to bundled fixtures.
-    /// What: tries each search directory (extra dirs → XDG user-config dir) for
-    /// `<name>/voice.toml`, then checks bundled fixtures.  Returns the first hit.
-    /// Returns `VoiceLoaderError::NotFound` when nothing matches.
+    /// the configured voice name and rely on graceful fallback to bundled
+    /// fixtures. `name` may originate from an attacker-controlled repo
+    /// `.trusty-review.toml` — see the module doc's security note.
+    /// What: validates `name` via `is_valid_identifier` FIRST, returning
+    /// [`VoiceLoaderError::InvalidName`] before any path join or filesystem
+    /// access. Only then tries each search directory (extra dirs → XDG
+    /// user-config dir) for `<name>/voice.toml`, then checks bundled
+    /// fixtures. Returns `VoiceLoaderError::NotFound` when nothing matches.
     /// Test: `load_bundled_duetto_voice`, `load_missing_voice_errors`,
-    /// `load_from_custom_dir`.
+    /// `load_from_custom_dir`, `load_rejects_absolute_path_before_any_io`,
+    /// `load_rejects_parent_traversal_before_any_io`.
     pub fn load(&self, name: &str) -> Result<VoicePackage, VoiceLoaderError> {
+        if !is_valid_identifier(name) {
+            return Err(VoiceLoaderError::InvalidName {
+                name: name.to_string(),
+            });
+        }
+
         // 1. Search extra dirs (highest priority — test injection + local overrides).
         for base in &self.extra_dirs {
             let candidate = base.join(name).join("voice.toml");

@@ -137,12 +137,16 @@ impl RoleModels {
     }
 }
 
-/// CLI-provided per-role model overrides (all optional).
+/// CLI-provided per-invocation overrides (all optional).
 ///
 /// Why: spec REV-312 requires CLI flags to be the highest-precedence override
-/// for model selection.
+/// for model selection; this same bag is reused as the general CLI-overrides
+/// carrier for any other `run`/`compare` flag that must outrank every config
+/// layer (e.g. `--review-template`, issue #2995) rather than inventing a
+/// second plumbing path from `commands/` into `ReviewConfig::from_env_and_file`.
 /// What: a plain struct carried from the CLI argument parser into
-/// `RoleModels::resolve`.
+/// `RoleModels::resolve` (model fields) and `ReviewConfig::from_env_and_file`
+/// (`review_template`).
 /// Test: covered by `role_models_precedence_cli_wins`.
 #[derive(Debug, Default, Clone)]
 pub struct RoleCliOverrides {
@@ -154,6 +158,9 @@ pub struct RoleCliOverrides {
     pub summarizer_model: Option<String>,
     /// `--provider openrouter|bedrock`.
     pub provider: Option<String>,
+    /// `--review-template <name>` (issue #2995) — highest-precedence override
+    /// for the named review-template addendum; see `ReviewConfig::review_template`.
+    pub review_template: Option<String>,
 }
 
 /// Per-role model ids read from environment variables.

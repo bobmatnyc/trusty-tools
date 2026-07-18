@@ -274,5 +274,147 @@ fn apex_path_prefixes_defaults_to_empty() {
     );
 }
 
+// ─── Repo-scoped `.trusty-review.toml` precedence (issue #2995) ───────────────
+
+/// `resolve_repo_config_path` skips discovery entirely when an explicit
+/// `--config` path is given — the pure, CWD-independent gate for
+/// "CLI --config > repo file".
+///
+/// Why: proves the skip happens BEFORE any filesystem/CWD access — the
+/// nonexistent dummy path is never read, so this assertion holds regardless
+/// of the real test-runner's CWD or its actual git-root contents.
+/// What: asserts `None` for `Some(path)` regardless of the path's validity.
+/// Test: this test; no filesystem access.
+#[test]
+fn explicit_config_path_skips_repo_discovery() {
+    let dummy = std::path::Path::new("/does/not/exist/config.toml");
+    assert_eq!(resolve_repo_config_path(Some(dummy)), None);
+}
+
+/// A repo-discovered `.trusty-review.toml` `[voice]` section overrides an
+/// ambient `TRUSTY_REVIEW_VOICE_PACKAGE`/`TRUSTY_REVIEW_PRINCIPLES` env var.
+///
+/// Why: end-to-end guard for the precedence documented on
+/// `ReviewConfig::from_env_and_file_inner` — a project's committed voice
+/// selection must not be silently shadowed by a developer's ambient env var.
+/// What: writes a `.trusty-review.toml` to a tempdir, passes its path directly
+/// as `repo_config_path` (no CWD mutation — see `from_env_and_file_inner`'s
+/// doc), and asserts the repo file's values win over conflicting env vars.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn repo_config_voice_overrides_env() {
+    unsafe {
+        std::env::set_var("TRUSTY_REVIEW_VOICE_PACKAGE", "env-voice");
+        std::env::set_var("TRUSTY_REVIEW_PRINCIPLES", "true");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_config = dir.path().join(".trusty-review.toml");
+    std::fs::write(
+        &repo_config,
+        "[voice]\npackage = \"repo-voice\"\nprinciples = false\n",
+    )
+    .expect("write repo config");
+
+    let config = ReviewConfig::from_env_and_file_inner(None, None, Some(&repo_config));
+
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_VOICE_PACKAGE");
+        std::env::remove_var("TRUSTY_REVIEW_PRINCIPLES");
+    }
+
+    assert_eq!(config.voice_package.as_deref(), Some("repo-voice"));
+    assert!(!config.voice_principles);
+}
+
+/// A repo-discovered `.trusty-review.toml` `[review]` section overrides an
+/// ambient `TRUSTY_REVIEW_TEMPLATE` env var.
+///
+/// Why: same rationale as `repo_config_voice_overrides_env`, for the new
+/// `[review] template` key.
+/// What: writes a `.trusty-review.toml` with `[review] template = "..."`,
+/// asserts the repo value wins over a conflicting env var.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn repo_config_review_template_overrides_env() {
+    unsafe {
+        std::env::set_var("TRUSTY_REVIEW_TEMPLATE", "env-template");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_config = dir.path().join(".trusty-review.toml");
+    std::fs::write(&repo_config, "[review]\ntemplate = \"repo-template\"\n")
+        .expect("write repo config");
+
+    let config = ReviewConfig::from_env_and_file_inner(None, None, Some(&repo_config));
+
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_TEMPLATE");
+    }
+
+    assert_eq!(config.review_template.as_deref(), Some("repo-template"));
+}
+
+/// A `--review-template` CLI override wins even over a repo-discovered
+/// `.trusty-review.toml`.
+///
+/// Why: `RoleCliOverrides.review_template` must be the top precedence tier
+/// (CLI --review-template > repo .trusty-review.toml > env vars > global
+/// config).
+/// What: sets a repo file AND a CLI override with different names; asserts
+/// the CLI override wins.
+/// Test: this test; tempfile-based.
+#[test]
+fn repo_config_cli_review_template_wins() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_config = dir.path().join(".trusty-review.toml");
+    std::fs::write(&repo_config, "[review]\ntemplate = \"repo-template\"\n")
+        .expect("write repo config");
+    let overrides = RoleCliOverrides {
+        review_template: Some("cli-template".to_string()),
+        ..Default::default()
+    };
+
+    let config = ReviewConfig::from_env_and_file_inner(None, Some(&overrides), Some(&repo_config));
+
+    assert_eq!(config.review_template.as_deref(), Some("cli-template"));
+}
+
+/// Zero-regression: no repo file present → behaviour is identical to
+/// pre-#2995 (env var still overrides an explicit/global config file).
+///
+/// Why: the issue explicitly requires "KEEP existing behavior when no repo
+/// file exists" — this guards that the four-tier repo insertion did not
+/// change the pre-existing env-over-file relationship when the new tier is
+/// absent.
+/// What: no repo file is supplied (`repo_config_path: None`); an env var and
+/// a conflicting `--config`-style file both set `voice.package`; asserts the
+/// env var still wins (the pre-#2995 relationship), matching
+/// `voice::load_voice_package`'s documented behaviour.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn no_repo_config_preserves_pre_2995_env_over_file_precedence() {
+    unsafe {
+        std::env::set_var("TRUSTY_REVIEW_VOICE_PACKAGE", "env-voice");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let explicit_config = dir.path().join("config.toml");
+    std::fs::write(&explicit_config, "[voice]\npackage = \"file-voice\"\n")
+        .expect("write explicit config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&explicit_config), None, None);
+
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_VOICE_PACKAGE");
+    }
+
+    assert_eq!(
+        config.voice_package.as_deref(),
+        Some("env-voice"),
+        "with no repo file, env must still win over the config file (unchanged from pre-#2995)"
+    );
+}
+
 // resolve_index and wiring-path tests are in the sibling file to stay under
 // the 500-line cap (#610).  See `config_resolve_index_tests.rs`.

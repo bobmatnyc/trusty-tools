@@ -265,6 +265,9 @@ Returns a health status object:
 | `GITHUB_TOKEN` | — | GitHub personal access token for `review_pr` |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | AWS credentials for Bedrock |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key (when using OpenRouter provider) |
+| `TRUSTY_REVIEW_VOICE_PACKAGE` | — | Voice package name; see [Per-project config & review templates](#per-project-config--review-templates) |
+| `TRUSTY_REVIEW_PRINCIPLES` | `true` | Disable the universal principles layer (`false`) |
+| `TRUSTY_REVIEW_TEMPLATE` | — | Named review-template addendum (issue #2995); see [Per-project config & review templates](#per-project-config--review-templates) |
 | `RUST_LOG` | `warn` | Tracing filter (logs to stderr) |
 
 AWS credentials can also be supplied via `~/.aws/credentials`, IAM roles, or SSO.
@@ -329,6 +332,73 @@ Provider prefix convention:
 - `bedrock/<id>` — AWS Bedrock Converse API (no API key needed, uses AWS credential chain)
 - `openrouter/<id>` — OpenRouter (requires `OPENROUTER_API_KEY`)
 - Bare id — uses the configured default provider
+
+## Per-project config & review templates
+
+`run` and `compare` auto-discover a `.trusty-review.toml` at the git root of
+the code under review (the same git-root walk the trusty-search index
+auto-derive already uses, issue #661) — commit it alongside your source so
+every contributor and CI run picks up the project's review standards with no
+per-machine setup. Supported keys today are `[voice]` (`package`,
+`principles`) and `[review]` (`template`, see below); anything else in the
+global config schema is trivially addable following the same pattern in
+`crates/trusty-review/src/config/`.
+
+```toml
+# .trusty-review.toml — committed at the repo root
+[voice]
+package = "duetto"
+
+[review]
+template = "strict-security"
+```
+
+**Precedence** (highest to lowest): `--config <path>` (an explicit config file
+always wins and skips repo discovery entirely) → the repo `.trusty-review.toml`
+→ the relevant `TRUSTY_REVIEW_*` env var → the caller-selected config file
+(`$XDG_CONFIG_HOME/trusty-review/config.toml` by default). When no repo file
+exists, behavior is unchanged from before #2995 (env var still overrides the
+config file). `--review-template` on the CLI is the single highest-precedence
+override for the template name specifically.
+
+### Named review templates
+
+`--review-template <name>` (or `[review] template = "<name>"`) selects a
+named markdown addendum appended to the layered PR-review system prompt.
+Resolution mirrors the `report` subcommand's template UX: bundled defaults →
+`<config_dir>/trusty-review/templates/review/<name>.md` user override
+(checked before the bundled `include_str!()` default — same pattern as
+`VoiceLoader` and the report `TemplateLoader`), where `<config_dir>` is
+[`dirs::config_dir()`](https://docs.rs/dirs/latest/dirs/fn.config_dir.html) —
+concretely:
+
+- Linux: `~/.config/trusty-review/templates/review/<name>.md` (or under
+  `$XDG_CONFIG_HOME` if set)
+- macOS: `~/Library/Application Support/trusty-review/templates/review/<name>.md`
+
+One template ships bundled: `strict-security` (extra scrutiny on injection,
+authn/authz, secrets, crypto, input validation, and supply-chain risk).
+
+`name` (from any source — CLI, repo file, env var, or config file) must be a
+bare identifier: only ASCII letters, digits, `-`, and `_` — no path
+separators, `..`, or absolute paths. This is a deliberate security guard
+(issue #2995): a review-template or voice-package name can originate from a
+repo-scoped `.trusty-review.toml`, which is attacker-controlled (any PR
+author can add one), so a path-like value is rejected before it can ever be
+used in a filesystem path join.
+
+A review template only **appends** a structured addendum section — it never
+replaces the stock grade scale, verdict table, or severity anchors. It
+composes with (never replaces) the voice/principles layers, landing LAST in
+the layering order:
+
+```
+stock base prompt → principles → voice addendum → review template
+```
+
+The review template is the most project-specific layer, so it reads as the
+final word after the broader principles/voice guidance. Wholesale rubric
+replacement is intentionally out of scope.
 
 ## Report generation
 
