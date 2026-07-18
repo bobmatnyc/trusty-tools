@@ -46,6 +46,31 @@ impl AgentConfig {
     /// Test: `AgentConfig::by_name("pm")` loads without error when run from
     /// the project root.
     pub fn by_name(name: &str) -> Result<Self> {
+        let cfg = Self::by_name_unresolved(name)?;
+        // #3055: resolve an `extends` chain at load time (DOC-41 §2.5). An
+        // agent with no `extends` is returned unchanged (its `extends` is
+        // already `None`); one that inherits is flattened base-first against
+        // sibling agents loaded by name.
+        if cfg.agent.extends.is_none() {
+            return Ok(cfg);
+        }
+        let lookup = |n: &str| Self::by_name_unresolved(n).ok();
+        let resolved = crate::agents::extends::resolve(name, &lookup)
+            .with_context(|| format!("failed to resolve `extends` chain for agent '{name}'"))?;
+        Ok(resolved.finalize_extends())
+    }
+
+    /// Load a single agent config by name WITHOUT resolving its `extends`
+    /// chain (#3055).
+    ///
+    /// Why: [`AgentConfig::resolve`](crate::agents::extends::resolve) walks the
+    /// chain recursively and must fetch each ancestor in its raw, still-
+    /// `extends`-bearing form; resolving inside the per-name loader would
+    /// double-resolve. This is the pre-#3055 `by_name` body, factored out.
+    /// What: prefers the directory-package format, else the flat `<name>.toml`.
+    /// Test: covered by the `extends_*` by-name tests and the pre-existing
+    /// `by_name` tests.
+    fn by_name_unresolved(name: &str) -> Result<Self> {
         // #482: Prefer the directory-package format (`<name>/agent.toml` +
         // `persona.md`) when present; fall back to the flat `<name>.toml`.
         let dir = agents_dir();
@@ -53,6 +78,29 @@ impl AgentConfig {
             return Ok(cfg);
         }
         Self::load(&dir.join(format!("{name}.toml")))
+    }
+
+    /// Re-run model + adapter resolution after an `extends` merge (#3055).
+    ///
+    /// Why: `extends` resolution ([`crate::agents::extends`]) folds a base and
+    /// child at the struct level without touching model resolution. A `.md`
+    /// child that omitted `model` inherits the base's, and a child that
+    /// declared one carries it raw — either way the merged config must run
+    /// through `resolve_model` (for `TAGENT_MODEL_*` / default-env overrides
+    /// keyed on the FINAL agent name) and re-derive the provider adapter so it
+    /// matches a normally-loaded config.
+    /// What: resolves `agent.model` via [`resolve_model`] and rebuilds
+    /// `adapter` from the result. Idempotent for an already-resolved model.
+    /// Test: `extends_resolved_child_inherits_base_model` (registry tests).
+    pub(crate) fn finalize_extends(mut self) -> Self {
+        let (resolved, _src) = resolve_model(
+            &self.agent.name,
+            &self.agent.model,
+            self.llm.model_override.as_deref(),
+        );
+        self.agent.model = resolved;
+        self.adapter = Arc::from(adapter_for_model(&self.agent.model));
+        self
     }
 
     /// Built-in default `ctrl` agent config used when no `ctrl.toml` /
@@ -90,7 +138,30 @@ impl AgentConfig {
         // the blocking cost is negligible relative to the LLM dispatch that
         // follows.
         let dir = agents_dir();
-        if let Some(cfg) = load_agent_package(&dir, name)? {
+        let cfg = Self::by_name_async_unresolved(name, &dir).await?;
+        // #3055: resolve `extends` at load time (DOC-41 §2.5). Base lookups use
+        // the sync unresolved loader — the reads are small config files, so the
+        // blocking cost is negligible relative to the LLM dispatch that follows
+        // (same rationale the package loader already relies on above).
+        if cfg.agent.extends.is_none() {
+            return Ok(cfg);
+        }
+        let lookup = |n: &str| Self::by_name_unresolved(n).ok();
+        let resolved = crate::agents::extends::resolve(name, &lookup)
+            .with_context(|| format!("failed to resolve `extends` chain for agent '{name}'"))?;
+        Ok(resolved.finalize_extends())
+    }
+
+    /// Async single-agent load WITHOUT `extends` resolution (#3055 companion to
+    /// [`Self::by_name_unresolved`]).
+    ///
+    /// Why: `by_name_async` needs the raw, still-`extends`-bearing child before
+    /// it walks the chain; this is the pre-#3055 async load body, factored out.
+    /// What: prefers the directory package, then the flat `<name>.toml`, then
+    /// the claude-mpm `.md` fallback — identical to the prior behavior.
+    /// Test: `by_name_async_loads_plan_agent`.
+    async fn by_name_async_unresolved(name: &str, dir: &Path) -> Result<Self> {
+        if let Some(cfg) = load_agent_package(dir, name)? {
             return Ok(cfg);
         }
         let path = dir.join(format!("{name}.toml"));

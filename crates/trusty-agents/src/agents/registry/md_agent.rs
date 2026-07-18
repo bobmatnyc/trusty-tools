@@ -41,6 +41,38 @@ struct MdAgentFrontmatter {
     runner: Option<String>,
     #[serde(default)]
     capabilities: Option<AgentCapabilities>,
+    /// Persona/display name layered by a personalization overlay (DOC-41
+    /// §2.5.1, #3055).
+    ///
+    /// Why: base agents are nameless; the friendly persona name (e.g.
+    /// `Izzie`) comes from the child overlay that `extends` the base. Parsing
+    /// it here lets a `.md` child set `display_name` even when its base has
+    /// none — scalar child-overrides semantics.
+    /// What: Optional string mapped straight onto `AgentInfo::display_name`.
+    /// Test: `agents::extends::tests::extends_child_sets_display_name_over_none`.
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Per-agent tool allowlist / scopes layered by a personalization overlay
+    /// (DOC-41 §2.5.1 worked example, #3055).
+    ///
+    /// Why: the §2.5.1 personalization example authors a `.md` agent whose
+    /// frontmatter declares `tools:\n  allowed: [...]` — before this the `.md`
+    /// loader hardcoded `ToolsConfig::default()` and silently dropped any
+    /// declared tools, so the `extends` tool UNION had nothing to union. Parsing
+    /// it here makes the personalization example actually work.
+    /// What: Optional `ToolsConfig` (same shape as the TOML `[tools]` table);
+    /// absent → `ToolsConfig::default()` (no restriction), exactly as before.
+    /// Test: `agents::extends::tests::registry_resolves_extends_chain`.
+    #[serde(default)]
+    tools: Option<ToolsConfig>,
+    /// Name of a base agent to inherit from (`extends:`), DOC-41 §2.5 / #3055.
+    ///
+    /// Why: makes the previously-inert `extends:` frontmatter key live so a
+    /// user can personalize a bundled base agent without forking it.
+    /// What: Optional base-agent name; resolved + merged by the loader.
+    /// Test: `agents::extends::tests`.
+    #[serde(default)]
+    extends: Option<String>,
 }
 
 /// Parse an `.md` agent file into an `AgentConfig`.
@@ -91,7 +123,15 @@ pub(super) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             .to_string()
     });
     let agent_model_raw = fm.model.unwrap_or_default();
-    let (resolved_model, _src) = crate::agents::resolve_model(&name, &agent_model_raw, None);
+    // #3055: when this agent `extends` a base, defer model resolution until
+    // after the `extends` merge. A child that omits `model` must INHERIT the
+    // base's, so keep the raw (possibly empty) value here rather than resolving
+    // it to a default now; `AgentRegistry::load` re-resolves the merged config.
+    let resolved_model = if fm.extends.is_some() {
+        agent_model_raw
+    } else {
+        crate::agents::resolve_model(&name, &agent_model_raw, None).0
+    };
     let runner = match fm.runner.as_deref() {
         Some("claude-code") => RunnerKind::ClaudeCode,
         Some("inline") => RunnerKind::Inline,
@@ -117,8 +157,9 @@ pub(super) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             persistent_session: false,
             runner,
             capabilities: fm.capabilities,
-            display_name: None,
+            display_name: fm.display_name,
             prompt_label: None,
+            extends: fm.extends,
         },
         llm: LlmParams {
             temperature: 0.2,
@@ -142,7 +183,7 @@ pub(super) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             content: body,
             skills: None,
         },
-        tools: ToolsConfig::default(),
+        tools: fm.tools.unwrap_or_default(),
         compress: AgentCompressConfig::default(),
         runner_config: crate::agents::RunnerConfig::default(),
         session: crate::agents::SessionCompressionConfig::default(),

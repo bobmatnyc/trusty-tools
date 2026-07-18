@@ -95,6 +95,7 @@ impl ClaudeMpmAgent {
                 capabilities: None,
                 display_name: None,
                 prompt_label: None,
+                extends: None,
             },
             llm: LlmParams {
                 temperature: 0.3,

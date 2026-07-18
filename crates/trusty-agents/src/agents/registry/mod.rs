@@ -15,6 +15,7 @@
 //! in `roster`.
 //! Test: See the unit tests in `tests`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -119,6 +120,7 @@ impl AgentRegistry {
             }
         }
 
+        resolve_extends_in_map(&mut agents);
         Self { agents }
     }
 
@@ -314,6 +316,57 @@ impl AgentRegistry {
                 }
             })
             .collect()
+    }
+}
+
+/// Flatten every discovered agent's `extends` chain in place (DOC-41 §2.5,
+/// issue #3055).
+///
+/// Why: `extends` resolution runs once, at load time — the natural
+/// instantiation point trusty-agents already has (no separate build/deploy
+/// pass like trusty-mpm). Doing it after the whole directory sweep means a
+/// child can inherit from ANY sibling in the map (a personal
+/// `~/.trusty-agents/agents/my-assistant.md` extending a bundled `assistant`),
+/// resolved base-first with cycle + depth safety.
+/// What: snapshots the raw (unresolved) configs into a case-folded index, then
+/// for each agent that declares `extends`, resolves + folds its chain via
+/// [`crate::agents::extends::resolve`] and re-runs model/adapter resolution on
+/// the result. A resolution failure (missing base, cycle, over-deep) logs a
+/// `warn` and leaves the unresolved agent in place — one bad `extends` never
+/// breaks startup, matching the loader's existing failure tolerance.
+/// Test: `registry_resolves_extends_chain`, `registry_extends_missing_base_warns`.
+fn resolve_extends_in_map(agents: &mut IndexMap<String, (AgentConfig, PathBuf)>) {
+    // Case-folded snapshot for the resolver's name lookup. Cloning is cheap
+    // relative to startup and keeps the resolver reading the pristine
+    // pre-resolution form of every base (its own `extends` still intact).
+    let raw: HashMap<String, AgentConfig> = agents
+        .iter()
+        .map(|(name, (cfg, _))| (name.to_lowercase(), cfg.clone()))
+        .collect();
+    let lookup = |n: &str| raw.get(&n.to_lowercase()).cloned();
+
+    let to_resolve: Vec<String> = agents
+        .iter()
+        .filter(|(_, (cfg, _))| cfg.agent.extends.is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    for name in to_resolve {
+        match crate::agents::extends::resolve(&name, &lookup) {
+            Ok(resolved) => {
+                let resolved = resolved.finalize_extends();
+                if let Some(entry) = agents.get_mut(&name) {
+                    entry.0 = resolved;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %name,
+                    error = %e,
+                    "failed to resolve agent `extends` chain; using the unresolved agent"
+                );
+            }
+        }
     }
 }
 
