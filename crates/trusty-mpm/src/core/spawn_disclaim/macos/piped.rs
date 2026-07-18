@@ -28,13 +28,26 @@
 //! "captured but never forwarded" behavior — rather than closed (closing it
 //! would deliver `SIGPIPE`/`EPIPE` to the child on its next stderr write, a
 //! behavior change out of scope for this fix). A `spawn_blocking` task reaps
-//! the child via [`super::wait_for`] immediately so the pid is never left a
-//! zombie even if the caller never calls `ChildHandle::wait`.
+//! the child via [`super::wait_for`] immediately, so the pid is never left a
+//! zombie even if the caller never calls `ChildHandle::wait` — and it is
+//! spawned BEFORE the `Sender`/`Receiver::from_owned_fd` pipe conversions
+//! (deliberately, not incidentally: `posix_spawnp` has already succeeded by
+//! that point, so the child is alive and running regardless of whether those
+//! conversions do; spawning the reaper first means a conversion error's `?`
+//! early-return still leaves the pid supervised rather than leaking it
+//! unsupervised — mirrors [`super::capture`]'s "reap the child
+//! UNCONDITIONALLY before propagating any pipe-read error" discipline).
 //! Test: `spawn_piped_disclaimed_writes_and_reads_via_cat`,
 //! `spawn_piped_disclaimed_preserves_cwd`,
 //! `spawn_piped_disclaimed_removes_env_and_keeps_rest`,
 //! `spawn_piped_disclaimed_reports_spawn_error_for_missing_binary`,
-//! `spawn_piped_disclaimed_kill_and_wait_reaps_child`.
+//! `spawn_piped_disclaimed_kill_and_wait_reaps_child`. The reaper-before-
+//! conversion ordering itself has no dedicated test: triggering a real
+//! `Sender`/`Receiver::from_owned_fd` failure needs a non-pipe fd or a
+//! deliberately-broken one, which this suite has no fault-injection seam
+//! for (every path here spawns a live process); the ordering is verified by
+//! code inspection instead — the reaper spawn is the last statement before
+//! the two conversions run, so it always executes first.
 
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsString};
@@ -51,7 +64,9 @@ use super::{
 /// disclaimed, wiring the parent's pipe ends into async tokio I/O.
 ///
 /// Why: see the module docs.
-/// What: see the module docs.
+/// What: see the module docs. Note the reaper is spawned before the
+/// `Sender`/`Receiver::from_owned_fd` conversions below, not after — see the
+/// module docs for why.
 /// Test: see the module docs.
 pub(crate) fn spawn_piped_disclaimed(cmd: std::process::Command) -> io::Result<PipedSpawn> {
     let prog_c = CString::new(cmd.get_program().as_bytes())
@@ -195,6 +210,19 @@ pub(crate) fn spawn_piped_disclaimed(cmd: std::process::Command) -> io::Result<P
     drop(out_wr);
     drop(err_wr);
 
+    // Reap unconditionally in the background so the pid is never left a
+    // zombie — whether or not the caller ever calls `ChildHandle::wait`, AND
+    // whether or not the pipe-fd conversions below succeed. `posix_spawnp`
+    // above already succeeded, so the child is alive and running from this
+    // point on regardless of what happens next; spawning the reaper BEFORE
+    // the `Sender`/`Receiver::from_owned_fd` conversions (rather than after,
+    // as originally written) means a conversion failure's `?` early-return
+    // still leaves this task waiting on `pid` in the background instead of
+    // leaking it unsupervised (mirrors `capture::spawn_capture_disclaimed`'s
+    // "reap the child UNCONDITIONALLY before propagating any pipe-read
+    // error" discipline).
+    let reaper = tokio::task::spawn_blocking(move || wait_for(pid));
+
     // SAFETY: each raw fd below is an owned, open pipe end whose `OwnedFd`
     // guard released it via `into_raw()` immediately beforehand, so there is
     // exactly one owner at all times; wrapping it in `std::os::fd::OwnedFd`
@@ -206,10 +234,6 @@ pub(crate) fn spawn_piped_disclaimed(cmd: std::process::Command) -> io::Result<P
 
     let sender = tokio::net::unix::pipe::Sender::from_owned_fd(stdin_owned)?;
     let receiver = tokio::net::unix::pipe::Receiver::from_owned_fd(stdout_owned)?;
-
-    // Reap unconditionally in the background so the pid is never left a
-    // zombie, whether or not the caller ever calls `ChildHandle::wait`.
-    let reaper = tokio::task::spawn_blocking(move || wait_for(pid));
 
     Ok(PipedSpawn {
         handle: ChildHandle::Disclaimed {

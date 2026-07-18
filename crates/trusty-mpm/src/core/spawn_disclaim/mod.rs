@@ -53,7 +53,8 @@
 //! `disclaimed_output_reports_spawn_error_for_missing_binary`,
 //! `disclaimed_status_inherits_and_reports_exit_code`,
 //! `disclaimed_status_applies_cwd_and_env_override`,
-//! `disclaimed_status_reports_spawn_error_for_missing_binary` (all macOS-only,
+//! `disclaimed_status_reports_spawn_error_for_missing_binary`,
+//! `disclaimed_second_kill_after_wait_is_noop` (all macOS-only,
 //! in this module's `tests`); `spawn_piped_disclaimed_writes_and_reads_via_cat`
 //! and its siblings in `macos::piped` (piped path, macOS-only);
 //! `disclaimed_piped_spawn_native_path_round_trips` (piped path, any OS —
@@ -161,7 +162,9 @@ pub type DynChildStdout = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 /// only for RAII — matches `StreamJsonBackend`'s pre-existing "captured but
 /// never forwarded" behavior).
 /// Test: exercised by every `spawn_piped_disclaimed_*` test (macOS) and
-/// `disclaimed_piped_spawn_native_path_round_trips` (any OS).
+/// `disclaimed_piped_spawn_native_path_round_trips` (any OS);
+/// `disclaimed_second_kill_after_wait_is_noop` covers the
+/// reap-then-re-kill sequence specifically.
 pub enum ChildHandle {
     /// The plain `tokio::process`-spawned child (non-macOS, or the
     /// [`DISABLE_ENV`] escape hatch).
@@ -179,16 +182,38 @@ impl ChildHandle {
     /// Send SIGKILL to the child (non-blocking), mirroring
     /// `tokio::process::Child::start_kill`.
     ///
-    /// Why/What: see [`ChildHandle`]'s docs.
-    /// Test: `spawn_piped_disclaimed_kill_and_wait_reaps_child`,
+    /// Why: `StreamJsonBackend::stop()` calls `start_kill()` then `wait()`
+    /// (reaping the pid), and its `Drop` impl calls `start_kill()`
+    /// unconditionally as a safety net on every path, including the normal
+    /// post-`stop()` drop — so a naive `libc::kill(pid, …)` here fires a
+    /// SECOND SIGKILL at an already-reaped pid on every graceful stop. Once a
+    /// pid is reaped the OS is free to recycle it for an unrelated process,
+    /// so that second signal is not a benign no-op — it can kill a stranger.
+    /// `reaper` doubles as the "have we reaped yet" flag: [`Self::wait`]
+    /// `take()`s it the first (and only allowed) time it runs, so
+    /// `reaper.is_none()` here means the pid is already gone and `start_kill`
+    /// must not touch it.
+    /// What: no-ops to `Ok(())` when `reaper` is `None` (already reaped via
+    /// `wait()`); otherwise sends SIGKILL as before. Safe to call before
+    /// `wait()`, including multiple times before it (the pid is still live in
+    /// both cases, so re-signalling it is the same benign repeat send
+    /// `tokio::process::Child::start_kill` allows).
+    /// Test: `disclaimed_second_kill_after_wait_is_noop` (this module),
+    /// `spawn_piped_disclaimed_kill_and_wait_reaps_child`,
     /// `disclaimed_piped_spawn_native_path_round_trips`.
     pub fn start_kill(&mut self) -> std::io::Result<()> {
         match self {
             ChildHandle::Native(child) => child.start_kill(),
             #[cfg(target_os = "macos")]
-            ChildHandle::Disclaimed { pid, .. } => {
-                // SAFETY: `pid` is our own spawned child; SIGKILL is always a
-                // valid signal to send to a live pid we own.
+            ChildHandle::Disclaimed { pid, reaper, .. } => {
+                if reaper.is_none() {
+                    // Already reaped by a prior `wait()` — the pid may have
+                    // been recycled by the OS since; do not signal it.
+                    return Ok(());
+                }
+                // SAFETY: `pid` is our own spawned child and, per the check
+                // above, has not yet been reaped; SIGKILL is always a valid
+                // signal to send to a live pid we own.
                 if unsafe { libc::kill(*pid, libc::SIGKILL) } == 0 {
                     Ok(())
                 } else {
@@ -203,8 +228,12 @@ impl ChildHandle {
     /// Why/What: see [`ChildHandle`]'s docs. Panics if called twice on a
     /// `Disclaimed` handle (the reaper task is consumed on the first call) —
     /// callers never do this today (`StreamJsonBackend::stop` and its `Drop`
-    /// impl are mutually exclusive by construction).
-    /// Test: `spawn_piped_disclaimed_writes_and_reads_via_cat`,
+    /// impl are mutually exclusive by construction). Consuming `reaper` here
+    /// via `take()` is also the "already reaped" signal [`Self::start_kill`]
+    /// checks — the two behaviors share the one field deliberately, so they
+    /// can never drift out of sync.
+    /// Test: `disclaimed_second_kill_after_wait_is_noop`,
+    /// `spawn_piped_disclaimed_writes_and_reads_via_cat`,
     /// `spawn_piped_disclaimed_kill_and_wait_reaps_child`,
     /// `disclaimed_piped_spawn_native_path_round_trips`.
     pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
@@ -466,6 +495,44 @@ mod tests {
         let status = disclaimed_status(&mut cmd).unwrap();
         unsafe { std::env::remove_var(DISABLE_ENV) };
         assert_eq!(status.code(), Some(3));
+    }
+
+    // --- ChildHandle::start_kill double-kill-after-reap regression (issue: PR #3037 review) ---
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn disclaimed_second_kill_after_wait_is_noop() {
+        // Reproduces the exact sequence `StreamJsonBackend::stop()` +
+        // `Drop::drop()` run on every graceful stop: start_kill() -> wait()
+        // (reaps the pid, consuming `reaper`) -> a second start_kill() from
+        // `Drop`. Before the fix the second call unconditionally re-sent
+        // SIGKILL to the already-reaped pid, risking a stray signal to a
+        // recycled pid; it must now be a no-op.
+        let mut cmd = std::process::Command::new("/bin/sleep");
+        cmd.arg("30");
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut spawned = macos::spawn_piped_disclaimed(cmd).unwrap();
+
+        spawned.handle.start_kill().unwrap();
+        spawned.handle.wait().await.unwrap();
+
+        // `wait()` consumes `reaper` — the same field `start_kill()` checks —
+        // so this assertion pins the exact signal the no-op branch relies on.
+        match &spawned.handle {
+            ChildHandle::Disclaimed { reaper, .. } => {
+                assert!(reaper.is_none(), "wait() must consume the reaper handle");
+            }
+            ChildHandle::Native(_) => {
+                unreachable!("macos::spawn_piped_disclaimed always returns Disclaimed")
+            }
+        }
+
+        // The second call must short-circuit to Ok(()) without re-signalling
+        // the pid (the SAFETY comment in start_kill establishes this is the
+        // only code path that could touch a reused pid).
+        assert!(spawned.handle.start_kill().is_ok());
     }
 }
 
