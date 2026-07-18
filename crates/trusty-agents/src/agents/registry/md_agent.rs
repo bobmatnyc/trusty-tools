@@ -87,7 +87,7 @@ struct MdAgentFrontmatter {
 /// overrides through `resolve_model`.
 /// Test: `md_agent_file_parses_frontmatter_and_body`,
 /// `registry_picks_up_md_files_alongside_toml`.
-pub(super) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
+pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     use anyhow::{Context, anyhow};
 
     let raw = std::fs::read_to_string(path)

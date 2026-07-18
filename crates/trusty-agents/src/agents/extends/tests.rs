@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use super::{AgentExtendsError, MAX_DEPTH, merge_extends, resolve};
 use crate::agents::AgentConfig;
+use crate::agents::RunnerKind;
 use crate::agents::registry::AgentRegistry;
 
 use tempfile::TempDir;
@@ -132,6 +133,63 @@ content = "c"
     assert_eq!(merged.agent.role, "researcher");
     // `extends` is consumed by the merge.
     assert!(merged.agent.extends.is_none());
+}
+
+#[test]
+fn extends_runner_and_persistent_session_child_override() {
+    // #3106 MEDIUM: a child's non-default `runner` and opt-in
+    // `persistent_session` must override the base (previously silently dropped).
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+runner = "claude-code"
+persistent_session = true
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.agent.runner, RunnerKind::ClaudeCode);
+    assert!(merged.agent.persistent_session);
+}
+
+#[test]
+fn extends_child_default_runner_inherits_base() {
+    // A child that leaves `runner` at the default inherits the base's runner.
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+runner = "claude-code"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+"#);
+    let ch = child("child", "base", "c"); // default runner (subprocess)
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.agent.runner, RunnerKind::ClaudeCode);
 }
 
 #[test]
@@ -525,4 +583,27 @@ fn registry_extends_missing_base_warns_and_keeps_agent() {
     assert_eq!(orphan.system_prompt.content.trim(), "Hello.");
     // Left unresolved — its extends marker is preserved so the miss is visible.
     assert_eq!(orphan.agent.extends.as_deref(), Some("nonexistent-base"));
+}
+
+#[test]
+fn registry_extends_error_surfaced_in_summary() {
+    // A failed `extends` resolution must be visible in the roster/agents-list,
+    // not merely logged (code-critic HIGH, PR #3106).
+    let dir = TempDir::new().unwrap();
+    let overlay = "---\nname: orphan\nrole: agent\nextends: nonexistent-base\n---\n\nHi.\n";
+    std::fs::write(dir.path().join("orphan.md"), overlay).unwrap();
+
+    let reg = AgentRegistry::load(&[dir.path().to_path_buf()]);
+    let summary = reg
+        .list()
+        .into_iter()
+        .find(|s| s.name == "orphan")
+        .expect("orphan listed");
+    let err = summary
+        .extends_error
+        .expect("broken extends surfaced in summary");
+    assert!(
+        err.contains("nonexistent-base"),
+        "error names the missing base: {err}"
+    );
 }

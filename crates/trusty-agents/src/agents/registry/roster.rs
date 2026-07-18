@@ -36,6 +36,11 @@ pub fn build_roster_section(registry: &AgentRegistry) -> String {
             continue;
         }
         let mut line = format!("- **{}**", summary.name);
+        // Surface a broken `extends` chain so the PM roster shows WHY an agent
+        // won't behave as declared (#3055 / code-critic PR #3106).
+        if let Some(err) = &summary.extends_error {
+            line.push_str(&format!(" ⚠️ unresolved extends: {err}"));
+        }
         let desc = summary.description.trim();
         if !desc.is_empty() {
             line.push_str(&format!(": {desc}"));

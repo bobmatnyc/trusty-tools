@@ -19,7 +19,7 @@
 //! never per dispatch.
 //! Test: `agents::extends::tests`.
 
-use crate::agents::{AgentCapabilities, AgentConfig};
+use crate::agents::{AgentCapabilities, AgentConfig, RunnerKind};
 
 #[cfg(test)]
 mod tests;
@@ -184,6 +184,16 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     merged.agent.extends = None;
 
     // --- Scalars: child overrides when present (non-neutral) ---
+    //
+    // Accepted limitation (code-critic LOW, PR #3106): `role == "agent"` is used
+    // as the "unset" sentinel because `AgentConfig` collapses the parsed
+    // `Option<String>` into a defaulted `String` (`parse_md_agent` fills the
+    // absent `role:` with `"agent"`), so post-parse we cannot distinguish a
+    // child that deliberately declared `role: agent` from one that omitted it —
+    // the former inherits the base's role. This is immaterial for the
+    // personalization use case (an overlay of a role-bearing base rarely
+    // re-declares the neutral role) and would only matter if a base itself had
+    // role `"agent"`, in which case the outcome is identical either way.
     if !child.agent.role.is_empty() && child.agent.role != "agent" {
         merged.agent.role = child.agent.role;
     }
@@ -198,6 +208,19 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     }
     if child.agent.prompt_label.is_some() {
         merged.agent.prompt_label = child.agent.prompt_label;
+    }
+    // `runner`: child-overrides when the child chose a non-default runner. The
+    // enum has no "unset", so a non-default child value is treated as a
+    // deliberate override (a `.md` child defaults to `Subprocess` and thus
+    // inherits the base's runner); this fixes the code-critic finding that a
+    // child's declared `runner:` was silently discarded.
+    if child.agent.runner != RunnerKind::default() {
+        merged.agent.runner = child.agent.runner;
+    }
+    // `persistent_session`: opt-in bool, child-overrides only when set true
+    // (`false` is the neutral default and inherits the base).
+    if child.agent.persistent_session {
+        merged.agent.persistent_session = true;
     }
 
     // --- user_authority: NEVER inherited/unioned through `extends` ---
@@ -225,6 +248,19 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     merged.system_prompt.content =
         concat_prose(&merged.system_prompt.content, &child.system_prompt.content);
 
+    // --- Inherited-from-base-wholesale bundles ---
+    //
+    // `llm.*`, `compress`, `runner_config`, `session`, `plugins`, and `rbac`
+    // are NOT in the §2.5 merge table and are intentionally inherited from the
+    // base as-is (a personalization overlay refines persona/tools/name, not the
+    // base's LLM sampling or runtime tuning). We deliberately do NOT warn that a
+    // child's values in these bundles are "dropped": `AgentConfig` has already
+    // collapsed each field's parse-time `Option`/default, so a `.md` child
+    // ALWAYS carries `llm.temperature = 0.2` / `max_tokens = 8192` (the
+    // `parse_md_agent` defaults) — a difference check against the base would
+    // fire on essentially every legitimate overlay (false positives), which is
+    // worse than silence. If a future need arises to let a child override these,
+    // it should be a deliberate schema addition, not a heuristic.
     merged
 }
 
