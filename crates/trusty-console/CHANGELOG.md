@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- the cross-crate `default_port_does_not_collide_with_known_siblings`
+  port-contract table now also tracks trusty-embedderd's `--http` mode
+  default (7890) and trusty-review's corrected default (7891), closing the
+  gap that let trusty-review's 7890 collide with trusty-embedderd silently
+  (closes #2573).
+
 ## [0.4.0] — 2026-07-09
 
 ### Changed

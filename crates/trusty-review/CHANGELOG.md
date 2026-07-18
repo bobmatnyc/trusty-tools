@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - narrowed confidence-banded reconciliation cap for Medium-driven REQUEST_CHANGES/D+ downgrades: when the model's own verdict is a clean APPROVE and the REQUEST_CHANGES floor rests SOLELY on one `Effort::Medium` finding in the marginal confidence band (`FLOOR_MIN_CONFIDENCE` 0.80 < c < the new `SOLO_MEDIUM_ESCALATION_CONFIDENCE` 0.90), the result is now capped at APPROVE* instead — a successor to the #1343 reconciliation cap #1876 removed, scoped narrowly so it does not reopen #1876's under-flagging regression (a ≥2-Medium floor, a solo Medium ≥0.90, any High-effort finding, or a confident conformance divergence all still escalate uncapped). Addresses the Rank-1 driver of the #1897 over-flagging shadow-eval (47% of clean PRs graded BLOCK/F under 0.6.3). Both new thresholds are env-overridable (`TRUSTY_REVIEW_SOLO_MEDIUM_ESCALATION_CONFIDENCE`, closes #1897)
+- **BREAKING:** `DEFAULT_PORT` moved from 7890 to 7891 — 7890 collided with
+  trusty-embedderd's `--http` mode default. The cross-crate
+  known-siblings port-contract test now also tracks trusty-embedderd,
+  closing the gap that let the collision through (closes #2573).
+  Anyone with tooling, scripts, or a launchd/systemd unit hard-coded to
+  `trusty-review`'s old default (7890, e.g. `curl http://127.0.0.1:7890/health`)
+  must either pass `--port 7890` explicitly to `trusty-review serve` to keep
+  the old behavior, or update that tooling to the new default (7891).
 
 ## [0.9.2] — 2026-07-17
 
