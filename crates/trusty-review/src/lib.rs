@@ -14,6 +14,11 @@
 //! Test: each public module carries its own unit tests; see each submodule.
 
 pub mod config;
+// Why: strict bare-identifier validation shared by the config-resolution
+// layer and the voice/review-template loaders (security fix, issue #2995) —
+// a dependency-free leaf module so it can be used by both without a cyclic
+// module relationship. Always compiled — no feature gate.
+pub mod identifier;
 pub mod integrations;
 pub mod llm;
 pub mod models;

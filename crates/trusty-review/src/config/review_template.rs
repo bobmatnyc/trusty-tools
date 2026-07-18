@@ -14,8 +14,19 @@
 //! Test: `review_template_from_cli`, `review_template_from_repo_file_beats_env`,
 //! `review_template_from_env`, `review_template_from_config_file`,
 //! `review_template_precedence_cli_wins_all`, `review_template_none_by_default`.
+//!
+//! 🔴 Security (issue #2995): `repo_file.template` originates from an
+//! attacker-controlled repo `.trusty-review.toml` (any PR author can add
+//! one). Every tier's value is validated with `is_valid_identifier` at THIS
+//! resolution point — BEFORE it is ever stored on `ReviewConfig.review_template`
+//! or reaches `crate::review_template::ReviewTemplateLoader::load`'s path
+//! join. The loader independently re-validates as defense-in-depth (belt and
+//! suspenders) for every caller regardless of source. See `crate::identifier`
+//! for the full threat model.
 
 use serde::Deserialize;
+
+use crate::identifier::is_valid_identifier;
 
 /// `[review]` section of the TOML config file.
 ///
@@ -41,37 +52,67 @@ pub struct ReviewFileConfig {
 /// env var, but a genuinely global config file (with no project file present)
 /// keeps the pre-existing "env wins over file" relationship intact — see the
 /// module doc for the full precedence discussion in `config/mod.rs`.
-/// What: returns the first non-empty (trimmed) value found across, in order:
-/// `cli_override`, `repo_file.template`, `TRUSTY_REVIEW_TEMPLATE`,
-/// `file.template`. `None` when none of the four sources specify a name.
+/// What: returns the first non-empty (trimmed), VALID (see
+/// `is_valid_identifier`) value found across, in order: `cli_override`,
+/// `repo_file.template`, `TRUSTY_REVIEW_TEMPLATE`, `file.template`. `None`
+/// when none of the four sources specify a valid name. A source whose value
+/// fails validation is REJECTED and resolution falls through to the next
+/// tier — it is never returned, logged loudly instead (security fix, issue
+/// #2995).
 /// Test: `review_template_from_cli`, `review_template_from_repo_file_beats_env`,
 /// `review_template_from_env`, `review_template_from_config_file`,
-/// `review_template_precedence_cli_wins_all`, `review_template_none_by_default`.
+/// `review_template_precedence_cli_wins_all`, `review_template_none_by_default`,
+/// `review_template_repo_file_rejects_path_traversal`.
 pub fn load_review_template(
     cli_override: Option<&str>,
     repo_file: Option<&ReviewFileConfig>,
     file: Option<&ReviewFileConfig>,
 ) -> Option<String> {
-    if let Some(name) = cli_override
-        && !name.trim().is_empty()
+    if let Some(name) = sanitize_template_name(cli_override) {
+        return Some(name);
+    }
+    // `repo_file` is attacker-controlled (any PR author can commit a
+    // `.trusty-review.toml`), so it is validated here BEFORE it can ever
+    // reach a path join.
+    if let Some(name) = sanitize_template_name(repo_file.and_then(|f| f.template.as_deref())) {
+        return Some(name);
+    }
+    if let Ok(val) = std::env::var("TRUSTY_REVIEW_TEMPLATE")
+        && let Some(name) = sanitize_template_name(Some(&val))
     {
-        return Some(name.trim().to_string());
+        return Some(name);
     }
-    if let Some(name) = repo_file
-        .and_then(|f| f.template.as_ref())
-        .filter(|s| !s.trim().is_empty())
-    {
-        return Some(name.trim().to_string());
+    sanitize_template_name(file.and_then(|f| f.template.as_deref()))
+}
+
+/// Trim and validate a candidate review-template name, rejecting (and
+/// loudly warning about) anything that is not a bare `is_valid_identifier` —
+/// the single gate that stops a path-traversal / absolute-path value from
+/// ever being stored on `ReviewConfig.review_template` (security fix, issue
+/// #2995).
+///
+/// Why: shared by all four precedence tiers in `load_review_template` so the
+/// same rejection logic — and the same actionable warning — applies
+/// regardless of which source supplied the value.
+/// What: `None`/empty-after-trim → `None` silently (the normal "not
+/// configured" case). A non-empty value that fails `is_valid_identifier` →
+/// `None`, with a `tracing::warn!` naming the offending value. Otherwise
+/// `Some(trimmed)`.
+/// Test: `review_template_repo_file_rejects_path_traversal`.
+fn sanitize_template_name(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        return None;
     }
-    if let Ok(val) = std::env::var("TRUSTY_REVIEW_TEMPLATE") {
-        let trimmed = val.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
+    if !is_valid_identifier(trimmed) {
+        tracing::warn!(
+            value = trimmed,
+            "review template name rejected: only bare alphanumeric/-/_ identifiers are allowed \
+             (path-traversal guard, issue #2995) — proceeding without this template layer"
+        );
+        return None;
     }
-    file.and_then(|f| f.template.as_ref())
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.trim().to_string())
+    Some(trimmed.to_string())
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -122,6 +163,81 @@ mod tests {
             result.as_deref(),
             Some("repo-template"),
             "repo .trusty-review.toml must win over the ambient env var"
+        );
+    }
+
+    // ── Security: path-traversal / absolute-path rejection (#2995) ─────────
+
+    /// A hostile `[review].template = "/etc/passwd"` (or any absolute path)
+    /// in a repo-discovered `.trusty-review.toml` must be REJECTED at this
+    /// resolution point — never returned as `Some`.
+    ///
+    /// Why: `repo_file` is attacker-controlled; without this guard the
+    /// rejected value would otherwise reach `ReviewTemplateLoader::load`'s
+    /// `base.join(format!("{name}.md"))`, and `Path::join` discards the base
+    /// directory for an absolute component.
+    /// What: sets an absolute-path repo template name with no env/file
+    /// fallback configured; asserts the result is `None`.
+    /// Test: this test itself; no filesystem I/O (pure string validation).
+    #[test]
+    #[serial_test::serial]
+    fn review_template_repo_file_rejects_absolute_path() {
+        unsafe {
+            std::env::remove_var("TRUSTY_REVIEW_TEMPLATE");
+        }
+        let repo = file_with("/etc/passwd");
+        let result = load_review_template(None, Some(&repo), None);
+        assert_eq!(
+            result, None,
+            "an absolute-path repo template name must be rejected, not returned"
+        );
+    }
+
+    /// A hostile `[review].template = "../../etc/passwd"` in a
+    /// repo-discovered `.trusty-review.toml` must be REJECTED, and
+    /// resolution must still fall through to a lower-precedence tier (env
+    /// var) rather than treating the whole resolution as failed.
+    ///
+    /// Why: same threat model as the absolute-path test, for the `..`
+    /// parent-traversal variant; also proves the fall-through behaviour.
+    /// What: sets a `../`-prefixed repo template name AND a valid env var;
+    /// asserts the env var's value wins.
+    /// Test: this test itself; no filesystem I/O.
+    #[test]
+    #[serial_test::serial]
+    fn review_template_repo_file_rejects_parent_traversal_falls_through_to_env() {
+        unsafe {
+            std::env::set_var("TRUSTY_REVIEW_TEMPLATE", "env-template");
+        }
+        let repo = file_with("../../etc/passwd");
+        let result = load_review_template(None, Some(&repo), None);
+        unsafe {
+            std::env::remove_var("TRUSTY_REVIEW_TEMPLATE");
+        }
+        assert_eq!(
+            result.as_deref(),
+            Some("env-template"),
+            "a rejected repo value must fall through to the env var, not propagate"
+        );
+    }
+
+    /// A hostile `--review-template ../../etc/passwd` CLI override must also
+    /// be REJECTED (defense-in-depth: even the highest-precedence,
+    /// operator-supplied tier is validated).
+    ///
+    /// Why: belt-and-suspenders — a malformed value should never reach the
+    /// loader regardless of which tier it came from.
+    /// What: asserts a `../`-prefixed CLI override falls through to a valid
+    /// file-tier value rather than being returned.
+    /// Test: this test itself; no filesystem I/O.
+    #[test]
+    fn review_template_cli_rejects_parent_traversal() {
+        let file = file_with("file-template");
+        let result = load_review_template(Some("../../etc/passwd"), None, Some(&file));
+        assert_eq!(
+            result.as_deref(),
+            Some("file-template"),
+            "a rejected CLI override must fall through to the file tier, not propagate"
         );
     }
 

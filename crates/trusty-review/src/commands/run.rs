@@ -66,7 +66,10 @@ pub struct RunArgs {
     pub provider: Option<String>,
 
     /// Name of a review template to append as a prompt addendum (issue #2995).
-    /// Resolved bundled → `~/.trusty-review/templates/review/<name>.md` (see
+    /// Resolved bundled → `<config_dir>/trusty-review/templates/review/<name>.md`
+    /// user override, where `<config_dir>` is `dirs::config_dir()` — on Linux
+    /// `~/.config` (or `$XDG_CONFIG_HOME`), on macOS
+    /// `~/Library/Application Support` (see
     /// `trusty_review::review_template::ReviewTemplateLoader`); composes with
     /// (never replaces) the stock rubric and any active voice/principles
     /// layers. Highest-precedence override — beats a repo `.trusty-review.toml`

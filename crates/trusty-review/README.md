@@ -366,11 +366,26 @@ override for the template name specifically.
 `--review-template <name>` (or `[review] template = "<name>"`) selects a
 named markdown addendum appended to the layered PR-review system prompt.
 Resolution mirrors the `report` subcommand's template UX: bundled defaults →
-`~/.trusty-review/templates/review/<name>.md` user override (checked before
-the bundled `include_str!()` default — same pattern as `VoiceLoader` and the
-report `TemplateLoader`). One template ships bundled: `strict-security`
-(extra scrutiny on injection, authn/authz, secrets, crypto, input validation,
-and supply-chain risk).
+`<config_dir>/trusty-review/templates/review/<name>.md` user override
+(checked before the bundled `include_str!()` default — same pattern as
+`VoiceLoader` and the report `TemplateLoader`), where `<config_dir>` is
+[`dirs::config_dir()`](https://docs.rs/dirs/latest/dirs/fn.config_dir.html) —
+concretely:
+
+- Linux: `~/.config/trusty-review/templates/review/<name>.md` (or under
+  `$XDG_CONFIG_HOME` if set)
+- macOS: `~/Library/Application Support/trusty-review/templates/review/<name>.md`
+
+One template ships bundled: `strict-security` (extra scrutiny on injection,
+authn/authz, secrets, crypto, input validation, and supply-chain risk).
+
+`name` (from any source — CLI, repo file, env var, or config file) must be a
+bare identifier: only ASCII letters, digits, `-`, and `_` — no path
+separators, `..`, or absolute paths. This is a deliberate security guard
+(issue #2995): a review-template or voice-package name can originate from a
+repo-scoped `.trusty-review.toml`, which is attacker-controlled (any PR
+author can add one), so a path-like value is rejected before it can ever be
+used in a filesystem path join.
 
 A review template only **appends** a structured addendum section — it never
 replaces the stock grade scale, verdict table, or severity anchors. It
