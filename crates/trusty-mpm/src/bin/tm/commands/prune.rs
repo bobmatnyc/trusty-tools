@@ -53,11 +53,15 @@ const MAX_INFLIGHT_VERDICTS: usize = 12;
 /// stderr still sees a clear message. `prune_idle` no longer exits the process
 /// itself — it returns [`PruneError::SmUnavailable`]; `main` downcasts that error
 /// and exits with this code at the top-level command boundary (no live async
-/// resources), which is why the constant is `pub(crate)`.
+/// resources), which is why the constant is `pub(crate)`. Sourced from
+/// `trusty_mpm::core::exit_codes::EXIT_UNAVAILABLE`, the single shared
+/// constant also used by `core::discovery::EXIT_DAEMON_URL_UNREACHABLE`
+/// (issue #1737) — rather than redefining the literal `75` a second time, so
+/// the two "target unavailable" conventions can never drift apart.
 /// What: `75` (EX_TEMPFAIL-adjacent) signals "SM unavailable, not an error".
 /// Test: `unavailable_exit_code_is_stable` (value) and
 /// `cli_prune_idle_unreachable_exit_code` (end-to-end wiring).
-pub(crate) const EXIT_SM_UNAVAILABLE: i32 = 75;
+pub(crate) const EXIT_SM_UNAVAILABLE: i32 = trusty_mpm::core::exit_codes::EXIT_UNAVAILABLE;
 
 /// A session paired with its latest activity verdict (the prune input row).
 ///

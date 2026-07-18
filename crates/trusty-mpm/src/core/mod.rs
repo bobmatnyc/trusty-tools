@@ -38,6 +38,7 @@ pub mod deterministic_overseer;
 pub mod discovery;
 pub mod doctor;
 pub mod error;
+pub mod exit_codes;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;

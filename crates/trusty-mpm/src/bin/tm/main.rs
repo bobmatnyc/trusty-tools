@@ -341,20 +341,21 @@ async fn main() -> anyhow::Result<()> {
     // #1737 note: this top-level resolution is deliberately NOT gated on
     // explicit-URL reachability, even though an explicit override never falls
     // back here (step (a) of the gateway resolver returns it verbatim — see
-    // that function's doc). Several dispatch targets below have an
-    // intentional FAIL-OPEN contract that must survive an unreachable
-    // `--url`/`TRUSTY_MPM_URL`: the bare `tm` guided default (daemon down is a
-    // normal, recoverable state — see `commands::guided`'s module doc) and
-    // `tm hook` (a Claude Code hook must never fail the user's turn because
-    // the best-effort daemon POST could not connect — see
-    // `tests/tm_hook_idle_parking.rs`, which asserts exit 0 even for
-    // `--url http://127.0.0.1:1`). A blanket probe-and-abort here would
-    // regress both. Callers that specifically need "explicit URL must be
-    // reachable, error otherwise" semantics (issue #1737) should use
-    // [`trusty_mpm::core::resolve_daemon_url_for_cli`] themselves — it and
-    // [`trusty_mpm::core::resolve_daemon_url_probing`] were fixed to error
-    // rather than silently fall back to the lock file / default when an
-    // EXPLICIT URL fails its reachability probe.
+    // that function's doc). `tm hook` has an intentional FAIL-OPEN contract
+    // that must survive an unreachable `--url`/`TRUSTY_MPM_URL` — a Claude
+    // Code hook must never fail the user's turn because the best-effort
+    // daemon POST could not connect (see `tests/tm_hook_idle_parking.rs`,
+    // which asserts exit 0 even for `--url http://127.0.0.1:1`); a blanket
+    // probe-and-abort here would regress it. A command that instead wants
+    // "explicit URL must be reachable, error otherwise" semantics calls
+    // [`trusty_mpm::core::resolve_daemon_url_for_cli`] itself, on top of this
+    // shared resolution, before running any of its own fallback-prone logic —
+    // `commands::guided::run_guided_default` (the bare `tm` dispatch target
+    // below) does exactly that: it was the one LIVE instance of the #1737
+    // silent-fallback bug (its daemon-autostart step ignores whichever URL it
+    // is handed and always re-resolves implicitly), so it now probes
+    // `explicit` up front and errors — translated to exit 75 below — instead
+    // of silently auto-starting/reconnecting to a different daemon.
     let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, cli.url.as_deref()).await;
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
@@ -362,7 +363,7 @@ async fn main() -> anyhow::Result<()> {
     // here — rather than inside the async `prune_idle` — guarantees no live async
     // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
     let result = match cli.command {
-        None => commands::guided::run_guided_default(&client, &url).await,
+        None => commands::guided::run_guided_default(&client, &url, cli.url.as_deref()).await,
         Some(Command::Status) => status(&client, &url).await,
         Some(Command::Start) => start(&client, &url).await,
         Some(Command::Serve { stdio }) => {
@@ -606,6 +607,19 @@ async fn main() -> anyhow::Result<()> {
         )
     {
         std::process::exit(commands::prune::EXIT_SM_UNAVAILABLE);
+    }
+    // #1737: the bare `tm` guided default returns `DaemonUrlError::Unreachable`
+    // when an EXPLICIT `--url`/`TRUSTY_MPM_URL` fails its reachability probe
+    // (see `commands::guided::run_guided_default`'s guard, which already
+    // printed the message — this arm only translates the exit code, mirroring
+    // the `PruneError::SmUnavailable` block above so the two "target
+    // unavailable" conventions exit identically).
+    if let Err(err) = &result
+        && err
+            .downcast_ref::<trusty_mpm::core::DaemonUrlError>()
+            .is_some()
+    {
+        std::process::exit(trusty_mpm::core::exit_codes::EXIT_UNAVAILABLE);
     }
     result
 }

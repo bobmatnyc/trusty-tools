@@ -36,10 +36,20 @@
 //! caller must be told, not redirected to a different daemon.
 //! [`resolve_daemon_url_probing`] now returns `Result<String, DaemonUrlError>`
 //! — `Err` only for an explicit, probed, unreachable URL; every implicit path
-//! still returns `Ok`. [`resolve_daemon_url_for_cli`] is the single shared
-//! entry point `main.rs` and `commands::projects::launch_bare_tui` both call,
-//! so the explicit/implicit branch can never drift between the two CLI
-//! entry points.
+//! still returns `Ok`. [`resolve_daemon_url_for_cli`] wraps that policy for a
+//! caller that wants it.
+//!
+//! `main.rs`'s top-level dispatch and `commands::projects::launch_bare_tui`
+//! deliberately keep calling the INFALLIBLE `resolve_daemon_url_via_gateway`
+//! directly, unchanged — several dispatch targets reached through that
+//! shared top-level `url` (the bare `tm` guided default's OTHER code paths,
+//! `tm hook`) have an intentional fail-open contract that must survive an
+//! unreachable URL (see `tests/tm_hook_idle_parking.rs`). The one confirmed
+//! LIVE instance of the #1737 bug — `commands::guided::run_guided_default`
+//! silently auto-starting/reconnecting to a completely different, real
+//! daemon when an explicit `--url` was unreachable — calls
+//! [`resolve_daemon_url_for_cli`] directly, itself, before any of its
+//! fail-open fallback logic runs; see that function's module for the guard.
 
 use std::path::PathBuf;
 
@@ -210,13 +220,17 @@ pub enum DaemonUrlError {
 
 /// Process exit code for a [`DaemonUrlError::Unreachable`] at the CLI boundary.
 ///
-/// Why (issue #1737): mirrors the existing `EX_TEMPFAIL`-adjacent convention
-/// already established by `commands::prune::EXIT_SM_UNAVAILABLE` (75) for
-/// "the thing you asked for is unavailable, not a generic failure" — giving
-/// scripts/skills a stable, non-1 code to branch on instead of parsing stderr.
+/// Why (issue #1737): shares the exact same value as the pre-existing
+/// `commands::prune::EXIT_SM_UNAVAILABLE` (#1313) — both mean "the thing you
+/// asked for is unavailable, not a generic failure" and want callers/skills
+/// to branch on one stable, non-1 code instead of parsing stderr. Sourced
+/// from [`crate::core::exit_codes::EXIT_UNAVAILABLE`], the single shared
+/// constant, rather than redefining the literal `75` a second time —
+/// `commands::prune::EXIT_SM_UNAVAILABLE` sources from the same constant, so
+/// the two can never drift apart.
 /// What: `75`.
 /// Test: `exit_code_matches_sm_unavailable_convention`.
-pub const EXIT_DAEMON_URL_UNREACHABLE: i32 = 75;
+pub const EXIT_DAEMON_URL_UNREACHABLE: i32 = crate::core::exit_codes::EXIT_UNAVAILABLE;
 
 /// Resolve the daemon URL with reachability probing for explicit overrides.
 ///
@@ -281,23 +295,30 @@ pub async fn resolve_daemon_url_probing(
 /// fallback chain (trusty-console gateway → lock file → default) that #1731
 /// and #1849 built.
 ///
-/// NOT wired into `main.rs`'s blanket top-level dispatch. Several commands
-/// have an intentional FAIL-OPEN contract that must survive an unreachable
-/// explicit URL: `tm hook` (a Claude Code hook must never fail the user's
-/// turn over a best-effort daemon POST — see
+/// NOT wired into `main.rs`'s blanket top-level dispatch — `cli.url` is
+/// still resolved once, unconditionally, via the infallible
+/// `resolve_daemon_url_via_gateway` (main.rs, right before the big command
+/// `match`), because `tm hook` has an intentional FAIL-OPEN contract that
+/// must survive an unreachable explicit URL (a Claude Code hook must never
+/// fail the user's turn over a best-effort daemon POST — see
 /// `tests/tm_hook_idle_parking.rs`, which asserts exit 0 even for
-/// `--url http://127.0.0.1:1`) and the bare `tm` guided default (daemon down
-/// is a normal, recoverable state — see `commands::guided`'s module doc). A
-/// command-specific caller that genuinely wants the strict contract (e.g. a
-/// future `tm session prune-idle` opt-in) should call this directly instead
-/// of relying on `main.rs`'s pre-resolved URL.
+/// `--url http://127.0.0.1:1`). A command that wants the strict contract
+/// calls this itself, on top of that shared resolution, before running its
+/// own fallback-prone logic — `commands::guided::run_guided_default` does
+/// exactly this: it was the one LIVE, empirically-confirmed instance of the
+/// #1737 bug (its `ensure_daemon_started` auto-start step ignores whatever
+/// URL it is handed and always re-resolves IMPLICITLY once some daemon is
+/// up, so an unreachable EXPLICIT `--url` silently ended up auto-starting/
+/// reconnecting to a completely different, real daemon and showing ITS live
+/// session list). See that function's guard at its top for the wiring.
 /// What: when `explicit` is `Some` and non-empty, probes it alone via
 /// [`resolve_daemon_url_probing`] and returns its `Result` untouched (`Err`
 /// on unreachable, no fallback). Otherwise delegates to the infallible
 /// [`resolve_daemon_url_via_gateway`] (gateway probe → lock file → default),
 /// wrapped in `Ok`.
 /// Test: `resolve_for_cli_explicit_unreachable_errors`,
-/// `resolve_for_cli_implicit_falls_back`.
+/// `resolve_for_cli_implicit_falls_back`; end-to-end wiring covered by
+/// `tests/tm_guided_default_explicit_url.rs`.
 pub async fn resolve_daemon_url_for_cli(
     client: &reqwest::Client,
     explicit: Option<&str>,
