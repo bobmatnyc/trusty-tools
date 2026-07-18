@@ -94,6 +94,58 @@ pub fn best_matching_index(indexes: &[IndexInfo], repo_root: &Path) -> Option<St
     best.map(|(info, _)| info.id.clone())
 }
 
+// ─── Explicit --source-root matching (#2994) ───────────────────────────────────
+
+/// Outcome of matching an explicit `--source-root <dir>` against the
+/// registered trusty-search index list.
+///
+/// Why: `best_matching_index` already implements the longest-root-path
+/// matching that `--source-root` needs (issue #2994) — this wraps the same
+/// matcher in a two-variant outcome so `ReviewConfig::resolve_source_root`
+/// (`config/mod.rs`) can distinguish "found a registered index" from "no
+/// match — fall back to diff-only" without re-deriving the logic.
+/// What: `Matched` carries the resolved index id; `NoIndex` signals no
+/// registered index's `root_path` is a prefix of `source_root`.
+/// Test: `resolve_source_root_matches`, `resolve_source_root_no_match`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceRootResolution {
+    /// `source_root` matched this registered index id.
+    Matched(String),
+    /// No registered index matches `source_root`.
+    NoIndex,
+}
+
+/// Match an explicit `--source-root` directory against the registered index list.
+///
+/// Why: same matcher as the CWD auto-derive path (`resolve_index_from_list`),
+/// applied to an operator-supplied directory instead of the process CWD, so
+/// `--source-root` is "the same resolution as today, just explicit" (#2994).
+/// What: delegates to `best_matching_index`; wraps the result in
+/// `SourceRootResolution` so call sites read as "matched vs. no index" rather
+/// than `Some`/`None`.
+/// Test: `resolve_source_root_matches`, `resolve_source_root_no_match`.
+pub fn resolve_source_root(indexes: &[IndexInfo], source_root: &Path) -> SourceRootResolution {
+    match best_matching_index(indexes, source_root) {
+        Some(id) => SourceRootResolution::Matched(id),
+        None => SourceRootResolution::NoIndex,
+    }
+}
+
+/// Canonicalise a `--source-root` directory, tolerating a path that doesn't
+/// (yet) exist or can't be resolved.
+///
+/// Why: index `root_path` values are stored canonicalised (see
+/// `best_matching_index`); an operator-supplied `--source-root` must be
+/// canonicalised the same way or a real match would be missed over a trailing
+/// slash, symlink, or relative-path difference.
+/// What: `Path::canonicalize`, falling back to the raw path unchanged on
+/// error (e.g. the directory doesn't exist) so resolution degrades to "no
+/// match" instead of panicking or erroring out the whole command.
+/// Test: `canonical_source_root_falls_back_on_missing_dir`.
+pub fn canonical_source_root(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Resolve the trusty-search index to use for the current project.
@@ -242,5 +294,35 @@ mod tests {
         let indexes = vec![make_index("my-index", Some("/home/user/my-project"))];
         let result = resolve_index_from_list(&indexes, Path::new("/home/user/my-project/src"));
         assert_eq!(result.as_deref(), Some("my-index"));
+    }
+
+    // ── resolve_source_root / canonical_source_root (#2994) ──────────────────
+
+    #[test]
+    fn resolve_source_root_matches() {
+        let indexes = vec![make_index("proj", Some("/home/user/proj"))];
+        let result = resolve_source_root(&indexes, Path::new("/home/user/proj"));
+        assert_eq!(result, SourceRootResolution::Matched("proj".to_string()));
+    }
+
+    #[test]
+    fn resolve_source_root_no_match() {
+        let indexes = vec![make_index("other", Some("/home/user/other"))];
+        let result = resolve_source_root(&indexes, Path::new("/home/user/proj"));
+        assert_eq!(result, SourceRootResolution::NoIndex);
+    }
+
+    #[test]
+    fn canonical_source_root_falls_back_on_missing_dir() {
+        let missing = Path::new("/nonexistent/path/for/trusty-review-2994-test");
+        let result = canonical_source_root(missing);
+        assert_eq!(result, missing.to_path_buf());
+    }
+
+    #[test]
+    fn canonical_source_root_resolves_real_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = canonical_source_root(dir.path());
+        assert_eq!(result, dir.path().canonicalize().unwrap());
     }
 }

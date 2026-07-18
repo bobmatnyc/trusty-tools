@@ -26,7 +26,10 @@ pub mod voice;
 // 500-line cap — mirrors the verification module pattern.
 pub mod outcome;
 
-pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
+pub use index_resolver::{
+    SourceRootResolution, canonical_source_root, find_git_root, repo_root_from_cwd,
+    resolve_index_from_list, resolve_source_root,
+};
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
 pub use context::{ContextConfig, ContextFileConfig};
@@ -82,6 +85,28 @@ impl std::str::FromStr for Provider {
             other => Err(format!("unknown provider: {other}")),
         }
     }
+}
+
+// ─── --source-root outcome (#2994) ────────────────────────────────────────────
+
+/// Outcome of `ReviewConfig::resolve_source_root`.
+///
+/// Why: the caller (`cmd_run`/`cmd_compare`) needs to know whether an explicit
+/// `--source-root <dir>` resolved to a real index (nothing further to do) or
+/// forced a diff-only fallback that also requires swapping in a
+/// `NullSearchClient` and surfacing the notice to the operator.
+/// What: `Matched` carries the resolved index id (already applied to
+/// `search_index` by the time this is returned — informational only);
+/// `DiffOnly` carries the human-readable notice to print/log.
+/// Test: `source_root_matches_registered_index`,
+/// `source_root_no_match_forces_diff_only`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceRootOutcome {
+    /// `--source-root` mapped to this registered index id.
+    Matched(String),
+    /// No registered index matched (or the daemon was unreachable) — diff-only
+    /// review with this notice.
+    DiffOnly(String),
 }
 
 // ─── Global ReviewConfig ──────────────────────────────────────────────────────
@@ -413,6 +438,87 @@ impl ReviewConfig {
                     "trusty-review: index auto-derive failed (daemon unreachable?): {e}; \
                      using fallback \"main\""
                 );
+            }
+        }
+    }
+
+    /// Resolve the trusty-search index for an explicit `--source-root <dir>`
+    /// (issue #2994).
+    ///
+    /// Why: `resolve_index` (env / CWD auto-derive) cannot point a review at an
+    /// arbitrary checkout without first running `trusty-search index <dir>`
+    /// out of band. `--source-root` gives an ergonomic, explicit one-off path:
+    /// if `dir` already maps to a registered index, use it (same
+    /// longest-root-path matching as `resolve_index`, just against an
+    /// explicit dir instead of the CWD). If it does not, this method chooses
+    /// the SAFE fallback — diff-only review with a clear, actionable notice —
+    /// rather than triggering an ephemeral index. An ephemeral/ad-hoc index
+    /// was considered (per the #2994 proposal) but rejected for this pass:
+    /// it interacts with the #2914 ephemeral-index-leak investigation, and
+    /// reliable cleanup is not trivially safe from this crate alone, so
+    /// diff-only-with-notice is the shipped default; ephemeral indexing
+    /// remains a documented follow-up.
+    /// What: canonicalises `dir`, lists indexes on `client`, and matches via
+    /// `index_resolver::resolve_source_root`. On a match: sets `search_index`
+    /// to the matched id and `search_index_explicit = true` (so `resolve_index`
+    /// becomes a no-op and this choice is never clobbered by CWD auto-derive),
+    /// returning `SourceRootOutcome::Matched`. On no match, or when the daemon
+    /// is unreachable: sets `search_index_explicit = true` and
+    /// `context.require_search = false` so the required-context gate
+    /// (`pipeline::context_gate::preflight_context`) degrades instead of
+    /// skipping, and returns `SourceRootOutcome::DiffOnly` with a notice the
+    /// caller must surface (stderr/log) and use to swap `deps.search` for a
+    /// `NullSearchClient` — relaxing `require_search` alone is not sufficient
+    /// because a healthy daemon would otherwise silently be queried against
+    /// whatever index `search_index` still holds.
+    /// Test: `source_root_matches_registered_index`,
+    /// `source_root_no_match_forces_diff_only`,
+    /// `source_root_daemon_unreachable_forces_diff_only`.
+    pub async fn resolve_source_root(
+        &mut self,
+        client: &dyn crate::integrations::search_client::SearchClient,
+        dir: &std::path::Path,
+    ) -> SourceRootOutcome {
+        let canonical = index_resolver::canonical_source_root(dir);
+        let indexes = match client.list_indexes().await {
+            Ok(indexes) => indexes,
+            Err(e) => {
+                self.search_index_explicit = true;
+                self.context.require_search = false;
+                let notice = format!(
+                    "--source-root {}: trusty-search unreachable while resolving an index \
+                     ({e}) — proceeding in diff-only mode (no code-context retrieval)",
+                    canonical.display()
+                );
+                warn!("{notice}");
+                return SourceRootOutcome::DiffOnly(notice);
+            }
+        };
+
+        match index_resolver::resolve_source_root(&indexes, &canonical) {
+            SourceRootResolution::Matched(id) => {
+                tracing::info!(
+                    index = %id,
+                    source_root = %canonical.display(),
+                    "trusty-review: --source-root resolved to a registered index"
+                );
+                self.search_index = id.clone();
+                self.search_index_explicit = true;
+                SourceRootOutcome::Matched(id)
+            }
+            SourceRootResolution::NoIndex => {
+                self.search_index_explicit = true;
+                self.context.require_search = false;
+                let notice = format!(
+                    "--source-root {} has no registered trusty-search index — proceeding in \
+                     diff-only mode (no code-context retrieval). Run `trusty-search index {}` \
+                     to enable full context, or omit --source-root to use the \
+                     auto-derived/TRUSTY_SEARCH_INDEX index.",
+                    canonical.display(),
+                    canonical.display()
+                );
+                warn!("{notice}");
+                SourceRootOutcome::DiffOnly(notice)
             }
         }
     }

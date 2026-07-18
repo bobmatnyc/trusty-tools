@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `--source-root <dir>` on `run`/`compare`: explicitly point a review's code-context retrieval at an arbitrary checkout instead of relying on `TRUSTY_SEARCH_INDEX`/CWD auto-derivation. If `<dir>` matches a registered trusty-search index (same longest-root-path matching as the existing auto-derive), that index is used. If it doesn't, the review degrades to diff-only mode (no code-context retrieval) with a clear stderr notice and an in-body banner, rather than silently querying the wrong project's index — an ephemeral/ad-hoc index was considered but deferred (interacts with the #2914 ephemeral-index-leak investigation) in favour of this safe default. `TRUSTY_SEARCH_INDEX` remains the fully-explicit override and still wins over `--source-root`; omitting `--source-root` is a zero-regression no-op. `--context-path <glob>` (scoping eligible context paths) was proposed alongside this but is deferred to a follow-up. Closes #2994.
 - direct diff ingestion for `run`/`compare`: `--base <REF> [--head <REF>]` reviews an arbitrary local git ref range (`git diff -M <base>...<head>`, three-dot merge-base range, `head` defaults to `HEAD` — never the working tree) instead of fetching a GitHub PR; `--local-diff -` reads a unified diff piped in on stdin. Both new sources behave exactly like the existing `--local-diff <PATH>`: forced dry-run, never post to GitHub. `--base` and `--local-diff` are mutually exclusive (clap-enforced). Closes #2993.
 
 ### Fixed

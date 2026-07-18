@@ -98,6 +98,10 @@ git diff origin/main...HEAD | trusty-review run --local-diff -
 trusty-review run --base origin/main
 trusty-review run --base origin/main --head my-feature-branch
 
+# Point a review at a checkout the daemon has never indexed — no manual
+# `trusty-search index <dir>` needed first.
+trusty-review run --base origin/main --source-root ~/code/some-other-checkout
+
 # Override the reviewer model
 trusty-review run owner repo 123 --reviewer-model bedrock/us.anthropic.claude-haiku-4-5
 
@@ -110,6 +114,38 @@ trusty-review compare --base origin/main --models bedrock/us.anthropic.claude-ha
 > are always dry-run — like every non-GitHub source, they can never post a
 > live PR comment (issue #2993). `--base` and `--local-diff` are mutually
 > exclusive.
+
+### Explicit source context: `--source-root` (issue #2994)
+
+Code context normally flows through a trusty-search index keyed by
+`TRUSTY_SEARCH_INDEX` (explicit) or auto-derived from the current directory's
+git root against the daemon's index registry. That means reviewing an
+arbitrary checkout — a fresh worktree, a repo the daemon has never seen —
+required first running `trusty-search index <dir>` out of band.
+
+`--source-root <dir>` (on both `run` and `compare`) resolves this explicitly:
+
+- If `<dir>` already matches a registered trusty-search index (same
+  longest-root-path matching as the CWD/env auto-derive, just against an
+  explicit directory), that index is used — no behaviour change from today's
+  auto-derive, just an ergonomic override for a one-off review of a directory
+  other than the CWD.
+- If `<dir>` does **not** match a registered index, the review proceeds in
+  **diff-only mode**: no code-context retrieval, with a clear notice printed
+  to stderr and prepended as a banner in the review body. Reviews never
+  silently query the wrong project's index. (An ephemeral/ad-hoc index was
+  considered but deferred — it interacts with the ephemeral-index-leak
+  investigation (issue #2914) and reliable cleanup isn't trivially safe from
+  this crate alone; diff-only-with-notice is the safe default. Ephemeral
+  indexing remains a documented follow-up.)
+- An explicit `TRUSTY_SEARCH_INDEX` always wins over `--source-root` — it
+  remains the fully-explicit override; `--source-root` is the ergonomic
+  one-off path. Omitting `--source-root` entirely is a no-op: existing
+  `TRUSTY_SEARCH_INDEX`/CWD-derive behaviour is unchanged.
+
+`--context-path <glob>` (scoping which source paths are eligible as retrieved
+context) was proposed alongside `--source-root` but is **not** implemented in
+this pass — it is deferred to a follow-up issue.
 
 ## HTTP server
 
