@@ -11,9 +11,16 @@
 //! [`sync_all_session_assets_route`] (POST …/managed/sync-assets) delegate to
 //! [`crate::core::session_launch::sync_session_assets`] — the SAME roster+style
 //! deployers `prepare_session` calls at launch — via [`sync_one`], run on the
-//! blocking pool since the deploy does synchronous filesystem I/O.
+//! blocking pool since the deploy does synchronous filesystem I/O. BOTH routes
+//! gate on [`syncable`] (`Active`/`Stopped`/`Errored` only) before touching the
+//! filesystem — the per-session route added this gate after a code-critic HIGH
+//! finding on the initial PR: a `Decommissioned` tombstone clears
+//! `workspace_path` but not `cwd`, so an ungated sync would silently recreate
+//! an already-deleted workspace directory.
 //! Test: `sync_route_redeploys_stale_agent`, `sync_route_missing_session_404`,
-//! `sync_all_route_skips_provisioning_and_decommissioned` in `super::tests`.
+//! `sync_route_decommissioned_session_blocked_no_fs_write`,
+//! `sync_all_route_skips_provisioning_and_decommissioned` in
+//! `sync_assets_tests.rs`.
 
 use std::sync::Arc;
 
@@ -42,8 +49,9 @@ use crate::session_manager::{ManagedSessionState, SessionRecord};
 /// What: a bare `Router<Arc<DaemonState>>` with both POST routes; `api.rs`
 /// merges it into the shared router (state is injected once, at that merge
 /// point).
-/// Test: covered end-to-end via `tests/session_manager_mvp.rs`'s router-level
-/// sync-assets tests.
+/// Test: covered end-to-end via the CLI's `commands::sync_assets_tests`
+/// (`bin/tm/commands/sync_assets_tests.rs`, hits this router over real HTTP)
+/// and the route-level tests in `sync_assets_tests.rs`.
 pub fn router() -> Router<Arc<DaemonState>> {
     Router::new()
         .route(
@@ -155,12 +163,28 @@ async fn sync_one(record: SessionRecord) -> Result<SyncAssetsResponse, String> {
 ///
 /// Why: the concrete fix for a single stale session flagged by `stale_assets`
 /// on `tm sessions ls` — re-run the SAME deployers launch uses, without a full
-/// relaunch or touching CLAUDE.md/hooks/MCP config.
-/// What: looks up the session (404 if unknown), then delegates to [`sync_one`].
-/// Applies regardless of the session's `stale_assets` state — running it on an
-/// already-current workspace is a safe, idempotent no-op (every deployer here
-/// is the SAME manifest-checksum-driven machinery `prepare_session` uses).
-/// Test: `sync_route_redeploys_stale_agent`, `sync_route_missing_session_404`.
+/// relaunch or touching CLAUDE.md/hooks/MCP config. MUST apply the SAME
+/// [`syncable`] state gate the fleet-wide route already enforces (code-critic
+/// HIGH finding on the initial PR): a `Provisioning` session has not deployed
+/// yet, and — critically — a `Decommissioned` tombstone clears
+/// `record.workspace_path` but NEVER `record.cwd`, so
+/// [`crate::core::session_assets::session_workdir`]'s cwd fallback would
+/// resolve to the ALREADY-REMOVED workspace directory; running the deployers
+/// against it (`create_dir_all` et al.) would silently RECREATE a directory
+/// `decommission` deleted on disk, with none of that workspace's git/session
+/// state. Gating here closes that hole before `sync_one` ever touches the
+/// filesystem.
+/// What: looks up the session (404 if unknown), rejects a non-[`syncable`]
+/// state with 409 (mirroring the `InvalidState` → 409 convention every other
+/// managed route uses for "session exists but is in the wrong lifecycle state
+/// for this operation" — see `delete_managed_session`/`resume_error.rs`),
+/// then delegates to [`sync_one`]. For a syncable session this applies
+/// regardless of its `stale_assets` flag — running it on an already-current
+/// workspace is a safe, idempotent no-op (every deployer here is the SAME
+/// manifest-checksum-driven machinery `prepare_session` uses).
+/// Test: `sync_route_redeploys_stale_agent`, `sync_route_missing_session_404`,
+/// `sync_route_decommissioned_session_blocked_no_fs_write` in
+/// `sync_assets_tests.rs`.
 pub async fn sync_session_assets_route(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
@@ -176,6 +200,18 @@ pub async fn sync_session_assets_route(
             return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
         }
     };
+    if !syncable(&record.state) {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "session {id_str} is {} — sync-assets only applies to active/stopped/errored \
+                 sessions (a provisioning session has not deployed yet; a decommissioned \
+                 session's workspace is gone and must never be recreated)",
+                record.state
+            ),
+        )
+            .into_response();
+    }
     match sync_one(record).await {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -224,3 +260,7 @@ pub async fn sync_all_session_assets_route(
         errors,
     })
 }
+
+#[cfg(test)]
+#[path = "sync_assets_tests.rs"]
+mod tests;

@@ -20,15 +20,24 @@
 //! sessions); [`session_asset_staleness`] runs the full agent+skill comparison
 //! and returns the [`StalenessReport`]; [`session_assets_stale`] is the boolean
 //! summary `tm sessions ls`'s stale-assets marker and `tm sessions sync-assets`'s
-//! pre-check consume.
+//! pre-check consume. [`session_plan`] and [`session_asset_staleness_with_catalog`]
+//! split the cheap per-session plan resolution from the expensive catalog-side
+//! hash compute (issue #2444 review MEDIUM finding) so a batch caller —
+//! `daemon::managed_routes::summary::checked_summaries`, computing this marker
+//! for every session on every `tm sessions ls` — can group sessions by their
+//! resolved `(agent_source, skill_source)` pair and share ONE
+//! [`crate::core::update_check::CatalogHashes::compute`] across every session
+//! using that same catalog, instead of recomposing the ~40+ catalog agents once
+//! PER SESSION.
 //! Test: `session_workdir_prefers_workspace_path`,
 //! `session_workdir_falls_back_to_cwd`, `session_assets_stale_false_when_fresh`,
 //! `session_assets_stale_true_when_catalog_moved`.
 
 use std::path::Path;
 
+use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::update_check::{StalenessReport, detect_for_framework};
+use crate::core::update_check::{CatalogHashes, StalenessReport, detect_for_framework};
 use crate::session_manager::SessionRecord;
 
 /// Resolve the on-disk directory a session's deployed assets live under.
@@ -68,6 +77,67 @@ pub fn session_asset_staleness(record: &SessionRecord) -> StalenessReport {
     let workdir = session_workdir(record);
     let fw = FrameworkPaths::for_managed_workspace(workdir);
     detect_for_framework(&fw, workdir)
+}
+
+/// Resolve the workspace-scoped [`FrameworkPaths`] and [`HarnessPlan`] for a
+/// session, WITHOUT doing any expensive catalog compose/hash work.
+///
+/// Why (issue #2444 review): a batch caller comparing many sessions needs to
+/// know each session's resolved `(plan.agent_source, plan.skill_source)`
+/// pair BEFORE deciding whether it can share an already-computed
+/// [`CatalogHashes`] or must compute a new one — that decision has to happen
+/// without paying the compose cost first. This is exactly the manifest-
+/// resolve step [`session_asset_staleness`] and
+/// `core::session_launch::sync_session_assets` already perform internally;
+/// splitting it out here means a batch caller does not have to re-implement
+/// (and risk diverging from) that resolution.
+/// What: builds `FrameworkPaths::for_managed_workspace(session_workdir(record))`
+/// and resolves its [`HarnessPlan`] exactly as [`session_asset_staleness`]
+/// does — only file reads of small manifest/config files (project-level
+/// `.trusty-mpm/manifest.toml` if present, the framework's own `config.toml`),
+/// never a catalog directory scan or agent compose.
+/// Test: `session_plan_resolves_default_bundled_source`.
+pub fn session_plan(record: &SessionRecord) -> (FrameworkPaths, HarnessPlan) {
+    let workdir = session_workdir(record);
+    let fw = FrameworkPaths::for_managed_workspace(workdir);
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    let sources = crate::core::manifest::ManifestSources::resolve(workdir, &fw.root, &catalog_root);
+    let manifest = crate::core::manifest::resolve_manifest(&sources);
+    let plan = HarnessPlan::from_manifest(&manifest, &fw, &catalog_root);
+    (fw, plan)
+}
+
+/// Compute a session's staleness report reusing a precomputed [`CatalogHashes`]
+/// for its resolved catalog source pair.
+///
+/// Why: the cheap, per-session half of the comparison a batch caller runs
+/// AFTER grouping sessions by [`session_plan`]'s resolved `(agent_source,
+/// skill_source)` pair and computing (or reusing) the matching
+/// [`CatalogHashes`] — see the module doc for the full #2444 review
+/// rationale. Reads only this session's OWN deployed manifest + on-disk
+/// files; performs zero catalog I/O.
+/// What: loads this session's deployed [`AgentManifest`]/[`SkillManifest`]
+/// from `fw.claude_agents_dir()`/`fw.claude_skills_dir()` and delegates to
+/// [`CatalogHashes::detect`] with `plan`'s selection predicates.
+/// Test: `session_asset_staleness_with_catalog_matches_uncached_result`.
+pub fn session_asset_staleness_with_catalog(
+    fw: &FrameworkPaths,
+    plan: &HarnessPlan,
+    catalog: &CatalogHashes,
+) -> StalenessReport {
+    let agents_dir = fw.claude_agents_dir();
+    let skills_dir = fw.claude_skills_dir();
+    let deployed_agents = crate::core::agent_manifest::AgentManifest::load(&agents_dir);
+    let deployed_skills = crate::core::skill_manifest::SkillManifest::load(&skills_dir);
+    catalog.detect(
+        &deployed_agents,
+        &deployed_skills,
+        &agents_dir,
+        &skills_dir,
+        |name| plan.agent_selected(name),
+        |name| plan.skill_selected(name),
+        |name| plan.agent_staleness_ignored(name),
+    )
 }
 
 /// Whether a session's deployed agents/skills have drifted from the catalog.
@@ -215,6 +285,60 @@ mod tests {
         assert!(
             session_assets_stale(&record),
             "session must be reported stale once the bundled source changed"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_plan_resolves_default_bundled_source() {
+        // With no project-level manifest override, `session_plan`'s resolved
+        // agent/skill source must equal the shared framework bundled dirs —
+        // the property `checked_summaries`'s batch grouping (issue #2444
+        // review) depends on to collapse multiple sessions onto ONE
+        // `CatalogHashes::compute` call.
+        let (home, _guard) = fake_home();
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let record = make_record(Some(workspace.clone()), workspace);
+
+        let (fw, plan) = session_plan(&record);
+        assert_eq!(plan.agent_source, fw.agent_source_dir());
+        assert_eq!(plan.skill_source, fw.skill_source_dir());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_asset_staleness_with_catalog_matches_uncached_result() {
+        // The batched (`session_plan` + `CatalogHashes` + `session_asset_staleness_with_catalog`)
+        // path must agree EXACTLY with the uncached `session_asset_staleness`
+        // path — sharing the catalog compute must never change the answer.
+        let (home, _guard) = fake_home();
+        let fw = FrameworkPaths::default();
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("rust-engineer.md"), "v1 body").unwrap();
+
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session_fw = FrameworkPaths::for_managed_workspace(&workspace);
+        deploy_agents_filtered(&bundled, &session_fw.claude_agents_dir(), |_| true).unwrap();
+        // Catalog drifts after deploy, so both paths must agree it is stale.
+        std::fs::write(bundled.join("rust-engineer.md"), "v2 body").unwrap();
+
+        let record = make_record(Some(workspace.clone()), workspace);
+        let uncached = session_asset_staleness(&record);
+
+        let (session_fw, plan) = session_plan(&record);
+        let catalog = crate::core::update_check::CatalogHashes::compute(
+            &plan.agent_source,
+            &plan.skill_source,
+        );
+        let cached = session_asset_staleness_with_catalog(&session_fw, &plan, &catalog);
+
+        assert_eq!(uncached.stale, cached.stale);
+        assert!(
+            cached.stale,
+            "the catalog drift must be detected either way"
         );
     }
 }

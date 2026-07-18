@@ -535,3 +535,158 @@ fn classify_drift_new_when_absent() {
     // Manifest already records the catalog content → not drift regardless of disk.
     assert_eq!(super::classify_drift(&cat, Some(&cat), None), None);
 }
+
+// ── #2444 review: CatalogHashes sharing (MEDIUM finding) ──────────────────────
+
+#[test]
+fn compute_agent_catalog_hashes_skips_compose_failures() {
+    // A malformed agent (unterminated frontmatter) must be absent from the
+    // map, not cause the whole computation to fail — mirrors the pre-existing
+    // `agent_changes` skip-on-compose-failure behavior.
+    let root = TempDir::new().unwrap();
+    let agents = root.path().join("agents");
+    write_agent(&agents, "good", "v1");
+    fs::write(agents.join("broken.md"), "---\nunterminated").unwrap();
+
+    let hashes = compute_agent_catalog_hashes(&agents);
+    assert!(hashes.contains_key("good"));
+    assert!(
+        !hashes.contains_key("broken"),
+        "a compose failure must be skipped, not panic or poison the map"
+    );
+}
+
+#[test]
+fn compute_skill_catalog_hashes_reads_bodies() {
+    let root = TempDir::new().unwrap();
+    let skills = root.path().join("skills");
+    write_skill(&skills, "tm-doctor", "v1");
+    let hashes = compute_skill_catalog_hashes(&skills);
+    assert_eq!(
+        hashes.get("tm-doctor"),
+        Some(&checksum("# tm-doctor\n\nv1\n"))
+    );
+}
+
+#[test]
+fn catalog_hashes_compute_is_unknown_without_either_source() {
+    let root = TempDir::new().unwrap();
+    let cache = CatalogHashes::compute(
+        &root.path().join("no-agents"),
+        &root.path().join("no-skills"),
+    );
+    let report = cache.detect(
+        &AgentManifest::default(),
+        &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
+        |_| true,
+        |_| true,
+        |_| false,
+    );
+    assert!(report.unknown);
+    assert!(!report.stale);
+}
+
+/// Issue #2444 review: the whole point of [`CatalogHashes`] — compute ONCE,
+/// `detect` against TWO independent deployed targets, and confirm each
+/// target's report is exactly what a fresh [`detect_staleness`] call would
+/// have produced for it (i.e. sharing the cache changes nothing about
+/// correctness, only how many times the catalog side is recomposed).
+#[test]
+fn catalog_hashes_shared_across_two_deployed_targets() {
+    let root = TempDir::new().unwrap();
+    let catalog_agents = root.path().join("catalog/agents");
+    let catalog_skills = root.path().join("catalog/skills");
+    write_agent(&catalog_agents, "rust-engineer", "v1");
+    write_skill(&catalog_skills, "tm-doctor", "v1");
+
+    // Target A: freshly deployed, matches the catalog exactly → not stale.
+    let a_agents_dir = root.path().join("a/agents");
+    let a_skills_dir = root.path().join("a/skills");
+    let a_agent_manifest = deployed_agent_matching(&catalog_agents, "rust-engineer");
+    let a_skill_manifest = deployed_skill_matching(&catalog_skills, "tm-doctor");
+
+    // Target B: deployed from an OLDER catalog version → stale.
+    let b_agents_dir = root.path().join("b/agents");
+    let b_skills_dir = root.path().join("b/skills");
+    let mut b_agent_manifest = AgentManifest::default();
+    b_agent_manifest.managed.insert(
+        "rust-engineer.md".to_string(),
+        crate::core::agent_manifest::ManifestEntry {
+            source_chain: vec!["rust-engineer".to_string()],
+            checksum: checksum("stale composed content"),
+            deployed_at: "2026-01-01T00:00:00Z".to_string(),
+            origin: crate::core::agent_manifest::Origin::Bundled,
+        },
+    );
+    fs::create_dir_all(&b_agents_dir).unwrap();
+    fs::write(
+        b_agents_dir.join("rust-engineer.md"),
+        "stale composed content",
+    )
+    .unwrap();
+    let b_skill_manifest = SkillManifest::default();
+
+    // Compute the catalog side EXACTLY ONCE, then detect against both targets.
+    let cache = CatalogHashes::compute(&catalog_agents, &catalog_skills);
+
+    let report_a = cache.detect(
+        &a_agent_manifest,
+        &a_skill_manifest,
+        &a_agents_dir,
+        &a_skills_dir,
+        |_| true,
+        |_| true,
+        |_| false,
+    );
+    assert!(
+        !report_a.stale,
+        "target A matches the catalog: {report_a:?}"
+    );
+
+    let report_b = cache.detect(
+        &b_agent_manifest,
+        &b_skill_manifest,
+        &b_agents_dir,
+        &b_skills_dir,
+        |_| true,
+        |_| true,
+        |_| false,
+    );
+    assert!(
+        report_b.stale,
+        "target B's agent is stale relative to the shared catalog: {report_b:?}"
+    );
+    assert!(
+        report_b.changes.iter().any(|c| c.name == "rust-engineer"),
+        "the stale agent must be named: {report_b:?}"
+    );
+
+    // Sanity: results must match what fresh, unshared `detect_staleness` calls
+    // would independently produce for each target.
+    let fresh_a = detect_staleness(
+        &catalog_agents,
+        &catalog_skills,
+        &a_agent_manifest,
+        &a_skill_manifest,
+        &a_agents_dir,
+        &a_skills_dir,
+        |_| true,
+        |_| true,
+        |_| false,
+    );
+    assert_eq!(fresh_a.stale, report_a.stale);
+    let fresh_b = detect_staleness(
+        &catalog_agents,
+        &catalog_skills,
+        &b_agent_manifest,
+        &b_skill_manifest,
+        &b_agents_dir,
+        &b_skills_dir,
+        |_| true,
+        |_| true,
+        |_| false,
+    );
+    assert_eq!(fresh_b.stale, report_b.stale);
+}
