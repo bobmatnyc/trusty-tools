@@ -28,10 +28,12 @@ The convention is parsed by `serde_yaml` **0.9.x** (pure-Rust `libyaml-safer`
 backend), pinned in the workspace `[workspace.dependencies]` table. The 0.8 line
 (which pulls the unmaintained `unsafe-libyaml` C binding) is explicitly excluded.
 
-`serde_yaml` 0.9 is itself in upstream maintenance mode; the full migration to a
-maintained successor (`serde_yml` / `serde-yaml-ng`) across **all** crates is
-tracked in **#1250** and is out of scope for #1220. Do not relax the `0.9` floor
-or add a new YAML crate without coordinating with #1250.
+`serde_yaml` 0.9 is itself in upstream maintenance mode. `serde_yml` — once
+considered a "maintained successor" per the old #1250 direction — turned out to
+be archived upstream and unsound (GHSA-hhw4-xg65-fp2x / GHSA-gfxp-f68g-8x78,
+Dependabot #42/#43); trusty-agents and trusty-search were migrated back onto
+`serde_yaml` in #2991. `serde_yaml` is the workspace standard going forward. Do
+not relax the `0.9` floor or reintroduce `serde_yml`/`libyml`.
 
 ## Adopting the convention in a crate (the shared helper)
 

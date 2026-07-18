@@ -30,7 +30,7 @@ const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4-6";
 ///
 /// Why: claude-mpm's agent schema is richer than our minimal needs. We
 /// extract only the fields we actively consume so unknown keys don't fail
-/// parsing (serde_yml silently drops fields absent from the struct).
+/// parsing (serde_yaml silently drops fields absent from the struct).
 /// What: Holds the handful of keys we care about, all optional so partial
 /// frontmatter loads instead of erroring.
 /// Test: `test_parse_valid_agent`.
@@ -139,7 +139,7 @@ impl ClaudeMpmAgent {
 /// (they may be README.md files or unrelated notes in the same directory),
 /// so returning `None` lets the scanner skip them without noise.
 /// What: Detects a leading `---\n` fence, extracts the YAML block, parses it
-/// with serde_yml, then treats everything after the closing `---` fence as
+/// with serde_yaml, then treats everything after the closing `---` fence as
 /// the system prompt body. Falls back to the filename stem when `name` is
 /// missing, and to `DEFAULT_MODEL` when `model` is absent.
 /// Test: `test_parse_valid_agent`, `test_parse_no_frontmatter_returns_none`,
@@ -163,7 +163,7 @@ pub fn parse_agent_file(path: &Path, content: &str) -> Option<ClaudeMpmAgent> {
         .or_else(|| after.strip_prefix("\r\n"))
         .unwrap_or(after);
 
-    let fm: ClaudeMpmFrontmatter = serde_yml::from_str(fm_str).ok()?;
+    let fm: ClaudeMpmFrontmatter = serde_yaml::from_str(fm_str).ok()?;
 
     let name = fm.name.unwrap_or_else(|| {
         path.file_stem()

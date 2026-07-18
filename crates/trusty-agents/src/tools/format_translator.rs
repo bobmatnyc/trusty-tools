@@ -5,7 +5,7 @@
 //! config translated to TOML for a Rust project). Centralizing these
 //! conversions behind a small trait keeps the logic testable and deterministic
 //! — same input always yields the same output — and avoids scattering
-//! ad-hoc `toml::from_str` / `serde_yml::from_str` calls across the codebase.
+//! ad-hoc `toml::from_str` / `serde_yaml::from_str` calls across the codebase.
 //! What: Defines `Format` (the supported file formats), a `FormatTranslator`
 //! trait, four concrete translators (Markdown→HTML, JSON↔TOML, YAML→JSON),
 //! and a `TranslatorRegistry` that looks up a translator by (from, to) pair.
@@ -138,11 +138,11 @@ impl FormatTranslator for TomlToJson {
     }
 }
 
-/// YAML → JSON via `serde_yml::Value` → `serde_json::Value`.
+/// YAML → JSON via `serde_yaml::Value` → `serde_json::Value`.
 ///
 /// Why: YAML is common in CI and k8s ecosystems; translating to JSON lets the
 /// downstream tools consume the data without a YAML parser.
-/// What: Parses input as `serde_yml::Value`, then pretty-prints as JSON.
+/// What: Parses input as `serde_yaml::Value`, then pretty-prints as JSON.
 /// Test: `test_yaml_to_json`.
 pub struct YamlToJson;
 
@@ -155,7 +155,7 @@ impl FormatTranslator for YamlToJson {
     }
     fn translate(&self, input: &str) -> Result<String> {
         let value: serde_json::Value =
-            serde_yml::from_str(input).map_err(|e| anyhow!("invalid YAML: {e}"))?;
+            serde_yaml::from_str(input).map_err(|e| anyhow!("invalid YAML: {e}"))?;
         serde_json::to_string_pretty(&value).map_err(|e| anyhow!("failed to serialize JSON: {e}"))
     }
 }
