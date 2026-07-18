@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use crate::agent_loop::{
     AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink, resolve_cadence_config,
 };
-use crate::agents::{AgentConfig, md_loader};
+use crate::agents::AgentConfig;
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::RpcError;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
@@ -285,11 +285,15 @@ async fn run_and_record(
     // `TCODE_DEBUG_TRANSCRIPT` is set, and cost nothing when it is not.
     let debug_sink: Option<Arc<DebugCaptureSink>> = DebugCaptureSink::from_env();
 
-    let pm_config_path = params.agents_dir.join(format!("{}.md", params.agent_name));
-    let pm_config = match md_loader::load_md_agent(&pm_config_path) {
+    // (#3046) Routes through the shared disk-then-embedded resolver —
+    // mirrors `run_task::execute_run_task`'s own PM-config load — so a
+    // top-level agent name that only exists in the embedded roster (e.g.
+    // `engineer`, `rust-engineer`) resolves here too, on the daemon-driven
+    // session path.
+    let pm_config = match crate::agents::resolve_agent(&params.agents_dir, &params.agent_name) {
         Ok(cfg) => cfg,
         Err(e) => {
-            finish_with_failure(&registry, &session_id, &format!("PM config error: {e:#}")).await;
+            finish_with_failure(&registry, &session_id, &format!("PM config error: {e}")).await;
             return;
         }
     };

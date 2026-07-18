@@ -92,10 +92,24 @@ async fn spawn_task_run_unknown_session_errors() {
 // (`aggregate_usage_per_role_prices_each_role_separately`). This module only
 // tests THIS daemon path's own wrapper (`resolve_engineer_model`, below).
 
-/// `resolve_engineer_model` must fall back to `"unknown"` (never panic) when
-/// the engineer config is missing.
+/// `resolve_engineer_model` resolves via the embedded default roster
+/// (#3046) — never panics, and no longer degrades to the literal
+/// `"unknown"` — when the on-disk engineer config is missing, because
+/// `ENGINEER_AGENT_NAME` (`"python-engineer"`) is one of the 31 embedded
+/// roster names.
+///
+/// Why: before #3046, `resolve_agent_model_slug` read
+/// `<agents_dir>/python-engineer.md` directly with no embedded fallback, so
+/// a fresh project with no `.claude/agents/` priced every engineer turn
+/// under the degraded `"unknown"` slug even though the run itself (once
+/// #3046's other fixes land) now actually dispatches a real embedded
+/// `python-engineer` config. This pins the corrected behaviour: pricing and
+/// dispatch now agree.
+/// What: empty agents dir, no `python-engineer.md`; asserts the resolved
+/// slug is neither empty nor the literal `"unknown"` fallback string.
+/// Test: this test.
 #[test]
-fn resolve_engineer_model_falls_back_when_config_missing() {
+fn resolve_engineer_model_falls_back_to_embedded_when_disk_config_missing() {
     let empty_agents = tempfile::tempdir().expect("empty agents tempdir");
     let p = TaskRunParams {
         session_id: "s".to_string(),
@@ -109,7 +123,12 @@ fn resolve_engineer_model_falls_back_when_config_missing() {
         deadline_secs: None,
     };
     let model = resolve_engineer_model(&p);
-    assert_eq!(model, "unknown");
+    assert_ne!(
+        model, "unknown",
+        "python-engineer is embedded (#3046); a missing disk config must resolve \
+         via the embedded fallback, not degrade to unknown"
+    );
+    assert!(!model.is_empty());
 }
 
 /// `daily_driver_skills_catalog` returns `None` under `HarnessMode::Parity`,

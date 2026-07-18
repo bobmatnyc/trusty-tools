@@ -27,7 +27,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
-use crate::agents::{AgentConfig, md_loader};
+use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::mode::HarnessMode;
 use crate::prompt::assemble_system_prompt_for_mode;
@@ -292,29 +292,37 @@ impl InProcessAgentRunner {
         self
     }
 
-    /// Load the agent config for `agent_name` from the config directory.
+    /// Load the agent config for `agent_name` from the config directory,
+    /// falling back to the embedded default roster when no disk config
+    /// exists (#3046).
     ///
     /// Why: Each delegation targets a named agent; its model, prompt, and
-    /// `tools.allowed` come from `<config_dir>/<agent_name>.md` (#2897 Slice D
-    /// — `.toml` is no longer a loadable source). Distinguishing "no such
-    /// file" (`UnknownAgent`) from "file present but unparseable"
-    /// (`ConfigLoad`) gives the caller actionable errors.
-    /// What: Builds the path, returns `UnknownAgent` if it does not exist, else
-    /// loads it via [`md_loader::load_md_agent`] (mapping a parse/compose
-    /// failure to `ConfigLoad`).
+    /// `tools.allowed` come from `<config_dir>/<agent_name>.md` (#2897 Slice
+    /// D — `.toml` is no longer a loadable source) when present, or from
+    /// `crate::assets::DEFAULT_AGENTS` when it is not — every delegated
+    /// sub-agent run goes through this method, so it is the load-bearing
+    /// site for making the 31-agent embedded roster actually dispatchable
+    /// from a real run (the gap #3046 closes). Distinguishing "no such
+    /// config anywhere" (`UnknownAgent`) from "a config exists but is
+    /// unparseable" (`ConfigLoad`) gives the caller actionable errors; this
+    /// method's own typed-error contract is preserved unchanged by mapping
+    /// [`crate::agents::resolve_agent`]'s shared `ResolveAgentError` onto
+    /// these SAME two `RunnerError` variants.
+    /// What: Delegates the disk-then-embedded precedence entirely to
+    /// [`crate::agents::resolve_agent`], then maps
+    /// `ResolveAgentError::NotFound` -> `RunnerError::UnknownAgent` and
+    /// `ResolveAgentError::Load` -> `RunnerError::ConfigLoad`.
     /// Test: `runner::tests::unknown_agent_errors`,
-    /// `runner::tests::delegate_runs_engineer_loop`.
+    /// `runner::tests::delegate_runs_engineer_loop`,
+    /// `runner::tests::embedded_restricted_agent_dispatch_preserves_tools_allowed`.
     fn load_agent(&self, agent_name: &str) -> Result<AgentConfig, RunnerError> {
-        let path = self.config_dir.join(format!("{agent_name}.md"));
-        if !path.exists() {
-            return Err(RunnerError::UnknownAgent {
-                name: agent_name.to_string(),
-                dir: self.config_dir.clone(),
-            });
-        }
-        md_loader::load_md_agent(&path).map_err(|source| RunnerError::ConfigLoad {
-            name: agent_name.to_string(),
-            source,
+        crate::agents::resolve_agent(&self.config_dir, agent_name).map_err(|e| match e {
+            crate::agents::ResolveAgentError::NotFound { name, dir, .. } => {
+                RunnerError::UnknownAgent { name, dir }
+            }
+            crate::agents::ResolveAgentError::Load { name, source } => {
+                RunnerError::ConfigLoad { name, source }
+            }
         })
     }
 
@@ -488,14 +496,24 @@ impl AgentRunner for InProcessAgentRunner {
     }
 }
 
-/// Convenience: discover whether an agent config exists for `name` under `dir`.
+/// Convenience: discover whether an agent config exists for `name` under
+/// `dir`, on disk OR in the embedded default roster (#3046).
 ///
-/// Why: Callers (e.g. the orchestrator wiring the delegate tool) sometimes need
-/// to pre-check an agent name without constructing a runner; exposing the same
-/// path rule the runner uses keeps the two in lockstep.
-/// What: Returns `true` iff `<dir>/<name>.md` exists (#2897 Slice D — `.toml`
-/// is no longer a loadable source).
-/// Test: `runner::tests::agent_config_exists_detects_present_and_absent`.
+/// Why: Callers (e.g. `tools::delegate::DelegateToAgentTool::execute`'s
+/// pre-flight gate) sometimes need to pre-check an agent name without
+/// constructing a runner; exposing the same disk-then-embedded rule
+/// [`crate::agents::resolve_agent`] uses keeps the two in lockstep — a
+/// pre-flight check that only saw disk would reject a real embedded roster
+/// name (e.g. `rust-engineer`) before the runner ever got a chance to
+/// resolve it.
+/// What: Returns `true` iff `<dir>/<name>.md` exists (#2897 Slice D —
+/// `.toml` is no longer a loadable source) OR `name` matches an entry in
+/// `crate::assets::DEFAULT_AGENTS`.
+/// Test: `runner::tests::agent_config_exists_detects_present_and_absent`,
+/// `runner::tests::agent_config_exists_detects_embedded_default`.
 pub fn agent_config_exists(dir: &Path, name: &str) -> bool {
     dir.join(format!("{name}.md")).exists()
+        || crate::assets::DEFAULT_AGENTS
+            .iter()
+            .any(|a| a.name() == name)
 }

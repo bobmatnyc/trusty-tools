@@ -237,29 +237,25 @@ impl DelegateToAgentTool {
         self
     }
 
-    /// List agent names discoverable in `config_dir`, if any.
+    /// List agent names discoverable in `config_dir`, disk ∪ embedded
+    /// (#3046), if any.
     ///
     /// Why: Builds the "available agents" hint in error messages so the LLM
     /// gets immediate, structured feedback when it invents a name. Reuses
-    /// `agents::discover_agents` (rather than re-implementing its own dir
-    /// scan) so this hint and the actual load path can never independently
-    /// drift on which extension counts as an agent, and a coexisting
-    /// orphaned `.toml` gets the SAME migration warning it would during a
-    /// real `load_all_agents` call.
-    /// What: Delegates to `crate::agents::discover_agents`, which already
-    /// returns `(name, path)` pairs sorted by name — mapped down to just the
-    /// names here. Returns `None` when no `config_dir` was attached
-    /// (`discover_agents` itself returns `[]`, not `None`, for a
-    /// missing/unreadable directory).
+    /// `agents::available_agent_names` (rather than re-implementing its own
+    /// dir scan) so this hint, the actual load path
+    /// (`crate::agents::resolve_agent`), and the pre-flight gate
+    /// (`crate::runner::agent_config_exists`) can never independently drift
+    /// on which agents are real — before #3046 this hint only ever named
+    /// disk agents, so on a fresh project with no `.claude/agents/` it named
+    /// NONE even though the 31-agent embedded roster was dispatchable.
+    /// What: Delegates to `crate::agents::available_agent_names`, which
+    /// already returns disk ∪ embedded names, sorted and deduped. Returns
+    /// `None` when no `config_dir` was attached.
     /// Test: Indirect via `unknown_agent_returns_helpful_error`.
     fn available_agents(&self) -> Option<Vec<String>> {
         let dir = self.config_dir.as_ref()?;
-        Some(
-            crate::agents::discover_agents(dir)
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect(),
-        )
+        Some(crate::agents::available_agent_names(dir))
     }
 }
 

@@ -29,7 +29,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig};
-use crate::agents::{AgentConfig, md_loader};
+use crate::agents::AgentConfig;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
@@ -247,11 +247,17 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     let debug_sink: Option<Arc<DebugCaptureSink>> = DebugCaptureSink::from_env();
 
     // Load the PM config; a missing/invalid config is a configuration error.
-    let pm_config =
-        match md_loader::load_md_agent(&params.agents_dir.join(format!("{}.md", params.agent))) {
-            Ok(cfg) => cfg,
-            Err(e) => return config_error_report(&params, &transcript, &format!("{e:#}")),
-        };
+    // (#3046) Routes through the shared disk-then-embedded resolver so a
+    // top-level agent name that is only in the embedded roster (e.g.
+    // `engineer`, `rust-engineer`) resolves here too, not just via
+    // `load_all_agents`'s dir-wide scan. Note the embedded roster has no
+    // `pm` entry, so `run-task pm ...` still requires a disk `pm.md` — only
+    // `run-task engineer` / `run-task rust-engineer` etc. exercise the new
+    // fallback.
+    let pm_config = match crate::agents::resolve_agent(&params.agents_dir, &params.agent) {
+        Ok(cfg) => cfg,
+        Err(e) => return config_error_report(&params, &transcript, &format!("{e}")),
+    };
 
     // Load project context (#1033) — absent file is fine.
     let project_context = load_project_context(&params.project);
@@ -623,13 +629,15 @@ fn apply_engineer_model_override(
 /// pricing step. Shared with the daemon path (`task::executor`'s own
 /// `resolve_engineer_model`, which now delegates here) so the two paths
 /// can never independently drift on how per-role pricing resolves a model.
-/// What: loads `<agents_dir>/<agent_name>.md` (#2897 Slice D); on any load
-/// failure (missing/invalid file) falls back to the literal string
-/// `"unknown"` — `crate::perf::cost_usd` degrades gracefully
-/// (Sonnet-equivalent pricing) for an unrecognised model rather than
-/// erroring, so a missing agent config degrades pricing accuracy, not the
-/// whole run. When `model_override` is `Some`, it wins over the config's own
-/// model (mirrors `RunContext`'s override precedence).
+/// What: (#3046) resolves `<agents_dir>/<agent_name>.md` via the shared
+/// disk-then-embedded [`crate::agents::resolve_agent`]; on any resolution
+/// failure (missing everywhere, or an invalid disk/embedded file) falls
+/// back to the literal string `"unknown"` — `crate::perf::cost_usd`
+/// degrades gracefully (Sonnet-equivalent pricing) for an unrecognised
+/// model rather than erroring, so a missing agent config degrades pricing
+/// accuracy, not the whole run. When `model_override` is `Some`, it wins
+/// over the config's own model (mirrors `RunContext`'s override
+/// precedence).
 /// Test: `run_task::tests::resolve_agent_model_slug_falls_back_when_config_missing`,
 /// `run_task::tests::resolve_agent_model_slug_honours_override`.
 pub fn resolve_agent_model_slug(
@@ -637,8 +645,7 @@ pub fn resolve_agent_model_slug(
     agent_name: &str,
     model_override: Option<&str>,
 ) -> String {
-    let path = agents_dir.join(format!("{agent_name}.md"));
-    let Ok(config) = md_loader::load_md_agent(&path) else {
+    let Ok(config) = crate::agents::resolve_agent(agents_dir, agent_name) else {
         return "unknown".to_string();
     };
     match model_override {

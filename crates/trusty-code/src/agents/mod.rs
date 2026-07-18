@@ -224,6 +224,148 @@ pub fn locate_agents_dir(project_root: &Path) -> std::path::PathBuf {
     claude_agents
 }
 
+/// Failure modes of [`resolve_agent`].
+///
+/// Why: `resolve_agent`'s callers need to distinguish "nothing named `name`
+/// exists anywhere" (a caller/LLM mistake — worth listing available agents
+/// for) from "a config for `name` exists but failed to load/compose" (a real
+/// bug in that specific file, on disk or embedded) — the same two shapes
+/// `RunnerError::UnknownAgent`/`ConfigLoad` already distinguish for the
+/// runner's own narrower `<dir>/<name>.md`-only lookup (#2897 Slice D).
+/// What: `NotFound` carries the searched `dir` and a precomputed
+/// `available` hint (disk ∪ embedded names, already joined for display —
+/// see [`available_agent_names`]). `Load` wraps the underlying
+/// `md_loader`/`compose` error, whether it came from an existing disk file
+/// or a compiled-in embedded asset.
+/// Test: `resolve_agent_unknown_name_lists_available_agents`,
+/// `resolve_agent_disk_parse_error_does_not_fall_back_to_embedded`.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveAgentError {
+    /// No config for `name` was found on disk or in the embedded roster.
+    #[error(
+        "unknown agent '{name}': no config found in {} and no embedded default \
+         named '{name}'. Available agents: {available}",
+        dir.display()
+    )]
+    NotFound {
+        /// The requested agent slug.
+        name: String,
+        /// The directory that was searched for `<name>.md`.
+        dir: PathBuf,
+        /// Disk ∪ embedded agent names, sorted/deduped and comma-joined.
+        available: String,
+    },
+    /// A config for `name` was found (on disk or embedded) but failed to
+    /// load, parse, or compose.
+    #[error("failed to load agent config for '{name}': {source}")]
+    Load {
+        /// The requested agent slug.
+        name: String,
+        /// The underlying load/parse/compose error.
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+/// Resolve a named agent's config, disk taking precedence over the embedded
+/// default roster (#3046 — the last gap in the #2958 embedded-roster arc).
+///
+/// Why: Slice E1-E3 (#2958) built a working embedded fallback for
+/// [`load_all_agents`] (the dir-wide scan), but five other production call
+/// sites — `runner::in_process::InProcessAgentRunner::load_agent`,
+/// `run_task::execute_run_task`'s and `task::executor`'s PM-config loads,
+/// `run_task::resolve_agent_model_slug`, and
+/// `tools::delegate::DelegateToAgentTool`'s pre-flight check — read
+/// `<dir>/<name>.md` directly by single-agent name, with no embedded
+/// consultation at all, so the 31-agent roster was unreachable from a real
+/// CLI run on a fresh project with no `.claude/agents/`. This is the ONE
+/// shared resolution helper all of them now route through, so the
+/// disk-wins/embedded-fallback precedence is written and tested exactly
+/// once.
+/// What: If `<dir>/<name>.md` EXISTS, loads it via [`md_loader::load_md_agent`]
+/// — a parse/compose error on an EXISTING disk file is returned as-is
+/// (`ResolveAgentError::Load`), NEVER silently falling through to an
+/// embedded copy of the same name: a project that deliberately overrode
+/// `name` gets its own broken override surfaced, not masked. If the disk
+/// file does not exist, looks `name` up in `crate::assets::DEFAULT_AGENTS`:
+/// a `Direct` entry projects via [`md_loader::project_embedded_md`]
+/// (infallible); a `Composed` entry projects via
+/// [`md_loader::project_embedded_md_with_extends`], and on `Err` (a
+/// build-time asset defect — see [`load_embedded_default_agents`]'s
+/// identical handling) logs `tracing::error!` and falls through to the
+/// not-found case below rather than propagating. If nothing matches
+/// anywhere, returns `ResolveAgentError::NotFound` with the disk ∪ embedded
+/// name list ([`available_agent_names`]) for a caller to surface.
+/// Test: `resolve_agent_disk_wins_over_embedded`,
+/// `resolve_agent_falls_back_to_embedded_when_disk_misses`,
+/// `resolve_agent_disk_parse_error_does_not_fall_back_to_embedded`,
+/// `resolve_agent_unknown_name_lists_available_agents`.
+pub fn resolve_agent(dir: &Path, name: &str) -> Result<AgentConfig, ResolveAgentError> {
+    let disk_path = dir.join(format!("{name}.md"));
+    if disk_path.exists() {
+        return md_loader::load_md_agent(&disk_path).map_err(|source| ResolveAgentError::Load {
+            name: name.to_string(),
+            source,
+        });
+    }
+
+    if let Some(embedded) = crate::assets::DEFAULT_AGENTS
+        .iter()
+        .find(|a| a.name() == name)
+    {
+        match embedded {
+            crate::assets::EmbeddedAgent::Direct { name: n, md } => {
+                return Ok(md_loader::project_embedded_md(n, md));
+            }
+            crate::assets::EmbeddedAgent::Composed { name: n } => {
+                match md_loader::project_embedded_md_with_extends(n) {
+                    Ok(cfg) => return Ok(cfg),
+                    Err(e) => {
+                        tracing::error!(
+                            "embedded roster agent '{n}' failed to compose \
+                             (build-time asset defect, not a runtime condition): {e}"
+                        );
+                        // Fall through to the not-found error below, mirroring
+                        // `load_embedded_default_agents`'s own handling.
+                    }
+                }
+            }
+        }
+    }
+
+    Err(ResolveAgentError::NotFound {
+        name: name.to_string(),
+        dir: dir.to_path_buf(),
+        available: available_agent_names(dir).join(", "),
+    })
+}
+
+/// List every agent name resolvable via [`resolve_agent`] for `dir`: disk ∪
+/// embedded, sorted and deduped.
+///
+/// Why: Both `resolve_agent`'s own not-found error and
+/// `tools::delegate::DelegateToAgentTool::available_agents` (the
+/// "Available agents: ..." hint an LLM sees after naming an unknown agent)
+/// need the same union — computing it in one place means the hint always
+/// names real dispatchable agents, on disk or embedded, never just one or
+/// the other.
+/// What: `discover_agents(dir)`'s names, plus every
+/// `crate::assets::DEFAULT_AGENTS` name not already present, sorted and
+/// deduped.
+/// Test: `available_agent_names_unions_disk_and_embedded`.
+pub fn available_agent_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = discover_agents(dir).into_iter().map(|(n, _)| n).collect();
+    for embedded in crate::assets::DEFAULT_AGENTS {
+        let n = embedded.name().to_string();
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -532,5 +674,133 @@ mod tests {
             tmp.path().join(".claude").join("agents"),
             "must prefer .claude/agents when both exist"
         );
+    }
+
+    /// `resolve_agent`: a disk override wins over an embedded agent of the
+    /// SAME name (#3046).
+    ///
+    /// Why: "project overrides always win" is the whole point of putting
+    /// disk-existence first in `resolve_agent`'s precedence.
+    /// What: `engineer` is BOTH on disk (with a distinguishing marker
+    /// description) and in the embedded roster; asserts the disk copy's
+    /// content came back, not the embedded one's.
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_disk_wins_over_embedded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("engineer.md"),
+            "---\nname: engineer\ndescription: DISK OVERRIDE MARKER\n---\n\nDisk body.\n",
+        )
+        .expect("write");
+
+        let cfg = resolve_agent(tmp.path(), "engineer").expect("resolve");
+        assert_eq!(
+            cfg.agent.description.as_deref(),
+            Some("DISK OVERRIDE MARKER")
+        );
+        assert_eq!(cfg.system_prompt.content, "Disk body.");
+    }
+
+    /// `resolve_agent`: a disk miss falls back to the embedded roster
+    /// (#3046).
+    ///
+    /// Why: this is the literal #3046 repro at the unit level — an empty
+    /// disk dir must still resolve a roster name like `rust-engineer`
+    /// (an `EmbeddedAgent::Composed` entry).
+    /// What: an empty/nonexistent agents dir; `resolve_agent(dir,
+    /// "rust-engineer")` must succeed and carry rust-engineer's known
+    /// composed content.
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_falls_back_to_embedded_when_disk_misses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = resolve_agent(tmp.path(), "rust-engineer").expect("resolve embedded");
+        assert_eq!(cfg.agent.name, "rust-engineer");
+        assert!(
+            cfg.system_prompt.content.contains("toolchains-rust-core"),
+            "expected rust-engineer's composed body, got: {:?}",
+            cfg.system_prompt.content
+        );
+    }
+
+    /// `resolve_agent`: a parse/compose error on an EXISTING disk file must
+    /// error, never silently fall back to the embedded copy of the same
+    /// name (#3046).
+    ///
+    /// Why: masking a real on-disk config bug behind a silently-substituted
+    /// embedded default would hide the exact kind of typo/misconfiguration
+    /// this validation exists to surface.
+    /// What: a disk `rust-engineer.md` with a broken `extends:` chain (a
+    /// name that resolves to nothing); asserts `resolve_agent` errors with
+    /// `ResolveAgentError::Load`, not `Ok` with the embedded content.
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_disk_parse_error_does_not_fall_back_to_embedded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("rust-engineer.md"),
+            "---\nname: rust-engineer\nextends: does-not-exist\n---\n\nBroken.\n",
+        )
+        .expect("write");
+
+        let err = resolve_agent(tmp.path(), "rust-engineer")
+            .expect_err("a broken disk override must error, not fall back");
+        assert!(
+            matches!(err, ResolveAgentError::Load { .. }),
+            "expected Load, got: {err:?}"
+        );
+    }
+
+    /// `resolve_agent`: a name absent from disk AND the embedded roster
+    /// errors with a message listing available agents (#3046).
+    ///
+    /// Why: pins the `NotFound` shape callers rely on to build a helpful
+    /// "unknown agent, did you mean one of..." message.
+    /// What: an empty disk dir; `resolve_agent(dir, "totally-bogus")`
+    /// errors, and the error text names at least one real embedded agent
+    /// (`engineer`).
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_unknown_name_lists_available_agents() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = resolve_agent(tmp.path(), "totally-bogus").expect_err("must error");
+        let msg = err.to_string();
+        assert!(msg.contains("totally-bogus"), "got: {msg}");
+        assert!(
+            msg.contains("engineer"),
+            "expected the available-agents hint to name a real embedded agent, got: {msg}"
+        );
+    }
+
+    /// `available_agent_names` unions disk and embedded names, sorted and
+    /// deduped (#3046).
+    ///
+    /// Why: shared by `resolve_agent`'s not-found hint and
+    /// `tools::delegate::DelegateToAgentTool::available_agents` — both need
+    /// the identical union, computed once.
+    /// What: one disk-only custom agent plus the embedded roster; asserts
+    /// both the disk name and a known embedded name are present, with no
+    /// duplicates.
+    /// Test: this test.
+    #[test]
+    fn available_agent_names_unions_disk_and_embedded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("custom.md"),
+            "---\nname: custom\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let names = available_agent_names(tmp.path());
+        assert!(names.contains(&"custom".to_string()), "got: {names:?}");
+        assert!(
+            names.contains(&"rust-engineer".to_string()),
+            "got: {names:?}"
+        );
+        let mut deduped = names.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(names, deduped, "must contain no duplicates");
     }
 }
