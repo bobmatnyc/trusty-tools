@@ -242,8 +242,17 @@ pub struct ReviewConfig {
 
     // ── Required-context gate (#590) ───────────────────────────────────────
     /// Resolved required-context settings (`require_search`, `require_analyze`).
-    /// Both default to `true`: a missing dependency skips the review rather than
-    /// degrading to a context-free verdict.
+    /// `require_analyze` defaults to `true`: a missing trusty-analyze skips the
+    /// review rather than degrading to a context-free verdict. `require_search`
+    /// defaults to `None` (no explicit operator override) and is instead
+    /// resolved PER CALL by `ContextConfig::effective_require_search` from the
+    /// caller's `InvocationSurface` (search-unreachable semantics fix, #3030):
+    /// `Hosted` surfaces (the webhook bot, CLI GitHub-PR `run`) stay strict
+    /// (effectively `true`); `Interactive` surfaces (MCP tool calls, CLI
+    /// `--local-diff`/`--base`/`--source-root` local reviews) default to
+    /// `false` and degrade instead of hard-skipping. An explicit
+    /// `require_search` override (env or TOML) always wins regardless of
+    /// surface.
     pub context: ContextConfig,
 
     // ── External context sources (Phase 6, #550) ───────────────────────────
@@ -533,7 +542,7 @@ impl ReviewConfig {
     /// becomes a no-op and this choice is never clobbered by CWD auto-derive),
     /// returning `SourceRootOutcome::Matched`. On no match, or when the daemon
     /// is unreachable: sets `search_index_explicit = true` AND clears BOTH
-    /// `context.require_search = false` and `context.require_analyze = false`
+    /// `context.require_search = Some(false)` and `context.require_analyze = false`
     /// so the required-context gate (`pipeline::context_gate::preflight_context`)
     /// degrades instead of skipping either dependency, and returns
     /// `SourceRootOutcome::DiffOnly` with a notice the caller must surface
@@ -556,7 +565,7 @@ impl ReviewConfig {
             Ok(indexes) => indexes,
             Err(e) => {
                 self.search_index_explicit = true;
-                self.context.require_search = false;
+                self.context.require_search = Some(false);
                 self.context.require_analyze = false;
                 let notice = format!(
                     "--source-root {}: trusty-search unreachable while resolving an index \
@@ -581,7 +590,7 @@ impl ReviewConfig {
             }
             SourceRootResolution::NoIndex => {
                 self.search_index_explicit = true;
-                self.context.require_search = false;
+                self.context.require_search = Some(false);
                 self.context.require_analyze = false;
                 let notice = format!(
                     "--source-root {} has no registered trusty-search index — proceeding in \
