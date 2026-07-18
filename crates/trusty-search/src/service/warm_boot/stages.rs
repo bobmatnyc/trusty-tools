@@ -37,6 +37,9 @@ pub struct WarmBootInputs {
     pub lexical_only: bool,
     /// `skip_kg` flag (issue #313): forces graph stage to `Skipped`.
     pub skip_kg: bool,
+    /// `skip_vector` flag (issue #2984 Phase 1): forces semantic stage to
+    /// `Skipped`, independently of `skip_kg`.
+    pub skip_vector: bool,
     /// Issue #1158: `true` when the redb corpus file existed but could not be
     /// opened (e.g. incompatible redb page-format, corrupted file).
     ///
@@ -61,8 +64,10 @@ pub struct WarmBootInputs {
 ///   2. `chunk_count > 0` → lexical is `Ready`.
 ///   3. `chunk_count == 0` → lexical is `InProgress`.
 ///   4. `lexical_only == true` → semantic + graph are `Skipped`.
-///   5. `hnsw_snapshot_ready` → semantic is `Ready`.
-///   6. `graph_node_count > 0` → graph is `Ready`.
+///   5. `skip_vector == true` → semantic is `Skipped` (issue #2984 Phase 1,
+///      independent of `skip_kg`/graph).
+///   6. `hnsw_snapshot_ready` → semantic is `Ready`.
+///   7. `graph_node_count > 0` → graph is `Ready`.
 ///
 /// Test: `warm_boot_*` tests in `commands/start.rs`.
 pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
@@ -112,7 +117,12 @@ pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
     let (semantic, graph) = if inputs.lexical_only {
         (StageState::skipped(), StageState::skipped())
     } else {
-        let semantic = if inputs.hnsw_snapshot_ready {
+        // Issue #2984 Phase 1: `skip_vector` forces semantic to `Skipped`,
+        // mirroring `skip_kg`'s graph gate below — independently, so the
+        // vector-off/KG-on quadrant classifies correctly at warm-boot.
+        let semantic = if inputs.skip_vector {
+            StageState::skipped()
+        } else if inputs.hnsw_snapshot_ready {
             StageState {
                 status: StageStatus::Ready,
                 ..Default::default()

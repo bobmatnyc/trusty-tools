@@ -30,7 +30,7 @@ use super::hash::hashes_for;
 use super::hash_cache;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
-use super::semaphore::{reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH};
+use super::semaphore::{index_semaphore, reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH};
 use super::stages::{mark_reindex_failed, now_rfc3339, schedule_progress_cleanup};
 use super::staging;
 use super::validate;
@@ -70,6 +70,17 @@ pub(super) async fn run_reindex(
     if !priority {
         BACKGROUND_QUEUE_DEPTH.fetch_sub(1, AtomicOrdering::Relaxed);
     }
+    // Issue #2984 Phase 1 CRITICAL finding 2: also acquire this index's
+    // per-index mutual-exclusion permit, held for the FULL reindex duration
+    // (dropped when this function returns). This is the same semaphore the
+    // `PATCH /indexes/:id/config` component-toggle handler `try_acquire`s, so
+    // a reindex and a component catch-up on the SAME index can never race
+    // each other regardless of which reindex priority track is in play —
+    // closing the gap where an interactive reindex (a separate 2-permit
+    // semaphore never touched by the old guard) could still race a catch-up.
+    let _index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
+        "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
+    );
 
     // Arm the termination guard. Any early exit — panic, early return, or
     // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which logs
@@ -373,6 +384,7 @@ pub(super) async fn run_reindex(
         started,
         total,
         lexical_only: handle.lexical_only,
+        skip_vector: handle.skip_vector,
         defer_embed: handle.defer_embed && !handle.lexical_only,
         embedder_pid_slot: embedderd_pid_slot.clone(),
     };

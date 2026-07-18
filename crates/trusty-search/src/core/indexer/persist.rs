@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 
 use crate::core::chunker::RawChunk;
 use crate::core::entity::RawEntity;
+use crate::core::symbol_graph::SymbolGraph;
 
 use super::{ChunkSnapshot, CodeIndexer};
 
@@ -298,6 +299,40 @@ impl CodeIndexer {
                 self.rebuild_symbol_graph().await;
             }
         }
+    }
+
+    /// Soft-disable the in-memory symbol graph (issue #2984 Phase 1: runtime
+    /// KG component toggle).
+    ///
+    /// Why: `PATCH /indexes/:id/config { kg: false }` must release the KG's
+    /// in-memory heap cost (petgraph `DiGraph`, ~50–100 MB/index) immediately
+    /// — matching the locked design's soft-disable contract (D2): on-disk KG
+    /// tables in the corpus redb are never touched, only the in-memory graph
+    /// is dropped. Re-enabling later calls [`Self::catch_up_symbol_graph`] to
+    /// reload it.
+    /// What: replaces `self.symbol_graph` with a fresh, empty `SymbolGraph`.
+    /// Test: `core::indexer::tests::branch_and_corpus::runtime_kg_disable_clears_symbol_graph_in_memory`.
+    pub async fn clear_symbol_graph_in_memory(&self) {
+        *self.symbol_graph.write().await = std::sync::Arc::new(SymbolGraph::new());
+    }
+
+    /// Public entry point for the runtime KG re-enable catch-up path (issue
+    /// #2984 Phase 1): reuses the exact "cheap load, fallback rebuild" logic
+    /// warm-boot already uses via [`Self::load_or_rebuild_symbol_graph`].
+    ///
+    /// Why: `load_or_rebuild_symbol_graph` is `pub(super)`-scoped to
+    /// `core::indexer` (it also gates on `self.skip_kg`, which is only
+    /// meaningful at warm-boot); the `PATCH /indexes/:id/config` handler lives
+    /// in `service::server` and needs the identical "try the cheap persisted
+    /// load, fall back to a full rebuild" behaviour without duplicating it.
+    /// Callers MUST have already flipped `self.skip_kg` to `false` (or be
+    /// calling in a context where the flag doesn't apply) before invoking
+    /// this — the delegate's `skip_kg` guard would otherwise no-op.
+    /// What: delegates to `load_or_rebuild_symbol_graph`.
+    /// Test: `core::indexer::tests::branch_and_corpus::runtime_kg_catch_up_prefers_load_from_corpus`
+    /// and `runtime_kg_catch_up_falls_back_to_rebuild_without_corpus`.
+    pub async fn catch_up_symbol_graph(&self) {
+        self.load_or_rebuild_symbol_graph().await;
     }
 
     /// Rebuild the in-memory BM25 index and `chunks` HashMap from scratch using

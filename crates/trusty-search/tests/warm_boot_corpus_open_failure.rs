@@ -36,6 +36,7 @@ fn corpus_open_failed_flag_emits_failed_stage() {
         graph_node_count: 0,
         lexical_only: false,
         skip_kg: false,
+        skip_vector: false,
         corpus_open_failed: true,
     });
     assert_eq!(
@@ -135,6 +136,7 @@ async fn corpus_open_failure_propagates_to_failed_stage() {
         graph_node_count: 0,
         lexical_only: false,
         skip_kg: false,
+        skip_vector: false,
         corpus_open_failed: indexer.corpus_open_failed,
     });
     assert_eq!(

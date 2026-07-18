@@ -129,6 +129,22 @@ impl VectorStore for UsearchStore {
         Ok(self.index.read().await.size())
     }
 
+    /// Issue #2984 Phase 1 HIGH finding 3: single-id membership check backed
+    /// by `id_to_key` (the authoritative chunk-id → HNSW-key map).
+    /// What: one read-lock acquisition.
+    /// Test: `tests::test_contains_reports_membership`.
+    async fn contains(&self, id: &str) -> bool {
+        self.id_to_key.read().await.contains_key(id)
+    }
+
+    /// Issue #2984 Phase 1 HIGH finding 3: bulk membership check under a
+    /// SINGLE `id_to_key` read lock, avoiding one lock acquisition per id.
+    /// Test: `tests::test_contains_many_reports_membership`.
+    async fn contains_many(&self, ids: &[String]) -> Vec<bool> {
+        let id_to_key = self.id_to_key.read().await;
+        ids.iter().map(|id| id_to_key.contains_key(id)).collect()
+    }
+
     async fn save_to(&self, path: &Path) -> Result<()> {
         self.save(path).await
     }

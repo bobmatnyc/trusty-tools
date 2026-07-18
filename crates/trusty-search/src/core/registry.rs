@@ -396,6 +396,24 @@ pub struct IndexHandle {
     /// Test: `skip_kg_index_never_runs_phase3` in `service::reindex::tests`.
     pub skip_kg: bool,
 
+    /// Vector/semantic-suppression flag (issue #2984 Phase 1): when `true`,
+    /// the embedder is never invoked for this index — the semantic stage is
+    /// permanently `Skipped` and no HNSW work happens, mirroring `skip_kg`
+    /// but for the embedding lane instead of the symbol graph. Orthogonal to
+    /// both `skip_kg` and `lexical_only`: `skip_kg=false, skip_vector=true`
+    /// is the "KG-on, vector-off" quadrant the design doc calls out.
+    ///
+    /// Why: embedder wedges (#1448/#1450) and EMFILE/FD pressure (#2914,
+    /// #2947) are per-component operational problems; operators need to
+    /// disable just the vector lane without losing KG expansion. Distinct
+    /// from `lexical_only`, which suppresses BOTH semantic and graph.
+    /// What: a bare `bool`, settable at `POST /indexes` create time and
+    /// toggleable at runtime via `PATCH /indexes/:id/config` (issue #2984
+    /// Phase 1). Persisted to `indexes.toml` so it survives daemon restarts.
+    /// Defaults to `false`.
+    /// Test: `skip_vector_index_never_embeds` in `service::reindex::tests`.
+    pub skip_vector: bool,
+
     /// Deferred-embedding mode (issue #923): when `true` (the default),
     /// the fast pass (walk → chunk → BM25 → KG) runs synchronously and
     /// marks lexical + graph stages `Ready` in seconds, making the index
@@ -524,6 +542,7 @@ impl IndexHandle {
             last_indexed_at: Arc::new(RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
+            skip_vector: false,
             defer_embed: true,
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),

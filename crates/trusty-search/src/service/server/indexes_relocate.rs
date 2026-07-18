@@ -210,6 +210,7 @@ pub(super) async fn relocate_index_handler(
         data_file_max_bytes: Some(existing.data_file_max_bytes),
         lexical_only: existing.lexical_only,
         skip_kg: existing.skip_kg,
+        skip_vector: existing.skip_vector,
         defer_embed: existing.defer_embed,
         // Issue #1088/#1089: preserve the persisted colocated flag rather than
         // hardcoding true. Toggling this flag silently would route the indexer
@@ -315,6 +316,7 @@ pub(super) async fn relocate_index_handler(
         last_indexed_at: Arc::clone(&existing.last_indexed_at),
         lexical_only: existing.lexical_only,
         skip_kg: existing.skip_kg,
+        skip_vector: existing.skip_vector,
         defer_embed: existing.defer_embed,
         stages: Arc::clone(&existing.stages),
         search_pressure: Arc::clone(&existing.search_pressure),

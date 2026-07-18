@@ -185,6 +185,13 @@ pub(super) async fn index_status_handler(
         "search_capabilities": search_capabilities,
         "lexical_only": handle.lexical_only,
         "skip_kg": handle.skip_kg,
+        "skip_vector": handle.skip_vector,
+        // Issue #2984 Phase 1: per-component visibility — on/off plus the
+        // live stage status (InProgress means a catch-up is running).
+        "components": {
+            "kg": { "enabled": !handle.skip_kg, "status": stages_snapshot.graph.status },
+            "vector": { "enabled": !handle.skip_vector, "status": stages_snapshot.semantic.status },
+        },
         "path_filter": path_filter,
         "has_context_embedding": has_context_embedding,
         "context_summary": context_summary,

@@ -64,6 +64,27 @@ pub(super) struct HealthResponse {
     /// `~102`) immediately visible without tailing logs. The `warm_boot_degraded`
     /// boolean is the machine-readable flag external monitors should poll.
     pub(super) warmboot_summary: WarmBootSummary,
+    /// Number of registered indexes with the KG component disabled
+    /// (`skip_kg == true`) — issue #2984 Phase 1.
+    ///
+    /// Why: gives operators a machine-readable count of per-component
+    /// suppression across the fleet without scanning every
+    /// `GET /indexes/:id/status` response individually.
+    /// What: computed live on every `GET /health` poll from the registry.
+    /// Test: `health_surfaces_component_disabled_counts` in
+    /// `tests_components`.
+    pub(super) indexes_kg_disabled: usize,
+    /// Number of registered indexes with the vector component disabled
+    /// (`skip_vector == true`) — issue #2984 Phase 1. See `indexes_kg_disabled`.
+    pub(super) indexes_vector_disabled: usize,
+    /// Number of registered indexes with an enabled component (KG and/or
+    /// vector) whose stage is currently `InProgress` — issue #2984 Phase 1.
+    /// Covers BOTH a runtime component re-enable catch-up and an ordinary
+    /// in-flight reindex (both drive the same stage transition); operators
+    /// wanting to distinguish the two should consult
+    /// `GET /indexes/:id/status`'s `stages` block alongside
+    /// `GET /indexes/:id/reindex/stream`.
+    pub(super) indexes_component_catch_up_in_progress: usize,
     /// Boot-time reconcile summary (issue #1672).
     ///
     /// Why: boot-reconcile catches stale indexes (git-delta path since #1670,
@@ -257,19 +278,44 @@ pub(super) async fn health_handler(
     // for the same id across consecutive polls) without changing the
     // fail-open behavior itself.
     let mut indexes_health_scan_skipped = 0usize;
+    // Issue #2984 Phase 1: fold the per-component aggregate counts into the
+    // SAME registry scan (rather than a second full iteration) — one pass
+    // computes corpus-failure, component-disabled, and catch-up-in-progress
+    // counts together.
+    let mut indexes_kg_disabled = 0usize;
+    let mut indexes_vector_disabled = 0usize;
+    let mut indexes_component_catch_up_in_progress = 0usize;
     let indexes_corpus_failed = state
         .registry
         .list_handles()
         .iter()
-        .filter(|handle| match handle.stages.try_read() {
-            Ok(stages) => stages.any_failed(),
-            Err(_) => {
-                indexes_health_scan_skipped += 1;
-                tracing::debug!(
-                    index_id = %handle.id,
-                    "health: stages lock contended — skipping this handle for this poll (#1870)"
-                );
-                false
+        .filter(|handle| {
+            if handle.skip_kg {
+                indexes_kg_disabled += 1;
+            }
+            if handle.skip_vector {
+                indexes_vector_disabled += 1;
+            }
+            match handle.stages.try_read() {
+                Ok(stages) => {
+                    if (!handle.skip_kg
+                        && stages.graph.status == crate::core::registry::StageStatus::InProgress)
+                        || (!handle.skip_vector
+                            && stages.semantic.status
+                                == crate::core::registry::StageStatus::InProgress)
+                    {
+                        indexes_component_catch_up_in_progress += 1;
+                    }
+                    stages.any_failed()
+                }
+                Err(_) => {
+                    indexes_health_scan_skipped += 1;
+                    tracing::debug!(
+                        index_id = %handle.id,
+                        "health: stages lock contended — skipping this handle for this poll (#1870)"
+                    );
+                    false
+                }
             }
         })
         .count();
@@ -338,6 +384,9 @@ pub(super) async fn health_handler(
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
         update_available,
+        indexes_kg_disabled,
+        indexes_vector_disabled,
+        indexes_component_catch_up_in_progress,
         warmboot_summary,
         boot_reconcile,
     })

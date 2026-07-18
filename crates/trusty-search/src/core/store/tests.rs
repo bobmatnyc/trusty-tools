@@ -54,6 +54,40 @@ async fn test_remove() {
     assert!(!hits.iter().any(|h| h.chunk_id == "del-me"));
 }
 
+/// Issue #2984 Phase 1 HIGH finding 3: `contains` must reflect exactly
+/// which ids have been upserted, and must NOT report a removed id as present.
+/// Test: this test.
+#[tokio::test]
+async fn test_contains_reports_membership() {
+    let store = UsearchStore::new(4).expect("store init");
+    assert!(!store.contains("chunk:a").await, "empty store has nothing");
+    store
+        .upsert("chunk:a", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    assert!(store.contains("chunk:a").await);
+    assert!(!store.contains("chunk:b").await, "never-upserted id absent");
+    store.remove("chunk:a").await.unwrap();
+    assert!(
+        !store.contains("chunk:a").await,
+        "removed id must report absent"
+    );
+}
+
+/// Issue #2984 Phase 1 HIGH finding 3: `contains_many` must return the same
+/// length/order as the input `ids`, correctly reporting a mix of present and
+/// absent ids in one call.
+/// Test: this test.
+#[tokio::test]
+async fn test_contains_many_reports_membership() {
+    let store = UsearchStore::new(4).expect("store init");
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.upsert("c", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let present = store.contains_many(&ids).await;
+    assert_eq!(present, vec![true, false, true]);
+}
+
 #[tokio::test]
 async fn test_concurrent_reads() {
     let store = Arc::new(UsearchStore::new(4).expect("store init"));

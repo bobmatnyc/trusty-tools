@@ -152,6 +152,22 @@ pub struct PersistedIndex {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skip_kg: bool,
 
+    /// Vector/semantic-suppression flag (issue #2984 Phase 1): when `true`,
+    /// the embedder is never invoked — no HNSW work, ever. The semantic
+    /// stage is permanently `Skipped` at warm-boot and after every reindex.
+    /// Orthogonal to `skip_kg`: `skip_kg=false, skip_vector=true` is the
+    /// "KG-on, vector-off" quadrant.
+    ///
+    /// Why: mirrors `skip_kg`'s persistence contract so an `indexes.toml`
+    /// round-trip preserves the caller's per-component choice across daemon
+    /// restarts — both create-time (`POST /indexes`) and runtime
+    /// (`PATCH /indexes/:id/config`).
+    /// What: `#[serde(default)]` so older `indexes.toml` files load as
+    /// `false` (vector enabled); only `true` is written to disk.
+    /// Test: `skip_vector_round_trips` in this module.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_vector: bool,
+
     /// Deferred-embedding mode (issue #923): when `true` (the default), the
     /// fast pass (walk → chunk → BM25 → KG) runs synchronously and marks
     /// lexical + graph stages `Ready` in seconds. Embedding is deferred to a
@@ -320,6 +336,7 @@ impl Default for PersistedIndex {
             data_file_max_bytes: default_data_file_max_bytes(),
             lexical_only: false,
             skip_kg: false,
+            skip_vector: false,
             defer_embed: true,
             colocated: false,
             last_queried_unix: None,
