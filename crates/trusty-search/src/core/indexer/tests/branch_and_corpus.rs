@@ -399,6 +399,218 @@ async fn test_corpus_store_swap_and_take() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #313 / #2984 (Phase 0) — warm-boot must honor `skip_kg`.
+// ---------------------------------------------------------------------------
+
+/// A `skip_kg=true` index must never load the symbol graph at warm-boot,
+/// even when a fully-populated graph was already persisted to the redb
+/// corpus by an earlier (non-skip_kg) session.
+///
+/// Why: this is the exact latent bug from #2984 — `IndexHandle::skip_kg`
+/// never reached `CodeIndexer`, so `load_or_rebuild_symbol_graph` ran
+/// unconditionally at warm-boot and happily loaded (or rebuilt) the graph
+/// regardless of the flag, defeating the whole point of setting it.
+/// What: builds a graph with real edges via `index_files_batch` (a function
+/// calling another function), confirms it built + persisted, drops the
+/// indexer, then warm-boots a fresh `CodeIndexer` with `skip_kg = true`
+/// against the same redb corpus and asserts the restored graph is empty
+/// while the chunk corpus itself (lexical/BM25) is fully restored — proving
+/// the skip is scoped to the graph only, per the locked "soft-off, stores
+/// untouched" design (the on-disk KG tables in redb are left alone; only the
+/// in-memory load is skipped).
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_kg_true_warm_boot_never_loads_persisted_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    // Phase 1: build + persist a real symbol graph (caller → callee edge).
+    {
+        let idx = make_indexer_with_corpus(&redb_path);
+        idx.index_files_batch(&[
+            ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+            ("src/callee.rs".into(), "fn callee() {}".into()),
+        ])
+        .await
+        .expect("index batch");
+        let graph = idx.snapshot_symbol_graph().await;
+        assert!(
+            graph.node_count() > 0,
+            "sanity: normal indexing must build a non-empty symbol graph"
+        );
+    } // indexer (and corpus Arc) dropped — simulates shutdown.
+
+    // Phase 2: warm-boot a fresh indexer with skip_kg=true against the same
+    // redb corpus that DOES have a persisted graph.
+    let mut restored = make_indexer_with_corpus(&redb_path);
+    restored.skip_kg = true;
+    let chunk_count = restored
+        .load_chunks_from_redb()
+        .await
+        .expect("warm-boot from redb");
+    assert!(
+        chunk_count >= 2,
+        "skip_kg must not affect chunk/lexical restoration"
+    );
+
+    let graph = restored.snapshot_symbol_graph().await;
+    assert_eq!(
+        graph.node_count(),
+        0,
+        "skip_kg=true must skip loading the persisted symbol graph at warm-boot"
+    );
+    assert_eq!(
+        graph.edge_count(),
+        0,
+        "skip_kg=true must skip loading persisted graph edges at warm-boot"
+    );
+}
+
+/// Counterpart of the test above: `skip_kg=false` (the default) must keep
+/// loading the persisted graph exactly as before — this fix must not
+/// regress the normal warm-boot path.
+///
+/// Why: proves the guard added to `load_or_rebuild_symbol_graph` is a
+/// targeted early-return, not an accidental behavior change for the common
+/// case.
+/// What: same two-phase setup as the test above, but the warm-boot indexer
+/// leaves `skip_kg` at its default `false` and asserts the restored graph
+/// is non-empty.
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_kg_false_warm_boot_still_loads_persisted_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    {
+        let idx = make_indexer_with_corpus(&redb_path);
+        idx.index_files_batch(&[
+            ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+            ("src/callee.rs".into(), "fn callee() {}".into()),
+        ])
+        .await
+        .expect("index batch");
+    }
+
+    let restored = make_indexer_with_corpus(&redb_path);
+    assert!(!restored.skip_kg, "sanity: skip_kg defaults to false");
+    restored
+        .load_chunks_from_redb()
+        .await
+        .expect("warm-boot from redb");
+
+    let graph = restored.snapshot_symbol_graph().await;
+    assert!(
+        graph.node_count() > 0,
+        "skip_kg=false must still load the persisted symbol graph at warm-boot"
+    );
+}
+
+/// `skip_kg=true` must skip the graph *rebuild* fallback too, not just the
+/// persisted-graph load — i.e. the guard must sit before the `corpus.is_none()`
+/// branch inside `load_or_rebuild_symbol_graph`, which otherwise falls back
+/// to a full from-chunks rebuild (the more expensive of the two paths this
+/// bug was about).
+///
+/// Why: a naive fix might only guard the `Some(corpus)` branch (skip the
+/// redb read) while leaving the `None` branch's `rebuild_symbol_graph` call
+/// unconditional — still paying the full O(chunks) rebuild cost for
+/// corpus-less (legacy/test) indexers.
+/// What: plants a chunk directly into the in-memory `chunks` map (bypassing
+/// `add_chunk`, which itself triggers its own unconditional rebuild) on a
+/// `skip_kg=true` indexer with NO corpus wired, calls
+/// `load_or_rebuild_symbol_graph` directly, and asserts the graph stays
+/// empty — proving the rebuild branch never ran (it would have picked up
+/// the planted chunk otherwise).
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired() {
+    let mut idx = make_indexer();
+    idx.skip_kg = true;
+    assert!(!idx.has_corpus_store(), "precondition: no corpus wired");
+
+    idx.chunks.write().await.insert(
+        "a:1".to_string(),
+        raw_with_kind(
+            "a:1",
+            "src/a.rs",
+            "fn a() { b(); }",
+            crate::core::chunker::ChunkType::Function,
+            Some("a"),
+        ),
+    );
+
+    idx.load_or_rebuild_symbol_graph().await;
+
+    let graph = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        graph.node_count(),
+        0,
+        "skip_kg=true must skip the from-chunks rebuild fallback too, \
+         not just the persisted-graph load"
+    );
+}
+
+/// `skip_kg=true` must also suppress the graph rebuild that runs after
+/// restoring the legacy `chunks.json` snapshot (`load_chunks_from_disk`'s
+/// Phase 4), the warm-boot fallback path used when a daemon upgraded from a
+/// JSON-snapshot build has a populated `chunks.json` but empty redb.
+///
+/// Why: `load_or_rebuild_symbol_graph` (guarded above) is only reachable from
+/// the redb corpus path (`load_chunks_from_redb`); `load_chunks_from_disk`
+/// calls `rebuild_symbol_graph` directly and needed its own separate guard
+/// (added alongside the `load_or_rebuild_symbol_graph` fix). This test pins
+/// that second guard directly, independent of the redb-corpus tests above.
+/// What: builds a legacy (no-corpus) indexer with a real caller→callee call
+/// edge, persists it to `chunks.json`, confirms the graph was non-empty
+/// pre-persist, then calls `load_chunks_from_disk` directly on a fresh
+/// `skip_kg=true` indexer and asserts the chunks are restored but the graph
+/// stays empty.
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_kg_true_legacy_json_restore_skips_graph_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("chunks.json");
+
+    // Stage a legacy JSON snapshot with a real call edge via a skip_kg=false
+    // indexer (no corpus store — the legacy pre-redb shape).
+    {
+        let legacy = make_indexer();
+        legacy
+            .index_files_batch(&[
+                ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+                ("src/callee.rs".into(), "fn callee() {}".into()),
+            ])
+            .await
+            .expect("index batch");
+        let graph = legacy.snapshot_symbol_graph().await;
+        assert!(
+            graph.node_count() > 0,
+            "sanity: normal indexing must build a non-empty symbol graph"
+        );
+        legacy.save_chunks_to_disk(&json_path).await.unwrap();
+    }
+    assert!(json_path.exists(), "precondition: chunks.json must exist");
+
+    // Warm-boot path: restore the JSON snapshot directly onto a fresh
+    // skip_kg=true indexer.
+    let mut idx = make_indexer();
+    idx.skip_kg = true;
+    let n = idx
+        .load_chunks_from_disk(&json_path)
+        .await
+        .expect("restore from chunks.json");
+    assert!(n >= 2, "skip_kg must not affect chunk restoration ({n})");
+
+    let graph = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        graph.node_count(),
+        0,
+        "skip_kg=true must skip the symbol graph rebuild after chunks.json restore"
+    );
+}
+
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]

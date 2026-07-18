@@ -855,7 +855,6 @@ crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_idle_shu
 crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_single_flight_concurrent
 crates/trusty-search/src/service/grep.rs	truncates_at_max_results
 crates/trusty-search/src/service/lazy_loader/store.rs	cold_store_mark_failed_is_failed
-crates/trusty-search/src/service/persistence_loader.rs	colocated_indexer_builds_from_entry
 crates/trusty-search/src/service/persistence_timestamps.rs	update_last_indexed_unix_roundtrip
 crates/trusty-search/src/service/persistence_timestamps.rs	update_last_queried_unix_roundtrip
 crates/trusty-search/src/service/persistence.rs	colocated_hnsw_path_resolves_under_root
