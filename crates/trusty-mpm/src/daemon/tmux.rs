@@ -367,7 +367,7 @@ impl TmuxDriver {
     /// which appends Enter). Keeping it a separate one-shot avoids the second
     /// `Enter` send-keys call.
     /// What: a single `send-keys -l` invocation (literal, no key-name follow-up).
-    /// Test: `core::tmux::send_keys_literal_argv` covers the argv shape.
+    /// Test: argv shape covered by `trusty_common::tmux`'s `send_keys_literal_argv`.
     pub fn send_keys_literal(&self, target: &TmuxTarget, text: &str) -> Result<()> {
         self.run(&TmuxCommand::SendKeys {
             target: target.clone(),
@@ -382,7 +382,7 @@ impl TmuxDriver {
     /// Why: restarting Claude Code in place means interrupting the running
     /// process before relaunching it; `C-c` is the clean stop.
     /// What: one `send-keys` invocation with the `C-c` key name (non-literal).
-    /// Test: `core::tmux::send_keys_keyname_argv` covers the argv shape.
+    /// Test: argv shape covered by `trusty_common::tmux`'s `send_keys_keyname_argv`.
     pub fn send_interrupt(&self, target: &TmuxTarget) -> Result<()> {
         self.run(&TmuxCommand::SendKeys {
             target: target.clone(),

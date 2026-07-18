@@ -1,13 +1,23 @@
-//! tmux session-control primitives AND the crate's single tmux-spawning
-//! entry point (#2398 architecture consolidation).
+//! Thin adapter over `trusty_common::tmux` + the crate's single
+//! tmux-spawning entry point (#2398 architecture consolidation, #3004
+//! shared-layer extraction).
 //!
 //! Why: trusty-mpm hosts each Claude Code session inside a named tmux session
 //! (the primary control model — see `docs/research/session-control-models.md`).
-//! The patterns here are distilled from `ai-commander`'s `commander-tmux` crate
-//! and `open-mpm`'s `tm` module: create named detached sessions, send keystrokes
-//! with `send-keys`, and capture pane output. `TmuxTarget`/`TmuxCommand`/
-//! `tmux_argv` stay PURE (no process spawning) so argv construction is
-//! unit-testable without a live tmux server.
+//! `TmuxTarget`/`TmuxCommand`/`tmux_argv` used to live here, but issue #3004
+//! extracted them (plus `scrollback_option_commands` and the
+//! options-before-`new-session` ordering guarantee) into `trusty_common::tmux`
+//! once a scrollback bug report against trusty-agents' INDEPENDENT tmux
+//! implementation revealed the real problem: #2398/#2399 could only fix the
+//! crate they lived in. This module re-exports the shared pure layer
+//! unchanged (every existing call site in this crate keeps compiling against
+//! `crate::core::tmux::{TmuxTarget, TmuxCommand, tmux_argv, ...}`) and keeps
+//! everything that is genuinely trusty-mpm-specific: binary resolution
+//! glue, TCC-disclaimed process spawning (issue #2819/#2820 — NOT moved to
+//! the shared layer, since it is a macOS/trusty-mpm-signing concern, not a
+//! tmux concern), and `create_managed_session`, which layers this crate's
+//! own `TrustyToolsConfig` resolution on top of the shared
+//! `managed_session_commands` recipe.
 //!
 //! Originally this module was argv-construction only, with each of the
 //! daemon (`daemon::tmux::TmuxDriver`), the CLI (`bin/tm`'s launch/connect/
@@ -40,220 +50,25 @@
 //! [`resolve_tmux_binary_or_bare`] even though its interactive,
 //! stdio-inheriting `.status()` call shape does not fit [`run_tmux`]'s
 //! output-capturing signature.
-//! What: `TmuxTarget` (session\[:pane\] addressing), `TmuxCommand` (a typed
-//! tmux sub-command), `tmux_argv` (renders a command to an argv vector),
-//! [`resolve_tmux_binary`]/[`resolve_tmux_binary_or_bare`] (binary
-//! resolution), [`run_tmux_with_bin`]/[`run_tmux`] (the shared spawn
+//! What: re-exports `TmuxTarget`/`TmuxCommand`/`tmux_argv`/
+//! `scrollback_option_commands`/the scrollback defaults from
+//! `trusty_common::tmux`; [`resolve_tmux_binary`]/[`resolve_tmux_binary_or_bare`]
+//! (binary resolution), [`run_tmux_with_bin`]/[`run_tmux`] (the shared spawn
 //! primitive), and [`create_managed_session`] (the session-creation choke
-//! point with ergonomics baked in).
-//! Test: `cargo test -p trusty-mpm-core` asserts the rendered argv for each
-//! command shape, including literal vs. key-name `send-keys`; the spawning
-//! functions are exercised transitively by every call site (a live `tmux`
-//! binary is needed to observe real output, so those paths are covered by
-//! `#[ignore]` integration tests plus this module's own no-panic smoke test).
+//! point with ergonomics baked in, config-resolved locally).
+//! Test: `cargo test -p trusty-mpm-core` covers the mpm-specific spawn/config
+//! glue; argv construction and the options-before-new-session ordering
+//! guarantee are tested once in `trusty_common::tmux` and reused here without
+//! re-testing (`managed_session_command_sequence_matches_shared_layer`
+//! asserts THIS crate's config-resolved call routes through it correctly).
 
 use tracing::warn;
 
-use serde::{Deserialize, Serialize};
-
-/// Addresses a tmux session, optionally a specific pane within it.
-///
-/// Why: every tmux I/O command needs a `-t` target; modelling it once avoids
-/// re-deriving the target string at each call site.
-/// What: a session name plus an optional pane id (`%0`, `%1`, ...).
-/// Test: `target_renders_session_and_bare_pane`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TmuxTarget {
-    /// tmux session name (the daemon names these `trusty-mpm-<session-id>`).
-    pub session: String,
-    /// Optional pane id; `None` addresses the session's active pane.
-    #[serde(default)]
-    pub pane: Option<String>,
-}
-
-impl TmuxTarget {
-    /// Address the active pane of a named session.
-    pub fn session(name: impl Into<String>) -> Self {
-        Self {
-            session: name.into(),
-            pane: None,
-        }
-    }
-
-    /// Address a specific pane within a session.
-    pub fn pane(name: impl Into<String>, pane: impl Into<String>) -> Self {
-        Self {
-            session: name.into(),
-            pane: Some(pane.into()),
-        }
-    }
-
-    /// Render the tmux `-t` target string.
-    ///
-    /// Why (CRITICAL fix, follow-up to #2467): tmux pane ids (`%NNNN`) are
-    /// GLOBALLY unique across the whole server, not scoped to a session — but
-    /// `-t "<session>:<pane_id>"` still parses everything after the `:` as a
-    /// WINDOW spec, not a pane spec. Live tmux 3.6b proof: `send-keys -t
-    /// "sess:%6028" ...` fails with `can't find window: %6028`, while `-t
-    /// "%6028"` (bare) works. Every resume/restart with a stored `pane_id`
-    /// hit this — `spawn_resume` returned `Err` and the record flipped to
-    /// `Errored`. The session-qualified form was never valid tmux syntax for
-    /// a pane target.
-    /// What: a pane target renders as the BARE pane id (`%NNNN`) with no
-    /// session qualifier; a session-only target still renders the session
-    /// name.
-    /// Test: `target_renders_session_and_bare_pane`;
-    /// `send_keys_pane_target_is_bare_id`.
-    pub fn as_target(&self) -> String {
-        match &self.pane {
-            Some(p) => p.clone(),
-            None => self.session.clone(),
-        }
-    }
-}
-
-/// A typed tmux sub-command the daemon's session manager can execute.
-///
-/// Why: enumerating the small set of tmux operations trusty-mpm needs
-/// (vs. building ad-hoc argv vectors) keeps the daemon's tmux usage auditable
-/// and the argv rendering testable without spawning processes.
-/// What: covers session lifecycle, keystroke injection, and output capture.
-/// Test: see the per-variant tests in this module.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TmuxCommand {
-    /// `new-session -A -d -s <name> [-c <dir>]` — create a detached session,
-    /// or attach to it if a session with the same name already exists (the
-    /// `-A` flag makes the command idempotent rather than failing on a
-    /// duplicate session name).
-    NewSession {
-        /// Session name.
-        name: String,
-        /// Optional working directory for the session's first pane.
-        workdir: Option<String>,
-    },
-    /// `kill-session -t <name>` — destroy a session.
-    KillSession {
-        /// Session name to kill.
-        name: String,
-    },
-    /// `has-session -t <name>` — probe whether a session exists.
-    HasSession {
-        /// Session name to probe.
-        name: String,
-    },
-    /// `list-sessions -F <fmt>` — enumerate sessions.
-    ListSessions,
-    /// `list-windows -t <name> -F <fmt>` — enumerate a session's windows.
-    ListWindows {
-        /// Session whose windows to list.
-        name: String,
-    },
-    /// `list-panes -s -t <name> -F <fmt>` — enumerate ALL of a session's
-    /// panes, across every window (`-s`).
-    ///
-    /// Why (CRITICAL follow-up, discovered by the live-tmux test written for
-    /// #2467's fix): without `-s`, tmux resolves a session-name target to
-    /// only the session's currently ACTIVE window and lists that window's
-    /// panes — exactly the sibling-window-hijack scenario this feature
-    /// exists to guard against. A pane in a non-active window (e.g. the
-    /// original pane, once a sibling window steals focus) would silently
-    /// vanish from this list even though it is still alive, making
-    /// `pane_exists` wrongly report `false` and `resume` wrongly refuse with
-    /// `PaneGone`.
-    ListPanes {
-        /// Session whose panes to list.
-        name: String,
-    },
-    /// `send-keys -t <target> [-l] <keys>` — inject keystrokes.
-    SendKeys {
-        /// Target session/pane.
-        target: TmuxTarget,
-        /// The keys (or literal text) to send.
-        keys: String,
-        /// When true, pass `-l` so tmux sends the text literally rather than
-        /// interpreting words like `Enter`/`C-c` as key names.
-        literal: bool,
-    },
-    /// `capture-pane -t <target> -p [-S -<lines>]` — capture pane output.
-    CapturePane {
-        /// Target session/pane.
-        target: TmuxTarget,
-        /// Optional number of trailing scrollback lines to capture.
-        lines: Option<u32>,
-    },
-    /// `set-environment -t <session> <key> <value>` — durably publish a
-    /// variable into the tmux SESSION environment (#2157 item 1).
-    ///
-    /// Why: the pane-shell `export …;` prefix ([`crate::runtime::claude_code`]'s
-    /// `session_id_export_prefix`) only lands in the ONE shell process that ran
-    /// it — a sibling pane/window in the same session, or a pane spawned by a
-    /// pre-fix build, never sees it. `tmux set-environment` writes into the
-    /// session's OWN environment table instead, which any process can query via
-    /// `tmux show-environment -t <session>` regardless of which pane/shell asks
-    /// or when it was created.
-    /// What: targets the SESSION (not a pane) — `set-environment` interprets
-    /// `-t` as a session target here, unlike `send-keys`/`capture-pane` which
-    /// address a specific pane.
-    SetEnvironment {
-        /// Session to set the variable in.
-        session: String,
-        /// Environment variable name.
-        key: String,
-        /// Environment variable value.
-        value: String,
-    },
-    /// `set-option -g <name> <value>` — set a server-wide (global) tmux
-    /// option (#2398).
-    ///
-    /// Why: managed sessions need a generous scrollback (`history-limit`) and
-    /// mouse-wheel scrolling (`mouse`) applied to the SERVER before any pane
-    /// is created — `history-limit` is captured into a pane's ring buffer AT
-    /// CREATION TIME, so a per-session `set-option` issued after a pane
-    /// already exists would not retroactively grow it. trusty-mpm runs every
-    /// managed session on the ONE default tmux server (no dedicated `-S`
-    /// socket), so a single `-g` (global) `set-option` benefits every session
-    /// subsequently created on that server.
-    /// What: renders `set-option -g <name> <value>`.
-    SetGlobalOption {
-        /// tmux option name (e.g. `history-limit`, `mouse`).
-        name: String,
-        /// Option value (e.g. `"100000"`, `"on"`).
-        value: String,
-    },
-}
-
-/// tmux global option name for scrollback lines retained per pane (#2398).
-pub const HISTORY_LIMIT_OPTION: &str = "history-limit";
-
-/// tmux global option name for mouse-wheel scrolling / copy-mode (#2398).
-pub const MOUSE_OPTION: &str = "mouse";
-
-/// Build the `set-option -g` command sequence that applies the scrollback +
-/// mouse-scroll ergonomics to the tmux server (#2398).
-///
-/// Why: [`crate::daemon::tmux::TmuxDriver::apply_scrollback_options`] needs a
-/// pure, unit-testable builder for the exact commands it issues (and their
-/// order) — the resolved values come from
-/// `core::trusty_tools_config::resolve_tmux_options`, not from here, so this
-/// function stays free of any config/file-system dependency and is testable
-/// with plain arguments.
-/// What: two [`TmuxCommand::SetGlobalOption`] entries, `history-limit` then
-/// `mouse` (rendered `"on"`/`"off"`), in the order the caller must run them —
-/// both must land before the caller's subsequent `new-session`.
-/// Test: `scrollback_option_commands_uses_configured_values`,
-/// `scrollback_option_commands_mouse_off`.
-pub fn scrollback_option_commands(history_limit: u32, mouse: bool) -> Vec<TmuxCommand> {
-    vec![
-        TmuxCommand::SetGlobalOption {
-            name: HISTORY_LIMIT_OPTION.to_string(),
-            value: history_limit.to_string(),
-        },
-        TmuxCommand::SetGlobalOption {
-            name: MOUSE_OPTION.to_string(),
-            value: if mouse { "on" } else { "off" }.to_string(),
-        },
-    ]
-}
+pub use trusty_common::tmux::{
+    DEFAULT_TMUX_HISTORY_LIMIT, DEFAULT_TMUX_MOUSE, HISTORY_LIMIT_OPTION, MOUSE_OPTION,
+    PANE_LIST_FORMAT, SESSION_LIST_FORMAT, TmuxCommand, TmuxTarget, WINDOW_LIST_FORMAT,
+    managed_session_commands, scrollback_option_commands, tmux_argv,
+};
 
 /// Resolve the `tmux` binary, preferring live `PATH` and falling back to
 /// well-known daemon dirs (Homebrew, user bins) via `trusty_common::bin_resolve`
@@ -311,8 +126,13 @@ pub fn resolve_tmux_binary_or_bare() -> String {
 /// to the signed `trusty-mpm` binary (issue #2819). On non-macOS it is a plain
 /// `Command::output`. Every session-creating call site routes through here, so
 /// the disclaim covers the one spawn that forks the shared server regardless of
-/// which tmux sub-command triggers the fork. Callers own interpreting the exit
-/// status / stderr — this function does not classify failures.
+/// which tmux sub-command triggers the fork. This TCC-disclaim wrapping is WHY
+/// process spawning stayed in trusty-mpm rather than moving to
+/// `trusty_common::tmux` in #3004 — it is a trusty-mpm-signing-identity
+/// concern, not a tmux-argv concern, and trusty-agents does not need it (no
+/// equivalent signed-binary/TCC-prompt problem reported for it). Callers own
+/// interpreting the exit status / stderr — this function does not classify
+/// failures.
 /// Test: `disclaimed_output_captures_stdout` (and the sibling
 /// `disclaimed_output_*` tests) in `crate::core::spawn_disclaim` cover the
 /// disclaim/capture behaviour; this thin adapter is exercised transitively by
@@ -336,6 +156,29 @@ pub fn run_tmux(cmd: &TmuxCommand) -> std::io::Result<std::process::Output> {
     run_tmux_with_bin(&resolve_tmux_binary_or_bare(), cmd)
 }
 
+/// Build the exact ordered [`TmuxCommand`] sequence [`create_managed_session`]
+/// issues, given already-resolved tmux options (#3004).
+///
+/// Why: extracted as a pure function (no process spawning, no config
+/// loading) purely so a hermetic unit test can assert THIS crate's
+/// session-creation call routes through `trusty_common::tmux`'s shared
+/// ordering guarantee with the right, config-resolved parameters — the
+/// per-consumer "integration assertion" issue #3004 asks for, without
+/// re-testing the ordering guarantee itself (already covered once in
+/// `trusty_common::tmux`'s own tests).
+/// What: delegates straight to
+/// [`trusty_common::tmux::managed_session_commands`] with `idempotent: true`
+/// (trusty-mpm's `-A`-attach creation semantics) and no initial command.
+/// Test: `managed_session_command_sequence_matches_shared_layer`.
+fn managed_session_command_sequence(
+    name: &str,
+    workdir: Option<&str>,
+    history_limit: u32,
+    mouse: bool,
+) -> Vec<TmuxCommand> {
+    managed_session_commands(name, workdir, history_limit, mouse, true, None)
+}
+
 /// Create a tmux session with the configured scrollback + mouse ergonomics
 /// applied FIRST — THE single choke point for "create a managed session"
 /// used by every session-creating call site in the crate (#2398 architecture
@@ -343,28 +186,33 @@ pub fn run_tmux(cmd: &TmuxCommand) -> std::io::Result<std::process::Output> {
 ///
 /// Why: `history-limit` is captured into a pane's ring buffer AT CREATION
 /// TIME, so the scrollback/mouse `set-option -g` calls MUST run before
-/// `new-session` — see [`scrollback_option_commands`]. Baking both steps into
-/// one function (rather than asking every caller to remember "apply options,
-/// then create") is what makes it structurally impossible for a future call
-/// site to bypass the ergonomics again, which is exactly how the #2398 QA
-/// finding happened the first time (5 call sites independently shelled out to
-/// `tmux new-session`, none aware the daemon-side ergonomics existed).
+/// `new-session` — see [`trusty_common::tmux::scrollback_option_commands`].
+/// Baking both steps into one function (rather than asking every caller to
+/// remember "apply options, then create") is what makes it structurally
+/// impossible for a future call site to bypass the ergonomics again, which
+/// is exactly how the #2398 QA finding happened the first time (5 call
+/// sites independently shelled out to `tmux new-session`, none aware the
+/// daemon-side ergonomics existed) — and, per #3004, exactly how
+/// trusty-agents' independent tmux implementation missed the fix entirely.
 /// What: resolves the tmux binary (`tmux_bin` if given, else
 /// [`resolve_tmux_binary_or_bare`]), loads
 /// [`crate::core::trusty_tools_config::TrustyToolsConfig`] and resolves the
-/// `tmux:` section, best-effort applies each
-/// [`scrollback_option_commands`] entry via [`run_tmux_with_bin`] (a failure
+/// `tmux:` section, then builds the ordered command sequence via
+/// [`managed_session_command_sequence`] (the shared
+/// `trusty_common::tmux::managed_session_commands` recipe). Best-effort
+/// applies each scrollback/mouse entry via [`run_tmux_with_bin`] (a failure
 /// here is logged and does NOT block session creation — `set-option -g` is
 /// idempotent and virtually never fails on a tmux new enough to run
 /// trusty-mpm at all), then issues `new-session` and returns its raw
 /// `Output`. Callers classify success/failure from the returned `Output`
 /// exactly as they did before this consolidation (`output.status.success()`).
-/// Test: argv construction is covered by `scrollback_option_commands_*` and
-/// `new_session_argv`; config resolution by `core::trusty_tools_config`'s
-/// `tmux_options_*` tests. The live-process call itself needs a real `tmux`
-/// binary, so it is exercised transitively by every migrated call site
-/// (daemon `#[ignore]` integration tests; CLI/TUI paths are exercised
-/// end-to-end by the existing `tm launch`/`tm connect` integration coverage).
+/// Test: argv construction and the ordering guarantee are covered once in
+/// `trusty_common::tmux`'s own tests; this crate's config-resolved call is
+/// covered by `managed_session_command_sequence_matches_shared_layer`. The
+/// live-process call itself needs a real `tmux` binary, so it is exercised
+/// transitively by every migrated call site (daemon `#[ignore]` integration
+/// tests; CLI/TUI paths are exercised end-to-end by the existing `tm
+/// launch`/`tm connect` integration coverage).
 pub fn create_managed_session(
     tmux_bin: Option<&str>,
     name: &str,
@@ -381,8 +229,12 @@ pub fn create_managed_session(
 
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
-    for cmd in scrollback_option_commands(opts.history_limit, opts.mouse) {
-        match run_tmux_with_bin(bin, &cmd) {
+    let commands = managed_session_command_sequence(name, workdir, opts.history_limit, opts.mouse);
+    let split = commands.len().saturating_sub(1);
+    let (options, new_session) = commands.split_at(split);
+
+    for cmd in options {
+        match run_tmux_with_bin(bin, cmd) {
             Ok(output) if !output.status.success() => {
                 warn!(
                     "tmux {cmd:?} exited non-zero (non-fatal, session creation continues): {}",
@@ -398,10 +250,9 @@ pub fn create_managed_session(
 
     run_tmux_with_bin(
         bin,
-        &TmuxCommand::NewSession {
-            name: name.to_string(),
-            workdir: workdir.map(str::to_string),
-        },
+        new_session
+            .first()
+            .expect("managed_session_command_sequence always ends with NewSession"),
     )
 }
 
@@ -422,9 +273,10 @@ pub fn create_managed_session(
 /// immediately WITHOUT sending `Enter`. Otherwise sends `Enter` and returns
 /// ITS `Output` — callers check `output.status.success()` exactly as they
 /// did with the single-invocation form.
-/// Test: argv shapes covered by `core::tmux`'s `send_keys_literal_argv`/
-/// `send_keys_keyname_argv`; the live-process call needs a real `tmux`
-/// binary, exercised transitively by every migrated call site.
+/// Test: argv shapes covered by `trusty_common::tmux`'s
+/// `send_keys_literal_argv`/`send_keys_keyname_argv`; the live-process call
+/// needs a real `tmux` binary, exercised transitively by every migrated call
+/// site.
 pub fn send_line(
     tmux_bin: Option<&str>,
     target: &TmuxTarget,
@@ -460,315 +312,9 @@ pub fn send_line(
     )
 }
 
-/// tmux `-F` format string for `list-sessions`.
-///
-/// Why: a single canonical format keeps the parser in the daemon aligned with
-/// the command emitted here.
-/// What: name, creation epoch, attached flag — colon-separated.
-pub const SESSION_LIST_FORMAT: &str = "#{session_name}:#{session_created}:#{session_attached}";
-
-/// tmux `-F` format string for `list-windows` (`index:name`).
-pub const WINDOW_LIST_FORMAT: &str = "#{window_index}:#{window_name}";
-
-/// tmux `-F` format string for `list-panes` (`pane_id:active`).
-pub const PANE_LIST_FORMAT: &str = "#{pane_id}:#{pane_active}";
-
-/// Render a [`TmuxCommand`] into an argv vector suitable for `Command::args`.
-///
-/// Why: separating argv construction from process spawning makes the command
-/// logic pure and unit-testable; the daemon just executes `tmux` with the
-/// returned argv.
-/// What: returns the argument list (excluding the `tmux` program name itself).
-/// Test: `new_session_argv`, `send_keys_literal_argv`, `capture_argv`, etc.
-pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
-    match cmd {
-        TmuxCommand::NewSession { name, workdir } => {
-            // `-A` attaches to an existing session of the same name instead
-            // of failing with "duplicate session"; combined with `-d` it
-            // stays detached, making session creation idempotent.
-            let mut argv = vec![
-                "new-session".to_string(),
-                "-A".to_string(),
-                "-d".to_string(),
-                "-s".to_string(),
-                name.clone(),
-            ];
-            if let Some(dir) = workdir {
-                argv.push("-c".to_string());
-                argv.push(dir.clone());
-            }
-            argv
-        }
-        TmuxCommand::KillSession { name } => {
-            vec!["kill-session".into(), "-t".into(), name.clone()]
-        }
-        TmuxCommand::HasSession { name } => {
-            vec!["has-session".into(), "-t".into(), name.clone()]
-        }
-        TmuxCommand::ListSessions => {
-            vec![
-                "list-sessions".into(),
-                "-F".into(),
-                SESSION_LIST_FORMAT.into(),
-            ]
-        }
-        TmuxCommand::ListWindows { name } => {
-            vec![
-                "list-windows".into(),
-                "-t".into(),
-                name.clone(),
-                "-F".into(),
-                WINDOW_LIST_FORMAT.into(),
-            ]
-        }
-        TmuxCommand::ListPanes { name } => {
-            vec![
-                "list-panes".into(),
-                // `-s`: list every pane in the SESSION (all windows), not just
-                // the currently active window's panes. See the variant doc.
-                "-s".into(),
-                "-t".into(),
-                name.clone(),
-                "-F".into(),
-                PANE_LIST_FORMAT.into(),
-            ]
-        }
-        TmuxCommand::SendKeys {
-            target,
-            keys,
-            literal,
-        } => {
-            let mut argv = vec![
-                "send-keys".to_string(),
-                "-t".to_string(),
-                target.as_target(),
-            ];
-            if *literal {
-                argv.push("-l".to_string());
-            }
-            argv.push(keys.clone());
-            argv
-        }
-        TmuxCommand::CapturePane { target, lines } => {
-            let mut argv = vec![
-                "capture-pane".to_string(),
-                "-t".to_string(),
-                target.as_target(),
-                "-p".to_string(),
-            ];
-            if let Some(n) = lines {
-                argv.push("-S".to_string());
-                argv.push(format!("-{n}"));
-            }
-            argv
-        }
-        TmuxCommand::SetEnvironment {
-            session,
-            key,
-            value,
-        } => {
-            vec![
-                "set-environment".to_string(),
-                "-t".to_string(),
-                session.clone(),
-                key.clone(),
-                value.clone(),
-            ]
-        }
-        TmuxCommand::SetGlobalOption { name, value } => {
-            vec![
-                "set-option".to_string(),
-                "-g".to_string(),
-                name.clone(),
-                value.clone(),
-            ]
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn target_renders_session_and_bare_pane() {
-        // Session-only targets still render the session name.
-        assert_eq!(TmuxTarget::session("s").as_target(), "s");
-        // Pane targets render the BARE pane id — no `session:` prefix.
-        // tmux pane ids are globally unique; `-t "session:%2"` parses `%2` as
-        // a WINDOW spec and fails with "can't find window: %2" (live tmux
-        // 3.6b), while `-t "%2"` correctly resolves the pane regardless of
-        // which window/session currently owns the terminal focus.
-        assert_eq!(TmuxTarget::pane("s", "%2").as_target(), "%2");
-    }
-
-    #[test]
-    fn new_session_argv() {
-        let argv = tmux_argv(&TmuxCommand::NewSession {
-            name: "trusty-mpm-1".into(),
-            workdir: Some("/tmp/proj".into()),
-        });
-        assert_eq!(
-            argv,
-            [
-                "new-session",
-                "-A",
-                "-d",
-                "-s",
-                "trusty-mpm-1",
-                "-c",
-                "/tmp/proj"
-            ]
-        );
-    }
-
-    #[test]
-    fn new_session_argv_without_workdir() {
-        let argv = tmux_argv(&TmuxCommand::NewSession {
-            name: "s".into(),
-            workdir: None,
-        });
-        assert_eq!(argv, ["new-session", "-A", "-d", "-s", "s"]);
-    }
-
-    #[test]
-    fn send_keys_literal_argv() {
-        // Literal text: -l is present so tmux does not interpret words as keys.
-        let argv = tmux_argv(&TmuxCommand::SendKeys {
-            target: TmuxTarget::session("s"),
-            keys: "claude --help".into(),
-            literal: true,
-        });
-        assert_eq!(argv, ["send-keys", "-t", "s", "-l", "claude --help"]);
-    }
-
-    #[test]
-    fn send_keys_keyname_argv() {
-        // Non-literal: used to send key names like `Enter` or `C-c`.
-        let argv = tmux_argv(&TmuxCommand::SendKeys {
-            target: TmuxTarget::pane("s", "%1"),
-            keys: "Enter".into(),
-            literal: false,
-        });
-        assert_eq!(argv, ["send-keys", "-t", "%1", "Enter"]);
-    }
-
-    /// CRITICAL regression guard (follow-up to #2467): asserts the literal
-    /// `-t` string built for a pane target is the bare `%NNNN` form with no
-    /// `session:` prefix, so a regression back to the session-qualified form
-    /// (which tmux parses as an invalid WINDOW spec, not a pane spec) fails
-    /// fast in CI without needing a live tmux binary.
-    #[test]
-    fn send_keys_pane_target_is_bare_id() {
-        let argv = tmux_argv(&TmuxCommand::SendKeys {
-            target: TmuxTarget::pane("trusty-mpm-xyz", "%6015"),
-            keys: "claude --resume".into(),
-            literal: true,
-        });
-        let target_arg = &argv[argv.iter().position(|a| a == "-t").unwrap() + 1];
-        assert_eq!(target_arg, "%6015", "pane target must be the bare pane id");
-        assert!(
-            !target_arg.contains(':'),
-            "pane target must not be session-qualified: {target_arg}"
-        );
-    }
-
-    #[test]
-    fn capture_argv() {
-        let argv = tmux_argv(&TmuxCommand::CapturePane {
-            target: TmuxTarget::session("s"),
-            lines: Some(50),
-        });
-        assert_eq!(argv, ["capture-pane", "-t", "s", "-p", "-S", "-50"]);
-
-        let argv = tmux_argv(&TmuxCommand::CapturePane {
-            target: TmuxTarget::session("s"),
-            lines: None,
-        });
-        assert_eq!(argv, ["capture-pane", "-t", "s", "-p"]);
-    }
-
-    #[test]
-    fn list_sessions_uses_canonical_format() {
-        let argv = tmux_argv(&TmuxCommand::ListSessions);
-        assert_eq!(argv, ["list-sessions", "-F", SESSION_LIST_FORMAT]);
-    }
-
-    #[test]
-    fn list_windows_argv() {
-        let argv = tmux_argv(&TmuxCommand::ListWindows {
-            name: "work".into(),
-        });
-        assert_eq!(
-            argv,
-            ["list-windows", "-t", "work", "-F", WINDOW_LIST_FORMAT]
-        );
-    }
-
-    #[test]
-    fn list_panes_argv() {
-        // `-s` is required so the listing spans every window in the session,
-        // not just the currently active one — without it, a pane in a
-        // non-active window (e.g. the original pane once a sibling window
-        // steals focus) silently drops out of the list.
-        let argv = tmux_argv(&TmuxCommand::ListPanes {
-            name: "work".into(),
-        });
-        assert_eq!(
-            argv,
-            ["list-panes", "-s", "-t", "work", "-F", PANE_LIST_FORMAT]
-        );
-    }
-
-    #[test]
-    fn set_environment_argv() {
-        let argv = tmux_argv(&TmuxCommand::SetEnvironment {
-            session: "tmpm-brave-otter".into(),
-            key: "TM_MANAGED_SESSION_ID".into(),
-            value: "11111111-2222-3333-4444-555555555555".into(),
-        });
-        assert_eq!(
-            argv,
-            [
-                "set-environment",
-                "-t",
-                "tmpm-brave-otter",
-                "TM_MANAGED_SESSION_ID",
-                "11111111-2222-3333-4444-555555555555"
-            ]
-        );
-    }
-
-    #[test]
-    fn set_global_option_argv() {
-        let argv = tmux_argv(&TmuxCommand::SetGlobalOption {
-            name: "history-limit".into(),
-            value: "100000".into(),
-        });
-        assert_eq!(argv, ["set-option", "-g", "history-limit", "100000"]);
-    }
-
-    #[test]
-    fn scrollback_option_commands_uses_configured_values() {
-        // Order matters: history-limit must precede mouse (both must land
-        // before the caller's subsequent new-session, but the internal order
-        // between the two is asserted here so it stays stable).
-        let cmds = scrollback_option_commands(50_000, true);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(
-            tmux_argv(&cmds[0]),
-            ["set-option", "-g", "history-limit", "50000"]
-        );
-        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
-    }
-
-    #[test]
-    fn scrollback_option_commands_mouse_off() {
-        let cmds = scrollback_option_commands(100_000, false);
-        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "off"]);
-    }
-
-    // ── #2398 architecture consolidation: shared tmux entry point ──────────
 
     #[test]
     fn resolve_tmux_binary_does_not_panic() {
@@ -804,5 +350,34 @@ mod tests {
             None,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn managed_session_command_sequence_matches_shared_layer() {
+        // #3004 integration assertion: this crate's config-resolved
+        // sequence must be EXACTLY what `trusty_common::tmux` would build
+        // for `idempotent: true, command: None` (trusty-mpm's creation
+        // semantics) with the same parameters — proving trusty-mpm's
+        // session creation genuinely routes through the shared layer
+        // rather than a local re-implementation drifting from it.
+        let got = managed_session_command_sequence("tmpm-sess", Some("/tmp/proj"), 100_000, true);
+        let want = trusty_common::tmux::managed_session_commands(
+            "tmpm-sess",
+            Some("/tmp/proj"),
+            100_000,
+            true,
+            true,
+            None,
+        );
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn managed_session_command_sequence_applies_options_before_new_session() {
+        let cmds = managed_session_command_sequence("tmpm-sess", None, 50_000, false);
+        assert_eq!(cmds.len(), 3);
+        assert!(matches!(cmds[0], TmuxCommand::SetGlobalOption { .. }));
+        assert!(matches!(cmds[1], TmuxCommand::SetGlobalOption { .. }));
+        assert!(matches!(cmds[2], TmuxCommand::NewSession { .. }));
     }
 }
