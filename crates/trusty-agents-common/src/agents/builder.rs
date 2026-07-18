@@ -10,7 +10,11 @@
 //! from `core::agent_builder` for source compatibility.
 //! What: [`compose_agent`] loads a source `.md` file, walks its `extends`
 //! chain base-first, strips intermediate frontmatter, and returns one composed
-//! Markdown document with a single merged frontmatter block on top.
+//! Markdown document with a single merged frontmatter block on top. The chain
+//! walk itself ([`resolve`]) is generic over the [`SourceLookup`] trait so a
+//! second, disk-free lookup strategy can reuse it without duplicating the
+//! walk/cycle/depth logic — see `agents::builder_in_memory` (issue #2958
+//! Slice E1) for the embedded-asset implementation.
 //! Test: `cargo test -p trusty-agents-common agents::builder` covers a
 //! base-only agent, a three-deep chain, cycle detection, and the depth limit.
 //!
@@ -101,6 +105,49 @@ impl From<std::io::Error> for AgentBuildError {
 /// the directory. Non-`.md` entries and subdirectories are ignored.
 /// Test: `case_insensitive_resolve_via_map` in builder_tests.rs.
 pub type SourceMap = HashMap<String, PathBuf>;
+
+/// Abstraction over "given an `extends:`/agent name, produce its raw
+/// markdown source" so [`resolve`] can walk an inheritance chain against
+/// either a filesystem-backed [`SourceMap`] or an in-memory asset map
+/// without duplicating the walk/cycle/depth logic.
+///
+/// Why: `compose_agent`'s fs implementation and `compose_agent_in_memory`'s
+/// embedded-asset implementation (issue #2958 Slice E1,
+/// `agents::builder_in_memory`) differ only in HOW a name resolves to raw
+/// content — the chain-walking algorithm (cycle detection, depth limiting,
+/// base-first ordering) is identical. Extracting that one seam into a trait
+/// lets [`resolve`] be written once and shared, rather than forked.
+/// What: `read_source` takes the ORIGINAL-case name (case-folding is the
+/// implementor's responsibility, matching [`SourceMap`]'s existing
+/// lowercased-stem convention) and returns the file's/asset's raw content, or
+/// [`AgentBuildError::NotFound`] keyed on that original-case name so error
+/// messages read naturally regardless of which backend resolved them.
+/// `pub(crate)` — this is an internal composition seam, not a stable public
+/// extension point; external callers use [`compose_agent`] or
+/// `compose_agent_in_memory` instead of implementing the trait themselves.
+/// Test: exercised indirectly by every `compose_agent`/`compose_agent_in_memory`
+/// test via [`resolve`]; the fs impl is `case_insensitive_resolve_via_map`.
+pub(crate) trait SourceLookup {
+    fn read_source(&self, name: &str) -> Result<String, AgentBuildError>;
+}
+
+impl SourceLookup for SourceMap {
+    fn read_source(&self, name: &str) -> Result<String, AgentBuildError> {
+        // Look up via lowercased key so `base-qa` matches `BASE-QA.md` on
+        // case-sensitive filesystems (Linux); macOS/HFS+ would already match
+        // either way.
+        let path = self
+            .get(&name.to_lowercase())
+            .ok_or_else(|| AgentBuildError::NotFound(name.to_string()))?;
+        match std::fs::read_to_string(path) {
+            Ok(content) => Ok(content),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err(AgentBuildError::NotFound(name.to_string()))
+            }
+            Err(err) => Err(AgentBuildError::Io(err)),
+        }
+    }
+}
 
 /// Build a [`SourceMap`] by scanning `source_dir` for `*.md` files.
 ///
@@ -661,18 +708,20 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
 /// Recursively resolve an agent and its ancestors, base-first.
 ///
 /// Why: composition concatenates parent content before child content, so the
-/// chain must be walked to its root before bodies are joined. Accepts a
-/// pre-built [`SourceMap`] so lookups are case-insensitive on all platforms
-/// (Linux ext4 and macOS HFS+ behave identically).
-/// What: looks up `name` (lowercased) in `sources`, reads the matched file,
-/// parses its frontmatter, recurses into `extends` while tracking the visited
-/// path for cycle detection and enforcing the depth limit, then returns
+/// chain must be walked to its root before bodies are joined. Generic over
+/// [`SourceLookup`] so both the fs-backed [`SourceMap`] and an in-memory
+/// asset map (`agents::builder_in_memory::InMemorySources`, issue #2958
+/// Slice E1) share this one walk instead of forking it.
+/// What: resolves `name` via `sources.read_source`, parses its frontmatter,
+/// recurses into `extends` while tracking the visited path for cycle
+/// detection and enforcing the depth limit, then returns
 /// `(frontmatter chain, body chain)` ordered base-first.
 /// Test: `cycle_detection`, `depth_exceeded`,
-///       `case_insensitive_resolve_via_map`.
-fn resolve(
+///       `case_insensitive_resolve_via_map` (fs); `compose_in_memory_*`,
+///       `in_memory_cycle_detection` (in-memory, builder_in_memory.rs).
+pub(crate) fn resolve<S: SourceLookup>(
     name: &str,
-    sources: &SourceMap,
+    sources: &S,
     visiting: &mut Vec<String>,
 ) -> Result<(Vec<Frontmatter>, Vec<String>), AgentBuildError> {
     if visiting.len() >= MAX_DEPTH {
@@ -684,19 +733,7 @@ fn resolve(
         return Err(AgentBuildError::Cycle(cycle));
     }
 
-    // Look up via lowercased key so `base-qa` matches `BASE-QA.md` on Linux.
-    let path = sources
-        .get(&name.to_lowercase())
-        .ok_or_else(|| AgentBuildError::NotFound(name.to_string()))?;
-
-    let raw = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AgentBuildError::NotFound(name.to_string()));
-        }
-        Err(err) => return Err(AgentBuildError::Io(err)),
-    };
-
+    let raw = sources.read_source(name)?;
     let (fm, body) = split_frontmatter(&raw)?;
 
     visiting.push(name.to_string());
@@ -709,6 +746,31 @@ fn resolve(
     frontmatters.push(fm);
     bodies.push(body);
     Ok((frontmatters, bodies))
+}
+
+/// Render a resolved, base-first chain into one composed Markdown document.
+///
+/// Why: [`compose_agent`] and `compose_agent_in_memory` (issue #2958 Slice
+/// E1) both need to turn a `(frontmatter chain, body chain)` pair from
+/// [`resolve`] into the exact same output shape — one merged frontmatter
+/// block followed by the concatenated, blank-line-separated bodies.
+/// Extracting this shared tail keeps the two entry points byte-identical for
+/// identical input instead of risking silent drift between two copies.
+/// What: delegates frontmatter merging to [`merge_frontmatter`], then joins
+/// non-empty, newline-trimmed bodies with a blank line between each.
+/// Test: `compose_engineer_chain`, `compose_base_only` (fs);
+/// `fs_and_in_memory_compose_are_byte_equivalent` (builder_in_memory.rs).
+pub(crate) fn render_composed(frontmatters: &[Frontmatter], bodies: &[String]) -> String {
+    let mut out = merge_frontmatter(frontmatters);
+    out.push('\n');
+    let joined: Vec<String> = bodies
+        .iter()
+        .map(|b| b.trim_matches('\n').to_string())
+        .filter(|b| !b.is_empty())
+        .collect();
+    out.push_str(&joined.join("\n\n"));
+    out.push('\n');
+    out
 }
 
 /// Resolves an inheritance chain and returns the composed content.
@@ -728,17 +790,7 @@ pub fn compose_agent(name: &str, source_dir: &Path) -> Result<String, AgentBuild
     let sources = build_source_map(source_dir);
     let mut visiting = Vec::new();
     let (frontmatters, bodies) = resolve(name, &sources, &mut visiting)?;
-
-    let mut out = merge_frontmatter(&frontmatters);
-    out.push('\n');
-    let joined: Vec<String> = bodies
-        .iter()
-        .map(|b| b.trim_matches('\n').to_string())
-        .filter(|b| !b.is_empty())
-        .collect();
-    out.push_str(&joined.join("\n\n"));
-    out.push('\n');
-    Ok(out)
+    Ok(render_composed(&frontmatters, &bodies))
 }
 
 /// The ordered inheritance chain (base-first) for an agent, by name.
