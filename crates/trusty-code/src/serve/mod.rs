@@ -287,23 +287,19 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::create_dir_all(project.path().join(".claude").join("agents")).expect("mkdir");
         std::fs::write(
-            project
-                .path()
-                .join(".claude")
-                .join("agents")
-                .join("pm.toml"),
-            "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"PM\"\n",
+            project.path().join(".claude").join("agents").join("pm.md"),
+            "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nPM\n",
         )
-        .expect("write pm.toml");
+        .expect("write pm.md");
         std::fs::write(
             project
                 .path()
                 .join(".claude")
                 .join("agents")
-                .join("python-engineer.toml"),
-            "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"eng\"\n",
+                .join("python-engineer.md"),
+            "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\neng\n",
         )
-        .expect("write python-engineer.toml");
+        .expect("write python-engineer.md");
 
         // SAFETY: test-only env mutation; serialized by the shared crate lock.
         let _guard = crate::task::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;

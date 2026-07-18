@@ -46,7 +46,8 @@
 //!
 //! Phase 3 public surface (agents + LLM layer, per #642):
 //!
-//! * [`agents`] — `AgentConfig` TOML schema, `discover_agents`, `load_all_agents`.
+//! * [`agents`] — `AgentConfig` schema (loaded from `.md`), `discover_agents`,
+//!   `load_all_agents`.
 //! * [`identity`] — `CallerIdentity`, `RecallCeiling` for memory scoping.
 //! * [`logging`] — tracing init helpers (`init_tracing`, `init_tracing_for_test`).
 //!
@@ -165,9 +166,9 @@ pub mod assets;
 
 /// Agent configuration loading.
 ///
-/// Why: Sub-agents are defined declaratively in TOML files under
-/// `.claude/agents/` so model, prompt, and parameters can evolve without code
-/// changes.
+/// Why: Sub-agents are defined declaratively in Markdown+frontmatter files
+/// under `.claude/agents/` (#2897 Slice D — TOML retired) so model, prompt,
+/// and parameters can evolve without code changes.
 /// What: `AgentConfig`, `AgentInfo`, `LlmParams`, `SystemPrompt`, `ToolsConfig`,
 /// `RunnerConfig`, `RunnerKind`, `discover_agents`, `load_all_agents`.
 /// Test: `agents::tests::*`.

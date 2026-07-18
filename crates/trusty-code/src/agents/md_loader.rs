@@ -1,15 +1,14 @@
-//! Markdown+frontmatter agent loader for tcode, DARK-LAUNCHED alongside the
-//! TOML loader (issue #2897, epic #2892, Slice B), and now also the loader
-//! for tcode's own EMBEDDED default agents (Slice C).
+//! Markdown+frontmatter agent loader for tcode — the ONLY on-disk agent
+//! source format as of #2897 Slice D (epic #2892). It was DARK-LAUNCHED
+//! alongside the (now-retired) TOML loader in Slice B, and became the loader
+//! for tcode's own EMBEDDED default agents in Slice C.
 //!
 //! Why: trusty-agents-common's `agents::builder` compose machinery (Slice A,
 //! #2952) already resolves `extends:` inheritance chains for trusty-mpm's
 //! `.md` agent format and now carries `max_tokens`/`tools` frontmatter fields
-//! that mirror tcode's TOML `AgentConfig` schema. Rather than fork a second
-//! `.md` parser, tcode reuses that composer and projects its output onto its
-//! existing `AgentConfig`. This is purely additive: the TOML loader
-//! (`AgentConfig::load`) is untouched, and both formats coexist through this
-//! slice. TOML retirement is Slice D. Slice C (#2897) additionally routes
+//! that mirror tcode's `AgentConfig` schema. Rather than fork a second `.md`
+//! parser, tcode reuses that composer and projects its output onto its
+//! existing `AgentConfig`. Slice C (#2897) additionally routes
 //! `crate::assets::DEFAULT_AGENTS`'s embedded fallback through this module:
 //! the embedded strings have no source directory to resolve an `extends:`
 //! chain against (they are compiled-in `&'static str`, not files on disk), so
@@ -26,11 +25,10 @@
 //! frontmatter (via `agents::metadata::agent_metadata_from_str`) and prose
 //! body onto tcode's `AgentConfig`. [`project_embedded_md`] does the same
 //! projection for an in-memory `&'static str` with no `extends:` resolution.
-//! Test: `parallel_fixture_equivalence` (same agent authored as `.toml` and
-//! `.md` load to field-identical configs), `tools_projection_*` (the
+//! Test: `load_md_agent_base_case`, `tools_projection_*` (the
 //! `Option<Vec<String>>` direct-map), `hr1_initial_prompt_not_leaked_into_body`
 //! (the HR-1 guard), `assets::tests::*` (embedded-default field-identity vs.
-//! the retired TOML fixtures).
+//! the retired TOML fixtures, kept as a historical regression pin).
 
 use std::path::Path;
 
@@ -41,18 +39,16 @@ use super::config::{AgentConfig, AgentInfo, LlmParams, SystemPrompt, ToolsConfig
 
 /// Load a tcode [`AgentConfig`] from a `.md` agent source file.
 ///
-/// Why: primary entry point for the `.md` loader, mirroring
-/// `AgentConfig::load`'s role for the TOML path — both take a file path and
-/// return a fully-populated `AgentConfig` or a descriptive error.
+/// Why: the primary entry point for the (now sole) agent loader — takes a
+/// file path and returns a fully-populated `AgentConfig` or a descriptive
+/// error.
 /// What: resolves `path`'s parent directory as the `extends:` source dir and
 /// its file stem as the agent name, composes the inheritance chain via
 /// `compose_agent`, then projects the result via [`project_to_agent_config`].
 /// A missing parent directory, an unreadable file stem, or any
 /// `AgentBuildError` (not found, cycle, depth exceeded, malformed
-/// frontmatter) is surfaced as a descriptive `anyhow::Error` — never a panic —
-/// matching `AgentConfig::load`'s fallibility contract so `load_all_agents`
-/// can handle both loaders identically.
-/// Test: `parallel_fixture_equivalence`, `load_md_agent_missing_file_errors`,
+/// frontmatter) is surfaced as a descriptive `anyhow::Error` — never a panic.
+/// Test: `load_md_agent_base_case`, `load_md_agent_missing_file_errors`,
 /// `load_md_agent_with_extends_resolves_chain`.
 pub fn load_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let source_dir = path
@@ -351,8 +347,9 @@ mod tests {
 
     /// A missing `.md` file surfaces a descriptive error, never a panic.
     ///
-    /// Why: matches `AgentConfig::load`'s fallibility contract so
-    /// `load_all_agents` can `filter_map` over both loaders identically.
+    /// Why: `load_all_agents` needs a fallible, never-panicking contract so
+    /// it can `filter_map` a directory listing without one bad path
+    /// crashing the whole scan.
     /// What: `load_md_agent` on a nonexistent path returns `Err`.
     /// Test: this test.
     #[test]
@@ -361,41 +358,42 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Parallel-fixture equivalence: the SAME agent authored as `.toml` and
-    /// as `.md` load to field-identical `AgentConfig`s.
+    /// A full-fidelity `.md` fixture projects every field the schema exposes
+    /// in one document (name, role, model, max_tokens, tools, system-prompt
+    /// body) — the successor to Slice B's retired
+    /// `parallel_fixture_equivalence` (which additionally compared against a
+    /// hand-authored TOML twin; #2897 Slice D removed the TOML loader that
+    /// comparison depended on, so this test keeps the full-field-set
+    /// assertion on the `.md` fixture alone).
     ///
-    /// Why: the acceptance criterion for Slice B — both formats must produce
-    /// the same runtime behavior for an operator migrating a config.
-    /// What: hand-authors matching TOML and `.md` fixtures (same name, model,
-    /// max_tokens, tools, and system-prompt body), loads both, and asserts
-    /// `model`, `max_tokens`, `tools.allowed`, and `system_prompt.content`
-    /// are equal.
+    /// Why: pins that every projected field — not just the ones individual
+    /// narrower tests each cover — round-trips together from one realistic
+    /// agent document.
+    /// What: one `.md` fixture setting every field; asserts `model`,
+    /// `max_tokens`, `tools.allowed`, and `system_prompt.content` all match
+    /// the authored values.
     /// Test: this test.
     #[test]
-    fn parallel_fixture_equivalence() {
+    fn full_fidelity_md_fixture_projects_every_field() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        std::fs::write(
-            tmp.path().join("twin.toml"),
-            "[agent]\nname = \"twin\"\nrole = \"engineer\"\nmodel = \"sonnet\"\n\n[llm]\nmax_tokens = 8192\n\n[system_prompt]\ncontent = \"You are a twin agent.\"\n\n[tools]\nallowed = [\"read_file\", \"grep\"]\n",
-        )
-        .expect("write toml");
         std::fs::write(
             tmp.path().join("twin.md"),
             "---\nname: twin\nrole: engineer\nmodel: sonnet\nmax_tokens: 8192\ntools: [read_file, grep]\n---\n\nYou are a twin agent.\n",
         )
         .expect("write md");
 
-        let toml_cfg = AgentConfig::load(&tmp.path().join("twin.toml")).expect("load toml");
-        let md_cfg = load_md_agent(&tmp.path().join("twin.md")).expect("load md");
+        let cfg = load_md_agent(&tmp.path().join("twin.md")).expect("load md");
 
-        assert_eq!(toml_cfg.agent.model, md_cfg.agent.model);
-        assert_eq!(toml_cfg.llm.max_tokens, md_cfg.llm.max_tokens);
+        assert_eq!(cfg.agent.name, "twin");
+        assert_eq!(cfg.agent.role.as_deref(), Some("engineer"));
+        assert_eq!(cfg.agent.model.as_deref(), Some("sonnet"));
+        assert_eq!(cfg.llm.max_tokens, Some(8192));
         assert_eq!(
-            toml_cfg.tools.and_then(|t| t.allowed),
-            md_cfg.tools.and_then(|t| t.allowed)
+            cfg.tools.and_then(|t| t.allowed),
+            Some(vec!["read_file".to_string(), "grep".to_string()])
         );
-        assert_eq!(toml_cfg.system_prompt.content, md_cfg.system_prompt.content);
+        assert_eq!(cfg.system_prompt.content, "You are a twin agent.");
     }
 
     /// `extract_body` closes the frontmatter block on the FIRST `---` fence

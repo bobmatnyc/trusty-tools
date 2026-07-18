@@ -11,9 +11,10 @@
 //! `skills::discover_skill_metadata`'s embedded-fallback branches).
 //! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the three default agent
 //! configs (`engineer`, `qa-agent`, `code-reviewer`), authored as Markdown+
-//! frontmatter (`.md`) as of #2897 Slice C (previously native TOML; the TOML
-//! loader for USER `.claude/agents/*.toml` configs is untouched and stays
-//! until Slice D). The embedded fallback projects each `.md` string onto
+//! frontmatter (`.md`) as of #2897 Slice C (previously native TOML; Slice D
+//! subsequently retired the TOML loader for USER `.claude/agents/*.toml`
+//! configs entirely — see `agents::mod`'s docs). The embedded fallback
+//! projects each `.md` string onto
 //! tcode's `AgentConfig` via `agents::md_loader::project_embedded_md`, which
 //! shares its frontmatter->`AgentConfig` mapping with the disk `.md` loader
 //! (`agents::md_loader::load_md_agent`) — see that module's docs.

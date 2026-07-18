@@ -40,21 +40,13 @@ impl AgentRunner for RecordingRunner {
 ///
 /// Why: Guards against hallucinated agent names causing confusing IO errors.
 /// What: Calls `execute({"agent_name":"ghost",...})` with a tempdir
-/// containing only `engineer.toml`; expects error with "ghost" and "engineer".
+/// containing only `engineer.md`; expects error with "ghost" and "engineer".
 /// Test: This test.
 #[tokio::test]
 async fn unknown_agent_returns_helpful_error() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        tmp.path().join("engineer.toml"),
-        "[agent]\nname = \"engineer\"\n",
-    )
-    .expect("write");
-    std::fs::write(
-        tmp.path().join("qa-agent.toml"),
-        "[agent]\nname = \"qa-agent\"\n",
-    )
-    .expect("write");
+    std::fs::write(tmp.path().join("engineer.md"), "---\nname: engineer\n---\n").expect("write");
+    std::fs::write(tmp.path().join("qa-agent.md"), "---\nname: qa-agent\n---\n").expect("write");
 
     let runner = Arc::new(RecordingRunner {
         invoked: std::sync::Mutex::new(Vec::new()),
@@ -88,16 +80,12 @@ async fn unknown_agent_returns_helpful_error() {
 /// A valid agent name passes validation and reaches the runner.
 ///
 /// Why: Verify the happy-path dispatch contract.
-/// What: Register `engineer.toml`, dispatch with `agent_name="engineer"`.
+/// What: Register `engineer.md`, dispatch with `agent_name="engineer"`.
 /// Test: This test.
 #[tokio::test]
 async fn known_agent_reaches_runner() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        tmp.path().join("engineer.toml"),
-        "[agent]\nname = \"engineer\"\n",
-    )
-    .expect("write");
+    std::fs::write(tmp.path().join("engineer.md"), "---\nname: engineer\n---\n").expect("write");
 
     let runner = Arc::new(RecordingRunner {
         invoked: std::sync::Mutex::new(Vec::new()),

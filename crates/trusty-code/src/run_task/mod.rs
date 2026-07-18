@@ -29,7 +29,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig};
-use crate::agents::AgentConfig;
+use crate::agents::{AgentConfig, md_loader};
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
@@ -182,7 +182,7 @@ fn daily_driver_skills_catalog(project: &Path) -> Option<(String, Arc<dyn SkillR
 /// Why: Bundling the inputs keeps `execute_run_task`'s signature stable as flags
 /// are added and lets the binary layer construct one value from clap.
 /// What: `agent` is the top-level (PM) agent name; `task` is the request; `project`
-/// is the canonical project root; `agents_dir` is where `<agent>.toml` live;
+/// is the canonical project root; `agents_dir` is where `<agent>.md` live;
 /// `engineer_model` is the optional per-run engineer model override (#1035).
 /// Test: `run_task::tests` build these directly.
 #[derive(Debug, Clone)]
@@ -193,7 +193,7 @@ pub struct RunTaskParams {
     pub task: String,
     /// Canonical project root.
     pub project: PathBuf,
-    /// Directory holding `<agent>.toml` configs.
+    /// Directory holding `<agent>.md` configs.
     pub agents_dir: PathBuf,
     /// Optional per-run engineer model override (#1035). `None` routes the
     /// engineer via its own config model.
@@ -248,7 +248,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 
     // Load the PM config; a missing/invalid config is a configuration error.
     let pm_config =
-        match AgentConfig::load(&params.agents_dir.join(format!("{}.toml", params.agent))) {
+        match md_loader::load_md_agent(&params.agents_dir.join(format!("{}.md", params.agent))) {
             Ok(cfg) => cfg,
             Err(e) => return config_error_report(&params, &transcript, &format!("{e:#}")),
         };
@@ -623,13 +623,13 @@ fn apply_engineer_model_override(
 /// pricing step. Shared with the daemon path (`task::executor`'s own
 /// `resolve_engineer_model`, which now delegates here) so the two paths
 /// can never independently drift on how per-role pricing resolves a model.
-/// What: loads `<agents_dir>/<agent_name>.toml`; on any load failure
-/// (missing/invalid file) falls back to the literal string `"unknown"` —
-/// `crate::perf::cost_usd` degrades gracefully (Sonnet-equivalent pricing)
-/// for an unrecognised model rather than erroring, so a missing agent
-/// config degrades pricing accuracy, not the whole run. When
-/// `model_override` is `Some`, it wins over the config's own model (mirrors
-/// `RunContext`'s override precedence).
+/// What: loads `<agents_dir>/<agent_name>.md` (#2897 Slice D); on any load
+/// failure (missing/invalid file) falls back to the literal string
+/// `"unknown"` — `crate::perf::cost_usd` degrades gracefully
+/// (Sonnet-equivalent pricing) for an unrecognised model rather than
+/// erroring, so a missing agent config degrades pricing accuracy, not the
+/// whole run. When `model_override` is `Some`, it wins over the config's own
+/// model (mirrors `RunContext`'s override precedence).
 /// Test: `run_task::tests::resolve_agent_model_slug_falls_back_when_config_missing`,
 /// `run_task::tests::resolve_agent_model_slug_honours_override`.
 pub fn resolve_agent_model_slug(
@@ -637,8 +637,8 @@ pub fn resolve_agent_model_slug(
     agent_name: &str,
     model_override: Option<&str>,
 ) -> String {
-    let path = agents_dir.join(format!("{agent_name}.toml"));
-    let Ok(config) = AgentConfig::load(&path) else {
+    let path = agents_dir.join(format!("{agent_name}.md"));
+    let Ok(config) = md_loader::load_md_agent(&path) else {
         return "unknown".to_string();
     };
     match model_override {

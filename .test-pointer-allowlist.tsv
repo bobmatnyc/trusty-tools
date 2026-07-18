@@ -182,8 +182,6 @@ crates/trusty-code/src/provider/openrouter.rs	supports_native_tools_claude
 crates/trusty-code/src/provider/traits.rs	bedrock_does_not_support_prompt_caching
 crates/trusty-code/src/rbac/mod.rs	default_is_local_cli_all
 crates/trusty-code/src/run_task/mod.rs	diff_reflects_engineer_file_change
-crates/trusty-code/src/run_task/mod.rs	resolve_agent_model_slug_falls_back_when_config_missing
-crates/trusty-code/src/run_task/mod.rs	resolve_agent_model_slug_honours_override
 crates/trusty-code/src/run_task/recorder.rs	recorder_flags_ran_test_command_on_matching_bash_call
 crates/trusty-code/src/runner/in_process.rs	with_timeout_secs_overrides_only_timeout
 crates/trusty-code/src/serve/http.rs	http_session_events_sse_streams_replay_then_live_event

@@ -190,15 +190,15 @@ mod tests {
     fn agents_dir() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("agents tempdir");
         std::fs::write(
-            tmp.path().join("pm.toml"),
-            "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM.\"\n",
+            tmp.path().join("pm.md"),
+            "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM.\n",
         )
-        .expect("write pm.toml");
+        .expect("write pm.md");
         std::fs::write(
-            tmp.path().join("python-engineer.toml"),
-            "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"engineer\"\n",
+            tmp.path().join("python-engineer.md"),
+            "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\nengineer\n",
         )
-        .expect("write python-engineer.toml");
+        .expect("write python-engineer.md");
         tmp
     }
 

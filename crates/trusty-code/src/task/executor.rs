@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use crate::agent_loop::{
     AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink, resolve_cadence_config,
 };
-use crate::agents::AgentConfig;
+use crate::agents::{AgentConfig, md_loader};
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::RpcError;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
@@ -71,7 +71,7 @@ use super::sink::SessionToolEventSink;
 const ENGINEER_BASH_TIMEOUT_SECS: u64 = 120;
 
 /// Hardcoded delegated engineer agent name, matching the `run_task`/fixture
-/// convention used across this crate (`<agents_dir>/python-engineer.toml`).
+/// convention used across this crate (`<agents_dir>/python-engineer.md`).
 /// A future ticket may make this configurable per `task.run` call.
 pub const ENGINEER_AGENT_NAME: &str = "python-engineer";
 
@@ -285,10 +285,8 @@ async fn run_and_record(
     // `TCODE_DEBUG_TRANSCRIPT` is set, and cost nothing when it is not.
     let debug_sink: Option<Arc<DebugCaptureSink>> = DebugCaptureSink::from_env();
 
-    let pm_config_path = params
-        .agents_dir
-        .join(format!("{}.toml", params.agent_name));
-    let pm_config = match AgentConfig::load(&pm_config_path) {
+    let pm_config_path = params.agents_dir.join(format!("{}.md", params.agent_name));
+    let pm_config = match md_loader::load_md_agent(&pm_config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             finish_with_failure(&registry, &session_id, &format!("PM config error: {e:#}")).await;
