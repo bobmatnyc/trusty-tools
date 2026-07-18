@@ -216,14 +216,16 @@ fn stop_response(text: &str) -> Value {
 
 // ── Fixtures: an agents config dir ───────────────────────────────────────────
 
-/// Create a temp agents dir containing a `python-engineer.toml`.
+/// Create a temp agents dir containing a `python-engineer.md`.
 ///
-/// Why: The runner loads `<dir>/<agent>.toml`; tests need a real file on disk.
-/// What: Writes `python-engineer.toml` with the given body and returns the dir.
+/// Why: The runner loads `<dir>/<agent>.md` (#2897 Slice D); tests need a
+/// real file on disk.
+/// What: Writes `python-engineer.md` with the given frontmatter+body and
+/// returns the dir.
 /// Test: Used by most runner tests.
 fn agents_dir_with(body: &str, agent: &str) -> TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::fs::write(tmp.path().join(format!("{agent}.toml")), body).expect("write agent toml");
+    std::fs::write(tmp.path().join(format!("{agent}.md")), body).expect("write agent md");
     tmp
 }
 
@@ -303,7 +305,7 @@ fn default_max_turns_is_generous() {
 /// Test: this test.
 #[test]
 fn agent_config_exists_detects_present_and_absent() {
-    let tmp = agents_dir_with("[agent]\nname = \"python-engineer\"\n", "python-engineer");
+    let tmp = agents_dir_with("---\nname: python-engineer\n---\n", "python-engineer");
     assert!(super::agent_config_exists(tmp.path(), "python-engineer"));
     assert!(!super::agent_config_exists(tmp.path(), "ghost"));
 }
@@ -322,14 +324,8 @@ fn agent_config_exists_detects_present_and_absent() {
 /// Test: this test.
 #[tokio::test]
 async fn delegate_runs_engineer_loop() {
-    let body = r#"
-[agent]
-name = "python-engineer"
-model = "deepseek/deepseek-chat"
-
-[system_prompt]
-content = "You are a Python engineer."
-"#;
+    let body = "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\n\
+                You are a Python engineer.\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[
@@ -387,17 +383,8 @@ content = "You are a Python engineer."
 /// Test: this test.
 #[tokio::test]
 async fn engineer_llm_max_tokens_reaches_chat_request() {
-    let body = r#"
-[agent]
-name = "python-engineer"
-model = "deepseek/deepseek-chat"
-
-[llm]
-max_tokens = 8192
-
-[system_prompt]
-content = "You are a Python engineer."
-"#;
+    let body = "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n\
+                max_tokens: 8192\n---\n\nYou are a Python engineer.\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("engineer done")]));
@@ -466,14 +453,8 @@ async fn unknown_agent_errors() {
 /// Test: this test.
 #[tokio::test]
 async fn tools_allowed_is_enforced() {
-    let body = r#"
-[agent]
-name = "python-engineer"
-model = "openai/gpt-4o-mini"
-
-[tools]
-allowed = ["allowed_tool"]
-"#;
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n\
+                tools: [allowed_tool]\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     // Model tries to call the DENIED tool, then concludes.
@@ -509,11 +490,7 @@ allowed = ["allowed_tool"]
 /// Test: this test.
 #[tokio::test]
 async fn no_allowlist_permits_all() {
-    let body = r#"
-[agent]
-name = "python-engineer"
-model = "openai/gpt-4o-mini"
-"#;
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[
@@ -546,7 +523,7 @@ model = "openai/gpt-4o-mini"
 /// Test: this test.
 #[tokio::test]
 async fn usage_rolls_up_to_output() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[
@@ -583,7 +560,7 @@ async fn usage_rolls_up_to_output() {
 /// Test: this test.
 #[tokio::test]
 async fn run_context_overrides_model() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n";
+    let body = "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
@@ -617,7 +594,7 @@ async fn run_context_overrides_model() {
 /// Test: this test.
 #[tokio::test]
 async fn run_context_overrides_max_turns() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     // Always-tool-call: the loop never converges, so only the cap stops it.
@@ -669,7 +646,7 @@ async fn run_context_overrides_max_turns() {
 /// Test: this test.
 #[tokio::test]
 async fn with_timeout_secs_shortens_the_deadline() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(SleepyLlm {
@@ -711,7 +688,7 @@ async fn with_timeout_secs_shortens_the_deadline() {
 /// Test: this test.
 #[tokio::test]
 async fn with_timeout_secs_preserves_configured_max_turns() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[
@@ -753,7 +730,8 @@ async fn with_timeout_secs_preserves_configured_max_turns() {
 /// Test: this test.
 #[tokio::test]
 async fn project_context_reaches_prompt() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"AGENT-PROMPT-MARKER\"\n";
+    let body =
+        "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n\nAGENT-PROMPT-MARKER\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
@@ -788,7 +766,7 @@ async fn project_context_reaches_prompt() {
 /// Test: this test.
 #[tokio::test]
 async fn skills_catalog_reaches_daily_driver_prompt() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
@@ -818,7 +796,7 @@ async fn skills_catalog_reaches_daily_driver_prompt() {
 /// Test: this test.
 #[tokio::test]
 async fn skills_catalog_ignored_in_parity() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
@@ -856,7 +834,7 @@ async fn skills_catalog_ignored_in_parity() {
 /// Test: this test.
 #[tokio::test]
 async fn with_mode_completes_a_delegated_run_in_both_modes() {
-    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let body = "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n";
     let tmp = agents_dir_with(body, "python-engineer");
 
     for mode in [
@@ -961,7 +939,7 @@ async fn sink_reaches_delegated_loop() {
         stop_response("engineer done"),
     ]));
     let tmp = agents_dir_with(
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n",
         "python-engineer",
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));
@@ -1025,7 +1003,7 @@ async fn sequential_delegations_to_same_named_agent_get_distinct_ids() {
         stop_response("engineer done 2"),
     ]));
     let tmp = agents_dir_with(
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n",
         "python-engineer",
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));
@@ -1143,7 +1121,7 @@ impl LlmClientTrait for ConversationAwareLlm {
 async fn concurrently_delegated_same_named_agents_get_distinct_ids_under_tokio_join() {
     let llm = Arc::new(ConversationAwareLlm);
     let tmp = agents_dir_with(
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n",
         "python-engineer",
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));
@@ -1201,7 +1179,7 @@ async fn cancel_flag_reaches_delegated_loop() {
         "should never be reached",
     )]));
     let tmp = agents_dir_with(
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n",
         "python-engineer",
     );
     let invoked = Arc::new(Mutex::new(Vec::new()));

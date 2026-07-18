@@ -1,20 +1,31 @@
 //! Agent configuration schema for tcode.
 //!
-//! Why: Sub-agents (and the PM itself) are defined declaratively in TOML so
-//! model, prompt, and LLM parameters can evolve without code changes.
-//! What: `AgentConfig` and all nested config types, deserializable from the
-//! `.claude/agents/<name>.toml` format compatible with Claude Code sub-agents.
-//! Test: `AgentConfig::from_toml_str` on inline TOML succeeds and round-trips.
+//! Why: Sub-agents (and the PM itself) are defined declaratively so model,
+//! prompt, and LLM parameters can evolve without code changes. As of #2897
+//! Slice D, the on-disk source format is Markdown+frontmatter
+//! (`.claude/agents/<name>.md`) ONLY — the original TOML loader
+//! (`AgentConfig::from_toml_str`/`AgentConfig::load`) has been retired; see
+//! `agents::md_loader` for the current loader and
+//! `scripts/migrate-tcode-agents-toml-to-md.py` for the one-time converter a
+//! project with pre-#2897 `.toml` agent files should run.
+//! What: `AgentConfig` and all nested config types. These are pure data
+//! structs — format-agnostic — that `agents::md_loader::project_to_agent_config`
+//! populates from a composed `.md` document's frontmatter + body.
+//! Test: `agent_config_default_is_empty`, `runner_kind_defaults_to_in_process`;
+//! the loading path itself is covered by `agents::md_loader::tests::*`.
 
 use serde::{Deserialize, Serialize};
 
-/// Top-level agent configuration loaded from `<name>.toml`.
+/// Top-level agent configuration.
 ///
 /// Why: Declarative agent configs let operators define or override agents
 /// without touching Rust code.
 /// What: `agent` carries identity/role; `llm` carries model/token params;
 /// `system_prompt` carries the prompt text; optional sections add capabilities.
-/// Test: `agent_config_roundtrip`, `agent_config_minimal`.
+/// Populated by `agents::md_loader::project_to_agent_config` from a composed
+/// `.md` agent document.
+/// Test: `agent_config_default_is_empty`; `agents::md_loader::tests::*` cover
+/// the actual field-projection contract end-to-end.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
     /// Core identity fields.
@@ -33,34 +44,12 @@ pub struct AgentConfig {
     pub runner: Option<RunnerConfig>,
 }
 
-impl AgentConfig {
-    /// Parse an `AgentConfig` from a TOML string.
-    ///
-    /// Why: Useful in tests and for in-process loading of bundled config.
-    /// What: Delegates to `toml::from_str`.
-    /// Test: `agent_config_roundtrip`.
-    pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
-    }
-
-    /// Load an `AgentConfig` from a TOML file on disk.
-    ///
-    /// Why: Primary entry point for the agent loader during harness startup.
-    /// What: Reads the file, then calls `from_toml_str`.
-    /// Test: Integration tests place a TOML file in a tempdir and call this.
-    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        let src = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("failed to read agent config {}: {e}", path.display()))?;
-        toml::from_str(&src)
-            .map_err(|e| anyhow::anyhow!("invalid agent config {}: {e}", path.display()))
-    }
-}
-
 /// Core identity fields for an agent.
 ///
 /// Why: Every agent needs a stable `name` (the dispatch key) and `model`.
 /// What: `name`, optional `role`, optional `model`.
-/// Test: `agent_config_minimal` asserts that `name` is loaded.
+/// Test: `agent_config_default_is_empty` asserts the zero-value default;
+/// `agents::md_loader::tests::load_md_agent_base_case` covers real loading.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInfo {
     /// The agent's dispatch key (e.g. `"engineer"`, `"python-engineer"`).
@@ -152,7 +141,7 @@ pub struct RunnerConfig {
 /// What: `InProcess` is the default (drives the sub-agent's `AgentLoop` in the
 /// same process — see `crate::runner::InProcessAgentRunner`); `SubProcess` spawns
 /// a new process via NDJSON IPC; `ClaudeCode` wraps the `claude` CLI binary.
-/// Test: `runner_kind_deserializes`, `runner_kind_defaults_to_in_process`.
+/// Test: `runner_kind_defaults_to_in_process`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerKind {
@@ -171,85 +160,25 @@ pub enum RunnerKind {
 mod tests {
     use super::*;
 
-    const MINIMAL_TOML: &str = r#"
-[agent]
-name = "engineer"
-"#;
-
-    const FULL_TOML: &str = r#"
-[agent]
-name = "python-engineer"
-role = "engineer"
-model = "anthropic/claude-sonnet-4-6"
-description = "Python software engineer"
-
-[llm]
-temperature = 0.2
-max_tokens = 8192
-
-[system_prompt]
-content = "You are a Python expert."
-
-[tools]
-allowed = ["delegate_to_agent", "search_code"]
-
-[runner]
-kind = "claude_code"
-"#;
-
-    /// Minimal config with only `[agent].name` parses successfully.
+    /// `AgentConfig::default()` yields the expected all-empty baseline.
     ///
-    /// Why: Operators should be able to define a minimal agent without
-    /// specifying every optional field.
-    /// What: `from_toml_str(MINIMAL_TOML)` returns `Ok` with `name == "engineer"`.
-    /// Test: This test.
+    /// Why: #2897 Slice D retired the TOML parsing tests (`from_toml_str`
+    /// itself is gone); the actual frontmatter -> `AgentConfig` field mapping
+    /// is now covered end-to-end by `agents::md_loader::tests::*`
+    /// (`load_md_agent_base_case`, `parallel fixture` field assertions,
+    /// etc.). What remains testable in THIS module is the plain-data
+    /// `Default` contract every construction path relies on.
+    /// What: every field is the type's zero value; `tools`/`runner` are
+    /// `None`.
+    /// Test: this test.
     #[test]
-    fn agent_config_minimal() {
-        let cfg = AgentConfig::from_toml_str(MINIMAL_TOML).expect("parse minimal");
-        assert_eq!(cfg.agent.name, "engineer");
+    fn agent_config_default_is_empty() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.agent.name, "");
         assert!(cfg.agent.model.is_none());
         assert!(cfg.tools.is_none());
-    }
-
-    /// Full config round-trips through TOML parsing.
-    ///
-    /// Why: Verify all fields are decoded correctly.
-    /// What: `from_toml_str(FULL_TOML)` round-trips all fields.
-    /// Test: This test.
-    #[test]
-    fn agent_config_roundtrip() {
-        let cfg = AgentConfig::from_toml_str(FULL_TOML).expect("parse full");
-        assert_eq!(cfg.agent.name, "python-engineer");
-        assert_eq!(
-            cfg.agent.model.as_deref(),
-            Some("anthropic/claude-sonnet-4-6")
-        );
-        assert_eq!(cfg.llm.temperature, Some(0.2));
-        assert_eq!(cfg.llm.max_tokens, Some(8192));
-        assert_eq!(cfg.system_prompt.content, "You are a Python expert.");
-        let allowed = cfg.tools.as_ref().and_then(|t| t.allowed.as_ref());
-        let expected: Vec<String> =
-            vec!["delegate_to_agent".to_string(), "search_code".to_string()];
-        assert_eq!(allowed.map(|v| v.as_slice()), Some(expected.as_slice()));
-        assert_eq!(
-            cfg.runner.as_ref().map(|r| &r.kind),
-            Some(&RunnerKind::ClaudeCode)
-        );
-    }
-
-    /// `RunnerKind` deserializes from `snake_case` strings via a TOML wrapper table.
-    ///
-    /// Why: Verify the serde rename_all contract.
-    /// What: Parse a `[runner]` table with `kind = "claude_code"` → `RunnerKind::ClaudeCode`.
-    /// Test: This test.
-    #[test]
-    fn runner_kind_deserializes() {
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            kind: RunnerKind,
-        }
-        let w: Wrapper = toml::from_str("kind = \"claude_code\"").expect("parse runner kind");
-        assert_eq!(w.kind, RunnerKind::ClaudeCode);
+        assert!(cfg.runner.is_none());
+        assert_eq!(cfg.system_prompt.content, "");
     }
 
     /// `RunnerKind` defaults to `InProcess` (the real default since #1029).
@@ -257,16 +186,17 @@ kind = "claude_code"
     /// Why: The acceptance criterion for #1029 makes the in-process runner the
     /// production default; a regression that flipped it back to `SubProcess`
     /// would silently route every undeclared agent through the wrong backend.
-    /// What: `RunnerKind::default()` equals `InProcess`; an agent config with no
-    /// `[runner]` table leaves `runner` `None` (callers treat absence as default).
+    /// What: `RunnerKind::default()` equals `InProcess`; a default-constructed
+    /// `AgentConfig` (mirroring an agent with no `[runner]`/no runner
+    /// frontmatter) leaves `runner` `None` (callers treat absence as default).
     /// Test: this test.
     #[test]
     fn runner_kind_defaults_to_in_process() {
         assert_eq!(RunnerKind::default(), RunnerKind::InProcess);
-        let cfg = AgentConfig::from_toml_str(MINIMAL_TOML).expect("parse minimal");
+        let cfg = AgentConfig::default();
         assert!(
             cfg.runner.is_none(),
-            "absent [runner] leaves runner None; callers apply the InProcess default"
+            "absent runner config leaves runner None; callers apply the InProcess default"
         );
     }
 }

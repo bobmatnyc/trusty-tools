@@ -25,7 +25,7 @@
 //! failed engineer attempt is worth automatically retrying — see that
 //! module's docs for the retry/cap mechanics.
 //! Test: `unknown_agent_returns_helpful_error` builds a tool pointed at a tempdir
-//! containing `engineer.toml` only, calls `execute({"agent_name":"ghost",...})`,
+//! containing `engineer.md` only, calls `execute({"agent_name":"ghost",...})`,
 //! and asserts the error names the unknown agent and lists `engineer`.
 //! `redelegation_hint_*` tests cover the reuse-directive behaviour.
 
@@ -173,8 +173,8 @@ impl EngineerCompletionSignal {
 /// `no_config_dir_skips_validation`, `delegate_refused_once_engineer_completed`.
 pub struct DelegateToAgentTool {
     runner: Arc<dyn AgentRunner>,
-    /// Directory holding `<agent>.toml` files. When `Some`, `execute()` rejects
-    /// calls whose `agent_name` does not have a matching TOML. When `None`,
+    /// Directory holding `<agent>.md` files. When `Some`, `execute()` rejects
+    /// calls whose `agent_name` does not have a matching `.md`. When `None`,
     /// validation is skipped (legacy / test mode).
     config_dir: Option<PathBuf>,
     /// Shared, run-scoped completion latch (#2683). When `Some` and already
@@ -206,7 +206,7 @@ impl DelegateToAgentTool {
     /// Why: When the LLM hallucinates an agent name, spawning the subprocess
     /// fails with a generic IO error. Validating up front returns a structured
     /// `ToolResult::err` listing available agents so the LLM can self-correct.
-    /// What: Stores `dir`. Files matching `<dir>/<agent_name>.toml` are
+    /// What: Stores `dir`. Files matching `<dir>/<agent_name>.md` are
     /// considered valid. Missing dir is treated as "no agents available".
     /// Test: `unknown_agent_returns_helpful_error`.
     pub fn with_config_dir(mut self, dir: PathBuf) -> Self {
@@ -240,28 +240,26 @@ impl DelegateToAgentTool {
     /// List agent names discoverable in `config_dir`, if any.
     ///
     /// Why: Builds the "available agents" hint in error messages so the LLM
-    /// gets immediate, structured feedback when it invents a name.
-    /// What: Reads `<config_dir>/*.toml` and returns each file stem. Returns
-    /// `None` when no `config_dir` was attached.
+    /// gets immediate, structured feedback when it invents a name. Reuses
+    /// `agents::discover_agents` (rather than re-implementing its own dir
+    /// scan) so this hint and the actual load path can never independently
+    /// drift on which extension counts as an agent, and a coexisting
+    /// orphaned `.toml` gets the SAME migration warning it would during a
+    /// real `load_all_agents` call.
+    /// What: Delegates to `crate::agents::discover_agents`, which already
+    /// returns `(name, path)` pairs sorted by name — mapped down to just the
+    /// names here. Returns `None` when no `config_dir` was attached
+    /// (`discover_agents` itself returns `[]`, not `None`, for a
+    /// missing/unreadable directory).
     /// Test: Indirect via `unknown_agent_returns_helpful_error`.
     fn available_agents(&self) -> Option<Vec<String>> {
         let dir = self.config_dir.as_ref()?;
-        let entries = std::fs::read_dir(dir).ok()?;
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("toml") {
-                    p.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        names.sort();
-        Some(names)
+        Some(
+            crate::agents::discover_agents(dir)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect(),
+        )
     }
 }
 
@@ -346,22 +344,23 @@ impl ToolExecutor for DelegateToAgentTool {
 
         // Pre-flight validation: if a config_dir was attached, verify the agent
         // config exists before spawning. Converts a generic IO error into a
-        // structured tool error the LLM can act on.
-        if let Some(dir) = &self.config_dir {
-            let agent_toml = dir.join(format!("{agent_name}.toml"));
-            if !agent_toml.exists() {
-                let available = self.available_agents().unwrap_or_default();
-                let available_str = if available.is_empty() {
-                    "(none discovered)".to_string()
-                } else {
-                    available.join(", ")
-                };
-                return ToolResult::err(format!(
-                    "Unknown agent '{agent_name}'. Available agents: {available_str}. \
-                     Note: native tools (search_code, web_search, etc.) are NOT agent \
-                     names — call them directly as tools instead of via delegate_to_agent."
-                ));
-            }
+        // structured tool error the LLM can act on. Reuses
+        // `runner::agent_config_exists` (the SAME `<dir>/<name>.md` rule the
+        // runner itself applies) rather than re-deriving the extension here.
+        if let Some(dir) = &self.config_dir
+            && !crate::runner::agent_config_exists(dir, agent_name)
+        {
+            let available = self.available_agents().unwrap_or_default();
+            let available_str = if available.is_empty() {
+                "(none discovered)".to_string()
+            } else {
+                available.join(", ")
+            };
+            return ToolResult::err(format!(
+                "Unknown agent '{agent_name}'. Available agents: {available_str}. \
+                 Note: native tools (search_code, web_search, etc.) are NOT agent \
+                 names — call them directly as tools instead of via delegate_to_agent."
+            ));
         }
 
         match self.runner.run(agent_name, task).await {

@@ -49,8 +49,6 @@ async-trait = { workspace = true }
 # already re-exports from here (see crates/trusty-agents/src/tools/traits.rs).
 trusty-agents-common = { workspace = true }
 
-# Phase 3: TOML config parsing for AgentConfig
-toml = { workspace = true }
 
 # Structured error types for library code (FsError, LlmError, etc.)
 thiserror = { workspace = true }

@@ -83,6 +83,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **BREAKING — the TOML agent loader is retired; `.claude/agents/*.toml` is
+  no longer read at all (#2897, epic #2892, Slice D).** `AgentConfig::load`
+  and `AgentConfig::from_toml_str` are deleted, along with the `toml` crate
+  dependency. `discover_agents` now globs `*.md` ONLY — a project whose
+  `.claude/agents/` still holds `.toml` files gets a LOUD, aggregated
+  `tracing::warn!` naming every orphaned file and pointing at the new
+  converter script, then those files are skipped (never parsed, never
+  erroring). If disk holds nothing but orphaned `.toml` (or nothing at all),
+  `load_all_agents` falls back to the embedded `engineer`/`qa-agent`/
+  `code-reviewer` defaults exactly as it does for an empty directory — a
+  project is never left with zero agents. **Migration:** run
+  `scripts/migrate-tcode-agents-toml-to-md.py <path-to-.toml-or-dir>` to
+  convert existing `.toml` agents to the `.md`+frontmatter format (dark-launched
+  in Slice B, #2897) that has been the primary format since Slice C; delete
+  the `.toml` sources once you've reviewed the generated `.md`. This
+  completes the #2897 epic (#2892): TOML -> `.md` is now a one-way door.
 - **trusty-code now depends on `trusty-agents-common`; `ServiceTier`,
   `RunContext`, and `HistoryMessage` are re-exported instead of redeclared
   (#2893, epic #2892).** `crates/trusty-code/src/tools/traits.rs` re-declared

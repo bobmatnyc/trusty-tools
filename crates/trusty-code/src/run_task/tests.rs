@@ -8,8 +8,8 @@
 //! so no network call is ever made.
 //! What: A `ScriptedLlm` replays a queue of `ChatResponse`s; because the PM and
 //! engineer share one inner client, the script is consumed in call order
-//! (PM-turn-1, engineer-turn-1, …). Fixtures build agents-dir TOMLs and a project
-//! dir; tests assert on the returned `RunReport`.
+//! (PM-turn-1, engineer-turn-1, …). Fixtures build agents-dir `.md` agents and a
+//! project dir; tests assert on the returned `RunReport`.
 //! Test: this module is itself the test surface.
 
 use std::path::PathBuf;
@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::{ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task};
+use super::{
+    ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task, resolve_agent_model_slug,
+};
 use crate::agent_loop::AgentLoopError;
 use crate::agents::AgentConfig;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
@@ -260,26 +262,27 @@ fn stop_response_with_model(text: &str, model: &str) -> Value {
     })
 }
 
-/// Build an agents dir with `pm.toml` and `python-engineer.toml`.
+/// Build an agents dir with `pm.md` and `python-engineer.md`.
 ///
-/// Why: `run-task` loads the PM config from `<agents_dir>/pm.toml` and the
-/// engineer from `<agents_dir>/python-engineer.toml`; tests need both on disk.
-/// What: Writes both TOMLs (engineer pinned to `engineer_model`) and returns the
-/// tempdir.
+/// Why: `run-task` loads the PM config from `<agents_dir>/pm.md` and the
+/// engineer from `<agents_dir>/python-engineer.md` (#2897 Slice D); tests
+/// need both on disk.
+/// What: Writes both `.md` agents (engineer pinned to `engineer_model`) and
+/// returns the tempdir.
 fn agents_dir(engineer_model: &str) -> TempDir {
     let tmp = tempfile::tempdir().expect("agents tempdir");
     std::fs::write(
-        tmp.path().join("pm.toml"),
-        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM.\"\n",
+        tmp.path().join("pm.md"),
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM.\n",
     )
-    .expect("write pm.toml");
+    .expect("write pm.md");
     std::fs::write(
-        tmp.path().join("python-engineer.toml"),
+        tmp.path().join("python-engineer.md"),
         format!(
-            "[agent]\nname = \"python-engineer\"\nmodel = \"{engineer_model}\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n"
+            "---\nname: python-engineer\nmodel: {engineer_model}\n---\n\nYou are a Python engineer.\n"
         ),
     )
-    .expect("write python-engineer.toml");
+    .expect("write python-engineer.md");
     tmp
 }
 
@@ -362,27 +365,26 @@ async fn end_to_end_pm_delegates_to_engineer() {
 /// Why: `execute_run_task` previously built the PM's `AgentLoopConfig` via
 /// `AgentLoopConfig { model: pm_model, ..AgentLoopConfig::default() }`,
 /// dropping `pm_config.llm.max_tokens` entirely so every PM turn was capped at
-/// the hard-coded default regardless of what `pm.toml` declared. This is the
-/// end-to-end regression guard: a `pm.toml` with `[llm].max_tokens = 8192`
-/// must produce a `ChatRequest.max_tokens` of `8192`, never the old 1024.
-/// What: `pm.toml` declares `[llm].max_tokens = 8192`; script a single PM stop
-/// turn; assert the scripted client observed `Some(8192)`.
+/// the hard-coded default regardless of what `pm.md` declared. This is the
+/// end-to-end regression guard: a `pm.md` with `max_tokens: 8192` must
+/// produce a `ChatRequest.max_tokens` of `8192`, never the old 1024.
+/// What: `pm.md` declares `max_tokens: 8192`; script a single PM stop turn;
+/// assert the scripted client observed `Some(8192)`.
 /// Test: this test.
 #[tokio::test]
 async fn pm_llm_max_tokens_reaches_chat_request() {
     let agents = tempfile::tempdir().expect("agents tempdir");
     std::fs::write(
-        agents.path().join("pm.toml"),
-        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n\
-         [llm]\nmax_tokens = 8192\n\
-         [system_prompt]\ncontent = \"You are the PM.\"\n",
+        agents.path().join("pm.md"),
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\nmax_tokens: 8192\n---\n\n\
+         You are the PM.\n",
     )
-    .expect("write pm.toml");
+    .expect("write pm.md");
     std::fs::write(
-        agents.path().join("python-engineer.toml"),
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
+        agents.path().join("python-engineer.md"),
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\nYou are a Python engineer.\n",
     )
-    .expect("write python-engineer.toml");
+    .expect("write python-engineer.md");
     let project = tempfile::tempdir().expect("project tempdir");
 
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
@@ -502,7 +504,7 @@ async fn no_changes_yields_no_changes_exit() {
 /// A missing PM config is a configuration error (no panic, distinct exit code).
 ///
 /// Why: Bad configuration must produce a faithful `ConfigError`, not a crash.
-/// What: Point the params at an agents dir with no `pm.toml`; assert
+/// What: Point the params at an agents dir with no `pm.md`; assert
 /// exit=ConfigError.
 /// Test: this test.
 #[tokio::test]
@@ -527,8 +529,51 @@ async fn missing_pm_config_is_config_error() {
     assert_eq!(
         report.exit,
         ExitCode::ConfigError,
-        "missing pm.toml must be a config error"
+        "missing pm.md must be a config error"
     );
+}
+
+/// `resolve_agent_model_slug` degrades to `"unknown"` when the agent's `.md`
+/// config is missing, rather than panicking or propagating an error.
+///
+/// Why: pricing (`crate::perf::cost_usd`) must degrade gracefully for an
+/// unrecognised model, not abort the whole run over a missing/renamed agent
+/// config — see this function's own doc comment.
+/// What: an empty agents dir, no `ghost.md`; asserts the literal string
+/// `"unknown"`.
+/// Test: this test.
+#[test]
+fn resolve_agent_model_slug_falls_back_when_config_missing() {
+    let empty_agents = tempfile::tempdir().expect("agents tempdir");
+    let slug = resolve_agent_model_slug(empty_agents.path(), "ghost", None);
+    assert_eq!(slug, "unknown");
+}
+
+/// `resolve_agent_model_slug`'s `model_override` wins over the agent
+/// config's own `model:`.
+///
+/// Why: mirrors `RunContext`'s override precedence — a per-run
+/// `--engineer-model` swap must be reflected in the PRICED model, not just
+/// the one that actually drove the loop.
+/// What: `python-engineer.md` pins `openai/gpt-4o-mini`; pass
+/// `Some("deepseek/deepseek-chat")` as the override; asserts the override
+/// slug wins.
+/// Test: this test.
+#[test]
+fn resolve_agent_model_slug_honours_override() {
+    let agents = tempfile::tempdir().expect("agents tempdir");
+    std::fs::write(
+        agents.path().join("python-engineer.md"),
+        "---\nname: python-engineer\nmodel: openai/gpt-4o-mini\n---\n\nengineer\n",
+    )
+    .expect("write python-engineer.md");
+
+    let slug = resolve_agent_model_slug(
+        agents.path(),
+        "python-engineer",
+        Some("deepseek/deepseek-chat"),
+    );
+    assert_eq!(slug, "deepseek/deepseek-chat");
 }
 
 /// A PM loop that errors (scripted client exhausts on a tool-call turn) yields

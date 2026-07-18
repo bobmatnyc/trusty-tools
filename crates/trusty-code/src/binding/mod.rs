@@ -198,7 +198,7 @@ impl ProjectBinding {
         self.root().map(|p| p.display().to_string())
     }
 
-    /// The agents directory this binding resolves `<agent>.toml` from.
+    /// The agents directory this binding resolves `<agent>.md` from.
     ///
     /// Why: a projectless daemon still runs a PM and still needs agent configs;
     /// with no project root there is no project-scoped `.claude/agents` to read,

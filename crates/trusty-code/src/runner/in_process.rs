@@ -27,7 +27,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
-use crate::agents::AgentConfig;
+use crate::agents::{AgentConfig, md_loader};
 use crate::llm::LlmClientTrait;
 use crate::mode::HarnessMode;
 use crate::prompt::assemble_system_prompt_for_mode;
@@ -133,7 +133,7 @@ impl Default for InProcessRunnerConfig {
 /// roll engineer cost up into the PM's transcript (#1030).
 /// What: Holds the shared LLM client, a `RegistryFactory`, the agents config
 /// directory, optional project context, and the default loop budget. For each
-/// `run`, it loads `<config_dir>/<agent_name>.toml`, asks the factory for the
+/// `run`, it loads `<config_dir>/<agent_name>.md`, asks the factory for the
 /// agent's tools, gates them by `tools.allowed`, resolves the model and
 /// assembled system prompt, then runs an `AgentLoop` and returns its output.
 /// Test: `runner::tests::*` cover the full delegation path offline.
@@ -295,22 +295,24 @@ impl InProcessAgentRunner {
     /// Load the agent config for `agent_name` from the config directory.
     ///
     /// Why: Each delegation targets a named agent; its model, prompt, and
-    /// `tools.allowed` come from `<config_dir>/<agent_name>.toml`. Distinguishing
-    /// "no such file" (`UnknownAgent`) from "file present but unparseable"
+    /// `tools.allowed` come from `<config_dir>/<agent_name>.md` (#2897 Slice D
+    /// — `.toml` is no longer a loadable source). Distinguishing "no such
+    /// file" (`UnknownAgent`) from "file present but unparseable"
     /// (`ConfigLoad`) gives the caller actionable errors.
     /// What: Builds the path, returns `UnknownAgent` if it does not exist, else
-    /// loads it (mapping a parse failure to `ConfigLoad`).
+    /// loads it via [`md_loader::load_md_agent`] (mapping a parse/compose
+    /// failure to `ConfigLoad`).
     /// Test: `runner::tests::unknown_agent_errors`,
     /// `runner::tests::delegate_runs_engineer_loop`.
     fn load_agent(&self, agent_name: &str) -> Result<AgentConfig, RunnerError> {
-        let path = self.config_dir.join(format!("{agent_name}.toml"));
+        let path = self.config_dir.join(format!("{agent_name}.md"));
         if !path.exists() {
             return Err(RunnerError::UnknownAgent {
                 name: agent_name.to_string(),
                 dir: self.config_dir.clone(),
             });
         }
-        AgentConfig::load(&path).map_err(|source| RunnerError::ConfigLoad {
+        md_loader::load_md_agent(&path).map_err(|source| RunnerError::ConfigLoad {
             name: agent_name.to_string(),
             source,
         })
@@ -491,8 +493,9 @@ impl AgentRunner for InProcessAgentRunner {
 /// Why: Callers (e.g. the orchestrator wiring the delegate tool) sometimes need
 /// to pre-check an agent name without constructing a runner; exposing the same
 /// path rule the runner uses keeps the two in lockstep.
-/// What: Returns `true` iff `<dir>/<name>.toml` exists.
+/// What: Returns `true` iff `<dir>/<name>.md` exists (#2897 Slice D — `.toml`
+/// is no longer a loadable source).
 /// Test: `runner::tests::agent_config_exists_detects_present_and_absent`.
 pub fn agent_config_exists(dir: &Path, name: &str) -> bool {
-    dir.join(format!("{name}.toml")).exists()
+    dir.join(format!("{name}.md")).exists()
 }

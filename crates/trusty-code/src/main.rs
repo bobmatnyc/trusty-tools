@@ -119,7 +119,7 @@ enum Command {
     /// and some callers may depend on its diff-report output, which the
     /// daemon-driven path does not (yet) compute.
     RunTask {
-        /// Agent name as declared in `.claude/agents/<name>.toml` (e.g. `pm`).
+        /// Agent name as declared in `.claude/agents/<name>.md` (e.g. `pm`).
         agent: String,
 
         /// Free-form task description passed to the agent's system prompt.
@@ -475,7 +475,7 @@ async fn run_serve(
 /// Validate that `agent_name` contains only safe filesystem characters.
 ///
 /// Why: The agent name is joined into a filesystem path
-/// (`<agents_dir>/<agent_name>.toml`). Without this guard a crafted name such
+/// (`<agents_dir>/<agent_name>.md`). Without this guard a crafted name such
 /// as `../../etc/passwd` escapes the agents directory and enables path
 /// traversal. Restricting to `[a-zA-Z0-9_-]` is safe, predictable, and covers
 /// every real agent name in use.
@@ -665,7 +665,7 @@ mod tests {
 
     /// A path-traversal agent name is rejected.
     ///
-    /// Why: Guards the `agents_dir.join(format!("{agent_name}.toml"))` path
+    /// Why: Guards the `agents_dir.join(format!("{agent_name}.md"))` path
     /// construction in the run-task pipeline against names that escape the agents
     /// directory.
     /// What: Asserts that `../../etc/passwd` and similar strings fail validation.

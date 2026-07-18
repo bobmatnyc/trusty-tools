@@ -21,8 +21,9 @@ use crate::agent_loop::AgentLoopError;
 /// does not exist" (recoverable, surface to the model) from "the agent's loop
 /// blew up" (propagate). Bundling them in one enum keeps the runner's signature
 /// a single `Result<_, RunnerError>`.
-/// What: `UnknownAgent` and `ConfigLoad` cover resolving the agent's TOML;
-/// `Loop` wraps an `AgentLoopError` from the multi-turn loop.
+/// What: `UnknownAgent` and `ConfigLoad` cover resolving the agent's `.md`
+/// config (#2897 Slice D); `Loop` wraps an `AgentLoopError` from the
+/// multi-turn loop.
 /// Test: `runner::tests::*` exercise `UnknownAgent` and `Loop` paths.
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -31,7 +32,7 @@ pub enum RunnerError {
     UnknownAgent {
         /// The requested agent slug.
         name: String,
-        /// The directory that was searched for `<name>.toml`.
+        /// The directory that was searched for `<name>.md`.
         dir: PathBuf,
     },
 

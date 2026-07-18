@@ -15,7 +15,7 @@
 //! — a real subprocess, a real JSON-RPC wire, a real in-process PM ->
 //! engineer delegation, just a scripted model underneath.
 //! What: [`task_run_streams_live_tool_events_to_completion`] provisions a
-//! throwaway project with `pm.toml` + `python-engineer.toml`, calls
+//! throwaway project with `pm.md` + `python-engineer.md`, calls
 //! `task.run`, `session.attach`es (the mock run may already have finished by
 //! the time this fires — the ring-buffer replay covers that race either
 //! way, mirroring `session_e2e.rs`'s own read-until-terminal pattern), and
