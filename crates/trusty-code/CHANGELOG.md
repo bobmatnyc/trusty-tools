@@ -25,6 +25,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Embedded tm agent catalog as in-memory assets (#2958, epic #2892 Slice
+  E2).** Bundled 33 `.md` assets byte-for-byte from trusty-mpm's agent
+  catalog under `assets/agents/`: the 5 `BASE-*` extends templates
+  (`BASE-AGENT`, `BASE-ENGINEER`, `BASE-OPS`, `BASE-QA`, `BASE-RESEARCH`) and
+  28 coding-relevant roster agents (`api-qa`, `code-analyzer`, `code-critic`,
+  `dart-engineer`, `data-engineer`, `documentation`, `golang-engineer`,
+  `java-engineer`, `javascript-engineer`, `local-ops`, `nextjs-engineer`,
+  `ops`, `phoenix-engineer`, `php-engineer`, `prompt-engineer`,
+  `python-engineer`, `qa`, `react-engineer`, `refactoring-engineer`,
+  `research`, `ruby-engineer`, `rust-engineer`, `security`, `svelte-engineer`,
+  `tauri-engineer`, `typescript-engineer`, `web-qa`, `web-ui-engineer`),
+  exposed via the new `assets::EMBEDDED_TM_AGENT_SOURCES` name->content
+  table. New `agents::md_loader::project_embedded_md_with_extends` resolves
+  an agent's `extends:` chain entirely against that table (e.g.
+  `rust-engineer` -> `base-engineer` -> `base-agent`) using
+  `trusty_agents_common::agents::builder_in_memory` (Slice E1, #3013) — no
+  filesystem access. Not yet wired into `assets::DEFAULT_AGENTS` or
+  `agents::load_all_agents`'s dispatchable fallback; that roster expansion is
+  a separate, later slice (E3).
 - **REST resource gateway — `session.*` write routes (#2983, #587, Slice 3).**
   New `POST`/`PUT`/`DELETE` routes on `tcode serve --http`, each a thin
   `axum` handler calling `rest::respond` (or the new `respond_created` for
