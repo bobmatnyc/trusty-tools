@@ -91,7 +91,7 @@ stop-words = "0.8"
 dirs = "5"
 sha2 = "0.10"
 comrak = { version = "0.52", default-features = false }
-serde_yml = "0.0.12"
+serde_yaml = { workspace = true }
 toml_edit = "0.22"
 base64 = "0.22"
 axum = { workspace = true }

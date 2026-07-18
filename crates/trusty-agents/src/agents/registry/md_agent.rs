@@ -49,7 +49,7 @@ struct MdAgentFrontmatter {
 /// users can install agents using whichever convention suits their workflow.
 /// The `.md` + YAML frontmatter format matches the claude-mpm ecosystem.
 /// What: Reads the file, splits on `---` fences, parses frontmatter via
-/// serde_yml, and uses the post-frontmatter body as the system prompt. Missing
+/// serde_yaml, and uses the post-frontmatter body as the system prompt. Missing
 /// fields fall back to sane defaults: `role = "agent"`, generic model, runner
 /// = Subprocess. The resolver still applies `TAGENT_MODEL_*` / default env
 /// overrides through `resolve_model`.
@@ -81,7 +81,7 @@ pub(super) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         .unwrap_or(after)
         .to_string();
 
-    let fm: MdAgentFrontmatter = serde_yml::from_str(fm_str)
+    let fm: MdAgentFrontmatter = serde_yaml::from_str(fm_str)
         .with_context(|| format!("failed to parse agent md frontmatter {}", path.display()))?;
 
     let name = fm.name.unwrap_or_else(|| {

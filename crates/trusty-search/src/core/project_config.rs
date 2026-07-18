@@ -121,7 +121,7 @@ impl ProjectConfig {
     /// (`Ok(Some(_))` → merge values), and file present but malformed
     /// (`Err(_)` → abort with a clear message rather than silently ignoring a
     /// typo'd config).
-    /// What: `stat` → `read_to_string` → `serde_yml::from_str`. Missing file is
+    /// What: `stat` → `read_to_string` → `serde_yaml::from_str`. Missing file is
     /// not an error. Read and parse failures are surfaced as `anyhow::Error`
     /// with the offending path included for context.
     /// Test: `test_load_absent`, `test_load_name_only`, `test_load_full`,
@@ -133,7 +133,7 @@ impl ProjectConfig {
         }
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-        let cfg: Self = serde_yml::from_str(&raw)
+        let cfg: Self = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
         Ok(Some(cfg))
     }
@@ -249,7 +249,7 @@ exclude:
         assert_eq!(cfg.data_file_max_bytes, Some(8192));
 
         // The defaults serialise into a fresh file (discoverable).
-        let serialized = serde_yml::to_string(&ProjectConfig::default()).unwrap();
+        let serialized = serde_yaml::to_string(&ProjectConfig::default()).unwrap();
         assert!(
             serialized.contains("extra_skip_dirs") && serialized.contains("data_file_max_bytes"),
             "defaults must serialise: {serialized}"

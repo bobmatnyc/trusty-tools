@@ -170,7 +170,7 @@ impl GlobalConfig {
         if raw.trim().is_empty() {
             return Ok(Self::default());
         }
-        let cfg: Self = serde_yml::from_str(&raw)
+        let cfg: Self = serde_yaml::from_str(&raw)
             .with_context(|| format!("could not parse {} as YAML", path.display()))?;
         Ok(cfg)
     }
@@ -194,7 +194,7 @@ impl GlobalConfig {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
-        let yaml = serde_yml::to_string(self).context("could not serialise config as YAML")?;
+        let yaml = serde_yaml::to_string(self).context("could not serialise config as YAML")?;
         let tmp = path.with_extension("yaml.tmp");
         std::fs::write(&tmp, yaml).with_context(|| format!("could not write {}", tmp.display()))?;
         std::fs::rename(&tmp, path)
