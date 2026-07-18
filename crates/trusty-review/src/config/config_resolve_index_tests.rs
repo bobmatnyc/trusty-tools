@@ -329,8 +329,9 @@ async fn source_root_matches_registered_index() {
         "a matched --source-root must be marked explicit so CWD auto-derive never overwrites it"
     );
     assert!(
-        config.context.require_search,
-        "a matched --source-root must not force the diff-only degradation"
+        config.context.require_search.is_none(),
+        "a matched --source-root must not force the diff-only degradation (require_search stays \
+         unconfigured, resolved per-surface as before)"
     );
 }
 
@@ -371,8 +372,9 @@ async fn source_root_no_match_forces_diff_only() {
         }
         other => panic!("expected DiffOnly, got {other:?}"),
     }
-    assert!(
-        !config.context.require_search,
+    assert_eq!(
+        config.context.require_search,
+        Some(false),
         "no-match must relax require_search so the gate degrades instead of skipping"
     );
     assert!(
@@ -450,7 +452,7 @@ async fn source_root_daemon_unreachable_forces_diff_only() {
         }
         other => panic!("expected DiffOnly, got {other:?}"),
     }
-    assert!(!config.context.require_search);
+    assert_eq!(config.context.require_search, Some(false));
     assert!(
         !config.context.require_analyze,
         "daemon-unreachable must ALSO relax require_analyze, mirroring require_search"

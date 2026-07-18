@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result};
 use tracing::warn;
 
 use trusty_review::{
-    config::{ReviewConfig, RoleCliOverrides, SourceRootOutcome},
+    config::{InvocationSurface, ReviewConfig, RoleCliOverrides, SourceRootOutcome},
     integrations::{
         NullAnalyzeClient, NullSearchClient,
         github::{AuthStrategy, GithubClient, RunMode},
@@ -171,6 +171,8 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         build_deps_async(&config_with_overrides, &reviewer_model, &default_provider).await?;
     apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
 
+    let surface = surface_for_diff_source(&diff_source);
+
     let input = ReviewInput {
         diff_source,
         reviewer_model: reviewer_model.clone(),
@@ -180,6 +182,7 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         run_mode: RunMode::Cli,
         allow_posting: true,
         caller_context: CallerContext::default(),
+        surface,
     };
 
     let result = run_review(&config_with_overrides, input, deps).await;
@@ -203,6 +206,32 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
 }
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
+
+/// Decide the `InvocationSurface` for a resolved `DiffSource` (search-
+/// unreachable semantics fix, closes #3030 tracked MEDIUM (a)).
+///
+/// Why: a local-diff/--base/--source-root review never posts to GitHub (the
+/// `owner == "local"` sentinel forces log-only downstream regardless of
+/// `allow_posting`), so it is safe and useful to default to a DEGRADED
+/// diff-only review when search is down. A GitHub-PR `run` invocation CAN
+/// post a live comment (same as the webhook bot), so it keeps the strict
+/// `Hosted` default — unchanged behaviour (zero regression for the gate use
+/// case). Extracted to a pure function (previously inlined in `cmd_run`) so
+/// the CLI surface mapping is independently unit-testable without building a
+/// full `ReviewConfig`/HTTP client.
+/// What: `DiffSource::Github { .. }` → `InvocationSurface::Hosted`; every
+/// other variant (`LocalFile`, `GitRange`, `Stdin`) → `InvocationSurface::Interactive`.
+/// Test: `surface_for_diff_source_github_is_hosted`,
+/// `surface_for_diff_source_local_file_is_interactive`,
+/// `surface_for_diff_source_git_range_is_interactive`,
+/// `surface_for_diff_source_stdin_is_interactive`.
+pub fn surface_for_diff_source(diff_source: &DiffSource) -> InvocationSurface {
+    if matches!(diff_source, DiffSource::Github { .. }) {
+        InvocationSurface::Hosted
+    } else {
+        InvocationSurface::Interactive
+    }
+}
 
 /// Resolve the `DiffSource` for the `run` subcommand.
 ///
@@ -406,6 +435,60 @@ mod tests {
     fn run_args_local_diff_dash_parses() {
         let args = RunArgs::try_parse_from(["run", "--local-diff", "-"]).expect("parse");
         assert_eq!(args.local_diff.as_deref(), Some(std::path::Path::new("-")));
+    }
+
+    // ── surface_for_diff_source (#3030 tracked MEDIUM (a)) ──────────────────
+
+    /// A GitHub PR diff source can post a live comment, so it must map to the
+    /// strict `Hosted` surface — unchanged behaviour (zero regression for the
+    /// gate use case).
+    #[test]
+    fn surface_for_diff_source_github_is_hosted() {
+        let source = DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "repo".to_string(),
+            pr: 1,
+            token: "tok".to_string(),
+        };
+        assert_eq!(surface_for_diff_source(&source), InvocationSurface::Hosted);
+    }
+
+    /// `--local-diff <PATH>` never posts to GitHub — must map to `Interactive`
+    /// so an unreachable search degrades instead of hard-skipping.
+    #[test]
+    fn surface_for_diff_source_local_file_is_interactive() {
+        let source = DiffSource::LocalFile {
+            path: std::path::PathBuf::from("/tmp/x.diff"),
+        };
+        assert_eq!(
+            surface_for_diff_source(&source),
+            InvocationSurface::Interactive
+        );
+    }
+
+    /// `--base`/`--head` (issue #2993) never posts to GitHub — must map to
+    /// `Interactive`.
+    #[test]
+    fn surface_for_diff_source_git_range_is_interactive() {
+        let source = DiffSource::GitRange {
+            repo_root: std::path::PathBuf::from("/repo"),
+            base: "main".to_string(),
+            head: None,
+        };
+        assert_eq!(
+            surface_for_diff_source(&source),
+            InvocationSurface::Interactive
+        );
+    }
+
+    /// `--local-diff -` (stdin) never posts to GitHub — must map to
+    /// `Interactive`.
+    #[test]
+    fn surface_for_diff_source_stdin_is_interactive() {
+        assert_eq!(
+            surface_for_diff_source(&DiffSource::Stdin),
+            InvocationSurface::Interactive
+        );
     }
 
     // ── --source-root (#2994) ───────────────────────────────────────────────

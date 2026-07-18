@@ -24,7 +24,7 @@ use tracing::info;
 use trusty_common::console_metrics::CONSOLE_METRICS_METHOD;
 
 use crate::{
-    config::ReviewConfig,
+    config::{InvocationSurface, ReviewConfig},
     integrations::github::{AuthStrategy, GithubClient, RunMode},
     mcp::console_metrics,
     models::ReviewResult,
@@ -222,6 +222,11 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         run_mode: mcp_run_mode(&state.config),
         allow_posting: false,
         caller_context: crate::pipeline::runner::CallerContext::default(),
+        // Search-unreachable semantics fix: the MCP tool surface can never post
+        // to a real PR (`allow_posting: false` above), so a search outage
+        // safely defaults to a loud DEGRADED diff-only review instead of a
+        // hard-Skip — see `InvocationSurface`.
+        surface: InvocationSurface::Interactive,
     };
 
     info!(owner, repo, pr, reviewer_model, "mcp: review_pr");
@@ -274,6 +279,8 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
         run_mode: mcp_run_mode(&state.config),
         allow_posting: false,
         caller_context: crate::pipeline::runner::CallerContext::default(),
+        // See the matching comment in `call_review_pr` — same rationale.
+        surface: InvocationSurface::Interactive,
     };
 
     info!(bytes = diff.len(), reviewer_model, "mcp: review_diff");
@@ -467,6 +474,17 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
         .ok_or_else(|| ToolError::InvalidParams(format!("missing or non-string '{key}'")))
 }
 
+/// Machine-readable envelope sentinel signalling that a tool result is NOT a
+/// real review verdict — a REQUIRED context dependency was unreachable
+/// (search-unreachable semantics fix).
+///
+/// Why: distinct from any `ReviewStatus` string embedded in the payload text
+/// (`"skipped"`/`"degraded"`/`"completed"`) — a caller must not have to parse
+/// `content[0].text` and branch on `status` to notice the review never ran.
+/// What: the literal value written to the envelope's `mcp_status` field.
+/// Test: `wrap_result_infra_unavailable_sets_error_and_sentinel` (tools_tests.rs).
+const MCP_STATUS_INFRA_UNAVAILABLE: &str = "infrastructure_unavailable";
+
 /// Wrap a `ReviewResult` in the MCP content envelope, optionally surfacing a
 /// reviewer-model override-fallback reason (closes #1357 item 2).
 ///
@@ -477,13 +495,26 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
 /// Surfacing the fallback in the response metadata (and inside the serialised
 /// payload the LLM reads) makes it DETECTABLE without breaking the non-error
 /// contract — the review still ran, just on a different model than requested.
+///
+/// Search-unreachable semantics fix: when `result.infra_unavailable` is set (a
+/// REQUIRED context dependency was genuinely unreachable — see
+/// `ReviewResult::infra_unavailable`), the envelope is made LOUD on purpose:
+/// `isError: true` (so any caller that only checks the MCP happy path notices)
+/// PLUS a top-level `mcp_status: "infrastructure_unavailable"` sentinel (so a
+/// programmatic caller has an unambiguous machine-readable signal that does not
+/// require parsing `content[0].text`).  A policy skip (e.g. a future non-infra
+/// `Skipped` producer, or the existing dedup/empty-diff short-circuits which
+/// never set `infra_unavailable`) and a normal/degraded verdict both keep
+/// `isError: false` — only a genuine infra outage gets the loud treatment.
 /// What: serialises `ReviewResult` to pretty JSON; when `fallback` is
 /// `Some(reason)` it injects a `reviewer_model_fallback` string into BOTH the
 /// serialised JSON object (so the LLM reading `content[0].text` sees it) and as a
 /// top-level envelope field (so programmatic callers can detect it without
-/// re-parsing the text).  `None` leaves the envelope unchanged (no extra field).
+/// re-parsing the text).  `None` leaves that field unset.
 /// Test: `wrap_result_surfaces_reviewer_model_fallback`,
-/// `wrap_result_no_fallback_omits_field` (in `tools_tests.rs`).
+/// `wrap_result_no_fallback_omits_field`,
+/// `wrap_result_infra_unavailable_sets_error_and_sentinel`,
+/// `wrap_result_degraded_stays_isError_false` (in `tools_tests.rs`).
 fn wrap_result(result: &ReviewResult, fallback: Option<&str>) -> Value {
     // Serialise to a JSON Value first so we can splice in the fallback marker.
     let mut payload = serde_json::to_value(result).unwrap_or(Value::Null);
@@ -496,10 +527,18 @@ fn wrap_result(result: &ReviewResult, fallback: Option<&str>) -> Value {
     let text = serde_json::to_string_pretty(&payload)
         .unwrap_or_else(|_| serde_json::to_string(&payload).unwrap_or_default());
 
+    let infra_unavailable = result.infra_unavailable;
+
     let mut envelope = serde_json::json!({
         "content": [{ "type": "text", "text": text }],
-        "isError": false,
+        "isError": infra_unavailable,
     });
+    if infra_unavailable && let Some(obj) = envelope.as_object_mut() {
+        obj.insert(
+            "mcp_status".to_string(),
+            Value::String(MCP_STATUS_INFRA_UNAVAILABLE.to_string()),
+        );
+    }
     if let (Some(reason), Some(obj)) = (fallback, envelope.as_object_mut()) {
         obj.insert(
             "reviewer_model_fallback".to_string(),

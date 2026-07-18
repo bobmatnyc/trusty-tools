@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use tracing::warn;
 
 use trusty_review::{
-    config::ReviewConfig,
+    config::{InvocationSurface, ReviewConfig},
     integrations::{
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
@@ -172,6 +172,10 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
             run_mode: RunMode::Cli,
             allow_posting: false,
             caller_context: CallerContext::default(),
+            // `compare` is out of scope for the interactive-degrade default
+            // (unaffected by the search-unreachable semantics fix) — keeps the
+            // strict `Hosted` default, unchanged behaviour.
+            surface: InvocationSurface::default(),
         };
         eprint!("  Running {} ...", model);
         let start = std::time::Instant::now();
