@@ -169,6 +169,69 @@ describe('SearchTab (DOC-39 §4.7, 10d)', () => {
     expect(noInputRendered()).toBe(true);
   });
 
+  it('issue #3111: renders the valid subset plus an omitted-rows indicator for a partially-valid payload', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/sessions')) return sessionsResponse();
+      if (url.endsWith(`/sessions/${SESSION_ID}/search-audit`)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            search_audit: [
+              {
+                kind: 'search',
+                agent: 'engineer',
+                agent_id: 'ag-1',
+                lane: 'semantic',
+                query: 'parse config',
+                hit_count: 7,
+                latency_ms: 42,
+                at: new Date().toISOString(),
+              },
+              // Malformed: lane must be a string. Must not take the whole
+              // response down with it (issue #3111 MEDIUM).
+              {
+                kind: 'search',
+                agent: 'engineer',
+                agent_id: 'ag-4',
+                lane: 42,
+                query: 'bad row',
+                hit_count: 1,
+                latency_ms: 10,
+                at: new Date().toISOString(),
+              },
+              // Unrecognized future kind — tolerated as omitted, not fatal.
+              {
+                kind: 'graph_traverse',
+                agent: 'engineer',
+                agent_id: 'ag-5',
+                query: 'call graph',
+                at: new Date().toISOString(),
+              },
+            ],
+          }),
+        } as Response;
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    instance = mount(SearchTab, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => normalizedText().includes('rows omitted'));
+
+    // The one valid row still renders.
+    expect(target.textContent).toContain('parse config');
+    // Two rows dropped (the bad `lane` and the unrecognized `kind`). jsdom's
+    // `textContent` preserves the template's source whitespace/line-wrapping
+    // verbatim (see `normalizedText()`'s own doc comment), so this asserts
+    // against the whitespace-collapsed text, not a raw substring.
+    expect(normalizedText()).toContain('2 rows omitted');
+    // Never the all-or-nothing "audit unavailable" for a partially-valid payload.
+    expect(target.textContent).not.toContain('audit unavailable');
+    expect(noInputRendered()).toBe(true);
+  });
+
   it('renders the empty-list state honestly when a session has no search activity yet', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -242,6 +305,58 @@ describe('SearchTab (DOC-39 §4.7, 10d)', () => {
     expect(target.textContent).toContain('audit unavailable');
     expect(target.textContent).toContain('HTTP 500');
     expect(noInputRendered()).toBe(true);
+  });
+
+  it('issue #3111 LOW: recovers on the next poll once the daemon stops returning 500 for search-audit', async () => {
+    vi.useFakeTimers();
+    try {
+      let auditCalls = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/sessions')) return sessionsResponse();
+        if (url.endsWith(`/sessions/${SESSION_ID}/search-audit`)) {
+          auditCalls += 1;
+          if (auditCalls === 1) {
+            return { ok: false, status: 500, json: async () => ({}) } as Response;
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              search_audit: [
+                {
+                  kind: 'search',
+                  agent: 'engineer',
+                  agent_id: 'ag-1',
+                  lane: 'semantic',
+                  query: 'recovered query',
+                  hit_count: 3,
+                  latency_ms: 15,
+                  at: new Date().toISOString(),
+                },
+              ],
+            }),
+          } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      instance = mount(SearchTab, { target }) as unknown as Record<string, unknown>;
+
+      // Flush the initial poll (poll #1: HTTP 500 -> "audit unavailable").
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.textContent).toContain('audit unavailable');
+      expect(auditCalls).toBe(1);
+
+      // Advance past POLL_MS (5000ms, matching StatusBar.svelte/SessionMonitor.svelte)
+      // to trigger poll #2, which now succeeds.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(auditCalls).toBe(2);
+      expect(target.textContent).toContain('recovered query');
+      expect(target.textContent).not.toContain('audit unavailable');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("AC-7.1: the explanatory banner is present and no input field ever renders", async () => {

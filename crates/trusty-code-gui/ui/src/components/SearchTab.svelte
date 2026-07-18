@@ -22,30 +22,36 @@
   // `setInterval` shape to the sibling components. A `404` on the audit
   // fetch (session vanished between the two calls in the same `refresh()`)
   // is treated as `no-session`, same as `SessionMonitor.svelte`'s handling
-  // of its own chained fetches. A non-200 or malformed body degrades to an
-  // `audit unavailable` row rather than throwing — the fetched body's shape
-  // is verified with `isSearchAuditResponse`
+  // of its own chained fetches. A non-200 or top-level-malformed body
+  // degrades to an `audit unavailable` row rather than throwing — the
+  // fetched body's shape is verified with `parseSearchAuditResponse`
   // (`lib/search-audit.ts`, mirroring `create-session.ts::isDirListing`)
   // before it becomes reactive state; no bare `as` assertion on
-  // network-derived data. Rows render in the order the daemon returns them
-  // (oldest first, newest last — the API doc's own ordering), so the most
-  // recent search lands where the eye naturally finishes reading, same
-  // convention as `transcript.ts::selectTranscriptTail`. `Recall` rows have
-  // no `lane`/`latency_ms` on the wire; `auditLaneLabel`/`auditLatencyLabel`
-  // (`lib/search-audit.ts`) normalize both variants onto the shared six
-  // columns without fabricating fields neither carries. A second, local
-  // `now` tick (no network call) redisplays each row's age every second via
-  // `transcript.ts::formatElapsed`, same pattern as `SessionMonitor.svelte`.
+  // network-derived data. A single malformed RECORD (or a future
+  // `SearchAuditRecord` variant this build doesn't recognize) does NOT take
+  // down the whole table (issue #3111 MEDIUM) — `parseSearchAuditResponse`
+  // filters to the trustworthy subset and reports how many rows it dropped,
+  // rendered as a visible "N rows omitted" notice alongside the known-good
+  // rows rather than silently or wholesale. Rows render in the order the
+  // daemon returns them (oldest first, newest last — the API doc's own
+  // ordering), so the most recent search lands where the eye naturally
+  // finishes reading, same convention as `transcript.ts::selectTranscriptTail`.
+  // `Recall` rows have no `lane`/`latency_ms` on the wire;
+  // `auditLaneLabel`/`auditLatencyLabel` (`lib/search-audit.ts`) normalize
+  // both variants onto the shared six columns without fabricating fields
+  // neither carries. A second, local `now` tick (no network call) redisplays
+  // each row's age every second via `transcript.ts::formatElapsed`, same
+  // pattern as `SessionMonitor.svelte`.
   //
   // Test: `SearchTab.test.ts` covers the four connection phases, the
-  // populated/empty/malformed audit states, and asserts no `<input>`/
-  // `<textarea>` ever renders (AC-7.1).
+  // populated/empty/partially-valid/malformed audit states, a poll-recovery
+  // sequence, and asserts no `<input>`/`<textarea>` ever renders (AC-7.1).
   import { apiBase } from '../lib/api-config';
   import {
     auditHitsLabel,
     auditLaneLabel,
     auditLatencyLabel,
-    isSearchAuditResponse,
+    parseSearchAuditResponse,
     type SearchAuditRecord,
   } from '../lib/search-audit';
   import {
@@ -64,6 +70,7 @@
   let session = $state<SessionSummary | null>(null);
   let error = $state<string | null>(null);
   let auditRows = $state<SearchAuditRecord[]>([]);
+  let auditOmittedCount = $state(0);
   let auditError = $state<string | null>(null);
   let now = $state(Date.now());
 
@@ -102,6 +109,7 @@
       phase = 'no-session';
       session = null;
       auditRows = [];
+      auditOmittedCount = 0;
       auditError = null;
       error = null;
       return;
@@ -119,6 +127,7 @@
           phase = 'no-session';
           session = null;
           auditRows = [];
+          auditOmittedCount = 0;
           auditError = null;
         }
         return;
@@ -126,16 +135,25 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body: unknown = await res.json();
       if (signal.aborted) return;
-      if (!isSearchAuditResponse(body)) {
+      const parsed = parseSearchAuditResponse(body);
+      if (!parsed) {
+        // Top-level shape failure only (not an object, or `search_audit`
+        // isn't even an array) — nothing here can be trusted or filtered.
         auditRows = [];
+        auditOmittedCount = 0;
         auditError = 'malformed response from daemon';
         return;
       }
-      auditRows = body.search_audit;
+      // A record-level failure (or an unrecognized future `kind`) never
+      // takes down the whole table (issue #3111) — render whatever subset
+      // IS trustworthy plus an honest omitted-count, not "audit unavailable".
+      auditRows = parsed.records;
+      auditOmittedCount = parsed.omittedCount;
       auditError = null;
     } catch (e) {
       if (!signal.aborted) {
         auditRows = [];
+        auditOmittedCount = 0;
         auditError = e instanceof Error ? e.message : String(e);
       }
     }
@@ -206,7 +224,7 @@
                 audit unavailable — {auditError}
               </td>
             </tr>
-          {:else if auditRows.length === 0}
+          {:else if auditRows.length === 0 && auditOmittedCount === 0}
             <tr>
               <td colspan="6" class="pt-2 text-trusty-text/40">no searches recorded yet</td>
             </tr>
@@ -221,6 +239,18 @@
                 <td class="py-0.5">{formatElapsed(record.at, now)}</td>
               </tr>
             {/each}
+            {#if auditOmittedCount > 0}
+              <tr>
+                <td
+                  colspan="6"
+                  class="pt-2 text-trusty-text/40"
+                  title="One or more search-audit records from the daemon didn't match a known shape (malformed or an unrecognized future kind) and were left out rather than crashing the tab."
+                >
+                  {auditOmittedCount}
+                  {auditOmittedCount === 1 ? 'row' : 'rows'} omitted (unrecognized record shape)
+                </td>
+              </tr>
+            {/if}
           {/if}
         </tbody>
       </table>

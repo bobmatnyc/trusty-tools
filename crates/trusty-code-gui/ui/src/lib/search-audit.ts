@@ -11,18 +11,32 @@
 // `as` assertion on a network-derived body. A `200` status is a promise from
 // THIS daemon version's handler, not from whatever actually answered the
 // socket — the shape must be verified before it becomes reactive state.
-// `isSearchAuditResponse` is the runtime shape guard, mirroring
+// `parseSearchAuditResponse` is the runtime shape guard, mirroring
 // `create-session.ts::isDirListing`'s per-field structural check.
 //
+// PARTIAL-VALIDITY note (issue #3111 MEDIUM, PR #3110 critic review): the
+// first cut of this guard (`isSearchAuditResponse`, a `body is
+// SearchAuditResponse` predicate) rejected the ENTIRE array when even one
+// record failed its per-kind check — a single malformed row, or a future
+// third `SearchAuditRecord` variant the client doesn't know about yet, took
+// down every known-good row with it. `parseSearchAuditResponse` replaces it:
+// only a TOP-LEVEL shape failure (body not an object, or `search_audit` not
+// an array — cases where there is no array to even iterate) returns `null`;
+// a record-level failure is filtered out of the returned subset and counted
+// in `omittedCount` instead, so `SearchTab.svelte` can render every row it
+// CAN trust plus an honest "N rows omitted" indicator, rather than an
+// all-or-nothing "audit unavailable".
+//
 // What: `SearchAuditRecord` (discriminated union on `kind`), the
-// `{search_audit: [...]}` response envelope, `isSearchAuditResponse` (the
-// shape guard `SearchTab.svelte` calls before trusting a fetched body), and
-// three pure per-record formatters (`auditLaneLabel`/`auditHitsLabel`/
-// `auditLatencyLabel`) — `Recall` records carry no `lane`/`latency_ms` (they
-// are not a lane search), so these normalize both variants onto AC-7.2's six
-// shared columns without fabricating fields neither the wire type nor the
-// daemon has. Reuses `transcript.ts::formatElapsed` for the "age" column
-// rather than re-deriving duration formatting.
+// `{search_audit: [...]}` response envelope, `parseSearchAuditResponse` (the
+// shape guard/subset-filter `SearchTab.svelte` calls before trusting a
+// fetched body), and three pure per-record formatters (`auditLaneLabel`/
+// `auditHitsLabel`/`auditLatencyLabel`) — `Recall` records carry no
+// `lane`/`latency_ms` (they are not a lane search), so these normalize both
+// variants onto AC-7.2's six shared columns without fabricating fields
+// neither the wire type nor the daemon has. Reuses
+// `transcript.ts::formatElapsed` for the "age" column rather than
+// re-deriving duration formatting.
 // Test: `search-audit.test.ts`.
 
 /** One `SearchAuditRecord::Search` row — mirrors `crate::events::SearchAuditRecord::Search`. */
@@ -58,7 +72,7 @@ export interface SearchAuditResponse {
 
 /**
  * Structural check for one `SearchAuditRecord` — used only through
- * {@link isSearchAuditResponse}, never called directly by the component.
+ * {@link parseSearchAuditResponse}, never called directly by the component.
  *
  * Why: same root pattern as `create-session.ts::isDirListing` — a record
  * whose `kind` doesn't match either known variant, or whose fields don't
@@ -69,8 +83,12 @@ export interface SearchAuditResponse {
  * `at`, all strings) is checked first; `kind === 'search'` additionally
  * requires `lane: string`, `hit_count: number | null`, `latency_ms: number`;
  * `kind === 'recall'` additionally requires `result_count`/`injected_count:
- * number`. Any other `kind` value fails.
- * Test: `search-audit.test.ts::isSearchAuditRecord-via-response`.
+ * number`. Any other `kind` value fails — including a hypothetical future
+ * third variant this client build doesn't know about yet, which is exactly
+ * the case {@link parseSearchAuditResponse} tolerates as "omit this one
+ * row", not "reject the whole response".
+ * Test: `search-audit.test.ts` (exercised indirectly through
+ * `parseSearchAuditResponse`).
  */
 function isValidRecord(value: unknown): value is SearchAuditRecord {
   if (typeof value !== 'object' || value === null) return false;
@@ -96,25 +114,56 @@ function isValidRecord(value: unknown): value is SearchAuditRecord {
   return false;
 }
 
+/** {@link parseSearchAuditResponse}'s result for a structurally-valid
+ * top-level body: the trustworthy subset of records, plus how many were
+ * dropped for failing {@link isValidRecord}. `omittedCount === 0` is the
+ * common case (every record valid); a positive count means `SearchTab.svelte`
+ * should render `records` plus a visible "N rows omitted" indicator, never
+ * silently drop them with no trace. */
+export interface ParsedSearchAudit {
+  records: SearchAuditRecord[];
+  omittedCount: number;
+}
+
 /**
- * Runtime shape guard for a `GET /sessions/{id}/search-audit` 200 response
- * body.
+ * Runtime shape guard AND subset-filter for a `GET /sessions/{id}/search-audit`
+ * 200 response body.
  *
  * Why: PR #3103 review finding (HIGH, `isDirListing`) established the house
  * rule — a bare `as SearchAuditResponse` assertion lets a malformed body
  * (schema drift, an interposed proxy) flow straight into reactive state and
- * throw once the template dereferences a missing field. `SearchTab.svelte`
- * must degrade to an error state instead, never throw from its `$effect`.
- * What: `body.search_audit` must be an array whose every element passes
- * {@link isValidRecord}. Malformed input (not an object, missing/non-array
- * `search_audit`, or any element failing its per-kind check) returns
- * `false`.
- * Test: `search-audit.test.ts::isSearchAuditResponse`.
+ * throw once the template dereferences a missing field. The first version of
+ * this guard (`isSearchAuditResponse`, issue #3111 MEDIUM) over-corrected:
+ * it rejected the ENTIRE array when even one record failed validation,
+ * hiding every known-good row behind an all-or-nothing "audit unavailable"
+ * just because one row (or a future third `SearchAuditRecord` variant) was
+ * unrecognized. A single bad row is not evidence the WHOLE response is
+ * untrustworthy — only a broken top-level shape (not an object, or
+ * `search_audit` isn't even an array to iterate) is.
+ * What: returns `null` only for a top-level shape failure (not an object, or
+ * `search_audit` missing/non-array — nothing to filter). Otherwise returns
+ * `{records, omittedCount}`: `records` is `search_audit` filtered to entries
+ * passing {@link isValidRecord} (in original order — filtering never
+ * reorders), `omittedCount` is how many entries were dropped. An empty
+ * `search_audit` array is valid input and returns `{records: [], omittedCount: 0}`,
+ * not `null` — there is a real, empty list, not a shape failure.
+ * Test: `search-audit.test.ts::parseSearchAuditResponse`.
  */
-export function isSearchAuditResponse(body: unknown): body is SearchAuditResponse {
-  if (typeof body !== 'object' || body === null) return false;
+export function parseSearchAuditResponse(body: unknown): ParsedSearchAudit | null {
+  if (typeof body !== 'object' || body === null) return null;
   const b = body as Record<string, unknown>;
-  return Array.isArray(b.search_audit) && b.search_audit.every(isValidRecord);
+  if (!Array.isArray(b.search_audit)) return null;
+
+  const records: SearchAuditRecord[] = [];
+  let omittedCount = 0;
+  for (const item of b.search_audit) {
+    if (isValidRecord(item)) {
+      records.push(item);
+    } else {
+      omittedCount++;
+    }
+  }
+  return { records, omittedCount };
 }
 
 /**

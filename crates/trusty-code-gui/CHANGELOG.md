@@ -23,6 +23,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   code, not the body, is authoritative that the session exists). Regression
   tests for both live in `CreateSessionForm.test.ts`; guard unit tests in
   `create-session.test.ts`.
+- Search-audit shape guard no longer rejects an entire
+  `GET /sessions/{id}/search-audit` response over a single bad record (issue
+  #3111 MEDIUM, PR #3110 critic review). `lib/search-audit.ts`'s
+  `isSearchAuditResponse` (a `body is SearchAuditResponse` all-or-nothing
+  predicate) is replaced by `parseSearchAuditResponse`, which filters
+  `search_audit` to the subset passing the existing per-record shape check
+  and reports how many entries were dropped (`omittedCount`) — a malformed
+  row, or a future third `SearchAuditRecord` variant this client build
+  doesn't recognize yet, no longer hides every known-good row behind an
+  "audit unavailable" wall. Only a genuine top-level shape failure (body not
+  an object, or `search_audit` not even an array) still returns `null` and
+  renders that error state. `SearchTab.svelte` now renders the trustworthy
+  rows plus a visible "N rows omitted (unrecognized record shape)" notice
+  when `omittedCount > 0`, rather than silently dropping or wholesale
+  rejecting them. Also added a fake-timer-driven regression test (issue
+  #3111 LOW) proving the tab recovers real rows on the next poll after a
+  transient `HTTP 500` from the audit route.
 
 ### Added
 
