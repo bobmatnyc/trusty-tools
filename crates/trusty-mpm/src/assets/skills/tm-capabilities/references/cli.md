@@ -142,6 +142,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `send` — Inject text into a managed session's pane
   - `start` — Start a new Claude Code session in the current/specified project
   - `stop` — Stop a session by id or friendly name (managed or project session)
+  - `sync-assets` — Re-sync a live managed session's deployed agents/skills/output-styles against the current catalog (issue #2444)
   - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
 - `sessions` — Define and manage Claude Code sessions within a project
   - `activity` — Show recent activity for a managed session
@@ -172,6 +173,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `send` — Inject text into a managed session's pane
   - `start` — Start a new Claude Code session in the current/specified project
   - `stop` — Stop a session by id or friendly name (managed or project session)
+  - `sync-assets` — Re-sync a live managed session's deployed agents/skills/output-styles against the current catalog (issue #2444)
   - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
 - `slack` — Manage the Slack remote-management bot (start, stop) — DOC-20 adapter #1294
   - `start` — Start the Slack bot process (Socket Mode — no public webhook required)

@@ -41,7 +41,9 @@ pub mod proxy;
 pub mod prune;
 mod reactivate;
 mod resume_error;
+mod session_summary;
 mod summary;
+pub mod sync_assets;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
 pub use front_gate::{
@@ -69,6 +71,7 @@ pub use prune::{
 };
 pub use reactivate::reactivate_managed_session;
 pub use resume_error::ResumeManagedError;
+pub use session_summary::SessionSummary;
 pub use summary::record_to_json;
 use summary::{
     attach_cmd_for, checked_summaries, parse_id, record_to_summary, record_to_summary_checked,
@@ -246,110 +249,9 @@ pub struct ListSessionsResponse {
     pub sessions: Vec<SessionSummary>,
 }
 
-/// Per-session summary for the list endpoint.
-///
-/// Why: the list endpoint returns less detail than the single-session endpoint;
-/// keeping a summary type avoids serializing the full record in list responses.
-/// What: id, name, state, workspace_path, repo_url, branch, timestamps,
-/// task, cwd, pending_decision, proposed_default, source_id.
-/// Test: list handler test.
-#[derive(Debug, Serialize)]
-pub struct SessionSummary {
-    /// Managed session id.
-    pub id: String,
-    /// tmux session name.
-    pub name: String,
-    /// Lifecycle state.
-    pub state: String,
-    /// Provisioned workspace path.
-    pub workspace_path: Option<String>,
-    /// Repository URL.
-    pub repo_url: Option<String>,
-    /// Git branch or ref.
-    pub branch: Option<String>,
-    /// Creation timestamp (RFC 3339).
-    pub created_at: String,
-    /// Last activity timestamp (RFC 3339), if any.
-    pub last_activity_at: Option<String>,
-    /// A pending decision question, if surfaced.
-    pub pending_decision: Option<String>,
-    /// Proposed default answer to the pending decision.
-    pub proposed_default: Option<String>,
-    /// Source project identity (`owner/repo`) for in-project sessions (#1707).
-    ///
-    /// Why: the in-project spawn path records the GitHub identity so callers can
-    /// filter sessions by project and reconnect to existing ones.
-    /// `None` for sessions not created via the in-project path.
-    pub source_id: Option<String>,
-    /// Task description for the session (additive; absent for legacy records).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    /// Working directory for the session (additive; absent for legacy records).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// Captured Claude Code conversation id, if any (additive; #2023 C).
-    ///
-    /// Why: the bare-`tm` in-pane relaunch path (#2023 component C) needs the
-    /// SAME `claude_session_id` the tmux-pane resume path uses for its
-    /// `--resume <id>` existence-check-and-fallback logic (#2013) — exposing it
-    /// on the wire lets the CLI build the identical command without a second,
-    /// divergent lookup. `None` for sessions where no `SessionStart` capture has
-    /// landed yet, or for legacy records predating the field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_session_id: Option<String>,
-    /// The Deliverable this session is working on, if bound (DOC-35 §10.6,
-    /// #2379; additive — absent for legacy records and sessions with no link).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deliverable_id: Option<String>,
-    /// The tmux `pane_id` of this session's original pane, if captured
-    /// (additive; #2453 review finding 1, round 2 — absent for legacy
-    /// records, or when the driver could not resolve one).
-    ///
-    /// Why: the bare-`tm` in-pane relaunch's nested-session guard needs this
-    /// to confirm the operator's CURRENT pane is genuinely the one bound to
-    /// this record before driving a destructive `exec` — see
-    /// `SessionRecord::pane_id`'s doc for the full rationale (a session-name
-    /// or process-env-var match alone is provably insufficient).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane_id: Option<String>,
-    /// Delivery status of the turnkey `--task` pane injection, if injection
-    /// was ever attempted for this session (additive; #2364).
-    ///
-    /// Why: `SessionManager::inject_task_when_ready` was fire-and-forget
-    /// before this field existed — callers had no way to poll whether an
-    /// injected task was actually delivered. Exposing it lets `tm session
-    /// info`/`tm sessions ls` surface `pending`/`success`/`failed_timeout`/
-    /// `failed_session_died` instead of requiring a blind wait on `tm session
-    /// activity`. `None` when injection was never attempted for this session
-    /// (opted out, empty task, non-Claude-Code runtime, or a spawn that never
-    /// reached `Active`) — see `session_manager::InjectionStatus::NotApplicable`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub injection_status: Option<String>,
-    /// True when this session is a dead pick: it is `stopped`/`errored` AND no
-    /// workdir candidate (`last_cwd`, `workspace_path`, `cwd`) exists on disk
-    /// any more, so a resume is guaranteed to fail (#2595).
-    ///
-    /// Why: #2577/#2594 fixed the ERROR an operator sees after picking a
-    /// GC-pruned session to restart (bare 500 → actionable 422); the deeper UX
-    /// defect was that such a session was OFFERED as a restart option at all.
-    /// Computing this once here — server-side, where the full record (`last_cwd`
-    /// included) and filesystem access both live — lets every listing surface
-    /// (the bare-`tm` guided default, the `tm ls` picker, and `tm sessions ls`,
-    /// all of which read this same list endpoint) mark/exclude the session
-    /// BEFORE the operator selects it, instead of only failing loudly after the
-    /// fact. Always `false` for live/provisioning/decommissioned sessions —
-    /// see `session_manager::resume_workdir::is_unresumable`.
-    /// What: computed by [`list_managed_sessions`]/[`get_managed_session`] via
-    /// `session_manager::resume_workdir::is_unresumable`; every other handler
-    /// that builds a `SessionSummary` via `record_to_summary` leaves it at its
-    /// `false` default (freshly spawned/reactivated/decommissioned sessions are
-    /// never mid-flight through this predicate).
-    /// Test: `list_marks_dead_stopped_session_unresumable`,
-    /// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in
-    /// `super::tests`.
-    #[serde(default)]
-    pub unresumable: bool,
-}
+// `SessionSummary` lives in its own file (issue #2444) — see
+// `session_summary.rs`'s module doc for why, and `stale_assets`'s field doc
+// for the new drift marker.
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.
 ///

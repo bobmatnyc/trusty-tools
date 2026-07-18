@@ -19,6 +19,7 @@ mod palace_alias;
 mod project_hooks;
 mod search_index;
 mod settings;
+mod sync_assets;
 #[cfg(test)]
 mod tests;
 // Injector-specific unit tests live in a dedicated `_tests.rs` file (1500-SLOC
@@ -82,6 +83,17 @@ pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_sta
 /// Test: covered by `worktree_sync`'s own unit tests (this is a plain
 /// re-export, no logic of its own).
 pub use worktree_sync::resume_self_heal;
+
+/// Re-export of the asset re-sync entry point (issue #2444) for the daemon's
+/// `sync-assets` route and `tm doctor`/`tm sessions ls` staleness surfaces.
+///
+/// Why: `mod sync_assets` above is private; this is the public boundary
+/// external callers go through, mirroring the `worktree_sync` re-export above.
+/// What: re-exports [`sync_assets::sync_session_assets`],
+/// [`sync_assets::SyncAssetsError`], and [`sync_assets::SyncAssetsReport`].
+/// Test: covered by `sync_assets`'s own unit tests (this is a plain
+/// re-export, no logic of its own).
+pub use sync_assets::{SyncAssetsError, SyncAssetsReport, sync_session_assets};
 
 /// Outcome of the pre-launch preparation for one session.
 ///

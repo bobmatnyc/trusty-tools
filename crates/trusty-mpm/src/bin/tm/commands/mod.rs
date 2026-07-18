@@ -56,6 +56,7 @@ pub(crate) mod sm_serve;
 pub(crate) mod standalone;
 pub(crate) mod statusline;
 pub(crate) mod supervisor;
+pub(crate) mod sync_assets;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
 pub(crate) mod tmux_attach;
