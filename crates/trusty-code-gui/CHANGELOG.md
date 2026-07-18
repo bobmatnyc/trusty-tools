@@ -122,3 +122,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Rust, per DOC-39 §2.1's thin-client rule. Minimal working shell only — the
   full DOC-39 screens land in later slices as the REST gateway (#2983) adds
   routes.
+
+### Added
+
+- Phase-1 Search tab (10d, DOC-39 §4.7): `SearchTab.svelte`, mounted in
+  `App.svelte` inside `.body` alongside `SessionMonitor`. Per §4.7/AC-7.1,
+  this screen is explicitly **not** a search box — it has no `<input>`
+  anywhere (pinned by `SearchTab.test.ts`) — and instead is meant to be the
+  audit trail of the searches agents performed, rendering AC-7.2's required
+  column headers (lane, query, hits, latency, agent, age) as static table
+  structure ready to receive rows once the REST gap below closes. Polls
+  `GET /sessions` only (identical `$effect`/`AbortController`/`setInterval`
+  shape to `StatusBar.svelte`/`SessionMonitor.svelte`) to distinguish
+  `connecting`/`daemon-unreachable`/`no-session` from an active session.
+  **Scope gap:** `Event::SearchPerformed`/`Event::MemoryRecalled`
+  (`crates/trusty-code/src/events.rs`) already carry every field AC-7.2
+  needs (`lane`/`query`/`hit_count`/`hits`/`latency_ms`/`agent`/`agent_id`),
+  but — the same underlying gap `SessionMonitor.svelte` already called out
+  for the 8b card's AC-6.3 (issue #3027) — both events are emitted ONLY on
+  the SSE stream (`GET /sessions/{id}/events`) with no REST snapshot/list
+  route and no persisted per-session accumulation in the registry. Per this
+  PR's architecture rule, the tab must be a thin REST client (never an SSE
+  consumer buffering an unbounded per-session event log client-side, and
+  never a direct `POST /rpc` caller bypassing the REST resource-gateway
+  pattern), so it ships the honest shell described above and renders a
+  labeled, non-hidden gap notice (same treatment as `StatusBar`'s `budget:
+  unavailable` span) instead of an empty table pretending to be complete.
+  Filed as issue #3072, proposing a new `GET /sessions/{id}/search-audit`
+  REST route backed by an always-retained `SessionEntry.search_audit` list
+  (mirroring the #2962 agents-map precedent), appended from the same
+  `SessionRegistry::record_search_performed`/`record_memory_recalled` path
+  that already emits the SSE event — a single fix that would close both
+  #3027 and #3072. `App.test.ts` gained a third assertion pinning that
+  `SearchTab` renders inside `.body`.

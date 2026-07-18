@@ -1,8 +1,9 @@
 <script lang="ts">
   // Why: Minimal scaffold shell (issue #2983, DOC-39) — proves the desktop
   // app connects to the tcode daemon and gives the next UI slice a layout to
-  // extend. Phase 1 adds the status bar (DOC-39 §6.2) and, in this slice,
-  // the 8b session monitor card (DOC-39 §4.6, refs #2983). `body`'s prior
+  // extend. Phase 1 adds the status bar (DOC-39 §6.2), the 8b session
+  // monitor card (DOC-39 §4.6, refs #2983), and, in this slice, the 10d
+  // Search tab (DOC-39 §4.7, refs #3072). `body`'s prior
   // `ActivityPlaceholder` explicitly said its purpose was "session list /
   // activity view... coming once GET /sessions lands" — that has now
   // landed and `SessionMonitor` covers "what's happening in the active
@@ -13,19 +14,22 @@
   // this placeholder was actually standing in for once GET /sessions is
   // live).
   // What: Renders a header, a `.body` region (the daemon HealthPanel smoke
-  // connection + the session monitor card), and `StatusBar` — the
-  // readiness+budget chrome — as a DIRECT SIBLING of `.body`, never nested
-  // inside it. DOC-39 §8.1 / AC-18.1 calls this out explicitly: nesting
-  // `.statusbar` inside `.body` has regressed the wireframe twice ("This bit
-  // us twice… assert it in a test") because it steals the body's row width.
-  // `App.test.ts` asserts the DOM invariant this markup encodes.
+  // connection + the session monitor card + the search audit tab), and
+  // `StatusBar` — the readiness+budget chrome — as a DIRECT SIBLING of
+  // `.body`, never nested inside it. DOC-39 §8.1 / AC-18.1 calls this out
+  // explicitly: nesting `.statusbar` inside `.body` has regressed the
+  // wireframe twice ("This bit us twice… assert it in a test") because it
+  // steals the body's row width. `App.test.ts` asserts the DOM invariant
+  // this markup encodes.
   // Test: Launch under Tauri or `pnpm dev` in a browser — both show the same
   // connected/disconnected state (DOC-39 §2.1 web/Tauri parity) plus the
-  // status bar's readiness indicator and the session monitor card.
-  // `App.test.ts::statusbar-is-sibling-of-body` pins the structural
-  // invariant; `App.test.ts::session-monitor-renders-inside-body` pins the
-  // monitor card's placement.
+  // status bar's readiness indicator, the session monitor card, and the
+  // search tab. `App.test.ts::statusbar-is-sibling-of-body` pins the
+  // structural invariant; `App.test.ts::session-monitor-renders-inside-body`
+  // and `App.test.ts::search-tab-renders-inside-body` pin the two cards'
+  // placement.
   import HealthPanel from './components/HealthPanel.svelte';
+  import SearchTab from './components/SearchTab.svelte';
   import SessionMonitor from './components/SessionMonitor.svelte';
   import StatusBar from './components/StatusBar.svelte';
 </script>
@@ -39,6 +43,7 @@
   <div class="body flex flex-1 flex-col gap-4 p-6">
     <HealthPanel />
     <SessionMonitor />
+    <SearchTab />
   </div>
 
   <StatusBar />
