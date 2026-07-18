@@ -21,7 +21,8 @@ pub use consolidator::SemanticConsolidator;
 pub use inference::{Inference, MockInference, OllamaInference, OpenRouterInference};
 pub use types::{
     CanonicalDrawer, ConsolidationAction, ConsolidationResult, SemanticConsolidationConfig,
-    inference_available, parse_consolidation_actions, validate_ollama_model,
+    inference_available, parse_consolidation_actions, resolve_openrouter_api_key,
+    validate_ollama_model,
 };
 
 #[cfg(test)]
@@ -109,6 +110,58 @@ mod tests {
     #[test]
     fn inference_available_true_with_local_model() {
         assert!(inference_available("", true));
+    }
+
+    /// Why: a non-empty configured value must always win over the
+    /// environment, regardless of what `OPENROUTER_API_KEY` holds — no env
+    /// mutation needed for this half of the contract.
+    #[test]
+    fn resolve_openrouter_api_key_prefers_configured_value() {
+        assert_eq!(resolve_openrouter_api_key("sk-configured"), "sk-configured");
+    }
+
+    /// Why (code review follow-up on #2977): `build_consolidator_from_config`
+    /// resolves an empty configured key against `OPENROUTER_API_KEY` in the
+    /// process environment before picking a backend; `resolve_openrouter_api_key`
+    /// must do the same so every caller (including
+    /// `trusty-memory::dream_config_from_user_config`) agrees on the
+    /// resolved key. `#[serial]` + a local `EnvVarGuard` avoid racing other
+    /// tests that read/write the same real env var.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_openrouter_api_key_falls_back_to_env() {
+        let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-from-env");
+        assert_eq!(resolve_openrouter_api_key(""), "sk-from-env");
+    }
+
+    // ─── RAII env-var guard for tests (mirrors
+    // trusty_common::memory_core::dream::tests::EnvVarGuard) ───────────────
+    //
+    // Safety: test-only; `#[serial_test::serial]` on every caller serialises
+    // access to the real process environment across test threads.
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // Safety: test-only; caller is `#[serial]`.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // Safety: test-only; caller is `#[serial]`.
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 
     /// Why: `parse_consolidation_actions` must extract actions from raw JSON.

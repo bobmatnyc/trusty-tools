@@ -16,7 +16,7 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::semantic_consolidation::{
-    SemanticConsolidator, inference_available, validate_ollama_model,
+    SemanticConsolidator, inference_available, resolve_openrouter_api_key, validate_ollama_model,
 };
 use crate::memory_core::store::vector::VectorStore;
 use anyhow::Result;
@@ -336,11 +336,7 @@ fn build_consolidator_from_config(
     if !config.semantic.enabled {
         return Ok(None);
     }
-    let api_key = if !config.openrouter_api_key.is_empty() {
-        config.openrouter_api_key.clone()
-    } else {
-        std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
-    };
+    let api_key = resolve_openrouter_api_key(&config.openrouter_api_key);
     if !inference_available(&api_key, config.local_model_enabled) {
         return Ok(None);
     }

@@ -123,6 +123,38 @@ pub struct CanonicalDrawer {
     pub canonical_for: Vec<Uuid>,
 }
 
+// ─── Effective OpenRouter API key resolution ───────────────────────────────
+
+/// Resolve the effective OpenRouter API key: the explicitly configured value
+/// if non-empty, otherwise the `OPENROUTER_API_KEY` environment variable.
+///
+/// Why: multiple call sites need to agree on whether an OpenRouter key is
+/// configured so they pick the SAME inference backend (Ollama vs OpenRouter)
+/// for the SAME model id — `build_consolidator_from_config` (this crate)
+/// resolves the key with this env-var fallback before branching;
+/// `dream_config_from_user_config` (trusty-memory) picks which model string
+/// to forward based on which backend will resolve. Before this function
+/// existed those two call sites computed "is a key configured" independently
+/// and diverged whenever `OPENROUTER_API_KEY` was set in the daemon's process
+/// environment but absent from `~/.trusty-memory/config.toml`: the helper
+/// picked the local-model id (config.toml has no key), the consolidator built
+/// the OpenRouter backend (the env var supplied one), and every consolidation
+/// call silently failed sending an Ollama-style tag to OpenRouter — a
+/// regression report on the #2593 fix itself.
+/// What: returns `configured` verbatim when non-empty; otherwise reads
+/// `OPENROUTER_API_KEY` from the process environment (empty string when
+/// unset). No trimming — matches the pre-existing resolution semantics of
+/// `build_consolidator_from_config` exactly, so callers stay bit-for-bit
+/// consistent with it.
+/// Test: `resolve_openrouter_api_key_prefers_configured_value`,
+/// `resolve_openrouter_api_key_falls_back_to_env`.
+pub fn resolve_openrouter_api_key(configured: &str) -> String {
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
+}
+
 // ─── Gate: is inference available? ─────────────────────────────────────────
 
 /// Check whether at least one inference backend is configured and potentially

@@ -1,26 +1,23 @@
-//! Free helper functions + user-config loading for the trusty-memory service
-//! layer.
+//! Free helper functions for the trusty-memory service layer.
 //!
 //! Why: thin no-IO transforms (preview/snippet/recall-entry JSON), palace-stat
-//! aggregation, palace-info enrichment, gaps-cache refresh, and user-config
-//! loading are shared by the HTTP handlers, the chat dispatcher, and the
-//! `MemoryService` core (split out of the former monolithic `service.rs`,
-//! issue #607).
-//! What: the free helpers + `LoadedUserConfig`/`load_user_config` +
-//! `service_result_to_anyhow`, moved verbatim. The service-layer unit tests
-//! live here too (1500-SLOC test cap applies).
+//! aggregation, palace-info enrichment, and gaps-cache refresh are shared by
+//! the HTTP handlers, the chat dispatcher, and the `MemoryService` core (split
+//! out of the former monolithic `service.rs`, issue #607). User-config
+//! loading + `DreamConfig` derivation live in the sibling `user_config`
+//! module (split out of this file, issue #2593 follow-up, to stay under the
+//! 500-SLOC cap).
+//! What: the free helpers + `service_result_to_anyhow`, moved verbatim. The
+//! service-layer unit tests live here too (1500-SLOC test cap applies).
 //! Test: `drawer_*`, `recall_entry_*`, and `list_drawers_*` in `service::tests`.
 
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use trusty_common::memory_core::dream::DreamConfig;
 use trusty_common::memory_core::palace::{Palace, PalaceId};
 use trusty_common::memory_core::retrieval::RecallResult;
-use trusty_common::memory_core::semantic_consolidation::SemanticConsolidationConfig;
 use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
@@ -305,148 +302,12 @@ pub async fn enrich_gap_exploration(
 }
 
 // ---------------------------------------------------------------------------
-// User config — moved from `web.rs` so chat and HTTP both load it cheaply.
+// User config loading + DreamConfig derivation moved to `service::user_config`
+// (split out, issue #2593 follow-up, to keep this file under the 500-SLOC
+// cap): `LoadedUserConfig`, `load_user_config`, `dream_config_from_user_config`.
+// `service::mod` re-exports them directly from there now — see that module's
+// doc header. Nothing in this file references them anymore.
 // ---------------------------------------------------------------------------
-
-/// Minimal mirror of the user-config schema.
-#[derive(Deserialize, Default, Clone)]
-struct UserConfigMin {
-    #[serde(default)]
-    openrouter: OpenRouterMin,
-    #[serde(default)]
-    local_model: LocalModelMin,
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct OpenRouterMin {
-    #[serde(default)]
-    api_key: String,
-    #[serde(default)]
-    model: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct LocalModelMin {
-    #[serde(default = "default_local_enabled")]
-    enabled: bool,
-    #[serde(default = "default_local_base_url")]
-    base_url: String,
-    #[serde(default = "default_local_model")]
-    model: String,
-}
-
-fn default_local_enabled() -> bool {
-    true
-}
-fn default_local_base_url() -> String {
-    "http://localhost:11434".to_string()
-}
-fn default_local_model() -> String {
-    "llama3.2".to_string()
-}
-
-impl Default for LocalModelMin {
-    fn default() -> Self {
-        Self {
-            enabled: default_local_enabled(),
-            base_url: default_local_base_url(),
-            model: default_local_model(),
-        }
-    }
-}
-
-/// Loaded user config (mirrors the public `LoadedUserConfig` from `web.rs`).
-#[derive(Clone)]
-pub struct LoadedUserConfig {
-    pub openrouter_api_key: String,
-    pub openrouter_model: String,
-    pub local_model: trusty_common::LocalModelConfig,
-}
-
-impl Default for LoadedUserConfig {
-    fn default() -> Self {
-        Self {
-            openrouter_api_key: String::new(),
-            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
-            local_model: trusty_common::LocalModelConfig::default(),
-        }
-    }
-}
-
-/// Read the user's `~/.trusty-memory/config.toml`, falling back to defaults.
-///
-/// Why: shared between HTTP config endpoint, chat tool dispatch, and
-/// provider auto-detection.
-/// What: returns `Some(LoadedUserConfig)` even when the file is missing
-/// (so callers see defaults consistently); `None` only when the home
-/// directory itself can't be resolved.
-/// Test: indirectly via `config_endpoint_returns_payload`.
-pub fn load_user_config() -> Option<LoadedUserConfig> {
-    let home = dirs::home_dir()?;
-    let path = home.join(".trusty-memory").join("config.toml");
-    if !path.exists() {
-        return Some(LoadedUserConfig::default());
-    }
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: UserConfigMin = toml::from_str(&raw).unwrap_or_default();
-    let model = if parsed.openrouter.model.is_empty() {
-        "anthropic/claude-3-5-sonnet".to_string()
-    } else {
-        parsed.openrouter.model
-    };
-    Some(LoadedUserConfig {
-        openrouter_api_key: parsed.openrouter.api_key,
-        openrouter_model: model,
-        local_model: trusty_common::LocalModelConfig {
-            enabled: parsed.local_model.enabled,
-            base_url: parsed.local_model.base_url,
-            model: parsed.local_model.model,
-        },
-    })
-}
-
-/// Derive a `DreamConfig` seed from the user's loaded config (OpenRouter key,
-/// local-model flag, and local-model id).
-///
-/// Why (issue #2593): the idle dream scheduler and the on-demand
-/// `dream_consolidate_room`/`palace_dream` tools both need to translate
-/// `LoadedUserConfig` into `DreamConfig` identically, or the two paths
-/// silently diverge — the idle scheduler previously used
-/// `DreamConfig::default()` outright (ignoring the user's config.toml
-/// entirely), and the on-demand path forwarded the OpenRouter key and the
-/// local-model flag but dropped `local_model.model`, leaving
-/// `semantic.model` on the OpenRouter-style default even when consolidation
-/// resolved to a local Ollama backend — the exact misconfiguration
-/// `validate_ollama_model` now rejects. Centralising the derivation also
-/// pins the "which model string goes with which backend" decision: it
-/// mirrors `build_consolidator_from_config`'s own branch
-/// (`local_model_enabled && api_key.is_empty()` => Ollama) so the model
-/// forwarded here always matches the backend the dream cycle will actually
-/// select.
-/// What: sets `openrouter_api_key`, `local_model_enabled`, and
-/// `semantic.model` (the local-model id when the local path resolves, the
-/// OpenRouter model id otherwise); every other `DreamConfig` field keeps its
-/// default.
-/// Test: `dream_config_from_user_config_prefers_local_model_when_resolved`,
-/// `dream_config_from_user_config_prefers_openrouter_model_with_key`.
-pub fn dream_config_from_user_config(cfg: &LoadedUserConfig) -> DreamConfig {
-    let resolves_local = cfg.local_model.enabled && cfg.openrouter_api_key.is_empty();
-    let model = if resolves_local {
-        cfg.local_model.model.clone()
-    } else {
-        cfg.openrouter_model.clone()
-    };
-
-    DreamConfig {
-        openrouter_api_key: cfg.openrouter_api_key.clone(),
-        local_model_enabled: cfg.local_model.enabled,
-        semantic: SemanticConsolidationConfig {
-            model,
-            ..SemanticConsolidationConfig::default()
-        },
-        ..DreamConfig::default()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Convenience helpers for callers that want `anyhow::Result<Value>` shape.
@@ -479,57 +340,6 @@ mod tests {
         // Leak the TempDir guard so the directory survives the test body.
         std::mem::forget(tmp);
         AppState::new(root)
-    }
-
-    /// Why (issue #2593): the exact production gap — the idle scheduler and
-    /// the on-demand tool both need `local_model.model` to reach
-    /// `DreamConfig.semantic.model` when the local Ollama path is what will
-    /// actually resolve (local model enabled, no OpenRouter key).
-    /// What: builds a `LoadedUserConfig` with a configured local model id and
-    /// no OpenRouter key; asserts the derived `DreamConfig.semantic.model`
-    /// equals the configured local model, not the OpenRouter-style default.
-    #[test]
-    fn dream_config_from_user_config_prefers_local_model_when_resolved() {
-        let cfg = LoadedUserConfig {
-            openrouter_api_key: String::new(),
-            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
-            local_model: trusty_common::LocalModelConfig {
-                enabled: true,
-                base_url: "http://localhost:11434".to_string(),
-                model: "llama3.2".to_string(),
-            },
-        };
-
-        let dream_cfg = dream_config_from_user_config(&cfg);
-
-        assert_eq!(dream_cfg.semantic.model, "llama3.2");
-        assert!(dream_cfg.local_model_enabled);
-        assert!(dream_cfg.openrouter_api_key.is_empty());
-    }
-
-    /// Why: when an OpenRouter key is configured, consolidation resolves to
-    /// the OpenRouter backend regardless of `local_model.enabled` (mirrors
-    /// `build_consolidator_from_config`'s branch), so the OpenRouter model
-    /// id must be forwarded instead of the local-model id.
-    /// What: builds a `LoadedUserConfig` with both a local model AND an
-    /// OpenRouter key configured; asserts the derived `semantic.model` is
-    /// the OpenRouter model, not the local one.
-    #[test]
-    fn dream_config_from_user_config_prefers_openrouter_model_with_key() {
-        let cfg = LoadedUserConfig {
-            openrouter_api_key: "sk-test-key".to_string(),
-            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
-            local_model: trusty_common::LocalModelConfig {
-                enabled: true,
-                base_url: "http://localhost:11434".to_string(),
-                model: "llama3.2".to_string(),
-            },
-        };
-
-        let dream_cfg = dream_config_from_user_config(&cfg);
-
-        assert_eq!(dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet");
-        assert_eq!(dream_cfg.openrouter_api_key, "sk-test-key");
     }
 
     /// Issue #184 — `sort=created_desc` paginates newest-first and the
