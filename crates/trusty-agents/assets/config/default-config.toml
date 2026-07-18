@@ -10,19 +10,21 @@ inject_for_roles = ["ctrl", "pm", "research", "observe"]
 # do not appear here.
 
 # gworkspace-mcp — the NATIVE in-workspace stdio MCP server built from crate
-# `trusty-gworkspace` (bin `gworkspace-mcp`, src/bin/gworkspace-mcp.rs). Per
-# ADR-0014 (native Rust MCP, PR #2624) this repoints off the retired external
-# Python upstream: the native binary is a pure stdio server that takes NO
-# subcommand, so `args = []` (the old external upstream required `["mcp"]`).
+# `trusty-gworkspace` (bin `trusty-gworkspace-mcp`,
+# src/bin/trusty-gworkspace-mcp.rs). Per ADR-0014 (native Rust MCP, PR #2624)
+# this repoints off the retired external Python upstream: the native binary is
+# a pure stdio server that takes NO subcommand, so `args = []` (the old
+# external upstream required `["mcp"]`).
 #
-# ⚠️ NAME COLLISION: the native cargo-installed `gworkspace-mcp` and the legacy
-# pipx Python package share the same binary name on $PATH, so which one launches
-# depends on PATH order. `args = []` targets the native contract, but full
-# disambiguation needs a binary rename (follow-up) or removing the pipx package.
+# Issue #2644: the native binary was renamed from `gworkspace-mcp` to
+# `trusty-gworkspace-mcp` to disambiguate it from the legacy pipx-installed
+# Python package, which previously shared the same name on $PATH. The service
+# `name` below stays `gworkspace-mcp` (registry identifier only); `command`
+# now targets the renamed binary.
 [[mcp.services]]
 name = "gworkspace-mcp"
 description = "Google Workspace (native trusty-gworkspace) — Gmail, Calendar, Drive, Docs, Sheets, Tasks"
-command = "gworkspace-mcp"
+command = "trusty-gworkspace-mcp"
 args = []
 transport = "stdio"
 enabled = true
@@ -222,17 +224,19 @@ eager_discovery = true
 timeout_ms = 5000
 
 # gworkspace — Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks)
-# via JSON-RPC 2.0 stdio. The `gworkspace-mcp` binary (from the trusty-common
-# workspace, crate `trusty-gworkspace`) exposes an OpenRPC 1.3.2 manifest via
-# `rpc.discover` and advertises Google OAuth scopes per tool through the
-# `x-google-scopes` extension. Disabled by default — flip `enabled = true`
-# after authenticating (`gworkspace-mcp auth login`) on a machine with the
-# binary on $PATH. See docs/trusty-agents/research/openrpc-trusty-contract.md.
+# via JSON-RPC 2.0 stdio. The `trusty-gworkspace-mcp` binary (renamed from
+# `gworkspace-mcp` in #2644 to resolve a $PATH collision with the legacy pipx
+# Python package; from the trusty-common workspace, crate `trusty-gworkspace`)
+# exposes an OpenRPC 1.3.2 manifest via `rpc.discover` and advertises Google
+# OAuth scopes per tool through the `x-google-scopes` extension. Disabled by
+# default — flip `enabled = true` after authenticating
+# (`trusty-gworkspace-mcp setup`) on a machine with the binary on $PATH. See
+# docs/trusty-agents/research/openrpc-trusty-contract.md.
 [[tool_registry.endpoints]]
 name = "gworkspace"
 driver = "direct"
 description = "Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Tasks"
-command = "gworkspace-mcp"
+command = "trusty-gworkspace-mcp"
 args = []
 enabled = false
 scopes = [

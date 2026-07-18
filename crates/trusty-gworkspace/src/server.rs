@@ -1,4 +1,4 @@
-//! MCP JSON-RPC dispatch + stdio loop for `gworkspace-mcp`.
+//! MCP JSON-RPC dispatch + stdio loop for `trusty-gworkspace-mcp`.
 //!
 //! Why: Every trusty-* MCP server uses the same shape — `initialize`,
 //! `tools/list`, `tools/call`, with notifications suppressed. Centralising
@@ -239,7 +239,7 @@ pub async fn handle_message(state: AppState, req: Value) -> Value {
 
 /// Run the stdio MCP loop wired to this server.
 ///
-/// Why: Single entry point for `bin/gworkspace-mcp.rs`.
+/// Why: Single entry point for `bin/trusty-gworkspace-mcp.rs`.
 /// What: Forwards every parsed `Request` to `handle_message` and wraps the
 /// JSON result back into a `Response`.
 /// Test: Manual — driven from Claude Code.

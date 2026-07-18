@@ -249,14 +249,17 @@ mod tests {
         assert_eq!(serve_args(), vec!["serve".to_string()]);
     }
 
-    /// Cross-crate port-uniqueness contract (#2566 review finding).
+    /// Cross-crate port-uniqueness contract (#2566, extended by #2573).
     ///
     /// Why: trusty-review's original `DEFAULT_PORT` (7880) silently collided
     /// with trusty-mpm's live `DEFAULT_DAEMON_ADDR`, crash-looping a launchd
     /// agent on install. This mirrors that fix's guard for the console's own
     /// default (`crate::DEFAULT_PORT`), pointer-commented to each sibling's
     /// real source constant, so a future edit here that reintroduces a
-    /// collision fails this test instead of shipping a crash-loop.
+    /// collision fails this test instead of shipping a crash-loop. #2573
+    /// extended this table to also cover trusty-embedderd's `--http` mode
+    /// default, which the original table omitted because it is a manual/
+    /// dev-run listener rather than a `tctl`-managed daemon.
     /// What: asserts `crate::DEFAULT_PORT` is absent from the known-sibling
     /// ports list.
     /// Test: this is the test.
@@ -281,13 +284,18 @@ mod tests {
             ),
             (
                 "trusty-review",
-                7890,
+                7891,
                 "trusty-review/src/service/mod.rs::DEFAULT_PORT",
             ),
             (
                 "trusty-mpm",
                 7880,
                 "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+            ),
+            (
+                "trusty-embedderd",
+                7890,
+                "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
             ),
         ];
         for (binary, port, source) in known_siblings {

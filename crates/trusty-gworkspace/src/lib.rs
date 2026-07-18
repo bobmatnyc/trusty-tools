@@ -5,7 +5,7 @@
 //! Docs/Sheets/Slides/Tasks access through Model Context Protocol.
 //! What: Two logical layers — a pure Google Workspace API client under
 //! `api::` (auth, token storage, service modules) and an MCP server in
-//! `server` + `bin/gworkspace-mcp.rs` that dispatches JSON-RPC tool calls.
+//! `server` + `bin/trusty-gworkspace-mcp.rs` that dispatches JSON-RPC tool calls.
 //! Test: `cargo test -p trusty-gworkspace` runs the auth-model deserialise
 //! tests and the tools-list shape test.
 

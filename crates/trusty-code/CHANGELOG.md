@@ -8,6 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- the unified-diff applier (`tools/fs/edit_format/diff.rs`) no longer errors
+  on a `git diff`-style `\ No newline at end of file` footer marker inside a
+  hunk body — the marker is metadata, not content, so it no longer fails the
+  whole apply. Its *position* (after a `-`, `+`, or ` ` line) is also tracked
+  so the applier picks the OUTPUT's trailing-newline state correctly instead
+  of always copying the original file's, which silently corrupted the
+  trailing byte on either direction of a no-trailing-newline state change
+  (closes #2150).
+- the delegated engineer's tool registry (`task::executor::ProjectToolFactory`)
+  now registers `use_skill` when a skills catalog resolved, matching what its
+  system prompt advertises via `with_skills_catalog` — previously the tool
+  call failed with "no tool registered" (closes #2152).
+
 ### Added
 
 - **Embedded default agents converted from TOML to `.md`+frontmatter (#2897,
