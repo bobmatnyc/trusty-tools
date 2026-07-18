@@ -16,6 +16,7 @@
 
 mod native_mcp;
 mod palace_alias;
+mod project_hooks;
 mod search_index;
 mod settings;
 #[cfg(test)]

@@ -79,6 +79,41 @@ fn check_hooks_hygiene_warns_on_foreign_conflict() {
     assert!(foreign.message.contains("informational"));
 }
 
+/// Why (issue #2948): a hand-mixed `PreToolUse` group carrying BOTH a tm
+/// entry and a foreign entry must trip BOTH checks — before the `.any()` fix
+/// this shape satisfied neither predicate and was invisible to `tm doctor`.
+#[test]
+fn check_hooks_hygiene_warns_on_mixed_group_both_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("mixed-project");
+    write_settings(
+        &project,
+        &serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [
+                        { "type": "command", "command": "/usr/local/bin/tm hook", "timeout": 5 },
+                        { "type": "command", "command": "claude-mpm hooks fire PreToolUse", "timeout": 5 }
+                    ]
+                }]
+            }
+        }),
+    );
+
+    let (contamination, foreign) = check_hooks_hygiene(Some(&project), &[]);
+    assert_eq!(
+        contamination.status,
+        CheckStatus::Warn,
+        "the tm entry in the mixed group must be flagged"
+    );
+    assert_eq!(
+        foreign.status,
+        CheckStatus::Warn,
+        "the foreign entry in the SAME mixed group must also be flagged"
+    );
+}
+
 #[test]
 fn check_hooks_hygiene_never_double_counts_active_workspace_dupes() {
     let dir = tempfile::tempdir().unwrap();

@@ -19,12 +19,19 @@
 //! `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
 //! `test_write_project_hooks_targets_project_dir`,
 //! `test_is_mpm_hook_command_recognises_tm_bin_name`,
-//! `test_write_project_hooks_replaces_stale_exe_path_group` in `tests`.
+//! `test_write_project_hooks_replaces_stale_exe_path_group`,
+//! `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group` in `tests`.
 //!
 //! Issue #2940: [`cleanup`] (sibling module) builds `tm hooks clean` and the
 //! `tm doctor` hook-hygiene probe on top of [`is_mpm_hook_command`] and
 //! [`strip_mpm_hook_entries`] — see that module's doc for the contamination
 //! background.
+//!
+//! Issue #2948: [`strip_hook_entries_matching_for_events`] generalises the
+//! removal logic to per-entry (not per-group) granularity so a hand-mixed
+//! group is handled correctly by both this module and [`cleanup`]; issue
+//! #2003 reuses the same primitive from `session_launch::settings` for the
+//! project-tier writer's broader trusty-owned predicate.
 
 #[cfg(test)]
 mod tests;
@@ -415,19 +422,50 @@ pub fn strip_mpm_hook_entries(val: &mut serde_json::Value) -> bool {
 /// group for an event *before* merging enforces replace-by-identity (event
 /// name + "is this an MPM hook"), not full-value equality, so exactly one
 /// MPM group per event survives regardless of exe-path churn.
-/// What: when `events` is `Some(list)`, only those event keys are inspected;
-/// when `None`, every event key under `hooks` is inspected (used by
-/// [`remove_global_trusty_mpm_hooks`] / [`strip_mpm_hook_entries`], which must
-/// clean up all events, not just a fresh-additions subset). Within scope,
-/// filters out matcher groups whose `hooks[*].command` all match
-/// [`is_mpm_hook_command`], removing the event key entirely once its array is
-/// empty. Non-MPM groups and out-of-scope events are left untouched. Returns
-/// `true` if anything was removed.
+/// What: delegates to [`strip_hook_entries_matching_for_events`] with
+/// [`is_mpm_hook_command`] as the predicate.
 /// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
-/// `test_write_project_hooks_replaces_stale_exe_path_group`.
+/// `test_write_project_hooks_replaces_stale_exe_path_group`,
+/// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
 fn strip_mpm_hook_entries_for_events(
     val: &mut serde_json::Value,
     events: Option<&[String]>,
+) -> bool {
+    strip_hook_entries_matching_for_events(val, events, is_mpm_hook_command)
+}
+
+/// Remove hook group ENTRIES matching `matches_cmd` for the given events (or
+/// all events) in-place, at PER-ENTRY (not per-group) granularity.
+///
+/// Why (issue #2948): the original group-level filter (`inner_hooks.iter().all(...)`
+/// then drop-or-keep the WHOLE group) left a hand-mixed group — one entry this
+/// predicate owns alongside one genuinely foreign entry in the SAME matcher
+/// group — completely untouched, since not every entry matched. That silently
+/// failed to strip the owned entry AND (via [`cleanup::event_names_matching`]'s
+/// matching `.all()`) made the contamination invisible to `tm doctor` too.
+/// Filtering each group's `hooks[*]` array individually strips exactly the
+/// matched entries and leaves any foreign entry — and the group itself — in
+/// place; only a group whose `hooks` array becomes empty (every entry matched,
+/// or it started empty) is dropped. Generalised over an arbitrary predicate
+/// (rather than hard-coding [`is_mpm_hook_command`]) so
+/// `session_launch::settings::write_project_hooks` (issue #2003) can reuse the
+/// exact same entry-level replace-by-identity logic for its broader
+/// trusty-owned predicate (lifecycle triad + `trusty-memory` + PM-guard),
+/// keeping the two writers' contamination-safety guarantees identical.
+/// What: when `events` is `Some(list)`, only those event keys are inspected;
+/// when `None`, every event key under `hooks` is inspected. Within scope, each
+/// group's `hooks[*]` array is filtered to drop entries whose `command` matches
+/// `matches_cmd`; a group whose array is left empty is dropped entirely, and an
+/// event key emptied of all groups is removed. Groups with a non-array/absent
+/// `hooks` field (unrecognised shape) are always retained untouched. Returns
+/// `true` if anything was removed.
+/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
+/// `test_write_project_hooks_replaces_stale_exe_path_group`,
+/// `test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group`.
+pub(crate) fn strip_hook_entries_matching_for_events(
+    val: &mut serde_json::Value,
+    events: Option<&[String]>,
+    matches_cmd: impl Fn(&str) -> bool,
 ) -> bool {
     let Some(hooks_map) = val.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
         return false;
@@ -446,19 +484,40 @@ fn strip_mpm_hook_entries_for_events(
             continue;
         };
         let before_len = arr.len();
-        arr.retain(|group| {
-            // Retain groups that do NOT contain exclusively mpm hook commands.
-            let Some(inner_hooks) = group.get("hooks").and_then(|h| h.as_array()) else {
-                return true; // keep unknown shapes
+        let mut event_changed = false;
+
+        // Strip matching entries WITHIN each group first, preserving any
+        // sibling entry that does not match.
+        for group in arr.iter_mut() {
+            let Some(inner_hooks) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+                continue; // unknown shape: leave entirely untouched
             };
-            !inner_hooks.iter().all(|entry| {
-                entry
+            let before_inner_len = inner_hooks.len();
+            inner_hooks.retain(|entry| {
+                !entry
                     .get("command")
                     .and_then(|c| c.as_str())
-                    .is_some_and(is_mpm_hook_command)
-            })
+                    .is_some_and(&matches_cmd)
+            });
+            if inner_hooks.len() != before_inner_len {
+                event_changed = true;
+            }
+        }
+
+        // Now drop groups left with an empty `hooks` array (every entry
+        // matched, or it started empty — same as the pre-#2948 behaviour for
+        // a homogeneous group). Groups with no `hooks` array at all are kept.
+        arr.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_none_or(|inner| !inner.is_empty())
         });
+
         if arr.len() != before_len {
+            event_changed = true;
+        }
+        if event_changed {
             any_changed = true;
             if arr.is_empty() {
                 events_to_remove.push(event_key);

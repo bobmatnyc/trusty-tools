@@ -285,6 +285,44 @@ fn test_strip_mpm_hook_entries_removes_only_mpm_entries() {
     );
 }
 
+/// Why (issue #2948): a hand-mixed group whose `hooks[]` array carries ONE
+/// tm-owned entry alongside ONE foreign entry must have ONLY the tm entry
+/// removed — the group (and the foreign entry) survive. The pre-fix `.all()`
+/// group-level filter left the whole group untouched in this shape.
+/// What: seeds a `PreToolUse` group with a tm entry + a foreign entry, calls
+/// `strip_mpm_hook_entries`, and asserts the group still exists with exactly
+/// the foreign entry remaining.
+#[test]
+fn test_strip_mpm_hook_entries_removes_only_tm_entry_from_mixed_group() {
+    let mut val = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        { "type": "command", "command": "trusty-mpm hook" },
+                        { "type": "command", "command": "claude-mpm hooks fire PreToolUse" }
+                    ]
+                }
+            ]
+        }
+    });
+
+    let changed = strip_mpm_hook_entries(&mut val);
+    assert!(changed, "must report change when the tm entry is stripped");
+
+    let groups = val["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("the mixed group must survive — it still carries a foreign entry");
+    assert_eq!(groups.len(), 1, "the group must not be dropped wholesale");
+    let inner = groups[0]["hooks"].as_array().unwrap();
+    assert_eq!(inner.len(), 1, "only the tm entry must be removed");
+    assert_eq!(
+        inner[0]["command"].as_str().unwrap(),
+        "claude-mpm hooks fire PreToolUse"
+    );
+}
+
 /// Why: absolute-path variants of the MPM hook command must also be
 /// recognised so stale entries from previous abspath installs are stripped.
 #[test]

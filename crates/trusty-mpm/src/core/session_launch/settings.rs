@@ -246,21 +246,34 @@ pub(super) fn write_output_style(
     Ok(())
 }
 
-/// Write the `trusty-memory` hook block into the project's `.claude/settings.json`.
+/// Write the project-tier trusty-mpm-owned hooks into the project's
+/// `.claude/settings.json`.
 ///
-/// Why: `trusty-memory` hooks must fire only for trusty-mpm-managed sessions.
-/// Scoping them to the project settings (instead of the operator's global
-/// `~/.claude/settings.json`) means they no longer run for unrelated Claude
-/// Code sessions such as claude-mpm.
+/// Why (issue #2003): the daemon's managed-launch path spawns `claude
+/// --setting-sources project,local`, excluding the `user` tier where
+/// [`crate::core::standalone::hooks::ensure_managed_hooks`] provisions the
+/// lifecycle triad (circuit breaker / audit log / dashboard). A managed
+/// session therefore never fired those events — only the `trusty-memory` +
+/// PM-guard entries this function previously wrote (by REPLACING the entire
+/// `hooks` key, which also clobbered any pre-existing hooks the project itself
+/// carried). [`super::project_hooks::project_managed_hook_additions`] now
+/// folds the SAME triad definition the user-tier writer uses into this
+/// project-tier write, and the entry-level replace-by-identity strip (issue
+/// #2948's [`crate::core::standalone::hooks::strip_hook_entries_matching_for_events`])
+/// removes only OUR OWN prior entries before merging, so a foreign/hand-added
+/// hook — even one sharing a matcher group with one of ours — survives.
 /// What: reads an existing `<project>/.claude/settings.json` (preserving all
-/// other keys), *replaces* the entire `hooks` key with [`TRUSTY_MEMORY_HOOKS`]
-/// **plus** a `PreToolUse` PM-enforcement guard entry (see
-/// [`pm_guard_hook_value`], issue #1977), and writes it back pretty-printed.
-/// Replacing — rather than merging — the `hooks` key avoids double-firing if
-/// this runs twice. Creates the file and `.claude/` directory when absent.
+/// other keys), strips any existing entry recognised by
+/// [`super::project_hooks::is_project_managed_hook_command`] for the events
+/// about to be (re)written, deep-merges in
+/// [`super::project_hooks::project_managed_hook_additions`] via
+/// [`trusty_common::claude_config::merge_hook_entries`], and writes the result
+/// back pretty-printed. Creates the file and `.claude/` directory when absent.
 /// Test: `write_project_hooks_writes_all_event_types`,
 /// `write_project_hooks_registers_pm_guard`,
-/// `write_project_hooks_replaces_existing`.
+/// `write_project_hooks_replaces_existing`,
+/// `project_hooks_tests::write_project_hooks_writes_lifecycle_triad`,
+/// `project_hooks_tests::write_project_hooks_preserves_foreign_hooks`.
 pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
@@ -279,21 +292,26 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
         Err(_) => serde_json::Value::Object(serde_json::Map::new()),
     };
 
-    // Replace the entire `hooks` key. The bundled block is a constant and is
-    // guaranteed to parse.
-    let mut hooks: serde_json::Value =
-        serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
-    // Register the PM-enforcement PreToolUse guard (issue #1977) alongside the
-    // trusty-memory hooks so the PM is blocked from editing code directly and
-    // steered to delegate. The bundled block is an object, so this insert
-    // always succeeds; guarded defensively regardless.
-    if let Some(obj) = hooks.as_object_mut() {
-        obj.insert("PreToolUse".to_string(), pm_guard_hook_value());
-    }
-    settings["hooks"] = hooks;
+    let additions = super::project_hooks::project_managed_hook_additions();
 
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    // Replace-by-identity at entry granularity: strip any existing entry we
+    // own (trusty-memory / PM-guard / lifecycle-triad) for the events we are
+    // about to (re)add, so re-running this on every launch never duplicates
+    // our own groups while a foreign entry sharing one of our matcher groups
+    // survives untouched.
+    if let Some(events) = additions.get("hooks").and_then(|h| h.as_object()) {
+        let event_keys: Vec<String> = events.keys().cloned().collect();
+        crate::core::standalone::hooks::strip_hook_entries_matching_for_events(
+            &mut settings,
+            Some(&event_keys),
+            super::project_hooks::is_project_managed_hook_command,
+        );
+    }
+
+    let merged = trusty_common::claude_config::merge_hook_entries(&settings, &additions);
+
+    let serialized =
+        serde_json::to_string_pretty(&merged).map_err(|err| PrepError::Deploy(err.to_string()))?;
     std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
         path: settings_path.clone(),
         source,
