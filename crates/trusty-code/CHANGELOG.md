@@ -18,6 +18,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   of always copying the original file's, which silently corrupted the
   trailing byte on either direction of a no-trailing-newline state change
   (closes #2150).
+- the delegated engineer's tool registry (`task::executor::ProjectToolFactory`)
+  now registers `use_skill` when a skills catalog resolved, matching what its
+  system prompt advertises via `with_skills_catalog` — previously the tool
+  call failed with "no tool registered" (closes #2152).
 
 ### Added
 

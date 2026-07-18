@@ -250,6 +250,7 @@ async fn project_tool_factory_threads_parity_mode_into_edit_tool() {
     let factory = ProjectToolFactory {
         project: project.path().to_path_buf(),
         mode: crate::mode::HarnessMode::Parity,
+        skill_resolver: None,
     };
     let agent = crate::agents::AgentConfig::default();
     let ctx = crate::tools::RunContext {
@@ -275,6 +276,78 @@ async fn project_tool_factory_threads_parity_mode_into_edit_tool() {
     assert!(result.content().contains("unified_diff"));
     let updated = std::fs::read_to_string(project.path().join("f.py")).expect("read");
     assert_eq!(updated, "line1\nline2-diffed\n");
+}
+
+/// #2152: `ProjectToolFactory::build` registers `use_skill` when a skill
+/// resolver was threaded in — the gap PR #2942 fixed on the legacy
+/// `run_task/mod.rs` path but left open on this daemon path (`task::executor`),
+/// where the engineer's prompt (`with_skills_catalog`) advertised `use_skill`
+/// while its registry omitted the tool, so a following call errored with
+/// "no tool registered".
+///
+/// Why: the positive case (`Some(resolver)` registers the tool) and the
+/// negative case (`None` must NOT register it) are both asserted directly
+/// against `ProjectToolFactory::build`'s resulting `ToolRegistry`, mirroring
+/// `run_task::tests::use_skill_absent_from_engineer_when_no_skills`'s direct
+/// (non-end-to-end) style — the embedded-default-skill-catalog fallback
+/// (#2895) makes `skill_resolver` virtually always `Some` on any real project
+/// directory, so exercising the `None` branch end-to-end would be impractical.
+/// What: builds one `ProjectToolFactory` with a resolver present and one with
+/// `skill_resolver: None`, calls `.build()` on each, and asserts
+/// `registry.contains("use_skill")` accordingly.
+/// Test: this test.
+#[tokio::test]
+async fn engineer_registry_includes_use_skill_when_catalog_present() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let skills_dir = project.path().join(".claude").join("skills").join("demo");
+    std::fs::create_dir_all(&skills_dir).expect("mkdir skill dir");
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nfull body\n",
+    )
+    .expect("write SKILL.md");
+
+    let mut p = params(&agents, &project, "s");
+    p.mode = crate::mode::HarnessMode::DailyDriver;
+    let (_, resolver) =
+        daily_driver_skills_catalog(&p, p.binding.root().expect("bound")).expect("catalog present");
+
+    let with_resolver = ProjectToolFactory {
+        project: project.path().to_path_buf(),
+        mode: crate::mode::HarnessMode::DailyDriver,
+        skill_resolver: Some(resolver),
+    };
+    let registry = with_resolver
+        .build(
+            &crate::agents::AgentConfig::default(),
+            &RunContext::default(),
+        )
+        .await;
+    assert!(
+        registry.contains("use_skill"),
+        "engineer registry must advertise use_skill when skill_resolver is Some"
+    );
+
+    let without_resolver = ProjectToolFactory {
+        project: project.path().to_path_buf(),
+        mode: crate::mode::HarnessMode::DailyDriver,
+        skill_resolver: None,
+    };
+    let registry = without_resolver
+        .build(
+            &crate::agents::AgentConfig::default(),
+            &RunContext::default(),
+        )
+        .await;
+    assert!(
+        !registry.contains("use_skill"),
+        "engineer registry must NOT advertise use_skill when skill_resolver is None"
+    );
+    assert!(
+        registry.contains("finish_task"),
+        "sanity check: registry should still contain other always-present tools"
+    );
 }
 
 // ── #2207/#2206: daemon-path deadline wiring + distinct status + telemetry ─────
