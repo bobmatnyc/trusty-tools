@@ -702,6 +702,38 @@ pub struct IndexReadinessSnapshot {
     pub summary: String,
 }
 
+/// A cached snapshot of the `Event::ContextBudget` payload (issue #3015 —
+/// `session.get_context_budget` query RPC; surfaced by PR #3014's GUI status
+/// bar, which renders "budget: unavailable" waiting for exactly this API).
+///
+/// Why: `Event::ContextBudget` above is a per-turn STREAM value, not a
+/// queryable one — a client that attaches (or reconnects) between turns has
+/// no way to ask "what is the working-context budget right now"; it can only
+/// ever see events that arrive while it happens to be subscribed. This is
+/// the field-for-field twin of `Event::ContextBudget`'s payload (deliberately
+/// excluding `session_id`, contextual to the cache slot it lives in) so
+/// `SessionRegistry` can cache the last-recorded measurement per session and
+/// `session.get_context_budget` can hand it back verbatim to a
+/// late-attaching client — mirrors [`IndexReadinessSnapshot`] exactly.
+/// What: every field name and type matches the corresponding field on
+/// `Event::ContextBudget` exactly. `SessionRegistry::record_context_budget`
+/// builds one of these first and derives the `Event::ContextBudget` it
+/// publishes from it, so the two can never disagree. All-`Copy` (unlike
+/// `IndexReadinessSnapshot`) since every field is a primitive.
+/// Test: `session::registry_tests::record_context_budget_caches_snapshot_for_late_query`,
+/// `session::protocol_budget::tests::get_context_budget_returns_recorded_snapshot_after_recording`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ContextBudgetSnapshot {
+    pub context_window_tokens: usize,
+    pub overhead_tokens: usize,
+    pub overhead_cap_tokens: usize,
+    pub working_context_pct: u8,
+    pub overhead_pct: u8,
+    pub within_budget: bool,
+    pub compaction_fired: bool,
+    pub compaction_rounds: usize,
+}
+
 impl Event {
     /// Return the event's `session_id` if it has one. Used by the SSE
     /// handler to filter the broadcast stream to a single task subscription.

@@ -24,8 +24,7 @@ use serde::Serialize;
 use super::*;
 use crate::tools::telemetry::{RecallTelemetry, SearchTelemetry};
 
-use crate::agent_loop::ContextBudgetSnapshot;
-use crate::events::IndexReadinessSnapshot;
+use crate::events::{ContextBudgetSnapshot, IndexReadinessSnapshot};
 
 /// `Event::IndexReadiness.state` when the semantic lane is queryable — an
 /// empty search result IS evidence of absence.
@@ -62,6 +61,28 @@ pub enum ReadinessQuery {
     Probed(IndexReadinessSnapshot),
     /// No `record_index_readiness` call has ever landed for this session.
     NeverProbed,
+}
+
+/// `session.get_context_budget`'s response payload (issue #3015).
+///
+/// Why: a session's working-context budget is a single cached value, not a
+/// collection — the same "typed nothing-yet, never a bare `null`" rationale
+/// as [`ReadinessQuery`] applies verbatim: a consumer must be able to tell
+/// "no turn has completed yet" from "a turn completed and every field
+/// happens to be zero" without a discriminant.
+/// What: `#[serde(tag = "status", rename_all = "snake_case")]` so the wire
+/// shape is `{"status":"recorded", ...snapshot fields}` for a session with a
+/// cached measurement, or `{"status":"never_recorded"}` for one with none.
+/// Test: `registry_tests::record_context_budget_caches_snapshot_for_late_query`,
+/// `protocol_budget::tests::get_context_budget_never_recorded_session_returns_never_recorded`.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ContextBudgetQuery {
+    /// A turn has completed for this session; wraps the last-recorded
+    /// snapshot.
+    Recorded(ContextBudgetSnapshot),
+    /// No `record_context_budget` call has ever landed for this session.
+    NeverRecorded,
 }
 
 impl SessionRegistry {
@@ -177,39 +198,95 @@ impl SessionRegistry {
             .unwrap_or(ReadinessQuery::NeverProbed))
     }
 
-    /// Record one turn's working-context budget measurement (epic #2343).
+    /// Record one turn's working-context budget measurement (epic #2343;
+    /// caches the snapshot for late queries as of issue #3015).
     ///
     /// Why: the Infinite Sessions guarantee (working context >= 60%, session
     /// overhead <= 40%) is enforced every single turn and was visible to
     /// nothing — `CadenceOutcome` was computed and dropped. This is the
     /// emission plumbing that lets `task::SessionToolEventSink` forward the
-    /// measurement to a `session.attach`ed UI's budget indicator.
-    /// What: maps a [`ContextBudgetSnapshot`] field-for-field onto
-    /// `Event::ContextBudget`; every value is already computed by the caller,
-    /// so this adds no arithmetic of its own. Errors with `session_not_found`
-    /// if `id` is unknown.
-    /// Test: `registry_tests::record_context_budget_publishes_event`.
+    /// measurement to a `session.attach`ed UI's budget indicator. (issue
+    /// #3015) Also caches the resulting [`ContextBudgetSnapshot`] on the
+    /// session (last-writer-wins), mirroring [`Self::record_index_readiness`],
+    /// so a client that attaches or reconnects AFTER a turn's event already
+    /// fired can still retrieve it via [`Self::get_context_budget`]/
+    /// `session.get_context_budget` — the API PR #3014's GUI status bar
+    /// polls instead of leaving "budget: unavailable" permanently.
+    /// What: maps the caller's `agent_loop::ContextBudgetSnapshot` field-for-
+    /// field onto a cached [`ContextBudgetSnapshot`] first, then derives
+    /// `Event::ContextBudget` from that cached value so the two can never
+    /// disagree; every value is already computed by the caller, so this adds
+    /// no arithmetic of its own. Errors with `session_not_found` if `id` is
+    /// unknown.
+    /// Test: `registry_tests::record_context_budget_publishes_event`,
+    /// `registry_tests::record_context_budget_caches_snapshot_for_late_query`.
     pub fn record_context_budget(
         &self,
         id: &str,
-        snapshot: &ContextBudgetSnapshot,
+        measurement: &crate::agent_loop::ContextBudgetSnapshot,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
+        let snapshot = ContextBudgetSnapshot {
+            context_window_tokens: measurement.context_window,
+            overhead_tokens: measurement.overhead_tokens,
+            overhead_cap_tokens: measurement.overhead_cap_tokens,
+            working_context_pct: measurement.working_context_pct,
+            overhead_pct: measurement.overhead_pct,
+            within_budget: measurement.within_budget,
+            compaction_fired: measurement.fired,
+            compaction_rounds: measurement.rounds,
+        };
+        {
+            let mut sessions = self.lock();
+            if let Some(entry) = sessions.get_mut(id) {
+                entry.context_budget = Some(snapshot);
+            }
+        }
         self.record(
             id,
             Event::ContextBudget {
                 session_id: id.to_string(),
-                context_window_tokens: snapshot.context_window,
+                context_window_tokens: snapshot.context_window_tokens,
                 overhead_tokens: snapshot.overhead_tokens,
                 overhead_cap_tokens: snapshot.overhead_cap_tokens,
                 working_context_pct: snapshot.working_context_pct,
                 overhead_pct: snapshot.overhead_pct,
                 within_budget: snapshot.within_budget,
-                compaction_fired: snapshot.fired,
-                compaction_rounds: snapshot.rounds,
+                compaction_fired: snapshot.compaction_fired,
+                compaction_rounds: snapshot.compaction_rounds,
             },
         );
         Ok(())
+    }
+
+    /// `session.get_context_budget`: return the last-recorded working-context
+    /// budget measurement for a session, for clients that attach after the
+    /// per-turn `Event::ContextBudget` already fired (issue #3015).
+    ///
+    /// Why: [`Self::record_context_budget`] emits its event once per PM turn
+    /// boundary — a client that attaches (or reconnects) between turns has no
+    /// query surface to ask "what is the budget right now", only a stream it
+    /// may have missed. This is that query surface, the exact counterpart to
+    /// [`Self::get_readiness`].
+    /// What: `Err(session_not_found)` if `id` is unknown. Otherwise
+    /// [`ContextBudgetQuery::Recorded`] wrapping the cached
+    /// [`ContextBudgetSnapshot`] if a turn has ever completed for this
+    /// session, or [`ContextBudgetQuery::NeverRecorded`] — a distinct,
+    /// clearly-typed state, never a bare `null` — if no
+    /// `record_context_budget` call has happened yet (e.g. a session queried
+    /// before its first PM turn completes, or a delegated sub-agent session,
+    /// which never emits cadence budget events at all).
+    /// Test: `registry_tests::record_context_budget_caches_snapshot_for_late_query`,
+    /// `protocol_budget::tests::get_context_budget_never_recorded_session_returns_never_recorded`,
+    /// `registry_tests::get_context_budget_unknown_session_errors`.
+    pub fn get_context_budget(&self, id: &str) -> Result<ContextBudgetQuery, RpcError> {
+        self.ensure_exists(id)?;
+        Ok(self
+            .lock()
+            .get(id)
+            .and_then(|e| e.context_budget)
+            .map(ContextBudgetQuery::Recorded)
+            .unwrap_or(ContextBudgetQuery::NeverRecorded))
     }
 
     /// Record a tool invocation starting (#2055 emission plumbing for

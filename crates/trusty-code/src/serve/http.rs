@@ -89,7 +89,8 @@ struct HttpState {
 /// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
 /// session's ring-buffer replay then live events as SSE; `crate::serve::rest`
 /// merges in the `session.*` REST read routes (`GET /sessions`,
-/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`),
+/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`,
+/// (issue #3015) `.../budget`),
 /// (Slice 3) the write routes (`POST /sessions`,
 /// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
 /// `PUT`/`DELETE /sessions/{id}/goal`), (Slice 4) `POST /tasks`, (Slice 5)
@@ -104,7 +105,8 @@ struct HttpState {
 /// `http_rest_post_sessions_route_is_merged_in`,
 /// `http_rest_post_tasks_route_is_merged_in`,
 /// `http_rest_get_fs_route_is_merged_in`,
-/// `http_rest_get_session_agents_route_is_merged_in`.
+/// `http_rest_get_session_agents_route_is_merged_in`,
+/// `http_rest_get_session_budget_route_is_merged_in`.
 pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
@@ -586,6 +588,35 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert!(v["agents"].is_array());
+    }
+
+    /// `GET /sessions/{id}/budget` (issue #3015, part of the `rest::sessions`
+    /// route group `build_axum_router` already merges via
+    /// `rest::sessions::routes`) must be reachable on the SAME router
+    /// `GET /sessions/{id}/events` is — proving the merge actually wires the
+    /// route rather than silently dropping it. Per-route error/status-code
+    /// behaviour is already covered by `rest::sessions::tests`; this test
+    /// only pins the merge itself.
+    #[tokio::test]
+    async fn http_rest_get_session_budget_route_is_merged_in() {
+        let (router, sessions) = router_and_sessions();
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let app = build_axum_router(router, sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{}/budget", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "never_recorded");
     }
 
     /// `GET /sessions/{id}/events` on an unknown session must 404 with a

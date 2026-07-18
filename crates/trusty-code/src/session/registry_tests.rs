@@ -1666,3 +1666,72 @@ async fn record_context_budget_publishes_event() {
             && compaction_rounds == 2
     ));
 }
+
+/// `record_context_budget` must cache the resulting [`events::ContextBudgetSnapshot`]
+/// on the session entry (issue #3015), so a LATER `get_context_budget` call —
+/// without ever re-subscribing to the event stream — retrieves the exact
+/// same state. Mirrors `record_index_readiness_caches_snapshot_for_late_query`.
+///
+/// Why: this is the registry-level half of the late-attaching-client
+/// guarantee: `Event::ContextBudget` fires once per turn and is easy to
+/// miss, so the cache `record_context_budget` writes (not the event itself)
+/// is what `get_context_budget` reads back.
+/// What: records a measurement, then calls `get_context_budget` and asserts
+/// it returns `ContextBudgetQuery::Recorded` with fields matching what was
+/// just recorded.
+/// Test: this test.
+#[tokio::test]
+async fn record_context_budget_caches_snapshot_for_late_query() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    let snapshot = crate::agent_loop::ContextBudgetSnapshot {
+        context_window: 200_000,
+        overhead_tokens: 50_000,
+        overhead_cap_tokens: 80_000,
+        working_context_pct: 75,
+        overhead_pct: 25,
+        within_budget: true,
+        fired: true,
+        rounds: 2,
+    };
+    registry
+        .record_context_budget(&session.id, &snapshot)
+        .unwrap();
+
+    let queried = registry.get_context_budget(&session.id).unwrap();
+    match queried {
+        events::ContextBudgetQuery::Recorded(cached) => {
+            assert_eq!(cached.context_window_tokens, 200_000);
+            assert_eq!(cached.working_context_pct, 75);
+            assert!(cached.within_budget);
+            assert!(cached.compaction_fired);
+            assert_eq!(cached.compaction_rounds, 2);
+        }
+        events::ContextBudgetQuery::NeverRecorded => {
+            panic!("expected a cached snapshot after record_context_budget, got NeverRecorded")
+        }
+    }
+}
+
+/// `get_context_budget` on a session with no recorded measurement must
+/// return the typed `NeverRecorded` variant, not an error or a bare `null`.
+/// Test: this test.
+#[tokio::test]
+async fn get_context_budget_never_recorded_returns_never_recorded() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    let queried = registry.get_context_budget(&session.id).unwrap();
+    assert!(matches!(queried, events::ContextBudgetQuery::NeverRecorded));
+}
+
+/// `get_context_budget` against an unknown session must error, not panic —
+/// mirrors every other registry method's `session_not_found` convention.
+/// Test: this test.
+#[tokio::test]
+async fn get_context_budget_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry.get_context_budget("nope").unwrap_err();
+    assert_eq!(err.code, -32007);
+}

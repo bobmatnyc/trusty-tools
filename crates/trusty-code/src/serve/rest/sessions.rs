@@ -18,6 +18,9 @@
 //!   - `GET /sessions/{id}/transcript` -> `session.get_transcript`
 //!   - `GET /sessions/{id}/readiness` -> `session.get_readiness`
 //!   - `GET /sessions/{id}/goals` -> `session.get_goals`
+//!   - `GET /sessions/{id}/budget` -> `session.get_context_budget` (issue
+//!     #3015 — the API PR #3014's GUI status bar polls instead of leaving
+//!     "budget: unavailable" permanently)
 //!
 //! `crate::serve::http::build_axum_router` merges this into the daemon's
 //! main router alongside `POST /rpc`, `GET /health`, and
@@ -60,6 +63,7 @@ pub fn routes(router: Arc<Router>) -> AxumRouter {
         .route("/sessions/{id}/transcript", get(get_transcript))
         .route("/sessions/{id}/readiness", get(get_readiness))
         .route("/sessions/{id}/goals", get(get_goals))
+        .route("/sessions/{id}/budget", get(get_context_budget))
         .with_state(SessionsState { router })
 }
 
@@ -131,6 +135,27 @@ async fn get_goals(State(state): State<SessionsState>, Path(id): Path<String>) -
     respond(
         &state.router,
         "session.get_goals",
+        json!({"session_id": id}),
+    )
+    .await
+}
+
+/// `GET /sessions/{id}/budget` -> `session.get_context_budget` (issue #3015).
+///
+/// Why: lets a late-attaching/reconnecting client (PR #3014's GUI status
+/// bar) query the working-context budget it may have missed on the SSE
+/// stream, instead of rendering "budget: unavailable" forever.
+/// What: `404` for an unknown `id`; otherwise the `ContextBudgetQuery` JSON
+/// (`{"status":"recorded",...}` or `{"status":"never_recorded"}`).
+/// Test: `tests::get_context_budget_found_returns_200_never_recorded`,
+/// `tests::get_context_budget_missing_returns_404_session_not_found`.
+async fn get_context_budget(
+    State(state): State<SessionsState>,
+    Path(id): Path<String>,
+) -> RestResult {
+    respond(
+        &state.router,
+        "session.get_context_budget",
         json!({"session_id": id}),
     )
     .await
@@ -295,6 +320,30 @@ mod tests {
         let (app, _sessions) = app_and_registry();
 
         let resp = get(&app, "/sessions/does-not-exist/goals").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["code"], -32007);
+    }
+
+    /// `GET /sessions/{id}/budget` on a session with no recorded turn must
+    /// return HTTP 200 with `status: "never_recorded"`, not an error.
+    #[tokio::test]
+    async fn get_context_budget_found_returns_200_never_recorded() {
+        let (app, sessions) = app_and_registry();
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        let resp = get(&app, &format!("/sessions/{}/budget", session.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "never_recorded");
+    }
+
+    /// `GET /sessions/{id}/budget` on an unknown id must 404.
+    #[tokio::test]
+    async fn get_context_budget_missing_returns_404_session_not_found() {
+        let (app, _sessions) = app_and_registry();
+
+        let resp = get(&app, "/sessions/does-not-exist/budget").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let v = body_json(resp).await;
         assert_eq!(v["error"]["code"], -32007);
