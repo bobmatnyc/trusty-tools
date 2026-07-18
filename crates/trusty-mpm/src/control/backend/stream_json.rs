@@ -8,15 +8,23 @@
 //! What: [`StreamJsonBackend`] spawns `claude -p --output-format stream-json
 //! [--append-system-prompt-file …] --workdir <dir>` with `ANTHROPIC_API_KEY`
 //! removed from the child environment via [`build_claude_command`] (the §9.1
-//! no-key-leak seam) and implements [`super::SessionBackend`]. `recv()` reads
-//! stdout line-by-line
-//! and parses each line as a `StreamJsonEvent`. Stderr is captured but never
-//! forwarded. On clean child exit `recv()` returns `None`. A seam for the
-//! crash-watchdog / auto-restart policy (WI-4) is present but not wired in
-//! Phase 1.
+//! no-key-leak seam) and implements [`super::SessionBackend`]. The spawn
+//! itself goes through [`crate::core::spawn_disclaim::disclaimed_piped_spawn`]
+//! (issue #2997): on macOS this disclaims TCC responsibility so the child —
+//! and everything IT forks, e.g. an agent's `cargo build` — is its own
+//! responsible process instead of the access request rolling up to the
+//! signed `trusty-mpm` binary (the same #2819/#2721 App-Data/media-library
+//! mis-attribution class the tmux-hosted path was already fixed for); on
+//! non-macOS it is an unchanged pass-through to `tokio::process::Command`.
+//! `recv()` reads stdout line-by-line and parses each line as a
+//! `StreamJsonEvent`. Stderr is captured but never forwarded. On clean child
+//! exit `recv()` returns `None`. A seam for the crash-watchdog / auto-restart
+//! policy (WI-4) is present but not wired in Phase 1.
 //! Test: `stream_json_spawn_requires_claude` (skipped if `claude` absent),
 //! `stream_json_backend_constructs` (constructor-only; no child process),
-//! `session_input_newtype` in the inline module.
+//! `session_input_newtype` in the inline module. The disclaim spawn itself is
+//! covered by `spawn_piped_disclaimed_*`/`disclaimed_piped_spawn_native_path_round_trips`
+//! in `crate::core::spawn_disclaim`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -25,11 +33,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tracing::{debug, warn};
 
 use crate::control::event::{SessionEvent, StreamJsonEvent};
 use crate::control::id::ControlSessionId;
+use crate::core::spawn_disclaim::{disclaimed_piped_spawn, ChildHandle, DynChildStdin, DynChildStdout};
 
 use super::{SessionBackend, SessionInput};
 
@@ -88,18 +96,19 @@ pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::
 /// daemon supervise a `claude` process without a PTY and without exposing the
 /// interactive readline TUI. It's the only path that gives the actor a
 /// machine-readable event stream (stream-JSON stdout).
-/// What: holds the spawned `Child` handle (for Drop / SIGKILL via
-/// `start_kill()`), a `ChildStdin` writer, and a `BufReader<ChildStdout>`
-/// for line-by-line event parsing. The session ID is carried for event
-/// construction. Note: `tokio::process::Child::start_kill()` sends SIGKILL,
-/// not SIGTERM — a graceful SIGTERM → wait → SIGKILL sequence is deferred to
-/// a later phase once a shutdown timeout is defined.
+/// What: holds the spawned [`ChildHandle`] (for Drop / SIGKILL via
+/// `start_kill()` — uniform across the native and macOS-disclaimed spawn
+/// paths, see [`disclaimed_piped_spawn`]), a [`DynChildStdin`] writer, and a
+/// `BufReader<DynChildStdout>` for line-by-line event parsing. The session ID
+/// is carried for event construction. Note: `ChildHandle::start_kill()` sends
+/// SIGKILL, not SIGTERM — a graceful SIGTERM → wait → SIGKILL sequence is
+/// deferred to a later phase once a shutdown timeout is defined.
 /// Test: `stream_json_backend_constructs`.
 pub struct StreamJsonBackend {
     session_id: ControlSessionId,
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    child: ChildHandle,
+    stdin: DynChildStdin,
+    stdout: BufReader<DynChildStdout>,
 }
 
 impl StreamJsonBackend {
@@ -111,23 +120,24 @@ impl StreamJsonBackend {
     /// What: delegates to [`build_claude_command`] (the §9.1 no-key-leak seam)
     /// for `claude -p --output-format stream-json
     /// [--append-system-prompt-file <prompt_file>] --workdir <workdir>` with
-    /// `ANTHROPIC_API_KEY` removed from the child environment, converts the
-    /// resulting `std::process::Command` to a `tokio::process::Command`, spawns
-    /// it (stdin/stdout piped, stderr captured and never forwarded), and wraps
-    /// the handles.
+    /// `ANTHROPIC_API_KEY` removed from the child environment, then spawns it
+    /// via [`disclaimed_piped_spawn`] (issue #2997 — disclaims TCC
+    /// responsibility on macOS; an unchanged `tokio::process::Command` spawn
+    /// elsewhere) and wraps the resulting handles.
     /// Test: `stream_json_spawn_requires_claude` (integration; #[ignore] if
     /// claude absent); constructor checked by `stream_json_backend_constructs`;
     /// the no-key-leak invariant is asserted at the command seam by
-    /// `build_command_removes_api_key` and the `auth_cost` integration suite.
+    /// `build_command_removes_api_key` and the `auth_cost` integration suite;
+    /// the disclaim spawn itself by `spawn_piped_disclaimed_*` in
+    /// `crate::core::spawn_disclaim`.
     pub fn spawn(
         session_id: ControlSessionId,
         workdir: PathBuf,
         prompt_file: Option<PathBuf>,
     ) -> Result<Self> {
         let std_cmd = build_claude_command(&workdir, prompt_file.as_deref());
-        let mut cmd = Command::from(std_cmd);
 
-        let mut child = cmd.spawn().with_context(|| {
+        let spawned = disclaimed_piped_spawn(std_cmd).with_context(|| {
             format!(
                 "failed to spawn 'claude' for session {} in {}",
                 session_id,
@@ -135,21 +145,11 @@ impl StreamJsonBackend {
             )
         })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .context("claude stdin pipe was not opened")?;
-        let raw_stdout = child
-            .stdout
-            .take()
-            .context("claude stdout pipe was not opened")?;
-        let stdout = BufReader::new(raw_stdout);
-
         Ok(Self {
             session_id,
-            child,
-            stdin,
-            stdout,
+            child: spawned.handle,
+            stdin: spawned.stdin,
+            stdout: BufReader::new(spawned.stdout),
         })
     }
 }
