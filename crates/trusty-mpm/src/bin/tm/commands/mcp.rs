@@ -224,13 +224,19 @@ pub(crate) fn get_cmd(root: Option<&str>, name: &str, json: bool) -> Result<()> 
         println!("  Type:   {}", entry_type(&entry));
         println!("  Target: {}", entry_target(&entry));
         println!("  Scope:  User config");
-        // #2739: the "available everywhere" claim was misleading. Native trusty
-        // servers are bridged into every daemon-managed/fleet session's
-        // `.mcp.json`; non-native (third-party/HTTP) managed servers reach only
-        // the standalone `tm run` driver, NOT fleet sessions.
+        // #2739 (+ follow-up): the "available everywhere" claim was misleading
+        // for fleet sessions until the follow-up landed. As of the follow-up,
+        // EVERY user-scope server here bridges into daemon-managed/fleet
+        // sessions' `.mcp.json` too (native trusty servers via the allowlist
+        // injector; everything else via the custom-server bridge) — EXCEPT a
+        // remote (http/sse) server that declares `headers`, which is rejected
+        // at bridge time (no established secret-delivery channel for HTTP
+        // auth headers into a git-tracked `.mcp.json` yet; see
+        // `session_launch::custom_mcp` docs).
         println!(
-            "          Native trusty servers reach all managed/fleet sessions; \
-             non-native managed servers apply to the standalone `tm run` driver only."
+            "          Bridges into managed/fleet sessions too, unless this is a remote \
+             (http/sse) server with `headers` set (not bridged — no safe delivery channel \
+             for header secrets into .mcp.json yet)."
         );
     }
     Ok(())

@@ -56,19 +56,31 @@ anyway. If a PM delegates "register the duetto-memory MCP" and an agent edits
 `.mcp.json` in whatever worktree happens to be open, that is the wrong scope —
 route it through `tm mcp add` instead.
 
-**Where these servers actually reach (issue #2739):**
+**Where these servers actually reach (issue #2739, plus the custom-server follow-up):**
 
 - The **standalone `tm run` driver** reads this user-scope map directly, so it
   sees **every** server you add here.
 - **Daemon-managed / fleet sessions** (`tm session new`) launch
   `claude --setting-sources project,local`, which does NOT read the user tier.
-  For them, only **native trusty MCP servers** are bridged into each session's
-  workspace `.mcp.json` at spawn — currently the allowlist
-  `slack-mcp`, `telegram-mcp`, `gworkspace-mcp`, `trusty-analyze`
-  (plus the always-provisioned `trusty-memory` / `trusty-search`, which have
-  their own dedicated injectors). Non-native/third-party or HTTP servers you add
-  (e.g. `github`, remote endpoints) apply to the standalone driver only and are
-  **not** injected into fleet sessions.
+  Since the #2739 follow-up, this is bridged in TWO ways:
+  - **Native trusty MCP servers** — the allowlist `slack-mcp`, `telegram-mcp`,
+    `gworkspace-mcp`, `trusty-analyze` (plus the always-provisioned
+    `trusty-memory` / `trusty-search`, which have their own dedicated
+    injectors) — are bridged with `env` secrets routed to a workspace
+    `.env.local` (never the git-tracked `.mcp.json`).
+  - **Every other (custom, non-native) server you add** — stdio or remote
+    (http/sse) — is ALSO bridged now, with the same `env`-to-`.env.local`
+    routing for stdio servers. The one exception: a **remote server that
+    declares `headers`** (e.g. an `Authorization` bearer token) is **not**
+    bridged — there is no established out-of-band delivery channel for an
+    HTTP header secret into `.mcp.json` yet, so it fails closed rather than
+    leak the header into a git-tracked file. A remote server with a clean URL
+    and no `headers` bridges normally.
+  - **Project scope**: a project's own `<project>/.trusty-mpm/manifest.toml`
+    `[mcp.custom.<name>]` table (the same per-project override file
+    `[agents]`/`[skills]` already use) declares servers scoped to THAT
+    project's fleet sessions only, and — on a name collision — OVERRIDES the
+    user-scope registry entry of the same name.
 
 ### The 3 auto-provisioned framework built-ins
 
