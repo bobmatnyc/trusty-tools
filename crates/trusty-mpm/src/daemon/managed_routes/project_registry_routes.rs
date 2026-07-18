@@ -122,12 +122,35 @@ pub async fn list_projects_registry_route(
 /// Why: backs `tm projects register` (#2115). Mirrors the `project_register` MCP
 /// tool: upsert keyed on `name`, preserving any existing `gh`/commit identity
 /// binding so a plain re-register never silently wipes config set elsewhere.
+///
+/// #3025 review follow-up (item 4, MEDIUM — "no safe update path"): before this
+/// fix, `stack_hint`/`tags`/`description`/`gh_user`/`gh_account` were REPLACED
+/// wholesale from the body on every register call — an operator running
+/// `tm projects register <name> --gh-account <login>` (the only way to pin an
+/// account without knowing the PATCH API) on an ALREADY-configured project
+/// silently wiped its description/tags/stack_hint/gh_user. Chosen fix (of the
+/// two the review offered): merge-with-existing for these five optional fields
+/// — an ABSENT body field now falls back to the CURRENT persisted value rather
+/// than resetting it, matching the `github`/`commit_name`/`commit_email`
+/// preservation this route already did (those simply have no body
+/// representation at all). `default_branch` is deliberately UNCHANGED (still
+/// defaults to `"main"` when absent) — it was not named in the review finding
+/// and register's positional/required framing around it differs from the other
+/// five. Explicit clearing of any of these five still works via PATCH's
+/// double-Option `null` semantics (`ConfigField`/`ClearableField` remain
+/// intentionally un-extended — see `project_config.rs`'s module doc for why
+/// adding a `GhAccount` variant there would require matching TUI-form changes
+/// out of scope for this fix).
 /// What: rejects a blank `name`/`repo_url` with 400; builds a [`Project`]
-/// (defaulting `default_branch` to `"main"`), preserves the existing binding,
-/// persists via [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
+/// (defaulting `default_branch` to `"main"`), preserving the CURRENT value of
+/// `stack_hint`/`tags`/`description`/`gh_user`/`gh_account`/`github`/
+/// `commit_name`/`commit_email` for every field the body omits, persists via
+/// [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
 /// and returns 201 with the stored record.
 /// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`,
-/// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`.
+/// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`,
+/// `register_preserves_unspecified_optional_fields_on_existing_project`,
+/// `register_explicit_fields_still_override_existing`.
 pub async fn register_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProjectBody>,
@@ -140,19 +163,27 @@ pub async fn register_project_registry_route(
     }
 
     let registry = state.project_registry().await;
-    // #2184 parity with `project_register`: a re-register REPLACES the record, so
-    // carry any existing per-project `gh`/commit identity binding forward rather
-    // than clobbering it (this route's body cannot express those fields).
     let existing = registry.get(&body.name).await.ok();
     let project = Project {
         name: body.name,
         repo_url: body.repo_url,
         default_branch: body.default_branch.unwrap_or_else(|| "main".to_string()),
-        stack_hint: body.stack_hint,
-        tags: body.tags.unwrap_or_default(),
-        description: body.description,
-        gh_user: body.gh_user,
-        gh_account: body.gh_account,
+        stack_hint: body
+            .stack_hint
+            .or_else(|| existing.as_ref().and_then(|p| p.stack_hint.clone())),
+        tags: body
+            .tags
+            .or_else(|| existing.as_ref().map(|p| p.tags.clone()))
+            .unwrap_or_default(),
+        description: body
+            .description
+            .or_else(|| existing.as_ref().and_then(|p| p.description.clone())),
+        gh_user: body
+            .gh_user
+            .or_else(|| existing.as_ref().and_then(|p| p.gh_user.clone())),
+        gh_account: body
+            .gh_account
+            .or_else(|| existing.as_ref().and_then(|p| p.gh_account.clone())),
         github: existing.as_ref().and_then(|p| p.github.clone()),
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),

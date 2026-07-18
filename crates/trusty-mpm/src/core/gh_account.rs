@@ -660,48 +660,90 @@ pub fn resolve_gh_account_env(
     resolve_gh_account_env_with(gh_account, gh_token_via_cli)
 }
 
-/// Resolve `GH_TOKEN`/`GH_USER` for the project owning workspace `cwd`
-/// (#3025) — the one call `ClaudeCodeAdapter::spawn`/`spawn_resume` uses at
-/// every session spawn/relaunch.
+/// Resolve `GH_TOKEN`/`GH_USER` for the project owning workspace `cwd`,
+/// consulting the [`crate::project::ProjectRegistry`] — the ACTUAL
+/// persistence target for a pinned `gh_account` (#3025 review follow-up:
+/// `tm projects register --gh-account`, the PATCH route, and the
+/// `project_register` MCP tool all write into the registry; an earlier
+/// revision matched against [`crate::core::trusty_tools_config::TrustyToolsConfig`]'s
+/// static `projects:` list instead, which none of those operator-facing
+/// paths ever touches, so spawn-time injection silently no-op'd). A
+/// config-declared `gh_account` is still covered: the daemon's
+/// `seed_from_config` mirrors `TrustyToolsConfig.projects` into the registry
+/// at startup, so it becomes visible here too, one hop later.
 ///
 /// Why: the runtime adapter only has a `cwd`, not a `Project`; detecting the
 /// owning project from `cwd`'s git origin mirrors the exact convention
-/// `bin/tm/gh_identity.rs::load_gh_env` already uses for CLI `gh` calls, so
-/// this and the CLI never disagree about which project a workspace belongs
-/// to.
-/// What: reads `cwd`'s `remote.origin.url`, matches it against the loaded
-/// [`crate::core::trusty_tools_config::TrustyToolsConfig`]'s `projects:` list,
-/// and resolves any pinned `gh_account` via [`resolve_gh_account_env`].
-/// Fail-open throughout: no git origin, no project match, no `gh_account`
-/// pinned, or a resolution failure all yield an EMPTY vec — never blocks the
-/// spawn. A resolution failure is logged as a `tracing::warn!` here so every
-/// call site gets the warning for free.
-/// Test: `resolve_gh_account_env_for_workspace_no_origin_is_empty`
-/// (`gh_account_spawn_env_tests.rs`); the match/resolve logic itself is
-/// covered by `resolve_gh_account_env_with`'s fake-resolver tests.
-pub fn resolve_gh_account_env_for_workspace(cwd: &std::path::Path) -> Vec<(String, String)> {
-    let origin = crate::daemon::managed_routes::inproject::get_origin_url(cwd);
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let gh_account = origin
-        .as_deref()
-        .and_then(|url| {
-            config
-                .projects
-                .iter()
-                .find(|p| crate::project::record::repo_url_matches(&p.repo_url, url))
-        })
-        .and_then(|p| p.gh_account.as_deref());
-    match resolve_gh_account_env(gh_account) {
+/// `bin/tm/gh_identity.rs::load_gh_env` already uses for CLI `gh` calls.
+/// What: runs the blocking `git config --get remote.origin.url` probe on the
+/// blocking pool, looks the result up against every registered project's
+/// `repo_url` (async — [`crate::project::ProjectRegistry::list`]), and — when
+/// a match pins a `gh_account` — mints its token via a SECOND blocking-pool
+/// hop (`gh auth token -u <account>` can block up to [`GH_ENFORCE_TIMEOUT`]).
+/// Both blocking hops run via `tokio::task::spawn_blocking` so this can be
+/// awaited directly from an async spawn/resume handler without stalling the
+/// executor (review follow-up; mirrors `daemon::managed_routes::summary::
+/// probe_stale_assets`'s `spawn_blocking` shape). Fail-open throughout: no
+/// git origin, no project match, no `gh_account` pinned, a panicked blocking
+/// task, or a resolution failure all yield an EMPTY vec — never blocks or
+/// fails the spawn. A resolution failure is logged as a `tracing::warn!`
+/// here so every call site gets the warning for free.
+/// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`
+/// (`gh_account_spawn_env_tests.rs`); the registry-matching step is
+/// separately, directly tested via [`find_pinned_gh_account`] below.
+pub async fn resolve_gh_account_env_for_registry(
+    registry: &crate::project::ProjectRegistry,
+    cwd: &std::path::Path,
+) -> Vec<(String, String)> {
+    let cwd_for_origin = cwd.to_path_buf();
+    let origin = tokio::task::spawn_blocking(move || {
+        crate::daemon::managed_routes::inproject::get_origin_url(&cwd_for_origin)
+    })
+    .await
+    .unwrap_or(None);
+    let Some(origin) = origin else {
+        return Vec::new();
+    };
+
+    let Some(gh_account) = find_pinned_gh_account(registry, &origin).await else {
+        return Vec::new();
+    };
+
+    let cwd_for_log = cwd.to_path_buf();
+    tokio::task::spawn_blocking(move || match resolve_gh_account_env(Some(&gh_account)) {
         None => Vec::new(),
         Some(Ok(vars)) => vars,
         Some(Err(msg)) => {
             tracing::warn!(
-                cwd = %cwd.display(),
+                cwd = %cwd_for_log.display(),
                 "gh_account token resolution failed; spawning without GH_TOKEN: {msg}"
             );
             Vec::new()
         }
-    }
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Look up the pinned `gh_account` for the first registered project whose
+/// `repo_url` matches `origin` — the pure(ish), registry-backed matching
+/// step [`resolve_gh_account_env_for_registry`] delegates to, isolated so it
+/// is directly testable against a real (temp-dir-backed) `ProjectRegistry`
+/// fixture without needing a real git repository or a live `gh` subprocess
+/// (#3025 review follow-up item 1: this is the exact step that proves the
+/// registry — not the static config — is consulted).
+/// Test: `resolve_gh_account_env_for_registry_picks_up_registered_gh_account`,
+/// `resolve_gh_account_env_for_registry_no_match_is_none`,
+/// `resolve_gh_account_env_for_registry_registered_without_gh_account_is_none`.
+async fn find_pinned_gh_account(
+    registry: &crate::project::ProjectRegistry,
+    origin: &str,
+) -> Option<String> {
+    let projects = registry.list().await.ok()?;
+    projects
+        .iter()
+        .find(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))
+        .and_then(|p| p.gh_account.clone())
 }
 
 #[cfg(test)]

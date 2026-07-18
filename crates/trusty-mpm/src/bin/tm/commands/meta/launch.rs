@@ -220,6 +220,11 @@ pub(crate) async fn launch_and_wait(
     );
 
     // (3) Launch `claude` in the pane via the SAME adapter the daemon uses.
+    // `gh_env`: empty — this CLI-driven metaharness path runs outside the
+    // daemon's `DaemonState`/`ProjectRegistry`, so #3025's spawn-env
+    // injection (which needs the registry) is out of scope here, matching
+    // the existing scope boundary around the bare-`tm` in-place relaunch
+    // path (`build_inplace_resume_command`).
     let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver());
     adapter
         .spawn(
@@ -227,6 +232,7 @@ pub(crate) async fn launch_and_wait(
             project_dir,
             &record.task,
             &record.id.to_string(),
+            &[],
         )
         .context("failed to spawn the claude runtime in the tmux pane")?;
     info!(tmux = %record.tmux_name, "meta run: claude runtime spawned");

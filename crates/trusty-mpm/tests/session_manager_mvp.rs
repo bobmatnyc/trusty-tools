@@ -427,6 +427,7 @@ async fn handler_spawn_wires_provision_and_spawn() {
         &prepared.path,
         task,
         &record.id.to_string(),
+        &[],
     );
 
     // Verify that the workspace directory was actually created on disk by the
@@ -749,6 +750,7 @@ async fn tcode_session_spawns_and_accepts_commands() {
         std::path::Path::new("/tmp/tcode-ws"),
         &record.task,
         &record.id.to_string(),
+        &[],
     );
 
     // Issue a command into the session's pane (operator interaction).

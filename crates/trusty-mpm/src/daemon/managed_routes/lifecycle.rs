@@ -32,6 +32,28 @@ use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecor
 #[cfg(test)]
 use crate::session_manager::ManagedError;
 
+/// Resolve the #3025 `GH_TOKEN`/`GH_USER` spawn-env override for `cwd`,
+/// consulting the daemon's shared `ProjectRegistry` (review follow-up — the
+/// actual persistence target for a pinned `gh_account`, not the static
+/// config file).
+///
+/// Why: every `adapter.spawn`/`spawn_resume` call site below needs the
+/// identical "get the registry, resolve for this workspace" sequence;
+/// centralising it here keeps each call site a single `.await` line and
+/// guarantees they cannot diverge.
+/// What: delegates to `core::gh_account::resolve_gh_account_env_for_registry`,
+/// which runs its blocking work (git origin probe, `gh auth token`) via
+/// `tokio::task::spawn_blocking` — safe to call directly from these async
+/// handlers without stalling the executor.
+/// Test: exercised indirectly via the existing `handler_spawn_*`/
+/// `resume_managed_*` tests in `tests/session_manager_mvp.rs` (empty-registry
+/// case — no regression); the registry-matching logic itself is unit-tested
+/// in `core::gh_account_spawn_env_tests`.
+async fn resolve_gh_env(state: &Arc<DaemonState>, cwd: &std::path::Path) -> Vec<(String, String)> {
+    let registry = state.project_registry().await;
+    crate::core::gh_account::resolve_gh_account_env_for_registry(&registry, cwd).await
+}
+
 /// Transport-agnostic inputs for spawning a managed session.
 ///
 /// Why: both the HTTP `POST /…/managed` handler and the MCP `session_new` tool
@@ -641,11 +663,13 @@ async fn spawn_managed_cloned(
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
+    let gh_env = resolve_gh_env(state, &prepared.path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
         &prepared.path,
         &params.task,
         &record.id.to_string(),
+        &gh_env,
     ) {
         warn!(
             id = %record.id,
@@ -915,11 +939,13 @@ async fn spawn_managed_inproject(
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
+    let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
         &worktree,
         &params.task,
         &record.id.to_string(),
+        &gh_env,
     ) {
         warn!(
             id = %record.id,
@@ -1150,11 +1176,13 @@ async fn spawn_managed_local(
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
+    let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
         &workspace,
         &params.task,
         &record.id.to_string(),
+        &gh_env,
     ) {
         warn!(
             id = %record.id,
@@ -1211,11 +1239,13 @@ pub async fn spawn_runtime_for(
 
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
+    let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
         &workspace,
         &record.task,
         &record.id.to_string(),
+        &gh_env,
     ) {
         warn!(
             id = %record.id,
@@ -1408,6 +1438,7 @@ pub async fn resume_managed(
     // (`SessionManager::resume`, just above, already confirmed it — or a
     // freshly recreated one — still exists) instead of a session-scoped
     // target that tmux could resolve to an unrelated active sibling pane.
+    let gh_env = resolve_gh_env(state, &workspace).await;
     if let Err(e) = adapter.spawn_resume(
         &record.tmux_name,
         record.pane_id.as_deref(),
@@ -1415,6 +1446,7 @@ pub async fn resume_managed(
         &record.task,
         record.claude_session_id.as_deref(),
         &record.id.to_string(),
+        &gh_env,
     ) {
         warn!(
             id = %record.id,
