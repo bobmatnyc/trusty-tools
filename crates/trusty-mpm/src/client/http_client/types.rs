@@ -777,8 +777,9 @@ pub struct FleetByProjectWireResponse {
 /// daemon's `HealthResponse` field names keeps the wire contract type-checked.
 /// What: `status` is the liveness word (`"ok"` while up); `catalog_stale` is true
 /// when deployed agents/skills drift from the synced catalog; `catalog_unknown`
-/// is true when the catalog has never been synced. All non-`status` fields
-/// default so an older daemon that returns only `status` still parses.
+/// is true when the catalog has never been synced; `version` is the running
+/// daemon's build version (issue #2332). All non-`status` fields default so an
+/// older daemon that returns only `status` still parses.
 /// Test: `health_snapshot_deserializes` in `tests.rs`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthSnapshot {
@@ -790,4 +791,17 @@ pub struct HealthSnapshot {
     /// True when the catalog has never been synced (nothing to compare).
     #[serde(default)]
     pub catalog_unknown: bool,
+    /// The running daemon's build version (`CARGO_PKG_VERSION`), issue #2332.
+    ///
+    /// Why: `tm doctor`'s stale-daemon check needs to compare the daemon's
+    /// actual running build against the freshly-installed `tm` binary that is
+    /// executing `doctor` itself.
+    /// What: empty string when the daemon predates this field (an older
+    /// daemon's `/health` response omits `version` entirely, and
+    /// `#[serde(default)]` fills the gap) — the staleness check treats an
+    /// empty string as "unknown build, recommend a restart" rather than
+    /// failing to parse.
+    /// Test: `health_snapshot_deserializes`.
+    #[serde(default)]
+    pub version: String,
 }

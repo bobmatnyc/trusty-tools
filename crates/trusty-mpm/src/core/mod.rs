@@ -89,6 +89,7 @@ pub mod standalone;
 pub mod tmux;
 pub mod trusty_tools_config;
 pub mod update_check;
+pub mod version_staleness;
 pub mod workspace_scan;
 pub mod worktree_naming;
 

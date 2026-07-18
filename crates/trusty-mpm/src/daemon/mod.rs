@@ -150,7 +150,15 @@ pub async fn serve_http(
     }
 
     let app = api::router(Arc::clone(&state));
-    info!("daemon listening; press Ctrl-C to stop");
+    // Issue #2332: the startup banner carries the build version + PID so a
+    // `~/Library/Logs/trusty-mpm/stderr.log` timeline can be correlated
+    // against `cargo install` / restart events without guessing which
+    // binary a long-lived daemon is actually running.
+    info!(
+        "daemon listening (trusty-mpm v{} pid {}); press Ctrl-C to stop",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
     // `into_make_service_with_connect_info` makes the peer `SocketAddr` available
     // to handlers via `ConnectInfo` — the loopback-only `POST /rpc` gate (#1221)
     // depends on it. Without connect-info the `ConnectInfo` extractor would 500.
