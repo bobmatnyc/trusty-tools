@@ -447,7 +447,7 @@ async fn resolve_daemon_url_via_gateway_inner(
 /// What: sends `GET <url>/health` (trailing slash on `url` is stripped first
 /// to avoid the double-slash path `//health`); returns `true` if the response
 /// has any 2xx status, `false` on error (connection refused, timeout, etc.).
-/// Test: `probing_resolver_falls_back_when_explicit_unreachable`,
+/// Test: `probing_resolver_errors_when_explicit_unreachable`,
 /// `probing_resolver_wins_when_explicit_reachable`,
 /// `probe_url_trims_trailing_slash`.
 async fn probe_url(client: &reqwest::Client, url: &str) -> bool {

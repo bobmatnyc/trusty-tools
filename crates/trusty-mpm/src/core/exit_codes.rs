@@ -14,10 +14,10 @@
 //! What: [`EXIT_UNAVAILABLE`] — the value `75` (`EX_TEMPFAIL`-adjacent, per
 //! `sysexits.h` conventions, chosen for "temporary/graceful unavailability"
 //! rather than a hard failure).
-//! Test: `exit_code_is_stable` (value); `commands::prune::tests::
-//! unavailable_exit_code_is_stable` and `core::discovery::tests::
-//! exit_code_matches_sm_unavailable_convention` both assert their
-//! re-exported constant equals this one, keeping all three in lockstep.
+//! Test: `exit_code_is_stable` (this module's own invariant test). The two
+//! dependent re-exports are each exercised by their own crate's test in
+//! lockstep with this constant: `commands::prune::tests::unavailable_exit_code_is_stable`
+//! and `core::discovery::tests::exit_code_matches_sm_unavailable_convention`.
 
 /// Process exit code for a graceful "target unavailable" condition.
 ///
