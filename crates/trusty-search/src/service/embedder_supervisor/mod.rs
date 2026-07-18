@@ -131,6 +131,9 @@ impl SupervisorConfig {
             // integration tests that exercise lifecycle, not batch forwarding.
             // Production spawns go through do_spawn, which sets Some(batch).
             sidecar_batch_size: None,
+            // wedge_reset_secs has no trusty-search-specific counterpart yet
+            // (#1450 HIGH follow-up); use the trusty-common default.
+            ..trusty_common::embedder_client::SupervisorConfig::default()
         }
     }
 }
@@ -556,6 +559,9 @@ async fn do_spawn(
         backoff_max_secs: config.backoff_max_secs,
         max_restarts: config.max_restarts,
         sidecar_batch_size: Some(forwarded_batch),
+        // wedge_reset_secs has no trusty-search-specific counterpart yet
+        // (#1450 HIGH follow-up); use the trusty-common default (300s).
+        ..trusty_common::embedder_client::SupervisorConfig::default()
     };
 
     let (supervisor, client_slot, child_pid_slot) =

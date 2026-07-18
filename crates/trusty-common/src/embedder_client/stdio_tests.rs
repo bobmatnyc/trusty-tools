@@ -715,3 +715,121 @@ async fn wait_until_pending_empty(pending: &PendingMap, budget: Duration) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
+
+// ── #1448 CRITICAL follow-up: post-death registration window ───────────
+
+/// Regression test for the CRITICAL gap: a request registered AFTER the
+/// client is already unhealthy (mirrors one issued during the kill/respawn
+/// window, when the OS process may still be alive but no reader task exists
+/// to ever answer it) must error promptly instead of hanging forever.
+///
+/// Why: `spawn_reader_with_monitor`'s one-time drain only clears the pending
+/// map as it existed at the moment the reader died. A request that registers
+/// itself afterward is invisible to that drain — without racing against the
+/// unhealthy signal, `reply_rx.await` would hang forever (no reader left,
+/// and the caller holds its own `Arc<dyn EmbedderClient>`, so nothing ever
+/// drops the sender either).
+///
+/// What: registers a pending entry directly (as `embed_batch` would), flips
+/// `unhealthy` to `true` BEFORE calling `await_reply_or_unhealthy`, then
+/// asserts the call resolves to an error within 2s and that the entry was
+/// removed from `pending` (not leaked).
+///
+/// Test: this test.
+#[tokio::test]
+async fn request_after_reader_death_errors_promptly() {
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, unhealthy_rx) = watch::channel(false);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let id = 42_u64;
+    pending.lock().await.insert(
+        id,
+        PendingRequest {
+            sent: 1,
+            reply: reply_tx,
+        },
+    );
+
+    // The client is already unhealthy before we start waiting — mirrors a
+    // request that registered itself during the kill/respawn window.
+    let _ = unhealthy_tx.send(true);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        await_reply_or_unhealthy(id, &pending, reply_rx, unhealthy_rx),
+    )
+    .await
+    .expect("must error promptly instead of hanging when the client is already unhealthy");
+
+    assert!(
+        matches!(result, Err(EmbedderError::Stdio(_))),
+        "got: {result:?}"
+    );
+    assert!(
+        !pending.lock().await.contains_key(&id),
+        "the stranded pending entry must be removed, not leaked"
+    );
+}
+
+/// Companion to `request_after_reader_death_errors_promptly`: the unhealthy
+/// signal fires WHILE the request is already waiting (not before), proving
+/// the `tokio::select!` race in `await_reply_or_unhealthy` — not just the
+/// pre-registration state — actually wakes up a stranded waiter.
+///
+/// Test: this test.
+#[tokio::test]
+async fn unhealthy_signal_during_wait_errors_promptly() {
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, unhealthy_rx) = watch::channel(false);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let id = 7_u64;
+    pending.lock().await.insert(
+        id,
+        PendingRequest {
+            sent: 1,
+            reply: reply_tx,
+        },
+    );
+
+    // Flip unhealthy shortly after the wait has already begun.
+    let flipper = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = unhealthy_tx.send(true);
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        await_reply_or_unhealthy(id, &pending, reply_rx, unhealthy_rx),
+    )
+    .await
+    .expect("must not hang once the unhealthy signal fires mid-wait");
+
+    assert!(
+        matches!(result, Err(EmbedderError::Stdio(_))),
+        "got: {result:?}"
+    );
+    flipper.await.expect("flipper task must not panic");
+}
+
+/// Guard against the `biased` select breaking the happy path: a real reply
+/// that is already available must still win over an unhealthy signal that
+/// never fires.
+///
+/// Test: this test.
+#[tokio::test]
+async fn await_reply_or_unhealthy_returns_ok_on_real_reply() {
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (_unhealthy_tx, unhealthy_rx) = watch::channel(false);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = reply_tx.send(Ok(vec![vec![0.1_f32, 0.2_f32]]));
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        await_reply_or_unhealthy(1, &pending, reply_rx, unhealthy_rx),
+    )
+    .await
+    .expect("must resolve promptly")
+    .expect("must succeed when a real reply is already available");
+
+    assert_eq!(result, vec![vec![0.1_f32, 0.2_f32]]);
+}

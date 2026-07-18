@@ -207,6 +207,132 @@ mod e2e {
         assert_eq!(vecs2[0].len(), 384);
     }
 
+    /// A wedged-but-alive sidecar (process running, but not responding) must
+    /// be detected and force-restarted via the `unhealthy_signal` arm
+    /// (#1448/#1450) — NOT via `child.wait()`, which never fires for a
+    /// merely-stalled process.
+    ///
+    /// Why: `supervisor_restarts_after_crash` (above) proves the pre-existing
+    /// process-EXIT restart path. This test proves the INDEPENDENT
+    /// unhealthy-signal path added by #1448/#1450: SIGSTOP suspends the child
+    /// without killing it — from the OS's perspective it is still alive
+    /// (`child.wait()` never resolves), so it cannot read stdin or write
+    /// stdout and every embed call against it times out. This is exactly the
+    /// "alive but wedged" condition #1450 targets (the CUDA BFCArena stall
+    /// from #1428 and the CoreML/ANE scheduling stall reported on #1450 both
+    /// look like this from the supervisor's point of view: process up,
+    /// nothing answering).
+    ///
+    /// What: spawns with a short `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` so wedge
+    /// detection does not need to wait out the 30s production default per
+    /// timeout; SIGSTOPs the child; fires a few concurrent embed calls that
+    /// will time out against the frozen process; then condition-polls
+    /// `pid_slot` for a change (proving a NEW child was spawned) within a
+    /// generous budget that also tolerates `embed_call_timeout()`'s
+    /// process-global `OnceLock` caching hazard (if another test in this
+    /// binary already read the env var first, our override here has no
+    /// effect and the default 30s timeout applies instead — the 180s budget
+    /// covers `WEDGED_TIMEOUT_THRESHOLD` x 30s plus kill + fresh model load
+    /// either way). Asserts a post-restart embed succeeds.
+    ///
+    /// Test: this test. Run standalone (not alongside other e2e tests in the
+    /// same process) for the `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` override to
+    /// reliably apply:
+    /// `cargo test -p trusty-search --test embedder_supervisor_e2e \
+    ///   supervisor_restarts_wedged_but_alive_sidecar -- --include-ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "requires trusty-embedderd binary + ONNX model; SIGSTOPs a process (~30-180 s)"]
+    async fn supervisor_restarts_wedged_but_alive_sidecar() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+
+        // Best-effort: shortens wedge detection from the 30s production
+        // default. Has no effect if `embed_call_timeout()`'s OnceLock was
+        // already initialised by an earlier test in this process — see the
+        // doc comment above and the 180s poll budget below, which tolerates
+        // that case.
+        // SAFETY: test-only; this test is meant to run standalone (see doc).
+        unsafe {
+            std::env::set_var("TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS", "3");
+        }
+
+        let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
+        let cfg = SupervisorConfig {
+            max_restarts: 3,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, slot, pid_slot) =
+            EmbedderSupervisor::spawn_stdio(binary, cfg.into_common_for_tests())
+                .await
+                .expect("spawn_stdio failed");
+        let pid_before_wedge = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+        assert!(pid_before_wedge > 0, "initial pid_slot should be non-zero");
+        supervisor.start_supervisor_task();
+
+        // Confirm the sidecar is healthy before wedging it.
+        let client = slot.read().await.clone();
+        client
+            .embed_batch(vec!["before wedge".to_owned()])
+            .await
+            .expect("pre-wedge embed failed");
+
+        // SIGSTOP suspends the process WITHOUT killing it. `child.wait()`
+        // will never resolve for a stopped-but-not-exited process, so any
+        // restart that happens here can ONLY have come from the
+        // `unhealthy_signal` arm, not the pre-existing exit-based path.
+        kill(Pid::from_raw(pid_before_wedge as i32), Signal::SIGSTOP).expect("SIGSTOP failed");
+
+        // Fire a few concurrent embed calls against the frozen process; each
+        // times out independently (bounded by the per-call timeout inside
+        // the client) and feeds the reader task's consecutive-timeout wedge
+        // counter. We don't need to await them to completion here — spawn
+        // them so the polling loop below isn't blocked on any one call.
+        for _ in 0..4 {
+            let client = slot.read().await.clone();
+            tokio::spawn(async move {
+                let _ = client.embed_batch(vec!["during wedge".to_owned()]).await;
+            });
+        }
+
+        // Condition-poll for the wedge-triggered restart (a NEW pid) rather
+        // than a fixed sleep — see the doc comment for why the budget is
+        // generous (tolerates the OnceLock timeout-override hazard).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+        let pid_after_restart = loop {
+            let pid = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+            if pid != 0 && pid != pid_before_wedge {
+                break pid;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "supervisor did not restart the wedged sidecar within 180s — \
+                 pid_slot is still {pid} (expected a new pid != {pid_before_wedge})"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        };
+        assert_ne!(
+            pid_before_wedge, pid_after_restart,
+            "pid_slot must differ after a wedge-triggered restart (new child = new pid) — \
+             SIGSTOP never makes child.wait() resolve, so this proves the \
+             unhealthy_signal arm fired"
+        );
+
+        // Post-restart embed must succeed (slot now points to the new client).
+        let client2 = slot.read().await.clone();
+        let vecs = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client2.embed_batch(vec!["after wedge restart".to_owned()]),
+        )
+        .await
+        .expect("post-restart embed timed out")
+        .expect("post-restart embed failed");
+        assert_eq!(vecs[0].len(), 384);
+
+        unsafe {
+            std::env::remove_var("TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS");
+        }
+    }
+
     /// An empty batch must return an empty Vec without contacting the backend.
     ///
     /// Why: callers may forward empty batches during idle periods; the sidecar

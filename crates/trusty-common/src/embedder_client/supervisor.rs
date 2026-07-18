@@ -82,6 +82,24 @@ pub struct SupervisorConfig {
     /// What: when `Some(n)`, `spawn_child` sets `.env("TRUSTY_EMBED_BATCH_SIZE", n)`.
     /// Test: `sidecar_batch_size_*` tests in this module.
     pub sidecar_batch_size: Option<usize>,
+
+    /// Seconds of sustained health (no further wedge-triggered restart)
+    /// required before the supervisor resets its wedge-restart escalation
+    /// counter back to zero (#1450 HIGH follow-up — restart-storm fix).
+    ///
+    /// Why: a workload-deterministic wedge (the sidecar reliably wedges again
+    /// shortly after every respawn, because the *workload* — not the process
+    /// — is what triggers the stall) would otherwise never escalate: the
+    /// ordinary `consecutive_failures` counter resets on every successful
+    /// respawn, since the respawn *probe* itself succeeds even though the
+    /// real workload re-wedges it moments later. `EmbedderSupervisor` tracks
+    /// wedge-triggered restarts in a separate counter that is reset ONLY
+    /// after this many seconds have elapsed since the last one — not by an
+    /// ordinary respawn-probe success — so a genuine storm eventually trips
+    /// `max_restarts` instead of cycling forever.
+    ///
+    /// Env: `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` (default 300 = 5 minutes).
+    pub wedge_reset_secs: u64,
 }
 
 impl Default for SupervisorConfig {
@@ -91,6 +109,7 @@ impl Default for SupervisorConfig {
             backoff_max_secs: 60,
             startup_timeout_secs: 5,
             sidecar_batch_size: None,
+            wedge_reset_secs: 300,
         }
     }
 }
@@ -101,8 +120,9 @@ impl SupervisorConfig {
     /// Why: lets operators tune restart behaviour in launchd/systemd unit files
     /// without recompiling.
     /// What: reads `TRUSTY_EMBEDDERD_MAX_RESTARTS`,
-    /// `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS`, and
-    /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` from the process environment.
+    /// `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS`,
+    /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`, and
+    /// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` from the process environment.
     /// `sidecar_batch_size` defaults to `None`; callers set it via the struct.
     /// Test: `from_env_uses_defaults` (no env vars set → defaults).
     pub fn from_env() -> Self {
@@ -118,6 +138,7 @@ impl SupervisorConfig {
                 def.startup_timeout_secs,
             ),
             sidecar_batch_size: None,
+            wedge_reset_secs: parse_env("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", def.wedge_reset_secs),
         }
     }
 }
@@ -466,6 +487,58 @@ enum RestartTrigger {
     Unhealthy,
 }
 
+// ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────────
+//
+// A workload-deterministic wedge (the sidecar reliably wedges again shortly
+// after every respawn because the WORKLOAD — not the process — triggers the
+// stall) previously never escalated: `consecutive_failures` reset to 0 on
+// every successful respawn (the respawn *probe* itself succeeds), so the
+// detect(90s)→kill→backoff→reset→re-wedge cycle repeated forever without ever
+// tripping `max_restarts`. `consecutive_wedge_restarts` is a second counter,
+// tracked alongside `consecutive_failures` in `supervision_loop`, that is
+// reset ONLY after sustained real-world health — never by an ordinary
+// respawn-probe success. The two pure functions below implement its
+// reset/give-up decisions so that logic is unit-testable without driving the
+// full async supervision loop.
+
+/// Decide whether the wedge-restart escalation counter should reset.
+///
+/// Why: extracted as a pure function (no I/O, no locking, no `Instant::now()`
+/// call) so the reset decision is directly unit-testable.
+/// What: `true` iff a prior wedge-restart happened (`elapsed_since_last_wedge`
+/// is `Some`) and at least `wedge_reset_secs` have elapsed since then. `None`
+/// (no prior wedge this supervision run) never resets — there is nothing to
+/// reset.
+/// Test: `wedge_counter_should_reset_*` in `supervisor_tests.rs`.
+fn wedge_counter_should_reset(
+    elapsed_since_last_wedge: Option<Duration>,
+    wedge_reset_secs: u64,
+) -> bool {
+    match elapsed_since_last_wedge {
+        Some(elapsed) => elapsed >= Duration::from_secs(wedge_reset_secs),
+        None => false,
+    }
+}
+
+/// Decide whether the supervisor should give up (stop respawning).
+///
+/// Why: extracted as a pure function so the "storm" ceiling check — which now
+/// considers TWO independent counters instead of one — is directly
+/// unit-testable. Either counter alone exceeding `max_restarts` is
+/// sufficient: an ordinary crash storm (`consecutive_failures`) or a wedge
+/// storm that keeps recurring despite each individual respawn's startup
+/// probe succeeding (`consecutive_wedge_restarts`).
+/// What: `consecutive_failures > max_restarts || consecutive_wedge_restarts >
+/// max_restarts`.
+/// Test: `should_give_up_*` in `supervisor_tests.rs`.
+fn should_give_up(
+    consecutive_failures: u32,
+    consecutive_wedge_restarts: u32,
+    max_restarts: u32,
+) -> bool {
+    consecutive_failures > max_restarts || consecutive_wedge_restarts > max_restarts
+}
+
 /// Background supervision loop.
 ///
 /// Why: runs as a detached Tokio task so the parent daemon never blocks on it.
@@ -474,9 +547,19 @@ enum RestartTrigger {
 /// (success → stop supervising; failure → back-off + respawn). An unhealthy
 /// signal force-kills the still-running child first, then falls into the same
 /// back-off + respawn path as a crash. Exits when the process exits cleanly
-/// (code 0) or when `max_restarts` is exceeded. `child_pid_slot` is updated to
-/// the new PID after each successful respawn and cleared to 0 when
-/// supervision terminates so RSS samplers stop sampling a dead PID.
+/// (code 0) or when either restart ceiling (`should_give_up`) is exceeded.
+/// `child_pid_slot` is updated to the new PID after each successful respawn
+/// and cleared to 0 when supervision terminates so RSS samplers stop sampling
+/// a dead PID.
+///
+/// Restart-storm prevention (#1450 HIGH follow-up): `consecutive_wedge_restarts`
+/// tracks wedge-triggered restarts specifically and — unlike
+/// `consecutive_failures` — is NOT reset by an ordinary respawn-probe
+/// success; it only resets once `wedge_counter_should_reset` observes
+/// `config.wedge_reset_secs` of sustained health since the last wedge. Both
+/// counters feed `should_give_up` and both drive the exponential back-off, so
+/// a workload-deterministic wedge that recurs after every respawn eventually
+/// trips `max_restarts` instead of cycling forever at a 1s backoff.
 /// Test: `supervisor_restarts_on_crash`.
 async fn supervision_loop(
     binary_path: PathBuf,
@@ -487,8 +570,25 @@ async fn supervision_loop(
     config: SupervisorConfig,
 ) {
     let mut consecutive_failures: u32 = 0;
+    let mut consecutive_wedge_restarts: u32 = 0;
+    let mut last_wedge_restart_at: Option<tokio::time::Instant> = None;
 
     loop {
+        // Reset the wedge-restart escalation counter once sustained health
+        // has been observed since the last wedge — see `wedge_counter_should_reset`.
+        if wedge_counter_should_reset(
+            last_wedge_restart_at.map(|t| t.elapsed()),
+            config.wedge_reset_secs,
+        ) {
+            tracing::info!(
+                "EmbedderSupervisor: {}s without a further wedge — resetting wedge-restart \
+                 escalation counter (was {consecutive_wedge_restarts})",
+                config.wedge_reset_secs,
+            );
+            consecutive_wedge_restarts = 0;
+            last_wedge_restart_at = None;
+        }
+
         // Race the child actually exiting against the live client reporting
         // itself unhealthy (#1448/#1450) — whichever happens first drives
         // this iteration.
@@ -547,11 +647,15 @@ async fn supervision_loop(
                 );
             }
             RestartTrigger::Unhealthy => {
+                consecutive_wedge_restarts += 1;
+                last_wedge_restart_at = Some(tokio::time::Instant::now());
                 tracing::warn!(
                     "EmbedderSupervisor: sidecar client reported unhealthy (reader task \
                      died, or accumulating call timeouts indicate a wedged process) — \
-                     forcing restart (failure #{}/{})",
+                     forcing restart (failure #{}/{}, wedge-restart #{}/{})",
                     consecutive_failures + 1,
+                    config.max_restarts,
+                    consecutive_wedge_restarts,
                     config.max_restarts,
                 );
                 // The process may still be running (that's the whole point of
@@ -573,24 +677,43 @@ async fn supervision_loop(
 
         consecutive_failures += 1;
 
-        if consecutive_failures > config.max_restarts {
+        if should_give_up(
+            consecutive_failures,
+            consecutive_wedge_restarts,
+            config.max_restarts,
+        ) {
             tracing::error!(
-                "EmbedderSupervisor: exceeded max_restarts={} — giving up. \
-                 Set TRUSTY_EMBEDDERD_MAX_RESTARTS to increase the limit.",
-                config.max_restarts
+                "EmbedderSupervisor: exceeded max_restarts={} ({}) — giving up. \
+                 Set TRUSTY_EMBEDDERD_MAX_RESTARTS to increase the limit, or \
+                 TRUSTY_EMBEDDERD_WEDGE_RESET_SECS if wedges are recurring faster \
+                 than the sustained-health reset window.",
+                config.max_restarts,
+                if consecutive_wedge_restarts > config.max_restarts {
+                    "wedge-restart storm — recurring despite successful respawns"
+                } else {
+                    "process-exit crash storm"
+                },
             );
             return;
         }
 
         // Exponential back-off: 1s, 2s, 4s, …, capped at backoff_max_secs.
-        let delay_secs = (1u64 << consecutive_failures.min(16)).min(config.backoff_max_secs);
+        // A wedge-triggered restart backs off against its own (non-resetting)
+        // counter so a recurring wedge escalates delay across cycles instead
+        // of returning to 1s every time the respawn probe itself succeeds.
+        let backoff_attempt = if is_wedge_restart {
+            consecutive_wedge_restarts
+        } else {
+            consecutive_failures
+        };
+        let delay_secs = (1u64 << backoff_attempt.min(16)).min(config.backoff_max_secs);
         tracing::info!(
             "EmbedderSupervisor: restarting sidecar in {delay_secs}s (attempt \
              {consecutive_failures}{})",
             if is_wedge_restart {
-                ", wedge-triggered"
+                format!(", wedge-triggered, wedge-restart #{consecutive_wedge_restarts}")
             } else {
-                ""
+                String::new()
             },
         );
         tokio::time::sleep(Duration::from_secs(delay_secs)).await;
@@ -625,7 +748,10 @@ async fn supervision_loop(
                 // Publish the PID after the child handle is in place.
                 child_pid_slot.store(new_pid, AtomicOrdering::Release);
 
-                // Reset consecutive failure count — the new process is up.
+                // Reset the ordinary failure count — the new process is up.
+                // NOTE: `consecutive_wedge_restarts` is deliberately NOT reset
+                // here (see its doc comment and `wedge_counter_should_reset`)
+                // — only sustained real-world health resets it.
                 consecutive_failures = 0;
                 tracing::info!(
                     "EmbedderSupervisor: sidecar restarted successfully (pid={new_pid})"

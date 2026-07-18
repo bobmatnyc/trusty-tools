@@ -29,11 +29,21 @@
 //! `unhealthy_signal` alongside `child.wait()` and forces a kill + respawn
 //! either way.
 //!
+//! Post-death registration window (#1448 CRITICAL follow-up): the one-time
+//! drain above only clears requests that existed *at the instant* the reader
+//! died. A request registered afterward — e.g. during the kill/respawn window
+//! while the OS process is still alive — would otherwise `write_all`
+//! successfully and then hang on its reply forever, since no reader task is
+//! left to answer it. `embed_batch` closes this window by (a) failing fast if
+//! the client is already unhealthy before ever registering, and (b) racing
+//! the reply against the unhealthy signal via `await_reply_or_unhealthy` so a
+//! request stranded mid-wait still errors promptly.
+//!
 //! Test: unit tests cover wire format, error decoding, stalled-reader timeout,
-//! the stale-frame misattribution proof, reader-task panic detection, and the
-//! wedged-timeout threshold. Multi-flight + correlation:
-//! `trusty-embedderd/tests/multiflight.rs`. End-to-end: `bit_identical --
-//! --include-ignored`.
+//! the stale-frame misattribution proof, reader-task panic detection, the
+//! wedged-timeout threshold, and the post-death registration window.
+//! Multi-flight + correlation: `trusty-embedderd/tests/multiflight.rs`.
+//! End-to-end: `bit_identical -- --include-ignored`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -286,7 +296,7 @@ impl StdioEmbedderClient {
     /// What: clones the `watch::Sender`'s receiver; the initial value is
     /// `false` and `changed()`/`borrow()` observe the transition to `true`
     /// exactly once, even if the receiver is created after the flip.
-    /// Test: `unhealthy_signal_fires_on_reader_panic`,
+    /// Test: `reader_panic_drains_pending_and_signals_unhealthy`,
     /// `wedge_threshold_fires_after_consecutive_timeouts` in `stdio_tests.rs`.
     pub fn unhealthy_signal(&self) -> watch::Receiver<bool> {
         self.unhealthy_tx.subscribe()
@@ -309,8 +319,8 @@ impl StdioEmbedderClient {
 /// `tokio::spawn` with the handle dropped would otherwise leave those oneshots
 /// (and therefore their `embed_batch` callers) hanging forever. Either way
 /// (panic or normal exit) the monitor flips the sender to `true`.
-/// Test: `unhealthy_signal_fires_on_reader_panic`,
-/// `reader_panic_drains_pending_requests_immediately` in `stdio_tests.rs`.
+/// Test: `reader_panic_drains_pending_and_signals_unhealthy`,
+/// `reader_eof_exit_also_signals_unhealthy` in `stdio_tests.rs`.
 fn spawn_reader_with_monitor<R>(
     reader: R,
     pending: PendingMap,
@@ -614,6 +624,59 @@ fn decode_response(line: &str, sent: usize) -> Result<Vec<Vec<f32>>, EmbedderErr
     Ok(result.embeddings)
 }
 
+/// Race a request's reply against the client's unhealthy signal (#1448
+/// CRITICAL fix).
+///
+/// Why: the one-time drain in `spawn_reader_with_monitor`'s monitor task only
+/// clears the requests that existed *at the instant* the reader died. A NEW
+/// `embed_batch` call registered during the kill/respawn window (process
+/// still alive, no reader task left to answer, drain already ran) would
+/// otherwise `write_all` successfully and then hang on `reply_rx.await`
+/// forever — nothing will ever resolve that oneshot. Racing the reply against
+/// `unhealthy_rx.changed()` closes that window: once the client is (or
+/// becomes) unhealthy, the caller gets a prompt error instead of hanging.
+/// What: `biased` select prefers a real reply if one is already available
+/// (avoids discarding a legitimate last-moment success in favour of an error
+/// that raced it). On the unhealthy branch, removes this request's own entry
+/// from `pending` (it will never be answered) before returning an error.
+/// Extracted as a standalone function — generic over its inputs rather than
+/// `&self` — so it is unit-testable without a real child process.
+/// Test: `request_after_reader_death_errors_promptly`,
+/// `unhealthy_signal_during_wait_errors_promptly`,
+/// `await_reply_or_unhealthy_returns_ok_on_real_reply` in `stdio_tests.rs`.
+async fn await_reply_or_unhealthy(
+    id: u64,
+    pending: &PendingMap,
+    reply_rx: oneshot::Receiver<Result<Vec<Vec<f32>>, EmbedderError>>,
+    mut unhealthy_rx: watch::Receiver<bool>,
+) -> Result<Vec<Vec<f32>>, EmbedderError> {
+    tokio::select! {
+        biased;
+
+        recv = reply_rx => {
+            recv.map_err(|_| EmbedderError::Stdio(
+                "reader task dropped reply channel (sidecar crashed or was restarted)".to_owned(),
+            ))?
+        }
+
+        changed = unhealthy_rx.changed() => {
+            // `Ok(())` means the value just flipped to true; `Err` means the
+            // sender was dropped (the client itself is gone) — either way,
+            // nobody is left to answer this request.
+            let _ = changed;
+            {
+                let mut guard = pending.lock().await;
+                guard.remove(&id);
+            }
+            Err(EmbedderError::Stdio(format!(
+                "embedder client became unhealthy while awaiting a reply (id={id}); \
+                 reader task died or the sidecar was judged wedged — a supervisor \
+                 restart is likely already in progress"
+            )))
+        }
+    }
+}
+
 /// Drain all pending requests with an error (EOF / crash path).
 ///
 /// Why: prevents callers from hanging when the reader exits. Supervisor then
@@ -645,12 +708,37 @@ impl EmbedderClient for StdioEmbedderClient {
     /// write + flush), then awaits the oneshot. Reader task dispatches replies
     /// by echoed JSON-RPC id, so stale/orphaned frames from timed-out requests
     /// can never be misattributed to new requests.
-    /// Test: `cargo test -p trusty-embedderd --test multiflight`
+    ///
+    /// #1448 CRITICAL fix: a request can be issued during the window after the
+    /// reader task has died (panic or wedge-declared) but before the
+    /// supervisor has killed + respawned the process. The one-time drain that
+    /// runs when the reader dies cannot see a request that didn't exist yet,
+    /// so this method (a) fails fast if the client is already known unhealthy,
+    /// before ever registering a pending entry, and (b) races the reply
+    /// against the unhealthy signal via `await_reply_or_unhealthy` so a
+    /// request that becomes stranded mid-wait still errors promptly instead
+    /// of hanging forever.
+    /// Test: `cargo test -p trusty-embedderd --test multiflight`;
+    /// `request_after_reader_death_errors_promptly`,
+    /// `unhealthy_signal_during_wait_errors_promptly` in `stdio_tests.rs`.
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
         let sent = texts.len();
+
+        // Fail fast if the client is already known unhealthy (#1448): avoids
+        // registering a pending entry and writing to stdin when no reader
+        // task exists to ever answer it.
+        let unhealthy_rx = self.unhealthy_tx.subscribe();
+        if *unhealthy_rx.borrow() {
+            return Err(EmbedderError::Stdio(
+                "embedder client is unhealthy (reader task died or the sidecar was \
+                 judged wedged); refusing new request — a supervisor restart is \
+                 likely already in progress"
+                    .to_owned(),
+            ));
+        }
 
         // Bound concurrent in-flight requests.
         let _permit = self
@@ -702,12 +790,10 @@ impl EmbedderClient for StdioEmbedderClient {
         // stdin lock released — next concurrent caller can write immediately.
         // permit is held until this function returns, bounding inflight depth.
 
-        // Await the reader task's dispatch.
-        let result = reply_rx.await.map_err(|_| {
-            EmbedderError::Stdio(
-                "reader task dropped reply channel (sidecar crashed or was restarted)".to_owned(),
-            )
-        })?;
+        // Await the reader task's dispatch, racing against the unhealthy
+        // signal (#1448) so a reader death or wedge declaration that happens
+        // AFTER this request was registered still resolves promptly.
+        let result = await_reply_or_unhealthy(id, &self.pending, reply_rx, unhealthy_rx).await;
 
         tracing::debug!(n = sent, id, "StdioEmbedderClient: batch complete");
         result
