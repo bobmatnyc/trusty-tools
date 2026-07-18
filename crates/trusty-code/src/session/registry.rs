@@ -114,6 +114,108 @@ struct SessionEntry {
     /// so a client that attaches AFTER the one-time `Event::IndexReadiness`
     /// fired can still retrieve the current state.
     readiness: Option<IndexReadinessSnapshot>,
+    /// (DOC-39 §5.4) Live per-agent roster, in first-seen order — the
+    /// AUTHORITATIVE state `session.get_agents` reads (see
+    /// `session::registry::agents`'s module docs). Updated by [`Self::record`]
+    /// (the SAME call every `record_tool_*` plumbing method already routes
+    /// through) whenever the event carries `agent`/`agent_id`, so it is
+    /// exactly as fresh as the ring buffer — but unlike `ring`, it is NEVER
+    /// evicted by `ring_capacity`. A code-critic HIGH on the #2962 PR caught
+    /// the bug this field exists to close: `session.get_agents` originally
+    /// FOLDED the bounded ring buffer directly, so a long-running agent's
+    /// `ToolStarted` could age out of the ring before any later attributed
+    /// event for that same `agent_id` landed, making it vanish from the
+    /// roster entirely — indistinguishable from "never spawned" while it may
+    /// still genuinely be running. A `Vec` (not a `HashMap`) because the
+    /// roster's first-seen ORDER is part of its contract and one session's
+    /// distinct-agent cardinality is small, so `record`'s linear find-or-insert
+    /// scan is cheap.
+    agents: Vec<AgentRosterState>,
+}
+
+/// One agent's live roster state inside a [`SessionEntry`] (DOC-39 §5.4) —
+/// see that field's own docs for why this exists separately from the ring
+/// buffer. `session::registry::agents::get_agents` reads this directly (not
+/// the ring) to build `session.get_agents`'s wire response.
+///
+/// Why: `agent_id` is stored inline (rather than as a `HashMap` key) so the
+/// containing `Vec`'s order doubles as the roster's first-seen order with no
+/// second parallel structure to keep in sync.
+/// What: `running` is `true` from the last-seen `ToolStarted` for this
+/// `agent_id` until the next `ToolFinished`/`ToolError`/telemetry event for
+/// the SAME id flips it back to `false` — see
+/// `session::registry::agents::tool_attribution`'s docs for why tool-dispatch
+/// ordering makes "last event wins" well-defined without needing to
+/// correlate `call_id`.
+struct AgentRosterState {
+    agent_id: String,
+    name: String,
+    running: bool,
+}
+
+impl SessionEntry {
+    /// Fold one event into `self.agents` (DOC-39 §5.4) if it carries
+    /// `agent`/`agent_id`; a no-op for every other `Event` variant.
+    ///
+    /// Why: the single update path for the always-retained roster — called
+    /// from [`SessionRegistry::record`] under the SAME lock that pushes onto
+    /// `ring`, so the two can never observe a different set of events.
+    /// What: find-or-insert by `agent_id` (empty ids are skipped — nothing
+    /// to key a roster row on), updating `name` (last-writer-wins) and
+    /// `running` (`true` only for `ToolStarted`; every other attributed kind
+    /// fires only after its tool call already completed — see
+    /// `session::registry::agents`'s module docs for the tool-dispatch
+    /// ordering that makes this well-defined).
+    fn note_agent_activity(&mut self, event: &Event) {
+        let Some((agent, agent_id, running)) = tool_attribution(event) else {
+            return;
+        };
+        if agent_id.is_empty() {
+            return;
+        }
+        match self.agents.iter_mut().find(|a| a.agent_id == agent_id) {
+            Some(existing) => {
+                existing.name = agent.to_string();
+                existing.running = running;
+            }
+            None => self.agents.push(AgentRosterState {
+                agent_id: agent_id.to_string(),
+                name: agent.to_string(),
+                running,
+            }),
+        }
+    }
+}
+
+/// Extract `(agent, agent_id, is_running)` from the attribution events the
+/// live roster (DOC-39 §5.4) cares about, or `None` for every other `Event`
+/// variant.
+///
+/// Why: shared by [`SessionEntry::note_agent_activity`] (the write path) and
+/// `session::registry::agents::get_agents`'s docs (which point back here) —
+/// centralises which events count as roster-relevant activity.
+/// What: `true` only for `ToolStarted`; every other attributed kind fires
+/// only after its tool call already completed
+/// (`ToolStarted` -> `ToolFinished`/`ToolError` -> optional telemetry).
+fn tool_attribution(event: &Event) -> Option<(&str, &str, bool)> {
+    match event {
+        Event::ToolStarted {
+            agent, agent_id, ..
+        } => Some((agent, agent_id, true)),
+        Event::ToolFinished {
+            agent, agent_id, ..
+        } => Some((agent, agent_id, false)),
+        Event::ToolError {
+            agent, agent_id, ..
+        } => Some((agent, agent_id, false)),
+        Event::SearchPerformed {
+            agent, agent_id, ..
+        } => Some((agent, agent_id, false)),
+        Event::MemoryRecalled {
+            agent, agent_id, ..
+        } => Some((agent, agent_id, false)),
+        _ => None,
+    }
 }
 
 /// #2056: bookkeeping for one in-flight background task execution.
@@ -214,6 +316,7 @@ impl SessionRegistry {
                     pm_transcript: None,
                     memory_sink: None,
                     readiness: None,
+                    agents: Vec::new(),
                 },
             );
         }
@@ -818,7 +921,11 @@ impl SessionRegistry {
     /// Why: every lifecycle/tool/log/progress/message event goes through
     /// this ONE function so `seq` assignment, the ring buffer, and the live
     /// bus can never drift out of sync with each other — the correctness
-    /// property `attach_replay_then_live_seq_is_contiguous` verifies.
+    /// property `attach_replay_then_live_seq_is_contiguous` verifies. It is
+    /// ALSO the one place `SessionEntry::agents` (DOC-39 §5.4) is updated —
+    /// the same critical section that pushes onto the capacity-bounded
+    /// `ring`, so the always-retained roster and the ring can never observe
+    /// a different event even transiently.
     /// What: a no-op (no envelope built, nothing published) if `id` is
     /// unknown — callers that need a hard error check existence first
     /// (`send`, `cancel`, every `record_*` plumbing method all do).
@@ -834,6 +941,7 @@ impl SessionRegistry {
                 entry.ring.pop_front();
             }
             entry.ring.push_back(envelope.clone());
+            entry.note_agent_activity(&envelope.event);
             envelope
         };
         crate::events::publish(envelope);

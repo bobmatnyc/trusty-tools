@@ -1,4 +1,4 @@
-//! `SessionRegistry::get_agents` — the live agent-roster fold behind
+//! `SessionRegistry::get_agents` — the live agent-roster query behind
 //! `session.get_agents` (DOC-39 §5.4). Split out of `registry.rs` purely to
 //! keep that production file under the crate's 500-SLOC cap — this is a
 //! child module of `registry` (declared via `#[path = ...] mod agents;`), so
@@ -10,18 +10,28 @@
 //! the shape §2.1 forbids (C-1: the daemon owns all logic; a client never
 //! derives). §5.4 names `session.get_agents` as "the principled endpoint;
 //! the fold is a Phase-1 loan, not a design" and directs that loan to be
-//! repaid by moving the fold server-side. This module is that repayment: the
-//! SAME fold, now performed once by the daemon over its own ring buffer
-//! rather than N times by N clients.
-//! What: [`get_agents`] folds a session's ring-buffer replay
-//! (`SessionRegistry::replay`, the same envelopes `session.attach`/the SSE
-//! route already expose) over the tool-attribution events every agent-loop
-//! tool dispatch already emits (`ToolStarted`/`ToolFinished`/`ToolError`/
-//! `SearchPerformed`/`MemoryRecalled` — all carry `agent` + `agent_id` since
-//! #2898/DOC-39 AC-13), producing one [`AgentRosterEntry`] per distinct
-//! `agent_id` in first-seen order. `state` is derived from the LAST
-//! attribution event seen for that `agent_id`: `"running"` if it was a
-//! `ToolStarted` with no later event for that id, `"idle"` otherwise.
+//! repaid by moving the fold server-side.
+//!
+//! **This module went through two designs, and the first one had a bug a
+//! code-critic review on the #2962 PR caught as a HIGH.** The first cut
+//! folded `SessionRegistry::replay`'s ring-buffer snapshot on every
+//! `get_agents` call. That moved WHERE the fold ran (daemon, not client) but
+//! not WHAT it could lose: the ring buffer is capacity-bounded
+//! (`ring_capacity`, default [`super::DEFAULT_RING_CAPACITY`]) and evicts
+//! oldest-first, so a long-running agent's `ToolStarted` could age out of
+//! the ring before any LATER attributed event for that same `agent_id`
+//! landed — making it vanish from the roster entirely, indistinguishable
+//! from "never spawned" even though it may still genuinely be running. That
+//! is the exact silent-data-loss shape §5.4's original text warned about;
+//! folding server-side did not close it.
+//! What: [`get_agents`] instead reads `SessionEntry::agents` — an
+//! ALWAYS-RETAINED `Vec<AgentRosterState>`, kept up to date by
+//! `SessionEntry::note_agent_activity` (called from
+//! `SessionRegistry::record`, the SAME critical section that pushes onto the
+//! ring — see that field's own docs in `registry.rs`) and evicted only when
+//! the session itself goes away, never by ring capacity. This closes the
+//! HIGH: an agent's roster row survives for the life of the session
+//! regardless of how much ring-buffer traffic follows it.
 //!
 //! **What is NOT populated, and why (§5.4 AC-15.1 is only partially met):**
 //! - `model` — always `None`. No production event ties a resolved model
@@ -40,35 +50,32 @@
 //!   they are net-new domain state, not a folding gap.
 //!
 //! `AgentSpawned`/`AgentStarted`/`AgentDone`/`AgentFailed` (DOC-39 AC-13)
-//! are NOT folded here even though their shape looks purpose-built for a
+//! are NOT sources here even though their shape looks purpose-built for a
 //! roster: `events.rs`'s own docs and #2898's CHANGELOG entry record that
-//! none of them are emitted by any production call site yet, so folding them
-//! would silently return an always-empty roster instead of the real,
-//! already-flowing tool-attribution activity.
+//! none of them are emitted by any production call site yet, so keying off
+//! them would silently return an always-empty roster instead of the real,
+//! already-flowing tool-attribution activity `registry.rs::tool_attribution`
+//! sources from.
 //! Test: `registry_agents::tests::*`; `protocol_agents::tests::*` covers the
 //! RPC-level wiring.
-
-use std::collections::HashMap;
 
 use serde::Serialize;
 
 use super::*;
-use crate::events::Event;
 
-/// `state` value for an agent whose most recent attributed event is a
-/// `ToolStarted` with no later attributed event on record — a tool call is
-/// (as far as the ring buffer shows) still in flight.
+/// `state` value for an agent whose live roster row (`AgentRosterState`) is
+/// currently `running: true` — its last known event is an unmatched
+/// `ToolStarted`.
 const STATE_RUNNING: &str = "running";
-/// `state` value for an agent whose most recent attributed event is a
-/// completion (`ToolFinished`/`ToolError`/`SearchPerformed`/
-/// `MemoryRecalled`) — no tool call is known to be in flight.
+/// `state` value for an agent whose live roster row is `running: false` — no
+/// tool call is known to be in flight.
 const STATE_IDLE: &str = "idle";
 
 /// One entry in `session.get_agents`'s live roster (DOC-39 §5.4).
 ///
 /// Why: the wire shape `session.get_agents` returns per agent — see the
-/// module docs for exactly which fields are folded from real state and which
-/// are deferred defaults.
+/// module docs for exactly which fields are read from the always-retained
+/// `SessionEntry::agents` state and which are deferred defaults.
 /// What: `agent_id` is the DOC-39 AC-13 stable per-spawn id; `name` is the
 /// human-readable agent name (`"pm"` for the root loop, an agent config name
 /// like `"python-engineer"` for a delegation). See module docs for
@@ -85,87 +92,44 @@ pub struct AgentRosterEntry {
     pub files_changed: Vec<String>,
 }
 
-/// Extract `(agent, agent_id, is_running)` from the attribution events the
-/// roster fold cares about, or `None` for every other `Event` variant.
-///
-/// Why: centralises which events count as roster-relevant activity — see the
-/// module docs for the full attribution list and the tool-dispatch ordering
-/// (`ToolStarted` -> `ToolFinished`/`ToolError` -> optional telemetry) that
-/// makes `is_running` well-defined from event KIND alone, with no need to
-/// correlate `call_id`.
-/// What: `true` only for `ToolStarted`; every other attributed kind fires
-/// only after its tool call already completed.
-fn tool_attribution(event: &Event) -> Option<(&str, &str, bool)> {
-    match event {
-        Event::ToolStarted {
-            agent, agent_id, ..
-        } => Some((agent, agent_id, true)),
-        Event::ToolFinished {
-            agent, agent_id, ..
-        } => Some((agent, agent_id, false)),
-        Event::ToolError {
-            agent, agent_id, ..
-        } => Some((agent, agent_id, false)),
-        Event::SearchPerformed {
-            agent, agent_id, ..
-        } => Some((agent, agent_id, false)),
-        Event::MemoryRecalled {
-            agent, agent_id, ..
-        } => Some((agent, agent_id, false)),
-        _ => None,
-    }
-}
-
 impl SessionRegistry {
     /// `session.get_agents(session_id) -> { agents: [AgentRosterEntry] }`
     /// (DOC-39 §5.4).
     ///
-    /// Why: the principled, daemon-owned replacement for the client-side
-    /// ring-buffer fold §5.4 acknowledges as a time-boxed Phase-1 loan — see
-    /// the module docs.
-    /// What: `-32007 session_not_found` if `id` is unknown (via
-    /// [`Self::replay`]). Otherwise folds the ring-buffer replay into one
-    /// [`AgentRosterEntry`] per distinct `agent_id`, in the order each
-    /// `agent_id` was first seen. A session with no tool activity yet
-    /// returns an empty roster, not an error — the same "empty means nothing
-    /// yet" convention `session.get_goals`/`session.get_transcript` use.
+    /// Why: the principled, daemon-owned, EVICTION-SAFE replacement for the
+    /// client-side ring-buffer fold §5.4 originally acknowledged as a
+    /// time-boxed Phase-1 loan — see the module docs for why reading the
+    /// bounded ring directly (this endpoint's first cut) was itself still a
+    /// silent-data-loss bug, not a fix.
+    /// What: `-32007 session_not_found` if `id` is unknown. Otherwise
+    /// projects `SessionEntry::agents` (the always-retained per-agent
+    /// roster, in first-seen order) into one [`AgentRosterEntry`] per row. A
+    /// session with no tool activity yet returns an empty roster, not an
+    /// error — the same "empty means nothing yet" convention
+    /// `session.get_goals`/`session.get_transcript` use.
     /// Test: `registry_agents::tests::get_agents_empty_session_returns_empty_roster`,
     /// `registry_agents::tests::get_agents_running_tool_reports_running_state`,
     /// `registry_agents::tests::get_agents_finished_tool_reports_idle_state`,
+    /// `registry_agents::tests::get_agents_distinguishes_same_named_concurrent_spawns`,
+    /// `registry_agents::tests::get_agents_survives_ring_eviction`,
     /// `registry_agents::tests::get_agents_unknown_session_errors`.
     pub fn get_agents(&self, id: &str) -> Result<Vec<AgentRosterEntry>, RpcError> {
-        let envelopes = self.replay(id)?;
-        let mut order: Vec<String> = Vec::new();
-        let mut roster: HashMap<String, AgentRosterEntry> = HashMap::new();
-
-        for envelope in &envelopes {
-            let Some((agent, agent_id, running)) = tool_attribution(&envelope.event) else {
-                continue;
-            };
-            if agent_id.is_empty() {
-                // Pre-#2898 recorded events (or a test double) with no
-                // stable id — nothing to key a roster row on.
-                continue;
-            }
-            let entry = roster.entry(agent_id.to_string()).or_insert_with(|| {
-                order.push(agent_id.to_string());
-                AgentRosterEntry {
-                    agent_id: agent_id.to_string(),
-                    name: agent.to_string(),
-                    model: None,
-                    state: STATE_IDLE.to_string(),
-                    task: None,
-                    todos: Vec::new(),
-                    files_changed: Vec::new(),
-                }
-            });
-            entry.name = agent.to_string();
-            entry.state = if running { STATE_RUNNING } else { STATE_IDLE }.to_string();
-        }
-
-        Ok(order
-            .into_iter()
-            .filter_map(|id| roster.remove(&id))
+        let sessions = self.lock();
+        let entry = sessions
+            .get(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        Ok(entry
+            .agents
+            .iter()
+            .map(|a| AgentRosterEntry {
+                agent_id: a.agent_id.clone(),
+                name: a.name.clone(),
+                model: None,
+                state: if a.running { STATE_RUNNING } else { STATE_IDLE }.to_string(),
+                task: None,
+                todos: Vec::new(),
+                files_changed: Vec::new(),
+            })
             .collect())
     }
 }
@@ -253,6 +217,69 @@ mod tests {
         assert_eq!(roster[0].agent_id, "spawn-a");
         assert_eq!(roster[1].agent_id, "spawn-b");
         assert!(roster.iter().all(|a| a.name == "python-engineer"));
+    }
+
+    /// THE code-critic HIGH this module's second design closes: an agent
+    /// whose `ToolStarted` has aged OUT of the (here, tiny) ring buffer must
+    /// still appear in `get_agents`, still `"running"` — the ring's bounded
+    /// capacity must never be able to make a still-running agent vanish from
+    /// the roster. Uses `SessionRegistry::with_capacity` (the same seam
+    /// `registry_tests.rs` uses for `ring_buffer_drops_oldest_when_full`) to
+    /// force eviction cheaply instead of pushing thousands of events.
+    #[test]
+    fn get_agents_survives_ring_eviction() {
+        let registry = SessionRegistry::with_capacity(2);
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        // Agent A starts a tool call — its `ToolStarted` is recorded at some
+        // early `seq`.
+        registry
+            .record_tool_started(&session.id, "python-engineer", "agent-a", "bash", "c1", "x")
+            .unwrap();
+
+        // Agent B then starts and finishes enough tool calls to push A's
+        // `ToolStarted` out of the (capacity-2) ring buffer entirely.
+        for i in 0..5 {
+            let call_id = format!("b-{i}");
+            registry
+                .record_tool_started(&session.id, "engineer-b", "agent-b", "bash", &call_id, "y")
+                .unwrap();
+            registry
+                .record_tool_finished(
+                    &session.id,
+                    "engineer-b",
+                    "agent-b",
+                    "bash",
+                    &call_id,
+                    true,
+                    "ok",
+                )
+                .unwrap();
+        }
+
+        // Sanity check: A's `ToolStarted` really is no longer in the replay
+        // — this test would be vacuous otherwise.
+        let replay = registry.replay(&session.id).unwrap();
+        assert!(
+            !replay.iter().any(|e| matches!(
+                &e.event,
+                crate::events::Event::ToolStarted { agent_id, .. } if agent_id == "agent-a"
+            )),
+            "test setup bug: agent-a's ToolStarted must have been evicted from the ring"
+        );
+
+        // THE assertion: agent-a still appears in the roster, still
+        // "running" — the always-retained map survived what the ring did not.
+        let roster = registry.get_agents(&session.id).unwrap();
+        let agent_a = roster
+            .iter()
+            .find(|a| a.agent_id == "agent-a")
+            .unwrap_or_else(|| panic!("agent-a must survive ring eviction: {roster:?}"));
+        assert_eq!(agent_a.state, "running");
+        assert_eq!(agent_a.name, "python-engineer");
+
+        let agent_b = roster.iter().find(|a| a.agent_id == "agent-b").unwrap();
+        assert_eq!(agent_b.state, "idle");
     }
 
     /// An unknown session must map to `-32007 session_not_found`.

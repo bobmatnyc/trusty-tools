@@ -688,7 +688,7 @@ JSON-RPC method or a new/extended `Event` variant.
 | 5 | Working-context budget (status bar) | `Event::ContextBudget{working_pct,overhead_pct,within_budget,fired}` | **MISSING** (discarded) | Stop dropping `CadenceOutcome` |
 | 6 | Goal slots (§4.5) | `session.get_goals` / `set_goal` / `clear_goal` | **EXISTS** | **none — UI wiring only** |
 | 7 | Projectless + binding (7a, §4.2) | `task.run` `project` → optional; unify with `session.create` | **PARTIAL** | Type change + reconciliation |
-| 8 | Agent roster (10b, 11a) | `session.get_agents` snapshot + `model` field | **EXISTS** | `session.get_agents` ships (closes #2962); `model` field remains deferred — see §5.4 |
+| 8 | Agent roster (10b, 11a) | `session.get_agents` snapshot + `model` field | **EXISTS** | `session.get_agents` ships, backed by an always-retained per-session map (not a ring-buffer fold) so it cannot lose a still-running agent to eviction (closes #2962); `model` field remains deferred — see §5.4 |
 | 9 | Workstream list/resume (7a/7b switcher) | Workstream domain object + persistence + `workstream.list` | **MISSING** | Domain + storage (§4B) |
 | 10 | Workflow lanes (10e) | Branch/PR/dirty-tree subsystem | **MISSING** | New subsystem, nothing to build on |
 | 11 | Clone-from-URL (7a) | `project.clone_from_url` | **MISSING** | Not present anywhere. Daemon capability when it lands (§5.8) |
@@ -762,18 +762,31 @@ from a preview string.
 was returned by the query. A held-back recall is the operator's evidence that the
 harness *chose*; conflating the two silently voids the core bet.
 
-### 5.4 Agent roster (EXISTS — endpoint shipped; `model` still deferred)
+### 5.4 Agent roster (EXISTS — endpoint shipped, eviction-safe; `model` still deferred)
 
-**Shipped (closes #2962).** `session.get_agents` now exists — the daemon folds a
-session's ring-buffer replay over the `agent`/`agent_id`-carrying tool-attribution
-events (`ToolStarted`/`ToolFinished`/`ToolError`/`SearchPerformed`/`MemoryRecalled`,
-#2898) server-side, repaying the §2.1 fold-in-the-client loan this section
-originally recorded. `AgentSpawned/AgentStarted/AgentDone/AgentFailed/PmDelegating`
-still exist as unused-in-production event shapes (`events.rs:186-211,312-316`) —
-see `session::registry::agents`'s module docs for why they are not folded. `model`
-remains unpopulated: it lives only on `LlmRequested/LlmResponded`, correlated by
-`agent_name` **string**, which AC-13.2 retires as a correlation key — so folding it
-onto `agent_id` would reintroduce the exact same-name collision bug #2898 closed.
+**Shipped (closes #2962).** `session.get_agents` now exists, backed by an
+ALWAYS-RETAINED per-session agent map (`SessionEntry::agents`,
+`registry.rs`) — not a fold over the capacity-bounded ring buffer. A first
+cut folded `SessionRegistry::replay`'s ring-buffer snapshot on every call;
+code-critic flagged that as a HIGH, because the ring evicts oldest-first
+(`ring_capacity`, default 1000) and a long-running agent's `ToolStarted`
+could age out of it before any later attributed event for that same
+`agent_id` landed — making the agent vanish from the roster entirely,
+indistinguishable from "never spawned" while it may still genuinely be
+running. That was the exact silent-data-loss shape this section originally
+warned about; moving the fold server-side had fixed WHERE it ran but not
+WHAT it could lose. The shipped design closes that: `SessionRegistry::record`
+— the SAME critical section that pushes onto the ring for every
+`agent`/`agent_id`-carrying event (`ToolStarted`/`ToolFinished`/`ToolError`/
+`SearchPerformed`/`MemoryRecalled`, #2898) — also updates the per-session
+map, which is evicted only when the session itself goes away, never by ring
+capacity. `AgentSpawned/AgentStarted/AgentDone/AgentFailed/PmDelegating`
+still exist as unused-in-production event shapes (`events.rs:186-211,312-316`)
+— see `session::registry::agents`'s module docs for why they are not
+sources. `model` remains unpopulated: it lives only on
+`LlmRequested/LlmResponded`, correlated by `agent_name` **string**, which
+AC-13.2 retires as a correlation key — so folding it onto `agent_id` would
+reintroduce the exact same-name collision bug #2898 closed.
 
 ```rust
 session.get_agents() -> { agents: [{ agent_id, name, model, state, task, todos, files_changed }] }
@@ -782,16 +795,23 @@ session.get_agents() -> { agents: [{ agent_id, name, model, state, task, todos, 
 **AC-15.1** `model` is carried on agent lifecycle events, not correlated by name.
 **NOT YET MET** — tracked as the remaining gap above, not closed by #2962.
 **AC-15.2** A late-joining client can render the roster. **MET as of #2962** —
-`session.get_agents` folds the ring buffer server-side, so a late-attaching client
-gets one RPC call instead of replaying and folding the SSE stream itself.
+`session.get_agents` reads the always-retained per-session map, so a
+late-attaching client gets one RPC call, with no ring-eviction risk, instead
+of replaying and folding the SSE stream itself.
 
-> **§2.1 tension — RESOLVED by #2962 for the roster shape itself; `model` (AC-15.1)
-> remains open.** This section previously recorded event-folding as a time-boxed
-> Phase-1 loan: "who is running?" was daemon-owned state a UI client had to
-> reconstruct by folding the SSE replay — the shape C-1 forbids. `session.get_agents`
-> repays that loan — the fold now runs once, in the daemon, over its own ring buffer.
-> The `model` gap is a separate, still-open debt (see above), not a re-opening of the
-> folding-in-the-client concern this callout originally raised.
+> **§2.1 tension — GENUINELY RESOLVED by #2962: both the C-1 thin-client
+> concern and the ring-eviction concern.** This section previously recorded
+> event-folding as a time-boxed Phase-1 loan on TWO counts: (1) "who is
+> running?" was daemon-owned state a UI client had to reconstruct by folding
+> the SSE replay — the shape C-1 forbids; (2) even a daemon-side fold over
+> the bounded ring would silently lose an agent once its `ToolStarted` aged
+> out. `session.get_agents` closes both: the daemon owns the computation
+> (no client-side derivation), and the state it reads
+> (`SessionEntry::agents`) is retained for the life of the session
+> independent of ring capacity, so it can never silently lose a still-running
+> agent to eviction. The `model` gap (AC-15.1) is a separate, still-open
+> debt (see above), not a re-opening of either concern this callout
+> originally raised.
 
 ### 5.5 Project binding (PARTIAL — the two surfaces must converge)
 
@@ -994,7 +1014,7 @@ the Workflow tab, the IDE half, or clone-from-URL.
 | **Workstream persistence** (§4B) | Real **domain + storage** work — deciding what a workstream *is*, not adding an endpoint. The largest item in the spec. Phase 1 ships value on the existing registry without it. |
 | **Per-line diff attribution UI** (10a gutter) | **Depends on §5.2** (`agent_id`). Ship the schema first; the gutter is a downstream consumer. |
 | **Workflow / delivery pipeline** (10e) | **New subsystem, nothing to build on** — no branch/PR/dirty-tree concept exists anywhere (§5.7). Also git-only, so it needs §4.2 settled first. |
-| **Agent roster `model` field** (10b) | **Shipped except `model`** — `session.get_agents` (§5.4) landed with #2962, closing the §2.1 client-side-fold tension. `model` per `agent_id` is the one still-deferred sub-item; see §5.4. |
+| **Agent roster `model` field** (10b) | **Shipped except `model`** — `session.get_agents` (§5.4) landed with #2962, backed by an always-retained per-session map (not a ring-buffer fold), closing BOTH the §2.1 client-side-fold tension AND the ring-eviction data-loss risk. `model` per `agent_id` is the one still-deferred sub-item; see §5.4. |
 | **Clone-from-URL** (7a) | Does not exist anywhere; pure additive scope with no dependents. Local-folder binding (`project.list_dir`, §5.8) covers the mandated projectless→bound path. **When it lands it is `project.clone_from_url` on the daemon — never a UI-side git op** (§5.8). |
 | **Monitor columns** (9b) | Demoted to transient trace mode (§4.6.1); the 8b inline card delivers the same trace at full width. |
 
