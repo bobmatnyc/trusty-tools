@@ -27,6 +27,37 @@ export interface SessionListResponse {
   sessions: SessionSummary[];
 }
 
+/**
+ * Mirrors `crate::session::model::Session` in full (the fields
+ * `SessionMonitor.svelte` renders beyond what `SessionSummary` covers).
+ * `GET /sessions/{id}` returns this shape as a single, unwrapped object —
+ * intentionally fetched with its own type here rather than widening
+ * `SessionSummary`, since `SessionSummary`'s doc comment scopes it to "the
+ * fields the status bar actually reads" and the monitor card is a second,
+ * independent reader. `binding` is deliberately omitted: the card doesn't
+ * render it, and the wire shape is described elsewhere as "approximate" —
+ * no need to over-fit a field nothing here uses.
+ */
+export interface SessionDetail extends SessionSummary {
+  task: string;
+  agent: string | null;
+  mode: string | null;
+}
+
+/**
+ * The set of terminal `Session.status` values (mirrors
+ * `crate::session::model::SessionStatus::is_terminal`). Exported so
+ * `SessionMonitor.svelte` can reuse the exact same terminal check
+ * `pickActiveSession` applies internally, rather than re-deriving its own
+ * copy of the set.
+ */
+export const TERMINAL_SESSION_STATUSES = new Set([
+  'cancelled',
+  'finished',
+  'failed',
+  'deadline_exceeded',
+]);
+
 /** Mirrors `crate::session::registry_events::ReadinessQuery`
  * (`#[serde(tag = "status")]`). */
 export type ReadinessQuery =
@@ -62,7 +93,6 @@ export type ReadinessQuery =
  */
 export function pickActiveSession(sessions: SessionSummary[]): SessionSummary | null {
   if (sessions.length === 0) return null;
-  const terminal = new Set(['cancelled', 'finished', 'failed', 'deadline_exceeded']);
   const byRecency = [...sessions].sort((a, b) => b.created_at.localeCompare(a.created_at));
-  return byRecency.find((s) => !terminal.has(s.status)) ?? byRecency[0];
+  return byRecency.find((s) => !TERMINAL_SESSION_STATUSES.has(s.status)) ?? byRecency[0];
 }
