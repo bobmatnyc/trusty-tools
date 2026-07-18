@@ -92,8 +92,10 @@ pub async fn build_indexer_with_persisted_state(
 /// `Err` only on OOM; corrupt/missing snapshots fall back to an empty store.
 /// What: resolves paths via `hnsw_path_for_entry` / `corpus_redb_path_for_entry`,
 /// builds the store (with fallback), attaches the embedder, rehydrates corpus.
-/// Test: `colocated_indexer_builds_from_entry` covers the colocated path;
-/// the existing warm-boot integration tests cover the legacy path.
+/// Test: `colocated_create_path_wires_corpus_store_for_schema_version` and
+/// `colocated_create_handler_path_survives_simulated_reload` cover the
+/// colocated path; `legacy_non_colocated_path_does_not_panic` covers the
+/// legacy path.
 pub async fn build_indexer_from_entry(
     entry: &PersistedIndex,
     embedder: &Arc<dyn Embedder>,
