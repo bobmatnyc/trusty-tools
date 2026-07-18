@@ -56,6 +56,15 @@
 #   will NEVER falsely fail a legitimate file. Pathological cases (e.g. a raw
 #   string containing /*) can be noted as exceptions in a code comment.
 #
+#   SWALLOW-TO-EOF RISK (issue #2563 item 2, intentional, not a bug): an
+#   unmatched /* inside a string/char literal — one with no real */ anywhere
+#   later in the file — is indistinguishable from a genuinely unterminated
+#   block comment, so it swallows every subsequent line to EOF as "inside a
+#   comment". This can undercount a large tail of a file, not just one line.
+#   It is still safe under the never-overcount invariant above (the gate can
+#   only pass files it should fail, never fail files it should pass) and is
+#   pinned as a fixture in scripts/test-data/sloc-string-literal-slash-star.rs.
+#
 # Test: exercised in the PR that introduced SLOC counting (clean tree exits 0;
 #   a production file with 600 SLOC fails; 600 SLOC in a test path passes;
 #   1600 SLOC in a test path fails). The logic is pure SLOC counting against
