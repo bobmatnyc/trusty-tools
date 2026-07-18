@@ -1,0 +1,50 @@
+# Agent-asset staleness guard for the trusty-tools workspace (issue #2958 Slice E4).
+#
+# Enforces that trusty-code's embedded tm-agent copies
+# (crates/trusty-code/src/assets/agents/*.md) never silently drift from their
+# trusty-mpm source (crates/trusty-mpm/src/assets/agents/*.md):
+#   - 29 files must stay byte-identical to their trusty-mpm source;
+#   - 4 known-deviated files (qa.md, code-critic.md, code-analyzer.md,
+#     web-qa.md — a Bob-approved tools: restriction + reworded prose) are
+#     pinned by trusty-mpm SOURCE hash instead, so an upstream edit behind
+#     one of them fails the gate for deliberate reconciliation instead of
+#     drifting unnoticed.
+#
+# Pure file/hash comparison — no Rust toolchain or build needed, so this runs
+# as its own lightweight job (matches line-cap.yml's structure/style). Scoped
+# to PRs touching either assets directory or the guard itself.
+name: Agent assets
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/trusty-code/src/assets/agents/**"
+      - "crates/trusty-mpm/src/assets/agents/**"
+      - "scripts/check_agent_assets.sh"
+      - "scripts/agent-asset-pins.tsv"
+      - ".github/workflows/agent-assets.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/trusty-code/src/assets/agents/**"
+      - "crates/trusty-mpm/src/assets/agents/**"
+      - "scripts/check_agent_assets.sh"
+      - "scripts/agent-asset-pins.tsv"
+      - ".github/workflows/agent-assets.yml"
+
+# Cancel superseded runs for the same ref to save CI minutes (matches ci.yml).
+concurrency:
+  group: agent-assets-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-assets:
+    name: tcode embedded agent-asset staleness check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enforce agent-asset parity + pinned-deviation checks
+        run: bash scripts/check_agent_assets.sh

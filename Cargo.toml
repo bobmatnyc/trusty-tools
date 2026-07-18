@@ -257,8 +257,12 @@ wiremock = "0.6"
 # ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + trusty-agents + tga) ──
 # Versions pinned to what is already resolved in Cargo.lock (1.8.17 / 1.131.0).
 # `behavior-version-latest` silences the deprecation warning on aws_config::load_from_env().
+# `aws-sdk-bedrockruntime`'s default `rustls` feature drags in a legacy hyper 0.14 +
+# rustls 0.21 + rustls-webpki 0.101.7 TLS stack for backward compat (GHSA-82j2-j2ch-gfr8,
+# GHSA-xgp8-3hg3-c2mh, GHSA-965h-392x-2mh5 / Dependabot #46-48). Disable default-features
+# and select only the modern rustls-aws-lc based client (`default-https-client`) instead.
 aws-config             = { version = "1.8", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = { version = "1.131" }
+aws-sdk-bedrockruntime = { version = "1.131", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-types              = { version = "1" }
 aws-smithy-types       = { version = "1.4" }
 
