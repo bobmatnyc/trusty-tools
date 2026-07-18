@@ -14,6 +14,8 @@ export default {
         'trusty-text-light': '#0f172a', // slate-900 (light)
         'status-ok': '#22c55e', // green-500
         'status-error': '#ef4444', // red-500
+        'status-warn': '#f59e0b', // amber-500 — DOC-39 §8: amber = inferred/warming
+        'status-neutral': '#64748b', // slate-500 — no-session / never-probed
       },
     },
   },
