@@ -147,7 +147,7 @@ pub async fn load_diff(source: &DiffSource) -> Result<String, GithubError> {
 /// -M --end-of-options <base>...<head>`; a non-zero exit or non-UTF-8 output is
 /// folded into `GithubError::Transport` with the first line of stderr (git's
 /// actual error, not its ~70-line usage dump) / the decode error.
-/// Test: `git_range_diff_matches_git_output`, `git_range_diff_bad_repo_errors`,
+/// Test: `git_range_diff_matches_git_output`, `git_range_diff_bad_repo_returns_error`,
 /// `git_range_diff_rejects_option_like_base_without_touching_filesystem`.
 fn run_git_range_diff(
     repo_root: &std::path::Path,
