@@ -72,3 +72,12 @@ compiles locally but fails on CI. Prefer stable channel toolchains.
 🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local` use edition 2024;
 all other crates use edition 2021. Let-chains (`if let … && let …`) only
 work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
+
+🟢 **`trusty-mpm-gui` is excluded from bare `cargo build`/`test`/`check`**
+(#2951) — the root `Cargo.toml`'s `default-members` list omits it, matching
+CI's existing `--workspace --exclude trusty-mpm-gui` for the same commands.
+Use `cargo build -p trusty-mpm-gui` (or `--workspace`, which always builds
+everything regardless of `default-members`) when you actually need it. This
+also stops every agent worktree from silently producing a fresh ad-hoc-signed
+GUI debug binary — and its own macOS "would like to access data from other
+apps" TCC prompt — on every bare `cargo build`.

@@ -38,6 +38,15 @@
 //!   Runtime is verified. TCC grant stability depends on `--identifier` + Team
 //!   ID, not on `--options runtime`, so this split does not reintroduce the
 //!   identifier drift above.
+//! - #2951: `trusty-mpm-gui` (the Tauri desktop shell) joined [`MPM_SET`] as a
+//!   third binary. It presented its own App-Data TCC prompt textually
+//!   identical to `trusty-mpm`'s (`productName: "trusty-mpm"` in
+//!   `tauri.conf.json`) and, because ad-hoc debug builds happen in every
+//!   worktree, churned a fresh random identity per rebuild — the same class of
+//!   bug this module already fixed for `trusty-mpm`/`tm`. The primary fix is
+//!   Tauri's own `bundle.macOS.signingIdentity` (so `cargo tauri build`
+//!   produces a Developer-ID-signed `.app` directly); this table entry covers
+//!   the fallback case of a bare `cargo install --path crates/trusty-mpm-gui`.
 //!
 //! What: [`binaries_for_set`] and [`codesign_identifier`] are both derived from
 //! the single [`SIGNABLE_BINARIES`] table (binary, set, identifier) so set
@@ -101,6 +110,20 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // (#2721). Ordered after `trusty-mpm` so `binaries_for_set(MPM_SET).first()`
     // — the binary whose path the guidance/prompt names — stays `trusty-mpm`.
     ("tm", MPM_SET, "com.trusty.tm"),
+    // `trusty-mpm-gui` (#2951): the Tauri desktop shell. It is a separate
+    // binary/crate from `trusty-mpm`/`tm` and is normally not present under
+    // `install_dir` unless someone runs `cargo install --path
+    // crates/trusty-mpm-gui`, so `post_install_signed_set`'s existing
+    // "skip if the path doesn't exist" behavior makes this entry a no-op for
+    // everyone who never installs the GUI that way. Sharing `MPM_SET` (rather
+    // than a new set) means `tctl sign trusty-mpm` / the automatic
+    // `tctl install` post-install hook picks it up for free with no new set
+    // name to thread through `SignSetError`'s messages. Identifier matches the
+    // `bundle.macOS.signingIdentity`-driven identifier in
+    // `crates/trusty-mpm-gui/tauri.conf.json` so both signing paths (Tauri's
+    // own bundler and this fallback for a bare `cargo install`ed binary) agree
+    // on one designated requirement.
+    ("trusty-mpm-gui", MPM_SET, "com.trusty.trusty-mpm.gui"),
 ];
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
@@ -674,8 +697,9 @@ mod tests {
     /// `trusty-mpm` set MUST include `tm` (#2721) — omitting it left the primary
     /// `tm` binary ad-hoc and the App-Data TCC prompt kept recurring. Order
     /// matters: `trusty-mpm` first so it stays the guidance/prompt "primary".
+    /// `trusty-mpm-gui` (#2951) joined the set after `tm` for the same reason.
     /// What: Asserts `trusty-search` covers search+embedderd, `trusty-mpm` covers
-    /// both `trusty-mpm` and `tm` in that order.
+    /// `trusty-mpm`, `tm`, and `trusty-mpm-gui` in that order.
     /// Test: This is the test.
     #[test]
     fn binaries_for_set_covers_search_and_mpm() {
@@ -683,7 +707,10 @@ mod tests {
             binaries_for_set(SEARCH_SET),
             vec!["trusty-search", "trusty-embedderd"]
         );
-        assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm", "tm"]);
+        assert_eq!(
+            binaries_for_set(MPM_SET),
+            vec!["trusty-mpm", "tm", "trusty-mpm-gui"]
+        );
     }
 
     /// Why: An unrecognised set name must not silently sign nothing without
@@ -700,8 +727,9 @@ mod tests {
     /// `com.trusty.trusty-<binary>` scheme used by `plist_label.rs` and the
     /// release-workflow docs (the pre-#2558 short-form identifiers were the
     /// drift this module fixes).
-    /// What: Asserts all four target binaries map to the expected IDs, including
-    /// the `tm` binary (`com.trusty.tm`, #2721) that shares the trusty-mpm set.
+    /// What: Asserts all five target binaries map to the expected IDs,
+    /// including the `tm` binary (`com.trusty.tm`, #2721) and `trusty-mpm-gui`
+    /// (`com.trusty.trusty-mpm.gui`, #2951) that share the trusty-mpm set.
     /// Test: This is the test.
     #[test]
     fn identifier_map_covers_all_signable_binaries() {
@@ -715,6 +743,10 @@ mod tests {
         );
         assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
         assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
+        assert_eq!(
+            codesign_identifier("trusty-mpm-gui"),
+            "com.trusty.trusty-mpm.gui"
+        );
     }
 
     /// Why: PR #2657 review MEDIUM — with set membership and identifier now
