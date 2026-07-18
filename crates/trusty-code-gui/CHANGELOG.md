@@ -56,6 +56,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `agent` from the `POST /sessions` body entirely and lets the daemon apply
   its own default, rather than inventing a roster endpoint DOC-39 §2.1 C-2
   would call a UI-side workaround.
+- Search tab (10d, DOC-39 §4.7) now renders real search/recall audit rows
+  instead of the honest "not yet implemented" shell PR #3085 shipped
+  (closes #3027; refs #3072, PR #3107). `SearchTab.svelte` polls
+  `GET /sessions/{id}/search-audit` for the active session in the same
+  `refresh()` cycle that already polls `GET /sessions`, using the identical
+  `$effect`/`AbortController`/`setInterval` shape as `StatusBar.svelte` /
+  `SessionMonitor.svelte`, plus an independent 1s local age-redisplay tick
+  (no network call), mirroring `SessionMonitor.svelte`'s elapsed-time tick.
+  New `lib/search-audit.ts` holds the wire types (`SearchAuditRecord`,
+  mirroring `crate::events::SearchAuditRecord`'s `search`/`recall` tagged
+  variants), a runtime shape guard (`isSearchAuditResponse`, following the
+  `create-session.ts::isDirListing` house pattern — a `200` status is a
+  promise from this daemon version's handler, not from whatever actually
+  answered the socket, so the body's shape is verified before it becomes
+  reactive state, never a bare `as` assertion), and three pure per-record
+  formatters (`auditLaneLabel`/`auditHitsLabel`/`auditLatencyLabel`) that
+  normalize `Search` and `Recall` records onto AC-7.2's shared six columns
+  without fabricating fields neither variant carries (`Recall` has no
+  `lane`/`latency_ms` on the wire; it renders `'recall'` and an em dash
+  respectively, and combines `result_count`/`injected_count` into one
+  "N (M injected)" hits label). A malformed response body degrades to a
+  labeled "audit unavailable" row rather than throwing; a `404` on the
+  audit fetch (session vanished mid-poll, same partial-fetch case
+  `SessionMonitor.svelte` already handles for its own chained requests) is
+  treated as `no-session`. `search-audit.test.ts` covers the shape guard's
+  valid/malformed cases and the formatters; `SearchTab.test.ts` gained
+  fetch-URL assertions plus populated/empty/malformed/404/500 audit-state
+  coverage on top of the existing four connection-phase tests. **Scope
+  note:** this closes the REST-consumption half of the search/recall gap
+  #3027 and #3072 shared; `SessionMonitor.svelte`'s own AC-6.3 "settled
+  inline card" half has not been wired to this same route yet — tracked
+  separately as issue #3108 (that component's gap notice/comment now points
+  there instead of the now-closed #3027). Deliberately did not build a
+  shared GUI session poller here (issue #3092 tracks that refactor
+  opportunity across `StatusBar`/`SessionMonitor`/`SearchTab`) — this card's
+  polling stays local, matching the existing per-component pattern.
 - Phase-1 session monitor card: an active-session summary — status, task,
   elapsed time, a recent transcript tail, and a cancel action — per DOC-39
   §4.6 (the 8b UI surface, refs #2983). `SessionMonitor.svelte` polls

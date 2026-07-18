@@ -21,9 +21,16 @@
   // but it does NOT fulfil AC-6.3's literal "live search/recall monitor
   // settling into an inline card" requirement. That gap is rendered as a
   // labeled, non-hidden notice below (mirroring exactly how
-  // `StatusBar.svelte` labels its missing-budget-RPC gap) and tracked in
-  // issue #3027 (DOC-39 §4.6 AC-6.3: SearchPerformed/MemoryRecalled are
-  // SSE-only with no REST snapshot route).
+  // `StatusBar.svelte` labels its missing-budget-RPC gap).
+  //
+  // UPDATE (issue #3027 closed, tracked onward as #3108): the underlying
+  // REST gap this comment originally described — `SearchPerformed`/
+  // `MemoryRecalled` being SSE-only with no snapshot route — is now closed
+  // (`GET /sessions/{id}/search-audit`, issue #3072, PR #3107). The sibling
+  // `SearchTab.svelte` (10d) consumes it for its full audit trail (AC-7.2).
+  // This component's own settled-card half of AC-6.3 has NOT been wired to
+  // that route yet — that remaining, purely client-side gap is tracked as
+  // issue #3108 rather than #3027 (now closed for the Search tab reason).
   //
   // What: Polls `GET /sessions` then `GET /sessions/{id}` +
   // `GET /sessions/{id}/transcript` for the session `pickActiveSession`
@@ -60,7 +67,7 @@
   const TICK_MS = 1000; // local redisplay tick only — no network call
 
   /** Tracks the future AC-6.3 gap (see the Why block above). */
-  const SEARCH_RECALL_GAP_ISSUE = 'https://github.com/bobmatnyc/trusty-tools/issues/3027';
+  const SEARCH_RECALL_GAP_ISSUE = 'https://github.com/bobmatnyc/trusty-tools/issues/3108';
 
   type Phase = 'connecting' | 'daemon-unreachable' | 'no-session' | 'ready';
   type CancelPhase = 'idle' | 'confirming' | 'cancelling';
@@ -327,9 +334,9 @@
 
     <p
       class="mt-3 text-[11px] text-trusty-text/30"
-      title={`DOC-39 §4.6 AC-6.3's live search/memory-recall monitor (lane/query/hit_count/latency, docked-rail → inline settle) is not implemented here — Event::SearchPerformed/Event::MemoryRecalled are SSE-only with no REST snapshot route. Tracked at ${SEARCH_RECALL_GAP_ISSUE}`}
+      title={`DOC-39 §4.6 AC-6.3's live search/memory-recall monitor (lane/query/hit_count/latency, docked-rail → inline settle) is not implemented here — GET /sessions/{id}/search-audit now exists (issue #3072) but this card has not been wired to it yet. Tracked at ${SEARCH_RECALL_GAP_ISSUE}`}
     >
-      search/recall monitor (AC-6.3): not yet implemented — see issue #3027
+      search/recall monitor (AC-6.3): not yet implemented — see issue #3108
     </p>
   {/if}
 </section>
