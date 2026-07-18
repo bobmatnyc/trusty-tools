@@ -10,8 +10,8 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [[bin]]
-name = "gworkspace-mcp"
-path = "src/bin/gworkspace-mcp.rs"
+name = "trusty-gworkspace-mcp"
+path = "src/bin/trusty-gworkspace-mcp.rs"
 
 [dependencies]
 trusty-common = { path = "../trusty-common", version = "0.23.0", features = ["mcp"] }

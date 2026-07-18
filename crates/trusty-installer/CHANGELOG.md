@@ -22,6 +22,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - `has_developer_id_cert()` no longer passes a garbage identity string (SHA1 fingerprint + quotes still attached) to `codesign --sign` — it now extracts the quoted common name between the first and last `"` on the matching `security find-identity` line, matching `scripts/install-trusty-mpm-signed.sh`'s working `detect_identity()`. Previously `codesign` failed with "no identity found" even though the certificate was valid and listed by `security find-identity` (closes #2937, closes #2939).
 
+### Fixed
+
+- `tctl start`'s launchd skip message now says "already loaded" instead of "already running" — `is_loaded()` only confirms launchd registration via `launchctl print`, not process health, so a crash-looping agent (`KeepAlive::Always` restarting on every throttle interval) previously reported a misleading "already running" (closes #2573).
+
 ## [0.4.2] — 2026-07-17
 
 Ships the real Developer-ID signed-install path — the working `tctl sign`

@@ -1,4 +1,4 @@
-//! Command-line interface for the `gworkspace-mcp` binary.
+//! Command-line interface for the `trusty-gworkspace-mcp` binary.
 //!
 //! Why: The binary was stdio-only (no arg parsing) and relied on the Python
 //! CLI for onboarding. Issue #2631 adds native `setup` / `doctor` / `accounts`
@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 use crate::api::auth::TokenStorage;
 use crate::api::auth::oauth::{DefaultMode, flow, run_consent};
 
-/// `gworkspace-mcp` — Google Workspace MCP server + onboarding CLI.
+/// `trusty-gworkspace-mcp` — Google Workspace MCP server + onboarding CLI.
 ///
 /// Why: One binary serves two roles — the MCP stdio server (no subcommand)
 /// and the interactive management CLI (subcommands).
@@ -28,7 +28,7 @@ use crate::api::auth::oauth::{DefaultMode, flow, run_consent};
 /// Test: `no_subcommand_parses`.
 #[derive(Debug, Parser)]
 #[command(
-    name = "gworkspace-mcp",
+    name = "trusty-gworkspace-mcp",
     about = "Google Workspace MCP server (run with no subcommand) + OAuth onboarding CLI",
     long_about = None,
     version

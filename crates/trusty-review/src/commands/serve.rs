@@ -37,16 +37,17 @@ use crate::cli_verify;
 ///
 /// Why: collects the port, bind address, and mode flags so the server can be
 /// configured purely from CLI flags without requiring env-var wrangling.
-/// What: `--port` sets the listen port (default 7890); `--stdio` activates the
+/// What: `--port` sets the listen port (default 7891); `--stdio` activates the
 /// MCP JSON-RPC stdio loop instead of binding TCP.
 /// Test: `cargo run -p trusty-review --features http-server -- serve --help`.
 #[derive(Debug, clap::Parser)]
 pub struct ServeArgs {
     /// HTTP listen port.
-    /// Default: 7890 — distinct from every known sibling default: trusty-memory
+    /// Default: 7891 — distinct from every known sibling default: trusty-memory
     /// :7070, trusty-search :7878, trusty-analyze :7879, trusty-console :7788,
-    /// AND trusty-mpm (`tm`) :7880 (the collision a live host reproduced —
-    /// #2566 review; see `service::DEFAULT_PORT`'s doc for the incident).
+    /// trusty-mpm (`tm`) :7880 (the collision a live host reproduced — #2566
+    /// review), AND trusty-embedderd's `--http` mode :7890 (#2573 — see
+    /// `service::DEFAULT_PORT`'s doc for both incidents).
     /// Ignored when --stdio is set.
     #[arg(long, default_value_t = DEFAULT_PORT, value_name = "PORT")]
     pub port: u16,

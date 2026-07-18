@@ -316,6 +316,9 @@ async fn run_and_record(
         EngineerPromptContext {
             project_context: project_context.clone(),
             skills_catalog: skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
+            skill_resolver: skills_catalog
+                .as_ref()
+                .map(|(_, resolver)| Arc::clone(resolver)),
         },
         Arc::clone(&transcript),
         Arc::clone(&sink),
@@ -534,9 +537,10 @@ async fn run_and_record(
 ///
 /// `skills_catalog` (#2069) is the same rendered metadata catalog the PM's own
 /// prompt gets, threaded through so the delegated engineer's DailyDriver
-/// prompt also sees it. Wiring the `use_skill` *tool* into the engineer's own
-/// per-delegation registry (`ProjectToolFactory::build`) is deferred — see
-/// this crate's #2069 delivery notes. #2207: resolves the SAME wall-clock
+/// prompt also sees it. #2152/#2942: the `use_skill` *tool* is now also wired
+/// into the engineer's own per-delegation registry (`ProjectToolFactory::build`)
+/// against the SAME resolver instance the PM's own `use_skill` tool and catalog
+/// were built from — see [`EngineerPromptContext::skill_resolver`]. #2207: resolves the SAME wall-clock
 /// budget applied to the delegating PM's own loop via
 /// `crate::provider::resolve_deadline_secs(params.deadline_secs)` — called
 /// again here (rather than threaded in as an extra argument) purely to keep
@@ -563,6 +567,7 @@ fn build_engineer_runner(
     let EngineerPromptContext {
         project_context,
         skills_catalog,
+        skill_resolver,
     } = prompt;
     let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
         llm,
@@ -573,6 +578,7 @@ fn build_engineer_runner(
     let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
         project: work_root.to_path_buf(),
         mode: params.mode,
+        skill_resolver,
     });
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
@@ -589,14 +595,21 @@ fn build_engineer_runner(
     apply_engineer_model_override(Arc::new(runner), params)
 }
 
-/// The two prompt-context strings the delegated engineer's system prompt is
-/// assembled from.
+/// The prompt-context strings (plus the skill resolver the `use_skill` tool
+/// needs) the delegated engineer's system prompt and registry are assembled
+/// from.
 ///
-/// Why: both are `Option<String>`, are always produced and consumed together,
-/// and are positionally adjacent — bundling them removes a real
+/// Why: `project_context`/`skills_catalog` are always produced and consumed
+/// together and are positionally adjacent — bundling them removes a real
 /// easy-to-transpose-the-arguments hazard and keeps
 /// [`build_engineer_runner`]'s arity under clippy's `too_many_arguments` gate
 /// now that `work_root` must also be threaded through for projectless runs.
+/// #2152: `skill_resolver` joined the bundle so `ProjectToolFactory::build`
+/// can register `use_skill` against the SAME resolver instance backing
+/// `skills_catalog` and the PM's own `use_skill` tool, rather than the
+/// engineer's registry omitting the tool its prompt explicitly advertises
+/// (closes the gap PR #2942 fixed in the legacy `run_task/mod.rs` path but
+/// left open here).
 /// What: `project_context` is the project's `CLAUDE.md` (`None` when absent —
 /// always the case projectless, since the scratch root has none);
 /// `skills_catalog` is the rendered skill-metadata catalog from either the
@@ -605,11 +618,16 @@ fn build_engineer_runner(
 /// (`skills::discover_skill_metadata`'s embedded-fallback, #2895). `None`
 /// only in `HarnessMode::Parity` (which never discovers skills at all, disk
 /// or embedded); in `DailyDriver` the embedded fallback means this is
-/// effectively always `Some`.
-/// Test: exercised via `task::executor::tests::*`'s engineer-runner paths.
+/// effectively always `Some`. `skill_resolver` is `Some` under the exact same
+/// condition as `skills_catalog` (both come from the same
+/// `daily_driver_skills_catalog` call at the sole construction site).
+/// Test: exercised via `task::executor::tests::*`'s engineer-runner paths;
+/// `engineer_registry_includes_use_skill_when_catalog_present` pins the
+/// registry-side contract.
 struct EngineerPromptContext {
     project_context: Option<String>,
     skills_catalog: Option<String>,
+    skill_resolver: Option<Arc<dyn SkillResolver>>,
 }
 
 /// Discover the (cheap, metadata-only) skill catalog under `work_root` and
@@ -658,6 +676,13 @@ struct ProjectToolFactory {
     /// does not carry this field — its `EditTool` stays on the pre-#2073
     /// plain per-model order, unchanged.
     mode: HarnessMode,
+    /// #2152: the SAME `Arc<dyn SkillResolver>` the PM's own `use_skill` tool
+    /// and the rendered skills catalog were built from (threaded through
+    /// [`EngineerPromptContext::skill_resolver`]). `None` under the same
+    /// condition `skills_catalog` is `None` (`HarnessMode::Parity`, which
+    /// never discovers skills). Mirrors `run_task::ProjectToolFactory`'s
+    /// `skill_resolver` field, which PR #2942 wired up on the legacy path.
+    skill_resolver: Option<Arc<dyn SkillResolver>>,
 }
 
 #[async_trait]
@@ -695,6 +720,13 @@ impl RegistryFactory for ProjectToolFactory {
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),
         )));
         reg.register(Arc::new(FinishTaskTool::new()));
+        // #2152: mirrors the PM's own conditional `use_skill` registration —
+        // only when a skill catalog actually resolved for this delegation, so
+        // the engineer's prompt (which advertises `use_skill` whenever
+        // `with_skills_catalog` was applied) and its registry stay in sync.
+        if let Some(resolver) = &self.skill_resolver {
+            reg.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
+        }
         Arc::new(reg)
     }
 }

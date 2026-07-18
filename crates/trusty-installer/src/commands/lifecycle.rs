@@ -321,8 +321,16 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
                     // this same daemon seconds earlier. Skip the bounce when the
                     // agent is already loaded; this is a cheap `launchctl print`
                     // check (mirrors the daemons' own `service status`).
+                    //
+                    // #2573 (LOW): `is_loaded()` only confirms launchd
+                    // REGISTRATION via `launchctl print` — it says nothing about
+                    // whether the process is actually healthy, so a crash-looping
+                    // agent (`KeepAlive::Always` restarting it every throttle
+                    // interval) still reports "loaded" here. The message says
+                    // "already loaded", not "already running", so it doesn't
+                    // imply a health guarantee it can't back up.
                     if cfg.is_loaded() {
-                        return Ok(format!("{} already running (skipped restart)", cfg.label));
+                        return Ok(format!("{} already loaded (skipped restart)", cfg.label));
                     }
                     cfg.bootstrap()?;
                     Ok(format!("bootstrapped {}", cfg.label))

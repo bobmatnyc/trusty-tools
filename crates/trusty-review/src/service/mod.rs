@@ -44,14 +44,22 @@ use crate::service::webhook::handle_github_webhook;
 /// `tm` daemon binds `127.0.0.1:7880` on every managed machine, so a launchd
 /// agent that runs `trusty-review serve` with no explicit `--port` collided
 /// with it and crash-looped (`KeepAlive::Always`, 10s throttle) on install.
-/// 7890 is verified free against the full known set: 7070 = trusty-memory,
+/// The follow-up default (7890) was itself found (#2573) to collide with
+/// `trusty-embedderd`'s `--http` mode default (`127.0.0.1:7890`,
+/// `crates/trusty-embedderd/src/lib.rs`) — not reachable via any
+/// `tctl`-managed automation, since the embedder auto-spawn always uses
+/// `--stdio`/UDS, so it was a manual dev-run footgun only, but still a real
+/// collision for anyone running `trusty-embedderd --http` and
+/// `trusty-review serve` on the same host with no explicit `--port`/`--http`.
+/// 7891 is verified free against the full known set: 7070 = trusty-memory,
 /// 7878 = trusty-search, 7879 = trusty-analyze, 7788 = trusty-console,
-/// 7880 = trusty-mpm (`tm`).
-/// What: 7890 (superseding the REV-803 spec's original 7880).
+/// 7880 = trusty-mpm (`tm`), 7890 = trusty-embedderd (`--http` mode).
+/// What: 7891 (superseding the #2566 fix's 7890, itself superseding the
+/// REV-803 spec's original 7880).
 /// Test: `serve_help_shows_default_port` checks the CLI default;
 /// `default_port_does_not_collide_with_known_siblings` pins uniqueness
-/// against the full known-port table.
-pub const DEFAULT_PORT: u16 = 7890;
+/// against the full known-port table, which now includes trusty-embedderd.
+pub const DEFAULT_PORT: u16 = 7891;
 
 /// Resolve the dotfile discovery path `~/.trusty-review/http_addr`.
 ///
@@ -259,16 +267,23 @@ mod tests {
         assert_eq!(content, "127.0.0.1:7880");
     }
 
-    /// Cross-crate port-uniqueness contract (#2566 review finding).
+    /// Cross-crate port-uniqueness contract (#2566, extended by #2573).
     ///
     /// Why: the original `DEFAULT_PORT` value (7880) silently collided with
     /// trusty-mpm's `DEFAULT_DAEMON_ADDR` (`core/discovery.rs`), which is bound
     /// on every managed machine — a launchd agent running `trusty-review serve`
-    /// crash-looped against the live `tm` daemon on install. This table encodes
-    /// every sibling daemon's known default port (pointer-commented to its real
-    /// source constant, mirroring `trusty-installer`'s `plist_label.rs` override
-    /// table) so a future edit to `DEFAULT_PORT` that reintroduces a collision
-    /// fails this test instead of shipping a crash-loop.
+    /// crash-looped against the live `tm` daemon on install. The follow-up
+    /// default (7890) then collided with `trusty-embedderd`'s `--http` mode
+    /// default (#2573) — that gap existed because this table only tracked
+    /// `tctl`-managed daemons and omitted trusty-embedderd, whose HTTP listener
+    /// is a manual/dev-only opt-in (auto-spawn always uses `--stdio`/UDS), not
+    /// a "full known set" as originally claimed. This table now encodes every
+    /// sibling process's known default port — both `tctl`-managed daemons AND
+    /// manually-run HTTP listeners like trusty-embedderd — pointer-commented to
+    /// its real source constant (mirroring `trusty-installer`'s
+    /// `plist_label.rs` override table), so a future edit to `DEFAULT_PORT`
+    /// that reintroduces a collision fails this test instead of shipping a
+    /// crash-loop or a silent bind failure.
     /// What: asserts `DEFAULT_PORT` is absent from the known-sibling-ports list.
     /// Test: this is the test.
     #[test]
@@ -299,6 +314,11 @@ mod tests {
                 "trusty-mpm",
                 7880,
                 "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+            ),
+            (
+                "trusty-embedderd",
+                7890,
+                "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
             ),
         ];
         for (binary, port, source) in known_siblings {

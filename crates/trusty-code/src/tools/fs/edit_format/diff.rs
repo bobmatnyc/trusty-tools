@@ -22,12 +22,28 @@ use crate::tools::fs::FsError;
 ///
 /// Why: Central entry point used by `edit_format::apply_payload`.
 /// What: Parses hunks from `diff_text`, applies each in order against
-/// `content`'s lines, and returns the full patched text (preserving whether
-/// the original had a trailing newline). Returns `FsError::DiffHunkHeader` if
-/// no valid hunk header is found, or `FsError::DiffContextMismatch` if a
-/// context/removal line does not match the file at the expected position.
+/// `content`'s lines, and returns the full patched text. Returns
+/// `FsError::DiffHunkHeader` if no valid hunk header is found, or
+/// `FsError::DiffContextMismatch` if a context/removal line does not match
+/// the file at the expected position.
+///
+/// Trailing-newline semantics (#2150, hardened after a #2975 code-critic
+/// HIGH finding): the default is to preserve whether the ORIGINAL `content`
+/// ended with `\n`. That default is overridden ONLY when the LAST hunk
+/// actually reaches end-of-file (no untouched original lines remain after
+/// it) AND that hunk carries a `\ No newline at end of file` footer marker —
+/// see [`Hunk`]'s docs for how the marker's position (after a `-`/old-side,
+/// `+`/new-side, or ` `/both-sides line) is tracked. A marker attached to the
+/// new/both side means the OUTPUT has no trailing newline; a marker attached
+/// ONLY to the old side means the diff is REMOVING a no-trailing-newline
+/// state, so the output DOES get a trailing newline, regardless of what the
+/// original file had. No marker at all in the tail-reaching hunk leaves the
+/// default (original file's own state) untouched.
 /// Test: `tests::apply_single_hunk`, `tests::apply_multiple_hunks`,
-/// `tests::apply_context_mismatch_errors`, `tests::apply_no_hunks_errors`.
+/// `tests::apply_context_mismatch_errors`, `tests::apply_no_hunks_errors`,
+/// `tests::apply_footer_marker_after_removal_only_forces_trailing_newline`,
+/// `tests::apply_footer_marker_after_addition_removes_trailing_newline`,
+/// `tests::apply_footer_marker_on_both_sides_keeps_no_trailing_newline`.
 pub(crate) fn apply_unified_diff(
     content: &str,
     diff_text: &str,
@@ -45,7 +61,12 @@ pub(crate) fn apply_unified_diff(
     let mut out: Vec<String> = Vec::with_capacity(orig_lines.len());
     let mut cursor = 0usize; // 0-based index into orig_lines already emitted/consumed
 
-    for hunk in &hunks {
+    // Set only when the LAST hunk reaches end-of-file and carries an
+    // explicit `\ No newline at end of file` hint; see the doc above.
+    let mut trailing_newline_override: Option<bool> = None;
+    let last_hunk_idx = hunks.len() - 1;
+
+    for (idx, hunk) in hunks.iter().enumerate() {
         let start = hunk.old_start.saturating_sub(1); // 0-based
         if start < cursor || start > orig_lines.len() {
             return Err(FsError::DiffContextMismatch {
@@ -74,11 +95,23 @@ pub(crate) fn apply_unified_diff(
                 }
             }
         }
+
+        if idx == last_hunk_idx && cursor == orig_lines.len() {
+            trailing_newline_override = match (hunk.new_tail_no_newline, hunk.old_tail_no_newline) {
+                // New/both side explicitly marked: output has no trailing \n.
+                (true, _) => Some(false),
+                // Only the old side was marked: the diff REMOVES the
+                // no-trailing-newline state, so output DOES get one.
+                (false, true) => Some(true),
+                // No marker at all: leave the original file's own state.
+                (false, false) => None,
+            };
+        }
     }
     out.extend(orig_lines[cursor..].iter().map(|s| s.to_string()));
 
     let mut result = out.join("\n");
-    if had_trailing_newline {
+    if trailing_newline_override.unwrap_or(had_trailing_newline) {
         result.push('\n');
     }
     Ok(result)
@@ -115,10 +148,29 @@ enum HunkLine {
 }
 
 /// A single parsed `@@ -old_start,old_len +new_start,new_len @@` hunk.
+///
+/// Why (#2150, hardened after a #2975 code-critic HIGH finding): a `git
+/// diff`-style `\ No newline at end of file` footer marker's POSITION
+/// carries meaning, not just its presence. It always immediately follows one
+/// hunk-body line, and which line tells you which file(s) it describes:
+/// after a `-` (`Removal`) line, the OLD file's last line there has no
+/// trailing newline; after a `+` (`Addition`) line, the NEW file's last line
+/// there has no trailing newline; after a ` ` (`Context`) line — common to
+/// both files — BOTH lack one. `old_tail_no_newline` / `new_tail_no_newline`
+/// record which side(s) any footer marker(s) in this hunk were attached to,
+/// so [`apply_unified_diff`] can decide the OUTPUT's trailing-newline state
+/// correctly instead of blindly copying the original file's.
+/// What: `old_tail_no_newline` is `true` when a footer followed a `Removal`
+/// or `Context` line in this hunk; `new_tail_no_newline` is `true` when one
+/// followed an `Addition` or `Context` line. Both can be `true` at once (two
+/// separate markers, one per side, both lacking a trailing newline with
+/// different content).
 #[derive(Debug, Clone, PartialEq)]
 struct Hunk {
     old_start: usize,
     lines: Vec<HunkLine>,
+    old_tail_no_newline: bool,
+    new_tail_no_newline: bool,
 }
 
 /// Parse every hunk out of a unified-diff text, skipping file-header lines.
@@ -135,6 +187,8 @@ fn parse_hunks(diff_text: &str) -> Result<Vec<Hunk>, FsError> {
             current = Some(Hunk {
                 old_start,
                 lines: Vec::new(),
+                old_tail_no_newline: false,
+                new_tail_no_newline: false,
             });
             continue;
         }
@@ -168,6 +222,29 @@ fn parse_hunks(diff_text: &str) -> Result<Vec<Hunk>, FsError> {
             b'+' => hunk
                 .lines
                 .push(HunkLine::Addition(raw_line[1..].to_string())),
+            // #2150: `git diff`-style output emits a footer marker line —
+            // `\ No newline at end of file` — directly after the last
+            // context/removal/addition line of a hunk when that line lacked a
+            // trailing newline in the source. It is metadata about the
+            // preceding line, not a hunk-body line itself, so it carries no
+            // content to apply — but WHICH line it followed matters (see
+            // `Hunk`'s docs), so record that before moving on.
+            b'\\' => {
+                match hunk.lines.last() {
+                    Some(HunkLine::Context(_)) => {
+                        hunk.old_tail_no_newline = true;
+                        hunk.new_tail_no_newline = true;
+                    }
+                    Some(HunkLine::Removal(_)) => hunk.old_tail_no_newline = true,
+                    Some(HunkLine::Addition(_)) => hunk.new_tail_no_newline = true,
+                    // A footer marker with no preceding line in this hunk is
+                    // malformed input we can't attribute to a side; ignore it
+                    // rather than erroring — the marker carries no content of
+                    // its own to apply either way.
+                    None => {}
+                }
+                continue;
+            }
             _ => {
                 return Err(FsError::DiffHunkHeader {
                     reason: format!("unrecognised hunk line prefix: {raw_line:?}"),
@@ -275,5 +352,40 @@ mod tests {
         let diff = "--- a/f.py\n+++ b/f.py\n@@ -1,1 +1,1 @@\n-a\n+A\n";
         let updated = apply_unified_diff(content, diff, Path::new("f.py")).expect("must apply");
         assert_eq!(updated, "A\nb\n");
+    }
+
+    /// #2150/#2975: a footer marker attached ONLY to the removed (old-side)
+    /// line means the diff is REMOVING a no-trailing-newline state — the
+    /// output must gain a trailing newline even though the original file
+    /// lacked one. (Regression case: pre-fix this incorrectly copied the
+    /// original file's own missing-trailing-newline state into the output.)
+    #[test]
+    fn apply_footer_marker_after_removal_only_forces_trailing_newline() {
+        let content = "a\nb"; // no trailing newline
+        let diff = "@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n";
+        let updated = apply_unified_diff(content, diff, Path::new("f.py")).expect("must apply");
+        assert_eq!(updated, "a\nB\n");
+    }
+
+    /// #2150/#2975: a footer marker attached to the added (new-side) line
+    /// means the diff INTRODUCES a no-trailing-newline state — the output
+    /// must lack a trailing newline even though the original file had one.
+    #[test]
+    fn apply_footer_marker_after_addition_removes_trailing_newline() {
+        let content = "a\nb\n"; // has a trailing newline
+        let diff = "@@ -1,2 +1,2 @@\n a\n-b\n+B\n\\ No newline at end of file\n";
+        let updated = apply_unified_diff(content, diff, Path::new("f.py")).expect("must apply");
+        assert_eq!(updated, "a\nB");
+    }
+
+    /// #2150/#2975: footer markers on BOTH sides (old line lacked a trailing
+    /// newline, and so does its new-side replacement) leave the
+    /// no-trailing-newline state unchanged across the edit.
+    #[test]
+    fn apply_footer_marker_on_both_sides_keeps_no_trailing_newline() {
+        let content = "a\nb"; // no trailing newline
+        let diff = "@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n\\ No newline at end of file\n";
+        let updated = apply_unified_diff(content, diff, Path::new("f.py")).expect("must apply");
+        assert_eq!(updated, "a\nB");
     }
 }

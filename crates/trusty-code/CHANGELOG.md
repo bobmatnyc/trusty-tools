@@ -8,6 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- the unified-diff applier (`tools/fs/edit_format/diff.rs`) no longer errors
+  on a `git diff`-style `\ No newline at end of file` footer marker inside a
+  hunk body — the marker is metadata, not content, so it no longer fails the
+  whole apply. Its *position* (after a `-`, `+`, or ` ` line) is also tracked
+  so the applier picks the OUTPUT's trailing-newline state correctly instead
+  of always copying the original file's, which silently corrupted the
+  trailing byte on either direction of a no-trailing-newline state change
+  (closes #2150).
+- the delegated engineer's tool registry (`task::executor::ProjectToolFactory`)
+  now registers `use_skill` when a skills catalog resolved, matching what its
+  system prompt advertises via `with_skills_catalog` — previously the tool
+  call failed with "no tool registered" (closes #2152).
+
 ### Added
 
 - **REST resource gateway bridge, no routes yet (#2983, #587, Slice 1).** New
@@ -22,7 +37,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   its JSON-RPC method twin always run the exact same handler — zero business-
   logic duplication. `serve::mod` now declares `mod rest;` but wires no axum
   routes; concrete resource routes land in S2-S6.
-
+- **`session.get_agents` — live, eviction-safe agent-roster RPC (DOC-39 §5.4,
+  closes #2962).** New JSON-RPC method `session.get_agents(session_id) ->
+  { agents: [{agent_id, name, model, state, task, todos, files_changed}] }`,
+  replacing the client-side SSE-fold §5.4 named "a Phase-1 loan, not a
+  design." Backed by an ALWAYS-RETAINED per-session agent map
+  (`SessionEntry::agents`, `registry.rs`) — NOT a fold over the
+  capacity-bounded ring buffer: `SessionRegistry::record` (the same critical
+  section that pushes every `agent`/`agent_id`-carrying event —
+  `ToolStarted`/`ToolFinished`/`ToolError`/`SearchPerformed`/
+  `MemoryRecalled`, since #2898 — onto the ring) also updates this map, which
+  is evicted only when the session itself goes away, never by ring capacity.
+  This closes a code-critic HIGH found on an earlier cut of this PR that
+  folded the ring buffer directly on every call: a long-running agent's
+  `ToolStarted` could age out of the (default 1000-entry) ring before any
+  later attributed event for that `agent_id` landed, silently vanishing that
+  agent from the roster — indistinguishable from "never spawned" while it
+  may still be running. `state` is `"running"` while an agent's last known
+  event is an unmatched `ToolStarted`, `"idle"` otherwise.
+  `model`/`task`/`todos`/`files_changed` are deferred (`null`/`[]`) — see
+  `session::registry::agents`'s module docs for exactly why each isn't
+  populated from today's event stream. Implementation lives in new sibling
+  files `session/registry_agents.rs` (the query) and
+  `session/protocol_agents.rs` (the RPC handler), mirroring
+  `session.get_readiness`'s split. This closes the last MISSING API item in
+  DOC-39 §5.1.
 - **Embedded default agents converted from TOML to `.md`+frontmatter (#2897,
   epic #2892, Slice C).** The three bundled default agents
   (`engineer`/`qa-agent`/`code-reviewer`, #2895) are now authored as

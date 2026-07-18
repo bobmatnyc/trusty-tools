@@ -82,9 +82,9 @@ enum Commands {
     /// Reads the `http_addr` discovery file written at daemon bind time and
     /// prints the address in one of three machine-readable formats:
     ///
-    ///   trusty-review port          → bare port:  7890
-    ///   trusty-review port --addr   → host:port:  127.0.0.1:7890
-    ///   trusty-review port --json   → JSON:       {"addr":"127.0.0.1","port":7890}
+    ///   trusty-review port          → bare port:  7891
+    ///   trusty-review port --addr   → host:port:  127.0.0.1:7891
+    ///   trusty-review port --json   → JSON:       {"addr":"127.0.0.1","port":7891}
     ///
     /// Exits non-zero when no daemon discovery file is found so shell
     /// substitution (`$(trusty-review port)`) fails safely.
@@ -98,7 +98,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Start the long-lived HTTP webhook server (port 7890 by default).
+    /// Start the long-lived HTTP webhook server (port 7891 by default).
     ///
     /// Exposes:
     ///   GET  /health                  — liveness + dep status

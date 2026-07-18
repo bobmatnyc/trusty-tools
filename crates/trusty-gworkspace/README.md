@@ -5,10 +5,22 @@ Python [`gworkspace-mcp`](https://pypi.org/project/gworkspace-mcp/) project.
 
 Exposes 43 [Model Context Protocol](https://modelcontextprotocol.io/) tools
 across Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Accounts.
-Authentication is fully native: the `gworkspace-mcp` binary runs the OAuth
-consent flow itself and reads/writes `~/.gworkspace-mcp/tokens.json` — no
-external CLI is required. The token file is wire-compatible with the original
-Python `gworkspace-mcp`, so an existing token file is picked up unchanged.
+Authentication is fully native: the `trusty-gworkspace-mcp` binary runs the
+OAuth consent flow itself and reads/writes `~/.gworkspace-mcp/tokens.json` —
+no external CLI is required. The token file is wire-compatible with the
+original Python `gworkspace-mcp`, so an existing token file is picked up
+unchanged.
+
+> **Breaking change (issue #2644):** the native binary was renamed from
+> `gworkspace-mcp` to `trusty-gworkspace-mcp`. Previously the cargo-installed
+> native binary and the legacy pipx-installed Python package both claimed the
+> `gworkspace-mcp` name on `$PATH`, so which implementation actually launched
+> depended on install order. Migration: update any `.mcp.json` /
+> `~/.claude.json` entry's `"command"` field from `"gworkspace-mcp"` to
+> `"trusty-gworkspace-mcp"`, then re-run `cargo install --path
+> crates/trusty-gworkspace` (or `cargo install trusty-gworkspace`) to get the
+> new binary name on `$PATH`. Token/config file paths (`~/.gworkspace-mcp/…`)
+> are unchanged — existing accounts keep working without re-authenticating.
 
 ## Installation
 
@@ -16,9 +28,9 @@ Python `gworkspace-mcp`, so an existing token file is picked up unchanged.
 cargo install --path crates/trusty-gworkspace
 ```
 
-This installs the `gworkspace-mcp` binary into `~/.cargo/bin`. The same binary
-is both the MCP stdio server (run with no subcommand) and the onboarding CLI
-(`setup` / `doctor` / `accounts`).
+This installs the `trusty-gworkspace-mcp` binary into `~/.cargo/bin`. The same
+binary is both the MCP stdio server (run with no subcommand) and the
+onboarding CLI (`setup` / `doctor` / `accounts`).
 
 ## Authentication
 
@@ -50,8 +62,8 @@ precedence over the file.
 ### 2. Authorize an account
 
 ```sh
-gworkspace-mcp setup                       # authorize the default profile
-gworkspace-mcp setup --profile work        # authorize a named profile
+trusty-gworkspace-mcp setup                       # authorize the default profile
+trusty-gworkspace-mcp setup --profile work        # authorize a named profile
 ```
 
 `setup` opens your browser to Google's consent screen, captures the redirect on
@@ -71,7 +83,7 @@ it is never changed.
 {
   "mcpServers": {
     "gworkspace": {
-      "command": "gworkspace-mcp"
+      "command": "trusty-gworkspace-mcp"
     }
   }
 }
@@ -88,14 +100,14 @@ fail with an actionable message naming the exact fix, e.g.:
 
 ```
 Google refresh token for profile 'work' is expired or revoked — re-authenticate
-with: gworkspace-mcp setup --profile work (400 Bad Request invalid_grant: …)
+with: trusty-gworkspace-mcp setup --profile work (400 Bad Request invalid_grant: …)
 ```
 
 You can run the fix without leaving the session:
 
 ```sh
-! gworkspace-mcp setup --profile work        # interactive browser consent
-! gworkspace-mcp setup --profile work --print-url   # headless: prints the URL
+! trusty-gworkspace-mcp setup --profile work        # interactive browser consent
+! trusty-gworkspace-mcp setup --profile work --print-url   # headless: prints the URL
 ```
 
 `--print-url` (alias `--no-browser`) skips the browser launch and prints the
@@ -110,10 +122,10 @@ spawned for you.
 profile's refresh token, classifying it OK / DEAD / UNKNOWN:
 
 ```sh
-gworkspace-mcp doctor
+trusty-gworkspace-mcp doctor
 ```
 
-For any DEAD profile it prints the exact `gworkspace-mcp setup --profile <name>`
+For any DEAD profile it prints the exact `trusty-gworkspace-mcp setup --profile <name>`
 command to fix it. The probe is read-only (it never rewrites `tokens.json`),
 bounded by a short per-profile timeout, and degrades to UNKNOWN when Google is
 unreachable rather than failing the whole diagnostic.
@@ -121,9 +133,9 @@ unreachable rather than failing the whole diagnostic.
 ## Managing accounts
 
 ```sh
-gworkspace-mcp accounts list                 # show profiles + which is default
-gworkspace-mcp accounts default work         # switch the default profile
-gworkspace-mcp accounts remove work          # forget a local token (no revoke)
+trusty-gworkspace-mcp accounts list                 # show profiles + which is default
+trusty-gworkspace-mcp accounts default work         # switch the default profile
+trusty-gworkspace-mcp accounts remove work          # forget a local token (no revoke)
 ```
 
 ## Configuration

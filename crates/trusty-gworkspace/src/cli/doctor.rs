@@ -3,7 +3,7 @@
 //! Why: OAuth onboarding fails in a handful of predictable ways (missing
 //! client creds, no tokens, an expired/revoked refresh token). A one-shot
 //! diagnostic tells the user exactly what to fix — and, crucially, for a dead
-//! refresh token it names the exact `gworkspace-mcp setup --profile <name>`
+//! refresh token it names the exact `trusty-gworkspace-mcp setup --profile <name>`
 //! command to run — before they hit a cryptic API error mid-session.
 //! What: Checks client-credential resolution and tokens.json state (read-only),
 //! then, when credentials are available, live-probes each stored profile's
@@ -52,7 +52,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Run the doctor check and print a report to stdout.
 ///
-/// Why: Human-facing entry point for `gworkspace-mcp doctor`.
+/// Why: Human-facing entry point for `trusty-gworkspace-mcp doctor`.
 /// What: Prints the static credential/storage checks, then — when client
 /// credentials resolve — live-probes each stored profile and prints its health.
 /// Always returns `Ok` (the report *is* the result); never mutates tokens.json.
@@ -165,7 +165,7 @@ async fn probe_profile(
 /// summary hint when something is wrong.
 /// Test: `report_lines_flags_missing_creds`, `report_lines_all_green`.
 pub fn report_lines(creds_ok: bool, account_count: usize, has_default: bool) -> Vec<String> {
-    let mut lines = vec!["gworkspace-mcp doctor".to_string(), String::new()];
+    let mut lines = vec!["trusty-gworkspace-mcp doctor".to_string(), String::new()];
 
     lines.push(format!("[{}] OAuth client credentials", mark(creds_ok)));
     if !creds_ok {
@@ -181,7 +181,7 @@ pub fn report_lines(creds_ok: bool, account_count: usize, has_default: bool) -> 
         mark(account_count > 0)
     ));
     if account_count == 0 {
-        lines.push("      Run `gworkspace-mcp setup` to authorize an account.".to_string());
+        lines.push("      Run `trusty-gworkspace-mcp setup` to authorize an account.".to_string());
     }
 
     lines.push(format!(
@@ -205,7 +205,7 @@ pub fn report_lines(creds_ok: bool, account_count: usize, has_default: bool) -> 
 /// real network call or a test — and a `Dead` profile must always print the
 /// exact re-auth command so the fix is copy-pasteable.
 /// What: `Live` → one OK line (email + access-token lifetime); `Dead` → a
-/// failure line plus the `gworkspace-mcp setup --profile <name>` command;
+/// failure line plus the `trusty-gworkspace-mcp setup --profile <name>` command;
 /// `Unknown` → one graceful "could not determine" line (never fatal).
 /// Test: `health_lines_ok_shows_email`, `health_lines_dead_names_setup_command`,
 /// `health_lines_unknown_is_graceful`.
@@ -221,7 +221,7 @@ pub fn health_lines(profile: &str, email: Option<&str>, result: &ProbeResult) ->
         }
         ProbeResult::Dead => vec![
             format!("[!] {profile}: DEAD — refresh token for {who} is expired or revoked"),
-            format!("      re-authenticate with: gworkspace-mcp setup --profile {profile}"),
+            format!("      re-authenticate with: trusty-gworkspace-mcp setup --profile {profile}"),
         ],
         ProbeResult::Unknown => vec![format!(
             "[?] {profile}: UNKNOWN — could not reach Google to verify ({who}); check your connection"
@@ -244,7 +244,7 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("[!] OAuth client credentials"));
         assert!(joined.contains("GOOGLE_OAUTH_CLIENT_ID"));
-        assert!(joined.contains("Run `gworkspace-mcp setup`"));
+        assert!(joined.contains("Run `trusty-gworkspace-mcp setup`"));
         assert!(joined.contains("need attention"));
     }
 
@@ -294,7 +294,7 @@ mod tests {
         assert!(joined.contains("DEAD"), "dead marker: {joined}");
         assert!(joined.contains("expired or revoked"), "cause: {joined}");
         assert!(
-            joined.contains("gworkspace-mcp setup --profile work"),
+            joined.contains("trusty-gworkspace-mcp setup --profile work"),
             "must name the exact re-auth command for the dead profile: {joined}"
         );
     }
