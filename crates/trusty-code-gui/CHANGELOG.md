@@ -10,6 +10,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Create-session flow: the 7a folder picker plus the minimal task-input form
+  needed to start a session from the desktop shell (refs DOC-39 §4.2.1,
+  §6.2 item 6). Previously the GUI was observe-and-cancel only — there was no
+  way to mint a session from the UI at all. `CreateSessionForm.svelte` is a
+  pure `fetch()` client over two already-shipped daemon routes: `GET /fs`
+  (`fs.list_dir`) for the picker and `POST /sessions` (`session.create`) to
+  submit. **No Tauri command and no native dialog plugin were added** — DOC-39
+  §2.1 C-4 explicitly bars a Tauri-native fs/dialog as a functional path (it
+  would give the Tauri build a capability the web build lacks, which C-3
+  forbids), and the daemon-served `GET /fs` route already covers the picker
+  identically in both shells. Picker interaction mirrors 7a's own shape:
+  browsing a directory lists its children as the selectable candidates (a
+  `▸`-style `open` button descends, a `use` button binds without navigating);
+  every selectable entry was already confirmed to exist and be a directory by
+  the listing call itself, so no separate path-validation round-trip is
+  needed before enabling submit. Leaving the selection cleared submits
+  projectless (`project` omitted from the body), per AC-2.1's "workstream
+  creatable with no project bound" requirement. New `lib/create-session.ts`
+  holds the pure logic (`buildCreateBody`, `canSubmitCreate`, `bindingLabel`,
+  `describeFsError`), covered by `create-session.test.ts`; the component's
+  disabled/enabled submit states, the no-double-submit guard, and picker
+  navigation are covered by `CreateSessionForm.test.ts`. Mounted in
+  `App.svelte` inside `.body`, between `HealthPanel` and `SessionMonitor`;
+  `App.test.ts` gained a new assertion pinning that it renders inside
+  `.body`. **Scope gap (documented, not worked around):**
+  `GET /sessions/{id}/agents` (`session.get_agents`) requires an existing
+  session — there is no pre-session agent-roster route — so this form omits
+  `agent` from the `POST /sessions` body entirely and lets the daemon apply
+  its own default, rather than inventing a roster endpoint DOC-39 §2.1 C-2
+  would call a UI-side workaround.
 - Phase-1 session monitor card: an active-session summary — status, task,
   elapsed time, a recent transcript tail, and a cancel action — per DOC-39
   §4.6 (the 8b UI surface, refs #2983). `SessionMonitor.svelte` polls
