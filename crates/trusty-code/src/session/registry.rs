@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use crate::agent_loop::Transcript;
 use crate::binding::ProjectBinding;
-use crate::events::{Event, IndexReadinessSnapshot, SessionEventEnvelope};
+use crate::events::{ContextBudgetSnapshot, Event, IndexReadinessSnapshot, SessionEventEnvelope};
 use crate::jsonrpc::{NotifySender, RpcError};
 use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
@@ -114,6 +114,13 @@ struct SessionEntry {
     /// so a client that attaches AFTER the one-time `Event::IndexReadiness`
     /// fired can still retrieve the current state.
     readiness: Option<IndexReadinessSnapshot>,
+    /// (issue #3015) The most recently recorded [`ContextBudgetSnapshot`] for
+    /// this session — last-writer-wins, mirrors `readiness` above but for
+    /// `record_context_budget`'s per-turn measurement. `None` until the
+    /// session's first `Event::ContextBudget` fires (PM-only; a delegated
+    /// sub-agent loop never emits one), so `session.get_context_budget` can
+    /// distinguish "never recorded" from an all-zero snapshot.
+    context_budget: Option<ContextBudgetSnapshot>,
     /// (DOC-39 §5.4) Live per-agent roster, in first-seen order — the
     /// AUTHORITATIVE state `session.get_agents` reads (see
     /// `session::registry::agents`'s module docs). Updated by [`Self::record`]
@@ -316,6 +323,7 @@ impl SessionRegistry {
                     pm_transcript: None,
                     memory_sink: None,
                     readiness: None,
+                    context_budget: None,
                     agents: Vec::new(),
                 },
             );

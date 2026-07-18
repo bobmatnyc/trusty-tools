@@ -10,6 +10,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Pollable context-budget snapshot — cache + `session.get_context_budget`
+  RPC + `GET /sessions/{id}/budget` REST route (#3015).** Closes the gap
+  behind PR #3014's GUI status bar rendering "budget: unavailable":
+  `record_context_budget` now caches a `ContextBudgetSnapshot`
+  (`crate::events`) on the session entry, mirroring how `record_index_readiness`
+  caches `IndexReadinessSnapshot`, so a client that attaches or reconnects
+  after a turn's `Event::ContextBudget` already fired can still retrieve it.
+  New `session.get_context_budget` JSON-RPC method (`session::protocol_budget`)
+  returns a tagged `ContextBudgetQuery` — `{"status":"recorded", ...}` or
+  `{"status":"never_recorded"}`, never a bare `null` — and a thin
+  `GET /sessions/{id}/budget` REST route in `serve::rest::sessions` forwards
+  to it, following the exact `session.get_readiness`/`GET .../readiness`
+  precedent.
+
 - **REST resource gateway — `task.run`/`fs.list_dir`/`session.get_agents`
   routes (#2983, #587, Slices 4-6).** Three more thin `axum` route groups on
   `tcode serve --http`, each calling `rest::respond` (or the new
