@@ -60,6 +60,7 @@ use trusty_common::mcp::Response;
 
 use crate::jsonrpc::{ConnectionContext, Router};
 use crate::serve::methods::health_payload;
+use crate::serve::rest;
 use crate::session::SessionRegistry;
 
 /// Shared axum state: the JSON-RPC router (for `POST /rpc`) and the session
@@ -76,7 +77,8 @@ struct HttpState {
 }
 
 /// Build the pure axum router (no listener bound) exposing `POST /rpc`,
-/// `GET /health`, and `GET /sessions/{id}/events`.
+/// `GET /health`, `GET /sessions/{id}/events`, and (#2983 Slice 2) the
+/// `GET /sessions*` REST resource group.
 ///
 /// Why: kept separate from [`run_http`] so unit tests exercise routing and
 /// dispatch via `tower::util::ServiceExt::oneshot` without opening a real
@@ -85,18 +87,26 @@ struct HttpState {
 /// What: `POST /rpc` dispatches the request body through
 /// `Router::dispatch_json` (shared with the STDIO transport); `GET /health`
 /// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
-/// session's ring-buffer replay then live events as SSE.
+/// session's ring-buffer replay then live events as SSE; `crate::serve::rest`
+/// merges in the `session.*` REST read routes (`GET /sessions`,
+/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`) —
+/// none of which collide with the paths registered directly on this router.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
-/// `http_session_events_sse_streams_replay_then_live_event`.
+/// `http_session_events_sse_streams_replay_then_live_event`,
+/// `http_rest_sessions_route_is_merged_in`.
 pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
-    let state = HttpState { router, sessions };
-    let app = AxumRouter::new()
+    let state = HttpState {
+        router: router.clone(),
+        sessions,
+    };
+    let core = AxumRouter::new()
         .route("/rpc", post(rpc_handler))
         .route("/health", get(health_handler))
         .route("/sessions/{id}/events", get(session_events_sse))
         .with_state(state);
+    let app = core.merge(rest::sessions::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
@@ -334,6 +344,33 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v, health_payload());
+    }
+
+    /// `GET /sessions` (the #2983 Slice 2 REST route group, merged in by
+    /// `build_axum_router`) must be reachable on the SAME router `POST /rpc`
+    /// and `GET /sessions/{id}/events` are — proving the merge in
+    /// `build_axum_router` actually wires `rest::sessions::routes` rather
+    /// than silently dropping it. Route-level behaviour (found/missing/
+    /// transcript/readiness/goals) is covered by `rest::sessions::tests`.
+    #[tokio::test]
+    async fn http_rest_sessions_route_is_merged_in() {
+        let (router, sessions) = router_and_sessions();
+        let app = build_axum_router(router, sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert!(v["sessions"].is_array());
     }
 
     /// `GET /sessions/{id}/events` on an unknown session must 404 with a
