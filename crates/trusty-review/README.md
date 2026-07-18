@@ -86,15 +86,30 @@ Homebrew provides:
 # Review a GitHub PR (Bedrock credentials required)
 trusty-review run owner repo 123
 
-# Review a local unified diff
+# Review a local unified diff file
 trusty-review run --local-diff /path/to/patch.diff
+
+# Review a diff piped in on stdin
+git diff origin/main...HEAD | trusty-review run --local-diff -
+
+# Review an arbitrary git ref range directly (no manual `git diff` step) —
+# runs `git diff -M <base>...<head>` in the current directory. `--head`
+# defaults to HEAD (the last commit, not the working tree).
+trusty-review run --base origin/main
+trusty-review run --base origin/main --head my-feature-branch
 
 # Override the reviewer model
 trusty-review run owner repo 123 --reviewer-model bedrock/us.anthropic.claude-haiku-4-5
 
 # Compare models
 trusty-review compare owner repo 123
+trusty-review compare --base origin/main --models bedrock/us.anthropic.claude-haiku-4-5,bedrock/us.anthropic.claude-sonnet-4-6
 ```
+
+> `--local-diff` (file or `-` for stdin) and `--base`/`--head` (git ref range)
+> are always dry-run — like every non-GitHub source, they can never post a
+> live PR comment (issue #2993). `--base` and `--local-diff` are mutually
+> exclusive.
 
 ## HTTP server
 

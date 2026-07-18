@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- direct diff ingestion for `run`/`compare`: `--base <REF> [--head <REF>]` reviews an arbitrary local git ref range (`git diff -M <base>...<head>`, three-dot merge-base range, `head` defaults to `HEAD` — never the working tree) instead of fetching a GitHub PR; `--local-diff -` reads a unified diff piped in on stdin. Both new sources behave exactly like the existing `--local-diff <PATH>`: forced dry-run, never post to GitHub. `--base` and `--local-diff` are mutually exclusive (clap-enforced). Closes #2993.
+
 ### Fixed
 
 - narrowed confidence-banded reconciliation cap for Medium-driven REQUEST_CHANGES/D+ downgrades: when the model's own verdict is a clean APPROVE and the REQUEST_CHANGES floor rests SOLELY on one `Effort::Medium` finding in the marginal confidence band (`FLOOR_MIN_CONFIDENCE` 0.80 < c < the new `SOLO_MEDIUM_ESCALATION_CONFIDENCE` 0.90), the result is now capped at APPROVE* instead — a successor to the #1343 reconciliation cap #1876 removed, scoped narrowly so it does not reopen #1876's under-flagging regression (a ≥2-Medium floor, a solo Medium ≥0.90, any High-effort finding, or a confident conformance divergence all still escalate uncapped). Addresses the Rank-1 driver of the #1897 over-flagging shadow-eval (47% of clean PRs graded BLOCK/F under 0.6.3). Both new thresholds are env-overridable (`TRUSTY_REVIEW_SOLO_MEDIUM_ESCALATION_CONFIDENCE`, closes #1897)

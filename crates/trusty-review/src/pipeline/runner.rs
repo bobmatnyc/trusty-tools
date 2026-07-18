@@ -159,6 +159,11 @@ pub async fn run_review(
     deps: ReviewDeps,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
+    // `LocalFile`, `GitRange`, and `Stdin` are all treated identically here:
+    // owner="local" is the sentinel `post::finalize_review` checks (via
+    // `is_github = owner != "local"`) to force `FinalizeAction::LogOnly` — so
+    // every non-GitHub source automatically inherits the "never post" / #2993
+    // dry-run guarantee without a separate posting check.
     let (owner, repo, pr_number, is_local) = match &input.diff_source {
         DiffSource::Github {
             owner, repo, pr, ..
@@ -167,6 +172,16 @@ pub async fn run_review(
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("local");
             ("local".to_string(), stem.to_string(), 0_u64, true)
         }
+        DiffSource::GitRange { base, head, .. } => {
+            let head_label = head.as_deref().unwrap_or("HEAD");
+            (
+                "local".to_string(),
+                format!("{base}...{head_label}"),
+                0_u64,
+                true,
+            )
+        }
+        DiffSource::Stdin => ("local".to_string(), "stdin".to_string(), 0_u64, true),
     };
 
     let pr_url = if !is_local {

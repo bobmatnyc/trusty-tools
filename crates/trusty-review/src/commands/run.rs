@@ -28,25 +28,29 @@ use trusty_review::{
 };
 
 use crate::cli_verify;
+use crate::commands::diff_source::{LocalDiffFlags, resolve_local_diff_source};
 
 // ─── run args (re-used by compare) ─────────────────────────────────────────
 
 /// Arguments for the `run` subcommand.
 ///
 /// Why: groups all run-mode flags in one place for clarity and testability.
-/// What: owner/repo/pr identify the GitHub PR; --local-diff bypasses GitHub.
+/// What: owner/repo/pr identify the GitHub PR; --local-diff bypasses GitHub
+/// (`-` reads a unified diff from stdin); --base [--head] derives the diff
+/// from a local git ref range instead (issue #2993). --base and --local-diff
+/// are mutually exclusive (enforced by clap).
 /// Test: `cargo run -p trusty-review -- run --help`.
 #[derive(Debug, clap::Parser)]
 pub struct RunArgs {
-    /// GitHub organisation or user (required unless --local-diff is set).
+    /// GitHub organisation or user (required unless --local-diff/--base is set).
     #[arg(value_name = "OWNER")]
     pub owner: Option<String>,
 
-    /// GitHub repository name (required unless --local-diff is set).
+    /// GitHub repository name (required unless --local-diff/--base is set).
     #[arg(value_name = "REPO")]
     pub repo: Option<String>,
 
-    /// Pull request number (required unless --local-diff is set).
+    /// Pull request number (required unless --local-diff/--base is set).
     #[arg(value_name = "PR")]
     pub pr: Option<u64>,
 
@@ -62,8 +66,20 @@ pub struct RunArgs {
     pub provider: Option<String>,
 
     /// Read a local unified diff file instead of fetching from GitHub.
-    #[arg(long, value_name = "PATH")]
+    /// Pass `-` to read the unified diff from stdin instead of a file.
+    #[arg(long, value_name = "PATH", conflicts_with = "base")]
     pub local_diff: Option<std::path::PathBuf>,
+
+    /// Diff the local git repository (current directory) from this ref instead
+    /// of fetching from GitHub — `git diff -M <base>...<head>` (three-dot
+    /// merge-base range). Mutually exclusive with --local-diff.
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
+
+    /// Head ref for --base; defaults to HEAD (the last commit, not the
+    /// working tree). Requires --base.
+    #[arg(long, value_name = "REF", requires = "base")]
+    pub head: Option<String>,
 
     /// Write the review log file to the configured log directory.
     #[arg(long = "no-log", action = clap::ArgAction::SetFalse, default_value = "true")]
@@ -143,28 +159,35 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
 
 /// Resolve the `DiffSource` for the `run` subcommand.
 ///
-/// Why: the diff source depends on whether `--local-diff` is set or the three
-/// positional args (owner/repo/pr) are provided.
-/// What: validates the args and builds the correct `DiffSource` variant.
-/// Test: positional args and --local-diff validated.
+/// Why: the diff source depends on whether `--local-diff`/`--base` is set or
+/// the three positional args (owner/repo/pr) are provided.
+/// What: delegates local-mode selection (`LocalFile`/`Stdin`/`GitRange`) to
+/// the shared `resolve_local_diff_source` (issue #2993); falls back to
+/// resolving a GitHub PR source from the positional args + a resolved token.
+/// Test: positional args and --local-diff/--base validated; local-mode
+/// selection itself is covered by `diff_source::tests`.
 pub async fn resolve_diff_source_run(config: &ReviewConfig, args: &RunArgs) -> Result<DiffSource> {
-    if let Some(ref path) = args.local_diff {
-        return Ok(DiffSource::LocalFile { path: path.clone() });
+    if let Some(source) = resolve_local_diff_source(LocalDiffFlags {
+        local_diff: args.local_diff.as_deref(),
+        base: args.base.as_deref(),
+        head: args.head.as_deref(),
+    })? {
+        return Ok(source);
     }
 
     let owner = args
         .owner
         .as_deref()
-        .context("OWNER is required (or use --local-diff)")?
+        .context("OWNER is required (or use --local-diff / --base)")?
         .to_string();
     let repo = args
         .repo
         .as_deref()
-        .context("REPO is required (or use --local-diff)")?
+        .context("REPO is required (or use --local-diff / --base)")?
         .to_string();
     let pr = args
         .pr
-        .context("PR number is required (or use --local-diff)")?;
+        .context("PR number is required (or use --local-diff / --base)")?;
 
     let client = GithubClient::new()
         .map_err(|e| anyhow::anyhow!("failed to build GitHub HTTP client: {e}"))?;

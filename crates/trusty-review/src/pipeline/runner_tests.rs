@@ -299,6 +299,49 @@ fn local_diff_source(diff: &str) -> (DiffSource, tempfile::NamedTempFile) {
     (DiffSource::LocalFile { path }, tmp)
 }
 
+// ── Helper to build a two-commit git repo for GitRange tests (#2993) ───
+
+/// Build a tiny git repo in a tempdir with two commits, returning the dir and
+/// a `GitRange` source spanning them (base..head), so `run_review` can be
+/// driven end-to-end from a real `git diff` rather than a hand-written diff.
+fn git_range_source() -> (DiffSource, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("utf8 git output")
+    };
+
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Test"]);
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").expect("write a.rs");
+    run(&["add", "a.rs"]);
+    run(&["commit", "-q", "-m", "base"]);
+    let base = run(&["rev-parse", "HEAD"]).trim().to_string();
+
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\nfn b() {}\n").expect("write a.rs");
+    run(&["add", "a.rs"]);
+    run(&["commit", "-q", "-m", "head"]);
+    let head = run(&["rev-parse", "HEAD"]).trim().to_string();
+
+    let source = DiffSource::GitRange {
+        repo_root: dir.path().to_path_buf(),
+        base,
+        head: Some(head),
+    };
+    (source, dir)
+}
+
 fn default_config() -> ReviewConfig {
     ReviewConfig::load(None)
 }
@@ -1176,6 +1219,65 @@ async fn run_review_local_diff_is_dry_run_and_not_posted() {
         "local-diff source must never post — always dry-run"
     );
     assert!(!result.posted, "local-diff must not be marked posted");
+}
+
+#[tokio::test]
+async fn run_review_git_range_is_dry_run_and_not_posted() {
+    // Same guarantee as `run_review_local_diff_is_dry_run_and_not_posted`,
+    // exercised end-to-end against a real two-commit git repo (#2993): even
+    // with the trigger forcing live and posting allowed, a GitRange source
+    // must never post.
+    let (source, _dir) = git_range_source();
+    let mut config = default_config();
+    config.dry_run = false; // service-live default
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::ForceLive, // would post if GitHub-sourced
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert!(
+        result.dry_run,
+        "git-range source must never post — always dry-run"
+    );
+    assert!(!result.posted, "git-range must not be marked posted");
+}
+
+#[tokio::test]
+async fn run_review_stdin_is_dry_run_and_not_posted() {
+    // Same guarantee, for the `Stdin` source (#2993). `run_review` never
+    // reads real stdin in this test — `Stdin` loading is exercised via
+    // `read_diff_from_reader` unit tests in `diff.rs`; here we only need to
+    // confirm the source-selection dry-run/no-post wiring, so an empty stdin
+    // (nothing piped into `cargo test`) reading to "" is fine — the pipeline
+    // still runs through the fail-safe/gate path and must stay dry-run.
+    let mut config = default_config();
+    config.dry_run = false; // service-live default
+    let input = ReviewInput {
+        diff_source: DiffSource::Stdin,
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::ForceLive, // would post if GitHub-sourced
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert!(
+        result.dry_run,
+        "stdin source must never post — always dry-run"
+    );
+    assert!(!result.posted, "stdin must not be marked posted");
 }
 
 #[tokio::test]
