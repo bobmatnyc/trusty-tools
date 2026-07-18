@@ -45,30 +45,32 @@ use tokio::time::timeout;
 /// test in seconds rather than hanging the suite.
 const WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.toml`.
+/// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.md`.
 ///
 /// Why: shared by `tests/task_e2e.rs` (drives the daemon directly) and
 /// (#2060) `tests/cli_e2e.rs` (drives the `tcode` CLI, which spawns its own
 /// nested daemon) — both need the SAME minimal two-agent fixture for
 /// `TCODE_MOCK_LLM=echo`'s scripted PM -> engineer delegation to resolve.
+/// `.md` (not `.toml`) since #2897 Slice D retired the TOML agent loader —
+/// `agents::discover_agents` only globs `*.md`.
 pub fn project_with_agents() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("project tempdir");
     let agents = tmp.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents).expect("mkdir agents");
     std::fs::write(
-        agents.join("pm.toml"),
-        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM. Delegate work to python-engineer.\"\n",
+        agents.join("pm.md"),
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM. Delegate work to python-engineer.\n",
     )
-    .expect("write pm.toml");
+    .expect("write pm.md");
     std::fs::write(
-        agents.join("python-engineer.toml"),
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
+        agents.join("python-engineer.md"),
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\nYou are a Python engineer.\n",
     )
-    .expect("write python-engineer.toml");
+    .expect("write python-engineer.md");
     tmp
 }
 
-/// A fake `$HOME` containing `~/.claude/agents/{pm,python-engineer}.toml`.
+/// A fake `$HOME` containing `~/.claude/agents/{pm,python-engineer}.md`.
 ///
 /// Why: a PROJECTLESS daemon has no project root to resolve `.claude/agents`
 /// from, so `ProjectBinding::agents_dir` falls back to the USER-level
@@ -76,23 +78,24 @@ pub fn project_with_agents() -> tempfile::TempDir {
 /// projectless e2e resolve real agent configs hermetically — and exercises that
 /// user-level fallback itself, rather than depending on whatever happens to be
 /// in the developer's real home directory.
-/// What: same two agent configs `project_with_agents` writes, rooted at
-/// `<tmp>/.claude/agents` and intended to be passed as the child's `HOME`.
+/// What: same two agent configs `project_with_agents` writes (`.md`, #2897
+/// Slice D), rooted at `<tmp>/.claude/agents` and intended to be passed as
+/// the child's `HOME`.
 /// Test: used by `task_e2e::projectless_task_runs_end_to_end`.
 pub fn home_with_user_level_agents() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("home tempdir");
     let agents = tmp.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents).expect("mkdir user-level agents");
     std::fs::write(
-        agents.join("pm.toml"),
-        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM. Delegate work to python-engineer.\"\n",
+        agents.join("pm.md"),
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM. Delegate work to python-engineer.\n",
     )
-    .expect("write pm.toml");
+    .expect("write pm.md");
     std::fs::write(
-        agents.join("python-engineer.toml"),
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
+        agents.join("python-engineer.md"),
+        "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\nYou are a Python engineer.\n",
     )
-    .expect("write python-engineer.toml");
+    .expect("write python-engineer.md");
     tmp
 }
 
