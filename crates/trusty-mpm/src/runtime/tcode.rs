@@ -175,7 +175,11 @@ impl RuntimeAdapter for TcodeAdapter {
     /// builds the `tcode run-task` command via [`build_spawn_command`], and
     /// sends it to the pane. `ANTHROPIC_API_KEY` is preserved (API-key path).
     /// `session_id` (the managed session UUID, #2023 component B) is exported
-    /// into the pane shell so it survives `tcode` exiting.
+    /// into the pane shell so it survives `tcode` exiting. `gh_env` (#3025)
+    /// is currently UNUSED by this adapter — `tcode` sessions are out of
+    /// scope for the `GH_TOKEN` spawn-env injection (the issue is scoped to
+    /// Claude Code's Bash-tool `gh` calls); accepted only to satisfy the
+    /// shared [`RuntimeAdapter`] signature.
     /// Test: `tcode_adapter_spawn_sends_run_task`.
     fn spawn(
         &self,
@@ -183,7 +187,9 @@ impl RuntimeAdapter for TcodeAdapter {
         cwd: &Path,
         task: &str,
         session_id: &str,
+        gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        let _ = gh_env;
         if !Self::tcode_available() {
             return Err(RuntimeError::BinaryNotFound(
                 "tcode binary not found on PATH — install trusty-code first".into(),
@@ -334,7 +340,13 @@ mod tests {
         // happy path instead so the test is meaningful in both environments.
         let fake = FakeTmux::new();
         let adapter = TcodeAdapter::new(fake.clone());
-        let result = adapter.spawn("tmpm-test", Path::new("/tmp"), "some task", TEST_SESSION_ID);
+        let result = adapter.spawn(
+            "tmpm-test",
+            Path::new("/tmp"),
+            "some task",
+            TEST_SESSION_ID,
+            &[],
+        );
         if TcodeAdapter::tcode_available() {
             assert!(result.is_ok(), "spawn should succeed when tcode is on PATH");
             assert_eq!(fake.sends.lock().expect("send log mutex").len(), 1);

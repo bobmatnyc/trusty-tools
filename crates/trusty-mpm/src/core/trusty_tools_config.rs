@@ -424,6 +424,15 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<String>,
 
+    /// GitHub account login pinned for this project's spawned sessions (#3025).
+    /// `None` → no pinning (no regression). `Some(login)` → mirrored onto the
+    /// seeded [`crate::project::record::Project::gh_account`] by
+    /// `seed_from_config`; resolved into `GH_TOKEN`/`GH_USER` spawn-env
+    /// overrides via [`crate::core::gh_account::resolve_gh_account_env`].
+    /// Test: `project_config_gh_user_yaml_round_trip` (extended).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_account: Option<String>,
+
     /// Per-project `gh`-CLI identity binding (#2184), overriding the global
     /// `github:` section for this project only.
     ///
@@ -778,6 +787,7 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: Some("bobmatnyc".into()),
+                gh_account: Some("bobmatnyc".into()),
                 github: None,
                 commit_name: None,
                 commit_email: None,
@@ -787,10 +797,11 @@ mod tests {
         };
         let yaml = serde_yaml::to_string(&cfg).expect("serialise");
         assert!(yaml.contains("gh_user"), "yaml: {yaml}");
+        assert!(yaml.contains("gh_account"), "yaml: {yaml}");
         let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
         assert_eq!(cfg, back);
 
-        // Absent gh_user must not serialise.
+        // Absent gh_user/gh_account must not serialise.
         let no_pref = TrustyToolsConfig {
             projects: vec![ProjectConfig {
                 name: "other".into(),
@@ -800,6 +811,7 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: None,
+                gh_account: None,
                 github: None,
                 commit_name: None,
                 commit_email: None,
@@ -809,6 +821,7 @@ mod tests {
         };
         let yaml_no_pref = serde_yaml::to_string(&no_pref).expect("serialise");
         assert!(!yaml_no_pref.contains("gh_user"), "yaml: {yaml_no_pref}");
+        assert!(!yaml_no_pref.contains("gh_account"), "yaml: {yaml_no_pref}");
     }
 
     /// Why (#2184): a project's per-project `github:` binding and commit
@@ -827,6 +840,7 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: None,
+                gh_account: None,
                 github: Some(GithubConfig {
                     config_dir: Some(PathBuf::from("/home/bob/.config/gh-work")),
                     token_env: None,
@@ -856,6 +870,7 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: None,
+                gh_account: None,
                 github: None,
                 commit_name: None,
                 commit_email: None,

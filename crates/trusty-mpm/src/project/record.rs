@@ -83,6 +83,32 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<String>,
 
+    /// GitHub account login pinned for THIS project's spawned sessions (#3025).
+    ///
+    /// Why: an operator with several `gh`-authenticated accounts on one host
+    /// (e.g. a personal account and a work account) is bitten when `gh auth
+    /// switch` — a single GLOBAL pointer — flips under a concurrently-running
+    /// session in a different project tree, breaking `gh pr merge --admin` and
+    /// similar calls until the account is switched back by hand (the
+    /// motivating 2026-07-18 incident). Unlike `gh_user` (#2081, which only
+    /// documents intent for the non-mutating `ensure_gh_account_for_project`
+    /// enforcement path and requires an already-isolated `GH_CONFIG_DIR`),
+    /// `gh_account` drives spawn-time `GH_TOKEN` minting: [`crate::core::
+    /// gh_account::resolve_gh_account_env`] runs `gh auth token -u
+    /// <gh_account>` and the resolved token/login are injected directly into
+    /// the spawned session's environment, so every `gh` call the session
+    /// makes (including from a Claude Code Bash tool child process) is
+    /// deterministic regardless of the ambient/global `gh auth switch` state.
+    /// Only the ACCOUNT NAME is ever persisted here — never a token.
+    /// What: `None` → no pinning; sessions spawned for this project inherit
+    /// whatever `gh` identity is ambient (no regression). `Some(login)` →
+    /// resolved at every spawn/relaunch via `gh auth token -u <login>`; a
+    /// resolution failure (gh missing, account not logged in) is logged as a
+    /// warning and the spawn proceeds WITHOUT `GH_TOKEN` rather than failing.
+    /// Test: `project_serde_round_trip`, `project_without_optionals`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_account: Option<String>,
+
     /// Per-project `gh`-CLI identity binding, mirrored from
     /// [`crate::core::trusty_tools_config::ProjectConfig::github`] (#2184).
     ///
@@ -204,6 +230,7 @@ mod tests {
             tags: vec!["backend".into(), "oss".into()],
             description: Some("the unified trusty workspace".into()),
             gh_user: Some("bobmatnyc".into()),
+            gh_account: Some("bobmatnyc".into()),
             github: Some(GithubConfig {
                 config_dir: Some("/home/bob/.config/gh-work".into()),
                 token_env: None,
@@ -215,6 +242,7 @@ mod tests {
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(json.contains("gh_user"), "json: {json}");
+        assert!(json.contains("gh_account"), "json: {json}");
         assert!(json.contains("github"), "json: {json}");
         assert!(json.contains("commit_name"), "json: {json}");
         assert!(json.contains("commit_email"), "json: {json}");
@@ -233,6 +261,7 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,
@@ -245,6 +274,10 @@ mod tests {
         assert!(
             !json.contains("gh_user"),
             "absent gh_user must not serialise: {json}"
+        );
+        assert!(
+            !json.contains("gh_account"),
+            "absent gh_account must not serialise: {json}"
         );
         assert!(
             !json.contains("tags"),

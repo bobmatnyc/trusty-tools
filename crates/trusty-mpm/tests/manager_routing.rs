@@ -65,6 +65,7 @@ async fn register_project(state: &Arc<DaemonState>, name: &str, tags: &[&str]) {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,

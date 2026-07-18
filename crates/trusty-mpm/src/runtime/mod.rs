@@ -73,7 +73,13 @@ pub trait RuntimeAdapter: Send + Sync {
     /// the managed session's UUID (#2023 component B) — it is exported as
     /// `TM_MANAGED_SESSION_ID` into the pane shell so a command run in that pane
     /// AFTER the runtime exits can identify which managed session it belongs to
-    /// (needed by the in-place-relaunch path, #2023 component C).
+    /// (needed by the in-place-relaunch path, #2023 component C). `gh_env`
+    /// (#3025) is the CALLER-resolved `GH_TOKEN`/`GH_USER` override pair
+    /// (empty when the project has no pinned `gh_account`) — resolution
+    /// consults the `ProjectRegistry` and mints a token via `gh auth token`,
+    /// both of which the caller (the async daemon spawn handler) must run off
+    /// the executor via `tokio::task::spawn_blocking`, so this trait method —
+    /// itself synchronous — never does that work internally.
     /// Test: `claude_code_adapter_spawn_sends_env_scrub_command`.
     fn spawn(
         &self,
@@ -81,6 +87,7 @@ pub trait RuntimeAdapter: Send + Sync {
         cwd: &Path,
         task: &str,
         session_id: &str,
+        gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError>;
 
     /// Start the runtime in a RESUME context — prefer conversation continuity.
@@ -106,6 +113,7 @@ pub trait RuntimeAdapter: Send + Sync {
     /// `spawn_resume_targets_stored_pane_id_when_known`,
     /// `spawn_resume_falls_back_to_session_target_when_pane_id_unknown` in
     /// `claude_code` tests.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_resume(
         &self,
         tmux_name: &str,
@@ -114,9 +122,10 @@ pub trait RuntimeAdapter: Send + Sync {
         task: &str,
         claude_session_id: Option<&str>,
         session_id: &str,
+        gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
         let _ = (pane_id, claude_session_id);
-        self.spawn(tmux_name, cwd, task, session_id)
+        self.spawn(tmux_name, cwd, task, session_id, gh_env)
     }
 
     /// Return a short human-readable name for this runtime backend.

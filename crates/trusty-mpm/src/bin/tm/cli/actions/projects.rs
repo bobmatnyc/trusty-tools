@@ -53,6 +53,10 @@ pub(crate) enum ProjectsAction {
         /// Preferred `gh` login for this project (#2081).
         #[arg(long)]
         gh_user: Option<String>,
+        /// GitHub account login pinned for this project's spawned sessions
+        /// (#3025); resolved into `GH_TOKEN`/`GH_USER` at spawn/relaunch.
+        #[arg(long)]
+        gh_account: Option<String>,
     },
     /// Show a project's config PLUS a read-only nested sessions listing.
     Show {

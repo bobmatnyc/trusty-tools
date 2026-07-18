@@ -69,6 +69,10 @@ pub struct RegisterProjectBody {
     /// Preferred `gh` login for this project (#2081).
     #[serde(default)]
     pub gh_user: Option<String>,
+    /// GitHub account login pinned for this project's spawned sessions,
+    /// resolved into `GH_TOKEN`/`GH_USER` at spawn time (#3025).
+    #[serde(default)]
+    pub gh_account: Option<String>,
 }
 
 /// Response body for `GET /api/v1/projects`.
@@ -118,12 +122,35 @@ pub async fn list_projects_registry_route(
 /// Why: backs `tm projects register` (#2115). Mirrors the `project_register` MCP
 /// tool: upsert keyed on `name`, preserving any existing `gh`/commit identity
 /// binding so a plain re-register never silently wipes config set elsewhere.
+///
+/// #3025 review follow-up (item 4, MEDIUM — "no safe update path"): before this
+/// fix, `stack_hint`/`tags`/`description`/`gh_user`/`gh_account` were REPLACED
+/// wholesale from the body on every register call — an operator running
+/// `tm projects register <name> --gh-account <login>` (the only way to pin an
+/// account without knowing the PATCH API) on an ALREADY-configured project
+/// silently wiped its description/tags/stack_hint/gh_user. Chosen fix (of the
+/// two the review offered): merge-with-existing for these five optional fields
+/// — an ABSENT body field now falls back to the CURRENT persisted value rather
+/// than resetting it, matching the `github`/`commit_name`/`commit_email`
+/// preservation this route already did (those simply have no body
+/// representation at all). `default_branch` is deliberately UNCHANGED (still
+/// defaults to `"main"` when absent) — it was not named in the review finding
+/// and register's positional/required framing around it differs from the other
+/// five. Explicit clearing of any of these five still works via PATCH's
+/// double-Option `null` semantics (`ConfigField`/`ClearableField` remain
+/// intentionally un-extended — see `project_config.rs`'s module doc for why
+/// adding a `GhAccount` variant there would require matching TUI-form changes
+/// out of scope for this fix).
 /// What: rejects a blank `name`/`repo_url` with 400; builds a [`Project`]
-/// (defaulting `default_branch` to `"main"`), preserves the existing binding,
-/// persists via [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
+/// (defaulting `default_branch` to `"main"`), preserving the CURRENT value of
+/// `stack_hint`/`tags`/`description`/`gh_user`/`gh_account`/`github`/
+/// `commit_name`/`commit_email` for every field the body omits, persists via
+/// [`ProjectRegistry::register`](crate::project::ProjectRegistry::register),
 /// and returns 201 with the stored record.
 /// Test: `tests/project_registry_routes.rs::register_get_list_status_round_trip`,
-/// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`.
+/// `register_is_idempotent_upsert`, `register_preserves_identity_binding_not_expressible_in_body`,
+/// `register_preserves_unspecified_optional_fields_on_existing_project`,
+/// `register_explicit_fields_still_override_existing`.
 pub async fn register_project_registry_route(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterProjectBody>,
@@ -136,18 +163,27 @@ pub async fn register_project_registry_route(
     }
 
     let registry = state.project_registry().await;
-    // #2184 parity with `project_register`: a re-register REPLACES the record, so
-    // carry any existing per-project `gh`/commit identity binding forward rather
-    // than clobbering it (this route's body cannot express those fields).
     let existing = registry.get(&body.name).await.ok();
     let project = Project {
         name: body.name,
         repo_url: body.repo_url,
         default_branch: body.default_branch.unwrap_or_else(|| "main".to_string()),
-        stack_hint: body.stack_hint,
-        tags: body.tags.unwrap_or_default(),
-        description: body.description,
-        gh_user: body.gh_user,
+        stack_hint: body
+            .stack_hint
+            .or_else(|| existing.as_ref().and_then(|p| p.stack_hint.clone())),
+        tags: body
+            .tags
+            .or_else(|| existing.as_ref().map(|p| p.tags.clone()))
+            .unwrap_or_default(),
+        description: body
+            .description
+            .or_else(|| existing.as_ref().and_then(|p| p.description.clone())),
+        gh_user: body
+            .gh_user
+            .or_else(|| existing.as_ref().and_then(|p| p.gh_user.clone())),
+        gh_account: body
+            .gh_account
+            .or_else(|| existing.as_ref().and_then(|p| p.gh_account.clone())),
         github: existing.as_ref().and_then(|p| p.github.clone()),
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),
@@ -269,6 +305,11 @@ pub struct PatchProjectBody {
     /// #2121 — this endpoint accepts and stores the string as-is.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub gh_user: Option<Option<String>>,
+    /// New pinned spawn-time `gh` account (#3025); absent=unchanged,
+    /// `null`=clear, string=set. Resolved into `GH_TOKEN`/`GH_USER` at
+    /// session spawn/relaunch — see [`crate::core::gh_account::resolve_gh_account_env`].
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub gh_account: Option<Option<String>>,
     /// Tags to add, deduplicated against the current set. Each entry is
     /// trimmed; a blank/whitespace-only entry rejects the WHOLE request with
     /// 400 (see [`trim_and_reject_blank_tags`]).
@@ -357,6 +398,7 @@ pub async fn patch_project_registry_route(
     let description = body.description;
     let stack_hint = body.stack_hint;
     let gh_user = body.gh_user;
+    let gh_account = body.gh_account;
 
     let registry = state.project_registry().await;
     let result = registry
@@ -375,6 +417,9 @@ pub async fn patch_project_registry_route(
             }
             if let Some(gh_user) = gh_user {
                 project.gh_user = gh_user;
+            }
+            if let Some(gh_account) = gh_account {
+                project.gh_account = gh_account;
             }
             if let Some(add) = tags_add {
                 for tag in add {
@@ -449,7 +494,8 @@ mod tests {
             "description": "the widget",
             "tags": ["backend", "oss"],
             "stack_hint": "rust",
-            "gh_user": "acme-bot"
+            "gh_user": "acme-bot",
+            "gh_account": "acme-bot"
         });
         let body: RegisterProjectBody = serde_json::from_value(json).unwrap();
         assert_eq!(body.name, "widget");
@@ -460,6 +506,7 @@ mod tests {
             Some(&["backend".to_string(), "oss".to_string()][..])
         );
         assert_eq!(body.gh_user.as_deref(), Some("acme-bot"));
+        assert_eq!(body.gh_account.as_deref(), Some("acme-bot"));
     }
 
     /// Only `name`/`repo_url` are required; the rest default to absent.
@@ -475,6 +522,7 @@ mod tests {
         assert!(body.tags.is_none());
         assert!(body.stack_hint.is_none());
         assert!(body.gh_user.is_none());
+        assert!(body.gh_account.is_none());
     }
 
     /// The PATCH body's three-state fields (`description`/`stack_hint`/
@@ -488,28 +536,33 @@ mod tests {
         assert_eq!(absent.description, None);
         assert_eq!(absent.stack_hint, None);
         assert_eq!(absent.gh_user, None);
+        assert_eq!(absent.gh_account, None);
 
         // Key present, value null → Some(None) (clear).
         let cleared: PatchProjectBody = serde_json::from_value(serde_json::json!({
             "description": null,
             "stack_hint": null,
-            "gh_user": null
+            "gh_user": null,
+            "gh_account": null
         }))
         .unwrap();
         assert_eq!(cleared.description, Some(None));
         assert_eq!(cleared.stack_hint, Some(None));
         assert_eq!(cleared.gh_user, Some(None));
+        assert_eq!(cleared.gh_account, Some(None));
 
         // Key present, value a string → Some(Some(v)) (set).
         let set: PatchProjectBody = serde_json::from_value(serde_json::json!({
             "description": "new desc",
             "stack_hint": "python",
-            "gh_user": "acme-bot"
+            "gh_user": "acme-bot",
+            "gh_account": "acme-bot"
         }))
         .unwrap();
         assert_eq!(set.description, Some(Some("new desc".to_string())));
         assert_eq!(set.stack_hint, Some(Some("python".to_string())));
         assert_eq!(set.gh_user, Some(Some("acme-bot".to_string())));
+        assert_eq!(set.gh_account, Some(Some("acme-bot".to_string())));
     }
 
     /// A `name` field identical to no path context still deserializes fine —
@@ -525,6 +578,7 @@ mod tests {
         assert!(body.description.is_none());
         assert!(body.stack_hint.is_none());
         assert!(body.gh_user.is_none());
+        assert!(body.gh_account.is_none());
         assert!(body.tags_add.is_none());
         assert!(body.tags_remove.is_none());
     }

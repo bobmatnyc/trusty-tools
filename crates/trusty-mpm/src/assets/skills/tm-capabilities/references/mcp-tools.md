@@ -221,6 +221,7 @@ Register or update a project in the project registry. Registration is idempotent
 |---|---|---|
 | `default_branch` | `string` | no |
 | `description` | `string` | no |
+| `gh_account` | `string` | no |
 | `gh_user` | `string` | no |
 | `name` | `string` | yes |
 | `repo_url` | `string` | yes |

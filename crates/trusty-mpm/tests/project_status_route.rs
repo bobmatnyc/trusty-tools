@@ -48,6 +48,7 @@ async fn register_project(
             tags: vec![],
             description: None,
             gh_user: gh_user.map(str::to_string),
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,

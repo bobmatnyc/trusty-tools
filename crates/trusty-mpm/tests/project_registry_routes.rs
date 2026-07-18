@@ -77,6 +77,7 @@ async fn register_get_list_status_round_trip() {
         tags: Some(vec!["backend".into()]),
         stack_hint: Some("rust".into()),
         gh_user: Some("acme-bot".into()),
+        gh_account: None,
     };
     let registered = client.registry_register_project(&args).await.unwrap();
     assert_eq!(registered.name, "widget");
@@ -129,6 +130,7 @@ async fn register_is_idempotent_upsert() {
         tags: None,
         stack_hint: None,
         gh_user: None,
+        gh_account: None,
     };
     client.registry_register_project(&base).await.unwrap();
     // Re-register with a different branch — upsert on name, not a duplicate.
@@ -137,6 +139,109 @@ async fn register_is_idempotent_upsert() {
     let out = client.registry_register_project(&updated).await.unwrap();
     assert_eq!(out.default_branch, "release");
     assert_eq!(client.registry_list_projects(None).await.unwrap().len(), 1);
+}
+
+/// #3025 review follow-up item 4 (MEDIUM — "no safe update path"): before this
+/// fix, re-registering an existing project with ONLY `gh_account` set (the
+/// only way to pin an account without knowing the PATCH API) silently wiped
+/// `stack_hint`/`tags`/`description`/`gh_user` back to absent because the
+/// route replaced the whole record from the body. Every field the second
+/// request OMITS must now survive.
+#[tokio::test]
+async fn register_preserves_unspecified_optional_fields_on_existing_project() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: Some("the widget project".into()),
+            tags: Some(vec!["backend".into(), "oss".into()]),
+            stack_hint: Some("rust".into()),
+            gh_user: Some("bobmatnyc".into()),
+            gh_account: None,
+        })
+        .await
+        .expect("initial register");
+
+    // Second register carries ONLY `gh_account` — every other optional field
+    // is omitted and must be preserved, not wiped.
+    let updated = client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+            gh_account: Some("bob-work".into()),
+        })
+        .await
+        .expect("gh_account-only re-register");
+
+    assert_eq!(updated.gh_account.as_deref(), Some("bob-work"));
+    assert_eq!(
+        updated.description.as_deref(),
+        Some("the widget project"),
+        "description must survive an omitting re-register"
+    );
+    assert_eq!(
+        updated.tags,
+        vec!["backend".to_string(), "oss".to_string()],
+        "tags must survive an omitting re-register"
+    );
+    assert_eq!(
+        updated.stack_hint.as_deref(),
+        Some("rust"),
+        "stack_hint must survive an omitting re-register"
+    );
+    assert_eq!(
+        updated.gh_user.as_deref(),
+        Some("bobmatnyc"),
+        "gh_user must survive an omitting re-register"
+    );
+}
+
+/// The flip side of the merge fix: a field the request DOES carry must still
+/// override the existing value — merge-with-existing must never become
+/// merge-that-ignores-new-values.
+#[tokio::test]
+async fn register_explicit_fields_still_override_existing() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: Some("old description".into()),
+            tags: Some(vec!["backend".into()]),
+            stack_hint: Some("rust".into()),
+            gh_user: Some("bobmatnyc".into()),
+            gh_account: Some("bobmatnyc".into()),
+        })
+        .await
+        .expect("initial register");
+
+    let updated = client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: None,
+            description: Some("new description".into()),
+            tags: Some(vec!["frontend".into()]),
+            stack_hint: Some("python".into()),
+            gh_user: Some("bob-work".into()),
+            gh_account: Some("bob-work".into()),
+        })
+        .await
+        .expect("overriding re-register");
+
+    assert_eq!(updated.description.as_deref(), Some("new description"));
+    assert_eq!(updated.tags, vec!["frontend".to_string()]);
+    assert_eq!(updated.stack_hint.as_deref(), Some("python"));
+    assert_eq!(updated.gh_user.as_deref(), Some("bob-work"));
+    assert_eq!(updated.gh_account.as_deref(), Some("bob-work"));
 }
 
 /// The highest-risk clobber path: a project already carries a per-project
@@ -165,6 +270,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: Some(GithubConfig {
                 config_dir: Some("/home/bob/.config/gh-work".into()),
                 token_env: None,
@@ -188,6 +294,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -249,6 +356,7 @@ async fn patch_round_trip_updates_fields() {
             tags: Some(vec!["backend".into(), "keep-me".into()]),
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -297,6 +405,7 @@ async fn patch_absent_fields_untouched() {
             tags: Some(vec!["backend".into()]),
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -367,6 +476,7 @@ async fn patch_rejects_blank_repo_url_surfaces_server_message() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -400,6 +510,7 @@ async fn patch_rejects_name_change() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -435,6 +546,7 @@ async fn patch_is_idempotent() {
             tags: Some(vec!["backend".into()]),
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -478,6 +590,7 @@ async fn patch_rejects_blank_tags_add() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -508,6 +621,7 @@ async fn patch_rejects_blank_tags_remove() {
             tags: Some(vec!["backend".into()]),
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -539,6 +653,7 @@ async fn patch_trims_tags_add_whitespace() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();

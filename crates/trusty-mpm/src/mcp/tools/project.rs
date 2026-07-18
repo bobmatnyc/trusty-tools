@@ -79,6 +79,16 @@ pub(super) fn project_tools() -> Vec<Value> {
                                          operations on this project (#2081). When set, `gh` \
                                          calls for this project should be scoped to this \
                                          account rather than whatever identity is ambient."
+                    },
+                    "gh_account": {
+                        "type": "string",
+                        "description": "Optional GitHub account login pinned for THIS \
+                                         project's spawned sessions (#3025). When set, every \
+                                         session spawn/relaunch resolves `gh auth token -u \
+                                         <gh_account>` and injects GH_TOKEN/GH_USER into the \
+                                         session's environment, so `gh` identity is \
+                                         deterministic regardless of the global `gh auth \
+                                         switch` state."
                     }
                 },
                 "required": ["name", "repo_url"],
