@@ -9,7 +9,17 @@
 //! just-installed binary (that is what running the command means), so
 //! comparing its own `CARGO_PKG_VERSION` against the version the daemon
 //! self-reports on `GET /health` (see [`crate::daemon::api::types::HealthResponse::version`])
-//! is a purely client-side, network-already-available check — no new RPC.
+//! is a purely client-side COMPARISON — the two values it folds together need
+//! no shared process or IPC to compare. It is NOT free of network cost,
+//! though: the caller, `stale_daemon_check` in the `tm` CLI binary's
+//! `commands::doctor_stale` module (a separate crate target from this
+//! library, so it cannot be an intra-doc link here), issues a SECOND
+//! `GET /health` round-trip after the primary `GET /api/v1/doctor` call
+//! already made by `tm doctor`, and the two requests are not atomic — the
+//! daemon can restart between them. That is handled by treating a transport
+//! failure on the second call as `Warn` rather than propagating an error (see
+//! `stale_daemon_check`'s own doc comment), not by this module, which only
+//! ever sees the two already-fetched strings.
 //! What: [`parse_version_triple`] extracts a `(major, minor, patch)` triple
 //! from a `CARGO_PKG_VERSION`-shaped string (mirrors the lightweight parser in
 //! [`crate::core::output_style::parse_claude_version`] rather than pulling in
@@ -190,5 +200,17 @@ mod tests {
         let check = check_daemon_version_staleness("0.42.0", "garbage");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("could not compare"));
+    }
+
+    #[test]
+    fn staleness_ok_when_triples_match_but_raw_strings_differ() {
+        // Covers the `(Some(_), Some(_))` equal-triple arm specifically — a
+        // pre-release suffix difference (e.g. "0.42.0" vs "0.42.0-beta") must
+        // NOT hit the `daemon_reported == installed` exact-string
+        // short-circuit above it, since the raw strings differ; it must also
+        // NOT hit either `<`/`>` ordering arm, since the triples are equal.
+        let check = check_daemon_version_staleness("0.42.0", "0.42.0-beta");
+        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+        assert_eq!(check.name, CHECK_NAME);
     }
 }
