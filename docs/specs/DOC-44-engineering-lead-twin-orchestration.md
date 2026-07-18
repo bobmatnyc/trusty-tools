@@ -1,26 +1,26 @@
 ---
 spec_refs:
   - id: SPEC-TWIN-01~draft
-    path: docs/specs/DOC-42-engineering-lead-twin-orchestration.md
+    path: docs/specs/DOC-44-engineering-lead-twin-orchestration.md
     anchor: SPEC-TWIN-01~draft
   - id: SPEC-TWIN-02~draft
-    path: docs/specs/DOC-42-engineering-lead-twin-orchestration.md
+    path: docs/specs/DOC-44-engineering-lead-twin-orchestration.md
     anchor: SPEC-TWIN-02~draft
   - id: SPEC-TWIN-03~draft
-    path: docs/specs/DOC-42-engineering-lead-twin-orchestration.md
+    path: docs/specs/DOC-44-engineering-lead-twin-orchestration.md
     anchor: SPEC-TWIN-03~draft
   - id: SPEC-TWIN-04~draft
-    path: docs/specs/DOC-42-engineering-lead-twin-orchestration.md
+    path: docs/specs/DOC-44-engineering-lead-twin-orchestration.md
     anchor: SPEC-TWIN-04~draft
 ---
 
-# DOC-42 — Engineering Lead / Virtual Twin Cross-Tool Orchestration Architecture
+# DOC-44 — Engineering Lead / Virtual Twin Cross-Tool Orchestration Architecture
 
 **Status:** DRAFT — Vision & Design Work Only (0% implemented)
 **Subsystem:** trusty-agents — multi-workstream lead orchestration / cross-tool supervision
 **Owner:** Engineering (trusty-agents, trusty-mpm, trusty-code)
 **Last-updated:** 2026-07-18
-**Spec ID:** `SPEC-TWIN-01~draft` … `SPEC-TWIN-04~draft` (DOC-42)
+**Spec ID:** `SPEC-TWIN-01~draft` … `SPEC-TWIN-04~draft` (DOC-44)
 **Epic:** #2109 — `tm manager`: Layer-3 Chat-Based Portfolio Project Manager (cross-tool unification, refs DOC-36)
 **Builds on:**
 - DOC-36 ([`tm manager`: Layer-3 Chat-Based Portfolio Project Manager](./tm-manager-vision.md)) — the PM-of-PMs concept, decision authority, escalation to user.
@@ -69,7 +69,7 @@ Bob's directive (#2109, #2036): **The user's workstreams should be supervised by
 - **tm is mature:** Session control, activity monitoring, and REPL I/O are solid (crates/trusty-mpm/src/client/proxy.rs, daemon/mcp_session.rs, 13 ops).
 - **tcode is nearing control parity:** REST session routes (S2, #2983) are shipping; daemon lifecycle, auth, and control endpoints are nearly ready (DOC-39, prerequisite items).
 - **Agents & memory are ready:** trusty-agents framework exists; trusty-memory MCP is durable and accessible. No new infrastructure blocker.
-- **The gap is coordination:** there is no "PM-of-PMs" that can decide and route across both tools. DOC-36 (`tm manager`) is the decision layer; DOC-42 (this spec) defines how it supervises heterogeneous workstreams.
+- **The gap is coordination:** there is no "PM-of-PMs" that can decide and route across both tools. DOC-36 (`tm manager`) is the decision layer; DOC-44 (this spec) defines how it supervises heterogeneous workstreams.
 
 ---
 
