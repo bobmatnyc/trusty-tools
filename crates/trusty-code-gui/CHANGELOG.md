@@ -28,6 +28,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Phase-1 status bar: readiness + budget chrome per DOC-39 §6.2 (refs #2983).
+  `StatusBar.svelte` polls `GET /sessions` then `GET /sessions/{id}/readiness`
+  (REST Slice 2, squash 15156b42) every 5s via a Svelte 5 `$effect` with its
+  own interval-clearing teardown, and renders a `daemon-unreachable` /
+  `no-session` / `ready` state — same thin-client, no-Rust-proxying pattern as
+  the existing `HealthPanel`. `pickActiveSession` (`lib/session-status.ts`)
+  is the one piece of client-side logic: with no session picker yet (Phase
+  2+ per DOC-39 §6.3) it picks the most recently created non-terminal
+  session to reflect. Mounted as `<StatusBar>` in `App.svelte`, structurally
+  a **sibling of `.body`**, never nested inside it, per DOC-39 §8.1 /
+  AC-18.1 — pinned by a new `App.test.ts` DOM-structure test (`pnpm test`,
+  vitest + jsdom, new devDependencies). **Data gap:** the budget half of the
+  status bar renders a labeled "unavailable" placeholder — `Event::ContextBudget`
+  is emitted on the SSE stream but never cached on the session the way
+  `IndexReadinessSnapshot` is, so there is no `session.get_context_budget`
+  RPC or `GET /sessions/{id}/budget` REST route to poll yet; tracked as a
+  REST-slice follow-up rather than adding a new daemon endpoint in this PR.
 - Initial scaffold: Tauri 2 + Svelte 5 desktop shell for the `trusty-code`
   (tcode) daemon, mirroring `crates/trusty-mpm-gui`'s structure (refs #2983,
   `docs/specs/trusty-code-harness-ui.md`). A single `get_daemon_url` IPC
