@@ -49,6 +49,26 @@
 //! copies against trusty-mpm's source) MUST whitelist the `tools:` line in
 //! exactly these four files rather than flagging them as drift.
 //!
+//! ## Prose deviation follow-up (Slice E3 review round, #3041)
+//!
+//! Adding the `tools:` override alone left three of the four files
+//! internally contradictory: their prose still instructed write/bash actions
+//! the new allowlist denies (`web-qa.md`'s "Technical Testing Protocol" told
+//! the agent to create test scripts, run `CI=true npm test`, and shell out to
+//! `ps aux`; `qa.md`'s methodology told it to "Implement"/"Execute" test
+//! suites directly; `code-analyzer.md`'s "Large-Volume Analysis" told it to
+//! generate-and-run a Python script). A code-critic review of PR #3041 (WARN,
+//! two HIGH + one MEDIUM findings) caught this. `web-qa.md`, `qa.md`, and
+//! `code-analyzer.md` were reworded in the SAME PR to a genuinely read-only
+//! frame: findings plus concrete, ready-to-run recommendations (drafted
+//! scenarios, specified test cases, recommended commands) handed off to an
+//! engineer/ops/CI to execute, never executed by the agent itself.
+//! `code-critic.md` needed no prose change — its review-only body already had
+//! no execute-oriented instructions. This is an ADDITIONAL deviation from
+//! trusty-mpm byte-parity beyond the `tools:` line alone; the deferred E4
+//! staleness guard must whitelist the reworded prose sections in these three
+//! files too, not just the `tools:` line.
+//!
 //! Test: `assets::tests::*` — every embedded agent `.md` parses and projects
 //! to a field-identical `AgentConfig` vs. the retired TOML fixtures (the
 //! original 3), every roster name resolves through the extends composer with
