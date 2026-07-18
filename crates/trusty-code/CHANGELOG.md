@@ -8,6 +8,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- the embedded 31-agent `DEFAULT_AGENTS` roster (#2958) is now actually
+  reachable from every real CLI dispatch path, not just `agents::load_all_agents`'s
+  dir-wide scan. `runner::in_process::InProcessAgentRunner::load_agent`,
+  `run_task::execute_run_task`'s and `task::executor`'s PM-config loads,
+  `run_task::resolve_agent_model_slug`, and
+  `tools::delegate::DelegateToAgentTool`'s pre-flight check/hint previously
+  read `<agents_dir>/<name>.md` directly off disk with no embedded
+  fallback, so `tcode run-task engineer ...` and `tcode run-task
+  rust-engineer ...` both failed with "agent source not found" on a fresh
+  project with no `.claude/agents/`. All five now route through a single
+  new `agents::resolve_agent` helper (disk always wins when present, even
+  when it fails to parse — no silent fallback to a same-named embedded
+  agent) and `agents::available_agent_names` (disk ∪ embedded, for
+  "available agents" hints). This is the last gap in the #2958 arc; closes
+  #3046, completing #2958.
+
 ### Added
 
 - **Pollable context-budget snapshot — cache + `session.get_context_budget`

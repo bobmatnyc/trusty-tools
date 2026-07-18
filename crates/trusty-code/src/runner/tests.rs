@@ -310,6 +310,70 @@ fn agent_config_exists_detects_present_and_absent() {
     assert!(!super::agent_config_exists(tmp.path(), "ghost"));
 }
 
+/// `agent_config_exists` also recognises an embedded default roster name
+/// with no disk config at all (#3046).
+///
+/// Why: `tools::delegate::DelegateToAgentTool::execute`'s pre-flight gate
+/// calls this function directly; before #3046 it only ever consulted disk,
+/// so a valid embedded roster name (e.g. `rust-engineer`) on a fresh
+/// project with no `.claude/agents/` was rejected before the runner ever
+/// got a chance to resolve it via the embedded fallback.
+/// What: An empty/nonexistent agents dir; asserts `true` for a known
+/// embedded roster name and `false` for a genuinely unknown one.
+/// Test: this test.
+#[test]
+fn agent_config_exists_detects_embedded_default() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(super::agent_config_exists(tmp.path(), "rust-engineer"));
+    assert!(!super::agent_config_exists(tmp.path(), "totally-bogus"));
+}
+
+/// Dispatching to an embedded, tools-restricted roster agent (`qa` — one of
+/// the four Slice E3 restricted agents) with NO disk config at all still
+/// enforces its `tools.allowed` — the embedded-fallback path in `load_agent`
+/// (#3046) feeds `run_pipeline`'s `gate_registry` exactly like a disk-loaded
+/// config does.
+///
+/// Why: Slice E3's own tests (`assets::tests::restricted_reviewer_agents_carry_read_only_tools`)
+/// already prove the COMPOSED `AgentConfig` carries the restricted
+/// allowlist; this proves the DISPATCH path — the thing #3046 actually
+/// wires up — narrows the registry for a name that was NEVER on disk,
+/// mirroring `tools_allowed_is_enforced`'s existing pattern but pointed at
+/// an empty agents dir so `load_agent` must take the embedded branch.
+/// What: An empty agents dir (no `qa.md`). Factory builds both an allowed
+/// tool (`read_file`, in `qa`'s restricted allowlist) and a denied one
+/// (`bash`, NOT in it). Script the model to call `bash`, then stop. Assert
+/// the denied tool never ran.
+/// Test: this test.
+#[tokio::test]
+async fn embedded_restricted_agent_dispatch_preserves_tools_allowed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "bash"),
+        stop_response("concluded"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(
+        vec!["read_file", "bash"],
+        Arc::clone(&invoked),
+    ));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf());
+
+    let out = runner
+        .run("qa", "try the denied tool")
+        .await
+        .expect("loop completes (denied tool surfaces a recoverable error)");
+
+    assert_eq!(out.content, "concluded");
+    let ran = invoked.lock().expect("invoked");
+    assert!(
+        !ran.contains(&"bash".to_string()),
+        "the embedded 'qa' agent's restricted allowlist must gate out 'bash' \
+         even though it was never loaded from disk, ran: {ran:?}"
+    );
+}
+
 /// Stubbed-PM: `delegate_to_agent(python-engineer)` runs the engineer's own loop
 /// on its own slug and returns an `AgentOutput` to the PM.
 ///
