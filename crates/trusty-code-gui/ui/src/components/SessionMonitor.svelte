@@ -154,6 +154,21 @@
 
     try {
       const res = await fetch(`${base}/sessions/${active.id}/transcript`, { signal });
+      if (res.status === 404) {
+        // Same "reachable daemon, session vanished mid-poll" case as the
+        // detail fetch above — the session could disappear between the two
+        // calls in this same refresh(), and without this branch the card
+        // would stay phase='ready' with a stale `session` (Cancel button
+        // included) showing a raw HTTP 404 as `error` until the next poll.
+        if (!signal.aborted) {
+          phase = 'no-session';
+          session = null;
+          transcript = null;
+          error = null;
+          cancelPhase = 'idle';
+        }
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as TranscriptRecord;
       if (!signal.aborted) transcript = body;
@@ -166,22 +181,27 @@
   }
 
   async function doCancel() {
-    if (!session) return;
+    if (!session || !pollController) return;
     const id = session.id;
+    const signal = pollController.signal;
     cancelPhase = 'cancelling';
     try {
       const base = await apiBase();
-      const res = await fetch(`${base}/sessions/${id}/cancel`, { method: 'POST' });
+      if (signal.aborted) return;
+      const res = await fetch(`${base}/sessions/${id}/cancel`, { method: 'POST', signal });
+      if (signal.aborted) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       error = null;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (!signal.aborted) {
+        error = e instanceof Error ? e.message : String(e);
+      }
     }
-    cancelPhase = 'idle';
+    if (!signal.aborted) cancelPhase = 'idle';
     // Reflect the new status immediately rather than waiting for the next
     // poll tick — cancellation is cooperative, not instantaneous, but the
     // UI should show whatever the daemon reports right away.
-    if (pollController) void refresh(pollController.signal);
+    if (!signal.aborted && pollController) void refresh(pollController.signal);
   }
 
   $effect(() => {
