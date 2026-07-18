@@ -147,3 +147,80 @@ pub(crate) fn index_semaphore(id: &IndexId) -> Arc<Semaphore> {
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
         .clone()
 }
+
+/// Remove `id`'s entry from [`INDEX_LOCKS`], e.g. when the index itself is
+/// deleted (issue #2984 Phase 1 delta-review MEDIUM finding).
+///
+/// Why: [`INDEX_LOCKS`] only ever grows — `index_semaphore` lazily inserts an
+/// entry per distinct `IndexId` it has ever seen and nothing previously
+/// removed one, so repeatedly creating and deleting indexes (a common
+/// integration-test / churn pattern) leaks one abandoned `Arc<Semaphore>` per
+/// deleted id for the lifetime of the daemon process.
+///
+/// Semantics chosen: **always remove unconditionally**, with no `try_acquire`
+/// probe first. This is safe because a task that is still mid-reindex/catch-up
+/// when the delete lands already holds its own `Arc<Semaphore>` clone (and,
+/// for an in-flight acquire, an `OwnedSemaphorePermit` derived from that same
+/// `Arc`) obtained from an earlier `index_semaphore(id)` call — removing the
+/// DashMap *entry* does not touch that `Arc`'s refcount or the semaphore
+/// object it points to, so the in-flight task's permit remains completely
+/// valid until the task finishes and drops it. The entry is purely a
+/// "next caller gets this instance" registration, not the lock itself. The
+/// only thing eviction changes is what a *future* `index_semaphore(id)` call
+/// returns: a brand-new, uncontended `Semaphore::new(1)`. That is exactly the
+/// right behaviour for a deleted id — an index recreated under the same id
+/// afterwards is a logically new resource and must not inherit stale busy/409
+/// state from a semaphore instance tied to the index that no longer exists.
+/// A `try_acquire` probe would add complexity (and a spurious 409-shaped
+/// signal to callers who don't expect one from a delete) without preventing
+/// anything eviction alone doesn't already handle correctly.
+/// What: removes the `(id, Arc<Semaphore>)` entry from [`INDEX_LOCKS`] if
+/// present. No-op if the map was never initialised or `id` was never seen.
+/// Test: `remove_index_semaphore_evicts_entry_and_next_call_gets_fresh_instance`,
+/// `remove_index_semaphore_is_a_no_op_for_unknown_id`.
+pub(crate) fn remove_index_semaphore(id: &IndexId) {
+    if let Some(map) = INDEX_LOCKS.get() {
+        map.remove(id);
+    }
+}
+
+#[cfg(test)]
+mod tests_index_lock_eviction {
+    use super::*;
+
+    /// After [`remove_index_semaphore`] evicts an id's entry, the next
+    /// [`index_semaphore`] call for that SAME id must allocate a brand-new
+    /// `Semaphore` instance rather than reusing the evicted one.
+    ///
+    /// Why: proves the DashMap entry is actually gone (not just untouched) —
+    /// pointer identity is the only externally-observable signal available
+    /// since `Semaphore` itself exposes no "was this ever used" state.
+    /// What: grabs the semaphore for a unique test-only id, evicts it, grabs
+    /// it again, and asserts the two `Arc<Semaphore>` pointers differ.
+    /// Test: this IS the test.
+    #[test]
+    fn remove_index_semaphore_evicts_entry_and_next_call_gets_fresh_instance() {
+        let id = IndexId::new("semaphore-evict-test-9f3a1c2d");
+        let first = index_semaphore(&id);
+        remove_index_semaphore(&id);
+        let second = index_semaphore(&id);
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "after eviction, index_semaphore must allocate a fresh Semaphore \
+             instance instead of reusing the evicted one (issue #2984 Phase 1 \
+             delta-review MEDIUM finding)"
+        );
+    }
+
+    /// Evicting an id that was never registered must be a silent no-op, not
+    /// a panic.
+    /// Why: the DELETE handler unconditionally calls this on every delete,
+    /// including deletes of indexes that never had a background reindex/
+    /// catch-up (and therefore never called `index_semaphore`).
+    /// What: calls `remove_index_semaphore` on a fresh, never-seen id.
+    /// Test: this IS the test (the absence of a panic is the assertion).
+    #[test]
+    fn remove_index_semaphore_is_a_no_op_for_unknown_id() {
+        remove_index_semaphore(&IndexId::new("semaphore-evict-test-never-seen-4b21"));
+    }
+}

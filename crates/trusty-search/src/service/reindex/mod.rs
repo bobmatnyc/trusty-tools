@@ -113,6 +113,16 @@ pub(crate) use semaphore::background_reindex_semaphore;
 /// `patch_component_toggle_succeeds_for_different_index_while_global_background_semaphore_busy`.
 pub(crate) use semaphore::index_semaphore;
 
+/// Re-export `remove_index_semaphore` so `service::server::search`'s
+/// `unregister_index` (the shared `DELETE /indexes/:id` + orphan-reaper path)
+/// can evict a deleted index's per-index semaphore entry (issue #2984 Phase 1
+/// delta-review MEDIUM finding: `INDEX_LOCKS` otherwise never shrinks).
+/// Why: the semaphore registry lives in the private `semaphore` submodule;
+/// re-exporting the single accessor here avoids widening the submodule itself.
+/// What: delegates to `semaphore::remove_index_semaphore`.
+/// Test: `semaphore::tests_index_lock_eviction`.
+pub(crate) use semaphore::remove_index_semaphore;
+
 /// Re-export `run_embed_catch_up` (issue #2984 Phase 1) so
 /// `service::server::components` can drive the same vector-catch-up logic
 /// `spawn_deferred_embed_pass` uses, without re-acquiring the background

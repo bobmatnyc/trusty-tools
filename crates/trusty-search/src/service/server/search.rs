@@ -66,6 +66,14 @@ pub(super) async fn unregister_index(
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
     state.reindex_progress.remove(&index_id);
     state.watcher_manager.stop_for_index(&index_id).await;
+    // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
+    // per-index reindex/catch-up mutual-exclusion semaphore registry) never
+    // shrinks on its own. Evict this id's entry unconditionally — safe even
+    // if it was never registered (no-op) or a task is still mid-flight on it
+    // (that task holds its own `Arc<Semaphore>` clone, unaffected by removing
+    // the registry entry) — see `remove_index_semaphore`'s doc comment for
+    // the full semantics.
+    crate::service::reindex::remove_index_semaphore(&index_id);
     if removed {
         if let Err(e) = crate::service::persistence::remove_index_registry_entry(id) {
             tracing::warn!("could not remove '{id}' from indexes.toml: {e}");

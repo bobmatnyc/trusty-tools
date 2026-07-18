@@ -86,8 +86,8 @@ pub(super) fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<
 /// What: calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ
 /// lock (the embed step holds no write lock), forces an HNSW snapshot, then
 /// marks semantic `Ready` (or `Failed` when embedding errors, issue #928).
-/// Idempotent: re-running after a partial failure re-embeds all chunks (HNSW
-/// upsert is idempotent).
+/// Idempotent: re-running after a partial failure re-embeds all not-yet-embedded
+/// chunks (HNSW upsert is idempotent).
 /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
 /// `failing_deferred_embed_pass_marks_semantic_failed` (via
 /// `spawn_deferred_embed_pass`, which is a thin wrapper over this function).

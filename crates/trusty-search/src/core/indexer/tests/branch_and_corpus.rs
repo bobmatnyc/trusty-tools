@@ -808,6 +808,168 @@ async fn embed_deferred_chunks_skips_already_embedded_chunks() {
     );
 }
 
+/// Issue #2984 Phase 1 delta-review HIGH finding (stale-embedding-on-
+/// re-enable): `commit_vectors_batch` must evict a chunk's existing
+/// vector-store entry the moment that chunk is (re-)committed WITHOUT a fresh
+/// embedding.
+///
+/// Why: chunk ids are positional (`{path}:{start}:{end}`), not
+/// content-addressed, so an edit that preserves a chunk's line range keeps
+/// its id. Before this fix, `commit_vectors_batch` silently skipped any
+/// chunk whose `vec_opt` was `None` (vector lane disabled/deferred), leaving
+/// whatever vector was already in the store completely untouched. A chunk
+/// embedded BEFORE the vector lane was disabled, then edited (same id) WHILE
+/// the lane stayed disabled, would keep its stale pre-edit vector forever —
+/// `contains_many` (the sole needs-embedding signal `embed_deferred_chunks`
+/// relies on) would never flag it for re-embedding once the lane is
+/// re-enabled.
+/// What: embeds a chunk normally (real vector in the store), then re-commits
+/// the SAME id with different content and no embedding — simulating an edit
+/// received while the vector lane is disabled. Asserts the stale vector is
+/// evicted immediately at commit time.
+/// Test: this IS the test.
+#[tokio::test]
+async fn stale_vector_evicted_when_chunk_recommitted_without_embedding() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+
+    let idx = make_indexer();
+    let dim = 32;
+
+    // Step 1: normal embed — chunk "shared-id" gets a real vector.
+    let original = raw("shared-id", "src/a.rs", "fn original_body() {}");
+    let original_vec = MockEmbedder::new(dim)
+        .embed(&original.content)
+        .await
+        .expect("mock embed");
+    let parsed = ParsedBatch {
+        chunks: vec![original],
+        embeddings: vec![Some(original_vec)],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 1,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit embedded chunk");
+    assert!(
+        idx.store.as_ref().unwrap().contains("shared-id").await,
+        "precondition: chunk must be embedded before the edit"
+    );
+
+    // Step 2: the vector lane is "disabled" (skip_vector-style) and the SAME
+    // chunk id is edited — same positional id, different content, no
+    // embedding computed for this commit (`vec_opt: None`), mirroring the
+    // `parse_files_only` path `service::reindex::batch` routes through when
+    // `skip_vector`/`lexical_only`/`defer_embed` is set.
+    let edited = raw(
+        "shared-id",
+        "src/a.rs",
+        "fn edited_body_totally_different() {}",
+    );
+    let parsed_edit = ParsedBatch {
+        chunks: vec![edited],
+        embeddings: vec![None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed_edit, false)
+        .await
+        .expect("commit edited chunk without embedding");
+
+    assert!(
+        !idx.store.as_ref().unwrap().contains("shared-id").await,
+        "the stale pre-edit vector must be evicted the moment the chunk is \
+         recommitted without a fresh embedding — otherwise it survives as a \
+         stale vector forever (issue #2984 Phase 1 delta-review HIGH finding)"
+    );
+}
+
+/// Issue #2984 Phase 1 delta-review HIGH finding: after the stale-vector
+/// eviction above, a later catch-up pass (`embed_deferred_chunks` — the core
+/// of the runtime vector re-enable path) must re-embed the chunk from its
+/// CURRENT content, not silently skip it.
+///
+/// Why: eviction alone isn't sufficient proof — this test closes the loop
+/// described in the finding end-to-end: embed → disable vector (no embedding
+/// on the next commit) → edit content under the SAME id → re-enable/catch-up
+/// → the chunk must be re-embedded, and the vector actually stored must
+/// match the NEW content's hash, not the stale pre-edit one.
+/// What: repeats the embed → edit-without-embedding sequence, then calls
+/// `embed_deferred_chunks` and asserts (1) the chunk was counted as newly
+/// embedded, (2) the store now contains its id again, and (3) the recovered
+/// vector matches `MockEmbedder`'s hash of the CURRENT (edited) content.
+/// Test: this IS the test.
+#[tokio::test]
+async fn stale_vector_eviction_then_catch_up_reembeds_current_content() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+
+    let idx = make_indexer();
+    let dim = 32;
+    let mock = MockEmbedder::new(dim);
+
+    let original = raw("shared-id-2", "src/b.rs", "fn original_two() {}");
+    let original_vec = mock.embed(&original.content).await.expect("mock embed");
+    let parsed = ParsedBatch {
+        chunks: vec![original],
+        embeddings: vec![Some(original_vec.clone())],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 1,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit embedded chunk");
+
+    let edited_content = "fn edited_two_with_new_body() {}";
+    let edited = raw("shared-id-2", "src/b.rs", edited_content);
+    let expected_new_vec = mock.embed(edited_content).await.expect("mock embed");
+    assert_ne!(
+        original_vec, expected_new_vec,
+        "test precondition: MockEmbedder must hash the edited content \
+         differently from the original — otherwise this test can't \
+         distinguish stale from current"
+    );
+    let parsed_edit = ParsedBatch {
+        chunks: vec![edited],
+        embeddings: vec![None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed_edit, false)
+        .await
+        .expect("commit edited chunk without embedding");
+
+    let (embedded, total) = idx
+        .embed_deferred_chunks(None)
+        .await
+        .expect("embed_deferred_chunks");
+    assert_eq!(total, 1);
+    assert_eq!(
+        embedded, 1,
+        "the edited chunk must be re-embedded once the vector lane's \
+         catch-up runs — the eviction made it visible as needs-embedding again"
+    );
+    assert!(
+        idx.store.as_ref().unwrap().contains("shared-id-2").await,
+        "chunk must be back in the store after catch-up"
+    );
+    let recovered_vec = idx
+        .get_embedding("shared-id-2")
+        .expect("embeddings cache must hold the freshly re-embedded vector");
+    assert_eq!(
+        recovered_vec, expected_new_vec,
+        "the re-embedded vector must reflect the CURRENT (edited) content, \
+         proving the stale pre-edit vector is truly gone rather than merely \
+         hidden"
+    );
+}
+
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]
