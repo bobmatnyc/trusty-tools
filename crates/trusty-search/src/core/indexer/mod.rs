@@ -206,6 +206,29 @@ pub struct CodeIndexer {
     /// immediately after `build_indexer_from_entry` returns.
     /// Test: `service::persistence_loader::tests::build_store_for_entry_flags_load_failure_on_corrupt_snapshot`.
     pub hnsw_load_failed: bool,
+
+    /// Issue #313 / #2984 (Phase 0): mirrors `IndexHandle::skip_kg` — `true`
+    /// when this index was created/persisted with KG construction disabled.
+    ///
+    /// Why: `IndexHandle::skip_kg` (the registry-level flag operators set via
+    /// `--no-kg` / YAML / `POST /indexes`) never reached `CodeIndexer` itself,
+    /// so the warm-boot path (`load_or_rebuild_symbol_graph`) had no way to
+    /// know the flag was set and unconditionally loaded — or worse, fully
+    /// rebuilt — the symbol graph into memory on every daemon restart. That
+    /// defeated the entire point of `skip_kg` (avoid the ~50-100 MB/index
+    /// petgraph heap cost) the moment the daemon restarted. Mirroring the
+    /// flag onto the indexer at construction time (`persistence_loader::
+    /// build_indexer_from_entry`) gives the warm-boot path a value to consult.
+    /// What: defaults to `false`; set by `build_indexer_from_entry` from
+    /// `PersistedIndex::skip_kg` immediately after construction. Consulted by
+    /// `load_or_rebuild_symbol_graph` and `load_chunks_from_disk` to skip
+    /// both the persisted-graph load AND the from-chunks rebuild — the graph
+    /// stays the empty `SymbolGraph::new()` installed by `Self::new`. Purely
+    /// in-memory/soft-off: on-disk KG tables are never touched by this flag.
+    /// Test: `core::indexer::tests::branch_and_corpus::skip_kg_true_warm_boot_never_loads_persisted_graph`,
+    /// `skip_kg_false_warm_boot_still_loads_persisted_graph`, and
+    /// `skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired`.
+    pub skip_kg: bool,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -264,6 +287,7 @@ impl CodeIndexer {
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
             corpus_open_failed: false,
             hnsw_load_failed: false,
+            skip_kg: false,
         }
     }
 

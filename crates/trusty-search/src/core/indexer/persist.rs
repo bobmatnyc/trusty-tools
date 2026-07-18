@@ -121,7 +121,19 @@ impl CodeIndexer {
         }
         // Phase 4: rebuild the symbol graph so KG expansion works on the
         // restored corpus immediately. Cheap relative to re-embedding.
-        self.rebuild_symbol_graph().await;
+        // Issue #313 / #2984 (Phase 0): a skip_kg index must never pay the
+        // rebuild cost here either — this is the legacy JSON-snapshot warm-
+        // boot fallback, the sibling of `load_or_rebuild_symbol_graph`'s redb
+        // path below, and must honor the same flag.
+        if self.skip_kg {
+            tracing::info!(
+                "index '{}': skip_kg=true — skipping symbol graph rebuild after \
+                 chunks.json restore (refs #2984)",
+                self.index_id
+            );
+        } else {
+            self.rebuild_symbol_graph().await;
+        }
         tracing::info!(
             "restored {} chunks for index '{}' from {}",
             total,
@@ -210,14 +222,41 @@ impl CodeIndexer {
     /// graph collapses that to a redb read; the rebuild is only paid on the
     /// genuine first-boot (when nothing has been saved yet) or after a schema
     /// migration that clears `KG_NODES_TABLE`.
-    /// What: if a `CorpusStore` is wired, calls
-    /// `SymbolGraph::load_from_corpus` on a blocking worker. On `Ok(Some)`
-    /// installs that graph directly; on `Ok(None)` or `Err` (logged at
-    /// `warn`) falls back to `rebuild_symbol_graph`.
-    /// Test: covered by the `corpus_kg_warm_boot_roundtrip` integration
-    /// test path; the symbol-graph round-trip itself is unit-tested in
-    /// `core::symbol_graph::tests`.
+    ///
+    /// Issue #313 / #2984 (Phase 0): `skip_kg` is checked FIRST, before
+    /// touching the corpus at all. Previously this method ran unconditionally
+    /// at warm-boot, so a `skip_kg=true` index whose graph was persisted
+    /// before the flag was set (or whose corpus had grown chunks since)
+    /// still paid the full load — or the even more expensive
+    /// `rebuild_symbol_graph` — on every daemon restart, silently defeating
+    /// the flag's entire purpose (avoid the ~50-100 MB/index petgraph heap
+    /// cost). The flag previously only gated reindex Phase-3
+    /// (`service/reindex/finish.rs`) and stage reporting
+    /// (`service/warm_boot/stages.rs`); this is the third and final gate.
+    /// This is a pure soft-off per the locked #2984 design: on-disk KG
+    /// tables in the corpus redb are never touched here — only the in-memory
+    /// load/rebuild is skipped. `self.symbol_graph` is left at the empty
+    /// `SymbolGraph::new()` installed by `CodeIndexer::new`.
+    /// What: if `self.skip_kg`, logs and returns immediately — neither the
+    /// persisted-graph load nor the from-chunks rebuild runs. Otherwise, if a
+    /// `CorpusStore` is wired, calls `SymbolGraph::load_from_corpus` on a
+    /// blocking worker. On `Ok(Some)` installs that graph directly; on
+    /// `Ok(None)` or `Err` (logged at `warn`) falls back to
+    /// `rebuild_symbol_graph`.
+    /// Test: `core::indexer::tests::branch_and_corpus::skip_kg_true_warm_boot_never_loads_persisted_graph`
+    /// and `skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired` cover
+    /// the new guard; `skip_kg_false_warm_boot_still_loads_persisted_graph`
+    /// covers the unchanged `skip_kg=false` behaviour; the symbol-graph
+    /// round-trip itself is unit-tested in `core::symbol_graph::tests`.
     pub(super) async fn load_or_rebuild_symbol_graph(&self) {
+        if self.skip_kg {
+            tracing::info!(
+                "warm-boot: skip_kg=true for '{}' — skipping symbol graph load/rebuild \
+                 (refs #2984)",
+                self.index_id
+            );
+            return;
+        }
         let Some(corpus) = self.corpus.clone() else {
             self.rebuild_symbol_graph().await;
             return;

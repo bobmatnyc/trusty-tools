@@ -109,6 +109,12 @@ pub async fn build_indexer_from_entry(
     // to load, so warm-boot / lazy-load can fold it into `hnsw_snapshot_ready`
     // instead of trusting bare file existence.
     indexer.hnsw_load_failed = hnsw_load_failed;
+    // Issue #313 / #2984 (Phase 0): propagate `skip_kg` onto the indexer
+    // itself — not just the `IndexHandle` built later by the caller — so
+    // `restore_corpus_for_entry` below (via `load_chunks_from_redb` /
+    // `load_chunks_from_disk`) can skip the symbol-graph load/rebuild
+    // entirely instead of paying the heap cost the flag was meant to avoid.
+    indexer.skip_kg = entry.skip_kg;
 
     // Issue #28/#840/#1158: wire the durable redb corpus store.  Failure is
     // non-fatal but logged at ERROR (#840) because a missing corpus means the
