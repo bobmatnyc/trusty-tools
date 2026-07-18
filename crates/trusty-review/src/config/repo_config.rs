@@ -16,7 +16,8 @@
 //! git root — absence is not an error (fail-open, matching `load_toml_file`).
 //!
 //! Test: `finds_repo_config_at_git_root`, `finds_repo_config_from_nested_cwd`,
-//! `no_repo_config_returns_none`, `no_git_root_returns_none`.
+//! `no_repo_config_returns_none`,
+//! `no_git_root_returns_none_unless_start_itself_has_file`.
 
 use std::path::{Path, PathBuf};
 

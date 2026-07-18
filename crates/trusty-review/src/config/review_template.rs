@@ -62,7 +62,9 @@ pub struct ReviewFileConfig {
 /// Test: `review_template_from_cli`, `review_template_from_repo_file_beats_env`,
 /// `review_template_from_env`, `review_template_from_config_file`,
 /// `review_template_precedence_cli_wins_all`, `review_template_none_by_default`,
-/// `review_template_repo_file_rejects_path_traversal`.
+/// `review_template_repo_file_rejects_absolute_path`,
+/// `review_template_repo_file_rejects_parent_traversal_falls_through_to_env`,
+/// `review_template_cli_rejects_parent_traversal`.
 pub fn load_review_template(
     cli_override: Option<&str>,
     repo_file: Option<&ReviewFileConfig>,
@@ -98,7 +100,8 @@ pub fn load_review_template(
 /// configured" case). A non-empty value that fails `is_valid_identifier` →
 /// `None`, with a `tracing::warn!` naming the offending value. Otherwise
 /// `Some(trimmed)`.
-/// Test: `review_template_repo_file_rejects_path_traversal`.
+/// Test: `review_template_repo_file_rejects_absolute_path`,
+/// `review_template_repo_file_rejects_parent_traversal_falls_through_to_env`.
 fn sanitize_template_name(raw: Option<&str>) -> Option<String> {
     let trimmed = raw.map(str::trim).unwrap_or("");
     if trimmed.is_empty() {

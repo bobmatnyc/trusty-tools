@@ -651,10 +651,6 @@ crates/trusty-review/src/config/mod.rs	test_config_defaults_no_env
 crates/trusty-review/src/config/mod.rs	test_config_from_env
 crates/trusty-review/src/config/role_models.rs	role_models_precedence_cli_wins
 crates/trusty-review/src/config/role_models.rs	role_models_precedence_config_file_wins
-crates/trusty-review/src/config/voice.rs	voice_package_from_config_file
-crates/trusty-review/src/config/voice.rs	voice_package_from_env
-crates/trusty-review/src/config/voice.rs	voice_principles_defaults_to_true
-crates/trusty-review/src/config/voice.rs	voice_principles_env_disable
 crates/trusty-review/src/coverage/lcov.rs	parse_lcov_from_path_roundtrip
 crates/trusty-review/src/coverage/policy.rs	coverage_file_config_defaults
 crates/trusty-review/src/coverage/policy.rs	coverage_policy_from_env

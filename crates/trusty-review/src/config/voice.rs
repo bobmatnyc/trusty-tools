@@ -57,7 +57,9 @@ pub struct VoiceFileConfig {
 /// is never returned, logged loudly instead (security fix, issue #2995).
 /// Test: `voice_package_from_env`, `voice_package_from_config_file`,
 /// `voice_package_repo_file_beats_env`,
-/// `voice_package_repo_file_rejects_path_traversal` (this module's `mod tests`).
+/// `voice_package_repo_file_rejects_absolute_path`,
+/// `voice_package_repo_file_rejects_parent_traversal_falls_through_to_env`
+/// (this module's `mod tests`).
 pub fn load_voice_package(
     repo_voice: Option<&VoiceFileConfig>,
     file_voice: Option<&VoiceFileConfig>,
@@ -91,7 +93,8 @@ pub fn load_voice_package(
 /// configured" case). A non-empty value that fails `is_valid_identifier` →
 /// `None`, with a `tracing::warn!` naming the offending value. Otherwise
 /// `Some(trimmed)`.
-/// Test: `voice_package_repo_file_rejects_path_traversal`.
+/// Test: `voice_package_repo_file_rejects_absolute_path`,
+/// `voice_package_repo_file_rejects_parent_traversal_falls_through_to_env`.
 fn sanitize_package_name(raw: Option<&str>) -> Option<String> {
     let trimmed = raw.map(str::trim).unwrap_or("");
     if trimmed.is_empty() {
