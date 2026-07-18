@@ -25,9 +25,9 @@ pub mod types;
 // monolithic module.
 pub use core::MemoryService;
 pub use helpers::{
-    drawer_content_preview, drawer_snippet, enrich_gap_exploration, load_user_config,
-    palace_info_from, recall_entry_json, refresh_gaps_cache, service_result_to_anyhow,
-    LoadedUserConfig, DRAWER_PREVIEW_MAX_CHARS, DRAWER_SNIPPET_MAX_CHARS,
+    drawer_content_preview, drawer_snippet, dream_config_from_user_config, enrich_gap_exploration,
+    load_user_config, palace_info_from, recall_entry_json, refresh_gaps_cache,
+    service_result_to_anyhow, LoadedUserConfig, DRAWER_PREVIEW_MAX_CHARS, DRAWER_SNIPPET_MAX_CHARS,
 };
 pub use types::{
     CreateDrawerBody, CreatePalaceBody, DreamStatusPayload, KgAssertBody, KgGraphPayload,

@@ -155,10 +155,11 @@ mod tests {
     #[test]
     fn validate_ollama_model_rejects_cloud_prefix() {
         let err = validate_ollama_model("anthropic/claude-haiku-4-5").unwrap_err();
-        assert!(err.contains("anthropic/"), "message should name the model");
-        assert!(err.contains("Ollama"), "message should name the provider");
+        let msg = err.to_string();
+        assert!(msg.contains("anthropic/"), "message should name the model");
+        assert!(msg.contains("Ollama"), "message should name the provider");
         assert!(
-            err.contains("semantic.model") || err.contains("openrouter_api_key"),
+            msg.contains("semantic.model") || msg.contains("openrouter_api_key"),
             "message should name a config knob to fix it"
         );
     }
@@ -170,6 +171,28 @@ mod tests {
         assert!(validate_ollama_model("llama3.1").is_ok());
         assert!(validate_ollama_model("llama3.1:8b").is_ok());
         assert!(validate_ollama_model("qwen2.5:7b-instruct").is_ok());
+    }
+
+    /// Why (code review on #2977): several `CLOUD_VENDOR_PREFIXES` entries
+    /// (`qwen/`, `mistralai/`, `nvidia/`, `meta-llama/`, `deepseek/`) are also
+    /// real, pullable Ollama registry namespaces. A locally-pulled model
+    /// referenced with its explicit `:tag` must NOT be rejected — otherwise
+    /// the validator itself would produce the false-positive failure mode
+    /// this issue is fixing.
+    #[test]
+    fn validate_ollama_model_accepts_tagged_vendor_namespaced_pull() {
+        assert!(validate_ollama_model("qwen/qwen2.5:7b-instruct").is_ok());
+        assert!(validate_ollama_model("mistralai/mistral-nemo:12b").is_ok());
+        assert!(validate_ollama_model("meta-llama/llama-3.1:8b").is_ok());
+    }
+
+    /// Why: dropping the `:tag` suffix removes the only signal that
+    /// distinguishes a deliberate local pull from a copy-pasted OpenRouter
+    /// id, so the untagged form of a vendor-namespaced id must still be
+    /// rejected.
+    #[test]
+    fn validate_ollama_model_rejects_untagged_vendor_namespaced_pull() {
+        assert!(validate_ollama_model("qwen/qwen2.5-7b-instruct").is_err());
     }
 
     /// Why: two different batches must have different keys so the cache

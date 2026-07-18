@@ -19,7 +19,7 @@ use crate::memory_core::semantic_consolidation::{
     SemanticConsolidator, inference_available, validate_ollama_model,
 };
 use crate::memory_core::store::vector::VectorStore;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -332,7 +332,7 @@ pub struct RoomConsolidationStats {
 /// (`Err` path), and the production daemon.
 fn build_consolidator_from_config(
     config: &DreamConfig,
-) -> std::result::Result<Option<Arc<SemanticConsolidator>>, String> {
+) -> Result<Option<Arc<SemanticConsolidator>>> {
     if !config.semantic.enabled {
         return Ok(None);
     }
@@ -568,11 +568,11 @@ pub(super) async fn semantic_consolidation_pass(
                     );
                     return (0, 0, 0);
                 }
-                Err(msg) => {
+                Err(e) => {
                     tracing::error!(
                         palace = %handle.id,
                         model = %config.semantic.model,
-                        "semantic consolidation disabled for this palace: {msg}"
+                        "semantic consolidation disabled for this palace: {e:#}"
                     );
                     disabled.store(true, Ordering::Relaxed);
                     return (0, 0, 0);
@@ -666,16 +666,16 @@ pub async fn consolidate_scoped(
                 );
                 return Ok(RoomConsolidationStats::default());
             }
-            Err(msg) => {
+            Err(e) => {
                 // On-demand call (not a recurring background job): surface
                 // the misconfiguration to the caller immediately rather than
                 // silently no-op'ing or retrying (issue #2593).
                 tracing::error!(
                     palace = %handle.id,
                     model = %config.semantic.model,
-                    "dream_consolidate_room: semantic consolidation misconfigured: {msg}"
+                    "dream_consolidate_room: semantic consolidation misconfigured: {e:#}"
                 );
-                return Err(anyhow!(msg));
+                return Err(e);
             }
         },
     };

@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::info;
-use trusty_common::memory_core::dream::{DreamConfig, Dreamer};
+use trusty_common::memory_core::dream::Dreamer;
 use trusty_common::memory_core::PalaceRegistry;
 
 /// Environment variable that disables autonomous dream scheduling when set to
@@ -46,11 +46,18 @@ pub const DREAM_DISABLED_ENV: &str = "TRUSTY_DREAM_DISABLED";
 ///
 /// What:
 /// 1. Checks `TRUSTY_DREAM_DISABLED`; returns immediately (no loops) when set.
-/// 2. Iterates every `PalaceId` currently registered in `registry`.
-/// 3. For each palace: resolves the `Arc<PalaceHandle>` via `registry.get()`,
-///    constructs a fresh `Dreamer` with `DreamConfig::default()`, and spawns
-///    a background loop via `Dreamer::start_with_shutdown(handle, rx.clone())`.
-/// 4. Spawns a bridge task that awaits `shutdown_rx` (a `watch::Receiver<bool>`
+/// 2. Loads the daemon's user config ONCE via `crate::service::load_user_config`
+///    and derives a shared `DreamConfig` template via
+///    `crate::service::dream_config_from_user_config` (issue #2593) — every
+///    loop previously used `DreamConfig::default()` outright, so the idle
+///    background job never saw the user's OpenRouter key, local-model flag,
+///    or local-model id at all, regardless of what `~/.trusty-memory/config.toml`
+///    said.
+/// 3. Iterates every `PalaceId` currently registered in `registry`.
+/// 4. For each palace: resolves the `Arc<PalaceHandle>` via `registry.get()`,
+///    constructs a fresh `Dreamer` from a clone of the shared template, and
+///    spawns a background loop via `Dreamer::start_with_shutdown(handle, rx.clone())`.
+/// 5. Spawns a bridge task that awaits `shutdown_rx` (a `watch::Receiver<bool>`
 ///    driven by the daemon's SIGTERM / SIGINT signal) and broadcasts the stop
 ///    signal to all dream loops.
 ///
@@ -74,11 +81,18 @@ pub fn spawn_dream_scheduler(
         return 0;
     }
 
+    // Loaded once for the whole scheduler (not per palace): all palaces on
+    // this daemon share the same `~/.trusty-memory/config.toml`, and the
+    // loader falls back to `LoadedUserConfig::default()` when the file is
+    // absent, so this never blocks scheduling on a missing config.
+    let user_cfg = crate::service::load_user_config().unwrap_or_default();
+    let config_template = crate::service::dream_config_from_user_config(&user_cfg);
+
     let palace_ids = registry.list();
     let mut spawned: usize = 0;
 
     for palace_id in palace_ids {
-        let config = DreamConfig::default();
+        let config = config_template.clone();
         let idle_secs = config.idle_secs;
         let dreamer = Arc::new(Dreamer::new(config));
         // Unpin (idle-to-disk): the loop takes the registry + id and resolves

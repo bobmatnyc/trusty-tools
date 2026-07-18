@@ -17,8 +17,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
+use trusty_common::memory_core::dream::DreamConfig;
 use trusty_common::memory_core::palace::{Palace, PalaceId};
 use trusty_common::memory_core::retrieval::RecallResult;
+use trusty_common::memory_core::semantic_consolidation::SemanticConsolidationConfig;
 use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
@@ -403,6 +405,49 @@ pub fn load_user_config() -> Option<LoadedUserConfig> {
     })
 }
 
+/// Derive a `DreamConfig` seed from the user's loaded config (OpenRouter key,
+/// local-model flag, and local-model id).
+///
+/// Why (issue #2593): the idle dream scheduler and the on-demand
+/// `dream_consolidate_room`/`palace_dream` tools both need to translate
+/// `LoadedUserConfig` into `DreamConfig` identically, or the two paths
+/// silently diverge — the idle scheduler previously used
+/// `DreamConfig::default()` outright (ignoring the user's config.toml
+/// entirely), and the on-demand path forwarded the OpenRouter key and the
+/// local-model flag but dropped `local_model.model`, leaving
+/// `semantic.model` on the OpenRouter-style default even when consolidation
+/// resolved to a local Ollama backend — the exact misconfiguration
+/// `validate_ollama_model` now rejects. Centralising the derivation also
+/// pins the "which model string goes with which backend" decision: it
+/// mirrors `build_consolidator_from_config`'s own branch
+/// (`local_model_enabled && api_key.is_empty()` => Ollama) so the model
+/// forwarded here always matches the backend the dream cycle will actually
+/// select.
+/// What: sets `openrouter_api_key`, `local_model_enabled`, and
+/// `semantic.model` (the local-model id when the local path resolves, the
+/// OpenRouter model id otherwise); every other `DreamConfig` field keeps its
+/// default.
+/// Test: `dream_config_from_user_config_prefers_local_model_when_resolved`,
+/// `dream_config_from_user_config_prefers_openrouter_model_with_key`.
+pub fn dream_config_from_user_config(cfg: &LoadedUserConfig) -> DreamConfig {
+    let resolves_local = cfg.local_model.enabled && cfg.openrouter_api_key.is_empty();
+    let model = if resolves_local {
+        cfg.local_model.model.clone()
+    } else {
+        cfg.openrouter_model.clone()
+    };
+
+    DreamConfig {
+        openrouter_api_key: cfg.openrouter_api_key.clone(),
+        local_model_enabled: cfg.local_model.enabled,
+        semantic: SemanticConsolidationConfig {
+            model,
+            ..SemanticConsolidationConfig::default()
+        },
+        ..DreamConfig::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Convenience helpers for callers that want `anyhow::Result<Value>` shape.
 // ---------------------------------------------------------------------------
@@ -434,6 +479,57 @@ mod tests {
         // Leak the TempDir guard so the directory survives the test body.
         std::mem::forget(tmp);
         AppState::new(root)
+    }
+
+    /// Why (issue #2593): the exact production gap — the idle scheduler and
+    /// the on-demand tool both need `local_model.model` to reach
+    /// `DreamConfig.semantic.model` when the local Ollama path is what will
+    /// actually resolve (local model enabled, no OpenRouter key).
+    /// What: builds a `LoadedUserConfig` with a configured local model id and
+    /// no OpenRouter key; asserts the derived `DreamConfig.semantic.model`
+    /// equals the configured local model, not the OpenRouter-style default.
+    #[test]
+    fn dream_config_from_user_config_prefers_local_model_when_resolved() {
+        let cfg = LoadedUserConfig {
+            openrouter_api_key: String::new(),
+            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
+            local_model: trusty_common::LocalModelConfig {
+                enabled: true,
+                base_url: "http://localhost:11434".to_string(),
+                model: "llama3.2".to_string(),
+            },
+        };
+
+        let dream_cfg = dream_config_from_user_config(&cfg);
+
+        assert_eq!(dream_cfg.semantic.model, "llama3.2");
+        assert!(dream_cfg.local_model_enabled);
+        assert!(dream_cfg.openrouter_api_key.is_empty());
+    }
+
+    /// Why: when an OpenRouter key is configured, consolidation resolves to
+    /// the OpenRouter backend regardless of `local_model.enabled` (mirrors
+    /// `build_consolidator_from_config`'s branch), so the OpenRouter model
+    /// id must be forwarded instead of the local-model id.
+    /// What: builds a `LoadedUserConfig` with both a local model AND an
+    /// OpenRouter key configured; asserts the derived `semantic.model` is
+    /// the OpenRouter model, not the local one.
+    #[test]
+    fn dream_config_from_user_config_prefers_openrouter_model_with_key() {
+        let cfg = LoadedUserConfig {
+            openrouter_api_key: "sk-test-key".to_string(),
+            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
+            local_model: trusty_common::LocalModelConfig {
+                enabled: true,
+                base_url: "http://localhost:11434".to_string(),
+                model: "llama3.2".to_string(),
+            },
+        };
+
+        let dream_cfg = dream_config_from_user_config(&cfg);
+
+        assert_eq!(dream_cfg.semantic.model, "anthropic/claude-3-5-sonnet");
+        assert_eq!(dream_cfg.openrouter_api_key, "sk-test-key");
     }
 
     /// Issue #184 — `sort=created_desc` paginates newest-first and the

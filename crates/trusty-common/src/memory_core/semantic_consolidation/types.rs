@@ -154,13 +154,15 @@ pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) 
 /// Vendor prefixes used by OpenRouter's `vendor/model` naming convention
 /// (e.g. `anthropic/claude-haiku-4-5`, `openai/gpt-4o-mini`).
 ///
-/// Why: Ollama's own model catalog does not use these prefixes — local tags
-/// are bare names like `llama3.1` or `llama3.1:8b`. A configured model that
-/// starts with one of these was written for OpenRouter and will 404 forever
-/// against a local Ollama server (issue #2593). This is a curated allowlist
-/// of the exact failure mode observed, not an exhaustive OpenRouter vendor
-/// catalog — good enough to catch the unambiguous mismatch without false-
-/// positiving on legitimate local tags.
+/// Why: most of these prefixes are ambiguous on their own — Ollama's own
+/// registry does host several vendor-namespaced pulls (`qwen/…`,
+/// `mistralai/…`, `nvidia/…`, `meta-llama/…`, `deepseek/…`), so a bare prefix
+/// match alone would false-positive on a legitimately-configured local model.
+/// `validate_ollama_model` additionally requires the id to carry no explicit
+/// `:tag` suffix before rejecting it — see that function's doc for the full
+/// rule. This is a curated allowlist of the exact failure mode observed
+/// (issue #2593: the OpenRouter-style default `anthropic/claude-haiku-4-5`
+/// resolved against Ollama), not an exhaustive OpenRouter vendor catalog.
 /// What: consulted only by `validate_ollama_model`.
 /// Test: `validate_ollama_model_rejects_cloud_prefix`.
 const CLOUD_VENDOR_PREFIXES: &[&str] = &[
@@ -188,31 +190,45 @@ const CLOUD_VENDOR_PREFIXES: &[&str] = &[
 /// log noise and redb write-lock churn on the retried batches. Catching the
 /// mismatch once at consolidator-build time lets the caller fail loud and
 /// disable the phase instead of retrying blindly.
-/// What: returns `Err` with an actionable message (names the model, the
-/// resolved provider, and the config knob to fix) when `model` starts with a
-/// known OpenRouter/cloud-vendor prefix; `Ok(())` otherwise. Does NOT verify
-/// the model is actually pulled in Ollama (that requires a network call this
-/// function deliberately avoids) — it only catches the specific, unambiguous
-/// "this is not a local-model id" case.
+/// What: returns `Err` (an actionable message naming the model, the resolved
+/// provider, and the config knob to fix) only when `model` BOTH starts with a
+/// known OpenRouter/cloud-vendor prefix AND carries no `:tag` suffix. Several
+/// of those prefixes (`qwen/`, `mistralai/`, `nvidia/`, `meta-llama/`,
+/// `deepseek/`) are also real, pullable Ollama namespaces, and a real local
+/// pull is near-always referenced with an explicit tag
+/// (`vendor/model:tag`) — so the presence of a `:tag` suffix is treated as
+/// evidence the operator deliberately configured that vendor-namespaced
+/// model locally, and bypasses the check. `Ok(())` in every other case. Does
+/// NOT verify the model is actually pulled in Ollama (that requires a
+/// network call this function deliberately avoids) — it only catches the
+/// specific, unambiguous "this is not a local-model id" case.
 /// Test: `validate_ollama_model_rejects_cloud_prefix`,
-/// `validate_ollama_model_accepts_local_tag`.
-pub fn validate_ollama_model(model: &str) -> std::result::Result<(), String> {
-    match CLOUD_VENDOR_PREFIXES
+/// `validate_ollama_model_accepts_local_tag`,
+/// `validate_ollama_model_accepts_tagged_vendor_namespaced_pull`.
+pub fn validate_ollama_model(model: &str) -> Result<()> {
+    let Some(prefix) = CLOUD_VENDOR_PREFIXES
         .iter()
         .find(|p| model.starts_with(**p))
-    {
-        Some(prefix) => Err(format!(
-            "semantic consolidation model '{model}' has the OpenRouter/cloud vendor prefix \
-             '{prefix}' but resolves to the local Ollama backend (local_model_enabled=true, no \
-             OpenRouter API key configured) — Ollama cannot serve this model id and every call \
-             would fail. Fix: set `DreamConfig.semantic.model` to a locally-pulled Ollama tag \
-             (e.g. \"llama3.1\"), or configure an OpenRouter API key \
-             (`DreamConfig.openrouter_api_key` / OPENROUTER_API_KEY env var) to route this model \
-             through OpenRouter instead. Semantic consolidation is disabled until the config is \
-             fixed."
-        )),
-        None => Ok(()),
+    else {
+        return Ok(());
+    };
+    if model.contains(':') {
+        // Carries an explicit tag (e.g. "qwen/qwen2.5:7b-instruct") — treat
+        // as a deliberately-configured local pull, not a copy-pasted
+        // OpenRouter id.
+        return Ok(());
     }
+    anyhow::bail!(
+        "semantic consolidation model '{model}' has the OpenRouter/cloud vendor prefix \
+         '{prefix}' but resolves to the local Ollama backend (local_model_enabled=true, no \
+         OpenRouter API key configured) — Ollama cannot serve this model id and every call \
+         would fail. Fix: set `DreamConfig.semantic.model` to a locally-pulled Ollama tag \
+         (e.g. \"llama3.1\"; if you really did pull \"{model}\" locally, add its explicit \
+         `:tag` suffix — e.g. \"{model}:latest\" — to bypass this check), or configure an \
+         OpenRouter API key (`DreamConfig.openrouter_api_key` / OPENROUTER_API_KEY env var) to \
+         route this model through OpenRouter instead. Semantic consolidation is disabled until \
+         the config is fixed."
+    );
 }
 
 // ─── Internal prompt/response helpers ───────────────────────────────────────

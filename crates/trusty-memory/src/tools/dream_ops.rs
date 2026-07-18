@@ -6,7 +6,8 @@
 //! actually shrinks. This handler exposes that scoped, synchronous pipeline.
 //! What: `handle_dream_consolidate_room` resolves the palace, parses the
 //! optional room + age window, builds a `DreamConfig` from the daemon's user
-//! config (OpenRouter key / local-model setting), and delegates to
+//! config (OpenRouter key, local-model flag, and local-model id — issue
+//! #2593) via `dream_config_from_user_config`, and delegates to
 //! `dream::consolidate_scoped`. Task drawers are skipped inside that helper.
 //! `handle_palace_dream` is an alias for `handle_dream_consolidate_room` with
 //! the same parameters, exposed as `palace_dream` in the MCP tool surface.
@@ -16,7 +17,7 @@
 use crate::AppState;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading, DreamConfig};
+use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading};
 
 use super::helpers::{open_palace_handle, parse_room, resolve_palace};
 
@@ -29,10 +30,11 @@ const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 /// control instead of waiting for the idle dreamer; returns the work done so
 /// the caller can log progress.
 /// What: parses `room` (null/omitted = all rooms) and `max_age_days`
-/// (default 7), builds a `DreamConfig` seeded with the daemon's OpenRouter key
-/// and local-model flag, opens the palace, and runs `consolidate_scoped`. When
-/// no inference backend is configured the helper is a graceful no-op (zero
-/// counts). Also computes the palace-wide fading-memories resurface list (issue
+/// (default 7), builds a `DreamConfig` seeded from the daemon's user config
+/// (OpenRouter key, local-model flag, local-model id — issue #2593), opens
+/// the palace, and runs `consolidate_scoped`. When no inference backend is
+/// configured the helper is a graceful no-op (zero counts). Also computes
+/// the palace-wide fading-memories resurface list (issue
 /// #2352) — high-value memories that have decayed below the resurface threshold,
 /// surfaced (never auto-boosted) so the caller can touch or `memory_forget`
 /// them. Returns
@@ -55,8 +57,13 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
     let handle = open_palace_handle(state, &palace)?;
 
     // Seed the consolidation config from the daemon's user config so the
-    // inference backend (OpenRouter key / local model) matches the idle dream
-    // cycle. Everything else uses the dream defaults (semantic enabled).
+    // inference backend (OpenRouter key / local model / local model id)
+    // matches the idle dream cycle. Everything else uses the dream defaults
+    // (semantic enabled). `dream_config_from_user_config` (issue #2593) also
+    // forwards `local_model.model` into `semantic.model` — previously only
+    // the key and the enabled flag were forwarded, leaving `semantic.model`
+    // on the OpenRouter-style default even when the local Ollama backend was
+    // what actually resolved.
     //
     // Use `crate::service::load_user_config` (the axum-free home of the loader,
     // issue #226) rather than the `crate::web::` re-export: this `tools` module
@@ -64,11 +71,7 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
     // "axum-server")]`-gated, so the re-export vanishes when a dependent builds
     // trusty-memory without that feature — which broke the build (E0433).
     let cfg = crate::service::load_user_config().unwrap_or_default();
-    let dream_cfg = DreamConfig {
-        openrouter_api_key: cfg.openrouter_api_key,
-        local_model_enabled: cfg.local_model.enabled,
-        ..DreamConfig::default()
-    };
+    let dream_cfg = crate::service::dream_config_from_user_config(&cfg);
 
     let stats = consolidate_scoped(&handle, &dream_cfg, room, max_age_days, None).await?;
 
