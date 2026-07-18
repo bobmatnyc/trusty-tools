@@ -249,20 +249,73 @@ jobs:
       # Primary model: Xenova/all-MiniLM-L6-v2 at the pinned snapshot.
       # The refs/main pointer, tokenizer files, and the quantized ONNX are
       # all needed for fastembed initialisation.
+      #
+      # Resilience (issue #2554): two changes after PR #2548's run 29291600721
+      # hit a hard HTTP 403 from HuggingFace's CDN and killed the whole Test
+      # job before any Rust tests ran:
+      #   (a) Authenticated requests when an optional HF_TOKEN repo/org
+      #       secret is configured — authenticated callers generally get a
+      #       materially higher HF rate limit than anonymous ones.
+      #       ${{ secrets.HF_TOKEN }} evaluates to an empty string (never an
+      #       error) when the secret is unset, so forks/PRs without access
+      #       to repo secrets fall back to the previous anonymous behavior.
+      #   (b) The whole step is now fail-SOFT: any failure (rate limit,
+      #       network blip, etc.) prints a ::warning:: annotation and lets
+      #       the job continue instead of hard-failing. This is safe because
+      #       the only tests that require the real downloaded model are
+      #       #[ignore]-gated (crates/trusty-common/src/embedder/mod.rs
+      #       fastembed_returns_correct_dim / fastembed_cache_hit_is_idempotent,
+      #       crates/trusty-search/tests/migration_e2e.rs, crates/trusty-search/
+      #       tests/embedder_supervisor_e2e.rs, crates/trusty-embedderd/tests/
+      #       bit_identical.rs) and are never run by the plain `cargo test
+      #       --workspace` step below. Every non-ignored test that touches
+      #       the shared embedder pre-seeds a MockEmbedder instead via
+      #       seed_shared_embedder_with_mock() (issue #850,
+      #       crates/trusty-common/src/memory_core/retrieval/embedder.rs), so
+      #       cargo test never needs HuggingFace network access — this step
+      #       is a best-effort latency/flake optimisation, not a correctness
+      #       dependency, and must not be allowed to fail the job.
+      #
+      #       PR #2981 code-critic fix: fail-soft MUST NOT invoke seed_models
+      #       directly as an `if`/`while` condition. Bash disables `errexit`
+      #       for the entire compound command being tested as a conditional,
+      #       and — per the bash manual — "this behavior applies even when
+      #       the failing command is ... contained within a shell function
+      #       called by a command in the list", so a `set -e` re-declared
+      #       INSIDE the function does not help: a mid-download curl failure
+      #       is silently swallowed, execution falls through to the final
+      #       `du -sh ... || true` (always exit 0), the function reports
+      #       success, the ::warning:: never fires, and a PARTIAL/corrupt
+      #       cache dir gets persisted by actions/cache's post-step and
+      #       served as a false "hit" on every run until the cache key
+      #       rotates. Empirically reproduced during review. Fix: invoke
+      #       seed_models as a plain statement in a subshell (never as a
+      #       conditional's test) and capture its exit status via $?.
       - name: Pre-seed fastembed models (cache miss only)
         if: steps.fastembed-cache.outputs.cache-hit != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
 
           CACHE_DIR="${FASTEMBED_CACHE_DIR}"
           mkdir -p "${CACHE_DIR}"
 
+          # ── Auth header (issue #2554) ───────────────────────────────────
+          # Authenticated HF requests get a materially higher rate limit
+          # than anonymous ones. Built once; empty when HF_TOKEN is unset so
+          # unauthenticated requests behave exactly as before.
+          CURL_AUTH=()
+          if [ -n "${HF_TOKEN:-}" ]; then
+            CURL_AUTH=(-H "Authorization: Bearer ${HF_TOKEN}")
+          fi
+
           # ── Retry helper ──────────────────────────────────────────────────
           # curl_retry <url> <dest>
           # 5 attempts, starting with 5 s back-off, doubling each time.
           curl_retry() {
             local url="$1" dest="$2" attempt=1 max=5 wait=5
-            until curl -fsSL --retry 0 -o "${dest}" "${url}"; do
+            until curl -fsSL --retry 0 "${CURL_AUTH[@]}" -o "${dest}" "${url}"; do
               if [ "${attempt}" -ge "${max}" ]; then
                 echo "ERROR: download failed after ${max} attempts: ${url}" >&2
                 return 1
@@ -274,58 +327,89 @@ jobs:
             done
           }
 
-          # ── Xenova/all-MiniLM-L6-v2 (AllMiniLML6V2Q — primary model) ────
-          # hf-hub resolves the model at the revision pinned in refs/main.
-          # We download the refs/main pointer first, then the exact snapshot.
-          HF_BASE="https://huggingface.co"
-          XENOVA_REPO="Xenova/all-MiniLM-L6-v2"
-          XENOVA_DIR="${CACHE_DIR}/models--Xenova--all-MiniLM-L6-v2"
+          # The substantive pre-seed logic runs strict (its own set -e) inside
+          # this function so any failure anywhere inside it — a 403, a
+          # transient network error, anything — aborts the function
+          # immediately instead of silently continuing. Bash functions share
+          # the enclosing shell's variables/other functions, so CURL_AUTH and
+          # curl_retry are visible here without re-declaration. See the
+          # PR #2981 code-critic note above the step name for why this MUST
+          # be invoked in a subshell below, never as an `if`/`while` test.
+          seed_models() {
+            set -euo pipefail
 
-          mkdir -p "${XENOVA_DIR}/refs" "${XENOVA_DIR}/blobs"
+            # ── Xenova/all-MiniLM-L6-v2 (AllMiniLML6V2Q — primary model) ──
+            # hf-hub resolves the model at the revision pinned in refs/main.
+            # We download the refs/main pointer first, then the exact snapshot.
+            HF_BASE="https://huggingface.co"
+            XENOVA_REPO="Xenova/all-MiniLM-L6-v2"
+            XENOVA_DIR="${CACHE_DIR}/models--Xenova--all-MiniLM-L6-v2"
 
-          # Resolve current HEAD commit for the model repo.
-          echo "Resolving Xenova/all-MiniLM-L6-v2 HEAD revision …"
-          XENOVA_REV=$(curl -fsSL \
-            "${HF_BASE}/${XENOVA_REPO}/resolve/main/onnx/model_quantized.onnx" \
-            -o /dev/null -w '%{url_effective}' | grep -oP '(?<=/resolve/)[^/]+' || true)
+            mkdir -p "${XENOVA_DIR}/refs" "${XENOVA_DIR}/blobs"
 
-          # Fallback: query the HF API for the main branch commit hash.
-          if [ -z "${XENOVA_REV}" ] || [ "${XENOVA_REV}" = "main" ]; then
-            XENOVA_REV=$(curl -fsSL \
-              "https://huggingface.co/api/models/${XENOVA_REPO}?full=false" \
-              | grep -oP '"sha":"[^"]{40}"' | head -1 | grep -oP '[0-9a-f]{40}' || true)
-          fi
+            # Resolve current HEAD commit for the model repo.
+            echo "Resolving Xenova/all-MiniLM-L6-v2 HEAD revision …"
+            XENOVA_REV=$(curl -fsSL "${CURL_AUTH[@]}" \
+              "${HF_BASE}/${XENOVA_REPO}/resolve/main/onnx/model_quantized.onnx" \
+              -o /dev/null -w '%{url_effective}' | grep -oP '(?<=/resolve/)[^/]+' || true)
 
-          # If we still have no revision, use the well-known pinned hash from
-          # the developer's local cache (matches fastembed 5.13.4).
-          XENOVA_REV="${XENOVA_REV:-751bff37182d3f1213fa05d7196b954e230abad9}"
-          echo "Using Xenova/all-MiniLM-L6-v2 revision: ${XENOVA_REV}"
-
-          echo "${XENOVA_REV}" > "${XENOVA_DIR}/refs/main"
-          SNAP_DIR="${XENOVA_DIR}/snapshots/${XENOVA_REV}"
-          mkdir -p "${SNAP_DIR}/onnx"
-
-          # Download required files for AllMiniLML6V2Q initialisation.
-          for FILE in tokenizer.json tokenizer_config.json special_tokens_map.json config.json; do
-            DEST="${SNAP_DIR}/${FILE}"
-            if [ ! -f "${DEST}" ]; then
-              echo "Downloading ${XENOVA_REPO}/${FILE} …"
-              curl_retry \
-                "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/${FILE}" \
-                "${DEST}"
+            # Fallback: query the HF API for the main branch commit hash.
+            if [ -z "${XENOVA_REV}" ] || [ "${XENOVA_REV}" = "main" ]; then
+              XENOVA_REV=$(curl -fsSL "${CURL_AUTH[@]}" \
+                "https://huggingface.co/api/models/${XENOVA_REPO}?full=false" \
+                | grep -oP '"sha":"[^"]{40}"' | head -1 | grep -oP '[0-9a-f]{40}' || true)
             fi
-          done
 
-          ONNX_DEST="${SNAP_DIR}/onnx/model_quantized.onnx"
-          if [ ! -f "${ONNX_DEST}" ]; then
-            echo "Downloading ${XENOVA_REPO}/onnx/model_quantized.onnx (~22 MB) …"
-            curl_retry \
-              "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/onnx/model_quantized.onnx" \
-              "${ONNX_DEST}"
+            # If we still have no revision, use the well-known pinned hash from
+            # the developer's local cache (matches fastembed 5.13.4).
+            XENOVA_REV="${XENOVA_REV:-751bff37182d3f1213fa05d7196b954e230abad9}"
+            echo "Using Xenova/all-MiniLM-L6-v2 revision: ${XENOVA_REV}"
+
+            echo "${XENOVA_REV}" > "${XENOVA_DIR}/refs/main"
+            SNAP_DIR="${XENOVA_DIR}/snapshots/${XENOVA_REV}"
+            mkdir -p "${SNAP_DIR}/onnx"
+
+            # Download required files for AllMiniLML6V2Q initialisation.
+            for FILE in tokenizer.json tokenizer_config.json special_tokens_map.json config.json; do
+              DEST="${SNAP_DIR}/${FILE}"
+              if [ ! -f "${DEST}" ]; then
+                echo "Downloading ${XENOVA_REPO}/${FILE} …"
+                curl_retry \
+                  "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/${FILE}" \
+                  "${DEST}"
+              fi
+            done
+
+            ONNX_DEST="${SNAP_DIR}/onnx/model_quantized.onnx"
+            if [ ! -f "${ONNX_DEST}" ]; then
+              echo "Downloading ${XENOVA_REPO}/onnx/model_quantized.onnx (~22 MB) …"
+              curl_retry \
+                "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/onnx/model_quantized.onnx" \
+                "${ONNX_DEST}"
+            fi
+
+            echo "fastembed model pre-seed complete."
+            du -sh "${CACHE_DIR}" || true
+          }
+
+          # Invoke as a plain statement in a subshell — NOT as an `if`/`while`
+          # test — so seed_models' own `set -e` is actually honored (see the
+          # PR #2981 code-critic note above). `set +e` around the call stops
+          # THIS failure from tripping the outer script's own errexit; it is
+          # restored immediately after the status is captured.
+          set +e
+          ( seed_models )
+          rc=$?
+          set -e
+
+          if [ "${rc}" -ne 0 ]; then
+            # Do not let actions/cache persist a partial/corrupt download
+            # tree under this run's key: an absent cache is a safe "miss"
+            # next run; a partial one would look like a permanent false
+            # "hit" until the key rotates (issue #2554/#2981).
+            rm -rf "${CACHE_DIR}"
+            echo "::warning::fastembed model pre-seed failed (rc=${rc}; HuggingFace rate-limit/403 or network issue) — continuing WITHOUT a pre-seeded cache. This is non-fatal: cargo test --workspace never needs the real model (non-ignored tests use a MockEmbedder via seed_shared_embedder_with_mock(), issue #850; the tests that need the real model are #[ignore]-gated and are not run in this job). See issue #2554 for details."
           fi
-
-          echo "fastembed model pre-seed complete."
-          du -sh "${CACHE_DIR}" || true
 
       - name: cargo test --workspace
         # Unset CI so trusty-common's update::check_throttled runs the

@@ -28,5 +28,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Gate on the SLOC counter's own regression fixtures (issue #2563) so a
+      # future edit to scripts/lib/sloc_awk.sh that reintroduces a counting
+      # bug (e.g. the nested-block-comment overcount fixed here, or the
+      # #2489/#2509 doc-comment-prose swallow) fails CI instead of silently
+      # rotting. Runs before the real gate since a broken counter makes the
+      # real gate's result unreliable.
+      - name: SLOC counter selftest (regression fixtures)
+        run: bash scripts/check_line_cap_selftest.sh
+
       - name: Enforce 500-line file cap (ratcheted allowlist)
         run: bash scripts/check_line_cap.sh
