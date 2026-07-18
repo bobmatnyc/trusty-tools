@@ -62,6 +62,7 @@ normative grammar — this note does not restate it.
 | DOC-39 | `SPEC-TCUI-01~draft` … `-09~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
 | DOC-40 | `SPEC-BGATTACH-01~draft` … `-07~draft` | [Durable Background Agents: Exclusive Attach/Detach Semantics](./durable-background-agents.md) | trusty-mpm — daemon / session-manager / agent delegation; trusty-code — session registry / task executor (cross-crate) |
 | DOC-41 | `SPEC-AGENTFW-01~draft` … `-06~draft` | [Eve-Style Agent Framework for trusty-agents](./trusty-agents-eve-style-agents-spec.md) | trusty-agents — agent definition / runtime / tool-calling / memory |
+| DOC-45 | `SPEC-MCPCRED-01~draft` … `-05~draft` | [Remote MCP Credential Delivery for Fleet Sessions](./remote-mcp-credential-delivery.md) | trusty-mpm — MCP bridging / credential injection / session launch |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -75,9 +76,9 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-42`** (re-scan of the whole `docs/` tree, 2026-07-16): the
-> highest claimed number is now **DOC-41** ([Eve-Style Agent Framework](./trusty-agents-eve-style-agents-spec.md),
-> the entry above), which claimed the next free number after **DOC-40**
+> **Next free `DOC-N` = `DOC-46`** (2026-07-18): **DOC-45** ([Remote MCP Credential Delivery](./remote-mcp-credential-delivery.md),
+> cataloged above) claimed the previously-free number. The highest claimed number is now **DOC-45**.
+> Previous note (2026-07-16): DOC-41 was the highest, which claimed the next free number after **DOC-40**
 > ([Durable Background Agents](./durable-background-agents.md)) merged and was cataloged, per the
 > scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
 > note is a *hint, not authority*; the scan is authoritative). **DOC-38 §10 F3** (the DOC-28
