@@ -734,6 +734,57 @@ pub struct ContextBudgetSnapshot {
     pub compaction_rounds: usize,
 }
 
+/// One row in a session's RETAINED search/recall audit trail (issue #3072;
+/// backs `session.get_search_audit` / `GET /sessions/{id}/search-audit` —
+/// DOC-39 §4.7's Search tab (10d) and the #3027 8b monitor card).
+///
+/// Why: [`Event::SearchPerformed`]/[`Event::MemoryRecalled`] are emitted only
+/// on the SSE stream, so a client that attaches after either fired — or never
+/// opens an SSE connection at all, per DOC-39 §2.1's thin-REST-client
+/// constraint — has no way to see search/recall history. This is the
+/// per-record projection `SessionRegistry::push_search_audit`
+/// (`session::registry_search_audit`) appends to `SessionEntry::search_audit`
+/// from the SAME call `record_search_performed`/`record_memory_recalled`
+/// already makes to emit the live event, so the retained list and the SSE
+/// stream can never disagree about what happened. Retention is capped at
+/// `session::registry_search_audit::SEARCH_AUDIT_CAP` records, oldest
+/// dropped first — mirrors the ring buffer's own eviction policy, so a
+/// long-running session's memory use stays bounded.
+/// What: `#[serde(tag = "kind", rename_all = "snake_case")]` — `Search`
+/// mirrors [`Event::SearchPerformed`]'s `lane`/`query`/`hit_count`/
+/// `latency_ms` fields verbatim; per-hit path/score detail is deliberately
+/// NOT retained here (`hit_count` already answers "how many" — carrying
+/// every hit for up to `SEARCH_AUDIT_CAP` records would be unbounded per-hit
+/// growth this audit trail does not need). `Recall` mirrors
+/// [`Event::MemoryRecalled`]'s `query`, plus `result_count`/`injected_count`
+/// folded from `results` (the recalled TEXT itself is likewise not retained,
+/// same rationale). Both variants carry `agent`/`agent_id` (DOC-39 AC-13
+/// attribution) and `at` — the wall-clock time the record was appended,
+/// generated here because neither source event carries its own timestamp,
+/// giving DOC-39 AC-7.2's "age" column something to compute from.
+/// Test: `session::registry_search_audit::tests::*`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SearchAuditRecord {
+    Search {
+        agent: String,
+        agent_id: String,
+        lane: String,
+        query: String,
+        hit_count: Option<usize>,
+        latency_ms: u64,
+        at: DateTime<Utc>,
+    },
+    Recall {
+        agent: String,
+        agent_id: String,
+        query: String,
+        result_count: usize,
+        injected_count: usize,
+        at: DateTime<Utc>,
+    },
+}
+
 impl Event {
     /// Return the event's `session_id` if it has one. Used by the SSE
     /// handler to filter the broadcast stream to a single task subscription.

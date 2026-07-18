@@ -45,7 +45,9 @@
 //! `DELETE /sessions/{id}/goal`. Slice 4 ([`tasks`]) adds
 //! `POST /tasks` -> `task.run`. Slice 5 ([`fs`]) adds
 //! `GET /fs` -> `fs.list_dir`. Slice 6 ([`agents`]) adds
-//! `GET /sessions/{id}/agents` -> `session.get_agents`. Every slice reuses
+//! `GET /sessions/{id}/agents` -> `session.get_agents`. Slice 7
+//! ([`search_audit`]) adds `GET /sessions/{id}/search-audit` ->
+//! `session.get_search_audit` (issue #3072). Every slice reuses
 //! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
@@ -54,6 +56,7 @@
 
 pub mod agents;
 pub mod fs;
+pub mod search_audit;
 pub mod sessions;
 pub mod sessions_write;
 pub mod tasks;

@@ -10,6 +10,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **REST-pollable search/recall audit trail (issue #3072).** New
+  `session.get_search_audit` RPC method and `GET /sessions/{id}/search-audit`
+  REST route return a session's retained, capped (200 records) history of
+  `search_code`/`recall_session` activity — the data source for DOC-39 §4.7's
+  Search tab (10d) and #3027's monitor card — mirroring the RPC+REST parity
+  pattern established by `session.get_agents` (#2962) and
+  `session.get_context_budget` (#3015).
 - **CI staleness guard for the embedded tm-agent copies (issue #2958 Slice
   E4).** `scripts/check_agent_assets.sh` + `.github/workflows/agent-assets.yml`
   diff `crates/trusty-code/src/assets/agents/*.md` against their source in
