@@ -584,6 +584,41 @@ additive to `compose_agent`'s prose-only scope — trusty-mpm's agents don't
 carry a `tools`/`subagents`/`memory` binding schema, so there is no
 precedent to diverge from there.
 
+### 2.5.1 `extends` in trusty-agents: Personalization (user customization without forking)
+
+While trusty-mpm and trusty-code use `extends:` to build specialist template hierarchies
+(e.g., `deep-reviewer` extends `BASE-code-reviewer`), trusty-agents uses `extends:` for a
+different, simpler purpose: **user personalization**.
+
+A trusty-agents user can create their own agent that extends a stock/bundled base agent
+to layer personal customization:
+
+```yaml
+# ~/.trusty-agents/agents/my-researcher.md
+---
+name: my-researcher
+role: agent
+description: My customized researcher
+extends: researcher          # Inherit the base researcher agent
+
+tools:
+  allowed: [search_papers, my_custom_tool]     # Add personal tools to base set
+---
+
+I like to cross-reference sources with my personal database lookup.
+Here are my personal prompt overrides...
+```
+
+When the PM agent invokes `researcher` or `my-researcher`, trusty-agents resolves and
+composes the inheritance chain identically to trusty-mpm (base-first prose concatenation,
+scalar child-overrides, list union on `tools` and `subagents.allowed`). No reimplementation;
+the same `compose_agent` rules apply.
+
+The key difference from mpm/tcode: trusty-agents' agents are predominantly *personal*
+(user-authored) or *stock* (bundled, meant to be extended), not a large intermediate
+specialist catalog. `extends` is a user-facing feature for customization, not a
+platform-internal template hierarchy.
+
 ### 2.6 No-code enforcement (NEW)
 
 The mechanical guarantee behind §2.0's principle, in two layers:
@@ -1190,6 +1225,49 @@ back through `ToolResult::ok(out.content)` exactly as today (`delegate.rs:167`).
   transport is introduced; the current `GET /api/events?session_id=`
   contract (Server-Sent Events, 15s keepalive, `Lagged` handling) already
   covers this.
+
+### 5.4 Runtime Delegation & PM-as-Agent: A Second Composition Mode
+
+In addition to config-time `extends:` (shared across all three products), trusty-agents
+uniquely employs a second, runtime-based composition mode for orchestration.
+
+**The PM/orchestrator is itself a declarative agent** — not special-cased code, but a flat
+`.md`+YAML agent in trusty-agents' own agent registry:
+
+```yaml
+# The PM orchestrator agent (example)
+---
+name: pm
+role: orchestrator
+description: Personal productivity orchestrator
+tools:
+  allowed: [delegate_to_agent]       # The delegate tool is its primary capability
+subagents:
+  allowed: [researcher, coder, reviewer, mpm-proxy]
+---
+
+I coordinate research, coding, review, and orchestration tasks.
+I delegate to specialized agents based on the task at hand.
+```
+
+When the PM agent (or any other agent in trusty-agents) needs to invoke a sub-agent at
+**runtime**, it calls `delegate_to_agent` (§5.1–5.2's `DelegateToAgentTool`), passing the
+sub-agent name and an optional `HandoffContext` (summary, relevant state, constraints).
+This is distinct from `extends:` — it is runtime dispatch, not definition-time inheritance.
+
+**Both modes coexist:** an agent in trusty-agents can:
+- **Inherit via `extends:`** from a base agent (personalization)
+- **Delegate to other agents at runtime** (orchestration)
+
+These are orthogonal concerns. The PM agent itself may extend a base `pm` agent (for
+personalization) and also delegate to `researcher`, `coder`, etc. (for orchestration).
+A user's personal `my-researcher` agent extends the stock `researcher` (personalization)
+and declares `subagents.allowed: [fact-checker]` to delegate to a fact-checker when
+needed (orchestration).
+
+**Depth-guarding:** the delegation chain is bounded (related to issue #2894) to prevent
+runaway loops. This is a runtime concern, distinct from the config-time cycle detection
+for `extends:`.
 
 ---
 
