@@ -134,6 +134,72 @@ fn in_memory_cycle_detection() {
 }
 
 #[test]
+fn in_memory_depth_exceeded() {
+    // A chain longer than the shared MAX_DEPTH limit must fail with
+    // DepthExceeded, mirroring the fs path's `depth_exceeded`. `resolve` is
+    // shared code (`agents::builder::resolve`), so this proves the in-memory
+    // backend inherits the depth guard rather than looping/overflowing the
+    // stack when fed a pathological embedded-asset chain.
+    let mut entries: Vec<(String, String)> = vec![(
+        "level0".to_string(),
+        "---\nname: level0\n---\n\nroot\n".to_string(),
+    )];
+    for i in 1..=10 {
+        entries.push((
+            format!("level{i}"),
+            format!(
+                "---\nname: level{i}\nextends: level{}\n---\n\nbody{i}\n",
+                i - 1
+            ),
+        ));
+    }
+    let sources = build_in_memory_source_map(entries.iter().map(|(n, c)| (n.as_str(), c.as_str())));
+    let err = compose_agent_in_memory("level10", &sources).unwrap_err();
+    assert!(
+        matches!(err, AgentBuildError::DepthExceeded(_)),
+        "expected DepthExceeded, got {err:?}"
+    );
+}
+
+#[test]
+fn in_memory_frontmatter_parse_error() {
+    // A frontmatter block missing its closing `---` must surface
+    // FrontmatterParse, mirroring the fs path's `unterminated_frontmatter_errors`.
+    // `split_frontmatter` is shared code, so this proves the in-memory
+    // backend surfaces the same parse-error variant, not a swallowed/
+    // silently-degraded result.
+    let sources = build_in_memory_source_map([("broken", "---\nname: broken\n\n# No close\n")]);
+    let err = compose_agent_in_memory("broken", &sources).unwrap_err();
+    assert!(matches!(err, AgentBuildError::FrontmatterParse(_)));
+}
+
+#[test]
+fn md_suffix_key_resolves_same_as_bare_name() {
+    // MEDIUM 2 (PR #3013 review): `build_source_map` (fs path) strips the
+    // `.md` filename extension via `Path::file_stem` before indexing, so
+    // `extends: base-qa` resolves a source registered on disk as
+    // `BASE-QA.md`. `InMemorySources::insert`/`read_source` must apply the
+    // same normalisation — a caller that registers an embedded asset under
+    // its original filename key (`"BASE-QA.md"`, the natural key when the
+    // asset list is generated from `include_str!` sites named after real
+    // files, issue #2958 Slice E2) must resolve identically to one
+    // registered under the bare stem (`"base-qa"`).
+    let sources = build_in_memory_source_map([
+        (
+            "BASE-QA.md",
+            "---\nname: base-qa\nrole: base-qa\n---\n\nQA BASE BODY\n",
+        ),
+        (
+            "qa",
+            "---\nname: qa\nrole: qa\nextends: base-qa\n---\n\nQA LEAF BODY\n",
+        ),
+    ]);
+    let composed = compose_agent_in_memory("qa", &sources).unwrap();
+    assert!(composed.contains("QA BASE BODY"));
+    assert!(composed.contains("QA LEAF BODY"));
+}
+
+#[test]
 fn fs_and_in_memory_compose_are_byte_equivalent() {
     // The property Slice E1 exists to guarantee: composing identical
     // content through the fs backend (`compose_agent`) and the in-memory

@@ -20,7 +20,9 @@
 //! `fs_and_in_memory_compose_are_byte_equivalent`, below).
 //! Test: `cargo test -p trusty-agents-common agents::builder_in_memory`
 //! covers single-level extends, a multi-level BASE-template chain, a
-//! missing-source error, a cycle error, and fs/in-memory byte-equivalence.
+//! missing-source error, a missing-extends-target error, a cycle error, a
+//! depth-exceeded error, a frontmatter-parse error, `.md`-suffixed key
+//! normalisation, and fs/in-memory byte-equivalence.
 
 use std::collections::HashMap;
 
@@ -55,25 +57,47 @@ impl InMemorySources {
         Self(HashMap::new())
     }
 
-    /// Register one named markdown source, case-folding the key.
+    /// Register one named markdown source, normalising the key.
     ///
     /// Why: `extends:` values are conventionally lowercase
     /// (`extends: base-qa`) while BASE template assets are conventionally
     /// named with an uppercase stem (`BASE-QA.md`, `BASE-QA` as a bare
     /// name); case-folding on insert (matching [`builder::build_source_map`]'s
     /// case-folding on scan) lets either spelling resolve the other.
-    /// What: inserts `(name.to_lowercase(), content)`, overwriting any prior
-    /// entry for the same case-folded name.
-    /// Test: `case_insensitive_in_memory_resolve`.
+    /// [`builder::build_source_map`] also strips the `.md` filename
+    /// extension via `Path::file_stem` before indexing — a caller here that
+    /// registers embedded assets by their original filename (e.g.
+    /// `"BASE-QA.md"`, the natural key if the asset list is generated from
+    /// `include_str!` sites named after real files, issue #2958 Slice E2)
+    /// must resolve identically to one registered by bare name (`"base-qa"`,
+    /// `"BASE-QA"`); without stripping the suffix here too, the two callers
+    /// would silently diverge from the fs path's behavior (review follow-up
+    /// on PR #3013, MEDIUM 2).
+    /// What: lowercases `name`, then strips one trailing `.md` suffix
+    /// (case-insensitive, since the lowercasing above already folds `.MD`/
+    /// `.Md`/etc. into `.md`) before inserting `(key, content)`, overwriting
+    /// any prior entry for the same normalised key.
+    /// Test: `case_insensitive_in_memory_resolve`,
+    /// `md_suffix_key_resolves_same_as_bare_name`.
     pub fn insert(&mut self, name: impl Into<String>, content: impl Into<String>) {
-        self.0.insert(name.into().to_lowercase(), content.into());
+        let lower = name.into().to_lowercase();
+        let key = lower.strip_suffix(".md").unwrap_or(&lower).to_string();
+        self.0.insert(key, content.into());
     }
 }
 
 impl SourceLookup for InMemorySources {
     fn read_source(&self, name: &str) -> Result<String, AgentBuildError> {
+        // Apply the same lowercase + `.md`-suffix-strip normalisation used
+        // by `insert`, so a lookup by either spelling (`"base-qa"` or
+        // `"base-qa.md"`) hits the same stored key. The error, if any, still
+        // reports the caller's ORIGINAL-case `name` (not the normalised
+        // key) so messages read naturally regardless of which spelling was
+        // requested.
+        let lower = name.to_lowercase();
+        let key = lower.strip_suffix(".md").unwrap_or(&lower);
         self.0
-            .get(&name.to_lowercase())
+            .get(key)
             .cloned()
             .ok_or_else(|| AgentBuildError::NotFound(name.to_string()))
     }
@@ -122,6 +146,7 @@ where
 /// Test: `compose_in_memory_single_level`,
 /// `compose_in_memory_multi_level_base_chain`,
 /// `compose_in_memory_missing_source_errors`, `in_memory_cycle_detection`,
+/// `in_memory_depth_exceeded`, `in_memory_frontmatter_parse_error`,
 /// `fs_and_in_memory_compose_are_byte_equivalent`.
 pub fn compose_agent_in_memory(
     name: &str,
