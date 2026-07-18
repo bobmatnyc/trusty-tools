@@ -219,16 +219,16 @@ Use the graceful restart convention (SIGTERM, not SIGKILL):
 
 ```bash
 # On macOS
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty-search.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty-memory.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty-mpm.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist
 
 # Reinstall or run: cargo install --path … --locked
 
 # Restart
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty-search.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty-memory.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty-mpm.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist
 ```
 
 On Linux, use `systemctl`:
@@ -247,10 +247,10 @@ rm ~/.local/bin/trusty-mpm ~/.local/bin/trusty-memory ~/.local/bin/trusty-search
 
 On macOS, also remove the launchd plists:
 ```bash
-rm ~/Library/LaunchAgents/com.trusty-*.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty-search.plist 2>/dev/null || true
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty-memory.plist 2>/dev/null || true
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty-mpm.plist 2>/dev/null || true
+rm ~/Library/LaunchAgents/com.trusty.*.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist 2>/dev/null || true
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist 2>/dev/null || true
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist 2>/dev/null || true
 ```
 
 ### Q: Installation failed. What do I do?
