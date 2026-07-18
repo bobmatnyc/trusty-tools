@@ -10,6 +10,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`session.get_agents` — live agent-roster RPC (DOC-39 §5.4, closes #2962).**
+  New JSON-RPC method `session.get_agents(session_id) -> { agents: [{agent_id,
+  name, model, state, task, todos, files_changed}] }` returns the daemon's
+  own fold of the ring-buffer replay's tool-attribution events
+  (`ToolStarted`/`ToolFinished`/`ToolError`/`SearchPerformed`/
+  `MemoryRecalled`, all carrying `agent`/`agent_id` since #2898) into one
+  roster entry per distinct `agent_id`, replacing the client-side SSE-fold
+  §5.4 named "a Phase-1 loan, not a design." `state` is `"running"` while an
+  agent's last known event is an unmatched `ToolStarted`, `"idle"`
+  otherwise. `model`/`task`/`todos`/`files_changed` are deferred
+  (`null`/`[]`) — see `session::registry::agents`'s module docs for exactly
+  why each isn't foldable from today's event stream. Implementation lives in
+  new sibling files `session/registry_agents.rs` (the fold) and
+  `session/protocol_agents.rs` (the RPC handler), mirroring
+  `session.get_readiness`'s split. This closes the last MISSING API item in
+  DOC-39 §5.1.
 - **Embedded default agents converted from TOML to `.md`+frontmatter (#2897,
   epic #2892, Slice C).** The three bundled default agents
   (`engineer`/`qa-agent`/`code-reviewer`, #2895) are now authored as

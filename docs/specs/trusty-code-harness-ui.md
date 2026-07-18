@@ -688,7 +688,7 @@ JSON-RPC method or a new/extended `Event` variant.
 | 5 | Working-context budget (status bar) | `Event::ContextBudget{working_pct,overhead_pct,within_budget,fired}` | **MISSING** (discarded) | Stop dropping `CadenceOutcome` |
 | 6 | Goal slots (§4.5) | `session.get_goals` / `set_goal` / `clear_goal` | **EXISTS** | **none — UI wiring only** |
 | 7 | Projectless + binding (7a, §4.2) | `task.run` `project` → optional; unify with `session.create` | **PARTIAL** | Type change + reconciliation |
-| 8 | Agent roster (10b, 11a) | `session.get_agents` snapshot + `model` field | **PARTIAL** | Event-folding is an acceptable stopgap |
+| 8 | Agent roster (10b, 11a) | `session.get_agents` snapshot + `model` field | **EXISTS** | `session.get_agents` ships (closes #2962); `model` field remains deferred — see §5.4 |
 | 9 | Workstream list/resume (7a/7b switcher) | Workstream domain object + persistence + `workstream.list` | **MISSING** | Domain + storage (§4B) |
 | 10 | Workflow lanes (10e) | Branch/PR/dirty-tree subsystem | **MISSING** | New subsystem, nothing to build on |
 | 11 | Clone-from-URL (7a) | `project.clone_from_url` | **MISSING** | Not present anywhere. Daemon capability when it lands (§5.8) |
@@ -762,31 +762,36 @@ from a preview string.
 was returned by the query. A held-back recall is the operator's evidence that the
 harness *chose*; conflating the two silently voids the core bet.
 
-### 5.4 Agent roster (PARTIAL — event-folding is acceptable for now)
+### 5.4 Agent roster (EXISTS — endpoint shipped; `model` still deferred)
 
-`AgentSpawned/AgentStarted/AgentDone/AgentFailed/PmDelegating` exist
-(`events.rs:186-211,312-316`). Missing: a snapshot endpoint, and `model` on the agent
-events (10b renders `sonnet`; model lives only on `LlmRequested/LlmResponded`,
-correlated by `agent_name` **string**).
+**Shipped (closes #2962).** `session.get_agents` now exists — the daemon folds a
+session's ring-buffer replay over the `agent`/`agent_id`-carrying tool-attribution
+events (`ToolStarted`/`ToolFinished`/`ToolError`/`SearchPerformed`/`MemoryRecalled`,
+#2898) server-side, repaying the §2.1 fold-in-the-client loan this section
+originally recorded. `AgentSpawned/AgentStarted/AgentDone/AgentFailed/PmDelegating`
+still exist as unused-in-production event shapes (`events.rs:186-211,312-316`) —
+see `session::registry::agents`'s module docs for why they are not folded. `model`
+remains unpopulated: it lives only on `LlmRequested/LlmResponded`, correlated by
+`agent_name` **string**, which AC-13.2 retires as a correlation key — so folding it
+onto `agent_id` would reintroduce the exact same-name collision bug #2898 closed.
 
 ```rust
 session.get_agents() -> { agents: [{ agent_id, name, model, state, task, todos, files_changed }] }
 ```
 
 **AC-15.1** `model` is carried on agent lifecycle events, not correlated by name.
-**AC-15.2** A late-joining client can render the roster. **Folding the SSE replay is an
-acceptable Phase-1 substitute** (§6.3) — the ring replay makes it correct-enough for a
-single-operator client, which is why this is not a Phase-1 blocker.
+**NOT YET MET** — tracked as the remaining gap above, not closed by #2962.
+**AC-15.2** A late-joining client can render the roster. **MET as of #2962** —
+`session.get_agents` folds the ring buffer server-side, so a late-attaching client
+gets one RPC call instead of replaying and folding the SSE stream itself.
 
-> **§2.1 tension — acknowledged, time-boxed, and now on the clock.** Event-folding is the
-> one place this spec knowingly leaves derivation in the client: "who is running?" is
-> daemon-owned state that the UI reconstructs. It survives Phase 1 on a **bounded
-> rationale** — the fold is over a ring the daemon replays, is small, and has exactly one
-> consumer. But it is **the shape C-1 forbids**, and it degrades precisely when the ring
-> evicts (§4A) — the roster silently loses agents the daemon still knows about. Two targets
-> folding independently is also two chances to fold differently (C-3).
-> **`session.get_agents` (§5.4) is the principled endpoint; the fold is a Phase-1 loan,
-> not a design.** Recorded so the deferral in §6.3 is read as debt, not as approval.
+> **§2.1 tension — RESOLVED by #2962 for the roster shape itself; `model` (AC-15.1)
+> remains open.** This section previously recorded event-folding as a time-boxed
+> Phase-1 loan: "who is running?" was daemon-owned state a UI client had to
+> reconstruct by folding the SSE replay — the shape C-1 forbids. `session.get_agents`
+> repays that loan — the fold now runs once, in the daemon, over its own ring buffer.
+> The `model` gap is a separate, still-open debt (see above), not a re-opening of the
+> folding-in-the-client concern this callout originally raised.
 
 ### 5.5 Project binding (PARTIAL — the two surfaces must converge)
 
@@ -989,7 +994,7 @@ the Workflow tab, the IDE half, or clone-from-URL.
 | **Workstream persistence** (§4B) | Real **domain + storage** work — deciding what a workstream *is*, not adding an endpoint. The largest item in the spec. Phase 1 ships value on the existing registry without it. |
 | **Per-line diff attribution UI** (10a gutter) | **Depends on §5.2** (`agent_id`). Ship the schema first; the gutter is a downstream consumer. |
 | **Workflow / delivery pipeline** (10e) | **New subsystem, nothing to build on** — no branch/PR/dirty-tree concept exists anywhere (§5.7). Also git-only, so it needs §4.2 settled first. |
-| **Agent roster snapshot** (10b) | **Event-folding is an acceptable substitute** — the SSE ring replay renders a correct roster for a single-operator client. Real cost, low marginal value now. **Carries a §2.1 tension: the fold is a loan, not a design** (§5.4). |
+| **Agent roster `model` field** (10b) | **Shipped except `model`** — `session.get_agents` (§5.4) landed with #2962, closing the §2.1 client-side-fold tension. `model` per `agent_id` is the one still-deferred sub-item; see §5.4. |
 | **Clone-from-URL** (7a) | Does not exist anywhere; pure additive scope with no dependents. Local-folder binding (`project.list_dir`, §5.8) covers the mandated projectless→bound path. **When it lands it is `project.clone_from_url` on the daemon — never a UI-side git op** (§5.8). |
 | **Monitor columns** (9b) | Demoted to transient trace mode (§4.6.1); the 8b inline card delivers the same trace at full width. |
 

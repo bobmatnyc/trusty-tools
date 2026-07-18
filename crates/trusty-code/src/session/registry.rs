@@ -940,6 +940,11 @@ mod memory_sink_ext;
 #[path = "registry_goals.rs"]
 mod goal_ops;
 
+/// `session.get_agents`'s live-roster fold (DOC-39 §5.4), split out into its
+/// own file for the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_agents.rs"]
+mod agents;
+
 #[cfg(test)]
 #[path = "registry_tests.rs"]
 mod registry_tests;
