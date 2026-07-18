@@ -78,24 +78,41 @@ pub struct SupervisorConfig {
     ///
     /// Env: `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` (default 300; `0` = disabled).
     pub idle_shutdown_secs: u64,
+
+    /// Seconds of sustained health (no further wedge-triggered restart)
+    /// required before the supervisor resets its wedge-restart escalation
+    /// counter back to zero (#1450 HIGH follow-up — restart-storm fix).
+    ///
+    /// Why: forwarded 1:1 to `trusty_common::embedder_client::SupervisorConfig`.
+    /// Without a trusty-search-specific field here, `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS`
+    /// would be dead configuration for the real daemon path — `do_spawn` builds
+    /// the common config directly and `into_common_for_tests` previously fell
+    /// back to `..SupervisorConfig::default()` (a hardcoded 300s), so the env
+    /// var never actually reached either construction site.
+    ///
+    /// Env: `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` (default 300 = 5 minutes).
+    pub wedge_reset_secs: u64,
 }
 
 impl SupervisorConfig {
     /// Read configuration from environment variables, falling back to defaults.
     ///
     /// Why: makes the supervisor tunable in CI / production without source changes.
-    /// What: reads the four `TRUSTY_EMBEDDERD_*` vars; ignores malformed
+    /// What: reads the five `TRUSTY_EMBEDDERD_*` vars; ignores malformed
     /// values and falls through to defaults. `idle_shutdown_secs` defaults to
     /// `300` (issue #2315) so an idle sidecar's ~2.9 GB RSS is reclaimed at rest
     /// rather than pinned for the daemon's lifetime; `0` explicitly disables it.
-    /// Test: `config_from_env_defaults`, `config_from_env_overrides`, and
-    /// `config_from_env_idle_shutdown_explicit_zero`.
+    /// `wedge_reset_secs` defaults to `300` (#1450 HIGH follow-up).
+    /// Test: `config_from_env_defaults`, `config_from_env_overrides`,
+    /// `config_from_env_idle_shutdown_explicit_zero`, and
+    /// `config_from_env_wedge_reset_secs_override`.
     pub fn from_env() -> Self {
         Self {
             startup_timeout_secs: parse_env_u64("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS", 30),
             backoff_max_secs: parse_env_u64("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS", 60),
             max_restarts: parse_env_u32("TRUSTY_EMBEDDERD_MAX_RESTARTS", 5),
             idle_shutdown_secs: parse_env_u64("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS", 300),
+            wedge_reset_secs: parse_env_u64("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", 300),
         }
     }
 
@@ -116,7 +133,8 @@ impl SupervisorConfig {
     /// in production spawn paths** — the `None` batch size means the sidecar
     /// will use its own default (32), silently losing batch forwarding.
     ///
-    /// What: maps the three spawn-relevant fields 1:1; `idle_shutdown_secs` is
+    /// What: maps the four spawn-relevant fields 1:1 (including
+    /// `wedge_reset_secs`, #1450 HIGH follow-up); `idle_shutdown_secs` is
     /// trusty-search–specific and has no counterpart in the common type.
     /// `sidecar_batch_size` is always `None`. Use `do_spawn` for production
     /// paths where batch forwarding is required.
@@ -131,6 +149,7 @@ impl SupervisorConfig {
             // integration tests that exercise lifecycle, not batch forwarding.
             // Production spawns go through do_spawn, which sets Some(batch).
             sidecar_batch_size: None,
+            wedge_reset_secs: self.wedge_reset_secs,
         }
     }
 }
@@ -140,8 +159,9 @@ impl Default for SupervisorConfig {
     ///
     /// Why: unit tests need a cheap config without touching env vars.
     /// What: `startup_timeout_secs=30`, `backoff_max_secs=60`,
-    /// `max_restarts=5`, `idle_shutdown_secs=300` (issue #2315 — matches
-    /// `from_env()` when no env vars are set).
+    /// `max_restarts=5`, `idle_shutdown_secs=300` (issue #2315),
+    /// `wedge_reset_secs=300` (#1450 HIGH follow-up) — matches `from_env()`
+    /// when no env vars are set.
     /// Test: used directly in unit tests.
     fn default() -> Self {
         Self {
@@ -149,6 +169,7 @@ impl Default for SupervisorConfig {
             backoff_max_secs: 60,
             max_restarts: 5,
             idle_shutdown_secs: 300,
+            wedge_reset_secs: 300,
         }
     }
 }
@@ -556,6 +577,11 @@ async fn do_spawn(
         backoff_max_secs: config.backoff_max_secs,
         max_restarts: config.max_restarts,
         sidecar_batch_size: Some(forwarded_batch),
+        // #1450 HIGH follow-up: forwarded from trusty-search's own
+        // SupervisorConfig (env TRUSTY_EMBEDDERD_WEDGE_RESET_SECS via
+        // from_env), not the trusty-common default — this is the field the
+        // running daemon actually respects.
+        wedge_reset_secs: config.wedge_reset_secs,
     };
 
     let (supervisor, client_slot, child_pid_slot) =

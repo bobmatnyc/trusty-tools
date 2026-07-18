@@ -26,6 +26,7 @@ fn config_from_env_defaults() {
     let _g2 = EnvGuard::remove("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS");
     let _g3 = EnvGuard::remove("TRUSTY_EMBEDDERD_MAX_RESTARTS");
     let _g4 = EnvGuard::remove("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS");
+    let _g5 = EnvGuard::remove("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS");
 
     let cfg = SupervisorConfig::from_env();
     assert_eq!(cfg.startup_timeout_secs, 30);
@@ -35,6 +36,32 @@ fn config_from_env_defaults() {
         cfg.idle_shutdown_secs, 300,
         "idle-shutdown must default to 300s (issue #2315) so an idle sidecar's \
          RSS is reclaimed at rest"
+    );
+    assert_eq!(
+        cfg.wedge_reset_secs, 300,
+        "wedge_reset_secs must default to 300s (#1450 HIGH follow-up)"
+    );
+}
+
+/// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` must be parsed and forwarded — this is
+/// the field that closes the #1450 HIGH follow-up gap (previously dead
+/// configuration: the running daemon's `do_spawn` and `into_common_for_tests`
+/// both hardcoded the trusty-common default via `..SupervisorConfig::default()`
+/// regardless of this env var).
+///
+/// Why: an operator-tuned reset window must actually reach the sidecar
+/// supervisor, not merely round-trip inside a config struct nobody reads.
+/// What: set the var to a distinctive, non-default value; assert `from_env()`
+/// returns it verbatim.
+/// Test: this test.
+#[test]
+#[serial]
+fn config_from_env_wedge_reset_secs_override() {
+    let _g = EnvGuard::set("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", "42");
+    assert_eq!(
+        SupervisorConfig::from_env().wedge_reset_secs,
+        42,
+        "explicit value must be honoured verbatim"
     );
 }
 
@@ -78,12 +105,14 @@ fn config_from_env_overrides() {
     let _g2 = EnvGuard::set("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS", "120");
     let _g3 = EnvGuard::set("TRUSTY_EMBEDDERD_MAX_RESTARTS", "10");
     let _g4 = EnvGuard::set("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS", "300");
+    let _g5 = EnvGuard::set("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", "600");
 
     let cfg = SupervisorConfig::from_env();
     assert_eq!(cfg.startup_timeout_secs, 15);
     assert_eq!(cfg.backoff_max_secs, 120);
     assert_eq!(cfg.max_restarts, 10);
     assert_eq!(cfg.idle_shutdown_secs, 300);
+    assert_eq!(cfg.wedge_reset_secs, 600);
 }
 
 /// Malformed env var values must fall through to defaults without panicking.
@@ -98,6 +127,7 @@ fn config_from_env_ignores_malformed() {
     let _g1 = EnvGuard::set("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS", "not_a_number");
     let _g2 = EnvGuard::set("TRUSTY_EMBEDDERD_MAX_RESTARTS", "bad");
     let _g3 = EnvGuard::set("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS", "nope");
+    let _g4 = EnvGuard::set("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", "also_bad");
 
     let cfg = SupervisorConfig::from_env();
     assert_eq!(cfg.startup_timeout_secs, 30);
@@ -106,14 +136,25 @@ fn config_from_env_ignores_malformed() {
         cfg.idle_shutdown_secs, 300,
         "malformed value must fall through to the 300s default (issue #2315)"
     );
+    assert_eq!(
+        cfg.wedge_reset_secs, 300,
+        "malformed value must fall through to the 300s default (#1450 HIGH follow-up)"
+    );
 }
 
 /// `into_common_for_tests()` must map fields correctly to the trusty-common
 /// type and always set `sidecar_batch_size: None`.
 ///
-/// Why: field mismatch would silently use wrong defaults at runtime.
-/// What: construct a custom config, convert via `into_common_for_tests`,
-/// and assert the common fields.
+/// Why: field mismatch would silently use wrong defaults at runtime. This
+/// also pins the #1450 HIGH follow-up fix: `wedge_reset_secs` must be
+/// forwarded from trusty-search's own config, not silently defaulted via
+/// `..SupervisorConfig::default()` (which would make
+/// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` dead configuration for the real
+/// daemon path).
+/// What: construct a custom config with a distinctive `wedge_reset_secs`,
+/// convert via `into_common_for_tests`, and assert the common fields —
+/// including that `wedge_reset_secs` round-trips exactly, not the
+/// trusty-common default (300).
 /// Test: this test.
 #[test]
 fn into_common_for_tests_maps_fields() {
@@ -122,11 +163,17 @@ fn into_common_for_tests_maps_fields() {
         backoff_max_secs: 77,
         max_restarts: 3,
         idle_shutdown_secs: 600,
+        wedge_reset_secs: 55,
     };
     let common = cfg.into_common_for_tests();
     assert_eq!(common.startup_timeout_secs, 99);
     assert_eq!(common.backoff_max_secs, 77);
     assert_eq!(common.max_restarts, 3);
+    assert_eq!(
+        common.wedge_reset_secs, 55,
+        "wedge_reset_secs must be forwarded from the trusty-search config, \
+         not defaulted to trusty-common's 300s"
+    );
     // idle_shutdown_secs is trusty-search–specific; not in the common type.
     // sidecar_batch_size must be None — this method is for test/lifecycle
     // spawns only; production paths use do_spawn to populate Some(batch).

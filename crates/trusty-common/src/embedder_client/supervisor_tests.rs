@@ -25,6 +25,7 @@ fn from_env_uses_defaults_when_no_vars_set() {
     let saved_max = std::env::var("TRUSTY_EMBEDDERD_MAX_RESTARTS").ok();
     let saved_backoff = std::env::var("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS").ok();
     let saved_timeout = std::env::var("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS").ok();
+    let saved_wedge_reset = std::env::var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS").ok();
 
     // Ensure they are unset during the test.
     // SAFETY: test-only, single-threaded by test framework convention.
@@ -32,12 +33,14 @@ fn from_env_uses_defaults_when_no_vars_set() {
         std::env::remove_var("TRUSTY_EMBEDDERD_MAX_RESTARTS");
         std::env::remove_var("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS");
         std::env::remove_var("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS");
+        std::env::remove_var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS");
     }
 
     let cfg = SupervisorConfig::from_env();
     assert_eq!(cfg.max_restarts, 5);
     assert_eq!(cfg.backoff_max_secs, 60);
     assert_eq!(cfg.startup_timeout_secs, 5);
+    assert_eq!(cfg.wedge_reset_secs, 300);
 
     // Restore.
     unsafe {
@@ -49,6 +52,32 @@ fn from_env_uses_defaults_when_no_vars_set() {
         }
         if let Some(v) = saved_timeout {
             std::env::set_var("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS", v);
+        }
+        if let Some(v) = saved_wedge_reset {
+            std::env::set_var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", v);
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn wedge_reset_secs_env_override() {
+    // Why: operators must be able to tune the sustained-health reset window
+    // without recompiling (#1450 HIGH follow-up).
+    // What: set the var to "42", call `from_env`, check the field.
+    // Test: this test.
+    let saved = std::env::var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS").ok();
+    // SAFETY: test-only.
+    unsafe {
+        std::env::set_var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", "42");
+    }
+    let cfg = SupervisorConfig::from_env();
+    assert_eq!(cfg.wedge_reset_secs, 42);
+    unsafe {
+        if let Some(v) = saved {
+            std::env::set_var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", v);
+        } else {
+            std::env::remove_var("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS");
         }
     }
 }
@@ -224,4 +253,96 @@ fn locate_binary_respects_explicit_override() {
             std::env::remove_var("TRUSTY_EMBEDDERD_BIN");
         }
     }
+}
+
+// ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────
+//
+// `wedge_counter_should_reset` and `should_give_up` are pure functions
+// (no async, no I/O) — the async supervision loop itself is exercised only
+// by the ignored real-binary e2e tests, so this logic is unit-tested
+// directly here per the review guidance ("test the counter logic as a pure
+// function if the async path is hard to drive").
+
+#[test]
+fn wedge_counter_should_reset_none_never_resets() {
+    // Why: no prior wedge this run — nothing to reset.
+    // What: `elapsed_since_last_wedge = None` → always false regardless of
+    // the configured window.
+    // Test: this test.
+    assert!(!wedge_counter_should_reset(None, 300));
+    assert!(!wedge_counter_should_reset(None, 0));
+}
+
+#[test]
+fn wedge_counter_should_reset_before_window_stays_escalated() {
+    // Why: a wedge that recurs before the sustained-health window elapses
+    // must NOT reset — that is exactly the storm case this fix targets.
+    // What: elapsed < wedge_reset_secs → false.
+    // Test: this test.
+    assert!(!wedge_counter_should_reset(
+        Some(Duration::from_secs(299)),
+        300
+    ));
+    assert!(!wedge_counter_should_reset(
+        Some(Duration::from_secs(0)),
+        300
+    ));
+}
+
+#[test]
+fn wedge_counter_should_reset_after_window_resets() {
+    // Why: sustained health for the configured window is the ONLY way the
+    // counter resets (never an ordinary respawn-probe success).
+    // What: elapsed >= wedge_reset_secs → true, at and beyond the boundary.
+    // Test: this test.
+    assert!(wedge_counter_should_reset(
+        Some(Duration::from_secs(300)),
+        300
+    ));
+    assert!(wedge_counter_should_reset(
+        Some(Duration::from_secs(301)),
+        300
+    ));
+}
+
+#[test]
+fn should_give_up_neither_counter_exceeds() {
+    // Why: normal operation — a couple of crashes/wedges within budget must
+    // not trip the ceiling.
+    // What: both counters <= max_restarts → false.
+    // Test: this test.
+    assert!(!should_give_up(2, 2, 5));
+    assert!(!should_give_up(5, 0, 5));
+    assert!(!should_give_up(0, 5, 5));
+}
+
+#[test]
+fn should_give_up_crash_storm_trips_ceiling() {
+    // Why: the pre-existing crash-storm behaviour must be preserved.
+    // What: consecutive_failures alone exceeding max_restarts → true.
+    // Test: this test.
+    assert!(should_give_up(6, 0, 5));
+}
+
+#[test]
+fn should_give_up_wedge_storm_trips_ceiling_even_with_failures_reset() {
+    // Why: THIS is the restart-storm fix under test — a workload-
+    // deterministic wedge where every individual respawn probe succeeds
+    // (so `consecutive_failures` is reset to 0 each cycle by the caller)
+    // must still eventually give up once `consecutive_wedge_restarts`
+    // climbs past `max_restarts`.
+    // What: consecutive_failures=0 (just reset by a successful respawn),
+    // consecutive_wedge_restarts=6 > max_restarts=5 → true.
+    // Test: this test.
+    assert!(should_give_up(0, 6, 5));
+}
+
+#[test]
+fn should_give_up_at_boundary_does_not_trip() {
+    // Why: the ceiling is `> max_restarts`, not `>=` — exactly
+    // `max_restarts` consecutive failures/wedges is still tolerated (matches
+    // the pre-existing crash-storm semantics).
+    // What: both counters exactly at max_restarts → false.
+    // Test: this test.
+    assert!(!should_give_up(5, 5, 5));
 }
