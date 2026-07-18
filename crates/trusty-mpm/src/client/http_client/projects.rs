@@ -56,6 +56,9 @@ pub struct RegisterProjectArgs {
     /// Preferred `gh` login (#2081).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<String>,
+    /// GitHub account login pinned for this project's spawned sessions (#3025).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gh_account: Option<String>,
 }
 
 /// Serializable body for `PATCH /api/v1/projects/{name}` (registry-B partial
@@ -96,6 +99,10 @@ pub struct PatchProjectArgs {
     /// validation is deferred to #2121).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<Option<String>>,
+    /// Same three-state semantics as `description`, for the pinned spawn-time
+    /// `gh` account (#3025).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gh_account: Option<Option<String>>,
     /// Tags to add, deduplicated server-side against the current set. A
     /// blank/whitespace-only entry rejects the whole PATCH with 400.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,6 +151,9 @@ pub struct ProjectConfigFlagsWire {
     /// Whether the per-project `gh` identity binding is set.
     #[serde(default)]
     pub github_binding_set: bool,
+    /// Whether the pinned spawn-time `gh` account (#3025) is set.
+    #[serde(default)]
+    pub gh_account_set: bool,
 }
 
 /// Deserialized `GET /api/v1/projects/{name}/status` rollup.
@@ -346,6 +356,7 @@ mod tests {
             tags: Some(vec!["backend".into()]),
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         };
         let v = serde_json::to_value(&args).unwrap();
         assert_eq!(v["name"], "widget");
@@ -356,6 +367,7 @@ mod tests {
         assert!(v.get("description").is_none());
         assert!(v.get("stack_hint").is_none());
         assert!(v.get("gh_user").is_none());
+        assert!(v.get("gh_account").is_none());
     }
 
     /// The list wrapper deserializes the `{ projects, count }` shape and drops the
@@ -388,6 +400,26 @@ mod tests {
         let v = serde_json::to_value(&args).unwrap();
         assert!(v["description"].is_null(), "{v}");
         assert_eq!(v["stack_hint"], "rust");
+    }
+
+    /// `gh_account`'s double-`Option` set/clear semantics mirror `gh_user`'s
+    /// (#3025).
+    #[test]
+    fn patch_args_serializes_gh_account_double_option() {
+        let cleared = PatchProjectArgs {
+            gh_account: Some(None),
+            ..Default::default()
+        };
+        assert!(serde_json::to_value(&cleared).unwrap()["gh_account"].is_null());
+
+        let set = PatchProjectArgs {
+            gh_account: Some(Some("bobmatnyc".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap()["gh_account"],
+            "bobmatnyc"
+        );
     }
 
     /// Every field defaults to `None` (outer), so a default `PatchProjectArgs`

@@ -164,11 +164,14 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `env_bin_prefix_orders_unset_flag_before_config_dir_assignment`,
 /// `spawn_command_sets_oauth_token_when_available`,
 /// `spawn_command_omits_oauth_token_when_absent`,
-/// `spawn_command_without_token_is_byte_identical_to_pre_2246`.
+/// `spawn_command_without_token_is_byte_identical_to_pre_2246`,
+/// `spawn_command_sets_gh_token_when_pinned` (`claude_code_gh_env_tests.rs`,
+/// issue #3025).
 fn env_bin_prefix(
     claude_bin: &str,
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
+    gh_env: &[(String, String)],
 ) -> String {
     let mut assignments = String::new();
     if let Some(dir) = config_dir {
@@ -178,6 +181,14 @@ fn env_bin_prefix(
     if let Some(token) = oauth_token {
         let quoted = shell_single_quote(token);
         assignments.push_str(&format!(" {OAUTH_TOKEN_ENV_VAR}={quoted}"));
+    }
+    // #3025: GH_TOKEN/GH_USER, when the project pins a spawn-time gh_account —
+    // applied via the SAME `env` prefix (rather than only `tmux
+    // set-environment`) so the value lands in `claude`'s actual process
+    // environment and is inherited by every `gh` call its Bash tool makes.
+    for (name, value) in gh_env {
+        let quoted = shell_single_quote(value);
+        assignments.push_str(&format!(" {name}={quoted}"));
     }
     format!("env -u ANTHROPIC_API_KEY{assignments} {claude_bin}")
 }
@@ -252,6 +263,7 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// `spawn_command_prefixes_cd_to_workdir`,
 /// `spawn_command_sets_oauth_token_when_available`,
 /// `spawn_command_omits_oauth_token_when_absent`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_command(
     cwd: &Path,
     claude_bin: &str,
@@ -259,11 +271,12 @@ fn spawn_command(
     session_id: &str,
     prompt_file: Option<&Path>,
     oauth_token: Option<&str>,
+    gh_env: &[(String, String)],
 ) -> String {
     let body = format!(
         "{}{}{} {} {}{}",
         session_id_export_prefix(session_id),
-        env_bin_prefix(claude_bin, config_dir, oauth_token),
+        env_bin_prefix(claude_bin, config_dir, oauth_token, gh_env),
         prompt_file_flag(prompt_file),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
@@ -354,9 +367,9 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
 /// `#[allow(too_many_arguments)]`: each parameter is an independently-tested,
 /// orthogonal command-builder input (cwd/#2250, config_dir/DOC-34, resume
 /// selection/#1744+#1840, session_id/#2023, prompt_file/#2230, oauth_token/
-/// #2246) — bundling them into a struct would only move the field list, not
-/// reduce it, and this is a private, single-call-site builder (mirrors the
-/// established pattern in `session_manager/create.rs`).
+/// #2246, gh_env/#3025) — bundling them into a struct would only move the
+/// field list, not reduce it, and this is a private, single-call-site
+/// builder (mirrors the established pattern in `session_manager/create.rs`).
 #[allow(clippy::too_many_arguments)]
 fn resume_command(
     cwd: &Path,
@@ -367,11 +380,12 @@ fn resume_command(
     session_id: &str,
     prompt_file: Option<&Path>,
     oauth_token: Option<&str>,
+    gh_env: &[(String, String)],
 ) -> String {
     let base = format!(
         "{}{}{} {} {}",
         session_id_export_prefix(session_id),
-        env_bin_prefix(claude_bin, config_dir, oauth_token),
+        env_bin_prefix(claude_bin, config_dir, oauth_token, gh_env),
         prompt_file_flag(prompt_file),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
@@ -831,6 +845,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // managed-session login loop. `None` when neither source has a
         // token — the command is then byte-identical to pre-#2246.
         let oauth_token = crate::core::oauth_token::resolve_oauth_token();
+        // Issue #3025: when the project owning `cwd` pins a spawn-time
+        // `gh_account`, inject GH_TOKEN/GH_USER via the same `env` prefix so
+        // `gh` identity is deterministic for this session's Bash tool calls
+        // regardless of the global `gh auth switch` state. Fail-open: a
+        // resolution failure is logged and yields an empty vec (no GH_TOKEN),
+        // never blocking the spawn.
+        let gh_env = crate::core::gh_account::resolve_gh_account_env_for_workspace(cwd);
         self.tmux
             .send_line(
                 tmux_name,
@@ -841,6 +862,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     session_id,
                     prompt_file.as_deref(),
                     oauth_token.as_deref(),
+                    &gh_env,
                 ),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
@@ -916,6 +938,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // here, so omitting it would leave exactly those sessions exposed to
         // the login loop spawn() itself was fixed against.
         let oauth_token = crate::core::oauth_token::resolve_oauth_token();
+        // Issue #3025: same GH_TOKEN/GH_USER injection as `spawn` — every
+        // resumed/guided-resume/crash-recovery session must get the same
+        // deterministic `gh` identity.
+        let gh_env = crate::core::gh_account::resolve_gh_account_env_for_workspace(cwd);
 
         // #2013: a stored id can go stale — existence-check it before trusting
         // `--resume <id>` so a missing session falls back gracefully instead
@@ -968,6 +994,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             session_id,
             prompt_file.as_deref(),
             oauth_token.as_deref(),
+            &gh_env,
         );
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's
@@ -1002,6 +1029,14 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         "claude-code"
     }
 }
+
+// #3025 GH_TOKEN/GH_USER spawn-env injection tests live in a companion
+// `_tests.rs` file (rather than the `mod tests` block below) purely to keep
+// this file — a production file capped at 500 SLOC (grandfathered, #2398) —
+// clear of further growth; see that file's module doc.
+#[cfg(test)]
+#[path = "claude_code_gh_env_tests.rs"]
+mod gh_env_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1066,6 +1101,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY"),
@@ -1092,6 +1128,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
         // #2250: the command now starts with `cd <workdir> && { ...` — the
@@ -1126,6 +1163,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains(
@@ -1158,6 +1196,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         let u_pos = cmd
             .find("-u ANTHROPIC_API_KEY")
@@ -1184,6 +1223,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             !cmd.contains("CLAUDE_CONFIG_DIR"),
@@ -1202,6 +1242,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             Some("sk-ant-oat01-fake-token"),
+            &[],
         );
         assert!(
             cmd.contains("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-fake-token'"),
@@ -1223,6 +1264,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             !cmd.contains("CLAUDE_CODE_OAUTH_TOKEN"),
@@ -1242,6 +1284,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         let expected = format!(
             "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
@@ -1267,6 +1310,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             Some("sk-ant-oat01-fake-token"),
+            &[],
         );
         assert!(
             cmd.contains(
@@ -1289,6 +1333,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             Some("sk-ant-oat01-fake-token"),
+            &[],
         );
         assert!(
             cmd.contains("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-fake-token'"),
@@ -1311,6 +1356,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             !cmd.contains("CLAUDE_CODE_OAUTH_TOKEN"),
@@ -1331,6 +1377,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         let expected = format!(
             "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
@@ -1357,6 +1404,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains(
@@ -1380,6 +1428,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             resume.contains(
@@ -1413,6 +1462,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("--setting-sources project,local"),
@@ -1441,6 +1491,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY /Users/me/.local/bin/claude "),
@@ -1607,6 +1658,7 @@ mod tests {
             TEST_SESSION_ID,
             Some(path),
             None,
+            &[],
         );
         assert!(
             cmd.contains("--append-system-prompt-file '/tmp/trusty-mpm-system-prompt-test.txt'"),
@@ -1629,6 +1681,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             !cmd.contains("--append-system-prompt-file"),
@@ -1666,6 +1719,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("--resume abc-123"),
@@ -1696,6 +1750,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
         // #2250: the command now starts with `cd <workdir> && { ...` — the
@@ -1730,6 +1785,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains(
@@ -1758,6 +1814,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("--continue"),
@@ -1783,6 +1840,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             !cmd.contains("--continue"),
@@ -2224,6 +2282,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             !cmd.contains("--continue"),
@@ -2286,6 +2345,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.starts_with("cd '/tmp/ws' && { "),
@@ -2311,6 +2371,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.starts_with("cd '/tmp/ws' && { "),
@@ -2343,6 +2404,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
@@ -2369,6 +2431,7 @@ mod tests {
             TEST_SESSION_ID,
             None,
             None,
+            &[],
         );
         assert!(
             cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
@@ -2397,6 +2460,7 @@ mod tests {
             TEST_SESSION_ID,
             Some(path),
             None,
+            &[],
         );
         assert!(
             cmd.contains(

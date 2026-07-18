@@ -50,8 +50,10 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// without editing `config.yaml` or restarting the daemon. `gh_user` (#2081)
 /// lets an operator declare the project's preferred `gh` account so callers
 /// can scope `gh` operations to it instead of relying on a per-session
-/// reminder — see [`crate::core::gh_account::resolve_gh_account_env`] for the
-/// non-mutating resolution mechanism.
+/// reminder. `gh_account` (#3025) is the SEPARATE spawn-time pinning field:
+/// when set, every session spawn/relaunch for this project resolves and
+/// injects `GH_TOKEN`/`GH_USER` via
+/// [`crate::core::gh_account::resolve_gh_account_env`].
 /// What: builds a `Project` from the supplied fields (defaulting
 /// `default_branch` to `"main"` when omitted), calls `registry.register`,
 /// and returns the persisted record.
@@ -66,6 +68,7 @@ pub async fn project_register(
     tags: Option<Vec<String>>,
     description: Option<&str>,
     gh_user: Option<&str>,
+    gh_account: Option<&str>,
 ) -> Result<Value, String> {
     let registry = state.project_registry().await;
     // #2184: `register` REPLACES the whole record and `project_register`'s
@@ -82,6 +85,7 @@ pub async fn project_register(
         tags: tags.unwrap_or_default(),
         description: description.map(str::to_string),
         gh_user: gh_user.map(str::to_string),
+        gh_account: gh_account.map(str::to_string),
         github: existing.as_ref().and_then(|p| p.github.clone()),
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),

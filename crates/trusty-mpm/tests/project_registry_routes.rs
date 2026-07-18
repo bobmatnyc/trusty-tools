@@ -77,6 +77,7 @@ async fn register_get_list_status_round_trip() {
         tags: Some(vec!["backend".into()]),
         stack_hint: Some("rust".into()),
         gh_user: Some("acme-bot".into()),
+        gh_account: None,
     };
     let registered = client.registry_register_project(&args).await.unwrap();
     assert_eq!(registered.name, "widget");
@@ -129,6 +130,7 @@ async fn register_is_idempotent_upsert() {
         tags: None,
         stack_hint: None,
         gh_user: None,
+        gh_account: None,
     };
     client.registry_register_project(&base).await.unwrap();
     // Re-register with a different branch — upsert on name, not a duplicate.
@@ -165,6 +167,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: Some(GithubConfig {
                 config_dir: Some("/home/bob/.config/gh-work".into()),
                 token_env: None,
@@ -188,6 +191,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -249,6 +253,7 @@ async fn patch_round_trip_updates_fields() {
             tags: Some(vec!["backend".into(), "keep-me".into()]),
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -297,6 +302,7 @@ async fn patch_absent_fields_untouched() {
             tags: Some(vec!["backend".into()]),
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -367,6 +373,7 @@ async fn patch_rejects_blank_repo_url_surfaces_server_message() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -400,6 +407,7 @@ async fn patch_rejects_name_change() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -435,6 +443,7 @@ async fn patch_is_idempotent() {
             tags: Some(vec!["backend".into()]),
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -478,6 +487,7 @@ async fn patch_rejects_blank_tags_add() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -508,6 +518,7 @@ async fn patch_rejects_blank_tags_remove() {
             tags: Some(vec!["backend".into()]),
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();
@@ -539,6 +550,7 @@ async fn patch_trims_tags_add_whitespace() {
             tags: None,
             stack_hint: None,
             gh_user: None,
+            gh_account: None,
         })
         .await
         .unwrap();

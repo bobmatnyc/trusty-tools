@@ -2021,6 +2021,7 @@ async fn fleet_route_marks_dead_session_unresumable() {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,

@@ -89,6 +89,8 @@ pub struct ProjectConfigFlags {
     pub gh_user_set: bool,
     /// Whether [`Project::github`] (per-project `gh` identity binding, #2184) is set.
     pub github_binding_set: bool,
+    /// Whether [`Project::gh_account`] (pinned spawn-time `gh` account, #3025) is set.
+    pub gh_account_set: bool,
 }
 
 /// Histogram of a project's Deliverables by [`DeliverableStatus`] (#2382, DOC-35
@@ -284,6 +286,7 @@ pub fn aggregate_project_status(
         config: ProjectConfigFlags {
             gh_user_set: project.gh_user.is_some(),
             github_binding_set: project.github.is_some(),
+            gh_account_set: project.gh_account.is_some(),
         },
         deliverables: count_deliverable_statuses(&project_deliverables),
         milestones: count_milestone_statuses(&project_milestones, &project_deliverable_ids),

@@ -177,6 +177,7 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,

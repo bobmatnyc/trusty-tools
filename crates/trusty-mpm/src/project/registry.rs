@@ -156,6 +156,8 @@ impl ProjectRegistry {
                 tags: entry.tags.clone().unwrap_or_default(),
                 description: entry.description.clone(),
                 gh_user: entry.gh_user.clone(),
+                // #3025: mirror the pinned spawn-time gh account the same way.
+                gh_account: entry.gh_account.clone(),
                 // #2184: mirror the per-project gh identity + commit identity
                 // onto the registry record so `project_get`/`project_list`
                 // surface it without a separate config-file read.
@@ -218,6 +220,7 @@ impl ProjectRegistry {
                 tags: vec![],
                 description: None,
                 gh_user: None,
+                gh_account: None,
                 // No source of a gh/commit identity binding for an implicitly
                 // auto-registered project (#2184) — the operator declares
                 // these explicitly via `config.projects`/`config_write`.
@@ -311,6 +314,7 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,
@@ -338,6 +342,7 @@ mod tests {
             tags: vec!["backend".into()],
             description: Some("desc".into()),
             gh_user: Some("bob-work".into()),
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,
@@ -363,6 +368,7 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,
@@ -512,6 +518,7 @@ mod tests {
                 tags: vec![],
                 description: None,
                 gh_user: None,
+                gh_account: None,
                 github: None,
                 commit_name: None,
                 commit_email: None,
@@ -537,6 +544,7 @@ mod tests {
                 tags: Some(vec!["ml".into()]),
                 description: Some("ml project".into()),
                 gh_user: Some("bobmatnyc".into()),
+                gh_account: Some("bobmatnyc".into()),
                 github: Some(crate::core::trusty_tools_config::GithubConfig {
                     config_dir: Some("/home/bob/.config/gh-ml".into()),
                     token_env: None,
@@ -555,6 +563,7 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: None,
+                gh_account: None,
                 github: None,
                 commit_name: None,
                 commit_email: None,
@@ -573,6 +582,7 @@ mod tests {
         assert_eq!(a.stack_hint.as_deref(), Some("python"));
         assert_eq!(a.default_branch, "main");
         assert_eq!(a.gh_user.as_deref(), Some("bobmatnyc"));
+        assert_eq!(a.gh_account.as_deref(), Some("bobmatnyc"));
         // #2184: the github/commit-identity binding must be mirrored onto the
         // registry record verbatim.
         assert_eq!(
@@ -588,6 +598,7 @@ mod tests {
         let b = registry.get("from-config-b").await.expect("get b");
         assert_eq!(b.default_branch, "main");
         assert_eq!(b.gh_user, None);
+        assert_eq!(b.gh_account, None);
         assert_eq!(b.github, None);
         assert_eq!(b.commit_name, None);
         assert_eq!(b.commit_email, None);
@@ -639,6 +650,7 @@ mod tests {
             tags: vec![],
             description: Some("manually registered".into()),
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,

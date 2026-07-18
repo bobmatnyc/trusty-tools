@@ -121,6 +121,8 @@ fn cli_parses_projects_register_full() {
         "rust",
         "--gh-user",
         "acme-bot",
+        "--gh-account",
+        "acme-bot",
     ]);
     match action {
         ProjectsAction::Register {
@@ -131,6 +133,7 @@ fn cli_parses_projects_register_full() {
             tags,
             stack_hint,
             gh_user,
+            gh_account,
         } => {
             assert_eq!(name, "widget");
             assert_eq!(repo_url, "https://github.com/acme/widget");
@@ -139,6 +142,7 @@ fn cli_parses_projects_register_full() {
             assert_eq!(tags, vec!["backend".to_string(), "oss".to_string()]);
             assert_eq!(stack_hint.as_deref(), Some("rust"));
             assert_eq!(gh_user.as_deref(), Some("acme-bot"));
+            assert_eq!(gh_account.as_deref(), Some("acme-bot"));
         }
         other => panic!("expected register, got {other:?}"),
     }

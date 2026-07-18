@@ -69,6 +69,10 @@ pub struct RegisterProjectBody {
     /// Preferred `gh` login for this project (#2081).
     #[serde(default)]
     pub gh_user: Option<String>,
+    /// GitHub account login pinned for this project's spawned sessions,
+    /// resolved into `GH_TOKEN`/`GH_USER` at spawn time (#3025).
+    #[serde(default)]
+    pub gh_account: Option<String>,
 }
 
 /// Response body for `GET /api/v1/projects`.
@@ -148,6 +152,7 @@ pub async fn register_project_registry_route(
         tags: body.tags.unwrap_or_default(),
         description: body.description,
         gh_user: body.gh_user,
+        gh_account: body.gh_account,
         github: existing.as_ref().and_then(|p| p.github.clone()),
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),
@@ -269,6 +274,11 @@ pub struct PatchProjectBody {
     /// #2121 — this endpoint accepts and stores the string as-is.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub gh_user: Option<Option<String>>,
+    /// New pinned spawn-time `gh` account (#3025); absent=unchanged,
+    /// `null`=clear, string=set. Resolved into `GH_TOKEN`/`GH_USER` at
+    /// session spawn/relaunch — see [`crate::core::gh_account::resolve_gh_account_env`].
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub gh_account: Option<Option<String>>,
     /// Tags to add, deduplicated against the current set. Each entry is
     /// trimmed; a blank/whitespace-only entry rejects the WHOLE request with
     /// 400 (see [`trim_and_reject_blank_tags`]).
@@ -357,6 +367,7 @@ pub async fn patch_project_registry_route(
     let description = body.description;
     let stack_hint = body.stack_hint;
     let gh_user = body.gh_user;
+    let gh_account = body.gh_account;
 
     let registry = state.project_registry().await;
     let result = registry
@@ -375,6 +386,9 @@ pub async fn patch_project_registry_route(
             }
             if let Some(gh_user) = gh_user {
                 project.gh_user = gh_user;
+            }
+            if let Some(gh_account) = gh_account {
+                project.gh_account = gh_account;
             }
             if let Some(add) = tags_add {
                 for tag in add {
@@ -449,7 +463,8 @@ mod tests {
             "description": "the widget",
             "tags": ["backend", "oss"],
             "stack_hint": "rust",
-            "gh_user": "acme-bot"
+            "gh_user": "acme-bot",
+            "gh_account": "acme-bot"
         });
         let body: RegisterProjectBody = serde_json::from_value(json).unwrap();
         assert_eq!(body.name, "widget");
@@ -460,6 +475,7 @@ mod tests {
             Some(&["backend".to_string(), "oss".to_string()][..])
         );
         assert_eq!(body.gh_user.as_deref(), Some("acme-bot"));
+        assert_eq!(body.gh_account.as_deref(), Some("acme-bot"));
     }
 
     /// Only `name`/`repo_url` are required; the rest default to absent.
@@ -475,6 +491,7 @@ mod tests {
         assert!(body.tags.is_none());
         assert!(body.stack_hint.is_none());
         assert!(body.gh_user.is_none());
+        assert!(body.gh_account.is_none());
     }
 
     /// The PATCH body's three-state fields (`description`/`stack_hint`/
@@ -488,28 +505,33 @@ mod tests {
         assert_eq!(absent.description, None);
         assert_eq!(absent.stack_hint, None);
         assert_eq!(absent.gh_user, None);
+        assert_eq!(absent.gh_account, None);
 
         // Key present, value null → Some(None) (clear).
         let cleared: PatchProjectBody = serde_json::from_value(serde_json::json!({
             "description": null,
             "stack_hint": null,
-            "gh_user": null
+            "gh_user": null,
+            "gh_account": null
         }))
         .unwrap();
         assert_eq!(cleared.description, Some(None));
         assert_eq!(cleared.stack_hint, Some(None));
         assert_eq!(cleared.gh_user, Some(None));
+        assert_eq!(cleared.gh_account, Some(None));
 
         // Key present, value a string → Some(Some(v)) (set).
         let set: PatchProjectBody = serde_json::from_value(serde_json::json!({
             "description": "new desc",
             "stack_hint": "python",
-            "gh_user": "acme-bot"
+            "gh_user": "acme-bot",
+            "gh_account": "acme-bot"
         }))
         .unwrap();
         assert_eq!(set.description, Some(Some("new desc".to_string())));
         assert_eq!(set.stack_hint, Some(Some("python".to_string())));
         assert_eq!(set.gh_user, Some(Some("acme-bot".to_string())));
+        assert_eq!(set.gh_account, Some(Some("acme-bot".to_string())));
     }
 
     /// A `name` field identical to no path context still deserializes fine —
@@ -525,6 +547,7 @@ mod tests {
         assert!(body.description.is_none());
         assert!(body.stack_hint.is_none());
         assert!(body.gh_user.is_none());
+        assert!(body.gh_account.is_none());
         assert!(body.tags_add.is_none());
         assert!(body.tags_remove.is_none());
     }

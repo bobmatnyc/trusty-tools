@@ -119,6 +119,7 @@ mod tests {
             tags: None,
             description: None,
             gh_user: None,
+            gh_account: None,
             github,
             commit_name: None,
             commit_email: None,

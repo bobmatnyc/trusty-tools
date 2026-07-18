@@ -249,6 +249,7 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,
@@ -363,6 +364,7 @@ mod tests {
             tags: vec!["frontend".into(), "oss".into()],
             description: Some("a fully-populated project".into()),
             gh_user: Some("bobmatnyc".into()),
+            gh_account: Some("bobmatnyc".into()),
             github: Some(crate::core::trusty_tools_config::GithubConfig {
                 config_dir: Some("/home/bob/.config/gh-full".into()),
                 token_env: None,

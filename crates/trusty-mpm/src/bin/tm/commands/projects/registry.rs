@@ -32,6 +32,7 @@ pub(crate) struct RegisterInput {
     pub tags: Vec<String>,
     pub stack_hint: Option<String>,
     pub gh_user: Option<String>,
+    pub gh_account: Option<String>,
 }
 
 /// Build a `DaemonClient` from the CLI's shared `(reqwest::Client, url)` pair.
@@ -81,6 +82,7 @@ pub(crate) async fn register(
         },
         stack_hint: input.stack_hint,
         gh_user: input.gh_user,
+        gh_account: input.gh_account,
     };
     let project = daemon(client, url).registry_register_project(&args).await?;
     println!(
@@ -138,6 +140,9 @@ pub(crate) async fn show(
     if let Some(gh) = &project.gh_user {
         println!("  gh_user: {gh}");
     }
+    if let Some(gh) = &project.gh_account {
+        println!("  gh_account: {gh}");
+    }
     println!(
         "  sessions ({}) [read-only — mutate via `tm sessions <verb>`]:",
         sessions.len()
@@ -180,6 +185,7 @@ pub(crate) async fn status(
             "config": {
                 "gh_user_set": status.config.gh_user_set,
                 "github_binding_set": status.config.github_binding_set,
+                "gh_account_set": status.config.gh_account_set,
             },
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -298,6 +304,10 @@ fn render_config_view(p: &Project) -> String {
             p.stack_hint.as_deref().unwrap_or("(unset)")
         ),
         format!("  gh_user: {}", p.gh_user.as_deref().unwrap_or("(unset)")),
+        format!(
+            "  gh_account: {}",
+            p.gh_account.as_deref().unwrap_or("(unset)")
+        ),
     ];
     lines.join("\n")
 }
@@ -332,8 +342,13 @@ fn render_status(s: &ProjectStatusWire) -> Vec<String> {
         ),
         format!("  last activity: {activity}"),
         format!(
-            "  config: gh_user {}, gh-binding {}",
+            "  config: gh_user {}, gh_account {}, gh-binding {}",
             if s.config.gh_user_set { "set" } else { "unset" },
+            if s.config.gh_account_set {
+                "set"
+            } else {
+                "unset"
+            },
             if s.config.github_binding_set {
                 "set"
             } else {
@@ -359,6 +374,7 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,
@@ -394,6 +410,7 @@ mod tests {
             config: ProjectConfigFlagsWire {
                 gh_user_set: true,
                 github_binding_set: false,
+                gh_account_set: true,
             },
         };
         let lines = render_status(&s);
@@ -402,6 +419,7 @@ mod tests {
         assert!(lines[1].contains("2 active"));
         assert!(lines[2].contains("2026-07-10"));
         assert!(lines[3].contains("gh_user set"));
+        assert!(lines[3].contains("gh_account set"));
     }
 
     #[test]
@@ -411,12 +429,14 @@ mod tests {
         p.tags = vec!["backend".to_string()];
         p.stack_hint = Some("rust".to_string());
         p.gh_user = Some("acme-bot".to_string());
+        p.gh_account = Some("acme-bot".to_string());
         let rendered = render_config_view(&p);
         assert!(rendered.contains("default_branch: main"));
         assert!(rendered.contains("description: the widget"));
         assert!(rendered.contains("tags: backend"));
         assert!(rendered.contains("stack_hint: rust"));
         assert!(rendered.contains("gh_user: acme-bot"));
+        assert!(rendered.contains("gh_account: acme-bot"));
     }
 
     #[test]
@@ -426,6 +446,7 @@ mod tests {
         assert!(rendered.contains("tags: (none)"));
         assert!(rendered.contains("stack_hint: (unset)"));
         assert!(rendered.contains("gh_user: (unset)"));
+        assert!(rendered.contains("gh_account: (unset)"));
     }
 
     #[test]

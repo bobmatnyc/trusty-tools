@@ -337,6 +337,8 @@ pub trait OrchestratorBackend: Send + Sync {
     ///      the entry rather than duplicating it. `gh_user` (#2081) lets an
     ///      operator declare the project's preferred `gh` account so callers
     ///      can scope `gh` operations to it without a per-session reminder.
+    ///      `gh_account` (#3025) separately pins the account resolved into
+    ///      `GH_TOKEN`/`GH_USER` at every session spawn/relaunch.
     /// What: upserts the project keyed by `name` and returns the persisted
     ///      project record as JSON.
     /// Test: `dispatch_project_register_tool`,
@@ -351,6 +353,7 @@ pub trait OrchestratorBackend: Send + Sync {
         tags: Option<Vec<String>>,
         description: Option<&str>,
         gh_user: Option<&str>,
+        gh_account: Option<&str>,
     ) -> Result<Value, String>;
 
     /// Back `project_get`: look up a single project by name.

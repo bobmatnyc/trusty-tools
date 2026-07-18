@@ -553,6 +553,161 @@ pub fn ensure_gh_account_for_project(gh_user: &str) -> anyhow::Result<()> {
     ensure_gh_account_in_dir(gh_user, &config_dir)
 }
 
+// ── #3025: spawn-time GH_TOKEN minting for a pinned `gh_account` ───────────
+//
+// Distinct from the #2081 mechanism above: `ensure_gh_account_for_project`
+// requires an already-isolated `GH_CONFIG_DIR` and only ever corrects the
+// "active" pointer INSIDE it. The functions below need no such isolation —
+// `gh auth token -u <account>` reads a specific already-logged-in account's
+// credential directly, with no "active account" mutation at all, so it is
+// safe to call unconditionally at every session spawn/relaunch and inject
+// the result as `GH_TOKEN`/`GH_USER` into that ONE session's environment,
+// leaving every other concurrently-running session's `gh` identity
+// untouched. This also fulfils the `resolve_gh_account_env` reference in
+// [`crate::core::trusty_tools_config::ProjectConfig::gh_user`]'s doc
+// comment, left dangling since #2081 landed.
+
+/// Env var this module injects for the resolved `GH_TOKEN` (#3025).
+pub const GH_TOKEN_ENV_VAR: &str = "GH_TOKEN";
+
+/// Env var this module injects to record which account minted the token
+/// (#3025) — informational only; `gh` itself never reads it.
+pub const GH_USER_ENV_VAR: &str = "GH_USER";
+
+/// Mint a `GH_TOKEN` for `account` via `gh auth token -u <account>` — the
+/// production resolver [`resolve_gh_account_env`] uses (#3025).
+///
+/// Why: `gh auth token -u <login>` reads an already-logged-in account's
+/// credential straight from the keyring/`hosts.yml` with NO "active
+/// account" side effect, unlike `gh auth switch` — safe to call from
+/// concurrently-spawning sessions pinned to different accounts.
+/// What: bounded by [`GH_ENFORCE_TIMEOUT`]; returns the trimmed stdout token
+/// on a zero exit with non-empty output, else an `Err` describing why (`gh`
+/// missing, account not logged in, empty output, or a timeout) — never
+/// panics, never retries.
+/// Test: exercised indirectly via [`resolve_gh_account_env_with`]'s
+/// fake-resolver tests (no live `gh` needed); this thin subprocess wrapper
+/// has no pure branch of its own left to unit test.
+pub fn gh_token_via_cli(account: &str) -> Result<String, String> {
+    let owned = account.to_string();
+    run_bounded(GH_ENFORCE_TIMEOUT, move || {
+        let out = std::process::Command::new("gh")
+            .args(["auth", "token", "-u", &owned])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Some(Err(format!("`gh auth token -u {owned}` failed: {stderr}")));
+        }
+        let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if token.is_empty() {
+            return Some(Err(format!(
+                "`gh auth token -u {owned}` returned an empty token"
+            )));
+        }
+        Some(Ok(token))
+    })
+    .unwrap_or_else(|| {
+        Err(format!(
+            "`gh auth token -u {account}` did not respond within {GH_ENFORCE_TIMEOUT:?} \
+             (is `gh` installed and on PATH?)"
+        ))
+    })
+}
+
+/// Resolve `GH_TOKEN`/`GH_USER` spawn-env overrides for a pinned
+/// `gh_account`, given an injectable token resolver (#3025) — the pure,
+/// hermetically testable core every call site shares.
+///
+/// Why: separating "which account, if any" from "how a token is minted for
+/// it" lets tests exercise every outcome (unset, success, failure) with a
+/// fake `resolve_token` closure, matching this codebase's established
+/// trait-seam convention (`GitBackend`, `ManagedTmuxDriver`) for I/O that
+/// cannot run hermetically in CI.
+/// What: `gh_account` unset or blank → `None` (nothing to inject, no
+/// regression). `Some(account)` → `Some(Ok(vars))` with `GH_TOKEN` then
+/// `GH_USER` (in that order) when `resolve_token(account)` succeeds;
+/// `Some(Err(msg))` when it fails — the caller logs `msg` as a warning and
+/// proceeds WITHOUT injecting anything (issue #3025's documented failure
+/// mode: spawn must never be blocked by a resolution failure).
+/// Test: `resolve_gh_account_env_with_unset_is_none`,
+/// `resolve_gh_account_env_with_blank_is_none`,
+/// `resolve_gh_account_env_with_success_returns_token_and_user`,
+/// `resolve_gh_account_env_with_failure_returns_err`.
+pub fn resolve_gh_account_env_with(
+    gh_account: Option<&str>,
+    resolve_token: impl FnOnce(&str) -> Result<String, String>,
+) -> Option<Result<Vec<(String, String)>, String>> {
+    let account = gh_account.map(str::trim).filter(|s| !s.is_empty())?;
+    Some(resolve_token(account).map(|token| {
+        vec![
+            (GH_TOKEN_ENV_VAR.to_string(), token),
+            (GH_USER_ENV_VAR.to_string(), account.to_string()),
+        ]
+    }))
+}
+
+/// Production entry point: resolve `GH_TOKEN`/`GH_USER` for `gh_account` via
+/// the real `gh auth token -u <account>` CLI (#3025).
+///
+/// Why: the one call every spawn/relaunch site uses, so none of them has to
+/// name [`gh_token_via_cli`] as a resolver argument itself.
+/// What: delegates to [`resolve_gh_account_env_with`] with [`gh_token_via_cli`].
+/// Test: covered via `resolve_gh_account_env_with`'s fake-resolver tests.
+pub fn resolve_gh_account_env(
+    gh_account: Option<&str>,
+) -> Option<Result<Vec<(String, String)>, String>> {
+    resolve_gh_account_env_with(gh_account, gh_token_via_cli)
+}
+
+/// Resolve `GH_TOKEN`/`GH_USER` for the project owning workspace `cwd`
+/// (#3025) — the one call `ClaudeCodeAdapter::spawn`/`spawn_resume` uses at
+/// every session spawn/relaunch.
+///
+/// Why: the runtime adapter only has a `cwd`, not a `Project`; detecting the
+/// owning project from `cwd`'s git origin mirrors the exact convention
+/// `bin/tm/gh_identity.rs::load_gh_env` already uses for CLI `gh` calls, so
+/// this and the CLI never disagree about which project a workspace belongs
+/// to.
+/// What: reads `cwd`'s `remote.origin.url`, matches it against the loaded
+/// [`crate::core::trusty_tools_config::TrustyToolsConfig`]'s `projects:` list,
+/// and resolves any pinned `gh_account` via [`resolve_gh_account_env`].
+/// Fail-open throughout: no git origin, no project match, no `gh_account`
+/// pinned, or a resolution failure all yield an EMPTY vec — never blocks the
+/// spawn. A resolution failure is logged as a `tracing::warn!` here so every
+/// call site gets the warning for free.
+/// Test: `resolve_gh_account_env_for_workspace_no_origin_is_empty`
+/// (`gh_account_spawn_env_tests.rs`); the match/resolve logic itself is
+/// covered by `resolve_gh_account_env_with`'s fake-resolver tests.
+pub fn resolve_gh_account_env_for_workspace(cwd: &std::path::Path) -> Vec<(String, String)> {
+    let origin = crate::daemon::managed_routes::inproject::get_origin_url(cwd);
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let gh_account = origin
+        .as_deref()
+        .and_then(|url| {
+            config
+                .projects
+                .iter()
+                .find(|p| crate::project::record::repo_url_matches(&p.repo_url, url))
+        })
+        .and_then(|p| p.gh_account.as_deref());
+    match resolve_gh_account_env(gh_account) {
+        None => Vec::new(),
+        Some(Ok(vars)) => vars,
+        Some(Err(msg)) => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "gh_account token resolution failed; spawning without GH_TOKEN: {msg}"
+            );
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "gh_account_spawn_env_tests.rs"]
+mod spawn_env_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

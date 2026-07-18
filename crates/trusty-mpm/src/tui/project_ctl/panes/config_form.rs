@@ -152,6 +152,7 @@ mod tests {
             tags: vec!["backend".to_string()],
             description: Some("the widget".to_string()),
             gh_user: Some("acme-bot".to_string()),
+            gh_account: None,
             github: None,
             commit_name: None,
             commit_email: None,

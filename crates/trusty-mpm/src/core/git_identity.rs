@@ -233,6 +233,7 @@ mod tests {
             tags: None,
             description: None,
             gh_user: None,
+            gh_account: None,
             github,
             commit_name: Some("Project Bot".into()),
             commit_email: Some("bot@project.example.com".into()),

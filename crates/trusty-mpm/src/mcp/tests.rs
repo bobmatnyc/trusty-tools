@@ -209,6 +209,7 @@ impl OrchestratorBackend for MockBackend {
         tags: Option<Vec<String>>,
         description: Option<&str>,
         gh_user: Option<&str>,
+        gh_account: Option<&str>,
     ) -> Result<Value, String> {
         Ok(json!({
             "name": name,
@@ -218,6 +219,7 @@ impl OrchestratorBackend for MockBackend {
             "tags": tags.unwrap_or_default(),
             "description": description,
             "gh_user": gh_user,
+            "gh_account": gh_account,
         }))
     }
     async fn project_get(&self, name: &str) -> Result<Value, String> {
@@ -942,6 +944,34 @@ async fn dispatch_project_register_accepts_gh_user() {
                 "name": "my-repo",
                 "repo_url": "https://github.com/o/my-repo",
                 "gh_user": "bobmatnyc"
+            }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("bobmatnyc"),
+        "expected 'bobmatnyc' in: {text}"
+    );
+}
+
+/// Why (#3025): `project_register` must accept the optional `gh_account` field
+/// (distinct from `gh_user`) and thread it through to the registered record
+/// so operators can pin the account resolved into `GH_TOKEN`/`GH_USER` at
+/// every session spawn/relaunch.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_accepts_gh_account() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_register",
+            json!({
+                "name": "my-repo",
+                "repo_url": "https://github.com/o/my-repo",
+                "gh_account": "bobmatnyc"
             }),
         ),
     )
