@@ -62,6 +62,7 @@ normative grammar — this note does not restate it.
 | DOC-39 | `SPEC-TCUI-01~draft` … `-09~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
 | DOC-40 | `SPEC-BGATTACH-01~draft` … `-07~draft` | [Durable Background Agents: Exclusive Attach/Detach Semantics](./durable-background-agents.md) | trusty-mpm — daemon / session-manager / agent delegation; trusty-code — session registry / task executor (cross-crate) |
 | DOC-41 | `SPEC-AGENTFW-01~draft` … `-06~draft` | [Eve-Style Agent Framework for trusty-agents](./trusty-agents-eve-style-agents-spec.md) | trusty-agents — agent definition / runtime / tool-calling / memory |
+| DOC-42 | `SPEC-TWIN-01~draft` … `-04~draft` | [Engineering Lead / Virtual Twin Cross-Tool Orchestration Architecture](./DOC-42-engineering-lead-twin-orchestration.md) | trusty-agents — multi-workstream lead orchestration / cross-tool supervision |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
