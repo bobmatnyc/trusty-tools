@@ -9,21 +9,23 @@ resolver = "2"
 exclude = []
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
-# except `trusty-mpm-gui` (#2951).
+# except `trusty-mpm-gui` (#2951) and `trusty-code-gui` (#2983, same rationale
+# — a second Tauri desktop GUI needing the pnpm/Svelte UI toolchain).
 #
 # Why: CI already runs the workspace-wide gates with
-# `--workspace --exclude trusty-mpm-gui` (`.github/workflows/ci.yml`) because
-# the GUI needs the pnpm/Svelte UI toolchain — a bare `cargo build`/`test`/
-# `check` had no equivalent exclusion, so every agent worktree (which routinely
-# runs the bare form per this repo's own documented workflow) silently
-# rebuilt the GUI too. Seven stray ad-hoc-signed `trusty-mpm-gui` debug
-# binaries were found across worktrees this way (forensics in #2951) — each a
-# brand-new identity to macOS TCC, and each a wasted UI-toolchain-dependent
-# build for anyone not actually touching the GUI. `--workspace` and `-p
-# trusty-mpm-gui` are UNAFFECTED by `default-members` and keep working exactly
-# as before (`cargo build --workspace`, `cargo test -p trusty-mpm-gui`, etc.),
-# so this only changes what the bare, no-flag form does — it does not remove
-# `trusty-mpm-gui` from the workspace.
+# `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui`
+# (`.github/workflows/ci.yml`) because these GUIs need the pnpm/Svelte UI
+# toolchain — a bare `cargo build`/`test`/`check` had no equivalent exclusion,
+# so every agent worktree (which routinely runs the bare form per this
+# repo's own documented workflow) silently rebuilt the GUI too. Seven stray
+# ad-hoc-signed `trusty-mpm-gui` debug binaries were found across worktrees
+# this way (forensics in #2951) — each a brand-new identity to macOS TCC, and
+# each a wasted UI-toolchain-dependent build for anyone not actually touching
+# the GUI. `--workspace` and `-p <crate>` are UNAFFECTED by `default-members`
+# and keep working exactly as before (`cargo build --workspace`,
+# `cargo test -p trusty-mpm-gui`, `cargo check -p trusty-code-gui`, etc.), so
+# this only changes what the bare, no-flag form does — it does not remove
+# either GUI crate from the workspace.
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate

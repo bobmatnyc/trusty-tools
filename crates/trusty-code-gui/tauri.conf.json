@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Trusty Code",
+  "version": "0.1.0",
+  "identifier": "com.trusty.trusty-code.gui",
+  "build": {
+    "frontendDist": "ui/dist",
+    "devUrl": "http://localhost:5174",
+    "beforeDevCommand": "cd ui && pnpm dev",
+    "beforeBuildCommand": "cd ui && pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Trusty Code",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Bob Matsuoka (4JH68XUHC5)"
+    }
+  }
+}

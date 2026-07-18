@@ -6,11 +6,11 @@
 #   test   – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
 #   msrv   – cargo check --workspace (toolchain 1.91, SKIP_UI_BUILD=1)
 #
-# trusty-mpm-gui is excluded from all jobs: it is a Tauri desktop GUI
-# (publish = false) that requires WebKit2GTK on Linux (~100 MB apt chain).
-# It is not a deployable service and cannot be meaningfully validated in a
-# headless CI runner. Exclude it via --exclude trusty-mpm-gui on every
-# cargo invocation.
+# trusty-mpm-gui and trusty-code-gui are excluded from all jobs: both are
+# Tauri desktop GUIs (publish = false) that require WebKit2GTK on Linux
+# (~100 MB apt chain). Neither is a deployable service, and neither can be
+# meaningfully validated in a headless CI runner. Exclude both via
+# --exclude trusty-mpm-gui --exclude trusty-code-gui on every cargo invocation.
 #
 # SKIP_UI_BUILD=1 is set globally: the four crates with build.rs Svelte
 # pipelines (trusty-search, trusty-memory, trusty-analyze, trusty-agents) skip
@@ -88,7 +88,7 @@ jobs:
 
   # --------------------------------------------------------------------------
   # clippy: deny warnings across the whole workspace (stable, all targets)
-  # trusty-mpm-gui excluded: Tauri desktop GUI, needs WebKit2GTK on Linux.
+  # trusty-mpm-gui and trusty-code-gui excluded: Tauri desktop GUIs, need WebKit2GTK on Linux.
   # --------------------------------------------------------------------------
   clippy:
     name: Clippy
@@ -132,13 +132,13 @@ jobs:
           key: clippy
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
-        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui -- -D warnings
 
   # --------------------------------------------------------------------------
   # test: run all unit + integration tests (stable, no --include-ignored).
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
   # because they require model downloads and a running embedderd daemon.
-  # trusty-mpm-gui excluded: see clippy note above.
+  # trusty-mpm-gui, trusty-code-gui excluded: see clippy note above.
   # fetch-depth: 0 (full clone) required for trusty-agents git tests that inspect
   # local branch refs and search commit history.
   #
@@ -419,7 +419,7 @@ jobs:
         # We set CI="" here to shadow the global CI=true injected by the runner.
         env:
           CI: ""
-        run: cargo test --workspace --exclude trusty-mpm-gui
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui
 
       # Explicit per-crate step so trusty-review failures are individually
       # attributed in the GitHub Actions UI (closes #950).
@@ -432,7 +432,7 @@ jobs:
   # msrv: verify the workspace compiles on the effective MSRV.
   # cargo check is used (not test) to keep this job fast: the MSRV guarantee
   # is that the code *compiles* on the minimum toolchain, not that tests pass.
-  # trusty-mpm-gui excluded: see clippy note above.
+  # trusty-mpm-gui, trusty-code-gui excluded: see clippy note above.
   #
   # Toolchain is 1.91, matching [workspace.package].rust-version = "1.91" in the
   # root Cargo.toml. The current Cargo.lock pulls aws-sdk-*/aws-smithy-* at
@@ -478,7 +478,7 @@ jobs:
           key: msrv-1-91
 
       - name: cargo check --workspace
-        run: cargo check --workspace --exclude trusty-mpm-gui
+        run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui
 
   # --------------------------------------------------------------------------
   # search-daemon-smoke: build the trusty-search release binary and verify

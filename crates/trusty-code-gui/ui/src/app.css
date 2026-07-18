@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base, dark-first styling — mirrors crates/trusty-mpm-gui/ui/src/app.css. */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  @apply bg-trusty-surface text-trusty-text font-sans antialiased;
+}
+
+html:not(.dark) body {
+  @apply bg-trusty-surface-light text-trusty-text-light;
+}
+
+#app {
+  height: 100%;
+}
