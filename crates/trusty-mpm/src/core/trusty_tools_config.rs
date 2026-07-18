@@ -190,27 +190,14 @@ pub struct DaemonConfig {
     pub allow_mcp_spawn: Option<bool>,
 }
 
-/// Built-in default tmux `history-limit` (scrollback lines) applied to every
-/// managed session (#2398).
-///
-/// Why: tmux's own default is 2000 lines, which a long-running PM session
-/// exhausts almost immediately. 100,000 lines comfortably covers a full
-/// working session without materially growing tmux's per-pane memory
-/// footprint (each line is only retained while it exists in the pane).
-/// What: `100_000`.
+/// Built-in default tmux `history-limit`/`mouse` (#2398), now the single
+/// shared source of truth in `trusty_common::tmux` (#3004) so
+/// trusty-agents' independent tmux implementation uses the identical
+/// defaults. Re-exported here so every existing reference to
+/// `DEFAULT_TMUX_HISTORY_LIMIT`/`DEFAULT_TMUX_MOUSE` in this module keeps
+/// compiling unchanged.
 /// Test: `tmux_options_default_when_no_config`.
-pub const DEFAULT_TMUX_HISTORY_LIMIT: u32 = 100_000;
-
-/// Built-in default for whether mouse-wheel scrolling (and click-to-select
-/// copy mode) is enabled on the tmux server (#2398).
-///
-/// Why: a large `history-limit` is only reachable in practice if the operator
-/// has an easy way to scroll into it; tmux's `mouse on` option maps the wheel
-/// to scrolling the pane / entering copy-mode, which is the actual "scroll"
-/// gesture operators expect.
-/// What: `true`.
-/// Test: `tmux_options_default_when_no_config`.
-pub const DEFAULT_TMUX_MOUSE: bool = true;
+pub use trusty_common::tmux::{DEFAULT_TMUX_HISTORY_LIMIT, DEFAULT_TMUX_MOUSE};
 
 /// Minimum tmux `history-limit` accepted from config (#2398 QA finding).
 ///

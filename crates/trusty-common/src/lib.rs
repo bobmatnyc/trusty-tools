@@ -631,6 +631,15 @@ pub mod openrouter_legacy;
 #[cfg(feature = "catchup")]
 pub mod catchup;
 
+/// Why: two independent tmux implementations (trusty-mpm, trusty-agents)
+/// meant the #2398/#2399 scrollback fix only reached one of them (issue
+/// #3004). Always-on: it is a small, dependency-light (`serde` only) pure
+/// command-construction layer, no feature gate needed.
+/// What: `TmuxTarget`/`TmuxCommand`/`tmux_argv`, the scrollback-ergonomics
+/// defaults, and the shared `managed_session_commands` ordering guarantee.
+/// Test: `cargo test -p trusty-common -- tmux::`.
+pub mod tmux;
+
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 
 pub use chat::{

@@ -4,16 +4,26 @@
 //! observe, and control tmux sessions without each call site shelling out
 //! manually. Centralizing this also gives us one place to enforce the
 //! send-text-then-Enter pattern that prevents stuck input on receivers.
+//! `create_session` routes through `trusty_common::tmux`'s shared
+//! `managed_session_commands` recipe (issue #3004) so this crate's tmux
+//! sessions get the same generous scrollback (`history-limit`) applied
+//! BEFORE pane creation that trusty-mpm's `core::tmux::create_managed_session`
+//! has applied since #2398/#2399 — before #3004 this crate had its own
+//! independent `new-session` construction with no scrollback handling at
+//! all, which is why a scrollback bug report against trusty-agents surfaced
+//! the duplication as the real root cause (trusty-mpm was already correct).
 //! What: `TmuxOrchestrator` owns the tmux binary path and exposes session
 //! lifecycle, pane enumeration, and I/O methods. Each method maps to one
 //! or two `tmux` invocations.
 //! Test: See `#[cfg(test)]` block — basic checks run unconditionally; full
 //! integration tests are gated by `#[ignore]` because they require a real
-//! tmux server.
+//! tmux server. `create_session_commands_applies_scrollback_before_new_session`
+//! is the #3004 hermetic ordering assertion (no live tmux needed).
 
 use std::process::{Command, Output};
 
 use tracing::{debug, trace, warn};
+use trusty_common::tmux::{TmuxCommand, managed_session_commands, tmux_argv};
 
 use super::error::{Result, TmuxError};
 use super::session::{TmuxPane, TmuxSession};
@@ -107,15 +117,56 @@ impl TmuxOrchestrator {
 
     // ==================== Session Management ====================
 
+    /// Build the ordered command sequence [`Self::create_session`] issues:
+    /// generous scrollback/mouse ergonomics FIRST, then `new-session`
+    /// (#3004).
+    ///
+    /// Why: pure and side-effect-free so the options-before-new-session
+    /// ordering can be asserted with a hermetic unit test, no live tmux
+    /// server required — mirrors trusty-mpm's identical extraction in
+    /// `core::tmux::managed_session_command_sequence`.
+    /// What: delegates to
+    /// [`trusty_common::tmux::managed_session_commands`] with
+    /// `idempotent: false` (this orchestrator's pre-#3004 fail-if-exists
+    /// semantics are preserved — unlike trusty-mpm, it does not attach `-A`)
+    /// and no initial command.
+    /// Test: `create_session_commands_applies_scrollback_before_new_session`.
+    fn create_session_commands(name: &str, dir: Option<&str>) -> Vec<TmuxCommand> {
+        managed_session_commands(
+            name,
+            dir,
+            trusty_common::tmux::DEFAULT_TMUX_HISTORY_LIMIT,
+            trusty_common::tmux::DEFAULT_TMUX_MOUSE,
+            false,
+            None,
+        )
+    }
+
     /// Create a new detached tmux session, optionally rooted at `dir`.
     pub fn create_session(&self, name: &str, dir: Option<&str>) -> Result<TmuxSession> {
         debug!(name = %name, dir = ?dir, "creating tmux session");
 
-        let mut args = vec!["new-session", "-d", "-s", name];
-        if let Some(d) = dir {
-            args.push("-c");
-            args.push(d);
+        let commands = Self::create_session_commands(name, dir);
+        let split = commands.len().saturating_sub(1);
+        let (options, new_session) = commands.split_at(split);
+
+        // Scrollback/mouse ergonomics are best-effort: `set-option -g` is
+        // idempotent and virtually never fails, but must never block session
+        // creation (mirrors trusty-mpm's `create_managed_session`, #2398).
+        for cmd in options {
+            let argv = tmux_argv(cmd);
+            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+            if let Err(e) = self.run_tmux_checked(&args) {
+                warn!(?cmd, "tmux scrollback/mouse option failed (non-fatal): {e}");
+            }
         }
+
+        let argv = tmux_argv(
+            new_session
+                .first()
+                .expect("create_session_commands always ends with NewSession"),
+        );
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         self.run_tmux_checked(&args)?;
 
         // Verify session was created and return its struct.
@@ -384,6 +435,33 @@ mod tests {
         // errors instead of failing construction.
         let result = TmuxOrchestrator::new();
         assert!(result.is_ok(), "constructor must not fail on missing tmux");
+    }
+
+    #[test]
+    fn create_session_commands_applies_scrollback_before_new_session() {
+        // #3004: hermetic proof (no live tmux needed) that this orchestrator's
+        // session creation routes through the shared `trusty_common::tmux`
+        // ordering guarantee — history-limit/mouse options land BEFORE
+        // new-session, closing the gap that let this crate's independent tmux
+        // implementation miss the #2398/#2399 scrollback fix entirely.
+        let cmds = TmuxOrchestrator::create_session_commands("sess", Some("/tmp/proj"));
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(
+            tmux_argv(&cmds[0]),
+            [
+                "set-option",
+                "-g",
+                "history-limit",
+                &trusty_common::tmux::DEFAULT_TMUX_HISTORY_LIMIT.to_string()
+            ]
+        );
+        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
+        // No `-A`: this orchestrator preserves its pre-#3004 fail-if-exists
+        // semantics, unlike trusty-mpm's idempotent creation.
+        assert_eq!(
+            tmux_argv(&cmds[2]),
+            ["new-session", "-d", "-s", "sess", "-c", "/tmp/proj"]
+        );
     }
 
     // Integration tests — require a real tmux server.

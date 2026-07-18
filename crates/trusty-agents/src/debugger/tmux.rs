@@ -5,17 +5,25 @@
 //! — without taking a tmux library dependency. We shell out to the `tmux`
 //! binary and parse its output. Synchronous `std::process::Command` is fine
 //! because every call is short-lived (capture-pane, send-keys, list-panes).
+//! `create_session` routes through `trusty_common::tmux`'s shared
+//! `managed_session_commands` recipe (issue #3004) so this REPL's tmux
+//! session gets the same generous scrollback applied BEFORE pane creation
+//! that trusty-mpm has had since #2398/#2399 — ironic given this is the
+//! debug REPL: before #3004 it had no scrollback handling at all.
 //! What: `TmuxAdapter` exposes session lifecycle (create/kill/exists),
 //! pane introspection (`get_pane_id`), output capture (`capture_output`),
 //! and keystroke injection (`send_line`). Errors flow through `TmuxError`.
 //! Test: `tmux_adapter_finds_binary` (when tmux is installed) plus
 //! lifecycle/capture/send round-trip behind the `tmux_integration` cfg gate
 //! so CI without tmux still passes.
+//! `create_session_commands_applies_scrollback_before_new_session` is the
+//! #3004 hermetic ordering assertion (no live tmux needed).
 
 use std::process::{Command, Output};
 
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
+use trusty_common::tmux::{TmuxCommand, managed_session_commands, tmux_argv};
 
 #[derive(Error, Debug)]
 pub enum TmuxError {
@@ -102,15 +110,61 @@ impl TmuxAdapter {
         matches!(out, Ok(o) if o.status.success())
     }
 
+    /// Build the ordered command sequence [`Self::create_session`] issues:
+    /// generous scrollback/mouse ergonomics FIRST, then `new-session <cmd>`
+    /// (#3004).
+    ///
+    /// Why: pure and side-effect-free so the options-before-new-session
+    /// ordering can be asserted with a hermetic unit test, no live tmux
+    /// server required.
+    /// What: delegates to
+    /// [`trusty_common::tmux::managed_session_commands`] with
+    /// `idempotent: false` (this adapter's pre-#3004 fail-if-exists
+    /// semantics are preserved) and `command: Some(cmd)` so the REPL launches
+    /// as the pane's initial process, exactly as before.
+    /// Test: `create_session_commands_applies_scrollback_before_new_session`.
+    fn create_session_commands(name: &str, cmd: &str) -> Vec<TmuxCommand> {
+        managed_session_commands(
+            name,
+            None,
+            trusty_common::tmux::DEFAULT_TMUX_HISTORY_LIMIT,
+            trusty_common::tmux::DEFAULT_TMUX_MOUSE,
+            false,
+            Some(cmd),
+        )
+    }
+
     /// Create a new detached session running `cmd`.
     ///
     /// Why: Detached so the TUI in the invoking terminal can render its own
     /// view while the REPL runs alongside.
-    /// What: `tmux new-session -d -s <name> <cmd>`.
+    /// What: `tmux new-session -d -s <name> <cmd>`, preceded by the shared
+    /// scrollback/mouse ergonomics (#3004).
     /// Test: integration; manual run shows the session created.
     pub fn create_session(&self, name: &str, cmd: &str) -> Result<()> {
         debug!(name = %name, cmd = %cmd, "creating tmux session");
-        self.run_checked(&["new-session", "-d", "-s", name, cmd])?;
+
+        let commands = Self::create_session_commands(name, cmd);
+        let split = commands.len().saturating_sub(1);
+        let (options, new_session) = commands.split_at(split);
+
+        // Best-effort: must never block the REPL from launching (mirrors
+        // trusty-mpm's `create_managed_session`, #2398).
+        for opt_cmd in options {
+            let argv = tmux_argv(opt_cmd);
+            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+            if let Err(e) = self.run_checked(&args) {
+                warn!(cmd = ?opt_cmd, "tmux scrollback/mouse option failed (non-fatal): {e}");
+            }
+        }
+
+        let argv = tmux_argv(
+            new_session
+                .first()
+                .expect("create_session_commands always ends with NewSession"),
+        );
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        self.run_checked(&args)?;
         Ok(())
     }
 
@@ -197,5 +251,30 @@ mod tests {
     fn tmux_error_session_not_found_displays() {
         let e = TmuxError::SessionNotFound("foo".into());
         assert!(format!("{e}").contains("foo"));
+    }
+
+    #[test]
+    fn create_session_commands_applies_scrollback_before_new_session() {
+        // #3004: hermetic proof (no live tmux needed) that the debug REPL's
+        // session creation routes through the shared `trusty_common::tmux`
+        // ordering guarantee — history-limit/mouse options land BEFORE
+        // new-session, and the initial command still renders as the
+        // trailing positional argument exactly as before.
+        let cmds = TmuxAdapter::create_session_commands("debug-repl", "run-repl");
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(
+            tmux_argv(&cmds[0]),
+            [
+                "set-option",
+                "-g",
+                "history-limit",
+                &trusty_common::tmux::DEFAULT_TMUX_HISTORY_LIMIT.to_string()
+            ]
+        );
+        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
+        assert_eq!(
+            tmux_argv(&cmds[2]),
+            ["new-session", "-d", "-s", "debug-repl", "run-repl"]
+        );
     }
 }
