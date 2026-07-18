@@ -18,6 +18,7 @@ pub mod dependency_graph;
 pub mod doctor;
 pub mod ensure;
 pub mod install;
+pub mod install_gate;
 pub mod lifecycle;
 pub mod macos_signing;
 pub mod passthrough;

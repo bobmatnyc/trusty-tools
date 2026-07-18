@@ -236,6 +236,18 @@ fn parse_install_no_service() {
     }
 }
 
+/// Parse `trusty-installer install --dry-run` (#2112 preview flag).
+#[test]
+fn parse_install_dry_run() {
+    let cli = Cli::try_parse_from(["trusty-installer", "install", "--dry-run"])
+        .expect("install --dry-run parses");
+    if let Commands::Install { dry_run, .. } = &cli.command {
+        assert!(*dry_run, "--dry-run must set the flag");
+    } else {
+        panic!("expected Install");
+    }
+}
+
 /// Parse `trusty-installer ensure`.
 #[test]
 fn parse_ensure() {
