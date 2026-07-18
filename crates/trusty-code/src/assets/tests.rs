@@ -167,3 +167,35 @@ fn default_skills_names_are_unique() {
         );
     }
 }
+
+/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 33 entries (5
+/// `BASE-*` templates + 28 roster agents), every key is unique, and every
+/// entry's raw content opens with a frontmatter fence.
+///
+/// Why: `agents::md_loader::project_embedded_md_with_extends` builds an
+/// `InMemorySources` map from this table via `build_in_memory_source_map`
+/// -- a duplicate key would silently shadow one agent's real content, and a
+/// wrong count would mean a roster entry was dropped or double-copied
+/// during the byte-for-byte copy from trusty-mpm's bundled assets.
+/// What: asserts the length, dedupes the (case-folded, per
+/// `InMemorySources::insert`'s own normalisation) keys, and checks every
+/// content string opens with `---`.
+/// Test: this test.
+#[test]
+fn embedded_tm_agent_sources_has_33_entries_and_unique_keys() {
+    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 33);
+    let mut keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
+        .iter()
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    let before = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), before, "no duplicate embedded tm agent keys");
+    for (name, content) in EMBEDDED_TM_AGENT_SOURCES {
+        assert!(
+            content.trim_start().starts_with("---"),
+            "embedded tm agent source '{name}' must open with a frontmatter fence"
+        );
+    }
+}
