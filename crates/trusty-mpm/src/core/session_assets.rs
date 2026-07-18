@@ -30,8 +30,8 @@
 //! using that same catalog, instead of recomposing the ~40+ catalog agents once
 //! PER SESSION.
 //! Test: `session_workdir_prefers_workspace_path`,
-//! `session_workdir_falls_back_to_cwd`, `session_assets_stale_false_when_fresh`,
-//! `session_assets_stale_true_when_catalog_moved`.
+//! `session_workdir_falls_back_to_cwd`, `session_asset_staleness_ok_when_fresh`,
+//! `session_asset_staleness_flags_catalog_drift`.
 
 use std::path::Path;
 
@@ -148,8 +148,8 @@ pub fn session_asset_staleness_with_catalog(
 /// "not stale", matching [`StalenessReport`]'s own documented semantics —
 /// nothing authoritative to compare against is not evidence of drift.
 /// What: `session_asset_staleness(record).stale`.
-/// Test: `session_assets_stale_false_when_fresh`,
-/// `session_assets_stale_true_when_catalog_moved`.
+/// Test: `session_asset_staleness_ok_when_fresh`,
+/// `session_asset_staleness_flags_catalog_drift`.
 pub fn session_assets_stale(record: &SessionRecord) -> bool {
     session_asset_staleness(record).stale
 }

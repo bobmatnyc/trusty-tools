@@ -49,7 +49,7 @@ use crate::session_manager::{ManagedSessionState, SessionRecord};
 /// What: a bare `Router<Arc<DaemonState>>` with both POST routes; `api.rs`
 /// merges it into the shared router (state is injected once, at that merge
 /// point).
-/// Test: covered end-to-end via the CLI's `commands::sync_assets_tests`
+/// Test: covered end-to-end via the CLI's `session_sync_assets_not_found_errors`
 /// (`bin/tm/commands/sync_assets_tests.rs`, hits this router over real HTTP)
 /// and the route-level tests in `sync_assets_tests.rs`.
 pub fn router() -> Router<Arc<DaemonState>> {
