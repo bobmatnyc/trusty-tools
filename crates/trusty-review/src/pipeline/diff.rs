@@ -132,12 +132,23 @@ pub async fn load_diff(source: &DiffSource) -> Result<String, GithubError> {
 /// Run `git diff -M <base>...<head>` in `repo_root` and return stdout.
 ///
 /// Why: extracted so the three-dot range formatting and error handling has one
-/// definition; also keeps `load_diff`'s match arms short.
+/// definition; also keeps `load_diff`'s match arms short. `--base`/`--head`
+/// are operator-controlled strings that reach this function verbatim — without
+/// a guard, a value like `--output=/tmp/poc` is parsed by git as an OPTION
+/// rather than a ref, letting an attacker who controls the CLI args write an
+/// arbitrary file (argument injection, found in review of #2993). `git diff`
+/// has no `--` end-of-options marker of its own (`--` after `diff` means "these
+/// are paths"), so the fix is git's dedicated `--end-of-options` pseudo-option
+/// (git >= 2.24, well below this workspace's toolchain floor): everything after
+/// it is treated as a positional revision/range argument, never re-parsed as a
+/// flag, even if it starts with `-`.
 /// What: shells out via `std::process::Command` (no `git2` dependency, mirroring
-/// the existing convention in `report/git_info.rs`); a non-zero exit or
-/// non-UTF-8 output is folded into `GithubError::Transport` with the captured
-/// stderr / decode error so the operator sees exactly what git rejected.
-/// Test: `git_range_diff_matches_git_output`, `git_range_diff_bad_repo_errors`.
+/// the existing convention in `report/git_info.rs`) as `git -C <repo_root> diff
+/// -M --end-of-options <base>...<head>`; a non-zero exit or non-UTF-8 output is
+/// folded into `GithubError::Transport` with the first line of stderr (git's
+/// actual error, not its ~70-line usage dump) / the decode error.
+/// Test: `git_range_diff_matches_git_output`, `git_range_diff_bad_repo_errors`,
+/// `git_range_diff_rejects_option_like_base_without_touching_filesystem`.
 fn run_git_range_diff(
     repo_root: &std::path::Path,
     base: &str,
@@ -149,17 +160,19 @@ fn run_git_range_diff(
         .arg(repo_root)
         .arg("diff")
         .arg("-M")
+        .arg("--end-of-options")
         .arg(&range)
         .output()
         .map_err(|e| GithubError::Transport(format!("failed to run `git diff {range}`: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.trim().lines().next().unwrap_or_default();
         return Err(GithubError::Transport(format!(
             "`git diff {range}` in {} failed ({}): {}",
             repo_root.display(),
             output.status,
-            stderr.trim()
+            first_line
         )));
     }
 
@@ -685,6 +698,42 @@ index abc..def 100644
         };
         let result = load_diff(&source).await;
         assert!(result.is_err(), "a non-repo directory must error");
+    }
+
+    /// Regression test for the argument-injection vuln found in review of
+    /// #2993: `base`/`head` are operator-controlled strings that reach `git
+    /// diff` as a positional arg. Before the `--end-of-options` guard, a
+    /// value that LOOKS like a git option (e.g. `--output=<path>`) was parsed
+    /// as one, letting an attacker who controls the `--base`/`--head` CLI
+    /// flags make git write an arbitrary file. Asserts both that the call
+    /// errors AND that nothing was written under the injected output
+    /// directory (the strong claim — not just "it returned Err").
+    #[tokio::test]
+    async fn git_range_diff_rejects_option_like_base_without_touching_filesystem() {
+        let (dir, _base, head) = tiny_git_repo();
+        let poc_dir = tempfile::tempdir().expect("poc tempdir");
+        let hostile_base = format!("--output={}/PWNED", poc_dir.path().display());
+
+        let source = DiffSource::GitRange {
+            repo_root: dir.path().to_path_buf(),
+            base: hostile_base,
+            head: Some(head),
+        };
+
+        let result = load_diff(&source).await;
+        assert!(
+            result.is_err(),
+            "an option-like --base value must be rejected, not silently accepted"
+        );
+
+        let wrote_any_file = std::fs::read_dir(poc_dir.path())
+            .expect("read poc dir")
+            .next()
+            .is_some();
+        assert!(
+            !wrote_any_file,
+            "the --end-of-options guard must prevent git from writing the injected --output path"
+        );
     }
 
     // ── Stdin tests (#2993) ───────────────────────────────────────────────

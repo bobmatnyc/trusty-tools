@@ -304,7 +304,38 @@ pub fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use trusty_review::models::{Effort, Finding, Verdict};
+
+    // ── CompareArgs clap wiring (#2993) ─────────────────────────────────
+
+    /// Guards the `conflicts_with = "base"` wiring on `local_diff`: a
+    /// field-id rename that silently drops the attribute would otherwise
+    /// only be caught by manual testing.
+    #[test]
+    fn compare_args_base_and_local_diff_conflict() {
+        let result =
+            CompareArgs::try_parse_from(["compare", "--base", "main", "--local-diff", "x.diff"]);
+        assert!(
+            result.is_err(),
+            "--base and --local-diff must be mutually exclusive"
+        );
+    }
+
+    /// Guards the `requires = "base"` wiring on `head`.
+    #[test]
+    fn compare_args_head_without_base_errors() {
+        let result = CompareArgs::try_parse_from(["compare", "--head", "feature"]);
+        assert!(result.is_err(), "--head requires --base");
+    }
+
+    #[test]
+    fn compare_args_base_and_head_parses() {
+        let args = CompareArgs::try_parse_from(["compare", "--base", "main", "--head", "feature"])
+            .expect("parse");
+        assert_eq!(args.base.as_deref(), Some("main"));
+        assert_eq!(args.head.as_deref(), Some("feature"));
+    }
 
     fn make_result(model: &str, verdict: Verdict, findings: usize, cost: f64) -> ReviewResult {
         let mut r = ReviewResult::new(

@@ -245,3 +245,51 @@ pub async fn build_deps_async(
         dedup: None,
     })
 }
+
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser as _;
+
+    /// Guards the `conflicts_with = "base"` wiring on `local_diff` (#2993):
+    /// a field-id rename that silently drops the attribute would otherwise
+    /// only be caught by manual testing.
+    #[test]
+    fn run_args_base_and_local_diff_conflict() {
+        let result = RunArgs::try_parse_from(["run", "--base", "main", "--local-diff", "x.diff"]);
+        assert!(
+            result.is_err(),
+            "--base and --local-diff must be mutually exclusive"
+        );
+    }
+
+    /// Guards the `requires = "base"` wiring on `head` (#2993).
+    #[test]
+    fn run_args_head_without_base_errors() {
+        let result = RunArgs::try_parse_from(["run", "--head", "feature"]);
+        assert!(result.is_err(), "--head requires --base");
+    }
+
+    #[test]
+    fn run_args_base_alone_parses() {
+        let args = RunArgs::try_parse_from(["run", "--base", "main"]).expect("parse");
+        assert_eq!(args.base.as_deref(), Some("main"));
+        assert!(args.head.is_none());
+    }
+
+    #[test]
+    fn run_args_base_and_head_parses() {
+        let args =
+            RunArgs::try_parse_from(["run", "--base", "main", "--head", "feature"]).expect("parse");
+        assert_eq!(args.base.as_deref(), Some("main"));
+        assert_eq!(args.head.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn run_args_local_diff_dash_parses() {
+        let args = RunArgs::try_parse_from(["run", "--local-diff", "-"]).expect("parse");
+        assert_eq!(args.local_diff.as_deref(), Some(std::path::Path::new("-")));
+    }
+}
