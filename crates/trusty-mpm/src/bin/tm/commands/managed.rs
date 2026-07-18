@@ -14,6 +14,20 @@
 //! the JSON responses; plus the local `catalog` handler that drives `CatalogSync`.
 //! Test: `cli_parses_catalog_sync` exercises the parse path; the HTTP round-trip
 //! is covered by `tests/session_manager_mvp.rs`.
+//!
+//! `"deleted"` slot tombstones vs. `"decommissioned"` sessions (issue #3034):
+//! these are two deliberately different states. A `"decommissioned"` session
+//! still has a live record in the store (soft-retired) and stays hidden from
+//! the default view per #1809 — that filter is unchanged here. A `"deleted"`
+//! slot tombstone is a stable-numbering placeholder for a session whose record
+//! has left the store entirely (hard-delete, decommission-reap, or prune); per
+//! Bob's explicit directive on #3034, tombstones are INTENTIONALLY shown in the
+//! default `tm ls`/picker view at their original slot position — hiding them
+//! would defeat the stable-numbering feature's whole point (an operator must
+//! see exactly why a captured number no longer resolves, not have it silently
+//! vanish). This is NOT unbounded growth: the slot registry is in-memory only
+//! and resets to empty on every daemon restart (see `SlotRegistry`'s doc), so
+//! tombstone count is bounded by daemon process lifetime, not by history.
 
 use std::io::IsTerminal as _;
 
@@ -46,30 +60,66 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
     eprintln!("{}", deprecation_message(old, new));
 }
 
-/// Return true when a session state should be shown in the default picker/list view.
+/// Return true when a session row should be shown in the default picker/list view.
 ///
-/// Why: TERMINAL tombstones (`decommissioned` AND `deleted`, #2012) accumulate
-/// without bound (#1809) and — critically — must NEVER be offered as a resume
-/// target: a deleted row surfaced in the picker would flow through the
-/// zombie-reconcile path and RESURRECT the deleted session. Driving the
-/// decision off [`ManagedSessionState::is_terminal`] (the single source of
-/// truth on the enum) rather than a hardcoded `== "decommissioned"` string
-/// guarantees a new terminal variant can never silently slip past this filter.
-/// What: returns `false` for any terminal state; `true` for every live state
-/// (active, provisioning, stopped, errored) and for any unrecognised token
-/// (fail-open for DISPLAY only — the daemon owns real lifecycle gating).
+/// Why: reconciles two independent, otherwise-contradictory directives that
+/// both landed on `"deleted"` wire rows. Main's #3302 hardening commit
+/// (`51243ea5`, addressing a code-critic CRITICAL finding) wanted a real,
+/// still-in-store record whose lifecycle state is `Deleted` (soft-deleted via
+/// `tm sessions delete`, #2012) hidden from the default view exactly like
+/// `"decommissioned"` — surfacing it risked flowing through the zombie-reconcile
+/// path and resurrecting it. #3034/#3044 (this PR) needs the OPPOSITE for a
+/// stable-numbering SLOT TOMBSTONE: it must render at its exact slot position
+/// in the default view, or the entire point of stable numbering (an operator
+/// seeing exactly why a captured number no longer resolves) is defeated.
+///
+/// Both rows serialize `state == "deleted"` on the wire, but only the slot
+/// tombstone sets the dedicated `deleted: bool` field
+/// ([`ManagedSessionSummary::deleted`], set exclusively by
+/// `daemon::managed_routes::summary::tombstone_summary`) — a soft-deleted
+/// real record's `deleted` field stays `false` even though its `state` string
+/// is `"deleted"`. Threading that flag through as `is_slot_tombstone`
+/// disambiguates the two without touching the wire shape or either directive:
+/// the slot tombstone (`is_slot_tombstone == true`) passes through and stays
+/// visible; the soft-deleted-in-store record (`is_slot_tombstone == false`)
+/// is hidden alongside `"decommissioned"`.
+///
+/// Resurrection-safety for a VISIBLE slot tombstone is unaffected by this
+/// visibility change — it is enforced independently, by two separate guards
+/// that never consult this predicate: the picker's `decide_for_index`
+/// (`session_picker.rs`) checks `ManagedSessionSummary::deleted` FIRST, ahead
+/// of every other branch, and returns `PickerDecision::SlotDeleted` rather
+/// than ever reaching `Resume`/`ConfirmRestart`; and
+/// `guided_resume::resume_guided_session`'s terminal-state refusal
+/// (`plan_resume` → `ResumeAction::Terminal`) independently refuses to attach
+/// to or restart any `"decommissioned"`/`"deleted"` session before any daemon
+/// round-trip. Both guards key off the session's own state/flags, not off
+/// whether this predicate decided to show or hide the row.
+/// What: returns `false` for `"decommissioned"` (always hidden) and for
+/// `"deleted"` when `is_slot_tombstone` is `false` (a soft-deleted, still-in-store
+/// record); returns `true` for every other state, and for `"deleted"` when
+/// `is_slot_tombstone` is `true` (a #3034 numbered-slot tombstone).
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
-/// `is_live_session_state_excludes_deleted` in `tests_behavior_c_tests.rs`.
-pub(crate) fn is_live_session_state(state: &str) -> bool {
-    !trusty_mpm::session_manager::ManagedSessionState::from_wire(state)
-        .is_some_and(|s| s.is_terminal())
+/// `is_live_session_state_excludes_soft_deleted_record`,
+/// `is_live_session_state_keeps_slot_tombstone_visible` in
+/// `tests_behavior_c_tests.rs`.
+pub(crate) fn is_live_session_state(state: &str, is_slot_tombstone: bool) -> bool {
+    match state {
+        "decommissioned" => false,
+        "deleted" => is_slot_tombstone,
+        _ => true,
+    }
 }
 
 /// Filter a session list to only live sessions for display in the picker (#1809).
 ///
-/// Why: the picker must never show decommissioned tombstones by default; the
-/// `--all` opt-in re-enables them for `tm session ls` via this module's path.
-/// What: retains only sessions whose `state` passes `is_live_session_state`.
+/// Why: the picker must never show decommissioned tombstones (or a
+/// soft-deleted, still-in-store record) by default; the `--all` opt-in
+/// re-enables them for `tm session ls` via this module's path. A #3034
+/// numbered-slot tombstone (`ManagedSessionSummary::deleted == true`) is
+/// deliberately kept regardless — see [`is_live_session_state`]'s doc.
+/// What: retains only sessions whose `(state, deleted)` pair passes
+/// [`is_live_session_state`].
 /// Test: `picker_filter_excludes_decommissioned_keeps_active` in
 /// `tests_behavior_c_tests.rs`.
 pub(crate) fn filter_live_sessions(
@@ -77,7 +127,7 @@ pub(crate) fn filter_live_sessions(
 ) -> Vec<ManagedSessionSummary> {
     sessions
         .into_iter()
-        .filter(|s| is_live_session_state(&s.state))
+        .filter(|s| is_live_session_state(&s.state, s.deleted))
         .collect()
 }
 

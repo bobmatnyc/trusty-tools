@@ -433,6 +433,8 @@ mod tests {
             branch: None,
             pending_decision: pending.map(str::to_string),
             proposed_default: None,
+            slot: 0,
+            deleted: false,
         }
     }
 

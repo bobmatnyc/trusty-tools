@@ -166,3 +166,73 @@ async fn numbered_snapshot_never_reuses_a_deleted_slot() {
         "slot 1 (tombstone) and slot 2 (d) must both be reported"
     );
 }
+
+#[tokio::test]
+async fn numbered_snapshot_concurrent_calls_agree_on_new_session_slot() {
+    // Why (#3034 fix-round MEDIUM): two concurrent `tm ls` invocations (or two
+    // redraws of the interactive picker) racing to FIRST observe a
+    // newly-created session into the slot registry must agree on its slot
+    // number — a purely per-fetch client-side enumeration could never
+    // guarantee this, which is exactly why numbering lives in one
+    // daemon-owned `SlotRegistry` every listing call reads and writes (see
+    // `SlotRegistry`'s doc). This drives that guarantee through the real
+    // `numbered_snapshot` seam — with `tokio::join!` running both calls truly
+    // concurrently rather than sequentially awaited one after another — so
+    // the race is exercised through `SlotRegistry::observe`'s actual
+    // `RwLock::write` serialization, not merely asserted by inspection.
+    // What: creates one session, fires two concurrent `numbered_snapshot`
+    // calls observing it for the first time, and asserts (a) both agree on
+    // its slot number, and (b) a THIRD, subsequent snapshot still reports
+    // exactly one slot for it — never two, which would mean the race handed
+    // out two different numbers for the same session id.
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let mgr = std::sync::Arc::new(mgr);
+
+    let session = mgr
+        .create(
+            "task racer".into(),
+            Some(PathBuf::from("/tmp/wt-race")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create session");
+
+    let records = mgr.list().await;
+    let mgr_a = std::sync::Arc::clone(&mgr);
+    let records_a = records.clone();
+    let mgr_b = std::sync::Arc::clone(&mgr);
+    let records_b = records.clone();
+
+    // Two truly-concurrent observations of the SAME newly-created session.
+    let (snap_a, snap_b) = tokio::join!(
+        async move { mgr_a.numbered_snapshot(&records_a).await },
+        async move { mgr_b.numbered_snapshot(&records_b).await },
+    );
+
+    let slot_in = |snap: &[super::slots::NumberedSlot]| {
+        snap.iter()
+            .find(|s| s.record.as_ref().map(|r| r.id) == Some(session.id))
+            .expect("session present in snapshot")
+            .slot
+    };
+    let slot_a = slot_in(&snap_a);
+    let slot_b = slot_in(&snap_b);
+    assert_eq!(
+        slot_a, slot_b,
+        "two concurrent observers of the same new session must agree on its slot"
+    );
+
+    // No double-assignment: a THIRD snapshot must still report exactly one
+    // slot for this one session.
+    let after = mgr.numbered_snapshot(&mgr.list().await).await;
+    assert_eq!(
+        after.len(),
+        1,
+        "one session must occupy exactly one slot even after concurrent observation"
+    );
+    assert_eq!(after[0].slot, slot_a);
+}

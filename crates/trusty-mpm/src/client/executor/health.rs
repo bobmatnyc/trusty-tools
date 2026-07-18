@@ -11,8 +11,9 @@
 //! managed list, composing a [`CommandResult::Health`]. A dead daemon yields a
 //! `Health { reachable: false, status: "unreachable", .. }` result (NEVER a
 //! panic), so an unreachable daemon stays renderable.
-//! Test: `execute_health_against_test_daemon` and `execute_health_dead_daemon_renders`
-//! in `tests.rs`.
+//! Test: `execute_health_against_test_daemon` and `execute_health_dead_daemon_renders`,
+//! plus `execute_health_excludes_deleted_tombstones_from_managed_total` (#3034
+//! fix-round), all in `tests.rs`.
 
 use super::CommandExecutor;
 use crate::client::result::{CommandResult, HealthReport};
@@ -36,7 +37,8 @@ impl CommandExecutor {
     /// fields at their defaults; a managed-list failure after a healthy probe
     /// leaves the fleet counts at zero (the daemon is up; only the secondary call
     /// failed) rather than masking the up status.
-    /// Test: `execute_health_against_test_daemon`, `execute_health_dead_daemon_renders`.
+    /// Test: `execute_health_against_test_daemon`, `execute_health_dead_daemon_renders`,
+    /// `execute_health_excludes_deleted_tombstones_from_managed_total`.
     pub(super) async fn health(&self) -> CommandResult {
         let url = self.client().base_url().to_string();
         let snapshot = match self.client().health_snapshot().await {
@@ -56,14 +58,22 @@ impl CommandExecutor {
         // The daemon answered: summarise the managed fleet too. A failure of this
         // secondary call must not flip the report to "down" — the daemon IS up —
         // so the counts default to zero and the up status is preserved.
+        //
+        // #3034 fix-round HIGH-2: `list_managed_sessions` now includes stable-slot
+        // `deleted: true` tombstone rows (blank fields, no real session behind
+        // them) alongside live sessions — they are intentionally shown in `tm ls`
+        // per Bob's directive, but a tombstone is not a session an operator can
+        // act on, so it must not inflate `managed_total`/`managed_pending_decisions`
+        // here. `pending_decision` is always `None` on a tombstone anyway, so the
+        // `deleted` filter only changes `managed_total`'s count, not `pending`'s —
+        // filtering both keeps this loop's intent explicit rather than relying on
+        // that incidental blank-field fact.
         let (managed_total, managed_pending_decisions) =
             match self.client().list_managed_sessions().await {
                 Ok(sessions) => {
-                    let total = sessions.len();
-                    let pending = sessions
-                        .iter()
-                        .filter(|s| s.pending_decision.is_some())
-                        .count();
+                    let live = sessions.iter().filter(|s| !s.deleted);
+                    let total = live.clone().count();
+                    let pending = live.filter(|s| s.pending_decision.is_some()).count();
                     (total, pending)
                 }
                 Err(_) => (0, 0),

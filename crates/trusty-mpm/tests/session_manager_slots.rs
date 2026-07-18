@@ -9,10 +9,13 @@
 //! the HTTP-layer proof of Bob's report: a session deleted mid-fleet must not
 //! shift every later session's `slot`, and its own slot must render as a
 //! `deleted: true` placeholder rather than vanishing or being reused.
-//! What: one end-to-end test driving the real
+//! What: two end-to-end tests driving the real
 //! [`trusty_mpm::daemon::managed_routes::list_managed_sessions`] handler
 //! against an isolated in-memory `DaemonState` (fake tmux driver — no real
-//! tmux/git required).
+//! tmux/git required): stable-numbering-plus-tombstone (the original #3034
+//! report), and (fix-round MEDIUM) two truly-concurrent list requests racing
+//! to first-observe a newly-created session, proving they agree on its slot
+//! and never double-assign a number.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
 use std::collections::HashMap;
@@ -158,5 +161,97 @@ async fn list_assigns_stable_slot_numbers_and_tombstones_deleted_one() {
         tombstone["id"].as_str(),
         Some(""),
         "tombstone id must be blank"
+    );
+}
+
+/// Two concurrent `GET /api/v1/sessions/managed` requests racing to first
+/// observe a newly-created session agree on its slot number, and no slot is
+/// ever double-assigned (issue #3034 fix-round MEDIUM).
+///
+/// Why: the unit-level `numbered_snapshot_concurrent_calls_agree_on_new_session_slot`
+/// (`session_manager::slots_tests`) proves the guarantee at the registry seam;
+/// this test proves it at the SAME layer an operator actually hits — the real
+/// axum handler — with `tokio::join!` driving two requests truly concurrently
+/// rather than sequentially awaited.
+/// What: seeds one session, fires two concurrent list requests, and asserts
+/// both responses assign the SAME slot to that session; a third, subsequent
+/// request must still report exactly one row for it — never two, which would
+/// mean the race handed out two different numbers for the same session id.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn concurrent_list_requests_agree_on_new_session_slot() {
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ManagedSessionId::new();
+    let ws = root.path().join(format!("{id}-slot-race"));
+    mgr.create_with_id(
+        id,
+        "slot-race".to_string(),
+        Some(ws.clone()),
+        None,
+        Some(ws),
+        Some("https://github.com/owner/repo".to_string()),
+        Some("main".to_string()),
+        RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session");
+
+    let find_slot = |body: &serde_json::Value, id: &str| -> Option<u64> {
+        body["sessions"]
+            .as_array()?
+            .iter()
+            .find(|s| s["id"].as_str() == Some(id))?
+            .get("slot")?
+            .as_u64()
+    };
+
+    // Two truly-concurrent list requests, both racing to first-observe `id`.
+    let (resp_a, resp_b) = tokio::join!(
+        list_managed_sessions(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(HashMap::new()),
+        ),
+        list_managed_sessions(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(HashMap::new()),
+        ),
+    );
+    let (status_a, body_a) = decode_response(resp_a).await;
+    let (status_b, body_b) = decode_response(resp_b).await;
+    assert_eq!(status_a, axum::http::StatusCode::OK);
+    assert_eq!(status_b, axum::http::StatusCode::OK);
+
+    let slot_a = find_slot(&body_a, &id.to_string()).expect("session present in response A");
+    let slot_b = find_slot(&body_b, &id.to_string()).expect("session present in response B");
+    assert_eq!(
+        slot_a, slot_b,
+        "two concurrent requests observing the same new session must agree on its slot"
+    );
+
+    // No double-assignment: a THIRD, subsequent request must still report
+    // exactly one row for this one session.
+    let (status_c, body_c) = decode_response(
+        list_managed_sessions(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(HashMap::new()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status_c, axum::http::StatusCode::OK);
+    let matches = body_c["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .filter(|s| s["id"].as_str() == Some(id.to_string().as_str()))
+        .count();
+    assert_eq!(
+        matches, 1,
+        "the session must occupy exactly one row/slot even after concurrent observation"
     );
 }

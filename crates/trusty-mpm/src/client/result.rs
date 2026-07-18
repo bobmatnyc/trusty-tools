@@ -406,11 +406,24 @@ pub(crate) fn fleet_state_glyph(state: &str) -> &'static str {
 /// ([`crate::client::ManagedSessionSummary`]) so a wire-shape change does not
 /// ripple into every formatter.
 /// What: the identity and lifecycle fields the UIs render, plus the pending
-/// decision a session may be blocked on.
+/// decision a session may be blocked on, plus (#3034) the stable `slot` number
+/// and `deleted` tombstone flag so non-`tm`-CLI consumers (`tm managed-list`,
+/// console/GUI adapters) can render or explicitly skip a tombstone row instead
+/// of only ever seeing an indistinguishable blank-`id`/blank-`name` entry.
+///
+/// Caution for any FUTURE map/lookup keyed by `id`: every tombstone row shares
+/// the same blank `id` (`String::new()`), since a tombstoned slot's underlying
+/// record no longer exists to supply one — `slot` (never blank, always unique
+/// per session-manager lifetime) is the only field a tombstone row can be keyed
+/// or deduplicated by. `deleted` must be checked before trusting `id` as a
+/// unique key at all. No existing consumer builds an id-keyed map over this
+/// type today (checked as part of the #3034 fix round); this note exists so a
+/// future one does not reintroduce the multiple-blank-id collision the wire
+/// DTO's `slot`/`deleted` fields were added to avoid.
 /// Test: covered by the executor's `managed_*` tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedSessionView {
-    /// Managed session id (UUID string).
+    /// Managed session id (UUID string), blank for a tombstone row.
     pub id: String,
     /// tmux session name.
     pub name: String,
@@ -426,12 +439,23 @@ pub struct ManagedSessionView {
     pub pending_decision: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
+    /// Stable, daemon-lifetime `tm ls` slot number (issue #3034). Mirrors
+    /// [`crate::client::ManagedSessionSummary::slot`] field-for-field; `0` is
+    /// the "not applicable" sentinel for call sites that never observe a
+    /// numbered listing.
+    pub slot: u32,
+    /// True when this row is a tombstone placeholder for a deleted slot rather
+    /// than a live session (issue #3034). Mirrors
+    /// [`crate::client::ManagedSessionSummary::deleted`] field-for-field.
+    pub deleted: bool,
 }
 
 impl From<crate::client::ManagedSessionSummary> for ManagedSessionView {
     /// Why: the executor maps the wire DTO to the UI view at the dispatch seam
     /// so adapters never see the transport shape.
-    /// What: moves the shared fields across one-to-one.
+    /// What: moves the shared fields across one-to-one, including `slot`/`deleted`
+    /// (#3034) so downstream consumers of this view keep the same tombstone
+    /// visibility the `tm` CLI's picker/table already has.
     /// Test: covered by `execute_managed_list_against_test_daemon`.
     fn from(s: crate::client::ManagedSessionSummary) -> Self {
         Self {
@@ -443,6 +467,8 @@ impl From<crate::client::ManagedSessionSummary> for ManagedSessionView {
             branch: s.branch,
             pending_decision: s.pending_decision,
             proposed_default: s.proposed_default,
+            slot: s.slot,
+            deleted: s.deleted,
         }
     }
 }

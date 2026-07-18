@@ -1854,6 +1854,11 @@ fn picker_filter_all_decommissioned_returns_empty() {
     );
 }
 
+// `parse_scoped_sessions_all_keeps_tombstone_in_slot_order` (#3034 fix-round
+// LOW) lives in `commands/session_tests.rs` instead of here — this file sits
+// at the 1500-SLOC test-file cap, and that test needs no fixture this file
+// already provides.
+
 // ── #1808: daily banner uses two-panel renderer ───────────────────────────────
 
 #[test]

@@ -34,7 +34,9 @@ impl SessionManager {
     /// removal path (hard-delete, decommission-reap, prune).
     /// Test: `numbered_snapshot_keeps_slot_stable_across_delete`,
     /// `numbered_snapshot_tombstones_deleted_slot`,
-    /// `numbered_snapshot_never_reuses_a_deleted_slot` in `super::slots_tests`.
+    /// `numbered_snapshot_never_reuses_a_deleted_slot`,
+    /// `numbered_snapshot_concurrent_calls_agree_on_new_session_slot` in
+    /// `super::slots_tests`.
     pub async fn numbered_snapshot(&self, records: &[SessionRecord]) -> Vec<NumberedSlot> {
         let mut reg = self.slots.write().await;
         for r in records {

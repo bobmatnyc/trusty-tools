@@ -163,10 +163,37 @@ pub(crate) async fn fetch_managed_raw(
 /// Why: the static table and the picker share one filtering/sorting policy so
 /// the two views never diverge (#1809/#1841).
 /// What: deserializes `ManagedListResponse`; when `all` is false, drops
-/// decommissioned tombstones via [`filter_live_sessions`]; when `all` is true,
-/// keeps every session but stable-sorts tombstones to the end.
+/// decommissioned records via [`filter_live_sessions`] (a `"deleted"` slot
+/// tombstone, #3034, is NOT a decommissioned record and always passes through
+/// this branch too — see [`super::managed::is_live_session_state`]'s doc).
+/// When `all` is true, keeps every row — live, decommissioned, AND tombstoned
+/// — but stable-sorts ONLY `"decommissioned"` records to the end.
+///
+/// `"deleted"` (#3034) tombstones are deliberately EXCLUDED from that
+/// sink-to-bottom sort key, even though a reviewer might expect both "dead"
+/// states to be grouped identically. The two are not interchangeable: a
+/// `"decommissioned"` row is a soft-retired but still-present record — sinking
+/// it to the bottom is a pre-existing (#1809) forensic declutter for the
+/// `--all` view, where recency/liveness ordering is more useful than slot
+/// order. A `"deleted"` tombstone, by contrast, IS the numbered slot itself —
+/// Bob's #3034 directive requires it to render at its ORIGINAL position in the
+/// numbered listing, not wherever a liveness sort would relocate it, so an
+/// operator scanning the table top-to-bottom sees the exact gap where a
+/// session used to be. `[`render_session_table`](super::managed::render_session_table)
+/// and the picker menu both label each row with its own `slot` field (not a
+/// recomputed position), so this is not merely cosmetic — a sink-to-bottom
+/// move for tombstones would visually separate a deleted slot from its live
+/// neighbors, breaking the "see it where it was" guarantee even though the
+/// printed number itself would still be technically correct. `fetched` already
+/// arrives in ascending-slot order from the daemon's `numbered_summaries`,
+/// and `Vec::sort_by_key` is stable, so every row that is not
+/// `"decommissioned"` (live rows AND tombstones alike) keeps that incoming
+/// slot order untouched.
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
-/// `ls_source_id_filter_selects_correct_slug` in `tests_behavior_c_tests.rs`.
+/// `ls_source_id_filter_selects_correct_slug` in `tests_behavior_c_tests.rs`;
+/// `parse_scoped_sessions_all_keeps_tombstone_in_slot_order` in
+/// `commands/session_tests.rs` covers the sink-to-bottom exclusion this doc
+/// describes.
 pub(crate) fn parse_scoped_sessions(
     raw: &str,
     all: bool,
@@ -174,6 +201,9 @@ pub(crate) fn parse_scoped_sessions(
     let fetched = serde_json::from_str::<ManagedListResponse>(raw)?.sessions;
     let sessions = if all {
         let mut s = fetched;
+        // Sink ONLY soft-retired "decommissioned" records — never "deleted"
+        // slot tombstones, which must stay in their original slot position
+        // (see this function's doc for the full reasoning).
         s.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
         s
     } else {

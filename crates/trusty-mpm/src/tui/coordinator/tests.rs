@@ -1468,6 +1468,8 @@ fn managed_view(id: &str, name: &str, state: &str) -> ManagedSessionView {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        slot: 0,
+        deleted: false,
     }
 }
 

@@ -266,6 +266,60 @@ async fn execute_health_against_test_daemon() {
 }
 
 #[tokio::test]
+async fn execute_health_excludes_deleted_tombstones_from_managed_total() {
+    // #3034 fix-round HIGH-2: a slot tombstone (`deleted: true`) is intentionally
+    // shown in `tm ls`, but it is not a session an operator can act on — `health`
+    // must count only live sessions, never inflate `managed_total` with
+    // tombstones the daemon reports for stable-slot numbering.
+    use std::path::PathBuf;
+    let (state, url) = spawn_test_daemon().await;
+    let mgr = state.session_manager().await;
+
+    let live = mgr
+        .create(
+            "keep me".into(),
+            Some(PathBuf::from("/tmp/wt-live")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create live session");
+    let gone = mgr
+        .create(
+            "delete me".into(),
+            Some(PathBuf::from("/tmp/wt-gone")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create session to delete");
+    // Observe both into the slot registry, then delete `gone` so the next list
+    // renders it as a `deleted: true` tombstone at its reserved slot.
+    mgr.numbered_snapshot(&mgr.list().await).await;
+    mgr.delete_record(&gone.id, true)
+        .await
+        .expect("delete gone session");
+
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::Health).await {
+        CommandResult::Health(report) => {
+            assert!(report.reachable, "daemon should be reachable");
+            assert_eq!(
+                report.managed_total, 1,
+                "the deleted slot's tombstone must not be counted alongside the live session {}",
+                live.id
+            );
+            assert_eq!(report.managed_pending_decisions, 0);
+        }
+        other => panic!("expected Health, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn execute_health_dead_daemon_renders() {
     // A dead daemon must render as a Health result with reachable=false — never a
     // panic and never a transport Error.

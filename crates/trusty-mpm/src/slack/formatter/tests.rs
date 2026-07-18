@@ -84,6 +84,8 @@ fn format_managed_sessions_lists_each() {
         branch: None,
         pending_decision: Some("apply patch?".into()),
         proposed_default: Some("yes".into()),
+        slot: 0,
+        deleted: false,
     }]);
     assert!(body.contains("*managed sessions*"));
     assert!(body.contains("`abcdef01…` blue-otter [running]"));
@@ -102,6 +104,8 @@ fn format_managed_session_renders_fields() {
         branch: Some("main".into()),
         pending_decision: Some("apply patch?".into()),
         proposed_default: Some("yes".into()),
+        slot: 0,
+        deleted: false,
     });
     assert!(body.contains("*blue-otter* (`abcdef01…`) [running]"));
     assert!(body.contains("📁 `/ws/blue`"));
@@ -299,6 +303,8 @@ fn format_fleet_by_project_slack_renders_projects() {
                     branch: None,
                     pending_decision: None,
                     proposed_default: None,
+                    slot: 0,
+                    deleted: false,
                 },
                 ManagedSessionView {
                     id: "cccc3333dddd4444".into(),
@@ -309,6 +315,8 @@ fn format_fleet_by_project_slack_renders_projects() {
                     branch: None,
                     pending_decision: Some("apply patch?".into()),
                     proposed_default: None,
+                    slot: 0,
+                    deleted: false,
                 },
             ],
         },
@@ -365,6 +373,8 @@ fn format_fleet_by_project_slack_provisioning_glyph() {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            slot: 0,
+            deleted: false,
         }],
     }];
     let body = SlackFormatter::format(&CommandResult::ManagedFleet(fleet));
