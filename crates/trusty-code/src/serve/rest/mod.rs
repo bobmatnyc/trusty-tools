@@ -1,5 +1,5 @@
 //! REST resource gateway over the JSON-RPC method registry (#2983, #587,
-//! Slice 1: bridge only — no routes).
+//! Slice 1 bridge + Slice 2 `session.*` read routes).
 //!
 //! Why: the vision spec (#587) wants `tcode serve --http` to expose a
 //! conventional REST resource vocabulary (`GET /projects`, `POST
@@ -25,19 +25,34 @@
 //! deliberately diverging from `POST /rpc`'s "always 200, error in the
 //! envelope" convention — matching how `GET /sessions/{id}/events`
 //! (`crate::serve::http::session_events_sse`) already returns a real `404`
-//! for `session_not_found` rather than a 200-wrapped error.
+//! for `session_not_found` rather than a 200-wrapped error. [`respond`] is
+//! the one place that glues those two together into the `Result<Json<Value>,
+//! (StatusCode, Json<Response>)>` shape every axum REST handler returns, so
+//! a route handler is never more than "extract params, call `respond`".
+//! [`throwaway_ctx`] builds the per-request [`ConnectionContext`] every REST
+//! handler needs to call [`call`] with — identical in spirit to
+//! `crate::serve::http::rpc_handler`'s own throwaway context, since a REST
+//! call is exactly as one-shot as a `POST /rpc` call.
 //!
-//! This slice wires no axum routes — [`crate::serve::mod`] only declares
-//! `mod rest;` so the bridge compiles and is unit-testable on its own.
-//! Concrete resource routes (`GET /projects`, `POST /sessions`, …) land in
-//! S2-S6, each calling [`call`] + [`rpc_error_to_status`] instead of talking
-//! to the `Router` directly.
+//! Slice 1 wired no axum routes — only this bridge. Slice 2
+//! ([`sessions`]) adds the first concrete resource group: `GET /sessions`,
+//! `GET /sessions/{id}`, `GET /sessions/{id}/transcript`,
+//! `GET /sessions/{id}/readiness`, `GET /sessions/{id}/goals`, each a thin
+//! handler calling [`respond`] against its `session.*` JSON-RPC twin.
+//! Further resource groups (`task.*`, `POST /sessions`, …) land in S3-S6,
+//! each its own sibling module reusing [`respond`]/[`throwaway_ctx`] rather
+//! than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
-//! assertion per `rpc_error_to_status` mapping.
+//! assertion per `rpc_error_to_status` mapping. See `sessions::tests` for
+//! the Slice 2 route-level coverage.
 
+pub mod sessions;
+
+use axum::Json;
+use axum::http::StatusCode;
 use serde_json::Value;
-use trusty_common::mcp::{Request, error_codes};
+use trusty_common::mcp::{Request, Response, error_codes};
 
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 
@@ -113,6 +128,59 @@ pub fn rpc_error_to_status(err: &RpcError) -> axum::http::StatusCode {
         c if c == error_codes::INTERNAL_ERROR => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// Build a throwaway [`ConnectionContext`] for a single REST call.
+///
+/// Why: every REST handler calls [`call`], which requires a
+/// `&ConnectionContext`, but a REST request is exactly as one-shot as an
+/// HTTP `POST /rpc` call — there is no live connection for a handler like
+/// `session.attach` to push notifications back to (that path is the
+/// dedicated SSE route, `crate::serve::http::session_events_sse`). Mirrors
+/// `crate::serve::http::rpc_handler`'s identical throwaway-channel
+/// construction so the two transports build a `ConnectionContext` the same
+/// way.
+/// What: a fresh `mpsc::unbounded_channel()`, receiver immediately dropped —
+/// any handler that queues a notification onto `notify` simply stops on its
+/// next send once this function returns.
+/// Test: exercised indirectly by every `sessions::tests::*` route test (a
+/// route only responds at all if its `ConnectionContext` is constructible).
+pub(crate) fn throwaway_ctx() -> ConnectionContext {
+    let (notify_tx, _notify_rx) = tokio::sync::mpsc::unbounded_channel();
+    ConnectionContext::new(notify_tx)
+}
+
+/// A REST handler's return type: the JSON-RPC result as a `Json` body on
+/// success, or a real HTTP status plus a JSON-RPC error envelope on failure.
+///
+/// Why: `(StatusCode, Json<Response>)` already implements axum's
+/// `IntoResponse` for the error arm, so every route handler can just return
+/// this type from [`respond`] without a bespoke error type.
+pub(crate) type RestResult = Result<Json<Value>, (StatusCode, Json<Response>)>;
+
+/// Call `method` through [`call`] and convert the result into a
+/// [`RestResult`] — the single glue point every Slice 2+ REST handler goes
+/// through.
+///
+/// Why: keeps route handlers themselves down to "extract path/query params,
+/// build `params`, call `respond`" with zero business logic and zero
+/// repeated error-mapping boilerplate (see module docs).
+/// What: `Ok(value)` becomes `Ok(Json(value))`; `Err(rpc_err)` becomes
+/// `Err((rpc_error_to_status(&rpc_err), Json(Response::err(None,
+/// rpc_err.code, rpc_err.message))))` — `data` is intentionally dropped from
+/// the REST envelope, matching `crate::serve::http::session_events_sse`'s
+/// existing `session_not_found` -> 404 mapping (the `id` is always `None`
+/// because a REST error response has no JSON-RPC request id to echo).
+/// Test: `sessions::tests::get_session_found_returns_200_with_session_json`,
+/// `sessions::tests::get_session_missing_returns_404_session_not_found`.
+pub(crate) async fn respond(router: &Router, method: &str, params: Value) -> RestResult {
+    call(router, method, params, &throwaway_ctx())
+        .await
+        .map(Json)
+        .map_err(|err| {
+            let status = rpc_error_to_status(&err);
+            (status, Json(Response::err(None, err.code, err.message)))
+        })
 }
 
 #[cfg(test)]

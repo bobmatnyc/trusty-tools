@@ -25,6 +25,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **REST resource gateway — `session.*` read routes (#2983, #587, Slice 2).**
+  New `GET` routes on `tcode serve --http`, each a thin `axum` handler calling
+  `rest::respond` (new: wraps `rest::call` + `rpc_error_to_status` into the
+  `Result<Json<Value>, (StatusCode, Json<Response>)>` shape every REST handler
+  returns) against its `session.*` JSON-RPC twin — zero duplicated business
+  logic:
+  - `GET /sessions` -> `session.list`
+  - `GET /sessions/{id}` -> `session.status`
+  - `GET /sessions/{id}/transcript` -> `session.get_transcript`
+  - `GET /sessions/{id}/readiness` -> `session.get_readiness`
+  - `GET /sessions/{id}/goals` -> `session.get_goals`
+
+  An unknown `id` returns a real HTTP `404` with a `session_not_found`
+  JSON-RPC error envelope (never a 200-wrapped error), matching the existing
+  `GET /sessions/{id}/events` convention. New `crate::serve::rest::sessions`
+  module, merged into `crate::serve::http::build_axum_router` alongside
+  `POST /rpc`/`GET /health`/`GET /sessions/{id}/events`.
 - **REST resource gateway bridge, no routes yet (#2983, #587, Slice 1).** New
   `crate::serve::rest` module: `rest::call(router, method, params, ctx)` drives
   a synthetic JSON-RPC `Request` through the existing `Router::dispatch` seam
