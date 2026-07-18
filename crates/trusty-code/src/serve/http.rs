@@ -89,17 +89,22 @@ struct HttpState {
 /// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
 /// session's ring-buffer replay then live events as SSE; `crate::serve::rest`
 /// merges in the `session.*` REST read routes (`GET /sessions`,
-/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`) and
+/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`),
 /// (Slice 3) the write routes (`POST /sessions`,
 /// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
-/// `PUT`/`DELETE /sessions/{id}/goal`) — none of which collide with the
-/// paths registered directly on this router.
+/// `PUT`/`DELETE /sessions/{id}/goal`), (Slice 4) `POST /tasks`, (Slice 5)
+/// `GET /fs`, and (Slice 6) `GET /sessions/{id}/agents` — none of which
+/// collide with the paths registered directly on this router or with each
+/// other.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
 /// `http_session_events_sse_streams_replay_then_live_event`,
 /// `http_rest_sessions_route_is_merged_in`,
-/// `http_rest_post_sessions_route_is_merged_in`.
+/// `http_rest_post_sessions_route_is_merged_in`,
+/// `http_rest_post_tasks_route_is_merged_in`,
+/// `http_rest_get_fs_route_is_merged_in`,
+/// `http_rest_get_session_agents_route_is_merged_in`.
 pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
@@ -112,7 +117,10 @@ pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) ->
         .with_state(state);
     let app = core
         .merge(rest::sessions::routes(router.clone()))
-        .merge(rest::sessions_write::routes(router));
+        .merge(rest::sessions_write::routes(router.clone()))
+        .merge(rest::tasks::routes(router.clone()))
+        .merge(rest::fs::routes(router.clone()))
+        .merge(rest::agents::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
@@ -453,6 +461,131 @@ mod tests {
             .unwrap();
         assert_eq!(delete_resp.status(), StatusCode::OK);
         assert_eq!(body_json(delete_resp).await, json!({}));
+    }
+
+    /// `POST /tasks` (the #2983 Slice 4 REST route group, merged in by
+    /// `build_axum_router` via `rest::tasks::routes`) must be reachable on
+    /// the SAME router `POST /sessions` is — proving the merge actually
+    /// wires `rest::tasks::routes` rather than silently dropping it.
+    /// Per-route error/status-code behaviour is already covered by
+    /// `rest::tasks::tests`; this test only pins the merge itself.
+    #[tokio::test]
+    async fn http_rest_post_tasks_route_is_merged_in() {
+        let _guard = crate::task::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by `MOCK_LLM_ENV_LOCK`.
+        unsafe {
+            std::env::set_var(
+                crate::task::mock_llm::MOCK_LLM_ENV,
+                crate::task::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        // `router_and_sessions()` does not register `task.run` (it is not
+        // needed by any other test in this file) — build a router that also
+        // has it wired, mirroring `task::protocol::tests::agents_dir`.
+        let sessions = Arc::new(SessionRegistry::new());
+        let agents = tempfile::tempdir().expect("agents tempdir");
+        std::fs::write(
+            agents.path().join("pm.md"),
+            "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM.\n",
+        )
+        .expect("write pm.md");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let mut router = Router::new();
+        crate::serve::methods::register(&mut router);
+        crate::session::protocol::register(&mut router, sessions.clone());
+        crate::task::protocol::register(
+            &mut router,
+            sessions.clone(),
+            crate::binding::ProjectBinding::resolve(Some(project.path().to_path_buf()))
+                .expect("tempdir must bind"),
+            agents.path().to_path_buf(),
+        );
+        let app = build_axum_router(Arc::new(router), sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"task_description": "say hi"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        unsafe {
+            std::env::remove_var(crate::task::mock_llm::MOCK_LLM_ENV);
+        }
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "running");
+    }
+
+    /// `GET /fs` (the #2983 Slice 5 REST route group, merged in by
+    /// `build_axum_router` via `rest::fs::routes`) must be reachable on the
+    /// SAME router `POST /rpc` is — proving the merge actually wires
+    /// `rest::fs::routes` rather than silently dropping it. Per-route
+    /// error/status-code behaviour is already covered by `rest::fs::tests`;
+    /// this test only pins the merge itself.
+    #[tokio::test]
+    async fn http_rest_get_fs_route_is_merged_in() {
+        // `router_and_sessions()` does not register `fs.list_dir` (it is not
+        // needed by any other test in this file) — build a router that also
+        // has it wired.
+        let sessions = Arc::new(SessionRegistry::new());
+        let mut router = Router::new();
+        crate::serve::methods::register(&mut router);
+        crate::session::protocol::register(&mut router, sessions.clone());
+        crate::fs_browse::protocol::register(&mut router);
+        let app = build_axum_router(Arc::new(router), sessions);
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/fs?path={}", tmp.path().display()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert!(v["entries"].is_array());
+    }
+
+    /// `GET /sessions/{id}/agents` (the #2983 Slice 6 REST route group,
+    /// merged in by `build_axum_router` via `rest::agents::routes`) must be
+    /// reachable on the SAME router `GET /sessions/{id}/events` is —
+    /// proving the merge actually wires `rest::agents::routes` rather than
+    /// silently dropping it. Per-route error/status-code behaviour is
+    /// already covered by `rest::agents::tests`; this test only pins the
+    /// merge itself.
+    #[tokio::test]
+    async fn http_rest_get_session_agents_route_is_merged_in() {
+        let (router, sessions) = router_and_sessions();
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let app = build_axum_router(router, sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{}/agents", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert!(v["agents"].is_array());
     }
 
     /// `GET /sessions/{id}/events` on an unknown session must 404 with a

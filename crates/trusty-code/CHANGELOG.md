@@ -8,6 +8,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **REST resource gateway — `task.run`/`fs.list_dir`/`session.get_agents`
+  routes (#2983, #587, Slices 4-6).** Three more thin `axum` route groups on
+  `tcode serve --http`, each calling `rest::respond` (or the new
+  `tasks::respond_accepted` for the one route with a non-`200` success
+  status) against its JSON-RPC twin — zero duplicated business logic:
+  - `POST /tasks` -> `task.run` (`202 Accepted` — this route is
+    deliberately asynchronous: it reserves the execution slot synchronously
+    and returns before the LLM run itself completes, and unlike `POST
+    /sessions` it does not always mint a brand-new resource — a
+    `session_id` in the body reuses an existing one — so `201`'s framing
+    does not fit uniformly)
+  - `GET /fs?path=..&include_hidden=..` -> `fs.list_dir` (the daemon-side
+    folder picker; error mapping already distinguishes `404 not_found`,
+    `400 invalid_argument` for a non-directory path, `403
+    permission_denied`, and `500 internal` via the existing
+    `rpc_error_to_status`, no new mapping needed)
+  - `GET /sessions/{id}/agents` -> `session.get_agents` (nested under
+    `/sessions/{id}`, not a bare `GET /agents`, because the RPC method
+    requires a `session_id` — there is no roster independent of a session;
+    this slots into the same family as Slice 2's other session-scoped read
+    routes)
+
+  New `crate::serve::rest::tasks`/`rest::fs`/`rest::agents` modules, merged
+  into `crate::serve::http::build_axum_router` alongside `POST /rpc`,
+  `GET /health`, `GET /sessions/{id}/events`, and the Slice 2/3 `session.*`
+  REST routes.
+
 ### Fixed
 
 - the unified-diff applier (`tools/fs/edit_format/diff.rs`) no longer errors

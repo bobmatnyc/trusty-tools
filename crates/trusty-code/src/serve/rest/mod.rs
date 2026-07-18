@@ -42,16 +42,21 @@
 //! Slice 3 ([`sessions_write`]) adds the `session.*` WRITE routes:
 //! `POST /sessions`, `POST /sessions/{id}/messages`,
 //! `POST /sessions/{id}/cancel`, `PUT /sessions/{id}/goal`,
-//! `DELETE /sessions/{id}/goal`. Further resource groups (`task.*`, …) land
-//! in S4-S6, each its own sibling module reusing
+//! `DELETE /sessions/{id}/goal`. Slice 4 ([`tasks`]) adds
+//! `POST /tasks` -> `task.run`. Slice 5 ([`fs`]) adds
+//! `GET /fs` -> `fs.list_dir`. Slice 6 ([`agents`]) adds
+//! `GET /sessions/{id}/agents` -> `session.get_agents`. Every slice reuses
 //! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
 //! assertion per `rpc_error_to_status` mapping. See `sessions::tests` for
 //! the Slice 2 route-level coverage.
 
+pub mod agents;
+pub mod fs;
 pub mod sessions;
 pub mod sessions_write;
+pub mod tasks;
 
 use axum::Json;
 use axum::http::StatusCode;
