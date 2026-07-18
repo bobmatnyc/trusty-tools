@@ -68,13 +68,17 @@ enum Commands {
     /// when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow it.
     ///
     /// Use --local-diff to review a local unified diff file without GitHub
-    /// (local-diff is always dry-run — it can never post).
+    /// (pass `-` to read the diff from stdin instead of a file), or --base
+    /// [--head] to review an arbitrary local git ref range (`git diff -M
+    /// <base>...<head>`; --head defaults to HEAD). All three local sources
+    /// are always dry-run — they can never post (#2993).
     Run(RunArgs),
 
     /// Compare the same PR across multiple models to evaluate speed/cost/quality.
     ///
     /// Runs the review pipeline once per model in the compare set (or --models
-    /// override) and prints a comparison table.  Always dry-run.
+    /// override) and prints a comparison table.  Always dry-run.  Accepts the
+    /// same --local-diff / --base [--head] local-diff flags as `run` (#2993).
     Compare(CompareArgs),
 
     /// Report the listening port of the running trusty-review daemon.

@@ -4,12 +4,14 @@
 //! to avoid token budget overruns, and a small set of changed symbols to drive
 //! the code-search context retrieval step.
 //!
-//! What: exposes `DiffSource` (GitHub PR or local file path), `load_diff` to
-//! fetch / read the raw diff text, `truncate_diff` to apply the char cap, and
-//! `extract_identifiers` to pull changed function/type names from `+`/`-` lines.
+//! What: exposes `DiffSource` (GitHub PR, local file, git range, or stdin),
+//! `load_diff` to fetch / read the raw diff text, `truncate_diff` to apply the
+//! char cap, and `extract_identifiers` to pull changed function/type names from
+//! `+`/`-` lines.
 //!
 //! Test: `truncate_does_not_exceed_limit`, `extract_identifiers_finds_symbols`,
-//! `local_diff_reads_file`.
+//! `local_diff_reads_file`, `git_range_diff_matches_git_output`,
+//! `stdin_reader_reads_full_diff`.
 
 use tracing::{debug, warn};
 
@@ -22,11 +24,16 @@ use crate::{
 
 /// Where to obtain the unified diff.
 ///
-/// Why: the CLI supports both fetching from GitHub and reading a local file;
-/// the pipeline step must handle both without special-casing throughout.
-/// What: two variants — `Github` (fetches via API) and `LocalFile` (reads from
-/// disk; always dry-run and requires no GitHub credentials).
-/// Test: `local_diff_reads_file`.
+/// Why: the CLI supports fetching from GitHub, reading a local file, deriving
+/// a diff from an arbitrary git ref range, or reading a diff piped in on
+/// stdin; the pipeline step must handle all four without special-casing
+/// throughout.
+/// What: four variants — `Github` (fetches via API), `LocalFile` (reads from
+/// disk), `GitRange` (shells out to `git diff`), and `Stdin` (reads a piped
+/// diff). The last three are always dry-run and require no GitHub credentials
+/// (issue #2993).
+/// Test: `local_diff_reads_file`, `git_range_diff_matches_git_output`,
+/// `stdin_reader_reads_full_diff`.
 #[derive(Debug, Clone)]
 pub enum DiffSource {
     /// Fetch the diff from a live GitHub pull request.
@@ -45,6 +52,28 @@ pub enum DiffSource {
         /// Absolute path to the `.diff` or `.patch` file.
         path: std::path::PathBuf,
     },
+    /// Derive the diff from a git ref range in a local repository (dry-run
+    /// only; no GitHub needed).
+    ///
+    /// The diff is produced with `git diff -M <base>...<head>` — three-dot
+    /// (merge-base) range syntax, matching how GitHub renders a PR's "Files
+    /// changed" tab: only commits reachable from `head` but not from `base`
+    /// are shown, so commits landed on `base` after the branch point never
+    /// leak into the diff. `-M` enables rename detection so a pure rename
+    /// shows as a rename hunk rather than a full delete+add.
+    GitRange {
+        /// Repository root to run `git diff` in (`git -C <repo_root> diff …`).
+        repo_root: std::path::PathBuf,
+        /// Base ref (older side of the range).
+        base: String,
+        /// Head ref (newer side of the range). `None` defaults to `HEAD` —
+        /// the last committed state, not the (possibly dirty) working tree —
+        /// so a git-range review is reproducible from ref names alone and
+        /// never silently includes uncommitted local edits.
+        head: Option<String>,
+    },
+    /// Read a unified diff piped in on stdin (dry-run only; no GitHub needed).
+    Stdin,
 }
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
@@ -54,9 +83,13 @@ pub enum DiffSource {
 /// Why: centralises the fetch / read logic so the rest of the pipeline just
 /// receives a `String` regardless of where the diff came from.
 /// What: for `Github`, calls `fetch_pr_diff`; for `LocalFile`, reads the file
-/// with `std::fs::read_to_string`.  Returns a `GithubError` if the GitHub API
-/// fails; wraps I/O errors in `GithubError::Transport` for `LocalFile`.
-/// Test: `local_diff_reads_file` writes a tmp file and calls this.
+/// with `std::fs::read_to_string`; for `GitRange`, shells out to `git diff`;
+/// for `Stdin`, reads to EOF from the process's stdin.  Returns a
+/// `GithubError` if the GitHub API fails; wraps I/O / subprocess failures in
+/// `GithubError::Transport` for the other three (same convention already used
+/// for `LocalFile`, so callers only ever match on one error type).
+/// Test: `local_diff_reads_file`, `git_range_diff_matches_git_output`,
+/// `stdin_reader_reads_full_diff`.
 pub async fn load_diff(source: &DiffSource) -> Result<String, GithubError> {
     match source {
         DiffSource::Github {
@@ -75,7 +108,93 @@ pub async fn load_diff(source: &DiffSource) -> Result<String, GithubError> {
                 GithubError::Transport(format!("read local diff {}: {e}", path.display()))
             })
         }
+        DiffSource::GitRange {
+            repo_root,
+            base,
+            head,
+        } => {
+            let head_ref = head.as_deref().unwrap_or("HEAD");
+            debug!(
+                repo_root = %repo_root.display(),
+                base,
+                head = head_ref,
+                "loading diff from git range"
+            );
+            run_git_range_diff(repo_root, base, head_ref)
+        }
+        DiffSource::Stdin => {
+            debug!("loading diff from stdin");
+            read_diff_from_reader(std::io::stdin().lock())
+        }
     }
+}
+
+/// Run `git diff -M <base>...<head>` in `repo_root` and return stdout.
+///
+/// Why: extracted so the three-dot range formatting and error handling has one
+/// definition; also keeps `load_diff`'s match arms short. `--base`/`--head`
+/// are operator-controlled strings that reach this function verbatim — without
+/// a guard, a value like `--output=/tmp/poc` is parsed by git as an OPTION
+/// rather than a ref, letting an attacker who controls the CLI args write an
+/// arbitrary file (argument injection, found in review of #2993). `git diff`
+/// has no `--` end-of-options marker of its own (`--` after `diff` means "these
+/// are paths"), so the fix is git's dedicated `--end-of-options` pseudo-option
+/// (git >= 2.24, well below this workspace's toolchain floor): everything after
+/// it is treated as a positional revision/range argument, never re-parsed as a
+/// flag, even if it starts with `-`.
+/// What: shells out via `std::process::Command` (no `git2` dependency, mirroring
+/// the existing convention in `report/git_info.rs`) as `git -C <repo_root> diff
+/// -M --end-of-options <base>...<head>`; a non-zero exit or non-UTF-8 output is
+/// folded into `GithubError::Transport` with the first line of stderr (git's
+/// actual error, not its ~70-line usage dump) / the decode error.
+/// Test: `git_range_diff_matches_git_output`, `git_range_diff_bad_repo_returns_error`,
+/// `git_range_diff_rejects_option_like_base_without_touching_filesystem`.
+fn run_git_range_diff(
+    repo_root: &std::path::Path,
+    base: &str,
+    head: &str,
+) -> Result<String, GithubError> {
+    let range = format!("{base}...{head}");
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg("-M")
+        .arg("--end-of-options")
+        .arg(&range)
+        .output()
+        .map_err(|e| GithubError::Transport(format!("failed to run `git diff {range}`: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_line = stderr.trim().lines().next().unwrap_or_default();
+        return Err(GithubError::Transport(format!(
+            "`git diff {range}` in {} failed ({}): {}",
+            repo_root.display(),
+            output.status,
+            first_line
+        )));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| {
+        GithubError::Transport(format!("`git diff {range}` produced non-UTF-8 output: {e}"))
+    })
+}
+
+/// Read a diff to completion from any `Read` implementation.
+///
+/// Why: extracted from the `Stdin` arm of `load_diff` so the read loop is
+/// directly unit-testable with an in-memory `Cursor` — real process stdin
+/// cannot be faked from within a single test binary.
+/// What: reads the reader to EOF into a `String`; a non-UTF-8 stream or I/O
+/// error is wrapped in `GithubError::Transport`.
+/// Test: `stdin_reader_reads_full_diff`, `stdin_reader_empty_input_is_ok`.
+fn read_diff_from_reader<R: std::io::Read>(mut reader: R) -> Result<String, GithubError> {
+    let mut buf = String::new();
+    reader
+        .read_to_string(&mut buf)
+        .map_err(|e| GithubError::Transport(format!("failed to read diff from stdin: {e}")))?;
+    Ok(buf)
 }
 
 // ─── Truncate ─────────────────────────────────────────────────────────────────
@@ -488,5 +607,147 @@ index abc..def 100644
             result.is_err(),
             "missing local diff file must return an error"
         );
+    }
+
+    // ── GitRange tests (#2993) ────────────────────────────────────────────
+
+    /// Build a tiny git repo in a tempdir with two commits, returning the dir
+    /// and the base/head SHAs (pinned by SHA rather than branch name, since
+    /// `git init`'s default branch name varies by git config).
+    fn tiny_git_repo() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).expect("utf8 git output")
+        };
+
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").expect("write a.rs");
+        run(&["add", "a.rs"]);
+        run(&["commit", "-q", "-m", "base"]);
+        let base = run(&["rev-parse", "HEAD"]).trim().to_string();
+
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\nfn b() {}\n").expect("write a.rs");
+        run(&["add", "a.rs"]);
+        run(&["commit", "-q", "-m", "head"]);
+        let head = run(&["rev-parse", "HEAD"]).trim().to_string();
+
+        (dir, base, head)
+    }
+
+    #[tokio::test]
+    async fn git_range_diff_matches_git_output() {
+        let (dir, base, head) = tiny_git_repo();
+        let source = DiffSource::GitRange {
+            repo_root: dir.path().to_path_buf(),
+            base: base.clone(),
+            head: Some(head.clone()),
+        };
+        let result = load_diff(&source).await.expect("git range diff");
+
+        // Recompute the expected diff independently (same flags `load_diff`
+        // is documented to use) to prove production code matches real git
+        // output rather than a hand-written fixture.
+        let expected = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("diff")
+            .arg("-M")
+            .arg(format!("{base}...{head}"))
+            .output()
+            .expect("git diff");
+        assert_eq!(result, String::from_utf8(expected.stdout).expect("utf8"));
+        assert!(
+            result.contains("+fn b() {}"),
+            "diff should show the added line: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_range_diff_defaults_head_to_head_ref() {
+        let (dir, base, _head) = tiny_git_repo();
+        let source = DiffSource::GitRange {
+            repo_root: dir.path().to_path_buf(),
+            base,
+            head: None, // must default to HEAD, not fail or need worktree state
+        };
+        let result = load_diff(&source).await.expect("git range diff");
+        assert!(result.contains("+fn b() {}"));
+    }
+
+    #[tokio::test]
+    async fn git_range_diff_bad_repo_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = DiffSource::GitRange {
+            repo_root: dir.path().to_path_buf(),
+            base: "main".to_string(),
+            head: Some("HEAD".to_string()),
+        };
+        let result = load_diff(&source).await;
+        assert!(result.is_err(), "a non-repo directory must error");
+    }
+
+    /// Regression test for the argument-injection vuln found in review of
+    /// #2993: `base`/`head` are operator-controlled strings that reach `git
+    /// diff` as a positional arg. Before the `--end-of-options` guard, a
+    /// value that LOOKS like a git option (e.g. `--output=<path>`) was parsed
+    /// as one, letting an attacker who controls the `--base`/`--head` CLI
+    /// flags make git write an arbitrary file. Asserts both that the call
+    /// errors AND that nothing was written under the injected output
+    /// directory (the strong claim — not just "it returned Err").
+    #[tokio::test]
+    async fn git_range_diff_rejects_option_like_base_without_touching_filesystem() {
+        let (dir, _base, head) = tiny_git_repo();
+        let poc_dir = tempfile::tempdir().expect("poc tempdir");
+        let hostile_base = format!("--output={}/PWNED", poc_dir.path().display());
+
+        let source = DiffSource::GitRange {
+            repo_root: dir.path().to_path_buf(),
+            base: hostile_base,
+            head: Some(head),
+        };
+
+        let result = load_diff(&source).await;
+        assert!(
+            result.is_err(),
+            "an option-like --base value must be rejected, not silently accepted"
+        );
+
+        let wrote_any_file = std::fs::read_dir(poc_dir.path())
+            .expect("read poc dir")
+            .next()
+            .is_some();
+        assert!(
+            !wrote_any_file,
+            "the --end-of-options guard must prevent git from writing the injected --output path"
+        );
+    }
+
+    // ── Stdin tests (#2993) ───────────────────────────────────────────────
+
+    #[test]
+    fn stdin_reader_reads_full_diff() {
+        let diff = "--- a/foo.rs\n+++ b/foo.rs\n+fn bar() {}\n";
+        let result = read_diff_from_reader(std::io::Cursor::new(diff.as_bytes())).expect("read");
+        assert_eq!(result, diff);
+    }
+
+    #[test]
+    fn stdin_reader_empty_input_is_ok() {
+        let result = read_diff_from_reader(std::io::Cursor::new(&[][..])).expect("read");
+        assert_eq!(result, "");
     }
 }

@@ -7,7 +7,7 @@
 //! Test: CLI integration via `cargo run -p trusty-review -- compare --help`;
 //! table formatting covered by `print_compare_table_formats_correctly`.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use tracing::warn;
 
 use trusty_review::{
@@ -21,6 +21,7 @@ use trusty_review::{
     pipeline::{CallerContext, DiffSource, ReviewInput, TriggerDecision, run_review},
 };
 
+use crate::commands::diff_source::{LocalDiffFlags, resolve_local_diff_source};
 use crate::commands::run::build_deps_async;
 
 // ─── compare args ────────────────────────────────────────────────────────────
@@ -33,15 +34,15 @@ use crate::commands::run::build_deps_async;
 /// Test: `cargo run -p trusty-review -- compare --help`.
 #[derive(Debug, clap::Parser)]
 pub struct CompareArgs {
-    /// GitHub organisation or user (required unless --local-diff is set).
+    /// GitHub organisation or user (required unless --local-diff/--base is set).
     #[arg(value_name = "OWNER")]
     pub owner: Option<String>,
 
-    /// GitHub repository name (required unless --local-diff is set).
+    /// GitHub repository name (required unless --local-diff/--base is set).
     #[arg(value_name = "REPO")]
     pub repo: Option<String>,
 
-    /// Pull request number (required unless --local-diff is set).
+    /// Pull request number (required unless --local-diff/--base is set).
     #[arg(value_name = "PR")]
     pub pr: Option<u64>,
 
@@ -50,8 +51,20 @@ pub struct CompareArgs {
     pub models: Option<Vec<String>>,
 
     /// Read a local unified diff file instead of fetching from GitHub.
-    #[arg(long, value_name = "PATH")]
+    /// Pass `-` to read the unified diff from stdin instead of a file.
+    #[arg(long, value_name = "PATH", conflicts_with = "base")]
     pub local_diff: Option<std::path::PathBuf>,
+
+    /// Diff the local git repository (current directory) from this ref instead
+    /// of fetching from GitHub — `git diff -M <base>...<head>` (three-dot
+    /// merge-base range). Mutually exclusive with --local-diff.
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
+
+    /// Head ref for --base; defaults to HEAD (the last commit, not the
+    /// working tree). Requires --base.
+    #[arg(long, value_name = "REF", requires = "base")]
+    pub head: Option<String>,
 
     /// Provider backend for bare model ids: `bedrock` (default) or `openrouter`.
     #[arg(long, value_name = "PROVIDER")]
@@ -101,11 +114,19 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
         .as_ref()
         .unwrap_or(&config.role_models.reviewer.provider);
 
+    // Resolved ONCE, outside the per-model loop: every model compares against
+    // the same diff. `materialize_stdin_if_needed` additionally guards against
+    // stdin only being readable once — see its doc comment (issue #2993).
+    let diff_source = resolve_diff_source_compare(&config, &args).await?;
+    // Keeps the tempfile alive for the whole loop when stdin was materialized;
+    // dropped (and deleted) when `cmd_compare` returns. `_stdin_tmp` itself is
+    // never read — it exists only to extend the tempfile's lifetime.
+    let (diff_source, _stdin_tmp) = materialize_stdin_if_needed(diff_source)?;
+
     for model in &models {
-        let diff_source = resolve_diff_source_compare(&config, &args).await?;
         let deps = build_deps_async(&config, model, default_provider).await?;
         let input = ReviewInput {
-            diff_source,
+            diff_source: diff_source.clone(),
             reviewer_model: model.clone(),
             write_log: false,
             print_result: false,
@@ -129,35 +150,43 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     Ok(())
 }
 
-// ─── diff source helper ──────────────────────────────────────────────────────
+// ─── diff source helpers ──────────────────────────────────────────────────────
 
 /// Resolve the `DiffSource` for the `compare` subcommand.
 ///
-/// Why: compare and run share the same diff-source logic; compare reuses it
-/// per-model run.
-/// What: identical to `resolve_diff_source_run` but takes `CompareArgs`.
-/// Test: covered by compare flow.
+/// Why: compare and run share the same diff-source logic; compare resolves it
+/// once and reuses it across every model run (see `cmd_compare`).
+/// What: delegates local-mode selection (`LocalFile`/`Stdin`/`GitRange`) to
+/// the shared `resolve_local_diff_source` (issue #2993); falls back to
+/// resolving a GitHub PR source from the positional args + a resolved token.
+/// Test: local-mode selection is covered by `diff_source::tests`;
+/// `materialize_stdin_if_needed_passes_through_non_stdin` covers the stdin
+/// safety net this feeds into.
 async fn resolve_diff_source_compare(
     config: &ReviewConfig,
     args: &CompareArgs,
 ) -> Result<DiffSource> {
-    if let Some(ref path) = args.local_diff {
-        return Ok(DiffSource::LocalFile { path: path.clone() });
+    if let Some(source) = resolve_local_diff_source(LocalDiffFlags {
+        local_diff: args.local_diff.as_deref(),
+        base: args.base.as_deref(),
+        head: args.head.as_deref(),
+    })? {
+        return Ok(source);
     }
 
     let owner = args
         .owner
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("OWNER is required (or use --local-diff)"))?
+        .ok_or_else(|| anyhow::anyhow!("OWNER is required (or use --local-diff / --base)"))?
         .to_string();
     let repo = args
         .repo
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("REPO is required (or use --local-diff)"))?
+        .ok_or_else(|| anyhow::anyhow!("REPO is required (or use --local-diff / --base)"))?
         .to_string();
     let pr = args
         .pr
-        .ok_or_else(|| anyhow::anyhow!("PR number is required (or use --local-diff)"))?;
+        .ok_or_else(|| anyhow::anyhow!("PR number is required (or use --local-diff / --base)"))?;
 
     let client = GithubClient::new()
         .map_err(|e| anyhow::anyhow!("failed to build GitHub HTTP client: {e}"))?;
@@ -172,6 +201,45 @@ async fn resolve_diff_source_compare(
         pr,
         token,
     })
+}
+
+/// Materialize a `Stdin` diff source into a tempfile-backed `LocalFile`.
+///
+/// Why: `compare` runs the SAME diff through every model in a loop, and each
+/// iteration's `run_review` independently calls `load_diff`. Stdin can only be
+/// read to EOF once — a second read after EOF returns `Ok("")`, not an error —
+/// so without this, every model after the first would silently compare an
+/// EMPTY diff instead of failing loudly (issue #2993). Reading stdin once up
+/// front and handing every iteration a re-readable `LocalFile` (the same
+/// mechanism `--local-diff <PATH>` already uses) closes that gap.
+/// What: a no-op for every other `DiffSource` variant (returned unchanged,
+/// `None` guard); for `Stdin`, reads stdin to EOF, writes it to a `NamedTempFile`,
+/// and returns `(LocalFile, Some(guard))` — the caller must keep the guard
+/// alive for as long as the source is used; the file is deleted when it drops.
+/// Test: `materialize_stdin_if_needed_passes_through_non_stdin`,
+/// `materialize_stdin_if_needed_git_range_passes_through`. The `Stdin` branch
+/// itself needs a real piped stdin and is exercised manually
+/// (`git diff | trusty-review compare --local-diff - --models a,b`);
+/// `pipeline::diff::read_diff_from_reader` covers the underlying read loop
+/// with an in-memory `Cursor` instead of real stdin.
+fn materialize_stdin_if_needed(
+    source: DiffSource,
+) -> Result<(DiffSource, Option<tempfile::NamedTempFile>)> {
+    if !matches!(source, DiffSource::Stdin) {
+        return Ok((source, None));
+    }
+    use std::io::{Read as _, Write as _};
+    let mut buf = String::new();
+    std::io::stdin()
+        .lock()
+        .read_to_string(&mut buf)
+        .context("failed to read diff from stdin")?;
+    let mut tmp =
+        tempfile::NamedTempFile::new().context("failed to create tempfile for stdin diff")?;
+    tmp.write_all(buf.as_bytes())
+        .context("failed to write stdin diff to tempfile")?;
+    let path = tmp.path().to_path_buf();
+    Ok((DiffSource::LocalFile { path }, Some(tmp)))
 }
 
 // ─── table printer ────────────────────────────────────────────────────────────
@@ -236,7 +304,38 @@ pub fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use trusty_review::models::{Effort, Finding, Verdict};
+
+    // ── CompareArgs clap wiring (#2993) ─────────────────────────────────
+
+    /// Guards the `conflicts_with = "base"` wiring on `local_diff`: a
+    /// field-id rename that silently drops the attribute would otherwise
+    /// only be caught by manual testing.
+    #[test]
+    fn compare_args_base_and_local_diff_conflict() {
+        let result =
+            CompareArgs::try_parse_from(["compare", "--base", "main", "--local-diff", "x.diff"]);
+        assert!(
+            result.is_err(),
+            "--base and --local-diff must be mutually exclusive"
+        );
+    }
+
+    /// Guards the `requires = "base"` wiring on `head`.
+    #[test]
+    fn compare_args_head_without_base_errors() {
+        let result = CompareArgs::try_parse_from(["compare", "--head", "feature"]);
+        assert!(result.is_err(), "--head requires --base");
+    }
+
+    #[test]
+    fn compare_args_base_and_head_parses() {
+        let args = CompareArgs::try_parse_from(["compare", "--base", "main", "--head", "feature"])
+            .expect("parse");
+        assert_eq!(args.base.as_deref(), Some("main"));
+        assert_eq!(args.head.as_deref(), Some("feature"));
+    }
 
     fn make_result(model: &str, verdict: Verdict, findings: usize, cost: f64) -> ReviewResult {
         let mut r = ReviewResult::new(
@@ -318,5 +417,36 @@ mod tests {
         r.error = Some("timeout".to_string());
         let results = vec![("openai/gpt-5.4-nano-20260317".to_string(), r)];
         print_compare_table(&results);
+    }
+
+    // ── materialize_stdin_if_needed (#2993) ────────────────────────────
+
+    #[test]
+    fn materialize_stdin_if_needed_passes_through_non_stdin() {
+        let source = DiffSource::LocalFile {
+            path: std::path::PathBuf::from("/tmp/some.diff"),
+        };
+        let (result, tmp) =
+            materialize_stdin_if_needed(source).expect("non-stdin must never read stdin");
+        assert!(tmp.is_none(), "no tempfile should be created for LocalFile");
+        match result {
+            DiffSource::LocalFile { path } => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/some.diff"));
+            }
+            other => panic!("expected LocalFile to pass through unchanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn materialize_stdin_if_needed_git_range_passes_through() {
+        let source = DiffSource::GitRange {
+            repo_root: std::path::PathBuf::from("/repo"),
+            base: "main".to_string(),
+            head: None,
+        };
+        let (result, tmp) =
+            materialize_stdin_if_needed(source).expect("git-range must never read stdin");
+        assert!(tmp.is_none());
+        assert!(matches!(result, DiffSource::GitRange { .. }));
     }
 }
