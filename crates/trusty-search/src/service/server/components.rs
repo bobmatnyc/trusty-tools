@@ -122,6 +122,19 @@ pub(super) async fn apply_component_transition(
             };
         }
     }
+    // Issue #2984 Phase 1 CRITICAL finding 1: synchronize `CodeIndexer`'s
+    // OWN `skip_kg` copy with the transition BEFORE any catch-up is spawned.
+    // `load_or_rebuild_symbol_graph`'s documented precondition (persist.rs)
+    // is that callers MUST flip `self.skip_kg` first — without this, a
+    // turn-on silently no-ops (the graph stays empty forever, even though
+    // the stage settles `Ready`) and a turn-off's in-memory clear wouldn't be
+    // mirrored back onto the indexer's own flag either. Both directions are
+    // handled here (`transition.new_skip_kg` is the resolved target for
+    // either a turn-on or a turn-off) via a single write-lock acquisition.
+    if transition.kg_turning_on || transition.kg_turning_off {
+        let mut indexer = handle.indexer.write().await;
+        indexer.set_skip_kg(transition.new_skip_kg);
+    }
     if transition.kg_turning_off {
         let indexer = handle.indexer.read().await;
         indexer.clear_symbol_graph_in_memory().await;
@@ -143,16 +156,17 @@ pub(super) async fn apply_component_transition(
 /// the single-permit semaphore.
 /// What: KG catch-up calls `CodeIndexer::catch_up_symbol_graph` (cheap
 /// `load_from_corpus`, falls back to a full rebuild — issue #2984 D3), then
-/// marks the graph stage `Ready`. Vector catch-up delegates to
-/// `service::reindex::run_embed_catch_up` (the generalised #923
-/// deferred-embed core), which marks the semantic stage `Ready`/`Failed`
-/// itself. Both may run in the same task since only one permit exists.
+/// marks the graph stage `Ready` via [`mark_kg_catch_up_complete`]. Vector
+/// catch-up delegates to `service::reindex::run_embed_catch_up` (the
+/// generalised #923 deferred-embed core), which marks the semantic stage
+/// `Ready`/`Failed` itself. Both may run in the same task since only one
+/// permit exists.
 /// Test: `service::server::tests_components::patch_vector_on_spawns_catch_up_and_reaches_ready`,
 /// `patch_kg_on_spawns_catch_up_and_reaches_ready`.
 pub(super) fn spawn_component_catch_up(
     handle: Arc<IndexHandle>,
     transition: ComponentTransition,
-    permit: tokio::sync::SemaphorePermit<'static>,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     tokio::spawn(async move {
         let _permit = permit;
@@ -165,15 +179,7 @@ pub(super) fn spawn_component_catch_up(
             let g = indexer.symbol_graph().await;
             let (node_count, edge_count) = (g.node_count(), g.edge_count());
             drop(indexer);
-            {
-                let mut stages = handle.stages.write().await;
-                stages.graph.status = StageStatus::Ready;
-                stages.graph.completed_at = Some(now_rfc3339());
-            }
-            tracing::info!(
-                "components[{index_id}]: KG catch-up complete ({node_count} nodes / \
-                 {edge_count} edges)"
-            );
+            mark_kg_catch_up_complete(&handle, node_count, edge_count).await;
         }
 
         if transition.vector_turning_on {
@@ -188,6 +194,49 @@ pub(super) fn spawn_component_catch_up(
             tracing::info!("components[{index_id}]: vector catch-up complete");
         }
     });
+}
+
+/// Complete a KG catch-up: flip the graph stage to `Ready` UNLESS a
+/// component disable already landed while the catch-up was running (issue
+/// #2984 Phase 1 MEDIUM finding 4 — mirrors the vector completion guard in
+/// `service::reindex::defer_embed::run_embed_catch_up`).
+///
+/// Why: `IndexHandle::skip_kg` is a plain, per-`Arc<IndexHandle>`-snapshot
+/// bool — every PATCH rebuilds a brand-new `IndexHandle` and re-registers it,
+/// so a task already holding an older `Arc<IndexHandle>` can never observe a
+/// LATER toggle updating that field. `stages`, by contrast, is the one piece
+/// of handle state preserved verbatim (`Arc::clone`, never replaced) across
+/// every rebuild, so it is the only reliable "did a disable land while I was
+/// running" signal available to this background task.
+/// `apply_component_transition`'s synchronous half already writes
+/// `stages.graph = Skipped` the instant a disable lands; checking for that
+/// here, under the SAME write lock the `Ready` write uses, makes
+/// disable-wins-over-a-racing-catch-up airtight.
+/// What: write-locks `handle.stages`; if `graph.status` is already `Skipped`,
+/// leaves it alone (logs at info, still records `node_count`/`edge_count`
+/// for the log line); otherwise flips it to `Ready` with `completed_at`.
+/// Test: `service::server::components::tests_pure::kg_catch_up_completion_never_clobbers_a_disable_that_landed_first`.
+async fn mark_kg_catch_up_complete(
+    handle: &Arc<IndexHandle>,
+    node_count: usize,
+    edge_count: usize,
+) {
+    let index_id = &handle.id.0;
+    let mut stages = handle.stages.write().await;
+    if stages.graph.status == StageStatus::Skipped {
+        tracing::info!(
+            "components[{index_id}]: KG disabled mid-catch-up — leaving graph Skipped \
+             ({node_count} nodes / {edge_count} edges computed but not published as Ready, \
+             issue #2984 Phase 1 finding 4)"
+        );
+        return;
+    }
+    stages.graph.status = StageStatus::Ready;
+    stages.graph.completed_at = Some(now_rfc3339());
+    drop(stages);
+    tracing::info!(
+        "components[{index_id}]: KG catch-up complete ({node_count} nodes / {edge_count} edges)"
+    );
 }
 
 /// RFC-3339 timestamp helper, mirroring `service::reindex::stages::now_rfc3339`
@@ -280,5 +329,52 @@ mod tests_pure {
         assert!(!t.kg_turning_on && !t.kg_turning_off);
         assert!(!t.vector_turning_on && !t.vector_turning_off);
         assert!(!t.needs_catch_up());
+    }
+
+    /// Issue #2984 Phase 1 MEDIUM finding 4: if a component disable lands
+    /// (synchronously writing `stages.graph = Skipped`) WHILE a KG catch-up
+    /// is still in flight, the catch-up's own completion must never clobber
+    /// that `Skipped` back to `Ready` — the disable must win.
+    ///
+    /// Why: `IndexHandle::skip_kg` is a plain per-handle-snapshot bool that a
+    /// concurrently in-flight task can never observe a later toggle updating
+    /// (every PATCH rebuilds and re-registers a brand-new `IndexHandle`).
+    /// `stages` is the one thing that IS reliably shared across every
+    /// rebuild, so `mark_kg_catch_up_complete` must arbitrate off `stages`,
+    /// not off `handle.skip_kg`. This test proves it deterministically by
+    /// pre-seeding `stages.graph = Skipped` (simulating "the disable already
+    /// landed") before calling the completion function directly.
+    /// What: builds a bare handle, sets `stages.graph` to `Skipped`, calls
+    /// `mark_kg_catch_up_complete`, and asserts the stage is still `Skipped`
+    /// (not clobbered to `Ready`).
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn kg_catch_up_completion_never_clobbers_a_disable_that_landed_first() {
+        use crate::core::indexer::CodeIndexer;
+        use crate::core::registry::{IndexHandle, IndexId};
+        use tokio::sync::RwLock;
+
+        let handle = Arc::new(IndexHandle::bare(
+            IndexId::new("kg-catchup-race"),
+            Arc::new(RwLock::new(CodeIndexer::new(
+                "kg-catchup-race",
+                "/tmp/kg-catchup-race",
+            ))),
+            "/tmp/kg-catchup-race".into(),
+        ));
+        {
+            let mut stages = handle.stages.write().await;
+            stages.graph = StageState::skipped();
+        }
+
+        mark_kg_catch_up_complete(&handle, 3, 2).await;
+
+        let stages = handle.stages.read().await;
+        assert_eq!(
+            stages.graph.status,
+            StageStatus::Skipped,
+            "a disable that landed first must win — completion must never \
+             clobber Skipped back to Ready (#2984 Phase 1 MEDIUM finding 4)"
+        );
     }
 }

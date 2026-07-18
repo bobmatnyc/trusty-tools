@@ -454,6 +454,28 @@ impl CodeIndexer {
         self.domain_terms = terms;
     }
 
+    /// Synchronize `self.skip_kg` with a runtime component-toggle transition
+    /// (issue #2984 Phase 1 CRITICAL finding 1).
+    ///
+    /// Why: `IndexHandle::skip_kg` (the registry-level flag flipped by
+    /// `PATCH /indexes/:id/config`) and this field are two independent
+    /// copies of the same logical flag — this one is set once at
+    /// construction (`persistence_loader::build_indexer_from_entry`) and is
+    /// the ONLY copy `load_or_rebuild_symbol_graph` consults. Before this
+    /// setter existed, nothing ever flipped it after construction: re-enabling
+    /// KG at runtime updated the handle's copy but `catch_up_symbol_graph` ->
+    /// `load_or_rebuild_symbol_graph` re-read `self.skip_kg` (still `true`)
+    /// and silently no-op'd — `/status` reported `kg: true` + graph stage
+    /// `Ready`, but the in-memory graph stayed empty until the next daemon
+    /// restart. Callers MUST call this (in both directions — also `true` on
+    /// disable, so a later warm-boot-style check never sees a stale `false`)
+    /// before triggering a catch-up.
+    /// What: assigns `self.skip_kg = skip_kg` directly.
+    /// Test: `service::server::tests_components::patch_kg_on_reloads_persisted_graph_for_indexer_built_with_skip_kg_true`.
+    pub fn set_skip_kg(&mut self, skip_kg: bool) {
+        self.skip_kg = skip_kg;
+    }
+
     /// Returns a cheap `Arc` snapshot of the current symbol graph.
     ///
     /// Why: the `GET /indexes/{id}/graph` endpoint needs to read the whole

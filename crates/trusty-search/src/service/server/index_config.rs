@@ -164,10 +164,11 @@ pub(super) async fn index_config_handler(
 /// turning one ON spawns a background catch-up job (`components` field in the
 /// response reports `catch_up_started`).
 /// What: validates inputs (rejects `data_file_max_bytes == 0`), resolves the
-/// component transition and — when a catch-up is needed — acquires the
-/// background reindex semaphore up front so a concurrent reindex or another
-/// catch-up returns `409 Conflict` before ANY state is mutated (issue #2984
-/// Phase 1, mirrors the `spawn_deferred_embed_pass` concurrency guard).
+/// component transition and — when a catch-up is needed — acquires THIS
+/// index's per-index mutual-exclusion semaphore up front so a concurrent
+/// reindex or another catch-up ON THE SAME INDEX returns `409 Conflict`
+/// before ANY state is mutated (issue #2984 Phase 1 CRITICAL finding 2; see
+/// `service::reindex::index_semaphore`).
 /// Rebuilds the in-memory handle with the merged fields (preserving the live
 /// indexer and all Arc-shared state), re-registers it, applies the immediate
 /// component side effects (stage flip + in-memory KG drop on disable), then
@@ -204,9 +205,16 @@ pub(super) async fn patch_index_config_handler(
             .into_response();
     };
 
-    // Issue #2984 Phase 1: resolve the component transition and, if it needs
-    // a catch-up, acquire the background reindex semaphore BEFORE mutating
-    // any state — a busy semaphore returns 409 with nothing half-applied.
+    // Issue #2984 Phase 1 CRITICAL finding 2: resolve the component
+    // transition and, if it needs a catch-up, acquire THIS index's
+    // per-index mutual-exclusion semaphore BEFORE mutating any state — a
+    // busy permit returns 409 with nothing half-applied. This is scoped
+    // per-`IndexId` (not the process-global `background_reindex_semaphore`,
+    // which throttles unrelated indexes' background embeds and must never
+    // gate an unrelated index's toggle) and is the SAME semaphore
+    // `runner::run_reindex` and `defer_embed::spawn_deferred_embed_pass`
+    // acquire for this index, so a genuinely concurrent reindex on the SAME
+    // index also correctly conflicts here.
     let transition = components::resolve_component_toggle(
         req.kg,
         req.vector,
@@ -214,14 +222,17 @@ pub(super) async fn patch_index_config_handler(
         existing.skip_vector,
     );
     let permit = if transition.needs_catch_up() {
-        match crate::service::reindex::background_reindex_semaphore().try_acquire() {
+        match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({
-                        "error": "a reindex or component catch-up is already in progress \
-                                  for this index — retry once it completes",
+                        "error": format!(
+                            "a reindex or component catch-up is already in progress for \
+                             index '{}' — retry once it completes",
+                            index_id.0,
+                        ),
                         "index_id": index_id.0,
                     })),
                 )

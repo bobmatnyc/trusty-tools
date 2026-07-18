@@ -498,14 +498,28 @@ impl CodeIndexer {
         }
     }
 
-    /// Embed all corpus chunks and upsert vectors into HNSW (issue #923 C2 pass).
+    /// Embed corpus chunks that don't already have a stored vector and upsert
+    /// them into HNSW (issue #923 C2 pass; issue #2984 Phase 1 HIGH finding 3).
     ///
     /// Why: fast pass (C1) stored chunks without embedding; this catch-up job
     /// fills the semantic lane. `progress_tx` is forwarded to
     /// `embed_chunks_in_batches` so callers can update `stages.semantic.embedded`
     /// per wave for live N/total progress on `/indexes/:id/status` (issue #929).
-    /// What: snapshots chunks, embeds in batches, commits vectors + cache. Idempotent.
-    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent`.
+    /// Issue #2984 Phase 1: this is also the runtime vector-component
+    /// re-enable catch-up (`components::spawn_component_catch_up` via
+    /// `service::reindex::run_embed_catch_up`) — the locked design decision is
+    /// "incremental catch-up, never a forced full rebuild", so re-embedding
+    /// every chunk unconditionally (the pre-fix behaviour) directly
+    /// contradicted it and re-paid the full embed cost every time vector was
+    /// re-enabled, even for content that was embedded before it was disabled.
+    /// What: snapshots chunks, then filters to only those the vector store
+    /// does NOT already have (`VectorStore::contains_many`, a single bulk
+    /// membership check) before embedding/committing. On a fresh corpus (the
+    /// ordinary post-reindex C1/C2 fast pass) no id is present yet, so the
+    /// filter is a no-op there — behaviour is unchanged for that path.
+    /// Returns `(newly_embedded, total_corpus_chunks)`.
+    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent`,
+    /// `embed_deferred_chunks_skips_already_embedded_chunks`.
     pub async fn embed_deferred_chunks(
         &self,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
@@ -519,10 +533,24 @@ impl CodeIndexer {
         if total == 0 || self.embedder.is_none() || self.store.is_none() {
             return Ok((0, total));
         }
-        let embeddings = self.embed_chunks_in_batches(&chunks, progress_tx).await?;
-        self.commit_vectors_batch(&chunks, &embeddings).await?;
-        self.commit_embeddings_cache(&chunks, embeddings).await;
-        Ok((chunks.len(), total))
+        // Issue #2984 Phase 1 HIGH finding 3: incremental catch-up — skip
+        // chunks that already have a stored vector rather than blindly
+        // re-embedding the whole corpus.
+        let store = self.store.as_ref().expect("store presence checked above");
+        let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
+        let already_embedded = store.contains_many(&ids).await;
+        let to_embed: Vec<RawChunk> = chunks
+            .into_iter()
+            .zip(already_embedded)
+            .filter_map(|(chunk, embedded)| (!embedded).then_some(chunk))
+            .collect();
+        if to_embed.is_empty() {
+            return Ok((0, total));
+        }
+        let embeddings = self.embed_chunks_in_batches(&to_embed, progress_tx).await?;
+        self.commit_vectors_batch(&to_embed, &embeddings).await?;
+        self.commit_embeddings_cache(&to_embed, embeddings).await;
+        Ok((to_embed.len(), total))
     }
 }
 

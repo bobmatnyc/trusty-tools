@@ -11,8 +11,11 @@
 //! Test: `interactive_reindex_not_starved_by_background` and
 //! `reindex_semaphore_selection_routes_by_priority` in `tests.rs`.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
+
+use crate::core::registry::IndexId;
+use dashmap::DashMap;
 
 /// Maximum number of concurrent interactive (user-initiated) reindex tasks.
 /// 2 permits allow a small burst (e.g. indexing two new projects at once)
@@ -97,4 +100,50 @@ pub(crate) fn reindex_semaphore_for(priority: bool) -> &'static Semaphore {
     } else {
         background_reindex_semaphore()
     }
+}
+
+/// Process-global registry of per-index mutual-exclusion semaphores (issue
+/// #2984 Phase 1 CRITICAL finding 2).
+///
+/// Why: `background_reindex_semaphore()` is a single process-wide 1-permit
+/// semaphore shared across EVERY index's background reindex/deferred-embed
+/// tasks. The `PATCH /indexes/:id/config` component-toggle handler used to
+/// `try_acquire` that global semaphore as its same-index conflict guard,
+/// which was wrong on both ends: it produced false `409`s for a completely
+/// UNRELATED index whenever any background embed was in flight anywhere
+/// (routine — `defer_embed` defaults `true` and startup auto-discover can
+/// queue 40+), and it missed the real hazard — a genuinely concurrent
+/// INTERACTIVE reindex on the SAME index (`reindex_semaphore()`, a separate
+/// 2-permit semaphore never touched by the old guard) could still race a
+/// component catch-up, corrupting `symbol_graph` with a lost update and
+/// flapping the stage between `InProgress`/`Ready`. A semaphore keyed by
+/// `IndexId` fixes both: unrelated indexes never contend with each other, and
+/// every mutating path for the SAME index — reindex (`runner::run_reindex`),
+/// deferred-embed (`defer_embed::spawn_deferred_embed_pass`), and component
+/// catch-up (`server::components::spawn_component_catch_up`, via the
+/// handler's own `try_acquire_owned`) — contends for the identical 1 permit.
+/// `background_reindex_semaphore` keeps its existing system-wide throttling
+/// role unchanged; this is purely additive per-index mutual exclusion.
+/// What: a `DashMap<IndexId, Arc<Semaphore>>`, lazily populated — one entry
+/// per index, created on first use, 1 permit each.
+/// Test: `service::server::tests_components::patch_component_turn_on_409s_when_same_index_catch_up_in_progress`,
+/// `patch_component_toggle_succeeds_for_different_index_while_global_background_semaphore_busy`.
+static INDEX_LOCKS: OnceLock<DashMap<IndexId, Arc<Semaphore>>> = OnceLock::new();
+
+/// Returns (creating on first use) the 1-permit mutual-exclusion semaphore
+/// for `id`. See [`INDEX_LOCKS`] for the full rationale.
+///
+/// Why: a single accessor keeps the lazy-creation logic in one place so every
+/// caller — the component-toggle handler, `run_reindex`, and
+/// `spawn_deferred_embed_pass` — shares the exact same semaphore instance per
+/// index.
+/// What: `DashMap::entry` + `or_insert_with` — no lock is held across the
+/// `Arc<Semaphore>` clone returned to the caller.
+/// Test: see the handler-level tests referenced on [`INDEX_LOCKS`].
+pub(crate) fn index_semaphore(id: &IndexId) -> Arc<Semaphore> {
+    INDEX_LOCKS
+        .get_or_init(DashMap::new)
+        .entry(id.clone())
+        .or_insert_with(|| Arc::new(Semaphore::new(1)))
+        .clone()
 }

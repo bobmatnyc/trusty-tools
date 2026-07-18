@@ -84,17 +84,34 @@ pub use quarantine::ReindexQuarantine;
 /// Test: `background_reindex_queue_depth_increments_and_decrements` in `tests.rs`.
 pub use semaphore::background_reindex_queue_depth;
 
-/// Re-export `background_reindex_semaphore` so `service::server::components`
-/// (issue #2984 Phase 1) can acquire the same concurrency guard the
-/// deferred-embed pass uses, giving `PATCH /indexes/:id/config`'s runtime
-/// component toggle a `409 Conflict` when a reindex or another catch-up is
-/// already in flight for the index.
+/// Re-export `background_reindex_semaphore` (test-only — see the
+/// `#[cfg(test)]` internal re-exports below) so
+/// `service::server::tests_components` can hold the process-global permit
+/// directly to simulate an unrelated index's background embed.
 ///
-/// Why: the semaphore lives in the private `semaphore` submodule; re-exporting
-/// the single accessor here avoids widening the submodule itself.
+/// Why: the semaphore lives in the private `semaphore` submodule. No
+/// production call site outside `service::reindex` needs this accessor
+/// anymore (issue #2984 Phase 1 CRITICAL finding 2 replaced the
+/// component-toggle handler's use of it with the per-index
+/// `index_semaphore`), so this is `#[cfg(test)]`-gated to avoid an
+/// unused-import warning in release builds.
 /// What: delegates to `semaphore::background_reindex_semaphore`.
-/// Test: `service::server::tests_components`.
+/// Test: `service::server::tests_components::patch_component_toggle_succeeds_for_different_index_while_global_background_semaphore_busy`.
+#[cfg(test)]
 pub(crate) use semaphore::background_reindex_semaphore;
+
+/// Re-export `index_semaphore` so `service::server::components` (the
+/// component-toggle handler) can acquire the SAME per-index mutual-exclusion
+/// guard that `runner::run_reindex` and `defer_embed::spawn_deferred_embed_pass`
+/// hold for the duration of their work on a given index (issue #2984 Phase 1
+/// CRITICAL finding 2).
+///
+/// Why: the semaphore registry lives in the private `semaphore` submodule;
+/// re-exporting the single accessor here avoids widening the submodule itself.
+/// What: delegates to `semaphore::index_semaphore`.
+/// Test: `service::server::tests_components::patch_component_turn_on_409s_when_same_index_catch_up_in_progress`,
+/// `patch_component_toggle_succeeds_for_different_index_while_global_background_semaphore_busy`.
+pub(crate) use semaphore::index_semaphore;
 
 /// Re-export `run_embed_catch_up` (issue #2984 Phase 1) so
 /// `service::server::components` can drive the same vector-catch-up logic

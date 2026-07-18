@@ -744,6 +744,70 @@ async fn runtime_kg_catch_up_falls_back_to_rebuild_without_corpus() {
     );
 }
 
+/// Issue #2984 Phase 1 HIGH finding 3: `embed_deferred_chunks` must skip
+/// chunks that already have a stored vector rather than blindly re-embedding
+/// the whole corpus — the locked design decision is "incremental catch-up,
+/// never a forced full rebuild".
+///
+/// Why: before this fix, `embed_deferred_chunks` always collected and
+/// re-embedded every corpus chunk unconditionally. That directly contradicted
+/// the design decision and made the runtime vector-component re-enable
+/// catch-up (`components::spawn_component_catch_up` via
+/// `service::reindex::run_embed_catch_up`) pay a full re-embed cost even for
+/// content that was embedded BEFORE the vector component was disabled.
+/// What: commits two chunks into the in-memory corpus, pre-seeds the vector
+/// store directly for ONE of them (simulating "embedded before vector was
+/// disabled"), then calls `embed_deferred_chunks` and asserts only the
+/// un-embedded chunk was processed (`embedded == 1`) while `total` still
+/// reflects the full corpus size.
+/// Test: this IS the test.
+#[tokio::test]
+async fn embed_deferred_chunks_skips_already_embedded_chunks() {
+    let idx = make_indexer();
+    let parsed = ParsedBatch {
+        chunks: vec![
+            raw("already-embedded", "src/a.rs", "fn a() {}"),
+            raw("needs-embedding", "src/b.rs", "fn b() {}"),
+        ],
+        embeddings: vec![None, None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit");
+
+    // Pre-seed the vector store directly for ONE chunk — simulating content
+    // that was embedded before the vector component was disabled.
+    idx.store
+        .as_ref()
+        .expect("store wired by make_indexer")
+        .upsert("already-embedded", vec![0.0; 32])
+        .await
+        .expect("pre-seed vector");
+
+    let (embedded, total) = idx
+        .embed_deferred_chunks(None)
+        .await
+        .expect("embed_deferred_chunks");
+    assert_eq!(total, 2, "total must reflect the full corpus");
+    assert_eq!(
+        embedded, 1,
+        "only the un-embedded chunk should have been processed \
+         (incremental catch-up, never a forced full re-embed)"
+    );
+    assert!(
+        idx.store
+            .as_ref()
+            .unwrap()
+            .contains("needs-embedding")
+            .await,
+        "the previously un-embedded chunk must now be in the store"
+    );
+}
+
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]

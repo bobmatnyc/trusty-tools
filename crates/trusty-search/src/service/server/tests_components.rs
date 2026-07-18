@@ -265,21 +265,27 @@ async fn patch_vector_on_spawns_catch_up_and_reaches_ready() {
     poll_stages(&handle, |s| s.semantic.status == StageStatus::Ready).await;
 }
 
-/// A component turn-on request that arrives while the background reindex
-/// semaphore is already held (a concurrent reindex or another catch-up) must
-/// return `409 Conflict` with NO state mutated — not queue behind it.
+/// A component turn-on request that arrives while THIS index's per-index
+/// mutual-exclusion permit is already held (a concurrent reindex or another
+/// catch-up on the SAME index) must return `409 Conflict` with NO state
+/// mutated — not queue behind it.
 ///
-/// Why: pins the #2984 Phase 1 concurrency guard — reusing
-/// `background_reindex_semaphore` (issue #458) so a component catch-up can
-/// never race a concurrent reindex, consistent with
-/// `spawn_deferred_embed_pass`'s existing guard.
-/// What: acquires the (1-permit) background semaphore directly in the test,
-/// then PATCHes `kg: true` on a KG-disabled index and asserts 409 + that
-/// `skip_kg` is untouched.
+/// Why: pins the #2984 Phase 1 CRITICAL finding 2 fix — the conflict guard
+/// must be scoped per `IndexId` (`service::reindex::index_semaphore`), not
+/// the process-global `background_reindex_semaphore` the pre-fix code
+/// mistakenly used (which both produced false 409s for unrelated indexes AND
+/// missed a real same-index conflict against the separate interactive
+/// reindex semaphore — see `patch_component_toggle_succeeds_for_different_index_while_global_background_semaphore_busy`
+/// for the false-409 half of the regression).
+/// What: acquires the per-index (1-permit) semaphore for `comp-409` directly
+/// in the test — the same semaphore `runner::run_reindex` and
+/// `defer_embed::spawn_deferred_embed_pass` hold for the duration of their
+/// work on this index — then PATCHes `kg: true` and asserts 409, a
+/// correctly-scoped error message, and that `skip_kg` is untouched.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::serial]
-async fn patch_component_turn_on_409s_when_semaphore_busy() {
+async fn patch_component_turn_on_409s_when_same_index_catch_up_in_progress() {
     let _isolated = IsolatedDataDir::new();
     let state = state_with_index("comp-409");
     // Disable KG first so the next PATCH is a turn-on (needs the permit).
@@ -294,9 +300,12 @@ async fn patch_component_turn_on_409s_when_semaphore_busy() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Hold the single background-reindex permit for the duration of this block.
-    let _permit = crate::service::reindex::background_reindex_semaphore()
-        .try_acquire()
+    // Hold THIS index's per-index permit for the duration of this block —
+    // simulates a concurrent reindex or another in-flight catch-up on the
+    // SAME index.
+    let index_id = IndexId::new("comp-409");
+    let _permit = crate::service::reindex::index_semaphore(&index_id)
+        .try_acquire_owned()
         .expect("semaphore must be free at test start");
 
     let resp = patch_index_config_handler(
@@ -309,11 +318,17 @@ async fn patch_component_turn_on_409s_when_semaphore_busy() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = body_json(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("comp-409"),
+        "409 error message must correctly name THIS index (finding 2's \
+         message-scope bug), got: {body}"
+    );
 
-    let handle = state
-        .registry
-        .get(&IndexId::new("comp-409"))
-        .expect("handle");
+    let handle = state.registry.get(&index_id).expect("handle");
     assert!(
         handle.skip_kg,
         "409 must leave skip_kg untouched (still disabled)"
@@ -323,6 +338,175 @@ async fn patch_component_turn_on_409s_when_semaphore_busy() {
         stages.graph.status,
         StageStatus::Skipped,
         "409 must leave the graph stage untouched"
+    );
+}
+
+/// A component turn-on request for one index must NEVER be blocked by an
+/// unrelated index's background embed holding the process-global
+/// `background_reindex_semaphore` — the pre-fix false-409 half of CRITICAL
+/// finding 2.
+///
+/// Why: before the fix, the toggle handler `try_acquire`d the SAME
+/// process-wide 1-permit semaphore shared by every index's background
+/// reindex/deferred-embed tasks, so ANY unrelated index's routine background
+/// embed (routine — `defer_embed` defaults `true`) produced a false `409`
+/// here.
+/// What: holds the global `background_reindex_semaphore` permit (simulating
+/// an unrelated index's background embed in flight elsewhere), then PATCHes
+/// `kg: true` on a DIFFERENT index and asserts it still succeeds.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn patch_component_toggle_succeeds_for_different_index_while_global_background_semaphore_busy(
+) {
+    let _isolated = IsolatedDataDir::new();
+    let state = state_with_index("comp-other-index");
+    // Disable KG first so the next PATCH is a turn-on (needs a permit).
+    let resp = patch_index_config_handler(
+        State(Arc::clone(&state)),
+        Path("comp-other-index".to_string()),
+        Json(PatchIndexConfigRequest {
+            kg: Some(false),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Hold the process-global background-reindex semaphore — simulates an
+    // unrelated index's deferred-embed pass in flight elsewhere in the fleet.
+    let _global_permit = crate::service::reindex::background_reindex_semaphore()
+        .try_acquire()
+        .expect("global semaphore must be free at test start");
+
+    let resp = patch_index_config_handler(
+        State(Arc::clone(&state)),
+        Path("comp-other-index".to_string()),
+        Json(PatchIndexConfigRequest {
+            kg: Some(true),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a toggle on an unrelated index must never be blocked by the \
+         global background-reindex semaphore (#2984 Phase 1 CRITICAL finding 2)"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(body["components"]["catch_up_started"].as_bool(), Some(true));
+}
+
+/// CRITICAL regression (#2984 Phase 1 finding 1): a runtime KG re-enable on
+/// an index whose `CodeIndexer` was constructed via
+/// `build_indexer_from_entry` with `skip_kg: true` — the REAL production
+/// wiring path, NOT `CodeIndexer::new` (which defaults `skip_kg` to `false`
+/// and would silently hide this exact bug, as every pre-existing test in this
+/// module does) — must actually reload the persisted symbol graph, not
+/// merely settle the stage to `Ready` while the graph stays empty.
+///
+/// Why: `apply_component_transition` used to flip `IndexHandle::skip_kg` but
+/// never touch `CodeIndexer`'s OWN internal `skip_kg` copy (set once at
+/// construction and consulted directly by `load_or_rebuild_symbol_graph`), so
+/// `catch_up_symbol_graph` silently no-op'd against a `skip_kg=true` indexer
+/// — the stage still reached `Ready`, but `node_count()` stayed `0` forever
+/// (until a daemon restart rebuilt the indexer fresh from the now-current
+/// `indexes.toml`).
+/// What: builds an indexer via `build_indexer_from_entry` with
+/// `skip_kg=false`, indexes two files with a real call edge so the redb
+/// corpus persists a non-empty graph, drops it, then rebuilds the SAME
+/// id/root via `build_indexer_from_entry` with `skip_kg=true` (mirroring
+/// `persistence_loader::tests`'s own regression pattern) — reproducing
+/// exactly how a `skip_kg=true` index is wired in production. Registers that
+/// indexer under a handle, PATCHes `{kg: true}`, polls until the graph stage
+/// is `Ready`, and asserts `node_count() > 0` — not merely the stage
+/// transition.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn patch_kg_on_reloads_persisted_graph_for_indexer_built_with_skip_kg_true() {
+    use crate::service::persistence::PersistedIndex;
+    use crate::service::persistence_loader::build_indexer_from_entry;
+
+    let _isolated = IsolatedDataDir::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let embedder: Arc<dyn crate::core::embed::Embedder> =
+        Arc::new(trusty_common::embedder::MockEmbedder::new(8));
+
+    let entry_no_skip = PersistedIndex {
+        id: "comp-kg-reload".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        skip_kg: false,
+        ..Default::default()
+    };
+
+    // Phase 1: build with skip_kg=false, index real content with a call
+    // edge so the redb corpus persists a non-empty graph, then drop
+    // (releases the redb file lock).
+    {
+        let indexer = build_indexer_from_entry(&entry_no_skip, &embedder)
+            .await
+            .expect("build indexer");
+        indexer
+            .index_files_batch(&[
+                ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+                ("src/callee.rs".into(), "fn callee() {}".into()),
+            ])
+            .await
+            .expect("index batch");
+        let graph = indexer.snapshot_symbol_graph().await;
+        assert!(graph.node_count() > 0, "sanity: real graph was built");
+    }
+
+    // Phase 2: rebuild the SAME id/root via the production skip_kg=true
+    // wiring path (mirrors how a real `skip_kg=true` index is loaded).
+    let entry_skip = PersistedIndex {
+        skip_kg: true,
+        ..entry_no_skip
+    };
+    let indexer = build_indexer_from_entry(&entry_skip, &embedder)
+        .await
+        .expect("build indexer with skip_kg=true");
+    // Sanity: the loader must have honoured skip_kg at construction — the
+    // graph is empty even though the corpus has a persisted one.
+    assert_eq!(indexer.snapshot_symbol_graph().await.node_count(), 0);
+
+    let mut handle = IndexHandle::bare(
+        IndexId::new("comp-kg-reload"),
+        Arc::new(RwLock::new(indexer)),
+        root,
+    );
+    handle.skip_kg = true;
+    let registry = IndexRegistry::new();
+    registry.register(handle);
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let resp = patch_index_config_handler(
+        State(Arc::clone(&state)),
+        Path("comp-kg-reload".to_string()),
+        Json(PatchIndexConfigRequest {
+            kg: Some(true),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let handle = state
+        .registry
+        .get(&IndexId::new("comp-kg-reload"))
+        .expect("handle");
+    poll_stages(&handle, |s| s.graph.status == StageStatus::Ready).await;
+
+    let graph = handle.indexer.read().await.snapshot_symbol_graph().await;
+    assert!(
+        graph.node_count() > 0,
+        "CRITICAL regression (#2984 Phase 1 finding 1): catch-up must \
+         actually reload the persisted graph, not merely settle the stage \
+         to Ready while the graph stays empty"
     );
 }
 
