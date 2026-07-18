@@ -17,6 +17,7 @@
 //! unknown-when-never-synced, and selection filtering; the `/health` and `apply`
 //! wiring is covered in the daemon and CLI suites.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::core::agent_builder::compose_agent;
@@ -200,96 +201,259 @@ fn classify_drift(
     }
 }
 
-/// Compare a catalog agent source tree against the deployed agents (manifest +
-/// on-disk files), reconciling the two so unmanifested-but-deployed files are not
-/// false "new" drift.
+/// Compose+hash every deployable agent under `catalog_agents`, keyed by stem.
+///
+/// Why (issue #2444 review, MEDIUM finding): [`agent_changes`] used to
+/// recompose EVERY catalog agent (walking its `extends:` chain) on every
+/// single call — cheap for the ORIGINAL one-shot `/health`/`apply` call
+/// sites, but `tm sessions ls`'s per-session staleness marker calls the
+/// staleness comparison once per managed session, and every session's
+/// default plan resolves to the SAME catalog agent source. Recomposing
+/// ~40+ agents once per session (rather than once per `ls` request) was the
+/// dominant cost. Splitting the compose step out into this standalone,
+/// reusable hash map lets a caller comparing MANY targets against the SAME
+/// catalog source (see [`CatalogHashes`]) compute it exactly once and share
+/// it, while [`detect_staleness`] (the original single-target entry point)
+/// still calls it fresh each time — identical behavior, no regression.
+/// What: composes each `.md` stem in `catalog_agents` and records
+/// `checksum(composed)`. A stem whose compose fails is simply absent from the
+/// map (mirrors [`agent_changes`]'s pre-existing skip-on-compose-failure —
+/// an agent that cannot be composed cannot be deployed either, so it was
+/// never actionable drift).
+/// Test: `compute_agent_catalog_hashes_skips_compose_failures`,
+/// `detect_flags_changed_agent` (exercises this transitively via
+/// [`detect_staleness`]).
+pub fn compute_agent_catalog_hashes(catalog_agents: &Path) -> HashMap<String, String> {
+    md_stems(catalog_agents)
+        .into_iter()
+        .filter_map(|stem| {
+            let composed = compose_agent(&stem, catalog_agents).ok()?;
+            let hash = checksum(&composed);
+            Some((stem, hash))
+        })
+        .collect()
+}
+
+/// Hash every deployable skill body under `catalog_skills`, keyed by stem —
+/// the skill-side sibling of [`compute_agent_catalog_hashes`].
+///
+/// Why: skills carry no `extends:` chain, so hashing them is already cheap
+/// (one file read each) — but sharing the map across many targets still
+/// saves the redundant reads for the common `tm sessions ls` case, and keeps
+/// the agent/skill halves of [`CatalogHashes`] symmetric.
+/// What: reads each `.md` stem's body under `catalog_skills` and records
+/// `checksum(body)`. An unreadable file is simply absent from the map
+/// (mirrors [`skill_changes`]'s pre-existing skip-on-read-failure).
+/// Test: `compute_skill_catalog_hashes_reads_bodies`.
+pub fn compute_skill_catalog_hashes(catalog_skills: &Path) -> HashMap<String, String> {
+    md_stems(catalog_skills)
+        .into_iter()
+        .filter_map(|stem| {
+            let filename = format!("{stem}.md");
+            let body = std::fs::read_to_string(catalog_skills.join(&filename)).ok()?;
+            let hash = checksum(&body);
+            Some((stem, hash))
+        })
+        .collect()
+}
+
+/// Compare precomputed catalog agent hashes against the deployed agents
+/// (manifest + on-disk files), reconciling the two so unmanifested-but-
+/// deployed files are not false "new" drift.
 ///
 /// Why: the agent half of staleness — for each selected catalog agent, the
-/// content the next deploy WOULD write (the composed agent) is hashed and
-/// classified via [`classify_drift`] against BOTH the checksum manifest and the
-/// file actually on disk under `deployed_dir`. Keying only on the manifest caused
-/// #1940's false positives; reconciling against the on-disk file fixes them.
-/// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the agent
-/// as `new`/`changed`. Agents the predicate rejects are skipped (not part of this
-/// harness's set). An agent that fails to compose is skipped rather than reported
-/// (it cannot be deployed either, so it is not actionable drift).
+/// PRECOMPUTED catalog hash (see [`compute_agent_catalog_hashes`]) is
+/// classified via [`classify_drift`] against BOTH the checksum manifest and
+/// the file actually on disk under `deployed_dir`. Keying only on the
+/// manifest caused #1940's false positives; reconciling against the on-disk
+/// file fixes them.
+/// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the
+/// agent as `new`/`changed`. Agents the predicate rejects are skipped (not
+/// part of this harness's set).
 /// Test: `detect_flags_changed_agent`, `detect_not_stale_when_identical`,
 /// `detect_respects_selection`, `detect_reconciles_deployed_but_unmanifested`,
 /// `detect_respects_ignore_staleness`.
 fn agent_changes(
-    catalog_agents: &Path,
+    catalog_hashes: &HashMap<String, String>,
     deployed: &AgentManifest,
     deployed_dir: &Path,
     select: &impl Fn(&str) -> bool,
     ignore_staleness: &impl Fn(&str) -> bool,
     out: &mut Vec<CatalogChange>,
 ) {
-    for stem in md_stems(catalog_agents) {
-        if !select(&stem) || ignore_staleness(&stem) {
+    for (stem, catalog_hash) in catalog_hashes {
+        if !select(stem) || ignore_staleness(stem) {
             continue;
         }
-        let Ok(composed) = compose_agent(&stem, catalog_agents) else {
-            continue;
-        };
         let filename = format!("{stem}.md");
-        let catalog_hash = checksum(&composed);
         let on_disk = std::fs::read_to_string(deployed_dir.join(&filename)).ok();
         if let Some(kind) = classify_drift(
-            &catalog_hash,
+            catalog_hash,
             deployed.managed.get(&filename).map(|e| e.checksum.as_str()),
             on_disk.as_deref(),
         ) {
             out.push(CatalogChange {
                 artifact: "agent",
-                name: stem,
+                name: stem.clone(),
                 kind,
             });
         }
     }
 }
 
-/// Compare a catalog skill source tree against the deployed skill manifest.
+/// Compare precomputed catalog skill hashes against the deployed skill
+/// manifest.
 ///
-/// Why: the skill half of staleness. Skills carry no inheritance, so the catalog
-/// content the next deploy would write is the raw file body; its hash is compared
-/// to the deployed skill manifest's checksum.
-/// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the skill
-/// as `new`/`changed`, reconciling the skill manifest against the file actually on
-/// disk (deployed skills live at `<deployed_dir>/<stem>/SKILL.md`). Unreadable
-/// catalog files are skipped (not actionable). The skill source the deployer
-/// consumes is a flat `<stem>.md` layout, and the [`SkillManifest`] is keyed by
-/// the bare STEM (no `.md`) — so the lookup uses `stem`, matching the deployer.
+/// Why: the skill half of staleness — the PRECOMPUTED catalog hash (see
+/// [`compute_skill_catalog_hashes`]) is compared against the deployed skill
+/// manifest's checksum.
+/// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the
+/// skill as `new`/`changed`, reconciling the skill manifest against the file
+/// actually on disk (deployed skills live at `<deployed_dir>/<stem>/SKILL.md`).
+/// The [`SkillManifest`] is keyed by the bare STEM (no `.md`) — so the lookup
+/// uses `stem`, matching the deployer.
 /// Test: `detect_flags_new_skill`, `detect_not_stale_when_identical`,
 /// `detect_reconciles_deployed_but_unmanifested`.
 fn skill_changes(
-    catalog_skills: &Path,
+    catalog_hashes: &HashMap<String, String>,
     deployed: &SkillManifest,
     deployed_dir: &Path,
     select: &impl Fn(&str) -> bool,
     out: &mut Vec<CatalogChange>,
 ) {
-    for stem in md_stems(catalog_skills) {
-        if !select(&stem) {
+    for (stem, catalog_hash) in catalog_hashes {
+        if !select(stem) {
             continue;
         }
-        let filename = format!("{stem}.md");
-        let Ok(body) = std::fs::read_to_string(catalog_skills.join(&filename)) else {
-            continue;
-        };
-        let catalog_hash = checksum(&body);
         // Deployed skills land as `<deployed_dir>/<stem>/SKILL.md` (per the
         // skill deployer); the SkillManifest is keyed by stem (no `.md`).
-        let on_disk = std::fs::read_to_string(deployed_dir.join(&stem).join("SKILL.md")).ok();
+        let on_disk = std::fs::read_to_string(deployed_dir.join(stem).join("SKILL.md")).ok();
         if let Some(kind) = classify_drift(
-            &catalog_hash,
-            deployed.managed.get(&stem).map(|e| e.checksum.as_str()),
+            catalog_hash,
+            deployed.managed.get(stem).map(|e| e.checksum.as_str()),
             on_disk.as_deref(),
         ) {
             out.push(CatalogChange {
                 artifact: "skill",
-                name: stem,
+                name: stem.clone(),
                 kind,
             });
+        }
+    }
+}
+
+/// Precomputed, reusable catalog-side hashes for ONE `(agent_source,
+/// skill_source)` pair — the expensive half of a staleness comparison,
+/// shareable across every DEPLOYED-side comparison against that same catalog
+/// within one caller's batch (issue #2444 review MEDIUM finding).
+///
+/// Why: a staleness comparison has two independent halves — hashing the
+/// CATALOG side (composing agents, reading skill bodies: expensive, and
+/// IDENTICAL for every target sharing the same source paths) and comparing
+/// against the DEPLOYED side (reading one target's manifest + on-disk files:
+/// cheap, and unique per target). `detect_staleness` previously redid the
+/// catalog-side work on every call; `tm sessions ls` calling it once per
+/// managed session (issue #2444) turned that redundant recompose into the
+/// dominant per-request cost. Splitting the two halves lets a batch caller
+/// (`daemon::managed_routes::summary::checked_summaries`) call
+/// [`CatalogHashes::compute`] ONCE per distinct `(agent_source, skill_source)`
+/// pair it encounters — which collapses to a SINGLE compute for the common
+/// case where every session resolves the same default bundled/catalog
+/// source — then call [`CatalogHashes::detect`] per target using the shared
+/// result. Selection predicates are NOT part of the cache key: they are cheap
+/// glob/string matching applied only in `detect`, so two sessions sharing a
+/// catalog source but selecting different subsets still share this cache
+/// correctly.
+/// What: `unknown` mirrors [`StalenessReport::unknown`] (neither source tree
+/// exists); the two hash maps are the [`compute_agent_catalog_hashes`] /
+/// [`compute_skill_catalog_hashes`] outputs.
+/// Test: `catalog_hashes_compute_is_unknown_without_either_source`,
+/// `catalog_hashes_shared_across_two_deployed_targets`.
+#[derive(Debug, Default)]
+pub struct CatalogHashes {
+    unknown: bool,
+    agent_hashes: HashMap<String, String>,
+    skill_hashes: HashMap<String, String>,
+}
+
+impl CatalogHashes {
+    /// Compute the catalog-side hashes for one `(catalog_agents,
+    /// catalog_skills)` pair.
+    ///
+    /// Why: the one-time expensive step ([`compute_agent_catalog_hashes`]/
+    /// [`compute_skill_catalog_hashes`]) a batch caller runs ONCE per distinct
+    /// source pair and reuses via [`Self::detect`].
+    /// What: `unknown: true` (empty maps) when NEITHER source tree exists —
+    /// identical short-circuit to [`detect_staleness`]'s original
+    /// never-synced check; otherwise computes both maps.
+    /// Test: `catalog_hashes_compute_is_unknown_without_either_source`.
+    pub fn compute(catalog_agents: &Path, catalog_skills: &Path) -> Self {
+        if !catalog_agents.is_dir() && !catalog_skills.is_dir() {
+            return Self {
+                unknown: true,
+                ..Default::default()
+            };
+        }
+        Self {
+            unknown: false,
+            agent_hashes: compute_agent_catalog_hashes(catalog_agents),
+            skill_hashes: compute_skill_catalog_hashes(catalog_skills),
+        }
+    }
+
+    /// Compare ONE deployed target against these precomputed catalog hashes.
+    ///
+    /// Why: the cheap, per-target half of the comparison — reads only this
+    /// target's manifest + on-disk files; does zero catalog I/O (that already
+    /// happened in [`Self::compute`]).
+    /// What: identical semantics to [`detect_staleness`] for a non-`unknown`
+    /// cache: compares the selected catalog agents/skills against the
+    /// deployed manifests + on-disk files via [`classify_drift`], caps the
+    /// change list at [`MAX_CHANGES`]. When `self.unknown`, returns the same
+    /// `unknown` report [`detect_staleness`] would.
+    /// Test: `catalog_hashes_shared_across_two_deployed_targets`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn detect(
+        &self,
+        deployed_agents: &AgentManifest,
+        deployed_skills: &SkillManifest,
+        deployed_agents_dir: &Path,
+        deployed_skills_dir: &Path,
+        agent_select: impl Fn(&str) -> bool,
+        skill_select: impl Fn(&str) -> bool,
+        agent_ignore_staleness: impl Fn(&str) -> bool,
+    ) -> StalenessReport {
+        if self.unknown {
+            return StalenessReport {
+                stale: false,
+                unknown: true,
+                changes: Vec::new(),
+            };
+        }
+
+        let mut changes = Vec::new();
+        agent_changes(
+            &self.agent_hashes,
+            deployed_agents,
+            deployed_agents_dir,
+            &agent_select,
+            &agent_ignore_staleness,
+            &mut changes,
+        );
+        skill_changes(
+            &self.skill_hashes,
+            deployed_skills,
+            deployed_skills_dir,
+            &skill_select,
+            &mut changes,
+        );
+
+        let stale = !changes.is_empty();
+        changes.truncate(MAX_CHANGES);
+        StalenessReport {
+            stale,
+            unknown: false,
+            changes,
         }
     }
 }
@@ -299,7 +463,12 @@ fn skill_changes(
 /// Why: this is the single autonomous check DOC-17 §HR-3 mandates — surfaced on
 /// `/health`, shown in the TUI, and the precondition for the rebuild offer. It is
 /// deliberately a pure, offline SHA compare so it can run on the health hot path
-/// and in deterministic tests without a network or a live `claude`.
+/// and in deterministic tests without a network or a live `claude`. This is a
+/// thin wrapper over [`CatalogHashes::compute`] + [`CatalogHashes::detect`] for
+/// the common single-target call site; a caller comparing MANY targets against
+/// the SAME catalog source (issue #2444's `tm sessions ls`) should call
+/// [`CatalogHashes`] directly and share the `compute` result instead of calling
+/// this once per target.
 /// What: when neither catalog source tree exists (the catalog was never synced)
 /// returns `unknown` (and NOT stale) so the surface can prompt a sync rather than
 /// imply currency — DOC-17's "catalog unreachable → treat as not-stale, never
@@ -330,40 +499,15 @@ pub fn detect_staleness(
     skill_select: impl Fn(&str) -> bool,
     agent_ignore_staleness: impl Fn(&str) -> bool,
 ) -> StalenessReport {
-    // Never-synced: neither source tree is present. Report `unknown` rather than
-    // fabricating staleness — there is nothing authoritative to compare against.
-    if !catalog_agents.is_dir() && !catalog_skills.is_dir() {
-        return StalenessReport {
-            stale: false,
-            unknown: true,
-            changes: Vec::new(),
-        };
-    }
-
-    let mut changes = Vec::new();
-    agent_changes(
-        catalog_agents,
+    CatalogHashes::compute(catalog_agents, catalog_skills).detect(
         deployed_agents,
-        deployed_agents_dir,
-        &agent_select,
-        &agent_ignore_staleness,
-        &mut changes,
-    );
-    skill_changes(
-        catalog_skills,
         deployed_skills,
+        deployed_agents_dir,
         deployed_skills_dir,
-        &skill_select,
-        &mut changes,
-    );
-
-    let stale = !changes.is_empty();
-    changes.truncate(MAX_CHANGES);
-    StalenessReport {
-        stale,
-        unknown: false,
-        changes,
-    }
+        agent_select,
+        skill_select,
+        agent_ignore_staleness,
+    )
 }
 
 /// Detect staleness for a framework root, resolving the harness manifest itself.

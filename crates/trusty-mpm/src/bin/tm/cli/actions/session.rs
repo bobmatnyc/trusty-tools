@@ -398,6 +398,33 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         include_active: bool,
     },
+    /// Re-sync a live managed session's deployed agents/skills/output-styles
+    /// against the current catalog (issue #2444).
+    ///
+    /// Why: `#2002`'s asset deployment is one-shot at launch — a long-lived
+    /// session never re-syncs when the bundled/catalog source changes
+    /// underneath it, so it silently keeps running stale content. This
+    /// OVERWRITES managed assets (the same "refresh a managed file, never
+    /// touch a user-modified one" rule the launch-time deployers already
+    /// enforce — see `core::session_launch::sync_session_assets`'s doc);
+    /// it never touches CLAUDE.md, hooks, or MCP config. `tm sessions ls`
+    /// flags a drifted session with a `[stale-assets]` marker.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/sync-assets` for one
+    /// session (resolved by id or friendly name), or
+    /// `/api/v1/sessions/managed/sync-assets` for EVERY syncable session
+    /// when `--all` is passed. Exactly one of `id`/`--all` may be given.
+    /// Test: `cli_parses_sessions_sync_assets`,
+    /// `cli_parses_sessions_sync_assets_all`,
+    /// `cli_sessions_sync_assets_id_and_all_conflict`.
+    SyncAssets {
+        /// Managed session id or friendly name to re-sync.
+        #[arg(conflicts_with = "all", required_unless_present = "all")]
+        id: Option<String>,
+        /// Re-sync EVERY syncable session (active/stopped/errored) instead
+        /// of one.
+        #[arg(long)]
+        all: bool,
+    },
     /// Remove orphaned per-session git worktree directories (#1840).
     ///
     /// Why: sessions decommissioned before the Fix 1a worktree-removal patch,

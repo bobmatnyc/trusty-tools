@@ -203,6 +203,7 @@ mod tests {
             pane_id: None,
             injection_status: None,
             unresumable: false,
+            stale_assets: false,
         }
     }
 

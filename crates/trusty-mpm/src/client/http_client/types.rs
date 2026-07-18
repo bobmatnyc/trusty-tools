@@ -481,6 +481,22 @@ pub struct ManagedSessionSummary {
     /// Test: `managed_session_summary_deserializes_unresumable_flag`.
     #[serde(default)]
     pub unresumable: bool,
+    /// True when this session's deployed `.claude/{agents,skills}` have
+    /// drifted from the current bundled/catalog source (additive; issue
+    /// #2444). Mirrors `daemon::managed_routes::SessionSummary::stale_assets`
+    /// field-for-field.
+    ///
+    /// Why: `#2002`'s asset deployment is one-shot at launch — a long-lived
+    /// session never re-syncs when the catalog/bundled source changes
+    /// underneath it. Surfacing this on the wire lets `tm sessions ls` mark
+    /// exactly which sessions need `tm sessions sync-assets` run against
+    /// them. `#[serde(default)]` keeps the client tolerant of an OLDER
+    /// daemon that omits the field — it deserializes to `false`.
+    /// What: a plain bool, `false` unless the daemon's staleness probe
+    /// (`Active`/`Stopped`/`Errored` sessions only) flagged drift.
+    /// Test: `managed_session_summary_deserializes_stale_assets_flag`.
+    #[serde(default)]
+    pub stale_assets: bool,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

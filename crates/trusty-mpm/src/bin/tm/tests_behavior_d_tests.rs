@@ -506,6 +506,56 @@ fn cli_parses_session_prune_worktrees() {
 }
 
 #[test]
+fn cli_parses_sessions_sync_assets() {
+    // #2444: `sync-assets <id>` re-syncs ONE session.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "sync-assets", "abc"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Sessions {
+            action: SessionAction::SyncAssets { id, all },
+        } => {
+            assert_eq!(id.as_deref(), Some("abc"));
+            assert!(!all);
+        }
+        other => panic!("expected sessions sync-assets, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessions_sync_assets_all() {
+    // #2444: `sync-assets --all` re-syncs every syncable session.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "sync-assets", "--all"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Sessions {
+            action: SessionAction::SyncAssets { id, all },
+        } => {
+            assert_eq!(id, None);
+            assert!(all);
+        }
+        other => panic!("expected sessions sync-assets --all, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_sessions_sync_assets_requires_id_or_all() {
+    // Neither an id nor --all: must be a parse error (required_unless_present).
+    let err = Cli::try_parse_from(["trusty-mpm", "sessions", "sync-assets"]);
+    assert!(
+        err.is_err(),
+        "sync-assets with neither an id nor --all must fail to parse"
+    );
+}
+
+#[test]
+fn cli_sessions_sync_assets_id_and_all_conflict() {
+    // Both an id and --all: must be a parse error (conflicts_with).
+    let err = Cli::try_parse_from(["trusty-mpm", "sessions", "sync-assets", "abc", "--all"]);
+    assert!(
+        err.is_err(),
+        "sync-assets with both an id and --all must fail to parse"
+    );
+}
+
+#[test]
 fn cli_parses_session_catchup() {
     // DOC-28 PR1 (#1762): `tm session catchup --all-projects --full` must parse
     // cleanly and deliver the expected field values.

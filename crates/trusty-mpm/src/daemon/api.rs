@@ -296,6 +296,10 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/api/v1/sessions/managed/{id}/send", post(send_to_session))
         // #2605: async-spawn progress poll route, merged as a sub-router.
         .merge(super::managed_routes::provision_status::router())
+        // #2444: per-session + fleet-wide asset re-sync
+        // (`tm sessions sync-assets <id>|--all`), merged as a sub-router —
+        // mirrors the `provision_status::router()` merge immediately above.
+        .merge(super::managed_routes::sync_assets::router())
         .route(
             "/api/v1/sessions/managed/{id}/answer",
             post(answer_session_decision),

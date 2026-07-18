@@ -173,6 +173,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         pane_id: None,
         injection_status: None,
         unresumable: false,
+        stale_assets: false,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -207,6 +208,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         pane_id: None,
         injection_status: None,
         unresumable: false,
+        stale_assets: false,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,
@@ -288,6 +290,38 @@ fn injection_status_wire_stringifies_other_variants() {
 // definition in `resume_error.rs` (#2577 review) — see
 // `resume_error::tests::unresumable_response_tags_reason_header_per_failure_class`.
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::session_assets::tests::HomeGuard` /
+/// `core::standalone::load::tests::HomeGuard`.
+///
+/// Why: `checked_summaries` now also runs the #2444 asset-staleness probe
+/// (`crate::core::session_assets::session_assets_stale`), which resolves its
+/// bundled-source half via `FrameworkPaths::for_managed_workspace` — always
+/// anchored at `FrameworkPaths::default().root` (the real `$HOME/.trusty-mpm`
+/// in production). Any test exercising `checked_summaries` must therefore
+/// point `$HOME` at a throwaway tempdir so the probe reads a fake framework
+/// tree, never the developer's real one.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at a fresh tempdir for the duration of the guard.
+fn fake_home() -> (tempfile::TempDir, HomeGuard) {
+    let home = tempfile::TempDir::new().unwrap();
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]` on every caller.
+    unsafe { std::env::set_var("HOME", home.path()) };
+    (home, HomeGuard(prior))
+}
+
 /// #2595 review (PR #2652, MEDIUM finding 4): [`checked_summaries`] fans its
 /// per-record `unresumable` probes out concurrently via `JoinSet`, which
 /// yields completed tasks in COMPLETION order, not submission order — this
@@ -295,7 +329,9 @@ fn injection_status_wire_stringifies_other_variants() {
 /// SAME order as the input `records` slice, and that only the genuinely-dead
 /// record among a live/dead/healthy-stopped trio gets flagged.
 #[tokio::test]
+#[serial_test::serial]
 async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() {
+    let _home = fake_home();
     // r0: Active — the state gate alone skips the filesystem probe.
     let mut r0 = make_record(None);
     r0.state = ManagedSessionState::Active;
@@ -348,5 +384,119 @@ async fn checked_summaries_preserves_input_order_and_flags_only_dead_sessions() 
     assert!(
         !summaries[2].unresumable,
         "an errored session with a REAL existing cwd must stay resumable"
+    );
+}
+
+/// Issue #2444: [`checked_summaries`]'s asset-staleness probe must fire only
+/// for the states where it is meaningful (`Active`/`Stopped`/`Errored`) and
+/// must correctly flag a session whose deployed agent has drifted from the
+/// (fake-home) bundled source, while leaving a `Provisioning` session (no
+/// deploy has happened yet — every artifact would spuriously read "new") at
+/// its `false` default regardless of workspace content.
+#[tokio::test]
+#[serial_test::serial]
+async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
+    let (home, _guard) = fake_home();
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+
+    // Deploy into an Active session's workspace, then drift the catalog.
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &session_fw.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+
+    let mut active = make_record(None);
+    active.state = ManagedSessionState::Active;
+    active.workspace_path = Some(workspace);
+
+    // Provisioning: no deploy has happened in this workspace at all.
+    let provisioning_ws = home.path().join("never-deployed");
+    std::fs::create_dir_all(&provisioning_ws).unwrap();
+    let mut provisioning = make_record(None);
+    provisioning.state = ManagedSessionState::Provisioning;
+    provisioning.workspace_path = Some(provisioning_ws);
+
+    let records = vec![active, provisioning];
+    let summaries = checked_summaries(&records).await;
+
+    assert!(
+        summaries[0].stale_assets,
+        "an Active session whose deployed agent drifted from the bundled \
+         source must be flagged stale_assets"
+    );
+    assert!(
+        !summaries[1].stale_assets,
+        "a Provisioning session must never be probed — it has not deployed yet"
+    );
+}
+
+/// Issue #2444 review (MEDIUM finding): `checked_summaries`'s staleness probe
+/// now shares ONE `CatalogHashes::compute` across every session resolving the
+/// same default catalog source (`stale_assets_for_many` in `summary.rs`).
+/// This pins that the SHARING never cross-contaminates results — two Active
+/// sessions using the identical (default bundled) catalog source, one fresh
+/// and one genuinely stale, must each get their OWN correct, independent
+/// `stale_assets` verdict.
+#[tokio::test]
+#[serial_test::serial]
+async fn checked_summaries_stale_assets_independent_per_session_sharing_one_catalog() {
+    let (home, _guard) = fake_home();
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+
+    // Session A: deploys while the catalog is at v1, then the catalog moves
+    // to v2 — A must end up stale.
+    let ws_a = home.path().join("workspace-a");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    let fw_a = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws_a);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &fw_a.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+
+    // Session B: deploys AFTER the catalog already moved to v2 — B must stay
+    // fresh, sharing the SAME (now-v2) catalog hash cache entry as A.
+    let ws_b = home.path().join("workspace-b");
+    std::fs::create_dir_all(&ws_b).unwrap();
+    let fw_b = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws_b);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &fw_b.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+
+    let mut a = make_record(None);
+    a.state = ManagedSessionState::Active;
+    a.workspace_path = Some(ws_a);
+    let mut b = make_record(None);
+    b.state = ManagedSessionState::Active;
+    b.workspace_path = Some(ws_b);
+
+    let records = vec![a, b];
+    let summaries = checked_summaries(&records).await;
+
+    assert!(
+        summaries[0].stale_assets,
+        "session A deployed against v1 and the catalog moved to v2 — must be stale"
+    );
+    assert!(
+        !summaries[1].stale_assets,
+        "session B deployed against the current v2 catalog — must stay fresh, \
+         even though it shares the SAME cached catalog hashes as session A"
     );
 }

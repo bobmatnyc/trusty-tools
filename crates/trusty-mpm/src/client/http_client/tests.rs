@@ -482,6 +482,27 @@ fn managed_session_summary_deserializes_unresumable_flag() {
     );
 }
 
+/// #2444: `stale_assets` must round-trip when present, and default `false`
+/// (never spuriously flag a session stale) when an older daemon omits it.
+#[test]
+fn managed_session_summary_deserializes_stale_assets_flag() {
+    let with_flag = serde_json::json!({
+        "id": "x", "name": "n", "state": "active", "stale_assets": true
+    });
+    let s: ManagedSessionSummary = serde_json::from_value(with_flag).unwrap();
+    assert!(
+        s.stale_assets,
+        "stale_assets: true must deserialize to true"
+    );
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "active"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert!(
+        !s.stale_assets,
+        "an older daemon omitting `stale_assets` must default to false"
+    );
+}
+
 #[test]
 fn managed_list_response_deserializes() {
     let json = serde_json::json!({

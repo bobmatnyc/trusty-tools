@@ -125,11 +125,15 @@ pub(crate) async fn session_ls(
 /// The STATE column appends `[dead]` (#2595) when the server-computed
 /// `unresumable` flag is set — the session's workspace no longer exists
 /// anywhere on disk, so `tm session resume`/the picker's restart would only
-/// ever fail; the operator's actionable remedy is `tm session rm`.
+/// ever fail; the operator's actionable remedy is `tm session rm`. It also
+/// appends `[stale-assets]` (#2444) when the server-computed `stale_assets`
+/// flag is set — the session's deployed agents/skills have drifted from the
+/// catalog; the remedy is `tm sessions sync-assets <id>`.
 /// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
 /// table bytes are exercised by `tests/session_manager_mvp.rs`;
-/// `format_state_column_appends_dead_marker` covers the `[dead]` marker via the
-/// extracted pure helper, [`format_state_column`].
+/// `format_state_column_appends_dead_marker` and
+/// `format_state_column_appends_stale_assets_marker` cover the two markers via
+/// the extracted pure helper, [`format_state_column`].
 pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
     if sessions.is_empty() {
         if let Some(sid) = source_id {
@@ -164,7 +168,7 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
         // #2595: flag a dead pick (stopped/errored with no workdir candidate
         // left on disk) right in the STATE column — the operator sees it
         // without having to select the session and hit a 422 first.
-        let state = format_state_column(&s.state, s.unresumable);
+        let state = format_state_column(&s.state, s.unresumable, s.stale_assets);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
             "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
@@ -178,21 +182,29 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
     }
 }
 
-/// Format the STATE column value for one `tm session ls` row (#2595).
+/// Format the STATE column value for one `tm session ls` row (#2595, #2444).
 ///
-/// Why: extracted as a pure function so the `[dead]` marker is unit-testable
-/// without capturing `render_session_table`'s stdout.
-/// What: returns `state` unchanged when `unresumable` is `false`; appends
-/// `" [dead]"` when `true` — the session is `stopped`/`errored` with no
-/// workdir candidate left on disk, so a resume is guaranteed to fail.
+/// Why: extracted as a pure function so the `[dead]`/`[stale-assets]` markers
+/// are unit-testable without capturing `render_session_table`'s stdout.
+/// What: returns `state` unchanged when both flags are `false`; appends
+/// `" [dead]"` when `unresumable` is `true` (the session is `stopped`/
+/// `errored` with no workdir candidate left on disk, so a resume is
+/// guaranteed to fail), and/or `" [stale-assets]"` when `stale_assets` is
+/// `true` (the session's deployed agents/skills have drifted from the
+/// catalog — `tm sessions sync-assets <id>` fixes it). Both markers can
+/// appear together.
 /// Test: `format_state_column_appends_dead_marker`,
+/// `format_state_column_appends_stale_assets_marker`,
 /// `format_state_column_leaves_healthy_state_unchanged`.
-fn format_state_column(state: &str, unresumable: bool) -> String {
+fn format_state_column(state: &str, unresumable: bool, stale_assets: bool) -> String {
+    let mut out = state.to_string();
     if unresumable {
-        format!("{state} [dead]")
-    } else {
-        state.to_string()
+        out.push_str(" [dead]");
     }
+    if stale_assets {
+        out.push_str(" [stale-assets]");
+    }
+    out
 }
 
 /// Truncate a string to at most `max` characters, appending `…` when cut.

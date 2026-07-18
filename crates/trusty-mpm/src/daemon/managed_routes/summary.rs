@@ -12,8 +12,13 @@
 //! Test: `serializers_include_source_id` in `super::tests`; the handler tests
 //! throughout `managed_routes` exercise these indirectly.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use axum::http::StatusCode;
 
+use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan};
+use crate::core::update_check::CatalogHashes;
 use crate::session_manager::{
     InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
 };
@@ -109,7 +114,78 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         pane_id: r.pane_id.clone(),
         injection_status: injection_status_wire(r.injection_status),
         unresumable: false,
+        stale_assets: false,
     }
+}
+
+/// Whether a record's state is one [`session_assets_stale`] is worth probing.
+///
+/// Why: shared by [`record_to_summary_checked`] and [`checked_summaries`] so
+/// the two never disagree on which states get the asset-staleness probe.
+/// Provisioning workspaces have not deployed yet (every managed artifact would
+/// spuriously read as "new"/stale) and decommissioned ones have no workspace
+/// left to probe — both would only add noise, not signal.
+/// What: `true` for `Active`, `Stopped`, and `Errored`.
+/// Test: `checked_summaries_flags_stale_assets_only_for_relevant_states`.
+fn probe_staleness_for(state: &ManagedSessionState) -> bool {
+    matches!(
+        state,
+        ManagedSessionState::Active | ManagedSessionState::Stopped | ManagedSessionState::Errored
+    )
+}
+
+/// Compute `stale_assets` for every record in `records`, sharing the
+/// catalog-side compose/hash work across ALL of them (issue #2444 review,
+/// MEDIUM finding: `checked_summaries` originally called
+/// `session_assets_stale` — a full, independent catalog recompose — once PER
+/// SESSION on every `tm sessions ls`, recomposing the same ~40+ catalog
+/// agents redundantly for every session sharing the default source).
+///
+/// Why: a staleness comparison splits into an expensive CATALOG-side half
+/// (composing agents, reading skill bodies — identical for every session
+/// sharing the same resolved `(agent_source, skill_source)` pair) and a
+/// cheap DEPLOYED-side half (this session's own manifest + on-disk files).
+/// Grouping records by their resolved source pair via
+/// [`crate::core::session_assets::session_plan`] and computing
+/// [`CatalogHashes::compute`] ONCE per distinct pair — which collapses to a
+/// SINGLE compute for the common case where every session resolves the
+/// shared default bundled/catalog source, and stays exactly correct for the
+/// rare session carrying its own project-level manifest override — removes
+/// the N-times recompose entirely. Both the manifest resolution and the
+/// catalog compose are filesystem-bound, so this whole function is
+/// synchronous/blocking; callers run it via [`tokio::task::spawn_blocking`].
+/// What: returns `record.id -> stale` for every record passed in (typically
+/// pre-filtered to [`probe_staleness_for`]'s syncable subset by the caller).
+/// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
+/// `checked_summaries_flags_stale_assets_only_for_relevant_states` in
+/// `super::tests`.
+fn stale_assets_for_many(records: Vec<SessionRecord>) -> HashMap<ManagedSessionId, bool> {
+    let mut cache: HashMap<(PathBuf, PathBuf), CatalogHashes> = HashMap::new();
+    let mut result = HashMap::with_capacity(records.len());
+    for record in records {
+        let (fw, plan) = session_plan(&record);
+        let key = (plan.agent_source.clone(), plan.skill_source.clone());
+        let catalog = cache
+            .entry(key)
+            .or_insert_with(|| CatalogHashes::compute(&plan.agent_source, &plan.skill_source));
+        let stale = session_asset_staleness_with_catalog(&fw, &plan, catalog).stale;
+        result.insert(record.id, stale);
+    }
+    result
+}
+
+/// Run [`stale_assets_for_many`] on the blocking pool for a single record —
+/// the `record_to_summary_checked` (single-session GET) call site, which has
+/// no batching benefit (N=1) but still needs the same blocking-pool handoff
+/// [`checked_summaries`] uses for the multi-session path.
+async fn probe_stale_assets(record: SessionRecord) -> bool {
+    let id = record.id;
+    tokio::task::spawn_blocking(move || stale_assets_for_many(vec![record]))
+        .await
+        .unwrap_or_default()
+        .get(&id)
+        .copied()
+        .unwrap_or(false)
 }
 
 /// [`record_to_summary`] plus the async `unresumable` probe (#2595).
@@ -126,6 +202,9 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
 pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSummary {
     let mut summary = record_to_summary(r);
     summary.unresumable = crate::session_manager::resume_workdir::is_unresumable(r).await;
+    if probe_staleness_for(&r.state) {
+        summary.stale_assets = probe_stale_assets(r.clone()).await;
+    }
     summary
 }
 
@@ -174,6 +253,29 @@ pub(super) async fn checked_summaries(records: &[SessionRecord]) -> Vec<SessionS
             summaries[idx].unresumable = unresumable;
         }
     }
+
+    // Second, independent pass for the #2444 asset-staleness probe. Unlike
+    // `unresumable` above, this is a SINGLE `spawn_blocking` call over every
+    // syncable record rather than one task per record — `stale_assets_for_many`
+    // shares the expensive catalog-side compose across all of them (issue
+    // #2444 review MEDIUM finding), which a per-record `JoinSet` fan-out
+    // would defeat (each task would redundantly recompose the same catalog).
+    let syncable: Vec<SessionRecord> = records
+        .iter()
+        .filter(|r| probe_staleness_for(&r.state))
+        .cloned()
+        .collect();
+    if !syncable.is_empty() {
+        let stale_map = tokio::task::spawn_blocking(move || stale_assets_for_many(syncable))
+            .await
+            .unwrap_or_default();
+        for (idx, r) in records.iter().enumerate() {
+            if let Some(&stale) = stale_map.get(&r.id) {
+                summaries[idx].stale_assets = stale;
+            }
+        }
+    }
+
     summaries
 }
 

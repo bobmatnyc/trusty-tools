@@ -452,6 +452,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
         pane_id: None,
         injection_status: None,
         unresumable: false,
+        stale_assets: false,
     };
     let client = reqwest::Client::new();
 

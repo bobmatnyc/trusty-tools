@@ -44,17 +44,41 @@ fn truncate_clips_and_appends_ellipsis() {
 /// the operator sees it without selecting the session and hitting a 422 first.
 #[test]
 fn format_state_column_appends_dead_marker() {
-    assert_eq!(format_state_column("stopped", true), "stopped [dead]");
-    assert_eq!(format_state_column("errored", true), "errored [dead]");
+    assert_eq!(
+        format_state_column("stopped", true, false),
+        "stopped [dead]"
+    );
+    assert_eq!(
+        format_state_column("errored", true, false),
+        "errored [dead]"
+    );
+}
+
+/// #2444: `tm sessions ls` must mark a session whose deployed assets drifted
+/// from the catalog, and both markers must be able to appear together.
+#[test]
+fn format_state_column_appends_stale_assets_marker() {
+    assert_eq!(
+        format_state_column("active", false, true),
+        "active [stale-assets]"
+    );
+    assert_eq!(
+        format_state_column("stopped", true, true),
+        "stopped [dead] [stale-assets]",
+        "both markers must be able to appear together"
+    );
 }
 
 /// #2595: a healthy (resumable) session's STATE column must render byte-for-byte
 /// unchanged — no regression for the common case.
 #[test]
 fn format_state_column_leaves_healthy_state_unchanged() {
-    assert_eq!(format_state_column("active", false), "active");
-    assert_eq!(format_state_column("stopped", false), "stopped");
-    assert_eq!(format_state_column("provisioning", false), "provisioning");
+    assert_eq!(format_state_column("active", false, false), "active");
+    assert_eq!(format_state_column("stopped", false, false), "stopped");
+    assert_eq!(
+        format_state_column("provisioning", false, false),
+        "provisioning"
+    );
 }
 
 #[test]

@@ -378,6 +378,16 @@ pub(crate) async fn session(
             // `--force` means "actually delete"; absence means dry-run (#1840).
             crate::commands::managed::session_prune_worktrees(client, url, !force).await?
         }
+        // #2444: re-sync a live session's (or every syncable session's)
+        // deployed assets against the current catalog. Fleet-wide store
+        // operation like `Prune`/`DecommissionEphemeral` above — direct HTTP,
+        // not chat-core.
+        SessionAction::SyncAssets { id: Some(id), .. } => {
+            crate::commands::sync_assets::session_sync_assets(client, url, id).await?
+        }
+        SessionAction::SyncAssets { id: None, .. } => {
+            crate::commands::sync_assets::session_sync_assets_all(client, url).await?
+        }
         // #2012: hard-delete the record; goes through direct HTTP like the
         // other fleet-teardown verbs above (not chat-core — `delete` is a
         // distinct terminal store operation, not a `decommission` alias).
