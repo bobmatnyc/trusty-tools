@@ -1,10 +1,19 @@
 <script lang="ts">
   // Why: Minimal scaffold shell (issue #2983, DOC-39) — proves the desktop
   // app connects to the tcode daemon and gives the next UI slice a layout to
-  // extend. Phase 1 adds the status bar (DOC-39 §6.2); the rest is still
-  // scaffold, not the full DOC-39 screen set.
+  // extend. Phase 1 adds the status bar (DOC-39 §6.2) and, in this slice,
+  // the 8b session monitor card (DOC-39 §4.6, refs #2983). `body`'s prior
+  // `ActivityPlaceholder` explicitly said its purpose was "session list /
+  // activity view... coming once GET /sessions lands" — that has now
+  // landed and `SessionMonitor` covers "what's happening in the active
+  // session" more concretely than the placeholder's static text did, so it
+  // is REPLACED here rather than shown alongside it (a still-unbuilt
+  // session-LIST/picker view, distinct from monitoring the one active
+  // session, is a separate Phase 2+ surface per DOC-39 §6.3, not something
+  // this placeholder was actually standing in for once GET /sessions is
+  // live).
   // What: Renders a header, a `.body` region (the daemon HealthPanel smoke
-  // connection + the session/activity placeholder), and `StatusBar` — the
+  // connection + the session monitor card), and `StatusBar` — the
   // readiness+budget chrome — as a DIRECT SIBLING of `.body`, never nested
   // inside it. DOC-39 §8.1 / AC-18.1 calls this out explicitly: nesting
   // `.statusbar` inside `.body` has regressed the wireframe twice ("This bit
@@ -12,10 +21,12 @@
   // `App.test.ts` asserts the DOM invariant this markup encodes.
   // Test: Launch under Tauri or `pnpm dev` in a browser — both show the same
   // connected/disconnected state (DOC-39 §2.1 web/Tauri parity) plus the
-  // status bar's readiness indicator. `App.test.ts::statusbar-is-sibling-of-body`
-  // pins the structural invariant.
+  // status bar's readiness indicator and the session monitor card.
+  // `App.test.ts::statusbar-is-sibling-of-body` pins the structural
+  // invariant; `App.test.ts::session-monitor-renders-inside-body` pins the
+  // monitor card's placement.
   import HealthPanel from './components/HealthPanel.svelte';
-  import ActivityPlaceholder from './components/ActivityPlaceholder.svelte';
+  import SessionMonitor from './components/SessionMonitor.svelte';
   import StatusBar from './components/StatusBar.svelte';
 </script>
 
@@ -27,7 +38,7 @@
 
   <div class="body flex flex-1 flex-col gap-4 p-6">
     <HealthPanel />
-    <ActivityPlaceholder />
+    <SessionMonitor />
   </div>
 
   <StatusBar />
