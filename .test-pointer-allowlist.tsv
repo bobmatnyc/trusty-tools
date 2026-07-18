@@ -203,7 +203,6 @@ crates/trusty-common/src/embedder_client/remote.rs	remote_embed_url_construction
 crates/trusty-common/src/embedder_client/supervisor.rs	from_env_uses_defaults
 crates/trusty-common/src/embedder_client/supervisor.rs	stdio_eof_terminates_child
 crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_restarts_on_crash
-crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_shutdown_kills_child
 crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_spawns_mock_child_and_embeds
 crates/trusty-common/src/embedder/fast_embedder.rs	cache_hit_is_idempotent
 crates/trusty-common/src/embedder/fast_embedder.rs	embed_batch_returns_correct_dim

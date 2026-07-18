@@ -346,3 +346,196 @@ fn should_give_up_at_boundary_does_not_trip() {
     // Test: this test.
     assert!(!should_give_up(5, 5, 5));
 }
+
+// ── Cooperative shutdown (issue #2979) ──────────────────────────────────
+//
+// These tests spawn a real (but tiny) child process — a POSIX shell script
+// that speaks just enough of the trusty-embedderd stdio JSON-RPC wire
+// protocol to pass `spawn_child`'s startup probe, then idles until killed —
+// so `EmbedderSupervisor::spawn_stdio` and `start_supervisor_task` exercise
+// their real process-lifecycle code paths without needing the actual ONNX
+// binary (which would pull in multi-second model-load time just for a
+// lifecycle assertion).
+#[cfg(unix)]
+mod shutdown_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    /// Write a minimal stdio JSON-RPC mock of `trusty-embedderd --stdio` to a
+    /// temp file; returns the path plus the guarding `TempDir` (kept alive by
+    /// the caller for as long as the script must remain spawnable on disk).
+    ///
+    /// Why: `spawn_child`'s startup probe sends one real `embed` JSON-RPC
+    /// request and requires a well-formed response within
+    /// `startup_timeout_secs` — a no-op binary would fail the probe. The mock
+    /// echoes back each request's `id` with one canned embedding (every
+    /// request in these tests sends exactly one text), then loops reading
+    /// (idling, like a real sidecar between requests) until the test process
+    /// kills it.
+    /// What: a `/bin/sh` script using only POSIX `read`/`sed`/`printf` — no
+    /// interpreter dependency beyond the shell every CI runner in this
+    /// workspace already has. Unix-only: the raw-kill behaviour this fix
+    /// replaces was already Unix-only (see `idle_watchdog`'s `#[cfg(unix)]`
+    /// gate in `trusty-search`), so Windows coverage is out of scope here.
+    /// Test: used by `supervisor_shutdown_kills_child`,
+    /// `supervisor_shutdown_handle_is_reachable_and_stops_child`,
+    /// `supervisor_intentional_shutdown_does_not_respawn`.
+    fn write_mock_embedderd() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$id" ] || id=1
+  printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+done
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
+    /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
+    /// an existence probe): success means the process still exists, failure
+    /// means it is gone.
+    /// Why: extracted for reuse across the tests below; trusty-common has no
+    /// `nix` dependency, so this shells out to the POSIX `kill` utility
+    /// rather than pulling one in just for a test assertion.
+    /// What: `Command::new("kill").args(["-0", pid])`; `true` iff it exits 0.
+    /// Test: exercised indirectly by every test in this module.
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Verify the pre-detach `EmbedderSupervisor::shutdown()` actually kills
+    /// the child — the one case where it was always reachable, since it only
+    /// becomes unreachable once `start_supervisor_task` consumes `self`.
+    ///
+    /// Why: this method's doc has cited this test name since before issue
+    /// #2979 (it was dangling — grandfathered in `.test-pointer-allowlist.tsv`);
+    /// making it real is a drive-by fix while touching this file for the
+    /// same issue.
+    /// What: spawn the mock, capture its PID, call `shutdown()` without ever
+    /// detaching, assert the OS process is gone.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_shutdown_kills_child() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let pid = pid_slot.load(Ordering::Acquire);
+        assert!(pid > 0, "pid_slot must be populated after spawn");
+
+        supervisor.shutdown().await;
+
+        assert!(
+            !process_alive(pid),
+            "child process {pid} must be gone after shutdown()"
+        );
+    }
+
+    /// Core issue #2979 assertion: `shutdown()` is reachable AFTER
+    /// `start_supervisor_task` — via the `SupervisorHandle` it now returns —
+    /// and actually stops the supervised child.
+    ///
+    /// Why: before this fix, `start_supervisor_task(self)` consumed `self`
+    /// and returned nothing, so a caller that detached (the only way
+    /// trusty-search ever used this type) had no way left to call
+    /// `shutdown()` at all.
+    /// What: spawn the mock, detach via `start_supervisor_task` (capturing
+    /// the returned handle), call `handle.shutdown().await`, assert the
+    /// child is gone and `child_pid_slot` was cleared to 0.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_shutdown_handle_is_reachable_and_stops_child() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let pid = pid_slot.load(Ordering::Acquire);
+        assert!(pid > 0, "pid_slot must be populated after spawn");
+
+        let handle = supervisor.start_supervisor_task();
+        handle.shutdown().await;
+
+        assert!(
+            !process_alive(pid),
+            "child process {pid} must be gone after SupervisorHandle::shutdown()"
+        );
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "child_pid_slot must be cleared to 0 after cooperative shutdown"
+        );
+    }
+
+    /// The other half of issue #2979: an intentional shutdown must NEVER
+    /// trigger the crash-restart path.
+    ///
+    /// Why: the bug this issue reports is not merely "shutdown doesn't
+    /// work" — it's that the old out-of-band PID kill raced
+    /// `supervision_loop`'s `child.wait()`, which had no way to distinguish
+    /// that deliberate kill from a crash and respawned the sidecar the
+    /// caller had just stopped.
+    /// What: shut down via the handle, then wait comfortably longer than the
+    /// first respawn back-off delay (1s) would take, and assert
+    /// `child_pid_slot` is STILL 0 — if the loop had misclassified the
+    /// shutdown as a crash, a respawn within that window would have
+    /// published a fresh non-zero PID.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_intentional_shutdown_does_not_respawn() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            max_restarts: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+
+        let handle = supervisor.start_supervisor_task();
+        handle.shutdown().await;
+
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "pid_slot must be 0 immediately after cooperative shutdown"
+        );
+
+        // Longer than the first exponential back-off delay (1s) a
+        // misclassified-as-crash respawn would have used.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "pid_slot must STILL be 0 well past the first respawn back-off \
+             window — a non-zero PID here would mean the shutdown was \
+             misclassified as a crash and the sidecar was respawned"
+        );
+    }
+}

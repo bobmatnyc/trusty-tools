@@ -239,6 +239,14 @@ pub fn default_socket_path() -> PathBuf {
 struct SpawnedState {
     /// The embed-client slot — the supervisor swaps this on crash-restart.
     client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>>,
+    /// Cooperative shutdown handle for the supervisor's detached task (issue
+    /// #2979). `idle_watchdog` calls `.shutdown()` on this instead of killing
+    /// the sidecar by raw OS PID — the old raw SIGTERM/SIGKILL raced the
+    /// supervision loop's `child.wait()`, which had no way to distinguish an
+    /// intentional stop from a crash and respawned the sidecar the watchdog
+    /// had just stopped. `None` only in hand-seeded test states that never
+    /// went through `do_spawn` (a real spawn always populates it).
+    supervisor_handle: Option<trusty_common::embedder_client::SupervisorHandle>,
     /// Kept alive so that dropping `SpawnedState` (on idle-shutdown or daemon
     /// exit) automatically signals the watchdog task to stop. The receiver
     /// end is held by the watchdog; when this Sender is dropped, the
@@ -618,14 +626,13 @@ async fn do_spawn(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Detach the crash-restart loop. Note: we need to arm the idle watchdog
-    // AFTER calling start_supervisor_task (which consumes the supervisor).
-    // We wrap the receiver in the supervision task by passing it as a
-    // graceful-stop signal via a separate mechanism — since the existing
-    // `start_supervisor_task` API doesn't accept a shutdown channel, we
-    // use `kill_on_drop(true)` (already set in `spawn_child`) + the watchdog
-    // directly killing the process via the PID slot.
-    supervisor.start_supervisor_task();
+    // Detach the crash-restart loop. `start_supervisor_task` returns a
+    // `SupervisorHandle` (issue #2979) that `idle_watchdog` uses for
+    // cooperative shutdown — flipping its internal shutdown flag makes the
+    // supervision loop kill and reap the child itself and return without
+    // ever entering the crash-restart path, so an intentional idle-shutdown
+    // can no longer be misclassified as a crash and respawned.
+    let supervisor_handle = supervisor.start_supervisor_task();
 
     // Arm the idle-shutdown watchdog when requested.
     let idle_secs = config.idle_shutdown_secs;
@@ -649,6 +656,7 @@ async fn do_spawn(
 
     Ok(SpawnedState {
         client_slot,
+        supervisor_handle: Some(supervisor_handle),
         shutdown_tx,
         pid_slot: child_pid_slot,
     })
@@ -664,23 +672,30 @@ async fn do_spawn(
 ///
 /// What: ticks every 10 seconds. On each tick:
 ///   1. Reads `last_use` to compute idle duration.
-///   2. If `idle_duration >= idle_secs` AND no request is in flight, kills the
-///      child via its OS PID, clears `state_cell` (resets the spawn gate), and
-///      exits. While `in_flight > 0` it skips the kill and re-checks next tick
-///      (issue #2315 — never SIGKILL a request mid-flight).
+///   2. If `idle_duration >= idle_secs` AND no request is in flight, resets
+///      the spawn gate (clears `state_cell`) and cooperatively shuts down the
+///      sidecar via `SpawnedState::supervisor_handle` (issue #2979), then
+///      exits. While `in_flight > 0` it skips the shutdown and re-checks next
+///      tick (issue #2315 — never kill a request mid-flight).
 ///   3. If `shutdown_rx` fires, exits cleanly (the handle was dropped or the
 ///      daemon is shutting down).
 ///
-/// Killing the child triggers the supervisor loop's `child.wait()` to
-/// return, which clears `child_pid_slot` to 0 and then stops supervising
-/// (exit code will be non-zero from SIGKILL; after `max_restarts` is
-/// exceeded the loop exits — but we clear `state_cell` first so the
-/// next request triggers `do_spawn` freshly rather than waiting for the
-/// old supervisor to exhaust its retry budget).
+/// Before issue #2979 this killed the child directly by raw OS PID
+/// (SIGTERM then SIGKILL), racing the supervision loop's `child.wait()` —
+/// which had no way to tell that deliberate kill apart from a crash and
+/// respawned the sidecar the watchdog had just stopped. Calling
+/// `SupervisorHandle::shutdown()` instead flips a flag the supervision loop
+/// itself selects on: the loop kills and reaps the child, clears
+/// `child_pid_slot`, and returns without ever entering the crash-restart
+/// path, so the intentional stop can no longer be misclassified.
 ///
 /// Test: `lazy_handle_idle_shutdown_waits_for_inflight_request` drives this
-/// task directly with a synthetic live state (pid 0 → no real kill) and asserts
-/// it defers eviction while `in_flight > 0`, then reclaims once it drops to 0.
+/// task directly with a synthetic live state (`supervisor_handle: None` → no
+/// real process to shut down) and asserts it defers eviction while
+/// `in_flight > 0`, then reclaims once it drops to 0. The underlying
+/// no-respawn guarantee that `SupervisorHandle::shutdown()` provides is
+/// proven against a real (mocked) child process by trusty-common's
+/// supervisor_intentional_shutdown_does_not_respawn test.
 async fn idle_watchdog(
     idle_secs: u64,
     state_cell: Arc<Mutex<Option<SpawnedState>>>,
@@ -741,40 +756,32 @@ async fn idle_watchdog(
             drop(guard);
             continue;
         }
-        if guard.is_some() {
-            // Kill the child process via its OS PID.
-            let pid = app_pid_slot.load(AtomicOrdering::Acquire);
-            if pid != 0 {
-                #[cfg(unix)]
-                {
-                    use nix::sys::signal::{kill, Signal};
-                    use nix::unistd::Pid;
-                    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-                    // Brief grace period before SIGKILL.
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                }
-                #[cfg(not(unix))]
-                {
-                    // On non-Unix platforms (Windows), we have no direct kill
-                    // mechanism from PID alone without a Child handle. The
-                    // watchdog logs and resets the state; the supervisor will
-                    // eventually notice the child is gone.
-                    tracing::warn!(
-                        "idle_watchdog: idle kill not supported on this platform; \
-                         clearing state only"
-                    );
-                }
-            }
-
-            // Reset the spawn gate so the next embed call triggers a fresh
-            // spawn. Clear the app PID slot so `/health` reports no sidecar.
-            *guard = None;
+        if let Some(spawned) = guard.take() {
+            // Reset the spawn gate immediately (the cell now holds `None`)
+            // and clear the app PID slot so `/health` reports no sidecar
+            // right away. Release the lock before awaiting the cooperative
+            // shutdown below — the gate is already clear, so a fresh embed
+            // request arriving during the shutdown just triggers a new
+            // `do_spawn` concurrently; it has no reason to wait on the
+            // just-stopped process.
+            drop(guard);
             app_pid_slot.store(0, AtomicOrdering::Release);
+
+            // Cooperative shutdown (issue #2979): flips the shared shutdown
+            // flag the supervision loop selects on. The loop kills and reaps
+            // the child itself and returns without ever entering the
+            // crash-restart path — unlike the old raw SIGTERM/SIGKILL-by-PID
+            // approach this replaces, the intentional stop can never be
+            // misclassified as a crash and respawned.
+            if let Some(handle) = spawned.supervisor_handle {
+                handle.shutdown().await;
+            }
 
             tracing::info!(
                 "LazyEmbedderHandle: embedderd idle-shutdown complete; spawn gate reset"
             );
+        } else {
+            drop(guard);
         }
 
         // Exit the watchdog — the next spawn will start a new watchdog task.

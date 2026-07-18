@@ -28,8 +28,24 @@
 //! fires, the loop force-kills the (possibly still-running) child and treats
 //! it exactly like a crash — same back-off, same respawn path.
 //!
-//! Test: `supervisor_spawns_mock_child_and_embeds`,
-//! `supervisor_restarts_on_crash`, `supervisor_shutdown_kills_child`,
+//! Cooperative shutdown (issue #2979): `start_supervisor_task` used to consume
+//! `self` and return nothing, so `EmbedderSupervisor::shutdown()` — which also
+//! consumes `self` — became permanently unreachable the moment a caller
+//! detached the background task (the only way callers actually use this
+//! type). trusty-search's idle-shutdown watchdog worked around this by
+//! sending a raw SIGTERM/SIGKILL to the child's OS PID directly, bypassing the
+//! supervisor entirely — but the supervision loop's `child.wait()` has no way
+//! to tell that deliberate kill apart from a real crash, so it respawned the
+//! sidecar the watchdog had just stopped. `start_supervisor_task` now returns
+//! a [`SupervisorHandle`] whose `shutdown()` flips a `watch::Receiver<bool>`
+//! the loop selects on (both while waiting on the child and during the
+//! respawn back-off sleep); the loop observes the flag, kills and reaps the
+//! child itself, clears the PID slot, and returns *without* ever entering the
+//! crash-restart path — the intentional stop can never be misclassified.
+//!
+//! Test: `supervisor_shutdown_kills_child`,
+//! `supervisor_shutdown_handle_is_reachable_and_stops_child`,
+//! `supervisor_intentional_shutdown_does_not_respawn`,
 //! `stdio_eof_terminates_child` in this module's `tests` submodule.
 
 use std::path::{Path, PathBuf};
@@ -345,25 +361,36 @@ impl EmbedderSupervisor {
     ///
     /// Why: the search daemon calls this once after `spawn_stdio` and then
     /// forgets about the supervisor — all restart logic runs in the background.
+    /// Returning a [`SupervisorHandle`] (rather than nothing, as before issue
+    /// #2979) is what makes cooperative shutdown reachable after detaching:
+    /// the caller keeps the handle instead of losing all access to the
+    /// (now-moved) supervisor.
     ///
     /// What: consumes `self` and spawns a Tokio task that races `child.wait()`
-    /// against the live client's `unhealthy_signal` (#1448/#1450) in a loop.
-    /// On non-zero exit, or on an unhealthy signal (which force-kills the
-    /// still-running child first): exponential back-off, respawn, swap in new
-    /// client. On `max_restarts` consecutive failures: log ERROR and stop.
-    /// `child_pid_slot` is updated to the new PID on each respawn and cleared
-    /// to 0 when the sidecar exits for the last time.
+    /// against the live client's `unhealthy_signal` (#1448/#1450) and a
+    /// shutdown flag (#2979) in a loop. On non-zero exit, or on an unhealthy
+    /// signal (which force-kills the still-running child first): exponential
+    /// back-off, respawn, swap in new client. On `max_restarts` consecutive
+    /// failures: log ERROR and stop. On the returned handle's `shutdown()`:
+    /// kill and reap the child, then stop — never respawn. `child_pid_slot` is
+    /// updated to the new PID on each respawn and cleared to 0 when the
+    /// sidecar exits for the last time.
     ///
-    /// Test: `supervisor_restarts_on_crash`.
-    pub fn start_supervisor_task(self) {
-        tokio::spawn(supervision_loop(
+    /// Test: `supervisor_restarts_on_crash`,
+    /// `supervisor_shutdown_handle_is_reachable_and_stops_child`,
+    /// `supervisor_intentional_shutdown_does_not_respawn`.
+    pub fn start_supervisor_task(self) -> SupervisorHandle {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let join = tokio::spawn(supervision_loop(
             self.binary_path,
             self.child,
             self.client_slot,
             self.child_pid_slot,
             self.unhealthy_signal,
             self.config,
+            shutdown_rx,
         ));
+        SupervisorHandle { shutdown_tx, join }
     }
 
     /// Terminate the sidecar and stop supervising.
@@ -383,6 +410,59 @@ impl EmbedderSupervisor {
             let _ = child.kill().await;
             let _ = child.wait().await;
             tracing::info!("EmbedderSupervisor: sidecar terminated on shutdown");
+        }
+    }
+}
+
+/// Cooperative shutdown handle for a detached supervision task (issue #2979).
+///
+/// Why: `start_supervisor_task` consumes `self`, so once a caller detaches
+/// the background task it no longer holds an `EmbedderSupervisor` to call
+/// `shutdown()` on — that method is unreachable from that point on. This
+/// handle is the reachable replacement: it is returned BY
+/// `start_supervisor_task`, so the caller always has a way to stop the
+/// sidecar cooperatively, no matter how long ago it detached.
+///
+/// What: wraps the `watch::Sender<bool>` half of the shutdown flag the
+/// supervision loop selects on, plus the loop's `JoinHandle` so `shutdown()`
+/// can await confirmation that the child was actually killed and reaped
+/// before returning — the same "confirmed dead" guarantee the old
+/// self-consuming `shutdown()` gave callers who never detached.
+///
+/// Test: `supervisor_shutdown_handle_is_reachable_and_stops_child`,
+/// `supervisor_intentional_shutdown_does_not_respawn`.
+#[must_use = "dropping the handle without calling shutdown() leaves the \
+              sidecar running in the background with no way to stop it \
+              cooperatively later"]
+pub struct SupervisorHandle {
+    shutdown_tx: watch::Sender<bool>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl SupervisorHandle {
+    /// Cooperatively stop the supervised sidecar and its supervision loop.
+    ///
+    /// Why: replaces the out-of-band PID kill trusty-search's idle watchdog
+    /// used before this fix (issue #2979) — that raw SIGTERM/SIGKILL raced
+    /// `child.wait()` in the supervision loop, which had no way to
+    /// distinguish an intentional stop from a crash and respawned the sidecar
+    /// the caller had just stopped.
+    ///
+    /// What: flips the shared shutdown flag to `true` (a send on a channel
+    /// with no live receiver — which only happens if the loop already exited
+    /// on its own, e.g. a clean-exit or a crash-storm give-up — is harmless
+    /// and ignored), then awaits the loop's `JoinHandle`. The loop observes
+    /// the flag (see `supervision_loop`'s shutdown branches), kills the
+    /// child, waits for it to exit, clears the PID slot, and returns without
+    /// respawning. A join error (the task panicked) is logged, not
+    /// propagated, since by definition the task — and therefore the sidecar
+    /// it supervised — is gone either way.
+    ///
+    /// Test: `supervisor_shutdown_handle_is_reachable_and_stops_child`.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(true);
+        if let Err(e) = self.join.await {
+            tracing::warn!("EmbedderSupervisor: supervision task join error on shutdown: {e}");
         }
     }
 }
@@ -543,11 +623,17 @@ fn should_give_up(
 ///
 /// Why: runs as a detached Tokio task so the parent daemon never blocks on it.
 /// What: races `child.wait()` against `unhealthy_signal.changed()`
-/// (#1448/#1450) each iteration. A process exit is handled as before
-/// (success → stop supervising; failure → back-off + respawn). An unhealthy
-/// signal force-kills the still-running child first, then falls into the same
-/// back-off + respawn path as a crash. Exits when the process exits cleanly
-/// (code 0) or when either restart ceiling (`should_give_up`) is exceeded.
+/// (#1448/#1450) and `shutdown_rx.changed()` (#2979) each iteration. A
+/// process exit is handled as before (success → stop supervising; failure →
+/// back-off + respawn). An unhealthy signal force-kills the still-running
+/// child first, then falls into the same back-off + respawn path as a crash.
+/// A shutdown signal kills and reaps the child itself and returns
+/// immediately — it never enters the crash-restart path, so it can never be
+/// misclassified as a failure and respawned. The respawn back-off sleep also
+/// races the shutdown signal so a shutdown requested mid-backoff stops
+/// promptly instead of waiting out the delay and respawning first. Exits when
+/// the process exits cleanly (code 0), shutdown is requested, or when either
+/// restart ceiling (`should_give_up`) is exceeded.
 /// `child_pid_slot` is updated to the new PID after each successful respawn
 /// and cleared to 0 when supervision terminates so RSS samplers stop sampling
 /// a dead PID.
@@ -560,7 +646,8 @@ fn should_give_up(
 /// counters feed `should_give_up` and both drive the exponential back-off, so
 /// a workload-deterministic wedge that recurs after every respawn eventually
 /// trips `max_restarts` instead of cycling forever at a 1s backoff.
-/// Test: `supervisor_restarts_on_crash`.
+/// Test: `supervisor_restarts_on_crash`,
+/// `supervisor_intentional_shutdown_does_not_respawn`.
 async fn supervision_loop(
     binary_path: PathBuf,
     child_slot: Arc<tokio::sync::Mutex<Option<Child>>>,
@@ -568,6 +655,7 @@ async fn supervision_loop(
     child_pid_slot: Arc<AtomicU32>,
     mut unhealthy_signal: watch::Receiver<bool>,
     config: SupervisorConfig,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut consecutive_failures: u32 = 0;
     let mut consecutive_wedge_restarts: u32 = 0;
@@ -617,6 +705,31 @@ async fn supervision_loop(
                                 continue;
                             }
                             RestartTrigger::Unhealthy
+                        }
+                        _ = shutdown_rx.changed() => {
+                            if !*shutdown_rx.borrow() {
+                                // Spurious wake with the flag still false —
+                                // nothing to do, keep watching the child.
+                                continue;
+                            }
+                            // Cooperative shutdown (issue #2979): kill and reap
+                            // the child ourselves and return directly — this
+                            // path never touches `RestartTrigger`, so it can
+                            // never be misclassified as a crash and respawned,
+                            // unlike the old out-of-band PID kill it replaces.
+                            tracing::info!(
+                                "EmbedderSupervisor: shutdown requested — stopping the \
+                                 sidecar and supervision loop (no respawn)"
+                            );
+                            if let Err(e) = child.start_kill() {
+                                tracing::warn!(
+                                    "EmbedderSupervisor: start_kill on shutdown failed \
+                                     (may have already exited): {e}"
+                                );
+                            }
+                            let _ = child.wait().await;
+                            child_pid_slot.store(0, AtomicOrdering::Release);
+                            return;
                         }
                     }
                 }
@@ -716,7 +829,22 @@ async fn supervision_loop(
                 String::new()
             },
         );
-        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+        // Race the back-off delay against shutdown (issue #2979) so a
+        // shutdown requested while a respawn is pending stops immediately
+        // instead of waiting out the delay and respawning anyway.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    tracing::info!(
+                        "EmbedderSupervisor: shutdown requested during respawn \
+                         back-off — stopping without respawn"
+                    );
+                    child_pid_slot.store(0, AtomicOrdering::Release);
+                    return;
+                }
+            }
+        }
 
         // Respawn.
         match spawn_child(&binary_path, &config).await {
