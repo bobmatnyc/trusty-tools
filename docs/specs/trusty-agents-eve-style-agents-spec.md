@@ -1,10 +1,10 @@
-# DOC-37 — Eve-Style Agent Framework for trusty-agents
+# DOC-41 — Eve-Style Agent Framework for trusty-agents
 
 **Status:** Draft
 **Subsystem:** trusty-agents — agent definition / runtime / tool-calling / memory
 **Owner:** Engineering (trusty-agents)
 **Last-updated:** 2026-07-16
-**Spec ID:** `SPEC-AGENTFW-01~draft` … `SPEC-AGENTFW-06~draft` (DOC-37)
+**Spec ID:** `SPEC-AGENTFW-01~draft` … `SPEC-AGENTFW-06~draft` (DOC-41)
 **Builds on:** the existing `.toml` and `.md`+YAML-frontmatter agent-definition
 loaders (`crates/trusty-agents/src/agents/registry/mod.rs`,
 `crates/trusty-agents/src/agents/registry/md_agent.rs`,
