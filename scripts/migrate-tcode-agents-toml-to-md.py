@@ -51,6 +51,38 @@ What: reads one or more tcode agent `.toml` files and emits the equivalent
                                           in-process runner is the only
                                           runtime backend)
 
+Frontmatter reader contract (why `yaml_scalar` never backslash-escapes):
+trusty-agents-common's frontmatter reader is NOT a full YAML parser. For
+every field this script emits (`name`, `role`, `description`, `model`, and
+each element of `tools:`/`skills:`), it only ever strips AT MOST ONE
+balanced leading/trailing quote-character pair
+(`agents::frontmatter::strip_one_quote_pair`, used by both `parse_kv_line`
+and `parse_list_value`) and does nothing else to the value. It does NOT
+backslash-unescape — that unescaping (`unescape_yaml_double_quoted`, in
+`agents/builder.rs`) is applied to exactly one field, `initial_prompt`,
+which this script never emits (tcode's `AgentConfig` has no
+`initial_prompt` concept). So `yaml_scalar` must emit a plain,
+un-escaped `"`..`"` wrap: since the reader always removes EXACTLY the
+first and last byte of a quoted value and nothing more, wrapping ANY
+string verbatim in one fresh quote pair round-trips correctly no matter
+what characters it contains — including embedded quotes, backslashes, or
+a value that itself starts/ends with a quote character. Backslash-escaping
+inner quotes (as a naive YAML emitter would) is WRONG here: the reader
+would leave the literal backslashes in the loaded value instead of
+resolving them.
+
+Verification (this script has no automated test harness, so this is a
+manually-reproducible check rather than a pinned regression test): a TOML
+fixture with `description = "\"Featured\""` (i.e. a decoded value that
+itself both starts AND ends with a literal `"`) was converted, then loaded
+through the REAL production parser
+(`trusty_agents_common::agents::metadata::agent_metadata_from_str`, the
+exact function `agents::md_loader::load_md_agent` calls) via a throwaway
+`cargo run` harness depending on `trusty-agents-common` by path. The
+loaded `description` was confirmed to equal the original `"Featured"`
+byte-for-byte, with no stray backslashes — re-run this check after editing
+`yaml_scalar`/`_needs_quoting`.
+
 Usage:
     # Convert a single file, writing <name>.md next to <name>.toml
     python3 scripts/migrate-tcode-agents-toml-to-md.py .claude/agents/engineer.toml
@@ -100,17 +132,27 @@ def _needs_quoting(value: str) -> bool:
 
 
 def yaml_scalar(value: str) -> str:
-    """Render `value` as a safe YAML scalar for frontmatter.
+    """Render `value` as a frontmatter scalar for a field the reader only
+    STRIPS a quote pair from, never unescapes (see the module docstring's
+    "Frontmatter reader contract" section — this covers every field this
+    script emits: `name`/`role`/`description`/`model`/list elements).
 
-    Why: agent names/models/descriptions are free-form strings that may
-    contain YAML-significant characters; emitting them unquoted in that case
-    would silently corrupt the frontmatter.
-    What: double-quotes and escapes the value when [`_needs_quoting`] says
-    so; otherwise emits it bare for readability.
+    Why: `agents::frontmatter::strip_one_quote_pair` removes exactly the
+    first and last byte of a quoted value with no further interpretation.
+    Backslash-escaping interior quotes/backslashes here (the naive YAML-
+    emitter move) would therefore be WRONG for this reader — those escapes
+    are never resolved back, so the loaded value would retain literal
+    backslashes. Wrapping the RAW value in one fresh, un-escaped quote pair
+    is the correct inverse of `strip_one_quote_pair` for ANY content
+    (including a value that itself starts/ends with a quote character),
+    because the strip always removes exactly the pair we just added and
+    returns everything between untouched.
+    What: double-quotes the value verbatim (no escaping) when
+    [`_needs_quoting`] says quoting is required; otherwise emits it bare for
+    readability.
     """
     if _needs_quoting(value):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+        return f'"{value}"'
     return value
 
 
