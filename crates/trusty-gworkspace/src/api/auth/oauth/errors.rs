@@ -189,7 +189,7 @@ pub(crate) fn is_invalid_grant(body: &str) -> bool {
 /// transient/server error is never misattributed to a dead token.
 /// What: For `invalid_grant`, returns
 /// `Google refresh token for profile '<name>' is expired or revoked —
-/// re-authenticate with: gworkspace-mcp setup --profile <name> (<sanitized>)`;
+/// re-authenticate with: trusty-gworkspace-mcp setup --profile <name> (<sanitized>)`;
 /// otherwise returns `token refresh failed: <sanitized>`.
 /// Test: `refresh_failure_message_names_profile_and_setup_command`,
 /// `refresh_failure_message_non_invalid_grant_has_no_hint`.
@@ -202,7 +202,7 @@ pub(crate) fn refresh_failure_message(
     if is_invalid_grant(body) {
         format!(
             "Google refresh token for profile '{profile}' is expired or revoked — \
-             re-authenticate with: gworkspace-mcp setup --profile {profile} ({sanitized})"
+             re-authenticate with: trusty-gworkspace-mcp setup --profile {profile} ({sanitized})"
         )
     } else {
         format!("token refresh failed: {sanitized}")
@@ -386,7 +386,7 @@ mod tests {
             "message must name the profile: {msg}"
         );
         assert!(
-            msg.contains("gworkspace-mcp setup --profile work"),
+            msg.contains("trusty-gworkspace-mcp setup --profile work"),
             "message must name the exact re-auth command: {msg}"
         );
         assert!(

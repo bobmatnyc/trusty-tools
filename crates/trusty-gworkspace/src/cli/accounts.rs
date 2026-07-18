@@ -22,7 +22,7 @@ use crate::api::auth::TokenStorage;
 pub fn list(storage: &TokenStorage) -> Result<()> {
     let rows = storage.list_accounts()?;
     if rows.is_empty() {
-        println!("No accounts found. Run `gworkspace-mcp setup` to authorize one.");
+        println!("No accounts found. Run `trusty-gworkspace-mcp setup` to authorize one.");
         return Ok(());
     }
     println!("{:<24} {:<32} DEFAULT", "PROFILE", "EMAIL");

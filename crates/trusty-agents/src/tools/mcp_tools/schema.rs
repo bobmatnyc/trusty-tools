@@ -41,7 +41,7 @@ pub fn mcp_tool_definitions() -> Vec<ChatCompletionTool> {
                     "name": {"type": "string", "description": "Unique service identifier"},
                     "description": {"type": "string", "description": "Human-readable description"},
                     "transport": {"type": "string", "enum": ["stdio", "http"], "description": "Transport type"},
-                    "command": {"type": "string", "description": "For stdio: command to run (e.g. 'gworkspace-mcp')"},
+                    "command": {"type": "string", "description": "For stdio: command to run (e.g. 'trusty-gworkspace-mcp')"},
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
