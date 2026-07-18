@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- `gworkspace` `[[tool_registry.endpoints]]` in the bundled default config now
+  ships `enabled = true` (was `false`, "pending auth"). `rpc.discover` on the
+  `trusty-gworkspace-mcp` server is a pure static function that never touches
+  the token store, so eager discovery at harness startup always succeeds
+  regardless of auth state; unauthenticated tool calls fail with a clear
+  "run setup" operational error instead of a startup crash. Authenticate with
+  `trusty-gworkspace-mcp setup` to actually light up Gmail/Calendar/Drive
+  access for the Assistant (Phase 1 of the Assistant epic #3052, part of
+  [#3056](https://github.com/bobmatnyc/trusty-tools/issues/3056))
+
 ### Fixed
 
 - `tmux::orchestrator::TmuxOrchestrator::create_session` and `debugger::tmux::TmuxAdapter::create_session` now apply generous tmux scrollback (`history-limit=100000`) and mouse-wheel scrolling BEFORE `new-session`, via the new shared `trusty_common::tmux` layer — this crate previously ran its own independent tmux implementation with no scrollback handling at all, so every trusty-agents-hosted tmux session (including the debug REPL) was stuck at tmux's tiny 2000-line default even after trusty-mpm's #2398/#2399 fix landed (closes [#3004](https://github.com/bobmatnyc/trusty-tools/issues/3004), refs #2398, #2399)
