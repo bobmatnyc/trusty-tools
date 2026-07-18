@@ -25,7 +25,7 @@ use super::discover::{TRUSTY_MEMORY_DEFAULT_ADDR, TRUSTY_SEARCH_DEFAULT_ADDR, di
 // Split out to keep this file under the 500-SLOC production cap (DOC-28 R4(a)).
 #[path = "doctor_output_style.rs"]
 mod doctor_output_style;
-use doctor_output_style::check_output_style;
+use doctor_output_style::{check_output_style, check_output_style_staleness};
 
 // Split out to keep this file under the 500-SLOC production cap (A2,
 // tm-skills-portfolio epic — adding check_skill_source pushed it over).
@@ -95,9 +95,13 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// a project-level `.claude/settings*.json` still carries tm hook entries
 /// from a pre-fix `tm install`'s `$HOME`-wide write and points at `tm hooks
 /// clean`; the latter warns, informationally only, when a project carries
-/// its own claude-mpm hook entries that would fire inside a tm session) —
-/// folding the resulting seventeen [`DoctorCheck`]s into a [`DoctorReport`]
-/// whose `overall` status is the worst of them.
+/// its own claude-mpm hook entries that would fire inside a tm session), and
+/// the `output_style_staleness` probe (issue #2333 — content-diffs each
+/// deployed output-style file against the bundled catalog and flags orphaned
+/// files under `output-styles/`, closing the gap where `check_output_style`
+/// only validates that the configured id RESOLVES to a file, not that its
+/// content is current) — folding the resulting eighteen [`DoctorCheck`]s into
+/// a [`DoctorReport`] whose `overall` status is the worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -119,7 +123,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_seventeen_checks`,
+/// Test: `run_doctor_produces_eighteen_checks`,
 /// `agents_check_scopes_to_managed_workspace_when_project_given`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -147,6 +151,7 @@ pub async fn run_doctor(
         check_skills(skills_root),
         check_skill_source(&paths),
         check_output_style(project_dir, &home),
+        check_output_style_staleness(project_dir, &home),
         check_deployment_completeness(&paths),
         check_skill_staleness(&paths),
         check_legacy_instruction_sources(&home),

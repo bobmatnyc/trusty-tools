@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// `doctor_checks_match_run_doctor_names`, which fails the test suite the
 /// moment `run_doctor`'s actual check set diverges from this list.
 /// Test: `doctor_checks_match_run_doctor_names`.
-pub(crate) const DOCTOR_CHECKS: [(&str, &str); 17] = [
+pub(crate) const DOCTOR_CHECKS: [(&str, &str); 18] = [
     (
         "instructions",
         "Framework instructions deployed and non-empty for the target project.",
@@ -50,6 +50,10 @@ pub(crate) const DOCTOR_CHECKS: [(&str, &str); 17] = [
     (
         "output_style",
         "The `trusty-mpm` Claude Code output style is configured and its file exists (DOC-28 F4).",
+    ),
+    (
+        "output_style_staleness",
+        "Deployed output-style file content matches the bundled catalog, and no orphaned files linger under `output-styles/` (issue #2333).",
     ),
     (
         "deployment",

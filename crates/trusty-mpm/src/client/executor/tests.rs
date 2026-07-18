@@ -190,7 +190,7 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns a seventeen-check report against a live daemon.
+    // `/doctor` returns an eighteen-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
@@ -204,9 +204,10 @@ async fn execute_doctor_against_test_daemon() {
             // agent_skills check (14); issue #2906 review split it into
             // agent_skills + agent_skills_prose_hints, bringing the total to
             // 15; issue #2940 added hooks_contamination + hooks_foreign_conflict,
-            // bringing the total to 17. #1905's stale-skill cleanup is a
+            // bringing the total to 17; issue #2333 added output_style_staleness,
+            // bringing the total to 18. #1905's stale-skill cleanup is a
             // one-time migration, not a probe here.
-            assert_eq!(report.checks.len(), 17);
+            assert_eq!(report.checks.len(), 18);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }
