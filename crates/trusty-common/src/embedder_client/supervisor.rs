@@ -648,6 +648,15 @@ fn should_give_up(
 /// trips `max_restarts` instead of cycling forever at a 1s backoff.
 /// Test: `supervisor_restarts_on_crash`,
 /// `supervisor_intentional_shutdown_does_not_respawn`.
+/// Test-only iteration counter (issue #3023 regression test): bumped once per
+/// `supervision_loop` pass so `supervisor_tests.rs` can assert the loop
+/// blocks normally — rather than busy-spinning — once `shutdown_rx`'s sender
+/// closes without a shutdown ever being requested. Compiled out entirely in
+/// non-test builds.
+#[cfg(test)]
+pub(crate) static SUPERVISION_LOOP_ITERATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 async fn supervision_loop(
     binary_path: PathBuf,
     child_slot: Arc<tokio::sync::Mutex<Option<Child>>>,
@@ -660,8 +669,19 @@ async fn supervision_loop(
     let mut consecutive_failures: u32 = 0;
     let mut consecutive_wedge_restarts: u32 = 0;
     let mut last_wedge_restart_at: Option<tokio::time::Instant> = None;
+    // Set once `shutdown_rx` observes its sender closed (issue #3023 HIGH):
+    // `watch::Receiver::changed()` resolves `Ready(Err(_))` on every
+    // subsequent poll once the sender drops without ever calling
+    // `.shutdown()`, so leaving that `select!` branch active would busy-spin
+    // this loop for the remaining lifetime of the child. Once set, the
+    // shutdown branches below are permanently excluded from the `select!` —
+    // supervision continues via `child.wait()` / `unhealthy_signal` only.
+    let mut shutdown_closed = false;
 
     loop {
+        #[cfg(test)]
+        SUPERVISION_LOOP_ITERATIONS.fetch_add(1, AtomicOrdering::Relaxed);
+
         // Reset the wedge-restart escalation counter once sustained health
         // has been observed since the last wedge — see `wedge_counter_should_reset`.
         if wedge_counter_should_reset(
@@ -706,7 +726,16 @@ async fn supervision_loop(
                             }
                             RestartTrigger::Unhealthy
                         }
-                        _ = shutdown_rx.changed() => {
+                        changed_result = shutdown_rx.changed(), if !shutdown_closed => {
+                            // Sender (SupervisorHandle) dropped without ever
+                            // calling `.shutdown()` — permanently disable this
+                            // branch (see `shutdown_closed` above) instead of
+                            // looping back into an immediately-ready `Err`
+                            // forever (issue #3023 HIGH).
+                            let Ok(()) = changed_result else {
+                                shutdown_closed = true;
+                                continue;
+                            };
                             if !*shutdown_rx.borrow() {
                                 // Spurious wake with the flag still false —
                                 // nothing to do, keep watching the child.
@@ -834,14 +863,29 @@ async fn supervision_loop(
         // instead of waiting out the delay and respawning anyway.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    tracing::info!(
-                        "EmbedderSupervisor: shutdown requested during respawn \
-                         back-off — stopping without respawn"
-                    );
-                    child_pid_slot.store(0, AtomicOrdering::Release);
-                    return;
+            // Closed (`Err`) means the sender dropped without a shutdown
+            // request ever firing — `changed()` resolves `Ready(Err(_))`
+            // immediately, so left unguarded this branch would win the race
+            // every time and skip the intended back-off delay, respawning
+            // immediately on every subsequent pass (issue #3023 MEDIUM).
+            // Disable the branch and honor the full delay here instead;
+            // `Ok(())` with the flag still false is a spurious wake — do
+            // nothing and fall through to the respawn below either way.
+            changed_result = shutdown_rx.changed(), if !shutdown_closed => {
+                match changed_result {
+                    Err(_) => {
+                        shutdown_closed = true;
+                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                    }
+                    Ok(()) if *shutdown_rx.borrow() => {
+                        tracing::info!(
+                            "EmbedderSupervisor: shutdown requested during respawn \
+                             back-off — stopping without respawn"
+                        );
+                        child_pid_slot.store(0, AtomicOrdering::Release);
+                        return;
+                    }
+                    Ok(()) => {}
                 }
             }
         }

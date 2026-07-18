@@ -664,4 +664,92 @@ exit 1
              followed by a respawn"
         );
     }
+
+    /// Regression test for issue #3023 HIGH: dropping a `SupervisorHandle`
+    /// WITHOUT ever calling `.shutdown()` drops `shutdown_tx`, closing the
+    /// channel. `watch::Receiver::changed()` then resolves `Ready(Err(_))`
+    /// on every subsequent poll — an immediately-ready future never yields
+    /// to the scheduler, so before the fix the main-loop `select!` branch
+    /// (`if !*shutdown_rx.borrow() { continue }` with the `Err` case
+    /// unhandled) busy-spun a tokio worker for as long as the child lived.
+    ///
+    /// Why: every existing shutdown test calls `handle.shutdown().await`
+    /// explicitly; none exercise the "handle just dropped" path that a
+    /// caller forgetting (or racing a panic past) the `#[must_use]` hint
+    /// would hit in production.
+    /// What: spawns the idling mock sidecar, detaches via
+    /// `start_supervisor_task`, resets the test-only
+    /// `SUPERVISION_LOOP_ITERATIONS` counter, then drops the handle without
+    /// calling `shutdown()`. A multi-thread runtime (2 workers) is used
+    /// deliberately: if the bug regresses, the busy-spin monopolizes one
+    /// worker while this test's own timer/assertions still progress on the
+    /// other, so a regression shows up as an assertion failure (iteration
+    /// count far exceeds a normal blocked-loop count) rather than a hang.
+    /// It then asserts the loop is bounded over a 300ms window, and finally
+    /// kills the (still-alive) child out-of-band and confirms the loop
+    /// still notices the exit and respawns it — proving the closed
+    /// shutdown channel only disabled its own `select!` branch
+    /// (`shutdown_closed`) and did not wedge ongoing supervision.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn supervisor_dropped_handle_does_not_busy_spin() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            max_restarts: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        super::SUPERVISION_LOOP_ITERATIONS.store(0, Ordering::Relaxed);
+
+        let handle = supervisor.start_supervisor_task();
+        // Deliberately drop WITHOUT calling `.shutdown()`. This closes
+        // `shutdown_tx` (the sender half); dropping the `JoinHandle` does
+        // NOT abort the detached `tokio::spawn`ed supervision task, so it
+        // keeps running in the background exactly as it would in
+        // production if a caller lost the handle.
+        drop(handle);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let iterations = super::SUPERVISION_LOOP_ITERATIONS.load(Ordering::Relaxed);
+        assert!(
+            iterations < 200,
+            "supervision_loop iterated {iterations} times in 300ms after its \
+             shutdown handle was dropped without shutdown() — expected a \
+             small, bounded count (the loop blocked on child.wait() / \
+             unhealthy_signal as usual), not a busy-spin on the closed \
+             shutdown_rx channel"
+        );
+
+        // Supervision must still function normally: force the still-alive
+        // child down out-of-band and confirm the loop notices the exit and
+        // respawns it, proving the closed shutdown channel didn't wedge the
+        // loop — only its own (now-permanently-disabled) `select!` branch.
+        std::process::Command::new("kill")
+            .args(["-9", &initial_pid.to_string()])
+            .status()
+            .expect("kill -9 mock child");
+
+        let respawned = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pid = pid_slot.load(Ordering::Acquire);
+                if pid != 0 && pid != initial_pid {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            respawned.is_ok(),
+            "supervisor never respawned the killed child within 5s — a \
+             closed shutdown channel must not wedge ongoing supervision"
+        );
+    }
 }

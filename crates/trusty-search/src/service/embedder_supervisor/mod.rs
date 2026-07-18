@@ -765,6 +765,11 @@ async fn idle_watchdog(
             // `do_spawn` concurrently; it has no reason to wait on the
             // just-stopped process.
             drop(guard);
+            // Note: a concurrent `do_spawn` racing in here could in principle
+            // overwrite this with a new PID before we finish; correctness
+            // relies on `do_spawn`'s own spawn + client-handshake latency
+            // making that reorder practically unreachable, not on any
+            // explicit ordering/lock between the two stores.
             app_pid_slot.store(0, AtomicOrdering::Release);
 
             // Cooperative shutdown (issue #2979): flips the shared shutdown
