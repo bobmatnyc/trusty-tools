@@ -30,10 +30,13 @@
 //! non-empty file), that file's CONTENT can still have drifted from the
 //! bundled asset — exactly what happened after PR #2328 corrected the PM
 //! identity string but the deployed `~/.claude/output-styles/*.md` copies
-//! were never refreshed. It mirrors the content-checksum approach
-//! `skill_staleness` (issue #2876) already uses for skills, plus an
-//! orphan-file scan for foreign/dormant files sitting in the same directory
-//! (e.g. a pre-rebrand `claude-mpm.md`).
+//! were never refreshed. It adopts the same Warn-on-drift diagnostic pattern
+//! `skill_staleness` (issue #2876) already uses for skills, but compares
+//! deployed bytes directly rather than via a deploy-manifest checksum — output
+//! styles have no per-deploy manifest, and a direct byte read also catches
+//! post-deploy manual edits/corruption that a manifest-checksum comparison
+//! would not see. Plus an orphan-file scan for foreign/dormant files sitting
+//! in the same directory (e.g. a pre-rebrand `claude-mpm.md`).
 //! Test: `staleness_ok_when_in_sync`, `staleness_warns_on_drift`,
 //! `staleness_warns_on_orphan`, `staleness_ok_when_dir_missing`,
 //! `staleness_ok_when_file_never_deployed`,
