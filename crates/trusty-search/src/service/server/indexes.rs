@@ -299,10 +299,27 @@ pub(super) async fn create_index_handler(
     // chunks and no corpus store after the first restart.  A missing corpus
     // store also causes `write_schema_version` to return
     // "cannot write schema_version: no durable corpus" (#485).
+    // Issue #313 / #2984 (Phase 0 follow-up): compute `skip_kg` BEFORE
+    // building `init_entry` (rather than at its historical spot further
+    // down, alongside the other create-time flags) and set it on the entry
+    // passed to `build_indexer_from_entry`. That builder synchronously
+    // restores any previously-persisted corpus/graph for this `id` (issue
+    // #85 warm-restore-on-create path) — if `skip_kg` weren't known until
+    // after the indexer was already built, a `POST /indexes` with
+    // `skip_kg=true` against an id that has a persisted symbol graph on
+    // disk would still load it into memory during THIS call, defeating the
+    // flag via the create/re-register door instead of the daemon-restart
+    // door the Phase-0 fix closed. Setting it post-hoc on `indexer.skip_kg`
+    // would be too late to prevent that already-synchronous load.
+    let skip_kg: bool = req.skip_kg.unwrap_or_else(|| {
+        let v = std::env::var("TRUSTY_NO_KG").unwrap_or_default();
+        matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    });
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
         root_path: req.root_path.clone(),
         colocated: true,
+        skip_kg,
         ..Default::default()
     };
     // Issue #954: propagate HNSW alloc failure (OOM) as a 500 response
@@ -413,13 +430,10 @@ pub(super) async fn create_index_handler(
     // Issue #109, Phase 1: staged-pipeline opt-out. `None` on the wire ⇒
     // `false` (full pipeline) so existing callers see no behaviour change.
     let lexical_only: bool = req.lexical_only.unwrap_or(false);
-    // Issue #313: KG-skip flag. `None` on the wire ⇒ `false` (KG built as
-    // normal). TRUSTY_NO_KG=1 provides a machine-wide default that operators
-    // can set without modifying per-index config.
-    let skip_kg: bool = req.skip_kg.unwrap_or_else(|| {
-        let v = std::env::var("TRUSTY_NO_KG").unwrap_or_default();
-        matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
-    });
+    // Issue #313: KG-skip flag — computed earlier now (see the comment above
+    // `init_entry`'s construction, issue #2984 Phase 0 follow-up) so
+    // `build_indexer_from_entry` can honor it during THIS call, not just on
+    // a later restart. `skip_kg` is already bound in scope here.
     // Issue #923: deferred-embedding mode. Default `true` — the fast-pass /
     // background-embed path. Callers opt out by passing `defer_embed: false`
     // to force synchronous full indexing. Has no effect on `lexical_only` indexes.

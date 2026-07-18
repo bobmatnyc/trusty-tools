@@ -552,6 +552,65 @@ async fn skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired() {
     );
 }
 
+/// `skip_kg=true` must also suppress the graph rebuild that runs after
+/// restoring the legacy `chunks.json` snapshot (`load_chunks_from_disk`'s
+/// Phase 4), the warm-boot fallback path used when a daemon upgraded from a
+/// JSON-snapshot build has a populated `chunks.json` but empty redb.
+///
+/// Why: `load_or_rebuild_symbol_graph` (guarded above) is only reachable from
+/// the redb corpus path (`load_chunks_from_redb`); `load_chunks_from_disk`
+/// calls `rebuild_symbol_graph` directly and needed its own separate guard
+/// (added alongside the `load_or_rebuild_symbol_graph` fix). This test pins
+/// that second guard directly, independent of the redb-corpus tests above.
+/// What: builds a legacy (no-corpus) indexer with a real caller→callee call
+/// edge, persists it to `chunks.json`, confirms the graph was non-empty
+/// pre-persist, then calls `load_chunks_from_disk` directly on a fresh
+/// `skip_kg=true` indexer and asserts the chunks are restored but the graph
+/// stays empty.
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_kg_true_legacy_json_restore_skips_graph_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("chunks.json");
+
+    // Stage a legacy JSON snapshot with a real call edge via a skip_kg=false
+    // indexer (no corpus store — the legacy pre-redb shape).
+    {
+        let legacy = make_indexer();
+        legacy
+            .index_files_batch(&[
+                ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+                ("src/callee.rs".into(), "fn callee() {}".into()),
+            ])
+            .await
+            .expect("index batch");
+        let graph = legacy.snapshot_symbol_graph().await;
+        assert!(
+            graph.node_count() > 0,
+            "sanity: normal indexing must build a non-empty symbol graph"
+        );
+        legacy.save_chunks_to_disk(&json_path).await.unwrap();
+    }
+    assert!(json_path.exists(), "precondition: chunks.json must exist");
+
+    // Warm-boot path: restore the JSON snapshot directly onto a fresh
+    // skip_kg=true indexer.
+    let mut idx = make_indexer();
+    idx.skip_kg = true;
+    let n = idx
+        .load_chunks_from_disk(&json_path)
+        .await
+        .expect("restore from chunks.json");
+    assert!(n >= 2, "skip_kg must not affect chunk restoration ({n})");
+
+    let graph = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        graph.node_count(),
+        0,
+        "skip_kg=true must skip the symbol graph rebuild after chunks.json restore"
+    );
+}
+
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]
