@@ -136,20 +136,28 @@ pub(crate) async fn session_ls(
 /// table, so the row formatting lives in one place rather than being duplicated
 /// across the two entry points.
 /// What: prints a "no managed sessions[ for <slug>]" line when the list is empty;
-/// otherwise prints the header + one row per session (id, state, truncated name,
-/// task/`(interactive)` placeholder, short created-at, and any pending decision).
-/// The STATE column appends `[dead]` (#2595) when the server-computed
-/// `unresumable` flag is set — the session's workspace no longer exists
-/// anywhere on disk, so `tm session resume`/the picker's restart would only
-/// ever fail; the operator's actionable remedy is `tm session rm`. It also
-/// appends `[stale-assets]` (#2444) when the server-computed `stale_assets`
-/// flag is set — the session's deployed agents/skills have drifted from the
-/// catalog; the remedy is `tm sessions sync-assets <id>`.
+/// otherwise prints the header + one row per session, prefixed by its stable
+/// `NUM` slot (#3034) — the SAME number the interactive picker shows and
+/// resolves `d<N>` against, so a number captured from this static table stays
+/// valid for a later picker session (or vice versa). A tombstoned row (`s.deleted`)
+/// prints ONLY its slot number and `-- deleted --`, every other field blanked, so
+/// a deleted session's number is never silently reused for its former neighbors.
+/// A live row shows id, state, truncated name, task/`(interactive)` placeholder,
+/// short created-at, and any pending decision. The STATE column appends
+/// `[dead]` (#2595) when the server-computed `unresumable` flag is set — the
+/// session's workspace no longer exists anywhere on disk, so `tm session
+/// resume`/the picker's restart would only ever fail; the operator's
+/// actionable remedy is `tm session rm`. It also appends `[stale-assets]`
+/// (#2444) when the server-computed `stale_assets` flag is set — the
+/// session's deployed agents/skills have drifted from the catalog; the remedy
+/// is `tm sessions sync-assets <id>`.
 /// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
 /// table bytes are exercised by `tests/session_manager_mvp.rs`;
 /// `format_state_column_appends_dead_marker` and
 /// `format_state_column_appends_stale_assets_marker` cover the two markers via
-/// the extracted pure helper, [`format_state_column`].
+/// the extracted pure helper, [`format_state_column`];
+/// `format_tombstone_row_shows_slot_and_placeholder` covers the #3034
+/// deleted-slot row via its own extracted pure helper, [`format_tombstone_row`].
 pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
     if sessions.is_empty() {
         if let Some(sid) = source_id {
@@ -161,10 +169,17 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
     }
     // Table header
     println!(
-        "{:<36}  {:<14}  {:<24}  {:<30}  CREATED",
-        "ID", "STATE", "NAME", "TASK"
+        "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  CREATED",
+        "NUM", "ID", "STATE", "NAME", "TASK"
     );
     for s in sessions {
+        if s.deleted {
+            // #3034: the slot stays reserved — never silently reused by a
+            // later session — so the operator sees exactly which number is
+            // now dead rather than having it vanish from the listing.
+            println!("{}", format_tombstone_row(s.slot));
+            continue;
+        }
         // #1841 Fix 3: show a descriptive placeholder for sessions with no task.
         let task = s
             .task
@@ -195,7 +210,8 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
         let state = format_state_column(base_state, s.unresumable, s.stale_assets);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
-            "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
+            "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  {}{}",
+            s.slot,
             s.id,
             state,
             truncate(&s.name, 24),
@@ -204,6 +220,17 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             pending
         );
     }
+}
+
+/// Format the `-- deleted --` tombstone row for a deleted slot (issue #3034).
+///
+/// Why: extracted as a pure function — mirroring [`format_state_column`] — so
+/// the exact tombstone row text is unit-testable without capturing stdout.
+/// What: returns `"{slot:<5}  -- deleted --"`, matching the live row's `NUM`
+/// column width so the table stays aligned.
+/// Test: `format_tombstone_row_shows_slot_and_placeholder`.
+fn format_tombstone_row(slot: u32) -> String {
+    format!("{slot:<5}  -- deleted --")
 }
 
 /// Format the STATE column value for one `tm session ls` row (#2595, #2444).

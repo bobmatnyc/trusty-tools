@@ -20,7 +20,8 @@ use axum::http::StatusCode;
 use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan};
 use crate::core::update_check::CatalogHashes;
 use crate::session_manager::{
-    InjectionStatus, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionRecord,
+    InjectionStatus, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, NumberedSlot,
+    SessionRecord,
 };
 
 use super::SessionSummary;
@@ -124,6 +125,11 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         // computes (see [`super::list_managed_sessions`]); every other summary
         // builder leaves it at its `false` default.
         attached: false,
+        // `slot`/`deleted` (#3034) are meaningful only on the numbered `tm ls`
+        // listing surface; every other caller of `record_to_summary` leaves
+        // them at their "not applicable" defaults.
+        slot: 0,
+        deleted: false,
     }
 }
 
@@ -211,6 +217,47 @@ pub(super) fn reconcile_against_tmux(
                  probe error as 'all sessions stopped')"
             );
         }
+    }
+}
+
+/// Build a tombstone `SessionSummary` for a deleted slot (issue #3034).
+///
+/// Why: `tm ls`'s stable numbering shows a `-- deleted --` placeholder for a
+/// slot whose session record no longer exists in the store, so operators
+/// never mistake a shifted neighbor for the session they meant. This is the
+/// single place that shape is constructed so every numbered-listing caller
+/// renders an identical, unambiguously-empty row.
+/// What: every string/option field is blank/`None`; `state` is the literal
+/// `"deleted"` — distinct from `"decommissioned"`, so the CLI's
+/// decommissioned-only tombstone filter (`is_live_session_state`) never hides
+/// this row from the default (non-`--all`) view; `slot` is the caller-supplied
+/// stable number and `deleted` is always `true`.
+/// Test: `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
+/// (integration test, `tests/session_manager_slots.rs`).
+pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
+    SessionSummary {
+        id: String::new(),
+        name: String::new(),
+        state: "deleted".to_string(),
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        created_at: String::new(),
+        last_activity_at: None,
+        pending_decision: None,
+        proposed_default: None,
+        source_id: None,
+        task: None,
+        cwd: None,
+        claude_session_id: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: None,
+        unresumable: false,
+        stale_assets: false,
+        attached: false,
+        slot,
+        deleted: true,
     }
 }
 
@@ -373,6 +420,59 @@ pub(super) async fn checked_summaries(records: &[SessionRecord]) -> Vec<SessionS
     }
 
     summaries
+}
+
+/// Build the numbered `tm ls` summaries for one listing call (issue #3034).
+///
+/// Why: `list_managed_sessions` combines the daemon's stable slot assignment
+/// with the existing async `unresumable`/`stale_assets` probes
+/// ([`checked_summaries`]), the LIVE-tmux `state`/`attached` reconciliation
+/// ([`reconcile_against_tmux`], #3302/#3531 — a running/attached session must
+/// never read `(stopped)` just because its persisted state went stale), and
+/// the `?source_id=` filter, in the order that keeps all three correct:
+/// filter the numbered rows FIRST (so a session outside the filter never pays
+/// the probe cost), THEN probe and reconcile only the live records that
+/// remain, THEN stitch each summary back to its slot number — while a
+/// tombstoned row skips both entirely and gets a blank [`tombstone_summary`]
+/// instead.
+/// What: takes the full [`NumberedSlot`] list (already observed against the
+/// registry for every record — filtered or not, by the caller), a tmux driver
+/// for the live-state reconciliation, plus an optional `source_id` filter;
+/// returns one [`SessionSummary`] per surviving row, in slot order. The
+/// stable `slot` field is the identity every by-number CLI surface resolves
+/// against, so it is set on the row AFTER reconciliation/probing overwrite
+/// `state`/`attached`/`unresumable`/`stale_assets` — sort/filter on the CLI
+/// side only ever reorders or subsets this returned `Vec`, it never
+/// recomputes `slot`.
+/// Test: `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
+/// (integration test, `tests/session_manager_slots.rs`).
+pub(super) async fn numbered_summaries(
+    numbered: Vec<NumberedSlot>,
+    tmux: &dyn ManagedTmuxDriver,
+    source_id_filter: Option<&str>,
+) -> Vec<SessionSummary> {
+    let filtered: Vec<NumberedSlot> = numbered
+        .into_iter()
+        .filter(|n| source_id_filter.is_none_or(|sid| n.source_id.as_deref() == Some(sid)))
+        .collect();
+    let live_records: Vec<SessionRecord> =
+        filtered.iter().filter_map(|n| n.record.clone()).collect();
+    let mut live_summaries = checked_summaries(&live_records).await;
+    reconcile_against_tmux(tmux, &mut live_summaries, &live_records);
+    let mut live_summaries = live_summaries.into_iter();
+    filtered
+        .into_iter()
+        .map(|n| match n.record {
+            Some(_) => {
+                let mut s = live_summaries
+                    .next()
+                    .expect("live_summaries has one entry per Some(record) row, same order");
+                s.slot = n.slot;
+                s
+            }
+            None => tombstone_summary(n.slot),
+        })
+        .collect()
 }
 
 /// Build the tmux attach command string for a session.

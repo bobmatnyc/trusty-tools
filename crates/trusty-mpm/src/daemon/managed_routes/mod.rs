@@ -76,7 +76,7 @@ pub use resume_error::ResumeManagedError;
 pub use session_summary::SessionSummary;
 pub use summary::record_to_json;
 use summary::{
-    attach_cmd_for, checked_summaries, parse_id, reconcile_against_tmux, record_to_summary,
+    attach_cmd_for, numbered_summaries, parse_id, reconcile_against_tmux, record_to_summary,
     record_to_summary_checked,
 };
 
@@ -551,39 +551,50 @@ pub async fn adopt_existing_session(
 /// GET /api/v1/sessions/managed — list all managed sessions.
 ///
 /// Why: the calling agentic process polls this to see all running sessions,
-/// their state, and pending decisions.
-/// What: returns all session records as a JSON list of summaries. When the
-/// optional `?source_id=<id>` query parameter is present, only sessions whose
-/// `source_id` matches exactly are returned. Each summary's `unresumable` flag
-/// (#2595) is computed here — via
-/// `session_manager::resume_workdir::is_unresumable`, which short-circuits to
-/// `false` without any I/O for every state other than `Stopped`/`Errored` — so
-/// every picker/list surface reading this endpoint sees dead sessions flagged
-/// up front rather than discovering them via a failed resume. The per-session
-/// probes run CONCURRENTLY via [`summary::checked_summaries`] (#2595 review,
-/// MEDIUM finding 4) rather than one-at-a-time, so a large fleet's response
-/// latency does not scale with its count of stopped/errored sessions.
+/// their state, and pending decisions. Since issue #3034, this is also the
+/// SOLE source of the stable `tm ls` slot numbers every by-number CLI surface
+/// (the picker, `d<N>` delete) resolves against — see
+/// `SessionManager::numbered_snapshot`'s doc for why the assignment must live
+/// here rather than being recomputed client-side per fetch.
+/// What: returns one summary per stable slot (1..=highest ever assigned),
+/// live or tombstoned. When the optional `?source_id=<id>` query parameter is
+/// present, only rows whose LAST-KNOWN `source_id` matches exactly are
+/// returned (a tombstoned slot still carries its last-known `source_id`, so
+/// deleting a project's session does not make its slot vanish from that
+/// project's filtered view). Each summary's `unresumable` flag (#2595) is
+/// computed here — via `session_manager::resume_workdir::is_unresumable`,
+/// which short-circuits to `false` without any I/O for every state other than
+/// `Stopped`/`Errored` — so every picker/list surface reading this endpoint
+/// sees dead sessions flagged up front rather than discovering them via a
+/// failed resume. The per-session probes run CONCURRENTLY via
+/// [`summary::checked_summaries`] (#2595 review, MEDIUM finding 4) rather than
+/// one-at-a-time, so a large fleet's response latency does not scale with its
+/// count of stopped/errored sessions. Numbering is observed against the FULL,
+/// unfiltered record set BEFORE the `source_id` filter is applied — otherwise
+/// a session outside the current filter would go unobserved and receive a
+/// fresh number the next time it IS listed.
 /// Test: list handler test; list-with-source-id-filter test;
 /// `list_marks_dead_stopped_session_unresumable`,
-/// `list_leaves_live_and_healthy_stopped_sessions_unmarked`.
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked`,
+/// `list_assigns_stable_slot_numbers_and_tombstones_deleted_one` (integration
+/// test, `tests/session_manager_slots.rs`).
 pub async fn list_managed_sessions(
     State(state): State<Arc<DaemonState>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let mgr = state.session_manager().await;
     let sid_filter = q.get("source_id").map(String::as_str);
-    let records: Vec<_> = mgr
-        .list()
-        .await
-        .into_iter()
-        .filter(|r| sid_filter.is_none_or(|sid| r.source_id.as_deref() == Some(sid)))
-        .collect();
-    let mut sessions = checked_summaries(&records).await;
-    // Reconcile the displayed state against LIVE tmux so a running/attached
-    // session never reads as `(stopped)` (and never gets offered a destructive
-    // `restart`) just because its persisted state went stale after a daemon
-    // restart. Fail-closed on a tmux probe error (see `reconcile_against_tmux`).
-    reconcile_against_tmux(mgr.tmux.as_ref(), &mut sessions, &records);
+    // #3034: numbering is observed against the FULL, unfiltered record set
+    // BEFORE the `source_id` filter is applied — otherwise a session outside
+    // the current filter would go unobserved and receive a fresh number the
+    // next time it IS listed. `numbered_summaries` applies the `source_id`
+    // filter, the async unresumable/stale-assets probes, AND the live-tmux
+    // `state`/`attached` reconciliation (#3302/#3531 — a running/attached
+    // session must never read `(stopped)`) to the surviving rows, fail-closed
+    // on a tmux probe error (see `reconcile_against_tmux`).
+    let all_records = mgr.list().await;
+    let numbered = mgr.numbered_snapshot(&all_records).await;
+    let sessions = numbered_summaries(numbered, mgr.tmux.as_ref(), sid_filter).await;
     Json(ListSessionsResponse { sessions })
 }
 

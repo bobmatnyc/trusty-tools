@@ -29,7 +29,7 @@
 
 use std::future::IntoFuture as _;
 
-use super::{format_state_column, short_timestamp, truncate};
+use super::{format_state_column, format_tombstone_row, short_timestamp, truncate};
 use super::{session_activity, session_decommission, session_resume, session_stop};
 
 #[test]
@@ -79,6 +79,14 @@ fn format_state_column_leaves_healthy_state_unchanged() {
         format_state_column("provisioning", false, false),
         "provisioning"
     );
+}
+
+/// #3034: a deleted slot's row shows only its number and the placeholder —
+/// never a blank-looking row that could be mistaken for "no session here".
+#[test]
+fn format_tombstone_row_shows_slot_and_placeholder() {
+    assert_eq!(format_tombstone_row(1), "1      -- deleted --");
+    assert_eq!(format_tombstone_row(42), "42     -- deleted --");
 }
 
 #[test]
