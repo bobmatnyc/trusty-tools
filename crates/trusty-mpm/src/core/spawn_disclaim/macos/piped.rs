@@ -228,6 +228,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn spawn_piped_disclaimed_writes_and_reads_via_cat() {
         let cmd = std::process::Command::new("/bin/cat");
         let mut spawned = disclaimed_piped_spawn(cmd).unwrap();
@@ -246,6 +247,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn spawn_piped_disclaimed_preserves_cwd() {
         let dir = std::env::temp_dir();
         let mut cmd = std::process::Command::new("/bin/pwd");
@@ -266,6 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn spawn_piped_disclaimed_removes_env_and_keeps_rest() {
         // SAFETY: single-threaded-relative-to-this-test env mutation; no
         // other test reads this specific key.
@@ -285,6 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn spawn_piped_disclaimed_reports_spawn_error_for_missing_binary() {
         let cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary-2997");
         // `PipedSpawn` holds `Box<dyn AsyncWrite/AsyncRead>` trait objects, so
@@ -300,6 +304,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn spawn_piped_disclaimed_kill_and_wait_reaps_child() {
         let mut cmd = std::process::Command::new("/bin/sleep");
         cmd.arg("30");

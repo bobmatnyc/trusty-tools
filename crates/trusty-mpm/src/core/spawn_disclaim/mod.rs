@@ -309,7 +309,23 @@ mod macos;
 mod tests {
     use super::*;
 
+    // Every test in this module (and `piped_native_tests` below, and
+    // `macos::piped`'s tests) spawns through `disclaimed_output`/
+    // `disclaimed_status`/`disclaimed_piped_spawn`, all of which read the
+    // process-global `DISABLE_ENV` var, and several of them toggle it via
+    // `set_var`/`remove_var`. `cargo test` runs `#[test]` fns in parallel
+    // threads within the same process by default, so an unserialized toggle
+    // in one test can transiently flip the branch taken by a concurrently
+    // running spawn in another test — exactly the race that produced the
+    // intermittent "child stdin pipe was not opened" panic in
+    // `spawn_piped_disclaimed_writes_and_reads_via_cat` under a full-suite
+    // run. `#[serial_test::serial]` (unnamed key, matching this crate's
+    // existing env-mutation convention — see `core::paths`/`standalone::load`)
+    // puts every test below in the same mutual-exclusion group as the ones in
+    // `piped_native_tests` and `macos::piped::tests`.
+
     #[test]
+    #[serial_test::serial]
     fn disclaimed_output_captures_stdout() {
         let out = disclaimed_output("/bin/echo", &["hello world".to_string()]).unwrap();
         assert!(out.status.success());
@@ -318,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_output_captures_stderr_and_nonzero_exit() {
         // `sh -c 'echo boom >&2; exit 3'` → stderr captured, exit code 3.
         let out = disclaimed_output(
@@ -332,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_output_saturates_stdout_and_stderr_without_deadlock() {
         // Fill BOTH stdout and stderr with ~2 MiB CONCURRENTLY (the stdout
         // producer is backgrounded so it races the stderr producer) — this is
@@ -358,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_output_reports_spawn_error_for_missing_binary() {
         let err = disclaimed_output("/nonexistent/definitely-not-a-real-binary-2819", &[])
             .expect_err("spawning a missing binary must error, not hang or panic");
@@ -369,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disable_env_forces_plain_path_still_captures() {
         // With the safety valve set we go through Command::output; behaviour
         // (captured stdout) must be identical.
@@ -383,6 +403,7 @@ mod tests {
     // --- disclaimed_status (issue #2997: tm run/tm login session-launch path) ---
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_status_inherits_and_reports_exit_code() {
         // No explicit stdio set on the Command — matches build_launch_command's
         // Stdio::inherit() shape (Command::status()'s implicit default is also
@@ -394,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_status_applies_cwd_and_env_override() {
         let tmp = tempfile::TempDir::new().unwrap();
         let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
@@ -423,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_status_reports_spawn_error_for_missing_binary() {
         let mut cmd = std::process::Command::new("/nonexistent/definitely-not-a-real-binary-2997");
         let err = disclaimed_status(&mut cmd)
@@ -434,6 +457,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disclaimed_status_disable_env_forces_plain_path() {
         // SAFETY: single-threaded test setup around the env toggle.
         unsafe { std::env::set_var(DISABLE_ENV, "1") };
@@ -456,6 +480,7 @@ mod piped_native_tests {
     /// every CI platform and proves the fallback is a correct, unaffected
     /// no-op wrapper around `tokio::process::Command`.
     #[tokio::test]
+    #[serial_test::serial]
     async fn disclaimed_piped_spawn_native_path_round_trips() {
         if cfg!(target_os = "windows") {
             return; // no portable `cat` equivalent; skip on Windows
