@@ -16,21 +16,19 @@
 //! (informational only — never removed); [`clean_settings_file`] performs the
 //! actual scan-or-apply pass over one file, always backing up before writing.
 //!
-//! Known limitations (issue #2940 review round 1):
-//! - **Mixed hook groups are invisible to both matchers.** [`event_names_matching`]
-//!   classifies a whole group by `.all()` over its inner `hooks[*].command`
-//!   entries — a hand-edited group whose inner array mixes ONE tm command with
-//!   ONE foreign (e.g. claude-mpm) command satisfies neither
-//!   [`tm_hook_event_names`] (not ALL entries are tm-owned) nor
-//!   [`foreign_hook_event_names`] (not ALL entries are foreign-owned), so it is
-//!   never flagged by `tm doctor` nor stripped by `tm hooks clean --force`,
-//!   even though it does carry a live tm entry. In practice every group this
-//!   module itself writes is homogeneous (see [`super::mpm_hook_additions_with_exe`]),
-//!   so this only bites a manually hand-edited settings file — a real gap, but
-//!   the full fix (an `.any()` classification plus per-entry filtering in
-//!   [`super::strip_mpm_hook_entries_for_events`], rather than per-group) is
-//!   deliberately out of this PR's scope to avoid ballooning the diff. Tracked
-//!   for a follow-up issue.
+//! Known limitations:
+//! - **Mixed hook groups (issue #2948, RESOLVED).** [`event_names_matching`]
+//!   now classifies a group by `.any()` over its inner `hooks[*].command`
+//!   entries, and [`super::strip_hook_entries_matching_for_events`] filters at
+//!   PER-ENTRY granularity within a group rather than dropping/keeping the
+//!   whole group. A hand-edited group whose inner array mixes ONE tm command
+//!   with ONE foreign (e.g. claude-mpm) command is now flagged by both
+//!   [`tm_hook_event_names`] and [`foreign_hook_event_names`] (it genuinely
+//!   carries both kinds of entry), and `tm hooks clean --force` removes only
+//!   the tm-owned entry, leaving the foreign entry and the group itself intact.
+//!   Previously (issue #2940 review round 1) the `.all()` classification made
+//!   such a group invisible to both `tm doctor` and `tm hooks clean` even
+//!   though it carried a live tm entry.
 //! - **The hash-suffixed binary matcher trusts any binary under a `deps/`
 //!   directory.** [`super::is_mpm_hook_command`]'s hash-suffix branch (via
 //!   [`super::is_mpm_hash_suffixed_artifact`]) requires the resolved path to
@@ -78,8 +76,10 @@ pub struct CleanOutcome {
 /// `tm doctor` contamination check need — scanning without ever risking a
 /// write.
 /// What: walks every array under the top-level `hooks` object and returns
-/// `true` as soon as one group's `hooks[*].command` entries are ALL recognised
-/// by [`is_mpm_hook_command`] (mirroring the matching semantics
+/// `true` as soon as one group's `hooks[*].command` entries include AT LEAST
+/// ONE recognised by [`is_mpm_hook_command`] (issue #2948: entry-level, not
+/// whole-group, so a hand-mixed group carrying one tm command alongside a
+/// foreign one is still detected — mirroring the matching semantics
 /// [`strip_mpm_hook_entries`] uses to decide what to remove).
 /// Test: `contains_tm_hooks_true_for_tm_entry`,
 /// `contains_tm_hooks_false_for_foreign_or_absent`.
@@ -93,10 +93,11 @@ pub fn contains_tm_hooks(val: &Value) -> bool {
 /// [`strip_mpm_hook_entries`] mutates the value away, and the doctor probe
 /// wants the same list for its message.
 /// What: returns every event key (e.g. `PreToolUse`, `Stop`) under `hooks`
-/// where at least one group's inner `hooks[*].command` entries are ALL
-/// tm-owned. Order follows the JSON object's iteration order; empty when
-/// `hooks` is absent or not an object.
-/// Test: `tm_hook_event_names_lists_only_contaminated_events`.
+/// where at least one group carries at least one tm-owned entry (issue #2948:
+/// entry-level match, so a hand-mixed group counts). Order follows the JSON
+/// object's iteration order; empty when `hooks` is absent or not an object.
+/// Test: `tm_hook_event_names_lists_only_contaminated_events`,
+/// `tm_hook_event_names_flags_mixed_group`.
 pub fn tm_hook_event_names(val: &Value) -> Vec<String> {
     event_names_matching(val, is_mpm_hook_command)
 }
@@ -105,16 +106,30 @@ pub fn tm_hook_event_names(val: &Value) -> Vec<String> {
 ///
 /// Why: `tm doctor` must warn about foreign hooks that would fire inside a tm
 /// session WITHOUT ever touching them — that call belongs to the operator.
-/// What: returns every event key under `hooks` where at least one group's
-/// inner `hooks[*].command` entries are ALL recognised by
-/// [`is_claude_mpm_hook_command`]. Never overlaps with
-/// [`tm_hook_event_names`] since the two predicates are mutually exclusive.
-/// Test: `foreign_hook_event_names_lists_claude_mpm_entries`.
+/// What: returns every event key under `hooks` where at least one group
+/// carries at least one entry recognised by [`is_claude_mpm_hook_command`]
+/// (issue #2948: entry-level match). [`is_mpm_hook_command`] and
+/// [`is_claude_mpm_hook_command`] are mutually exclusive PER COMMAND STRING —
+/// a single command is never classified as both — but a single EVENT can now
+/// appear in both [`tm_hook_event_names`] and this function's result when a
+/// hand-mixed group (or two separate groups under the same event) carries one
+/// entry of each kind; that is a real, simultaneous contamination-and-conflict
+/// state, not a classification bug.
+/// Test: `foreign_hook_event_names_lists_claude_mpm_entries`,
+/// `foreign_hook_event_names_flags_mixed_group`.
 pub fn foreign_hook_event_names(val: &Value) -> Vec<String> {
     event_names_matching(val, is_claude_mpm_hook_command)
 }
 
 /// Shared walker behind [`tm_hook_event_names`] / [`foreign_hook_event_names`].
+///
+/// Why (issue #2948): a hook GROUP is classified by whether ANY of its inner
+/// `hooks[*].command` entries match — not ALL of them. The previous `.all()`
+/// classification made a hand-mixed group (one tm command + one foreign
+/// command in the same matcher group) invisible to both the tm-owned and
+/// foreign-owned predicates, since neither ALL-tm nor ALL-foreign held. `.any()`
+/// makes the walker symmetric with [`super::strip_hook_entries_matching_for_events`],
+/// which also now operates at entry (not group) granularity.
 fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> Vec<String> {
     let Some(hooks) = val.get("hooks").and_then(Value::as_object) else {
         return Vec::new();
@@ -129,13 +144,12 @@ fn event_names_matching(val: &Value, matches_cmd: impl Fn(&str) -> bool) -> Vec<
                 .get("hooks")
                 .and_then(Value::as_array)
                 .is_some_and(|inner| {
-                    !inner.is_empty()
-                        && inner.iter().all(|entry| {
-                            entry
-                                .get("command")
-                                .and_then(Value::as_str)
-                                .is_some_and(&matches_cmd)
-                        })
+                    inner.iter().any(|entry| {
+                        entry
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .is_some_and(&matches_cmd)
+                    })
                 })
         });
         if hit {

@@ -16,6 +16,7 @@
 
 mod native_mcp;
 mod palace_alias;
+mod project_hooks;
 mod search_index;
 mod settings;
 #[cfg(test)]
@@ -557,13 +558,16 @@ fn prepare_session_inner(
         tracing::warn!("failed to write statusLine config: {err}");
     }
 
-    // Write the `trusty-memory` hook block into the project settings so the
-    // hooks fire only for trusty-mpm sessions. Non-fatal: the session still
-    // launches, it just won't record memory via the hooks.
+    // Write the project-tier trusty-mpm-owned hooks: the `trusty-memory`
+    // block, the PM-enforcement guard, and (issue #2003) the lifecycle triad
+    // (circuit breaker / audit log / dashboard) — folded in here because the
+    // daemon's managed launch excludes the user tier where that triad would
+    // otherwise be provisioned. Non-fatal: the session still launches, it
+    // just won't record memory or lifecycle events via the hooks.
     let hooks_written = match write_project_hooks(project_dir) {
         Ok(()) => true,
         Err(err) => {
-            tracing::warn!("failed to write trusty-memory project hooks: {err}");
+            tracing::warn!("failed to write trusty-mpm project hooks: {err}");
             false
         }
     };

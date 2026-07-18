@@ -599,12 +599,14 @@ fn write_project_hooks_uses_canonical_commands() {
 
 #[test]
 fn write_project_hooks_omits_post_tool_use_and_stop() {
-    // Why (#1270): trusty-memory has no PostToolUse/Stop CLI hook surface, so
-    // those events must not be registered (they previously invoked `hooks fire`,
-    // which fails). Memory writes during a session flow through MCP tools.
-    // NOTE (#1977): PreToolUse IS now registered — it carries the PM-enforcement
-    // guard, not a trusty-memory hook — so it is intentionally excluded from
-    // the absent list here (see `write_project_hooks_registers_pm_guard`).
+    // Why (#1270, superseded by #2003): trusty-memory itself has no
+    // PostToolUse/Stop CLI hook surface (memory writes flow through MCP
+    // tools), so PostToolUse/Stop never carry a `trusty-memory` command.
+    // BUT issue #2003 folds the lifecycle triad into this same write, so
+    // PostToolUse/Stop ARE now registered — with the triad's `... hook`
+    // command, never a `trusty-memory ...` one. See
+    // `project_hooks_tests::write_project_hooks_writes_lifecycle_triad` for
+    // the full six-event triad assertion.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
@@ -614,11 +616,17 @@ fn write_project_hooks_omits_post_tool_use_and_stop() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
-    for absent in ["PostToolUse", "Stop"] {
-        assert!(
-            value["hooks"].get(absent).is_none(),
-            "{absent} hook must not be registered"
-        );
+    for event in ["PostToolUse", "Stop"] {
+        let groups = value["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("{event} must be registered by the lifecycle triad"));
+        for group in groups {
+            let cmd = group["hooks"][0]["command"].as_str().unwrap();
+            assert!(
+                !cmd.starts_with("trusty-memory"),
+                "{event} must never carry a trusty-memory command: {cmd}"
+            );
+        }
     }
 }
 
@@ -627,6 +635,8 @@ fn write_project_hooks_registers_pm_guard() {
     // Why (#1977): managed PM sessions must register the PreToolUse enforcement
     // guard so the PM is blocked from editing code directly. The command must be
     // an absolute path (PATH-robust, per #1914) ending in `hook --pm-guard`.
+    // NOTE (#2003): PreToolUse now also carries the lifecycle-triad group
+    // alongside the guard — two groups, not one.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
@@ -639,10 +649,16 @@ fn write_project_hooks_registers_pm_guard() {
     let groups = value["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be an array");
-    assert_eq!(groups.len(), 1, "exactly one PreToolUse handler group");
-    // Matcher `""` means the guard fires for every tool call.
-    assert_eq!(groups[0]["matcher"], serde_json::json!(""));
-    let cmd = groups[0]["hooks"][0]["command"]
+    assert_eq!(
+        groups.len(),
+        2,
+        "PreToolUse must carry the PM-guard group plus the lifecycle-triad group"
+    );
+    let guard = groups
+        .iter()
+        .find(|g| g["matcher"] == serde_json::json!(""))
+        .expect("the guard group (matcher \"\") must be present");
+    let cmd = guard["hooks"][0]["command"]
         .as_str()
         .expect("command must be a string");
     assert!(
@@ -651,14 +667,17 @@ fn write_project_hooks_registers_pm_guard() {
     );
     assert!(
         !cmd.starts_with("trusty-memory"),
-        "PreToolUse must be the tm guard, not a trusty-memory hook: {cmd}"
+        "the guard group must be the tm guard, not a trusty-memory hook: {cmd}"
     );
 }
 
 #[test]
 fn write_project_hooks_replaces_existing() {
-    // Why: re-running prep must replace the hooks block, not append to it,
-    // so handler arrays never duplicate and cause double-firing.
+    // Why: re-running prep must replace OUR OWN prior groups, not append to
+    // them, so handler arrays never duplicate and cause double-firing.
+    // NOTE (#2003): SessionStart now carries 2 stable groups (trusty-memory +
+    // lifecycle-triad) rather than 1 — the assertion is "stays at 2 across
+    // repeats", not "stays at 1".
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
@@ -674,8 +693,8 @@ fn write_project_hooks_replaces_existing() {
         .expect("SessionStart must be an array");
     assert_eq!(
         ss.len(),
-        1,
-        "re-running must replace, not append, handler groups"
+        2,
+        "re-running must not duplicate our own handler groups"
     );
     // Unrelated keys must survive the replace.
     write_project_hooks(project).expect("third write succeeds");

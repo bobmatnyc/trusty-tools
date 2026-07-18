@@ -36,6 +36,25 @@ fn claude_mpm_settings() -> Value {
     })
 }
 
+/// A settings JSON value with a MIXED `PreToolUse` group: one tm-owned entry
+/// and one foreign (claude-mpm) entry inside the SAME matcher group (issue
+/// #2948) — the shape a hand-merged settings file can produce even though
+/// [`super::super::mpm_hook_additions_with_exe`] never writes one itself.
+fn mixed_group_settings() -> Value {
+    json!({
+        "outputStyle": "trusty-mpm",
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [
+                    { "type": "command", "command": "/usr/local/bin/tm hook", "timeout": 5 },
+                    { "type": "command", "command": "claude-mpm hooks fire PreToolUse", "timeout": 5 }
+                ]
+            }]
+        }
+    })
+}
+
 #[test]
 fn contains_tm_hooks_true_for_tm_entry() {
     assert!(contains_tm_hooks(&tm_settings()));
@@ -63,6 +82,75 @@ fn foreign_hook_event_names_lists_claude_mpm_entries() {
     val["hooks"]["PreToolUse"] = tm_settings()["hooks"]["PreToolUse"].clone();
     let names = foreign_hook_event_names(&val);
     assert_eq!(names, vec!["SessionStart".to_string()]);
+}
+
+/// Why (issue #2948): the `.all()`-based classification made a hand-mixed
+/// group invisible to `tm doctor`'s `hooks_contamination` check even though it
+/// genuinely carries a tm-owned entry. `.any()` must flag it.
+/// What: asserts `tm_hook_event_names` (the primitive `doctor_hooks_hygiene`
+/// calls) lists `PreToolUse` for [`mixed_group_settings`].
+#[test]
+fn tm_hook_event_names_flags_mixed_group() {
+    let names = tm_hook_event_names(&mixed_group_settings());
+    assert_eq!(
+        names,
+        vec!["PreToolUse".to_string()],
+        "a mixed group carrying a tm entry must be flagged as contaminated"
+    );
+}
+
+/// Why (issue #2948): the same mixed group also carries a genuinely foreign
+/// (claude-mpm) entry, so `tm doctor`'s `hooks_foreign_conflict` check must
+/// flag it too — both checks can legitimately fire on the same event now.
+/// What: asserts `foreign_hook_event_names` lists `PreToolUse` for
+/// [`mixed_group_settings`].
+#[test]
+fn foreign_hook_event_names_flags_mixed_group() {
+    let names = foreign_hook_event_names(&mixed_group_settings());
+    assert_eq!(
+        names,
+        vec!["PreToolUse".to_string()],
+        "a mixed group carrying a foreign entry must be flagged as a conflict"
+    );
+}
+
+/// Why (issue #2948): `tm hooks clean --force` must strip ONLY the tm-owned
+/// entry from a mixed group, leaving the foreign entry AND the group itself
+/// (matcher, other keys) intact — never delete a group wholesale just because
+/// it also happens to carry a tm entry.
+/// What: force-cleans [`mixed_group_settings`] and asserts the resulting
+/// `PreToolUse` group still exists with exactly the foreign entry, while
+/// `contains_tm_hooks` is now `false`.
+#[test]
+fn clean_settings_file_force_strips_tm_entry_from_mixed_group_preserves_foreign() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("settings.json");
+    let original = serde_json::to_string_pretty(&mixed_group_settings()).unwrap();
+    std::fs::write(&path, &original).unwrap();
+
+    let outcome = clean_settings_file(&path, true).unwrap().unwrap();
+    assert_eq!(outcome.removed_events, vec!["PreToolUse".to_string()]);
+
+    let cleaned: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        !contains_tm_hooks(&cleaned),
+        "the tm-owned entry must be gone after cleaning"
+    );
+    let groups = cleaned["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("the PreToolUse group must survive — it still carries a foreign entry");
+    assert_eq!(groups.len(), 1, "the group itself must not be dropped");
+    let inner = groups[0]["hooks"].as_array().unwrap();
+    assert_eq!(inner.len(), 1, "only the tm entry must be removed");
+    assert_eq!(
+        inner[0]["command"].as_str().unwrap(),
+        "claude-mpm hooks fire PreToolUse",
+        "the foreign entry must survive untouched"
+    );
+    assert_eq!(
+        groups[0]["matcher"], "*",
+        "the group's other keys (matcher) must be preserved"
+    );
 }
 
 #[test]
