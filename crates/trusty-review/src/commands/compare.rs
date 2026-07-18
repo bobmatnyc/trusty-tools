@@ -7,15 +7,12 @@
 //! Test: CLI integration via `cargo run -p trusty-review -- compare --help`;
 //! table formatting covered by `print_compare_table_formats_correctly`.
 
-use std::sync::Arc;
-
 use anyhow::{Context as _, Result};
 use tracing::warn;
 
 use trusty_review::{
     config::ReviewConfig,
     integrations::{
-        NullSearchClient,
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
     },
@@ -25,7 +22,7 @@ use trusty_review::{
 };
 
 use crate::commands::diff_source::{LocalDiffFlags, resolve_local_diff_source};
-use crate::commands::run::{build_deps_async, resolve_source_root_arg};
+use crate::commands::run::{apply_source_root_fallback, build_deps_async, resolve_source_root_arg};
 
 // ─── compare args ────────────────────────────────────────────────────────────
 
@@ -148,9 +145,7 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
 
     for model in &models {
         let mut deps = build_deps_async(&config, model, default_provider).await?;
-        if let Some(notice) = &source_root_notice {
-            deps.search = Arc::new(NullSearchClient::new(notice.clone()));
-        }
+        apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
         let input = ReviewInput {
             diff_source: diff_source.clone(),
             reviewer_model: model.clone(),

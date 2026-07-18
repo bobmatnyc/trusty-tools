@@ -94,7 +94,8 @@ impl std::str::FromStr for Provider {
 /// Why: the caller (`cmd_run`/`cmd_compare`) needs to know whether an explicit
 /// `--source-root <dir>` resolved to a real index (nothing further to do) or
 /// forced a diff-only fallback that also requires swapping in a
-/// `NullSearchClient` and surfacing the notice to the operator.
+/// `NullSearchClient` AND a `NullAnalyzeClient` and surfacing the notice to
+/// the operator.
 /// What: `Matched` carries the resolved index id (already applied to
 /// `search_index` by the time this is returned — informational only);
 /// `DiffOnly` carries the human-readable notice to print/log.
@@ -463,17 +464,20 @@ impl ReviewConfig {
     /// to the matched id and `search_index_explicit = true` (so `resolve_index`
     /// becomes a no-op and this choice is never clobbered by CWD auto-derive),
     /// returning `SourceRootOutcome::Matched`. On no match, or when the daemon
-    /// is unreachable: sets `search_index_explicit = true` and
-    /// `context.require_search = false` so the required-context gate
-    /// (`pipeline::context_gate::preflight_context`) degrades instead of
-    /// skipping, and returns `SourceRootOutcome::DiffOnly` with a notice the
-    /// caller must surface (stderr/log) and use to swap `deps.search` for a
-    /// `NullSearchClient` — relaxing `require_search` alone is not sufficient
-    /// because a healthy daemon would otherwise silently be queried against
-    /// whatever index `search_index` still holds.
+    /// is unreachable: sets `search_index_explicit = true` AND clears BOTH
+    /// `context.require_search = false` and `context.require_analyze = false`
+    /// so the required-context gate (`pipeline::context_gate::preflight_context`)
+    /// degrades instead of skipping either dependency, and returns
+    /// `SourceRootOutcome::DiffOnly` with a notice the caller must surface
+    /// (stderr/log) and use to swap BOTH `deps.search` for a `NullSearchClient`
+    /// AND `deps.analyze` for a `NullAnalyzeClient` — relaxing the `require_*`
+    /// flags alone is not sufficient because a healthy daemon would otherwise
+    /// silently be queried against whatever index `search_index` still holds.
     /// Test: `source_root_matches_registered_index`,
     /// `source_root_no_match_forces_diff_only`,
-    /// `source_root_daemon_unreachable_forces_diff_only`.
+    /// `source_root_daemon_unreachable_forces_diff_only`,
+    /// `source_root_no_match_also_disables_require_analyze`,
+    /// `source_root_daemon_unreachable_also_disables_require_analyze`.
     pub async fn resolve_source_root(
         &mut self,
         client: &dyn crate::integrations::search_client::SearchClient,
@@ -485,6 +489,7 @@ impl ReviewConfig {
             Err(e) => {
                 self.search_index_explicit = true;
                 self.context.require_search = false;
+                self.context.require_analyze = false;
                 let notice = format!(
                     "--source-root {}: trusty-search unreachable while resolving an index \
                      ({e}) — proceeding in diff-only mode (no code-context retrieval)",
@@ -509,6 +514,7 @@ impl ReviewConfig {
             SourceRootResolution::NoIndex => {
                 self.search_index_explicit = true;
                 self.context.require_search = false;
+                self.context.require_analyze = false;
                 let notice = format!(
                     "--source-root {} has no registered trusty-search index — proceeding in \
                      diff-only mode (no code-context retrieval). Run `trusty-search index {}` \

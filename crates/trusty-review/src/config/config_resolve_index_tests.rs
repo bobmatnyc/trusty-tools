@@ -376,8 +376,49 @@ async fn source_root_no_match_forces_diff_only() {
         "no-match must relax require_search so the gate degrades instead of skipping"
     );
     assert!(
+        !config.context.require_analyze,
+        "no-match must ALSO relax require_analyze — leaving it required would let a healthy \
+         trusty-analyze daemon silently query the stale index (finding #1, #2994 re-review)"
+    );
+    assert!(
         config.search_index_explicit,
         "no-match must prevent CWD auto-derive from later overwriting the diff-only intent"
+    );
+}
+
+/// `source_root_no_match_forces_diff_only` already asserts `require_analyze`
+/// is cleared alongside `require_search`; this test names that assertion
+/// explicitly per the doc-comment cross-reference so a future reader can find
+/// it without re-deriving which test covers which flag.
+///
+/// Why: the #1 re-review finding was specifically that `require_analyze` was
+/// left untouched while `require_search` was correctly cleared — a dedicated,
+/// explicitly-named test prevents that asymmetry from silently regressing.
+/// What: identical setup to `source_root_no_match_forces_diff_only`, asserting
+/// only the `require_analyze` flag.
+/// Test: this test.
+#[tokio::test]
+async fn source_root_no_match_also_disables_require_analyze() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().canonicalize().unwrap();
+
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+    assert!(
+        config.context.require_analyze,
+        "precondition: require_analyze must default to true"
+    );
+
+    let indexes = vec![make_index_info("unrelated", Some("/srv/totally-different"))];
+    let client = FixedIndexSearch(indexes);
+
+    let outcome = config.resolve_source_root(&client, &canonical).await;
+
+    assert!(matches!(outcome, SourceRootOutcome::DiffOnly(_)));
+    assert!(
+        !config.context.require_analyze,
+        "no-match must relax require_analyze, mirroring require_search"
     );
 }
 
@@ -410,5 +451,33 @@ async fn source_root_daemon_unreachable_forces_diff_only() {
         other => panic!("expected DiffOnly, got {other:?}"),
     }
     assert!(!config.context.require_search);
+    assert!(
+        !config.context.require_analyze,
+        "daemon-unreachable must ALSO relax require_analyze, mirroring require_search"
+    );
     assert!(config.search_index_explicit);
+}
+
+/// `source_root_daemon_unreachable_forces_diff_only` already asserts
+/// `require_analyze` is cleared; this test names that assertion explicitly
+/// per the doc-comment cross-reference (see
+/// `source_root_no_match_also_disables_require_analyze` for the rationale).
+/// Test: this test.
+#[tokio::test]
+async fn source_root_daemon_unreachable_also_disables_require_analyze() {
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+    assert!(config.context.require_analyze, "precondition");
+
+    let client = FailListSearch;
+    let outcome = config
+        .resolve_source_root(&client, Path::new("/tmp/whatever-2994-analyze"))
+        .await;
+
+    assert!(matches!(outcome, SourceRootOutcome::DiffOnly(_)));
+    assert!(
+        !config.context.require_analyze,
+        "daemon-unreachable must relax require_analyze, mirroring require_search"
+    );
 }
