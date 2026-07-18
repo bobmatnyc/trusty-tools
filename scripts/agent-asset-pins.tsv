@@ -1,0 +1,25 @@
+# agent-asset-pins.tsv — pinned trusty-mpm source hashes for deliberately
+# deviated tcode agent copies (issue #2958 Slice E4).
+#
+# Format: <mpm-source-relative-path><TAB><sha256-of-mpm-source-file>
+#
+# These 4 files are the KNOWN INTENTIONAL DEVIATIONS from byte-parity
+# documented in crates/trusty-code/src/assets/mod.rs ("Tools-restriction
+# deviation" / "Prose deviation follow-up" doc blocks, Slice E3, PR #3041):
+# the tcode copy carries an added `tools:` frontmatter line plus (for three
+# of the four) reworded read-only prose, so it can never be byte-identical
+# to the trusty-mpm source it was derived from.
+#
+# check_agent_assets.sh does NOT byte-compare these 4 tcode copies against
+# their mpm source (that would always fail by design). Instead it hashes the
+# CURRENT mpm SOURCE file and compares against the pin recorded here. If the
+# mpm source hash no longer matches, upstream changed behind a deliberately
+# deviated copy — the guard fails so a human reconciles the tcode copy on
+# purpose, rather than silently drifting.
+#
+# Regenerate a pin (only after manually reconciling the tcode copy with the
+# new upstream content) with: scripts/check_agent_assets.sh --update
+crates/trusty-mpm/src/assets/agents/code-analyzer.md	de345cc4775625d0c1953bd8cf06f8701d068ebac138c69dd4cb15cc163b02bc
+crates/trusty-mpm/src/assets/agents/code-critic.md	e68065861132e1684392e15fc3a718ffae3e0b398aecdb36460e7ca16a153d63
+crates/trusty-mpm/src/assets/agents/qa.md	1878ecb3773296fb5e2d659b1d28a044608511bad2cf7c294870bd67aa1fc353
+crates/trusty-mpm/src/assets/agents/web-qa.md	50f913c1291d3f5b118413abc35c3d6bcf125ca06fa06b3351315781b5b60b97

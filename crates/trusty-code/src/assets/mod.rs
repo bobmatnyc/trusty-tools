@@ -69,6 +69,15 @@
 //! staleness guard must whitelist the reworded prose sections in these three
 //! files too, not just the `tools:` line.
 //!
+//! ## E4 staleness guard (issue #2958, `scripts/check_agent_assets.sh`)
+//!
+//! CI enforcement of everything above: byte-compares the 29 non-deviated
+//! embedded copies against their trusty-mpm source, and pins the 4 deviated
+//! files' upstream SOURCE hash (`scripts/agent-asset-pins.tsv`) so an
+//! upstream edit behind one of them fails the gate for deliberate
+//! reconciliation rather than drifting unnoticed. See that script's header
+//! for the full design and `.github/workflows/agent-assets.yml` for the gate.
+//!
 //! Test: `assets::tests::*` — every embedded agent `.md` parses and projects
 //! to a field-identical `AgentConfig` vs. the retired TOML fixtures (the
 //! original 3), every roster name resolves through the extends composer with
