@@ -10954,6 +10954,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-code-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
+
+[[package]]
 name = "trusty-common"
 version = "0.23.2"
 dependencies = [

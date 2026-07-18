@@ -1,0 +1,33 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark rounded square background -->
+  <rect width="512" height="512" rx="96" ry="96" fill="#1E1E2E"/>
+
+  <!-- "A" letterform: occupies x 52-192, y 140-372 -->
+  <path d="M 52 372 L 122 140 L 162 140 L 232 372 L 196 372 L 178 312 L 108 312 L 90 372 Z
+           M 118 274 L 168 274 L 143 192 Z"
+        fill="#6366F1"/>
+
+  <!-- "I" letterform: occupies x 216-256 -->
+  <rect x="216" y="140" width="40" height="232" rx="6" ry="6" fill="#6366F1"/>
+
+  <!-- "C" letterform: occupies x 272-460 -->
+  <path d="M 448 198 Q 396 136 334 148 Q 272 160 272 256 Q 272 352 334 364 Q 396 376 448 314"
+        fill="none" stroke="#6366F1" stroke-width="48" stroke-linecap="round"/>
+
+  <!-- Robot head accent: top-center above letters -->
+  <g transform="translate(256, 68)">
+    <!-- Antenna -->
+    <line x1="0" y1="-28" x2="0" y2="-12" stroke="#A5B4FC" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="0" cy="-32" r="5" fill="#A5B4FC"/>
+    <!-- Head -->
+    <rect x="-24" y="-10" width="48" height="36" rx="8" ry="8" fill="#A5B4FC" opacity="0.9"/>
+    <!-- Eyes -->
+    <circle cx="-10" cy="6" r="5" fill="#1E1E2E"/>
+    <circle cx="10" cy="6" r="5" fill="#1E1E2E"/>
+    <!-- Mouth -->
+    <rect x="-8" y="16" width="16" height="3" rx="1.5" fill="#1E1E2E"/>
+  </g>
+
+  <!-- Terminal cursor accent: solid indigo block bottom-left -->
+  <rect x="52" y="398" width="36" height="46" rx="4" ry="4" fill="#A5B4FC" opacity="0.85"/>
+</svg>
