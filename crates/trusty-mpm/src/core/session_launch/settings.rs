@@ -262,18 +262,27 @@ pub(super) fn write_output_style(
 /// #2948's [`crate::core::standalone::hooks::strip_hook_entries_matching_for_events`])
 /// removes only OUR OWN prior entries before merging, so a foreign/hand-added
 /// hook — even one sharing a matcher group with one of ours — survives.
+/// Since #2969 this writes the full lifecycle triad on every managed-session
+/// launch, so a crash mid-write has a larger blast radius than before; issue
+/// #2972 switched the final write from a plain `fs::write` to
+/// [`trusty_common::claude_config::write_json_atomic`] (temp-file + rename) for
+/// parity with the sibling `tm hooks clean` mutation path, so a crash or `^C`
+/// mid-write can never leave a torn/truncated `settings.json`.
 /// What: reads an existing `<project>/.claude/settings.json` (preserving all
 /// other keys), strips any existing entry recognised by
 /// [`super::project_hooks::is_project_managed_hook_command`] for the events
 /// about to be (re)written, deep-merges in
 /// [`super::project_hooks::project_managed_hook_additions`] via
-/// [`trusty_common::claude_config::merge_hook_entries`], and writes the result
-/// back pretty-printed. Creates the file and `.claude/` directory when absent.
+/// [`trusty_common::claude_config::merge_hook_entries`], and atomically writes
+/// the result back pretty-printed via
+/// [`trusty_common::claude_config::write_json_atomic`]. Creates the file and
+/// `.claude/` directory when absent.
 /// Test: `write_project_hooks_writes_all_event_types`,
 /// `write_project_hooks_registers_pm_guard`,
 /// `write_project_hooks_replaces_existing`,
 /// `project_hooks_tests::write_project_hooks_writes_lifecycle_triad`,
-/// `project_hooks_tests::write_project_hooks_preserves_foreign_hooks`.
+/// `project_hooks_tests::write_project_hooks_preserves_foreign_hooks`,
+/// `project_hooks_tests::write_project_hooks_writes_via_atomic_path`.
 pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
@@ -310,12 +319,8 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
 
     let merged = trusty_common::claude_config::merge_hook_entries(&settings, &additions);
 
-    let serialized =
-        serde_json::to_string_pretty(&merged).map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
-        path: settings_path.clone(),
-        source,
-    })?;
+    trusty_common::claude_config::write_json_atomic(&settings_path, &merged)
+        .map_err(|err| PrepError::Deploy(err.to_string()))?;
     Ok(())
 }
 

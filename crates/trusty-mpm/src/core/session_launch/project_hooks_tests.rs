@@ -197,3 +197,58 @@ fn write_project_hooks_preserves_foreign_hooks() {
         "re-running must not duplicate any group"
     );
 }
+
+/// Why (issue #2972): the final write must go through
+/// `trusty_common::claude_config::write_json_atomic` (temp-file + rename), not
+/// a plain `fs::write`, so a crash mid-write can never leave a
+/// torn/truncated `settings.json`. `write_json_atomic` backs the prior file up
+/// to `<path>.bak` before replacing it — that backup only appears when the
+/// atomic path actually ran, so its presence after a second write (and
+/// absence after the first) is an observable proxy for "the atomic
+/// temp-file+rename mechanism was used" without reaching into private
+/// trusty-common internals.
+/// What: writes twice, asserting no `.bak`/`.tmp` after the first write (file
+/// didn't exist yet), a `.bak` byte-identical to the pre-second-write content
+/// after the second, no leftover `.tmp` file (the rename is what makes the
+/// write atomic), and that the JSON payload itself is unchanged by the write
+/// mechanism swap.
+#[test]
+fn write_project_hooks_writes_via_atomic_path() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path();
+    let claude_dir = project.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+    let bak_path = claude_dir.join("settings.json.bak");
+    let tmp_path = claude_dir.join("settings.json.tmp");
+
+    super::super::settings::write_project_hooks(project).expect("first write succeeds");
+    assert!(settings_path.exists(), "settings.json must be created");
+    assert!(
+        !bak_path.exists(),
+        "no backup expected on first write (file did not previously exist)"
+    );
+    assert!(
+        !tmp_path.exists(),
+        "the .tmp file must be renamed away, never left behind"
+    );
+    let first_content = std::fs::read_to_string(&settings_path).unwrap();
+
+    super::super::settings::write_project_hooks(project).expect("second write succeeds");
+    assert!(
+        bak_path.exists(),
+        "write_json_atomic must back up the prior file before replacing it"
+    );
+    assert!(
+        !tmp_path.exists(),
+        "the .tmp file must be renamed away, never left behind"
+    );
+    let backup_content = std::fs::read_to_string(&bak_path).unwrap();
+    assert_eq!(
+        backup_content, first_content,
+        "the backup must be a byte-identical copy of the pre-second-write content"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert!(value["hooks"]["SessionStart"].is_array());
+}
