@@ -809,6 +809,109 @@ async fn dream_cycle_semantic_consolidation_no_inference() {
     );
 }
 
+/// Why (issue #2593): the exact production failure — default config
+/// (`local_model_enabled = true`, no OpenRouter key, `semantic.model =
+/// "anthropic/claude-haiku-4-5"`) — must be caught once and disable the
+/// phase for this `Dreamer`'s lifetime instead of retrying every cycle.
+/// What: Runs `dream_cycle` twice with no injected consolidator and
+/// `DreamConfig::default()`. Asserts both cycles report zero semantic work,
+/// `Dreamer::is_semantic_consolidation_disabled()` is `true` after the first
+/// cycle, and it stays `true` (no reset) after the second — proving the
+/// second cycle short-circuited before rebuilding/retrying the backend.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    let handle = open_test_handle("dream-semantic-invalid-model").await;
+    handle
+        .remember(
+            "some memory that should not be semantically consolidated".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig::default());
+    assert!(!dreamer.is_semantic_consolidation_disabled());
+
+    let stats1 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        stats1.semantically_consolidated, 0,
+        "misconfigured model must not produce any consolidation output"
+    );
+    assert_eq!(stats1.semantic_llm_calls, 0);
+    assert!(
+        dreamer.is_semantic_consolidation_disabled(),
+        "invalid model/provider combination must disable the phase after one cycle"
+    );
+
+    let stats2 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        stats2.semantically_consolidated, 0,
+        "second cycle must remain a no-op (no retry of the known-bad config)"
+    );
+    assert_eq!(stats2.semantic_llm_calls, 0);
+    assert!(
+        dreamer.is_semantic_consolidation_disabled(),
+        "disabled state must persist across cycles"
+    );
+
+    // Palace must be intact — no partial writes from the doomed build attempt.
+    assert_eq!(
+        handle.drawers.read().len(),
+        1,
+        "drawer must survive untouched"
+    );
+}
+
+/// Why (issue #2593): a correctly-configured local model (a bare Ollama tag,
+/// no OpenRouter/cloud vendor prefix) must pass validation and NOT trip the
+/// disable flag — only the specific cloud-vendor-prefix mismatch should.
+/// What: Sets `semantic.model = "llama3.1"` with the local-model path
+/// enabled. The actual HTTP call still fails in this sandboxed test
+/// environment (no live Ollama server), which `SemanticConsolidator`
+/// already handles gracefully (counts the call, returns no actions) — the
+/// assertion here is specifically that `is_semantic_consolidation_disabled()`
+/// stays `false`, proving the model passed validation and normal operation
+/// (build + attempt) proceeded unchanged.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    let handle = open_test_handle("dream-semantic-valid-local-model").await;
+    handle
+        .remember(
+            "some memory that should not be semantically consolidated".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "llama3.1".to_string(),
+            ..Default::default()
+        },
+        local_model_enabled: true,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
+
+    let _stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert!(
+        !dreamer.is_semantic_consolidation_disabled(),
+        "a valid local model id must pass validation and not disable the phase"
+    );
+}
+
 /// Why: When `semantic.enabled = false`, the phase must be skipped even
 /// if an inference backend is configured, so operators can opt out cheaply.
 /// What: Supply a consolidator but set enabled=false; assert the consolidator's
@@ -1436,8 +1539,13 @@ async fn consolidate_scoped_skips_task_drawers() {
 }
 
 /// Why: when no inference backend is configured the tool must no-op cleanly.
-/// What: with the OpenRouter env key removed, default config, and no injected
-/// consolidator, `consolidate_scoped` returns zero counts without error.
+/// What: with the OpenRouter env key removed, the local-model path explicitly
+/// disabled, and no injected consolidator, `consolidate_scoped` returns zero
+/// counts without error. `local_model_enabled: false` is set explicitly here
+/// (issue #2593): `DreamConfig::default()` alone is no longer "no inference"
+/// — its default model/provider combination is exactly the misconfiguration
+/// this issue fixes, so it now returns `Err` (see
+/// `consolidate_scoped_invalid_model_returns_err`) instead of a silent no-op.
 /// Test: this function.
 #[tokio::test]
 async fn consolidate_scoped_no_inference_is_noop() {
@@ -1447,10 +1555,44 @@ async fn consolidate_scoped_no_inference_is_noop() {
         .remember("some aged fact".into(), RoomType::Backend, vec![], 0.5)
         .await
         .unwrap();
-    let stats = consolidate_scoped(&handle, &DreamConfig::default(), None, 7, None)
+    let cfg = DreamConfig {
+        local_model_enabled: false,
+        ..DreamConfig::default()
+    };
+    let stats = consolidate_scoped(&handle, &cfg, None, 7, None)
         .await
         .unwrap();
     assert_eq!(stats, RoomConsolidationStats::default());
+}
+
+/// Why (issue #2593): the on-demand `dream_consolidate_room` tool must
+/// surface a misconfigured model/provider combination to the caller as an
+/// error rather than silently no-op'ing (it's a single user-triggered call,
+/// not a recurring background job, so there is nothing to "disable").
+/// What: `DreamConfig::default()` — local-model path enabled, no OpenRouter
+/// key, default OpenRouter-style model id — is exactly the #2593
+/// misconfiguration. Asserts `consolidate_scoped` returns `Err` naming both
+/// the model and Ollama.
+#[tokio::test]
+async fn consolidate_scoped_invalid_model_returns_err() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let handle = open_test_handle("scoped-invalid-model").await;
+    handle
+        .remember("some aged fact".into(), RoomType::Backend, vec![], 0.5)
+        .await
+        .unwrap();
+    let err = consolidate_scoped(&handle, &DreamConfig::default(), None, 7, None)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("anthropic/"),
+        "error should name the model: {msg}"
+    );
+    assert!(
+        msg.contains("Ollama"),
+        "error should name the provider: {msg}"
+    );
 }
 
 /// Why: `max_age_days <= 0` is a guard value meaning "consolidate nothing".

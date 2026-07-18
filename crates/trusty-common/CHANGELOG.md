@@ -16,6 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- semantic-consolidation dream job: validate the configured model against the resolved provider (Ollama vs OpenRouter) before building the inference backend; a misconfigured model (e.g. the OpenRouter-style default resolved against a local Ollama server) now logs one loud, actionable error and disables the phase for that palace's `Dreamer` lifetime instead of retrying every dream cycle ([#2593](https://github.com/bobmatnyc/trusty-tools/issues/2593))
 - harden mid-task incremental index-file updates against transient send failures ([#2796](https://github.com/bobmatnyc/trusty-tools/pull/2796)) ([`1f8b569`](https://github.com/bobmatnyc/trusty-tools/commit/1f8b56924db6534d6b67811c39d8862dc53cc606))
 - bump lru and jsonwebtoken to patched versions ([#2782](https://github.com/bobmatnyc/trusty-tools/pull/2782)) ([`298df87`](https://github.com/bobmatnyc/trusty-tools/commit/298df87e6a5b5e96874ea2866509303df14712bc))
 

@@ -19,17 +19,22 @@ pub mod core;
 pub mod core_kg;
 pub mod helpers;
 pub mod types;
+pub mod user_config;
 
 // Re-export the full public surface so external call sites
 // (`crate::service::X`) keep resolving exactly as they did against the former
-// monolithic module.
+// monolithic module. `load_user_config`, `dream_config_from_user_config`, and
+// `LoadedUserConfig` moved from `helpers` to `user_config` (issue #2593
+// follow-up, to keep `helpers.rs` under the 500-SLOC cap); re-exported from
+// their new home here so `crate::service::X` call sites are unaffected.
 pub use core::MemoryService;
 pub use helpers::{
-    drawer_content_preview, drawer_snippet, enrich_gap_exploration, load_user_config,
-    palace_info_from, recall_entry_json, refresh_gaps_cache, service_result_to_anyhow,
-    LoadedUserConfig, DRAWER_PREVIEW_MAX_CHARS, DRAWER_SNIPPET_MAX_CHARS,
+    drawer_content_preview, drawer_snippet, enrich_gap_exploration, palace_info_from,
+    recall_entry_json, refresh_gaps_cache, service_result_to_anyhow, DRAWER_PREVIEW_MAX_CHARS,
+    DRAWER_SNIPPET_MAX_CHARS,
 };
 pub use types::{
     CreateDrawerBody, CreatePalaceBody, DreamStatusPayload, KgAssertBody, KgGraphPayload,
     ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult, StatusPayload,
 };
+pub use user_config::{dream_config_from_user_config, load_user_config, LoadedUserConfig};

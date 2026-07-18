@@ -22,7 +22,7 @@ use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::semantic_consolidation::SemanticConsolidator;
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::helpers::now_secs;
@@ -43,6 +43,13 @@ pub struct Dreamer {
     /// When `None`, `semantic_consolidation_pass` builds the consolidator from
     /// `config` at runtime.
     pub(super) consolidator: Option<Arc<SemanticConsolidator>>,
+    /// Set once the semantic-consolidation phase hits an unresolvable
+    /// model/provider combination (issue #2593). Once `true`,
+    /// `semantic_consolidation_pass` skips the phase entirely on every
+    /// subsequent cycle instead of rebuilding and retrying a known-bad
+    /// config forever. Only cleared by constructing a fresh `Dreamer` (i.e.
+    /// a config reload), matching "disabled until the config is fixed".
+    pub(super) semantic_consolidation_disabled: AtomicBool,
 }
 
 impl Dreamer {
@@ -58,6 +65,7 @@ impl Dreamer {
             config,
             last_activity: Arc::new(AtomicU64::new(now_secs())),
             consolidator: None,
+            semantic_consolidation_disabled: AtomicBool::new(false),
         }
     }
 
@@ -76,6 +84,7 @@ impl Dreamer {
             config,
             last_activity: Arc::new(AtomicU64::new(now_secs())),
             consolidator: Some(consolidator),
+            semantic_consolidation_disabled: AtomicBool::new(false),
         }
     }
 
@@ -88,6 +97,18 @@ impl Dreamer {
     pub fn is_idle(&self) -> bool {
         let last = self.last_activity.load(Ordering::Relaxed);
         now_secs().saturating_sub(last) >= self.config.idle_secs
+    }
+
+    /// Whether the semantic-consolidation phase is disabled due to a
+    /// misconfigured model/provider combination detected during a prior
+    /// cycle (issue #2593).
+    ///
+    /// Why: surfaces the "fail loud once, don't retry" state for callers
+    /// (tests, admin dashboards) without exposing the raw atomic field.
+    /// What: relaxed load of `semantic_consolidation_disabled`.
+    /// Test: `dream_cycle_semantic_consolidation_invalid_model_disables_once`.
+    pub fn is_semantic_consolidation_disabled(&self) -> bool {
+        self.semantic_consolidation_disabled.load(Ordering::Relaxed)
     }
 
     /// Spawn the background dream loop.
@@ -245,7 +266,13 @@ impl Dreamer {
 
         // ── Phase: Semantic consolidation (optional, inference-gated) ──────────
         let (semantically_consolidated, semantic_llm_calls, semantic_cache_hits) =
-            semantic_consolidation_pass(handle, &self.config, self.consolidator.clone()).await;
+            semantic_consolidation_pass(
+                handle,
+                &self.config,
+                self.consolidator.clone(),
+                &self.semantic_consolidation_disabled,
+            )
+            .await;
 
         // Persist the trimmed L1 snapshot so a restart sees the consolidated state.
         if let Err(e) = handle.flush() {
