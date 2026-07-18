@@ -115,11 +115,14 @@ async fn respond_accepted(
 /// session per `crate::task::protocol::task_run`'s docs.
 /// What: `202 Accepted` with `{session_id, status, mode, binding}` on
 /// success (see [`respond_accepted`] for the status-code rationale); `400`
-/// for an empty `task_description` (`-32003 invalid_argument`); `404` for an
-/// unknown `session_id` (`-32007 session_not_found`).
+/// for an empty `task_description` (`-32003 invalid_argument`) or a
+/// syntactically malformed body (rejected by axum's `Json` extractor before
+/// this handler runs); `404` for an unknown `session_id` (`-32007
+/// session_not_found`).
 /// Test: `tests::run_task_returns_202_with_running_session`,
 /// `tests::run_task_empty_task_description_returns_400`,
-/// `tests::run_task_unknown_session_id_returns_404`.
+/// `tests::run_task_unknown_session_id_returns_404`,
+/// `tests::run_task_malformed_body_returns_400`.
 async fn run_task(
     State(state): State<TasksState>,
     Json(body): Json<RunTaskBody>,
@@ -245,5 +248,17 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let v = body_json(resp).await;
         assert_eq!(v["error"]["code"], -32007);
+    }
+
+    /// Syntactically invalid JSON must never reach the handler — axum's
+    /// `Json` extractor rejects it with a client error before `task.run`
+    /// runs, matching `sessions_write_tests::create_session_malformed_body_returns_400`'s
+    /// identical case for `POST /sessions`.
+    #[tokio::test]
+    async fn run_task_malformed_body_returns_400() {
+        let (app, _sessions, _project) = app_and_registry();
+
+        let resp = post(&app, "/tasks", "{not valid json").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

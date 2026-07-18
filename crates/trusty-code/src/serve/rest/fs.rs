@@ -19,9 +19,11 @@
 //! mirroring `super::sessions::SessionsState`) mapping
 //! `GET /fs?path=..&include_hidden=..` -> `fs.list_dir`. The simpler
 //! `GET /fs` shape (rather than `GET /fs/list`) was chosen because no spec in
-//! this repo (including DOC-39, whose §5.8 `project.list_dir` predates the
-//! #2983 REST gateway and explicitly says "there is no REST resource
-//! surface") mandates a `/list` suffix.
+//! this repo mandates a `/list` suffix: DOC-39 §5.0 ("Today's surface")
+//! explicitly says "there is no REST resource surface", and its §5.8
+//! (`project.list_dir`, predating the #2983 REST gateway) proposes that
+//! method as "a new method on the existing `POST /rpc` route — no new HTTP
+//! route" rather than any REST shape at all.
 //! `crate::serve::http::build_axum_router` merges this into the daemon's main
 //! router alongside `POST /rpc`, `GET /health`, `GET /sessions/{id}/events`,
 //! and the other REST resource groups — `/fs` collides with none of them.
