@@ -62,7 +62,6 @@ normative grammar — this note does not restate it.
 | DOC-39 | `SPEC-TCUI-01~draft` … `-09~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
 | DOC-40 | `SPEC-BGATTACH-01~draft` … `-07~draft` | [Durable Background Agents: Exclusive Attach/Detach Semantics](./durable-background-agents.md) | trusty-mpm — daemon / session-manager / agent delegation; trusty-code — session registry / task executor (cross-crate) |
 | DOC-41 | `SPEC-AGENTFW-01~draft` … `-06~draft` | [Eve-Style Agent Framework for trusty-agents](./trusty-agents-eve-style-agents-spec.md) | trusty-agents — agent definition / runtime / tool-calling / memory |
-| DOC-42 | `SPEC-AGENTSKILLS-01~draft` | [Agent-Bundled Skills: Declarative Skill Association and Co-Deployment](./agent-bundled-skills.md) | trusty-mpm — agent composition / skill deployment |
 | DOC-43 | `SPEC-REQ-01~draft` … `-07~draft` | [Requirements Standard: A Traceable, Verifiable, Spec-Linked Requirement Authoring Standard](./DOC-43-requirements-standard.md) | documentation standard — requirements engineering (language-agnostic, spec-driven) |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
@@ -77,16 +76,15 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-44`** (re-scan of the whole `docs/` tree, 2026-07-18): the
-> highest claimed number is now **DOC-43** ([Requirements Standard](./DOC-43-requirements-standard.md),
-> the entry above), which was added as the next available slot after **DOC-42** ([Agent-Bundled Skills](./agent-bundled-skills.md))
-> per the scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
-> note is a *hint, not authority*; the scan is authoritative). DOC-34 is assigned
+> **Next free `DOC-N` = `DOC-44`** (2026-07-18 scan): the highest cataloged number is
+> **DOC-43** ([Requirements Standard](./DOC-43-requirements-standard.md), above). **DOC-42
+> is in-flight** (PR #3006, Engineering-Lead / Virtual-Twin Cross-Tool Orchestration spec)
+> and will be cataloged separately when that PR merges. DOC-34 is assigned
 > ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
-> #1999 — still a catalog gap), DOC-35/36/38/39/41/42/43 are cataloged, and **DOC-37** is
+> #1999 — still a catalog gap). DOC-35/36/38/39/40/41/43 are cataloged; **DOC-37** is
 > self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
 > (`SPEC-SEARCHREPO-01~draft`…, uncataloged). The DOC-N assignment rule (scan-before-claim)
-> and collision handling are now normative in [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft)
+> and collision handling are normative in [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft)
 > (note: `{#SPEC-…}` cross-links are best-effort on github.com — GitHub does not
 > honor explicit heading IDs, DOC-38 §4.3 — so this link lands on the file; scan
 > for §4.1 from there).
