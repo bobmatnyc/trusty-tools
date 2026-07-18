@@ -1,7 +1,18 @@
 [workspace]
 # Glob picks up every crate directory under `crates/`. Add a new crate by
 # dropping its directory in `crates/` with its own Cargo.toml.
-members = ["crates/*"]
+#
+# The explicit `crates/trusty-agents/ui/src-tauri` entry (#3053) is the
+# trusty-agents Tauri desktop app. It lives NESTED inside the trusty-agents
+# member's directory rather than as a top-level `crates/*` dir, so the glob
+# above does not match it — it must be listed by full path. It used to declare
+# its own standalone `[workspace]` table (self-excluding from all
+# workspace-wide build/clippy/test); that has been removed so the crate is now
+# workspace-verified. It is deliberately NOT in `default-members` below (same
+# as the two other Tauri GUIs — bare builds skip it) and is excluded from the
+# headless CI jobs (WebKit2GTK-dependent); a dedicated `agents-ui` CI job
+# build- and lint-verifies it.
+members = ["crates/*", "crates/trusty-agents/ui/src-tauri"]
 resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`

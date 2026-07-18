@@ -25,8 +25,16 @@ tracing = "0.1"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
-# Mark this crate as its own (empty) workspace so the parent workspace at
-# /Users/masa/Projects/trusty-tools/crates/trusty-agents/Cargo.toml doesn't try to claim it. The Tauri
-# crate intentionally lives outside the main workspace because its tauri/wry
-# deps don't share the parent's edition / target dir layout. (#364)
-[workspace]
+# NOTE (#3053): This crate is now a first-class member of the root
+# trusty-tools workspace (declared explicitly in the root Cargo.toml
+# `[workspace.members]` list because the `crates/*` glob only matches
+# top-level crate directories, not this nested `ui/src-tauri` path). It no
+# longer declares its own empty `[workspace]` table. The original #364
+# rationale ("tauri/wry deps don't share the parent's edition/target-dir
+# layout") is now moot: the workspace already hosts two other Tauri GUIs
+# (trusty-mpm-gui, trusty-code-gui) that pin the same `tauri = "2"` and share
+# the workspace target dir without issue. Keeping this crate in the workspace
+# gives it shared dependency resolution and lets a dedicated CI job build- and
+# lint-verify it (see .github/workflows/ci.yml `agents-ui` job). Like the
+# other two Tauri GUIs it is intentionally NOT in the root `default-members`
+# list, so a bare `cargo build` (no --workspace / -p) still skips it.
