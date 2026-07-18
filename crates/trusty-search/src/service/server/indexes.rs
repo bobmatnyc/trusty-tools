@@ -315,11 +315,15 @@ pub(super) async fn create_index_handler(
         let v = std::env::var("TRUSTY_NO_KG").unwrap_or_default();
         matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
     });
+    // Issue #2984 Phase 1: mirrors `skip_kg` — no equivalent env-var default
+    // (no `TRUSTY_NO_VECTOR`), so `None` on the wire simply maps to `false`.
+    let skip_vector: bool = req.skip_vector.unwrap_or(false);
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
         root_path: req.root_path.clone(),
         colocated: true,
         skip_kg,
+        skip_vector,
         ..Default::default()
     };
     // Issue #954: propagate HNSW alloc failure (OOM) as a 500 response
@@ -487,6 +491,7 @@ pub(super) async fn create_index_handler(
             data_file_max_bytes: data_file_max_bytes_opt,
             lexical_only,
             skip_kg,
+            skip_vector,
             defer_embed,
             colocated,
             // Issue #993: new indexes have no query/index history yet.
@@ -504,20 +509,30 @@ pub(super) async fn create_index_handler(
     // Issue #109, Phase 1: pre-mark semantic + graph as `Skipped` for
     // lexical-only indexes so the search handler never tries the HNSW lane.
     // Issue #313: pre-mark graph as `Skipped` for skip_kg indexes.
+    // Issue #2984 Phase 1: `skip_vector` pre-marks semantic as `Skipped`,
+    // independently of `skip_kg`'s graph gate — the two compose freely so
+    // every quadrant (both on, KG-only, vector-only, both off via
+    // `lexical_only`) is reachable from create time.
     let stages = if lexical_only {
         crate::core::registry::IndexStages {
             lexical: crate::core::registry::StageState::pending(),
             semantic: crate::core::registry::StageState::skipped(),
             graph: crate::core::registry::StageState::skipped(),
         }
-    } else if skip_kg {
+    } else {
         crate::core::registry::IndexStages {
             lexical: crate::core::registry::StageState::pending(),
-            semantic: crate::core::registry::StageState::pending(),
-            graph: crate::core::registry::StageState::skipped(),
+            semantic: if skip_vector {
+                crate::core::registry::StageState::skipped()
+            } else {
+                crate::core::registry::StageState::pending()
+            },
+            graph: if skip_kg {
+                crate::core::registry::StageState::skipped()
+            } else {
+                crate::core::registry::StageState::pending()
+            },
         }
-    } else {
-        crate::core::registry::IndexStages::default()
     };
     let handle = IndexHandle {
         id: id.clone(),
@@ -539,6 +554,7 @@ pub(super) async fn create_index_handler(
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
+        skip_vector,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

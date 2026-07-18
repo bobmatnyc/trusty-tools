@@ -101,6 +101,7 @@ pub(crate) async fn restore_index_on_demand(
     let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
     let lexical_only = entry.lexical_only;
     let skip_kg = entry.skip_kg;
+    let skip_vector = entry.skip_vector;
     let defer_embed = entry.defer_embed;
 
     // Issue #1158: read corpus_open_failed before chunk_count so a redb
@@ -125,18 +126,20 @@ pub(crate) async fn restore_index_on_demand(
         graph_node_count,
         lexical_only,
         skip_kg,
+        skip_vector,
         corpus_open_failed,
     });
 
     tracing::info!(
         "lazy-load: index '{}' restored — chunks={} hnsw_snapshot={} \
-         graph_nodes={} lexical_only={} skip_kg={} corpus_open_failed={}",
+         graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failed={}",
         entry.id,
         chunk_count,
         hnsw_snapshot_ready,
         graph_node_count,
         lexical_only,
         skip_kg,
+        skip_vector,
         corpus_open_failed,
     );
 
@@ -162,6 +165,7 @@ pub(crate) async fn restore_index_on_demand(
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
+        skip_vector,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

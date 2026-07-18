@@ -420,6 +420,86 @@ root_path = "/tmp/legacy"
     assert!(entries[0].skip_kg, "skip_kg preserved");
 }
 
+/// Issue #2984 Phase 1: `skip_vector` defaults to `false` and is omitted from
+/// the TOML when unset, preserving the compact shape of existing
+/// `indexes.toml` files. An explicit `true` survives a save/load round-trip,
+/// an `indexes.toml` written by an older daemon (without the field) loads as
+/// `false` (vector lane enabled), and `skip_vector` coexists independently
+/// with `skip_kg` (the vector-off/KG-on quadrant).
+///
+/// Why: mirrors `skip_kg_round_trips` — pins the same backward-compat
+/// contract for the new per-component vector flag.
+/// What: default constructor, missing-field deserialization, explicit-true
+/// round-trip, and orthogonality with `skip_kg` — the same shapes as
+/// `skip_kg_round_trips`.
+/// Test: this test.
+#[test]
+fn skip_vector_round_trips() {
+    // Default constructor returns false.
+    assert!(!PersistedIndex::default().skip_vector);
+
+    // Loading legacy TOML without the field gives false (vector enabled).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    std::fs::write(
+        &path,
+        r#"
+[[index]]
+id = "legacy"
+root_path = "/tmp/legacy"
+"#,
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        !entries[0].skip_vector,
+        "missing field must default to false (issue #2984 back-compat)"
+    );
+
+    // Explicit true survives round-trip and is written to disk.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    save_index_registry_at(
+        &path,
+        &[PersistedIndex {
+            id: "no_vector".into(),
+            root_path: PathBuf::from("/tmp/v"),
+            skip_vector: true,
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let s = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        s.contains("skip_vector"),
+        "explicit true must be serialised — TOML was: {s}"
+    );
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].skip_vector);
+
+    // skip_vector and skip_kg can coexist independently (the KG-on,
+    // vector-off quadrant).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    save_index_registry_at(
+        &path,
+        &[PersistedIndex {
+            id: "vector_off_kg_on".into(),
+            root_path: PathBuf::from("/tmp/v"),
+            skip_kg: false,
+            skip_vector: true,
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].skip_kg, "skip_kg stays false");
+    assert!(entries[0].skip_vector, "skip_vector preserved");
+}
+
 /// Issue #403: `colocated` defaults to `false` so existing `indexes.toml`
 /// files load as legacy global storage. An explicit `true` survives a
 /// save/load round-trip, and is written to TOML only when set.

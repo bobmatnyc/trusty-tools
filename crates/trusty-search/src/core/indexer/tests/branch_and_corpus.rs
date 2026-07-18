@@ -611,6 +611,139 @@ async fn skip_kg_true_legacy_json_restore_skips_graph_rebuild() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #2984 Phase 1 — runtime KG component soft-toggle helpers.
+// ---------------------------------------------------------------------------
+
+/// `clear_symbol_graph_in_memory` must drop the in-memory symbol graph back
+/// to empty, without touching the durable corpus's persisted KG tables.
+///
+/// Why: pins D2 (soft-disable = keep-on-disk, drop-from-memory) at the
+/// `CodeIndexer` level — the `PATCH /indexes/:id/config { kg: false }`
+/// handler calls this directly.
+/// What: builds a real graph with a call edge, persists it to redb, calls
+/// `clear_symbol_graph_in_memory`, asserts the in-memory graph is empty, then
+/// proves the on-disk data survived by loading a FRESH indexer against the
+/// same redb path and confirming its warm-boot graph is non-empty.
+/// Test: this IS the test.
+#[tokio::test]
+async fn runtime_kg_disable_clears_symbol_graph_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    let idx = make_indexer_with_corpus(&redb_path);
+    idx.index_files_batch(&[
+        ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+        ("src/callee.rs".into(), "fn callee() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+    assert!(
+        idx.snapshot_symbol_graph().await.node_count() > 0,
+        "sanity: normal indexing must build a non-empty symbol graph"
+    );
+
+    idx.clear_symbol_graph_in_memory().await;
+    assert_eq!(
+        idx.snapshot_symbol_graph().await.node_count(),
+        0,
+        "clear_symbol_graph_in_memory must drop the in-memory graph"
+    );
+    drop(idx); // simulates the live index continuing to run after disable.
+
+    // On-disk KG tables must be untouched — a fresh warm-boot against the
+    // same redb path still finds the persisted graph.
+    let restored = make_indexer_with_corpus(&redb_path);
+    restored
+        .load_chunks_from_redb()
+        .await
+        .expect("warm-boot from redb");
+    assert!(
+        restored.snapshot_symbol_graph().await.node_count() > 0,
+        "on-disk KG tables must survive an in-memory-only clear"
+    );
+}
+
+/// `catch_up_symbol_graph` must prefer the cheap persisted-graph load over a
+/// full rebuild when a persisted graph exists in the corpus.
+///
+/// Why: pins D3's "attempt load_from_corpus (near-instant) … fall back to
+/// rebuild" catch-up contract for the runtime KG re-enable path
+/// (`PATCH /indexes/:id/config { kg: true }`).
+/// What: builds + persists a real graph, clears it in memory (simulating a
+/// prior soft-disable), calls `catch_up_symbol_graph`, and asserts the graph
+/// is restored to its original node/edge counts.
+/// Test: this IS the test.
+#[tokio::test]
+async fn runtime_kg_catch_up_prefers_load_from_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+
+    let idx = make_indexer_with_corpus(&redb_path);
+    idx.index_files_batch(&[
+        ("src/caller.rs".into(), "fn caller() { callee(); }".into()),
+        ("src/callee.rs".into(), "fn callee() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+    let (orig_nodes, orig_edges) = {
+        let g = idx.snapshot_symbol_graph().await;
+        (g.node_count(), g.edge_count())
+    };
+    assert!(orig_nodes > 0, "sanity: graph must be non-empty");
+
+    idx.clear_symbol_graph_in_memory().await;
+    assert_eq!(idx.snapshot_symbol_graph().await.node_count(), 0);
+
+    idx.catch_up_symbol_graph().await;
+    let g = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        g.node_count(),
+        orig_nodes,
+        "catch-up must restore the exact persisted node count"
+    );
+    assert_eq!(
+        g.edge_count(),
+        orig_edges,
+        "catch-up must restore the exact persisted edge count"
+    );
+}
+
+/// `catch_up_symbol_graph` must fall back to a full rebuild-from-chunks when
+/// no corpus is wired (mirrors `load_or_rebuild_symbol_graph`'s existing
+/// fallback, exercised here through the new public entry point).
+///
+/// Why: the runtime re-enable path must work correctly even for legacy /
+/// corpus-less indexers, not just the redb-backed common case.
+/// What: plants a chunk with a call edge directly into the in-memory
+/// `chunks` map on a corpus-less indexer, calls `catch_up_symbol_graph`, and
+/// asserts the graph was rebuilt from those chunks (non-empty).
+/// Test: this IS the test.
+#[tokio::test]
+async fn runtime_kg_catch_up_falls_back_to_rebuild_without_corpus() {
+    let idx = make_indexer();
+    assert!(!idx.has_corpus_store(), "precondition: no corpus wired");
+
+    idx.chunks.write().await.insert(
+        "a:1".to_string(),
+        raw_with_kind(
+            "a:1",
+            "src/a.rs",
+            "fn a() { b(); }",
+            crate::core::chunker::ChunkType::Function,
+            Some("a"),
+        ),
+    );
+
+    idx.catch_up_symbol_graph().await;
+
+    let graph = idx.snapshot_symbol_graph().await;
+    assert!(
+        graph.node_count() > 0,
+        "catch-up must fall back to a from-chunks rebuild when no corpus is wired"
+    );
+}
+
 // ----- Issue #75 — line numbers, grep fallback, archive downranking ---------
 
 #[test]

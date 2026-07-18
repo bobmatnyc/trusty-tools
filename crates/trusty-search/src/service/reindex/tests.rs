@@ -47,6 +47,7 @@ async fn reindex_honours_include_paths_filter() {
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only: false,
         skip_kg: false,
+        skip_vector: false,
         defer_embed: true,
         stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
@@ -128,6 +129,7 @@ async fn reindex_honours_path_filter() {
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only: false,
         skip_kg: false,
+        skip_vector: false,
         defer_embed: true,
         stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
@@ -790,6 +792,65 @@ fn make_handle_with_flags(
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
+        skip_vector: false,
+        defer_embed: false,
+        stages: Arc::new(tokio::sync::RwLock::new(stages)),
+        search_pressure: Arc::new(tokio::sync::Notify::new()),
+        walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+            crate::core::registry::WalkDiagnostics::default(),
+        )),
+    })
+}
+
+/// Handle builder used by `skip_vector` tests (issue #2984 Phase 1).
+///
+/// Why: mirrors `make_handle_with_flags` but toggles `skip_vector` instead
+/// of `skip_kg` — the two components are orthogonal, so KG stays enabled
+/// (`Pending`, not `Skipped`) here, pinning the vector-off/KG-on quadrant.
+/// What: constructs an `Arc<IndexHandle>` with `skip_vector` set; pre-sets
+/// `stages` so the semantic lane is `Skipped` from the start when `true`.
+/// Test: used by `skip_vector_index_never_embeds`.
+fn make_handle_with_skip_vector(
+    id: &str,
+    root: std::path::PathBuf,
+    skip_vector: bool,
+) -> Arc<IndexHandle> {
+    use crate::core::registry::{IndexStages, StageState};
+    let indexer = CodeIndexer::new(id.to_string(), root.clone());
+    let stages = if skip_vector {
+        IndexStages {
+            lexical: StageState::pending(),
+            semantic: StageState::skipped(),
+            graph: StageState::pending(),
+        }
+    } else {
+        IndexStages::default()
+    };
+    Arc::new(IndexHandle {
+        id: IndexId::new(id),
+        indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
+        root_path: root,
+        include_paths: vec![],
+        exclude_globs: vec![],
+        extensions: vec![],
+        domain_terms: vec![],
+        include_docs: false,
+        respect_gitignore: true,
+        follow_links: true,
+        extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
+        data_file_max_bytes: crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES,
+        path_filter: vec![],
+        context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
+        context_summary: Arc::new(tokio::sync::RwLock::new(None)),
+        indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
+        last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
+        lexical_only: false,
+        skip_kg: false,
+        skip_vector,
+        // Issue #2984 Phase 1: `defer_embed=false` forces the fast pass to
+        // attempt synchronous embedding for a non-`skip_vector` control run —
+        // exercising the `batch.rs` fast-pass gate, not just the deferred
+        // background-pass gate the default `defer_embed=true` would hit.
         defer_embed: false,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
@@ -997,6 +1058,87 @@ async fn skip_kg_index_never_runs_phase3() {
         graph.node_count(),
         0,
         "symbol graph must be empty when skip_kg=true"
+    );
+}
+
+/// Issue #2984 Phase 1: a `skip_vector` index permanently keeps the semantic
+/// stage at `Skipped`, while the graph (KG) stage runs and reaches `Ready`
+/// normally — the vector-off/KG-on quadrant. `search_capabilities` must
+/// never include `"vector"` but MUST include `"kg"`.
+///
+/// Why: mirrors `skip_kg_index_never_runs_phase3` for the new orthogonal
+/// flag, pinning that the two components toggle independently end-to-end
+/// through the real reindex pipeline (not just the pure stage-transition
+/// unit tests).
+/// What: builds a `skip_vector` handle (KG enabled) with `defer_embed=false`
+/// (exercises the synchronous fast-pass gate in `batch.rs`, not just the
+/// deferred-pass gate), reindexes a tiny fixture repo, asserts the semantic
+/// stage stays Skipped, the graph stage reaches Ready, and `search_capabilities`
+/// reflects exactly that split.
+/// Test: this test.
+#[tokio::test]
+async fn skip_vector_index_never_embeds() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::write(
+        root.join("b.rs"),
+        "pub fn skip_vector_func() { let x = 1; }\n",
+    )
+    .unwrap();
+
+    let handle = make_handle_with_skip_vector("skip-vector-test", root.clone(), true);
+    // Pre-condition: semantic stage pre-set to Skipped, graph left Pending.
+    {
+        let stages = handle.stages.read().await;
+        assert_eq!(
+            stages.semantic.status,
+            crate::core::registry::StageStatus::Skipped
+        );
+        assert_eq!(
+            stages.graph.status,
+            crate::core::registry::StageStatus::Pending
+        );
+    }
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+    let stages = handle.stages.read().await.clone();
+    assert_eq!(
+        stages.lexical.status,
+        crate::core::registry::StageStatus::Ready,
+        "lexical must be Ready"
+    );
+    assert_eq!(
+        stages.semantic.status,
+        crate::core::registry::StageStatus::Skipped,
+        "skip_vector must never flip semantic away from Skipped"
+    );
+    assert_eq!(
+        stages.graph.status,
+        crate::core::registry::StageStatus::Ready,
+        "KG must still build normally — orthogonal to skip_vector"
+    );
+    let caps = stages.search_capabilities();
+    assert!(
+        !caps.contains(&"vector"),
+        "skip_vector must not advertise vector capability: {caps:?}"
+    );
+    assert!(
+        caps.contains(&"kg"),
+        "skip_vector must not suppress the kg capability: {caps:?}"
+    );
+
+    // No embedder was ever invoked (bare test indexer has none wired anyway,
+    // but the gate must route through parse_files_only regardless of that).
+    let indexer = handle.indexer.read().await;
+    assert_eq!(
+        indexer.chunk_count(),
+        1,
+        "the file must still be chunked/committed via the lexical lane"
     );
 }
 

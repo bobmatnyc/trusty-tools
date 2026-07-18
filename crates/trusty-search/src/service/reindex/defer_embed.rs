@@ -6,9 +6,13 @@
 //! resulting vectors into HNSW, then marks the semantic stage `Ready` (or
 //! `Failed` on error, so /indexes/:id/status exposes the failure — issue #928).
 //!
-//! What: a single public entry point `spawn_deferred_embed_pass` that:
+//! What: `spawn_deferred_embed_pass` is the post-reindex entry point
+//! (acquires the background semaphore, then delegates); `run_embed_catch_up`
+//! (issue #2984 Phase 1) is the reusable core, callable directly by a caller
+//! that already holds a concurrency permit — e.g. the runtime vector
+//! component re-enable path in `service::server::components`.
 //! 1. Acquires the background reindex semaphore (serialises against concurrent
-//!    reindexes on the same handle).
+//!    reindexes on the same handle) — `spawn_deferred_embed_pass` only.
 //! 2. Calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ lock
 //!    (no write lock held during embedding — the long operation).
 //! 3. On success: forces an HNSW snapshot and marks semantic `Ready`.
@@ -33,12 +37,8 @@ use std::sync::Arc;
 /// resulting vectors into HNSW, then marks the semantic stage `Ready`.
 ///
 /// What: acquires the background reindex semaphore (one permit) so the embed
-/// pass never races with a concurrent reindex, calls
-/// `CodeIndexer::embed_deferred_chunks` under the indexer's READ lock (the
-/// embed step holds no write lock), forces an HNSW snapshot, then marks
-/// semantic `Ready` (or `Failed` when embedding errors, issue #928). The job
-/// is idempotent: re-running after a partial failure re-embeds all chunks
-/// (HNSW upsert is idempotent).
+/// pass never races with a concurrent reindex, then delegates to
+/// [`run_embed_catch_up`] for the actual embed/commit/mark-ready work.
 ///
 /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
 /// `failing_deferred_embed_pass_marks_semantic_failed` in this module's tests.
@@ -57,124 +57,150 @@ pub(super) fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<
                 return;
             }
         };
+        run_embed_catch_up(handle, progress).await;
+    });
+}
 
-        let total_chunks = {
-            let indexer = handle.indexer.read().await;
-            indexer.chunk_count()
-        };
+/// Embed every un-embedded corpus chunk and mark the semantic stage
+/// `Ready`/`Failed` — the reusable core of the C2 deferred-embed pass (issue
+/// #923), generalised for issue #2984 Phase 1's runtime vector re-enable
+/// catch-up.
+///
+/// Why: [`spawn_deferred_embed_pass`] (the post-reindex deferred-embed job)
+/// and the `PATCH /indexes/:id/config { vector: true }` runtime catch-up
+/// (issue #2984 Phase 1, `service::server::components`) both need the
+/// identical "embed all corpus chunks, upsert HNSW, mark semantic
+/// Ready/Failed" behaviour. Extracting it here means both callers share one
+/// implementation instead of drifting. Callers are responsible for their own
+/// concurrency guard — this function does NOT acquire the background
+/// semaphore itself, so a caller that already holds a permit (the runtime
+/// toggle path) can call this directly without a nested-acquire deadlock.
+/// What: calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ
+/// lock (the embed step holds no write lock), forces an HNSW snapshot, then
+/// marks semantic `Ready` (or `Failed` when embedding errors, issue #928).
+/// Idempotent: re-running after a partial failure re-embeds all chunks (HNSW
+/// upsert is idempotent).
+/// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
+/// `failing_deferred_embed_pass_marks_semantic_failed` (via
+/// `spawn_deferred_embed_pass`, which is a thin wrapper over this function).
+pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>) {
+    let index_id = handle.id.clone();
+    let total_chunks = {
+        let indexer = handle.indexer.read().await;
+        indexer.chunk_count()
+    };
 
-        tracing::info!(
-            "deferred_embed[{}]: starting background embed pass ({} chunks)",
-            index_id.0,
-            total_chunks,
-        );
+    tracing::info!(
+        "deferred_embed[{}]: starting background embed pass ({} chunks)",
+        index_id.0,
+        total_chunks,
+    );
 
-        // Issue #929: populate total + embedded=0 before embedding starts so
-        // `GET /indexes/:id/status` shows real N/total progress rather than 0/0.
-        {
-            let mut stages = handle.stages.write().await;
-            stages.semantic.started_at = Some(now_rfc3339());
-            stages.semantic.total = Some(total_chunks);
-            stages.semantic.embedded = Some(0);
-        }
+    // Issue #929: populate total + embedded=0 before embedding starts so
+    // `GET /indexes/:id/status` shows real N/total progress rather than 0/0.
+    {
+        let mut stages = handle.stages.write().await;
+        stages.semantic.started_at = Some(now_rfc3339());
+        stages.semantic.total = Some(total_chunks);
+        stages.semantic.embedded = Some(0);
+    }
 
-        // Emit an SSE event so observers (UI, CLI `--watch`) know embedding
-        // has started. This fires on the progress handle after the fast-pass
-        // `complete` event, so late SSE subscribers may see it.
-        progress
-            .push(serde_json::json!({
-                "event": "embed_start",
-                "index_id": index_id.0,
-                "total_chunks": total_chunks,
-            }))
-            .await;
+    // Emit an SSE event so observers (UI, CLI `--watch`) know embedding
+    // has started. This fires on the progress handle after the fast-pass
+    // `complete` event, so late SSE subscribers may see it.
+    progress
+        .push(serde_json::json!({
+            "event": "embed_start",
+            "index_id": index_id.0,
+            "total_chunks": total_chunks,
+        }))
+        .await;
 
-        // Issue #929: wire a per-wave progress channel so the stage counter
-        // advances in real time while embedding is in progress.
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, u64)>();
-        let embedded_counter = Arc::new(AtomicUsize::new(0));
-        let counter_clone = Arc::clone(&embedded_counter);
-        let stages_clone = Arc::clone(&handle.stages);
-        // Spawn a task that drains wave notifications and updates stages.semantic.embedded.
-        let progress_updater = tokio::spawn(async move {
-            while let Some((wave_chunks, _ms)) = progress_rx.recv().await {
-                let n = counter_clone.fetch_add(wave_chunks, Ordering::AcqRel) + wave_chunks;
-                let mut stages = stages_clone.write().await;
-                stages.semantic.embedded = Some(n);
-            }
-        });
-
-        let result = {
-            let indexer = handle.indexer.read().await;
-            indexer.embed_deferred_chunks(Some(&progress_tx)).await
-        };
-        // Drop the sender so the updater task's recv loop terminates.
-        drop(progress_tx);
-        // Wait for the updater to finish processing any buffered notifications.
-        let _ = progress_updater.await;
-
-        match result {
-            Ok((embedded, total)) => {
-                // Force an HNSW snapshot so the vectors survive a daemon
-                // restart even if no subsequent reindex runs.
-                {
-                    let indexer = handle.indexer.read().await;
-                    indexer.force_incremental_persist();
-                }
-                tracing::info!(
-                    "deferred_embed[{}]: embedded {}/{} chunks — marking semantic Ready",
-                    index_id.0,
-                    embedded,
-                    total,
-                );
-                // Mark the semantic stage Ready — the full HNSW lane is now
-                // queryable. We write the stage directly (not via
-                // `mark_semantic_ready_graph_in_progress`) because the graph
-                // stage is already Ready from the fast-pass KG rebuild; we
-                // must not flip it back to InProgress.
-                {
-                    let mut stages = handle.stages.write().await;
-                    stages.semantic.status = StageStatus::Ready;
-                    stages.semantic.completed_at = Some(now_rfc3339());
-                    stages.semantic.embedded = Some(embedded);
-                    stages.semantic.total = Some(total);
-                }
-                progress
-                    .push(serde_json::json!({
-                        "event": "embed_complete",
-                        "index_id": index_id.0,
-                        "embedded": embedded,
-                        "total": total,
-                    }))
-                    .await;
-            }
-            Err(e) => {
-                let reason = format!("{e:#}");
-                tracing::error!(
-                    "deferred_embed[{}]: embed pass failed — {reason}",
-                    index_id.0,
-                );
-                // Issue #928: mark semantic stage as Failed so the /status
-                // endpoint exposes the failure. Without this, the stage stays
-                // in whatever pre-Ready state it was in (Pending or InProgress)
-                // and operators polling /indexes/:id/status cannot tell that
-                // embedding failed — it silently looks like "still embedding".
-                {
-                    let mut stages = handle.stages.write().await;
-                    stages.semantic = StageState::failed(reason.clone());
-                }
-                progress
-                    .push(serde_json::json!({
-                        "event": "embed_error",
-                        "index_id": index_id.0,
-                        "message": reason,
-                    }))
-                    .await;
-                // Issue #929: semantic.total was pre-seeded before embedding;
-                // the Failed state replaces it (StageState::failed clears it).
-            }
+    // Issue #929: wire a per-wave progress channel so the stage counter
+    // advances in real time while embedding is in progress.
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, u64)>();
+    let embedded_counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = Arc::clone(&embedded_counter);
+    let stages_clone = Arc::clone(&handle.stages);
+    // Spawn a task that drains wave notifications and updates stages.semantic.embedded.
+    let progress_updater = tokio::spawn(async move {
+        while let Some((wave_chunks, _ms)) = progress_rx.recv().await {
+            let n = counter_clone.fetch_add(wave_chunks, Ordering::AcqRel) + wave_chunks;
+            let mut stages = stages_clone.write().await;
+            stages.semantic.embedded = Some(n);
         }
     });
+
+    let result = {
+        let indexer = handle.indexer.read().await;
+        indexer.embed_deferred_chunks(Some(&progress_tx)).await
+    };
+    // Drop the sender so the updater task's recv loop terminates.
+    drop(progress_tx);
+    // Wait for the updater to finish processing any buffered notifications.
+    let _ = progress_updater.await;
+
+    match result {
+        Ok((embedded, total)) => {
+            // Force an HNSW snapshot so the vectors survive a daemon
+            // restart even if no subsequent reindex runs.
+            {
+                let indexer = handle.indexer.read().await;
+                indexer.force_incremental_persist();
+            }
+            tracing::info!(
+                "deferred_embed[{}]: embedded {}/{} chunks — marking semantic Ready",
+                index_id.0,
+                embedded,
+                total,
+            );
+            // Mark the semantic stage Ready — the full HNSW lane is now
+            // queryable. We write the stage directly (not via
+            // `mark_semantic_ready_graph_in_progress`) because the graph
+            // stage is already Ready from the fast-pass KG rebuild; we
+            // must not flip it back to InProgress.
+            {
+                let mut stages = handle.stages.write().await;
+                stages.semantic.status = StageStatus::Ready;
+                stages.semantic.completed_at = Some(now_rfc3339());
+                stages.semantic.embedded = Some(embedded);
+                stages.semantic.total = Some(total);
+            }
+            progress
+                .push(serde_json::json!({
+                    "event": "embed_complete",
+                    "index_id": index_id.0,
+                    "embedded": embedded,
+                    "total": total,
+                }))
+                .await;
+        }
+        Err(e) => {
+            let reason = format!("{e:#}");
+            tracing::error!(
+                "deferred_embed[{}]: embed pass failed — {reason}",
+                index_id.0,
+            );
+            // Issue #928: mark semantic stage as Failed so the /status
+            // endpoint exposes the failure. Without this, the stage stays
+            // in whatever pre-Ready state it was in (Pending or InProgress)
+            // and operators polling /indexes/:id/status cannot tell that
+            // embedding failed — it silently looks like "still embedding".
+            {
+                let mut stages = handle.stages.write().await;
+                stages.semantic = StageState::failed(reason.clone());
+            }
+            progress
+                .push(serde_json::json!({
+                    "event": "embed_error",
+                    "index_id": index_id.0,
+                    "message": reason,
+                }))
+                .await;
+            // Issue #929: semantic.total was pre-seeded before embedding;
+            // the Failed state replaces it (StageState::failed clears it).
+        }
+    }
 }
 
 #[cfg(test)]

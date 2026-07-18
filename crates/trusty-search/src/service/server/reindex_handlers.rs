@@ -171,6 +171,9 @@ pub(super) async fn reindex_handler(
                     // root_path override — the operator's KG choice is
                     // orthogonal to the path being indexed.
                     skip_kg: handle.skip_kg,
+                    // Issue #2984 Phase 1: preserve the skip_vector flag
+                    // across the root_path override — orthogonal to the path.
+                    skip_vector: handle.skip_vector,
                     // Issue #923: preserve the defer_embed flag across the
                     // root_path override — the operator's embedding-mode
                     // choice is orthogonal to the path being indexed.

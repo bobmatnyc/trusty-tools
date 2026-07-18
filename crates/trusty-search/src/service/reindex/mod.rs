@@ -84,6 +84,26 @@ pub use quarantine::ReindexQuarantine;
 /// Test: `background_reindex_queue_depth_increments_and_decrements` in `tests.rs`.
 pub use semaphore::background_reindex_queue_depth;
 
+/// Re-export `background_reindex_semaphore` so `service::server::components`
+/// (issue #2984 Phase 1) can acquire the same concurrency guard the
+/// deferred-embed pass uses, giving `PATCH /indexes/:id/config`'s runtime
+/// component toggle a `409 Conflict` when a reindex or another catch-up is
+/// already in flight for the index.
+///
+/// Why: the semaphore lives in the private `semaphore` submodule; re-exporting
+/// the single accessor here avoids widening the submodule itself.
+/// What: delegates to `semaphore::background_reindex_semaphore`.
+/// Test: `service::server::tests_components`.
+pub(crate) use semaphore::background_reindex_semaphore;
+
+/// Re-export `run_embed_catch_up` (issue #2984 Phase 1) so
+/// `service::server::components` can drive the same vector-catch-up logic
+/// `spawn_deferred_embed_pass` uses, without re-acquiring the background
+/// semaphore (the caller already holds a permit — see `defer_embed`'s module
+/// docs for the nested-acquire deadlock this avoids).
+/// Test: `service::server::tests_components`.
+pub(crate) use defer_embed::run_embed_catch_up;
+
 /// Re-export the two public entry points for kicking off a reindex task.
 ///
 /// Why: `reindex_handlers.rs` calls `spawn_reindex_with_cleanup`; a handful of

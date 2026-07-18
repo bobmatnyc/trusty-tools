@@ -66,8 +66,14 @@ pub(crate) async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) {
         };
     } else {
         // Issue #313: skip_kg forces graph to Skipped from the start of the
-        // reindex. Semantic is unaffected (skip_kg is orthogonal to embedding).
+        // reindex. Issue #2984 Phase 1: skip_vector likewise forces semantic
+        // to Skipped, independently — the two compose freely.
         let graph_init = if handle.skip_kg {
+            StageState::skipped()
+        } else {
+            StageState::pending()
+        };
+        let semantic_init = if handle.skip_vector {
             StageState::skipped()
         } else {
             StageState::pending()
@@ -78,7 +84,7 @@ pub(crate) async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) {
                 started_at: Some(now_rfc3339()),
                 ..Default::default()
             },
-            semantic: StageState::pending(),
+            semantic: semantic_init,
             graph: graph_init,
         };
     }
@@ -127,6 +133,9 @@ pub(crate) async fn mark_lexical_ready_semantic_in_progress(
     // state. For full-pipeline indexes the semantic stage has been running
     // alongside the producer (the embed step is part of every batch); flip
     // it to `InProgress` so callers see it as queryable-soon.
+    // Issue #2984 Phase 1: a `skip_vector` index pre-marked semantic
+    // `Skipped` in `reset_stages_for_reindex`, so this `== Pending` check
+    // already excludes it — no separate `!handle.skip_vector` guard needed.
     if !handle.lexical_only && stages.semantic.status == StageStatus::Pending {
         stages.semantic.status = StageStatus::InProgress;
         stages.semantic.started_at = Some(now_rfc3339());
@@ -141,9 +150,10 @@ pub(crate) async fn mark_lexical_ready_semantic_in_progress(
 /// Why: after embed phase completes the HNSW lane is queryable; exposing
 /// InProgress on the graph stage lets searches use KG expansion as soon as
 /// it lands.
-/// What: write-locks stages and updates `semantic` to Ready + `graph` to
-/// InProgress (unless skip_kg or lexical_only).
-/// Test: covered by reindex integration tests.
+/// What: write-locks stages and updates `semantic` to Ready (unless
+/// `skip_vector`) + `graph` to InProgress (unless skip_kg or lexical_only).
+/// Test: covered by reindex integration tests; `skip_vector_index_never_embeds`
+/// (`service::reindex::tests`) covers the #2984 Phase 1 guard.
 pub(crate) async fn mark_semantic_ready_graph_in_progress(
     handle: &Arc<IndexHandle>,
     embedded: usize,
@@ -155,10 +165,15 @@ pub(crate) async fn mark_semantic_ready_graph_in_progress(
         // skipped state alone.
         return;
     }
-    stages.semantic.status = StageStatus::Ready;
-    stages.semantic.completed_at = Some(now_rfc3339());
-    stages.semantic.embedded = Some(embedded);
-    stages.semantic.total = Some(total);
+    // Issue #2984 Phase 1: a skip_vector index never embeds — leave semantic
+    // in its pre-marked Skipped state (set by `reset_stages_for_reindex`)
+    // rather than flipping it Ready. Orthogonal to the graph transition below.
+    if !handle.skip_vector {
+        stages.semantic.status = StageStatus::Ready;
+        stages.semantic.completed_at = Some(now_rfc3339());
+        stages.semantic.embedded = Some(embedded);
+        stages.semantic.total = Some(total);
+    }
     // Issue #313: skip_kg holds graph in Skipped — do not flip to InProgress.
     if !handle.skip_kg && stages.graph.status == StageStatus::Pending {
         stages.graph.status = StageStatus::InProgress;

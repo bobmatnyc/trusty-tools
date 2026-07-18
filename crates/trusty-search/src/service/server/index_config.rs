@@ -1,4 +1,5 @@
-//! Per-index hygiene-config inspector + updater (issue #1372).
+//! Per-index hygiene-config inspector + updater (issue #1372), extended in
+//! issue #2984 Phase 1 with the runtime KG/vector component soft-toggle.
 //!
 //! Why: indexing hygiene (which directories to skip, the data-file size cap,
 //! the extension allow-list, gitignore handling, doc inclusion) used to be
@@ -6,15 +7,20 @@
 //! per-index config defaults that an operator can read and override at runtime
 //! (and, in a follow-up, edit from the dashboard). These two handlers are the
 //! daemon-side read/update surface: `GET /indexes/:id/config` returns the
-//! current hygiene config; `PATCH /indexes/:id/config` updates the in-memory
-//! handle AND persists to `indexes.toml`. Neither auto-triggers a reindex —
-//! the PATCH response carries `reindex_required: true` so the caller knows the
-//! change takes effect on the next reindex.
+//! current hygiene config + component state; `PATCH /indexes/:id/config`
+//! updates the in-memory handle AND persists to `indexes.toml`. Hygiene edits
+//! don't auto-trigger a reindex — the PATCH response carries
+//! `reindex_required: true` so the caller knows the change takes effect on the
+//! next reindex. Component toggles (`kg`/`vector`) are different: turning a
+//! component OFF is instantaneous (soft-disable); turning one ON spawns a
+//! background catch-up job (issue #2984 Phase 1, see `super::components`).
 //!
 //! What: `index_config_handler` (GET), `patch_index_config_handler` (PATCH),
-//! and the serde request/response types.
+//! and the serde request/response types. The component-toggle decision logic
+//! and catch-up spawn live in the sibling `components` module to keep this
+//! file under the 500-SLOC production cap.
 //!
-//! Test: `service::server::tests_index_config`.
+//! Test: `service::server::tests_index_config`, `service::server::tests_components`.
 
 use axum::{
     extract::{Path, State},
@@ -27,6 +33,7 @@ use std::sync::Arc;
 
 use crate::core::registry::{IndexHandle, IndexId};
 
+use super::components;
 use super::state::{DaemonEvent, SearchAppState};
 
 /// JSON shape returned by `GET /indexes/:id/config` and accepted (all fields
@@ -55,13 +62,19 @@ pub struct IndexConfigView {
     pub include_docs: bool,
     /// Whether the walk honours `.gitignore` / `.ignore` / `.rgignore`.
     pub respect_gitignore: bool,
+    /// Whether the KG (symbol graph) component is enabled (issue #2984
+    /// Phase 1). `!handle.skip_kg`.
+    pub kg: bool,
+    /// Whether the vector/semantic component is enabled (issue #2984
+    /// Phase 1). `!handle.skip_vector`.
+    pub vector: bool,
 }
 
 impl IndexConfigView {
     /// Build the view from a live handle.
     ///
     /// Why: both GET and the PATCH echo-back need the same projection of the
-    /// handle's hygiene fields.
+    /// handle's hygiene + component fields.
     /// What: clones the relevant handle fields into the wire struct.
     /// Test: `get_returns_current_config` in `tests_index_config`.
     fn from_handle(handle: &IndexHandle) -> Self {
@@ -72,6 +85,8 @@ impl IndexConfigView {
             exclude_globs: handle.exclude_globs.clone(),
             include_docs: handle.include_docs,
             respect_gitignore: handle.respect_gitignore,
+            kg: !handle.skip_kg,
+            vector: !handle.skip_vector,
         }
     }
 }
@@ -98,6 +113,19 @@ pub struct PatchIndexConfigRequest {
     pub include_docs: Option<bool>,
     #[serde(default)]
     pub respect_gitignore: Option<bool>,
+    /// Runtime KG soft-toggle (issue #2984 Phase 1). `Some(true)` enables
+    /// (triggering a background catch-up if currently disabled); `Some(false)`
+    /// soft-disables (in-memory graph dropped, on-disk KG tables untouched).
+    /// `None` leaves the current state unchanged.
+    #[serde(default)]
+    pub kg: Option<bool>,
+    /// Runtime vector/semantic soft-toggle (issue #2984 Phase 1). `Some(true)`
+    /// enables (triggering a background embedding catch-up if currently
+    /// disabled); `Some(false)` soft-disables (embedder/HNSW no longer used
+    /// for new content; the on-disk `hnsw.usearch` snapshot is untouched).
+    /// `None` leaves the current state unchanged.
+    #[serde(default)]
+    pub vector: Option<bool>,
 }
 
 /// `GET /indexes/:id/config` — return the index's current hygiene config.
@@ -123,31 +151,33 @@ pub(super) async fn index_config_handler(
     Json(IndexConfigView::from_handle(&handle)).into_response()
 }
 
-/// `PATCH /indexes/:id/config` — update the index's hygiene config.
+/// `PATCH /indexes/:id/config` — update the index's hygiene config and/or
+/// runtime component (KG/vector) state.
 ///
 /// Why: applies an operator's hygiene edit to the running daemon and persists
-/// it so the change survives a restart. Does NOT auto-reindex — the response's
-/// `reindex_required: true` hint tells the caller a reindex is needed for the
-/// new filters to take effect on already-indexed files.
-/// What: validates inputs (rejects `data_file_max_bytes == 0` and blank /
-/// duplicate-free not required but empty-string entries are dropped), rebuilds
-/// the in-memory handle with the merged fields (preserving the live indexer and
-/// all Arc-shared state), re-registers it, then upserts the matching
-/// `indexes.toml` entry. Returns the updated `IndexConfigView` plus
-/// `reindex_required` on success. A persistence failure returns **500** with a
-/// clear error body so the UI never claims success while `indexes.toml` silently
-/// went stale (the in-memory change is left applied, but the response is
-/// truthful).
-///
-/// Concurrency note (review #1372): the `dashmap::Ref` returned by
-/// `registry.get` is dropped (its scope ends at `read_existing_fields`) BEFORE
-/// `registry.register` takes a shard write-lock or `persist_hygiene_update`
-/// performs blocking file I/O — holding a read-guard across either could
-/// self-deadlock on the same shard. We clone every field we need out of the
-/// guard up front, then operate only on owned locals.
+/// it so the change survives a restart. Hygiene fields don't auto-reindex —
+/// the response's `reindex_required: true` hint tells the caller a reindex is
+/// needed for the new filters to take effect on already-indexed files.
+/// Issue #2984 Phase 1: `kg`/`vector` toggle the KG and vector/semantic
+/// components at runtime without a full reindex or index recreation — turning
+/// a component OFF is instantaneous (soft-disable, on-disk data untouched);
+/// turning one ON spawns a background catch-up job (`components` field in the
+/// response reports `catch_up_started`).
+/// What: validates inputs (rejects `data_file_max_bytes == 0`), resolves the
+/// component transition and — when a catch-up is needed — acquires the
+/// background reindex semaphore up front so a concurrent reindex or another
+/// catch-up returns `409 Conflict` before ANY state is mutated (issue #2984
+/// Phase 1, mirrors the `spawn_deferred_embed_pass` concurrency guard).
+/// Rebuilds the in-memory handle with the merged fields (preserving the live
+/// indexer and all Arc-shared state), re-registers it, applies the immediate
+/// component side effects (stage flip + in-memory KG drop on disable), then
+/// upserts the matching `indexes.toml` entry and spawns the catch-up task (if
+/// any). A persistence failure returns **500** with a clear error body so the
+/// UI never claims success while `indexes.toml` silently went stale.
 /// Test: `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
 /// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
-/// `patch_unknown_index_404`.
+/// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
+/// for the component-toggle paths.
 pub(super) async fn patch_index_config_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -166,102 +196,123 @@ pub(super) async fn patch_index_config_handler(
             .into_response();
     }
 
-    // Read everything we need out of the handle guard and DROP the guard before
-    // any write-lock (`register`) or file I/O (`persist_hygiene_update`). The
-    // inner scope bounds the `dashmap::Ref` lifetime so it cannot be held across
-    // those operations (review #1372 — deadlock guard).
-    let new_handle = {
-        let Some(existing) = state.registry.get(&index_id) else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) })),
-            )
-                .into_response();
-        };
+    let Some(existing) = state.registry.get(&index_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) })),
+        )
+            .into_response();
+    };
 
-        // Merge: start from the current handle values, overlay the supplied
-        // fields.
-        let extra_skip_dirs = req
-            .extra_skip_dirs
-            .map(sanitize_dirs)
-            .unwrap_or_else(|| existing.extra_skip_dirs.clone());
-        let data_file_max_bytes = req
-            .data_file_max_bytes
-            .unwrap_or(existing.data_file_max_bytes);
-        let extensions = req
-            .extensions
-            .map(sanitize_extensions)
-            .unwrap_or_else(|| existing.extensions.clone());
-        let exclude_globs = req
-            .exclude_globs
-            .map(sanitize_dirs)
-            .unwrap_or_else(|| existing.exclude_globs.clone());
-        let include_docs = req.include_docs.unwrap_or(existing.include_docs);
-        let respect_gitignore = req.respect_gitignore.unwrap_or(existing.respect_gitignore);
-
-        // Rebuild the handle, preserving the live indexer + all Arc-shared state
-        // (stages, context, SHA, …). Mirrors the reindex/relocate rebuild
-        // pattern. Built entirely from clones of the guard's fields so the
-        // guard can be released as this block returns.
-        IndexHandle {
-            id: index_id.clone(),
-            indexer: Arc::clone(&existing.indexer),
-            root_path: existing.root_path.clone(),
-            include_paths: existing.include_paths.clone(),
-            exclude_globs,
-            extensions,
-            domain_terms: existing.domain_terms.clone(),
-            include_docs,
-            respect_gitignore,
-            // The symlink policy is a create-time setting, not part of the
-            // hygiene PATCH surface; preserve the existing value across the
-            // rebuild so an unrelated config edit never flips it.
-            follow_links: existing.follow_links,
-            extra_skip_dirs,
-            data_file_max_bytes,
-            path_filter: existing.path_filter.clone(),
-            context_embedding: Arc::clone(&existing.context_embedding),
-            context_summary: Arc::clone(&existing.context_summary),
-            indexed_head_sha: Arc::clone(&existing.indexed_head_sha),
-            last_indexed_at: Arc::clone(&existing.last_indexed_at),
-            lexical_only: existing.lexical_only,
-            skip_kg: existing.skip_kg,
-            defer_embed: existing.defer_embed,
-            stages: Arc::clone(&existing.stages),
-            search_pressure: Arc::clone(&existing.search_pressure),
-            walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
+    // Issue #2984 Phase 1: resolve the component transition and, if it needs
+    // a catch-up, acquire the background reindex semaphore BEFORE mutating
+    // any state — a busy semaphore returns 409 with nothing half-applied.
+    let transition = components::resolve_component_toggle(
+        req.kg,
+        req.vector,
+        existing.skip_kg,
+        existing.skip_vector,
+    );
+    let permit = if transition.needs_catch_up() {
+        match crate::service::reindex::background_reindex_semaphore().try_acquire() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "a reindex or component catch-up is already in progress \
+                                  for this index — retry once it completes",
+                        "index_id": index_id.0,
+                    })),
+                )
+                    .into_response();
+            }
         }
-        // `existing` (the dashmap::Ref) is dropped here as the block ends.
+    } else {
+        None
+    };
+
+    // Merge: start from the current handle values, overlay the supplied
+    // fields.
+    let extra_skip_dirs = req
+        .extra_skip_dirs
+        .map(sanitize_dirs)
+        .unwrap_or_else(|| existing.extra_skip_dirs.clone());
+    let data_file_max_bytes = req
+        .data_file_max_bytes
+        .unwrap_or(existing.data_file_max_bytes);
+    let extensions = req
+        .extensions
+        .map(sanitize_extensions)
+        .unwrap_or_else(|| existing.extensions.clone());
+    let exclude_globs = req
+        .exclude_globs
+        .map(sanitize_dirs)
+        .unwrap_or_else(|| existing.exclude_globs.clone());
+    let include_docs = req.include_docs.unwrap_or(existing.include_docs);
+    let respect_gitignore = req.respect_gitignore.unwrap_or(existing.respect_gitignore);
+
+    // Apply the immediate (synchronous) half of the component transition:
+    // flip the shared `stages` Arc and, on a KG turn-off, drop the in-memory
+    // symbol graph. Safe to do before the handle rebuild below — `stages` and
+    // `indexer` are the same `Arc`s the rebuilt handle will carry.
+    components::apply_component_transition(&existing, &transition).await;
+
+    // Rebuild the handle, preserving the live indexer + all Arc-shared state
+    // (stages, context, SHA, …). Mirrors the reindex/relocate rebuild pattern.
+    let new_handle = IndexHandle {
+        id: index_id.clone(),
+        indexer: Arc::clone(&existing.indexer),
+        root_path: existing.root_path.clone(),
+        include_paths: existing.include_paths.clone(),
+        exclude_globs,
+        extensions,
+        domain_terms: existing.domain_terms.clone(),
+        include_docs,
+        respect_gitignore,
+        // The symlink policy is a create-time setting, not part of the
+        // hygiene PATCH surface; preserve the existing value across the
+        // rebuild so an unrelated config edit never flips it.
+        follow_links: existing.follow_links,
+        extra_skip_dirs,
+        data_file_max_bytes,
+        path_filter: existing.path_filter.clone(),
+        context_embedding: Arc::clone(&existing.context_embedding),
+        context_summary: Arc::clone(&existing.context_summary),
+        indexed_head_sha: Arc::clone(&existing.indexed_head_sha),
+        last_indexed_at: Arc::clone(&existing.last_indexed_at),
+        lexical_only: existing.lexical_only,
+        skip_kg: transition.new_skip_kg,
+        skip_vector: transition.new_skip_vector,
+        defer_embed: existing.defer_embed,
+        stages: Arc::clone(&existing.stages),
+        search_pressure: Arc::clone(&existing.search_pressure),
+        walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
     };
 
     // Snapshot the owned fields we need for persistence + the response view.
-    // The guard is already released, so these are all owned clones.
     let view = IndexConfigView::from_handle(&new_handle);
     let root_path = new_handle.root_path.clone();
-    let extra_skip_dirs = new_handle.extra_skip_dirs.clone();
-    let data_file_max_bytes = new_handle.data_file_max_bytes;
-    let extensions = new_handle.extensions.clone();
-    let exclude_globs = new_handle.exclude_globs.clone();
-    let include_docs = new_handle.include_docs;
-    let respect_gitignore = new_handle.respect_gitignore;
 
-    // Apply the in-memory change (shard write-lock; guard already dropped).
-    state.registry.register(new_handle);
+    // Apply the in-memory change (shard write-lock).
+    let registered = state.registry.register(new_handle);
 
     // Persist: load the existing entry (to preserve fields the handle doesn't
-    // carry — colocated, LRU timestamps), overlay the hygiene fields, upsert.
-    // A failure here means the in-memory change took but `indexes.toml` did not
-    // — surface it as 500 so the caller does NOT report success and revert on
-    // the next daemon restart (review #1372).
+    // carry — colocated, LRU timestamps), overlay the hygiene + component
+    // fields, upsert. A failure here means the in-memory change took but
+    // `indexes.toml` did not — surface it as 500 so the caller does NOT
+    // report success and revert on the next daemon restart (review #1372).
     if let Err(e) = persist_hygiene_update(
         &index_id.0,
         &root_path,
-        &extra_skip_dirs,
-        data_file_max_bytes,
-        &extensions,
-        &exclude_globs,
-        include_docs,
-        respect_gitignore,
+        &view.extra_skip_dirs,
+        view.data_file_max_bytes,
+        &view.extensions,
+        &view.exclude_globs,
+        view.include_docs,
+        view.respect_gitignore,
+        transition.new_skip_kg,
+        transition.new_skip_vector,
     ) {
         tracing::error!(
             "patch_index_config[{}]: persistence failed: {e}",
@@ -287,6 +338,14 @@ pub(super) async fn patch_index_config_handler(
             .into_response();
     }
 
+    // Issue #2984 Phase 1: spawn the background catch-up now that the new
+    // state is registered + persisted. `permit` (held since the semaphore
+    // acquisition above) moves into the task and is released when it finishes.
+    let catch_up_started = transition.needs_catch_up();
+    if let Some(permit) = permit {
+        components::spawn_component_catch_up(registered, transition, permit);
+    }
+
     state.emit(DaemonEvent::IndexRegistered {
         id: index_id.0.clone(),
     });
@@ -296,6 +355,11 @@ pub(super) async fn patch_index_config_handler(
         "config": view,
         "reindex_required": true,
         "persisted": true,
+        "components": {
+            "kg": view.kg,
+            "vector": view.vector,
+            "catch_up_started": catch_up_started,
+        },
     }))
     .into_response()
 }
@@ -337,11 +401,13 @@ fn sanitize_extensions(v: Vec<String>) -> Vec<String> {
 /// we log it and seed a minimal entry, because that path still produces a
 /// correct persisted record.
 /// What: reads the registry file, finds the matching entry (or seeds a minimal
-/// one), updates the six hygiene fields, and writes back via
+/// one), updates the hygiene fields plus the `skip_kg`/`skip_vector` component
+/// flags (issue #2984 Phase 1), and writes back via
 /// `upsert_index_registry_entry`, propagating any write error.
 /// Test: `patch_persists_to_toml` drives the success path against a tempfile;
 /// `patch_persist_failure_returns_500` forces an unwritable registry path and
-/// asserts the error surfaces.
+/// asserts the error surfaces; `service::server::tests_components` covers the
+/// component-flag persistence.
 #[allow(clippy::too_many_arguments)]
 fn persist_hygiene_update(
     id: &str,
@@ -352,6 +418,8 @@ fn persist_hygiene_update(
     exclude_globs: &[String],
     include_docs: bool,
     respect_gitignore: bool,
+    skip_kg: bool,
+    skip_vector: bool,
 ) -> anyhow::Result<()> {
     use crate::service::persistence::{
         load_index_registry, upsert_index_registry_entry, PersistedIndex,
@@ -380,5 +448,7 @@ fn persist_hygiene_update(
     entry.exclude_globs = exclude_globs.to_vec();
     entry.include_docs = include_docs;
     entry.respect_gitignore = respect_gitignore;
+    entry.skip_kg = skip_kg;
+    entry.skip_vector = skip_vector;
     upsert_index_registry_entry(entry)
 }

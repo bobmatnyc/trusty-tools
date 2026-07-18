@@ -64,6 +64,7 @@ async fn health_reports_degraded_when_corpus_open_failed() {
             graph_node_count: 1_000,
             lexical_only: false,
             skip_kg: false,
+            skip_vector: false,
             corpus_open_failed: true,
         });
         assert!(

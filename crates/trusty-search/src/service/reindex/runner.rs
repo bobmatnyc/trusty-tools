@@ -373,6 +373,7 @@ pub(super) async fn run_reindex(
         started,
         total,
         lexical_only: handle.lexical_only,
+        skip_vector: handle.skip_vector,
         defer_embed: handle.defer_embed && !handle.lexical_only,
         embedder_pid_slot: embedderd_pid_slot.clone(),
     };
