@@ -227,14 +227,19 @@ fn parse_developer_id_identity_no_match() {
 /// Why: A "Developer ID Application" line with fewer than two quote
 /// characters (malformed / truncated output) must be skipped rather than
 /// aborting the entire probe — a later, well-formed line should still be
-/// found.
-/// What: Feeds a malformed line followed by a well-formed one; asserts
-/// the well-formed identity is still returned.
+/// found. Covers both malformed shapes: zero quotes (takes the `let-else
+/// continue` path when `find('"')` fails) and exactly one quote (takes the
+/// `last > first` false branch, since `find` and `rfind` return the same
+/// index) — code-critic review on PR #2963 flagged the single-quote branch as
+/// untested.
+/// What: Feeds a zero-quote line, a one-quote (truncated) line, then a
+/// well-formed line; asserts the well-formed identity is still returned.
 /// Test: This is the test.
 #[test]
 fn parse_developer_id_identity_skips_malformed_line() {
     let fixture = "1) F03283D9CB41F7F084FFB01636A9AED54C8FB362 Developer ID Application: no quotes here\n\
-         2) A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2 \"Developer ID Application: Bob Matsuoka (4JH68XUHC5)\"\n";
+         2) B4C5D6E7F8A9B4C5D6E7F8A9B4C5D6E7F8A9B4C5 \"Developer ID Application: truncated\n\
+         3) A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2 \"Developer ID Application: Bob Matsuoka (4JH68XUHC5)\"\n";
     let identity = parse_developer_id_identity(fixture).expect("must find the well-formed line");
     assert_eq!(
         identity,
