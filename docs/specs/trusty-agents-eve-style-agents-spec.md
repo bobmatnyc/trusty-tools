@@ -256,6 +256,8 @@ role: subagent
 description: Handles billing and refund queries
 extends: engineer                    # NEW — §2.5
 
+user_authority: false                # NEW — default; singleton-enforced, non-inherited, §5.5
+
 model: anthropic/claude-opus-4-6      # existing AgentInfo.model — opaque, adapter-resolved (§7.2)
 
 tools:                                # binds ToolsConfig (existing struct, §4)
@@ -1269,6 +1271,132 @@ needed (orchestration).
 runaway loops. This is a runtime concern, distinct from the config-time cycle detection
 for `extends:`.
 
+### 5.5 User-Authority Singleton (NEW)
+
+trusty-agents supports two invocation paths — DIRECT (the user talks to any
+agent) and DELEGATED (an agent dispatches to a sub-agent via
+`delegate_to_agent`, §5.1–§5.2). Exactly **one** loaded agent may "speak with
+the authority of the user" — act as the user (send email/Slack/calendar as
+them), resolve the user's personal connector credentials, or have a
+user-authoritative action execute without further review. Every other agent —
+including one the user is talking to directly — does not, regardless of
+dispatch path.
+
+**Manifest marker.** A **NEW** top-level manifest key, additive to §2.3's
+schema:
+
+```yaml
+user_authority: true    # default: false
+```
+
+Not a `scopes` entry — `scopes` values compose (union across `extends`,
+§2.5); `user_authority` deliberately does not, per the non-inheritance rule
+below.
+
+**Identification — hybrid: scanned invariant plus optional explicit pointer.**
+The authority holder is identified two ways, both active simultaneously:
+
+1. **Scan-based singleton (the mechanical safety net).** At
+   `AgentRegistry::load` time (the same load pass that enforces §2.6's
+   closed-schema/foreign-file rejections), the loader counts agents with
+   `user_authority: true` across all loaded manifests. Zero is valid (no
+   authority-holder configured). Two or more is a load error:
+   `MultipleUserAuthorityHolders { agents: Vec<String> }`.
+2. **Optional `authority_agent` config pointer (NEW, explicit/auditable
+   declaration).** `~/.trusty-agents/config.toml` gains an optional
+   top-level key, `authority_agent: Option<String>` (§6), naming the agent
+   expected to hold `user_authority: true`. When set, it does not replace
+   the scan — it is validated against it: load fails with
+   `AuthorityAgentMismatch { configured: String, actual: Option<String> }`
+   if the named agent's own manifest does not carry `user_authority: true`,
+   or if the scan resolves to a different agent than the one configured.
+   This gives operators (and CI) an explicit, greppable declaration of
+   intent without weakening the scan's role as the mechanical invariant —
+   there is no path by which setting `authority_agent` alone, without the
+   matching manifest flag, grants authority.
+
+**Non-inheritance.** §2.5's `extends` merge rules (scalar-override,
+list-union) exclude `user_authority`: a child manifest's value is always its
+own explicit setting, defaulting to `false`, **never** inherited or unioned
+from its parent — even when `extends` targets the authority holder itself.
+This prevents personalization (§2.5.1, e.g. a user's own `my-assistant
+extends assistant`) from accidentally minting a second authority holder and
+tripping the singleton check.
+
+**Credential-namespace gating (required in M1 — mandatory defense-in-depth).**
+`McpService.credential_ref` values (§4.2 item 3) in the reserved `user.*`
+namespace (e.g. `user.gmail`, `user.calendar`, `user.slack-personal`) resolve
+only when the **currently-executing** agent's own manifest has
+`user_authority: true`. This check is independent of, and does not replace,
+`resolve_key`'s existing tier resolution (env → keyring → file-store,
+`resolver.rs`); it gates *whether resolution is attempted at all* for this
+namespace, based on caller identity. All non-`user.*` `credential_ref`
+values (inference-provider keys, service tokens) resolve exactly as they do
+today, for every agent — unaffected. This gate is required for M1, not
+deferred: a manifest-authoring mistake (a stray `user_authority: true`, or a
+missing `tools.deny` entry on a non-authoritative agent) must not become a
+credential leak on its own — the manifest flag and this namespace gate are
+two independent layers, not one.
+
+Per the credential-fallback resolution recorded against issue #3066 (owner,
+2026-07-18): resolution of `user.*`-namespaced credentials hard-fails rather
+than falling back to the plaintext-but-permission-hardened `FileKeyStore`
+when the OS keychain probe is negative — a deliberate, explicit divergence
+from `default_store()`'s existing fallback behavior for every other
+credential category, scoped exclusively to this namespace. An explicit
+opt-in env override (naming and shape gated in §10, mirroring the
+`TAGENT_*`-with-legacy-fallback convention of §6) exists for headless/CI
+environments with no OS keychain; absent that override, a negative keychain
+probe on a `user.*` resolution is a hard failure, never a silent fallback to
+disk.
+
+**Delegation never grants authority (propose-not-authorize, absolute for
+M1 — no exceptions).** A sub-agent invoked via `delegate_to_agent`
+(§5.1–§5.2) always runs with its own manifest's `user_authority` value —
+never the dispatching agent's. In practice this means only the singleton
+authority-holder can ever call a user-authoritative tool; every sub-agent's
+only path to influence such an action is to return a **proposal** — drafted
+content — in its `AgentOutput`, which the authority-holder reviews (per its
+own persona-level approval discipline, e.g. "show the draft, ask before
+sending") before invoking the tool itself, in its own turn, under its own
+identity. No `HandoffContext` field (§5.2) grants elevated authority to a
+callee; there is no mechanism by which a delegate can act as the user. For
+M1 this is absolute: there is no capability-token mechanism and no
+co-authority allowlist by which a delegated sub-agent can resolve `user.*`
+credentials or invoke a user-authoritative tool directly, regardless of
+which agent dispatched it or under what constraints. A bounded exception is
+explicitly out of scope for M1 (§9); revisiting it requires its own
+security-reviewed design, not an extension of this section.
+
+**Direct invocation uses the identical check.** Whether an agent was reached
+by the user typing to it directly or by another agent's `delegate_to_agent`
+call is irrelevant to this section — the credential gate and the singleton
+marker key off *which manifest is currently executing*, never the invocation
+path. This is intentional: it is the single mechanism that satisfies both
+the DIRECT and DELEGATED cases without a second, divergent enforcement path
+to maintain.
+
+### 5.6 Conformance
+
+- Loading two agent manifests with `user_authority: true` fails with
+  `MultipleUserAuthorityHolders`, naming both.
+- Setting `authority_agent` in `config.toml` to an agent whose manifest does
+  not have `user_authority: true` (or to a name that does not match the
+  scan's result) fails load with `AuthorityAgentMismatch`.
+- An agent `extends`-ing the authority holder without its own
+  `user_authority: true` loads with `user_authority == false`.
+- A non-authoritative agent's attempt to resolve a `user.*` `credential_ref`
+  returns a recoverable `ToolResult::err`, never a panic, never a
+  silently-empty credential, regardless of whether the agent was invoked
+  directly or via `delegate_to_agent`.
+- A `user.*` credential resolution on a host where the OS keychain probe is
+  negative fails closed (no `FileKeyStore` fallback) unless the documented
+  env override is set.
+- A delegated sub-agent's `AgentOutput` can carry drafted content proposing a
+  user-authoritative action, but no code path allows that sub-agent to
+  invoke the tool itself or to resolve a `user.*` credential — this holds
+  regardless of the dispatching agent's own `user_authority` value.
+
 ---
 
 ## 6. SPEC-AGENTFW-05 — Config Surface
@@ -1296,6 +1424,7 @@ Every new/extended config key introduced by §2–§5, following the existing
 | `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing `McpService`, extended, §4.2) | `credential_ref` | `Option<String>` (a `provider` name resolved via `resolve_key`, §4.2 item 3) | `None` | n/a |
 | `~/.trusty-agents/config.toml` `[[mcp.services]]` (existing, extended, §4.2) | `timeout_secs` | `u64` | `30` | n/a |
 | `~/.trusty-agents/config.toml` (**NEW** `[model]` table, §2.3.4) | `default` | `Option<String>` (`"provider/model-id"`) | `None` | n/a — sits between `TAGENT_DEFAULT_MODEL` and `FALLBACK_MODEL` in precedence (§2.3.4) |
+| `~/.trusty-agents/config.toml` (**NEW**, §5.5) | `authority_agent` | `Option<String>` (agent name; validated against the `user_authority` scan, §5.5) | `None` | n/a |
 | Workflow engine (process-level, **NEW**, §3.3) | checkpoint journal enabled | `bool` | `true` | `TAGENT_CHECKPOINT_DISABLE=1` — naming/shape gated in §10 (not grounded against a verified existing analogous flag). |
 | Workflow engine (**NEW**, §3.3) | checkpoint state root | `PathBuf` | `.trusty-agents/state/runs/` (resolved the same way `agents_dir()`/`TAGENT_CONFIG_DIR` resolves, `loader.rs`) | `TAGENT_STATE_DIR` (**NEW**, mirrors the existing `TAGENT_CONFIG_DIR` pattern exactly) |
 | `HandoffContext` (process-level constant, **NEW**, §5.2) | max size (bytes) | `usize` | `4096` | `TAGENT_HANDOFF_MAX_BYTES` (**NEW**) |
@@ -1517,6 +1646,13 @@ out (#2791) — not a single mega-PR.
   connecting to an operator-run broker (e.g. an existing Home Assistant
   Mosquitto instance) — trusty-agents never hosts broker infrastructure
   itself.
+- **No bounded exception to propose-not-authorize, for M1.** **DECIDED**
+  (owner, 2026-07-18): §5.5's single-user-authority-proxy model is absolute
+  for M1 — no capability-token mechanism and no fixed "co-authority"
+  sub-agent allowlist by which a delegated agent could resolve `user.*`
+  credentials or invoke a user-authoritative tool directly. A bounded
+  exception, if ever pursued, is its own security-reviewed design for M2 or
+  later, not a variant of this spec's delegation model.
 
 ---
 
@@ -1539,7 +1675,10 @@ granularity) and in §13's change log. What remains:
    `credential_ref` resolution accepts the same fallback every other
    credential in this codebase already accepts, or (b) it hard-fails when
    the keychain is unavailable rather than falling back, diverging from
-   `resolve_key`'s existing behavior for this one caller.
+   `resolve_key`'s existing behavior for this one caller. **Partially
+   resolved (owner, 2026-07-18):** for the `user.*` namespace specifically,
+   (b) applies — hard-fail, no `FileKeyStore` fallback (§5.5). This item
+   remains open for every other (non-`user.*`) `credential_ref` value.
 2. **`tools/call` proxy dispatch surface (gates SPEC-AGENTFW-03 item 1).**
    `ServiceDescriptor` has no execute method — confirmed this pass. Needs a
    research pass into `trusty-memory`'s/`trusty-search`'s actual
@@ -1596,6 +1735,13 @@ granularity) and in §13's change log. What remains:
     explicitly the operator's own concern, entirely out of this spec's
     scope? HMAC signature verification (§2.3.6) is the auth story regardless
     of the answer — this item is about reachability, not authentication.
+12. **`user.*` credential hard-fail env-override naming (gates
+    SPEC-AGENTFW-04 §5.5).** §5.5 establishes that headless/CI environments
+    need an opt-in env override to avoid the `user.*` hard-fail-on-negative-
+    keychain-probe behavior; the exact variable name/shape is not yet
+    grounded against a verified existing analogous flag, mirroring item 4's
+    open status for `TAGENT_CHECKPOINT_DISABLE`. Confirm naming before the
+    credential-namespace-gating implementation lands (epic #3052).
 
 ---
 
@@ -1752,6 +1898,22 @@ not a speculative extension.
   scheduling is a confirmed real gap, not hypothetical), and a new §10 item
   11 (webhook public-reachability story — a tunnel/reverse-proxy question
   distinct from the already-specified HMAC auth).
+- **2026-07-18 (v3.2)** — Added §5.5 **User-Authority Singleton** (issue
+  #3073, epic #3052) and its §5.6 Conformance block, the normative anchor
+  for the single-user-authority-proxy model: a `user_authority` manifest key
+  (§2.3) with singleton enforcement at load time, identified via a hybrid of
+  a scan-based invariant and an optional explicit `authority_agent` pointer
+  in `config.toml` (§6); non-inheritance across `extends` (§2.5); a required
+  M1 credential-namespace gate on `user.*` `credential_ref` values (§4.2)
+  layered on top of the manifest flag, with issue #3066's hard-fail-no-
+  plaintext behavior scoped to that namespace and an opt-in env override for
+  headless/CI; and an absolute, no-exceptions-for-M1 propose-not-authorize
+  rule governing `delegate_to_agent` (§5.1–§5.2) — no capability-token, no
+  co-authority allowlist. §6's config-surface table gained the
+  `authority_agent` key and §2.3's manifest schema example gained
+  `user_authority` to stay consistent with this addition; §9 gained a
+  matching non-goal bullet and §10 gained item 12 plus a partial-resolution
+  note on item 1, both scoped to the `user.*` namespace only.
 
 [gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
