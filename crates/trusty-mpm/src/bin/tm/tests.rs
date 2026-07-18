@@ -390,6 +390,11 @@ fn cli_parses_project_info() {
     }
 }
 
+// `cli_parses_project_trust`/`cli_parses_project_trust_revoke` and the
+// `project trust` behavioral coverage live in
+// `tests_project_trust_tests.rs` instead of here, to stay under this file's
+// 1500-SLOC test cap (issue #3033).
+
 #[test]
 fn cli_project_requires_action() {
     // `project` with no action is an error.

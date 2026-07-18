@@ -80,7 +80,20 @@ route it through `tm mcp add` instead.
     `[mcp.custom.<name>]` table (the same per-project override file
     `[agents]`/`[skills]` already use) declares servers scoped to THAT
     project's fleet sessions only, and — on a name collision — OVERRIDES the
-    user-scope registry entry of the same name.
+    user-scope registry entry of the same name. A `trusty-memory`/
+    `trusty-search`/native-allowlist name declared here is always REJECTED —
+    a project manifest can never override a reserved name (issue #3033).
+  - **Consent gate (issue #3033):** because a project-scope `[mcp.custom]`
+    entry ships with the cloned repo itself, it is honored ONLY after the
+    operator explicitly runs `tm project trust [--dir <path>]` for that
+    project — an untrusted project's `[mcp.custom]` table is skipped entirely
+    (a single warning names the project and hints the trust command). Trust
+    state lives in USER-scope config (`~/.trusty-tools/trusty-mpm/project-trust.json`),
+    never inside the repo, so a cloned repo can never self-trust. Revoke with
+    `tm project trust --revoke [--dir <path>]`; `tm project list`/`tm project
+    info` show an `[mcp-trusted]` marker / trust line for the current state.
+    User-scope registry entries (`tm mcp add`) are unaffected — you already
+    consented to those by registering them locally.
 
 ### The 3 auto-provisioned framework built-ins
 

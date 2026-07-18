@@ -3,8 +3,13 @@
 //! Why: project registration, listing, and inspection are a self-contained
 //! group that benefits from a dedicated file.
 //! What: `project` dispatcher, `scaffold_project_dir`, `resolve_dir`.
-//! Test: `cli_parses_project_*`, `project_init_scaffolds_dotdir`,
-//! `project_init_keeps_existing_config` in `tests.rs`.
+//! `Trust`/`Trust { revoke: true }` are handled entirely LOCALLY (no daemon
+//! HTTP round-trip, unlike `Init`/`List`/`Info`) via
+//! `trusty_mpm::core::project_trust::ProjectTrustStore` — issue #3033's
+//! consent gate for project-scope custom MCP bridging.
+//! Test: `cli_parses_project_*` in `tests.rs`, `project_init_scaffolds_dotdir`/
+//! `project_init_keeps_existing_config` in `tests_behavior_a.rs`,
+//! `project_trust_grants_and_revokes` in `tests_project_trust_tests.rs`.
 
 use serde::Deserialize;
 
@@ -28,12 +33,20 @@ pub(crate) fn resolve_dir(dir: Option<String>) -> anyhow::Result<std::path::Path
 ///
 /// Why: a project is a registered working directory; operators need shell
 /// commands to register one, list all, and inspect the current one without
-/// hand-crafting HTTP requests.
+/// hand-crafting HTTP requests. `Trust` additionally lets them consent to
+/// project-scope custom MCP bridging (issue #3033).
 /// What: `Init` registers the directory (`POST /projects`) and scaffolds a
-/// local `.trusty-mpm/`; `List` prints `GET /projects`; `Info` prints the
-/// current directory's project via `GET /projects/current`.
+/// local `.trusty-mpm/`; `List` prints `GET /projects` with an
+/// `[mcp-trusted]` marker per project; `Info` prints the current directory's
+/// project via `GET /projects/current` plus its trust status; `Trust` is
+/// handled entirely locally by [`trust_cmd`] (no daemon round-trip — see its
+/// own doc). Trust status in `List`/`Info` is read from the SAME local
+/// `core::project_trust` store `Trust` writes, never from the daemon.
 /// Test: `cli_parses_project_init`, `cli_parses_project_list`,
-/// `cli_parses_project_info`, `project_init_scaffolds_dotdir`.
+/// `cli_parses_project_info`, `cli_parses_project_trust`,
+/// `cli_parses_project_trust_revoke`, `project_init_scaffolds_dotdir`,
+/// `project_trust_grants_and_revokes` (the last three CLI-parse tests and the
+/// behavioral test live in `tests_project_trust_tests.rs`).
 pub(crate) async fn project(
     client: &reqwest::Client,
     url: &str,
@@ -73,7 +86,12 @@ pub(crate) async fn project(
                 println!("no projects registered");
             }
             for p in &body.projects {
-                println!("{} {}", p.name, p.path.display());
+                let trust_marker = if trusty_mpm::core::project_trust::is_project_trusted(&p.path) {
+                    " [mcp-trusted]"
+                } else {
+                    ""
+                };
+                println!("{} {}{trust_marker}", p.name, p.path.display());
             }
         }
         ProjectAction::Info { dir } => {
@@ -89,7 +107,49 @@ pub(crate) async fn project(
                 let body: serde_json::Value = resp.error_for_status()?.json().await?;
                 println!("{}", serde_json::to_string_pretty(&body)?);
             }
+            let trusted = trusty_mpm::core::project_trust::is_project_trusted(&path);
+            println!(
+                "project-scope custom MCP trust: {}",
+                if trusted { "trusted" } else { "untrusted" }
+            );
         }
+        ProjectAction::Trust { dir, revoke } => trust_cmd(dir, revoke)?,
+    }
+    Ok(())
+}
+
+/// `project trust` / `project trust --revoke` handler (issue #3033).
+///
+/// Why: entirely LOCAL and synchronous — unlike the other `project` actions,
+/// this must work without a running daemon (mirrors how
+/// `session_launch::custom_mcp` itself reads/writes plain files, never HTTP).
+/// What: resolves the target directory (defaults to cwd, same as every other
+/// `project` action), loads the trust store from
+/// [`trusty_mpm::core::project_trust::trust_store_root`], and calls `trust`/
+/// `revoke`, saving only when the store actually changed.
+/// Test: `project_trust_grants_and_revokes`.
+pub(crate) fn trust_cmd(dir: Option<String>, revoke: bool) -> anyhow::Result<()> {
+    let path = resolve_dir(dir)?;
+    let Some(root) = trusty_mpm::core::project_trust::trust_store_root() else {
+        anyhow::bail!("cannot resolve the home directory for the project-trust store");
+    };
+    let mut store = trusty_mpm::core::project_trust::ProjectTrustStore::load(&root)?;
+    if revoke {
+        if store.revoke(&path) {
+            store.save()?;
+            println!("revoked trust for {}", path.display());
+        } else {
+            println!("{} was not trusted (no change)", path.display());
+        }
+    } else if store.trust(&path) {
+        store.save()?;
+        println!(
+            "trusted {} — its [mcp.custom] manifest entries will now be bridged into fleet \
+             sessions",
+            path.display()
+        );
+    } else {
+        println!("{} is already trusted (no change)", path.display());
     }
     Ok(())
 }

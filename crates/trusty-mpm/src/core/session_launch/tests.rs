@@ -8,6 +8,7 @@ use super::settings::{
     write_project_hooks, write_status_line,
 };
 use super::*;
+use std::collections::BTreeSet;
 use tempfile::tempdir;
 
 /// Why: env-mutating tests previously restored the var by hand at the end of the
@@ -1275,7 +1276,7 @@ fn preseed_trust_marks_directory() {
     let claude_json = tmp.path().join(".claude.json");
     let workspace = tmp.path().join("ws");
 
-    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("seed succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
@@ -1304,7 +1305,7 @@ fn preseed_trust_preserves_other_keys() {
     )
     .unwrap();
 
-    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("seed succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
@@ -1333,9 +1334,9 @@ fn preseed_trust_is_idempotent() {
     let claude_json = tmp.path().join(".claude.json");
     let workspace = tmp.path().join("ws");
 
-    preseed_workspace_trust(&claude_json, &workspace).expect("first seed");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("first seed");
     let first = std::fs::read_to_string(&claude_json).unwrap();
-    preseed_workspace_trust(&claude_json, &workspace).expect("second seed");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("second seed");
     let second = std::fs::read_to_string(&claude_json).unwrap();
 
     assert_eq!(first, second, "re-seeding must leave the file unchanged");
@@ -1351,7 +1352,7 @@ fn preseed_trust_leaves_malformed_file() {
     let garbage = "{ this is not valid json ";
     std::fs::write(&claude_json, garbage).unwrap();
 
-    preseed_workspace_trust(&claude_json, &workspace).expect("soft-fails to Ok");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("soft-fails to Ok");
 
     let after = std::fs::read_to_string(&claude_json).unwrap();
     assert_eq!(after, garbage, "malformed file must be left untouched");
@@ -1374,7 +1375,7 @@ fn preseed_trust_enables_mcp_servers_from_mcp_json() {
     )
     .unwrap();
 
-    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("seed succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
@@ -1401,7 +1402,7 @@ fn preseed_trust_enables_empty_when_no_mcp_json() {
     let workspace = tmp.path().join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
 
-    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("seed succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
@@ -1414,6 +1415,11 @@ fn preseed_trust_enables_empty_when_no_mcp_json() {
         "no .mcp.json yields an empty approval list, not a crash"
     );
 }
+
+// `preseed_trust_excludes_project_scope_names_from_approval` (issue #2739
+// follow-up security fix) lives in `native_mcp_tests.rs` instead of here to
+// stay under this file's 1500-SLOC test cap; it exercises the same
+// `preseed_workspace_trust` imported above.
 
 #[test]
 #[serial_test::serial]
@@ -1451,7 +1457,7 @@ fn prepare_session_preseeds_enabled_mcp_servers() {
     // Seed an isolated ~/.claude.json to assert the approval list is derived
     // from the now-populated .mcp.json.
     let claude_json = tmp_home.path().join(".claude-iso.json");
-    preseed_workspace_trust(&claude_json, project).expect("seed succeeds");
+    preseed_workspace_trust(&claude_json, project, &BTreeSet::new()).expect("seed succeeds");
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
     let key = project.to_string_lossy().to_string();

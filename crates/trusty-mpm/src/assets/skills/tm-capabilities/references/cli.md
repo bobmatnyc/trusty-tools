@@ -73,6 +73,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `info` — Show the current project's registered info and config
   - `init` — Register a working directory as a trusty-mpm project
   - `list` — List all registered projects with their status
+  - `trust` — Grant (or revoke) consent for a project's `[mcp.custom]` manifest entries to be bridged into fleet sessions (issue #3033 security fix)
 - `projects` — Manage the project registry (registry B) and its Deliverable/Milestone ledger
   - `config` — View or edit a project's deterministic config (§3.1/§6, #2120)
     - `set` — Set a field to a new value

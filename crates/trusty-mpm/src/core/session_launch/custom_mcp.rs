@@ -69,10 +69,70 @@
 //! `http`/`sse` goes through [`validate_custom_remote_server`]. Collected `env`
 //! secrets are merged into `.env.local` via the shared native helper. Runs
 //! BEFORE `preseed_workspace_trust_home` (same ordering requirement as the
-//! native injector) so injected names flow into `enabledMcpjsonServers`.
+//! native injector) so injected names flow into `enabledMcpjsonServers` — EXCEPT
+//! the names that came from the PROJECT manifest scope, which
+//! [`inject_custom_trusty_mcps`] returns to the caller so they can be excluded
+//! from that auto-approval pre-seed (see the "consent" paragraph below).
 //! Test: `custom_mcp_tests.rs`.
+//!
+//! **Reserved-name enforcement applies to BOTH scopes.** A project manifest
+//! `[mcp.custom]` entry named e.g. `trusty-memory` or `slack-mcp` must be
+//! rejected exactly like a same-named user-scope registry entry would be —
+//! [`inject_mcp_server`] is an upsert-by-name and the dedicated/native
+//! injectors for those reserved names run BEFORE this one
+//! (`session_launch/mod.rs`), so an unfiltered project loop could silently
+//! clobber a legitimate entry (arbitrary command execution via a spoofed
+//! stdio command, or redirecting `trusty-memory`/`trusty-search` calls to an
+//! attacker-controlled endpoint). Both scope loops call [`is_reserved_name`]
+//! before injecting.
+//!
+//! **Consent gate for project-scope servers.** A project-scope `[mcp.custom]`
+//! entry ships with the CLONED REPO itself — unlike a user-scope registry
+//! entry, which the operator personally added via `tm mcp add` on their OWN
+//! machine. The PRIMARY safeguard (owner decision, superseding the original
+//! interim design) is [`crate::core::project_trust::is_project_trusted`]:
+//! [`inject_custom_trusty_mcps`] consults it before honoring ANY entry in
+//! `project_custom` and, when the project is untrusted, skips the ENTIRE
+//! project-scope loop with a single `warn!` naming the project path and
+//! hinting `tm project trust <path>` (never logging entry values). Trust is
+//! recorded in USER-scope state (`core::project_trust`, under
+//! `~/.trusty-tools/trusty-mpm/`), never inside the repo, so a cloned repo
+//! cannot self-trust; `tm project trust` / `tm project trust --revoke`
+//! (`bin/tm/commands/project.rs`) are the only way to flip it. As
+//! DEFENSE-IN-DEPTH this module additionally keeps the earlier no-preseed
+//! safeguard: even for a TRUSTED project, [`inject_custom_trusty_mcps`]
+//! returns the set of names it injected from the PROJECT scope so the caller
+//! ([`super::settings::preseed_workspace_trust_home`]) can exclude them from
+//! the `enabledMcpjsonServers` auto-approval — the server still bridges into
+//! `.mcp.json` once trusted, but Claude Code's own "new MCP servers found"
+//! consent dialog still fires for it in-session rather than being silently
+//! pre-enabled. This is a deliberate simplification, not an oversight: it
+//! costs the operator one extra in-session click even after explicitly
+//! trusting the project, in exchange for never having to reason about a
+//! separate "trusted AND pre-approved" code path. User-scope registry names
+//! are unaffected by either gate (still pre-approved, matching the existing
+//! native-allowlist posture) — the operator already consented to those by
+//! registering them locally.
+//! Test: `custom_project_scope_cannot_override_reserved_name`,
+//! `custom_project_scope_cannot_override_trusty_memory`,
+//! `custom_project_scope_cannot_override_trusty_search`,
+//! `custom_project_scope_cannot_override_slack_mcp`,
+//! `custom_project_scope_skipped_when_project_untrusted`,
+//! `custom_project_scope_bridges_when_project_trusted`,
+//! `custom_project_scope_skipped_again_after_revoke`.
+//!
+//! **Known limitation — no pruning of stale bridged entries (tracked in
+//! issue #3045).** Once a custom server (user- or project-scope) is injected
+//! into a workspace's `.mcp.json`, nothing ever removes it again if the
+//! registry entry or manifest declaration is later revoked or deleted —
+//! every past bridge target accumulates in `.mcp.json` forever, growing the
+//! trust surface over time. A tracked-name-set approach (recording which
+//! names THIS module injected, then pruning any that no longer appear in
+//! either source on the next `prepare_session`) would close this, but is
+//! deliberately NOT implemented here; see issue #3045 and the CHANGELOG
+//! entry for this change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::Value;
@@ -84,6 +144,7 @@ use super::native_mcp::{
 use super::settings::inject_mcp_server;
 use crate::core::manifest::CustomMcpServer;
 use crate::core::mcp_config::{self, BUILTIN_MANAGED_MCP_SERVERS};
+use crate::core::project_trust::is_project_trusted;
 use crate::core::trusty_tools_config::managed_claude_config_dir;
 
 /// The ONLY top-level fields a custom remote (http/sse) registration may carry
@@ -109,21 +170,41 @@ const INJECTABLE_REMOTE_FIELDS: &[&str] = &["type", "url"];
 /// What: reads the managed `.claude.json` registry (best-effort — a
 /// stripped-environment or read failure is logged and treated as "no user-scope
 /// entries", never fatal to the launch) and injects every entry that is not a
-/// native or builtin reserved name, THEN injects every entry in
-/// `project_custom` (overwriting a same-named user entry — see the module docs
-/// for the precedence rationale). Collected stdio secrets are merged into
-/// `.env.local` once at the end. Non-fatal: an injection or secret-routing
-/// failure for one entry never aborts the rest.
+/// native or builtin reserved name. THEN, only when
+/// [`crate::core::project_trust::is_project_trusted`] returns `true` for
+/// `project_path`, injects every entry in `project_custom` (overwriting a
+/// same-named user entry — see the module docs for the precedence rationale).
+/// An untrusted project's `project_custom` table is skipped in its entirety
+/// (logged once at `warn!`, never fatal). Collected stdio secrets are merged
+/// into `.env.local` once at the end. Non-fatal: an injection or
+/// secret-routing failure for one entry never aborts the rest.
+///
+/// Returns the set of names actually injected from the PROJECT scope (not the
+/// user scope) so the caller can exclude them from the workspace-trust
+/// auto-approval pre-seed (see the module docs' "Consent gate" section) —
+/// only names for which [`inject_one_custom_entry`] actually wrote an entry
+/// are included, so a project-scope entry that itself fails validation (e.g.
+/// a headers-bearing remote server) is never wrongly excluded from
+/// pre-approval when it left a pre-existing user-scope entry of the same name
+/// untouched. Always empty when the project is untrusted.
 /// Test: `custom_user_scope_http_server_bridges`,
 /// `custom_user_scope_stdio_server_bridges_with_secret_routing`,
 /// `custom_project_scope_server_bridges`,
 /// `custom_project_scope_overrides_user_scope_on_name_collision`,
-/// `custom_bridging_skips_native_and_builtin_names`.
+/// `custom_bridging_skips_native_and_builtin_names`,
+/// `custom_project_scope_cannot_override_reserved_name`,
+/// `custom_project_scope_cannot_override_trusty_memory`,
+/// `custom_project_scope_cannot_override_trusty_search`,
+/// `custom_project_scope_cannot_override_slack_mcp`,
+/// `custom_project_scope_skipped_when_project_untrusted`,
+/// `custom_project_scope_bridges_when_project_trusted`,
+/// `custom_project_scope_skipped_again_after_revoke`.
 pub(super) fn inject_custom_trusty_mcps(
     project_path: &Path,
     project_custom: &BTreeMap<String, CustomMcpServer>,
-) -> Result<(), PrepError> {
+) -> Result<BTreeSet<String>, PrepError> {
     let mut secret_env: BTreeMap<String, String> = BTreeMap::new();
+    let mut project_scope_injected: BTreeSet<String> = BTreeSet::new();
 
     // USER SCOPE (lower precedence): every managed-registry entry that is
     // neither a native trusty server (owned by `native_mcp`) nor one of the
@@ -153,16 +234,49 @@ pub(super) fn inject_custom_trusty_mcps(
     }
 
     // PROJECT SCOPE (higher precedence — overwrites a same-named user entry):
-    // the resolved manifest's `[mcp.custom]` table.
-    for (name, def) in project_custom {
-        let entry = custom_manifest_entry_to_value(def);
-        inject_one_custom_entry(project_path, name, &entry, &mut secret_env)?;
+    // the resolved manifest's `[mcp.custom]` table. GATED on operator consent
+    // (see the module docs' "Consent gate" paragraph): a project manifest
+    // ships with the cloned repo, so its `[mcp.custom]` entries are honored
+    // ONLY when the operator has explicitly run `tm project trust` for this
+    // project path. An untrusted project contributes NOTHING here — a single
+    // `warn!` names the project and hints the trust command; entry values are
+    // never logged.
+    if project_custom.is_empty() {
+        // Nothing declared — skip the trust lookup entirely (no I/O, no log).
+    } else if !is_project_trusted(project_path) {
+        tracing::warn!(
+            project = %project_path.display(),
+            "skipping project-scope custom MCP servers: this project is not trusted — run \
+             `tm project trust {}` to allow its [mcp.custom] manifest entries to bridge",
+            project_path.display()
+        );
+    } else {
+        // Reserved names (native or builtin) are rejected here EXACTLY like
+        // the user-scope loop above — a TRUSTED project manifest must still
+        // never be able to shadow `trusty-memory`, `trusty-search`,
+        // `trusty-review`, or a native-allowlist server (see the module docs'
+        // reserved-name-enforcement paragraph; this was previously unguarded
+        // and let a project manifest silently overwrite those entries).
+        for (name, def) in project_custom {
+            if is_reserved_name(name) {
+                tracing::warn!(
+                    server = %name,
+                    "refusing to bridge project-scope custom MCP server: name is reserved by a \
+                     native or builtin injector and cannot be overridden by a project manifest"
+                );
+                continue;
+            }
+            let entry = custom_manifest_entry_to_value(def);
+            if inject_one_custom_entry(project_path, name, &entry, &mut secret_env)? {
+                project_scope_injected.insert(name.clone());
+            }
+        }
     }
 
     if !secret_env.is_empty() {
         route_mcp_secrets_to_env_local(project_path, &secret_env)?;
     }
-    Ok(())
+    Ok(project_scope_injected)
 }
 
 /// Whether `name` is already owned by another injector and must never be
@@ -174,8 +288,15 @@ pub(super) fn inject_custom_trusty_mcps(
 /// pinning-aware injectors — re-injecting any of them here (unpinned, or
 /// duplicated) would clobber that ownership.
 /// What: `true` iff `name` is in [`NATIVE_TRUSTY_MCP_SERVERS`] or
-/// [`BUILTIN_MANAGED_MCP_SERVERS`].
-/// Test: `custom_bridging_skips_native_and_builtin_names`.
+/// [`BUILTIN_MANAGED_MCP_SERVERS`]. Applied identically to BOTH the
+/// user-scope registry loop and the project-scope manifest loop in
+/// [`inject_custom_trusty_mcps`] — a project manifest must not be able to
+/// bypass this check the user-scope loop already enforced.
+/// Test: `custom_bridging_skips_native_and_builtin_names`,
+/// `custom_project_scope_cannot_override_reserved_name`,
+/// `custom_project_scope_cannot_override_trusty_memory`,
+/// `custom_project_scope_cannot_override_trusty_search`,
+/// `custom_project_scope_cannot_override_slack_mcp`.
 fn is_reserved_name(name: &str) -> bool {
     NATIVE_TRUSTY_MCP_SERVERS.contains(&name) || BUILTIN_MANAGED_MCP_SERVERS.contains(&name)
 }
@@ -192,29 +313,35 @@ fn is_reserved_name(name: &str) -> bool {
 /// everything else (`stdio`, or no `type` at all — the bare-command shape) goes
 /// through [`split_public_and_secret_env`], with any `env` secrets folded into
 /// `secret_env` for the caller to route. A rejected entry is simply not
-/// injected (already `warn!`-logged by the validator).
+/// injected (already `warn!`-logged by the validator). Returns `true` iff an
+/// entry was actually written to `.mcp.json`, so callers (specifically the
+/// project-scope loop in [`inject_custom_trusty_mcps`]) can track exactly
+/// which names this call caused to appear, rather than which names were merely
+/// attempted.
 /// Test: covered via `inject_custom_trusty_mcps`'s own test suite.
 fn inject_one_custom_entry(
     project_path: &Path,
     name: &str,
     entry: &Value,
     secret_env: &mut BTreeMap<String, String>,
-) -> Result<(), PrepError> {
+) -> Result<bool, PrepError> {
     let transport = entry.get("type").and_then(Value::as_str);
     match transport {
         Some("http") | Some("sse") => {
             if let Some(public) = validate_custom_remote_server(entry, name) {
                 inject_mcp_server(project_path, name, public)?;
+                return Ok(true);
             }
         }
         _ => {
             if let Some((public, env)) = split_public_and_secret_env(entry, name) {
                 inject_mcp_server(project_path, name, public)?;
                 secret_env.extend(env);
+                return Ok(true);
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Validate a custom remote (http/sse) registration and return its injectable

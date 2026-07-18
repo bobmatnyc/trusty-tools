@@ -22,7 +22,7 @@ use super::native_mcp::{
 };
 use super::settings::preseed_workspace_trust;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -533,7 +533,8 @@ fn inject_native_trust_preseed_covers_injected() {
     seed_managed_registry(cfg.path());
 
     inject_native_trusty_mcps_from(&workspace, cfg.path()).expect("injection succeeds");
-    preseed_workspace_trust(&claude_json, &workspace).expect("trust preseed succeeds");
+    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new())
+        .expect("trust preseed succeeds");
 
     let value: Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
@@ -552,6 +553,44 @@ fn inject_native_trust_preseed_covers_injected() {
     assert!(
         !enabled.contains(&"github"),
         "non-native never reaches the workspace, so never trusted here"
+    );
+}
+
+#[test]
+fn preseed_trust_excludes_project_scope_names_from_approval() {
+    // Why (issue #2739 follow-up security fix, `custom_mcp.rs`): a
+    // project-scope custom MCP server ships with the cloned repo itself, so
+    // it must NOT be silently pre-approved via `enabledMcpjsonServers` even
+    // though it is present in `.mcp.json` — `exclude_mcp_names` carries
+    // exactly those names.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join(".mcp.json"),
+        r#"{"mcpServers":{"trusty-search":{"command":"trusty-search"},"project-only":{"command":"project-tool"}}}"#,
+    )
+    .unwrap();
+
+    let mut exclude = BTreeSet::new();
+    exclude.insert("project-only".to_string());
+    preseed_workspace_trust(&claude_json, &workspace, &exclude).expect("seed succeeds");
+
+    let value: Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let key = workspace.to_string_lossy().to_string();
+    let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        enabled,
+        vec!["trusty-search"],
+        "the project-scope-bridged name must be excluded from auto-approval, \
+         even though it is present in .mcp.json"
     );
 }
 
