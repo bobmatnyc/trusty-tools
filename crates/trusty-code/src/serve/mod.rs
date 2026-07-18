@@ -35,6 +35,7 @@
 
 pub mod http;
 pub mod methods;
+pub mod rest;
 pub mod transport;
 
 use std::sync::Arc;
