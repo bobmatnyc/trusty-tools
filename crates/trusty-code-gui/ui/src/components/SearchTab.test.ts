@@ -52,6 +52,21 @@ beforeEach(() => {
 });
 
 describe('SearchTab (DOC-39 §4.7, 10d)', () => {
+  it('renders the connecting state before the first poll resolves', async () => {
+    // A `fetch` that never resolves keeps `refresh()` parked on its first
+    // `await` forever, so `phase` never advances past its initial
+    // `'connecting'` value — review follow-up (code-critic on PR #3085): the
+    // doc comment claims all four phases are covered, but `connecting` had
+    // no assertion.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+    instance = mount(SearchTab, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('connecting') ?? false);
+
+    expect(target.textContent).toContain('connecting');
+    expect(noInputRendered()).toBe(true);
+  });
+
   it('AC-7.1: renders no input field while daemon-unreachable', async () => {
     vi.stubGlobal(
       'fetch',
