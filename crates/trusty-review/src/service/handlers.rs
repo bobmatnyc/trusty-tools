@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::{
-    config::ReviewConfig,
+    config::{InvocationSurface, ReviewConfig},
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
@@ -446,6 +446,10 @@ pub async fn handle_review(
             pr_discussion: req.pr_discussion.clone(),
             referenced_code: req.referenced_code.clone(),
         },
+        // POST /review is out of scope for the interactive-degrade default
+        // (unaffected by the search-unreachable semantics fix) — keeps the
+        // strict `Hosted` default, unchanged behaviour.
+        surface: InvocationSurface::default(),
     };
 
     state.in_flight.fetch_add(1, Ordering::Relaxed);

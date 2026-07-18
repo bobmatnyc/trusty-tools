@@ -38,7 +38,7 @@ pub use index_resolver::{
 };
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
-pub use context::{ContextConfig, ContextFileConfig};
+pub use context::{ContextConfig, ContextFileConfig, InvocationSurface};
 pub use outcome::{OutcomeConfig, OutcomeFileConfig};
 pub use repo_config::find_repo_config_path;
 pub use review_template::ReviewFileConfig;

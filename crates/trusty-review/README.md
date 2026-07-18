@@ -291,6 +291,42 @@ Returns a health status object:
 - `auth_error` — inference provider reachable but auth failed (bad API key).
 - `unknown` — inference probe could not determine status.
 
+#### Required context, infra outages, and interactive degrade
+
+trusty-review's value comes from the code (trusty-search) and static-analysis
+(trusty-analyze) context it injects into every review — a review produced
+WITHOUT that context is actively harmful (false confidence). By default both
+dependencies are **required**: if either is unreachable, the review is
+**skipped** rather than silently run context-free.
+
+**A Skip caused by a genuine infra outage is never mistaken for a real
+verdict.** When `review_pr`/`review_diff` skip because a required dependency
+is unreachable, the MCP response sets `"isError": true` and adds a top-level
+`"mcp_status": "infrastructure_unavailable"` sentinel — distinct from both a
+real verdict and any (hypothetical) policy-driven skip, which stay
+`isError: false`. A caller must handle this explicitly rather than reading a
+`verdict`/`status` field out of a payload that looks like a normal result.
+
+**`require_search` resolves per invocation surface** when you have not set an
+explicit override:
+
+| Surface | Examples | Default when search is down |
+|---------|----------|------------------------------|
+| `Interactive` | MCP `review_pr`/`review_diff` tool calls; CLI `run --local-diff`/`--base`/`--source-root` | **Degrade** — a loudly-labelled, non-authoritative diff-only review still runs (the LLM is still called) |
+| `Hosted` | The GitHub webhook bot (`serve`); CLI `run <owner> <repo> <pr>` | **Skip** — refuse to review without code context (unchanged) |
+
+Neither MCP tool call nor a local-diff CLI review can post to a real GitHub
+PR, so degrading them when search is down is safe and more useful than
+wasting a developer's time with a hard-Skip. The webhook bot and a
+GitHub-PR `run` invocation CAN post a live review, so they keep the strict
+default.
+
+An explicit override — `TRUSTY_REVIEW_REQUIRE_SEARCH=false`/`true` or
+`[context] require_search = false`/`true` in the config file — always wins
+regardless of surface. `require_analyze` has no per-surface default; it stays
+required (`true`) everywhere unless explicitly opted out via
+`TRUSTY_REVIEW_REQUIRE_ANALYZE`/`[context] require_analyze`.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -298,6 +334,8 @@ Returns a health status object:
 | `PR_INTELLIGENCE_DRY_RUN` | `true` | When `true`, no GitHub comments are posted |
 | `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon URL |
 | `PR_INTELLIGENCE_ANALYZER_URL` | `http://127.0.0.1:7879` | trusty-analyze daemon URL |
+| `TRUSTY_REVIEW_REQUIRE_SEARCH` | per-surface (see above) | Force search required (`true`) or allow degrade (`false`) regardless of invocation surface |
+| `TRUSTY_REVIEW_REQUIRE_ANALYZE` | `true` | Force analyze required (`true`) or allow degrade (`false`) |
 | `GITHUB_TOKEN` | — | GitHub personal access token for `review_pr` |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | AWS credentials for Bedrock |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key (when using OpenRouter provider) |

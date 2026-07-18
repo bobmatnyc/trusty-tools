@@ -21,7 +21,10 @@
 
 use tracing::{info, warn};
 
-use crate::{config::ReviewConfig, pipeline::runner::ReviewDeps};
+use crate::{
+    config::{InvocationSurface, ReviewConfig},
+    pipeline::runner::ReviewDeps,
+};
 
 /// Decision produced by the required-context preflight gate.
 ///
@@ -50,15 +53,24 @@ pub enum GateOutcome {
 /// REQUIRED by default; a missing one skips the review rather than silently
 /// degrading to a context-free, false-confidence verdict.  Running this once,
 /// before context gathering, makes the policy apply uniformly to every review
-/// subject.
-/// What: probes search health and analyze readiness concurrently.  For each
-/// dependency that is down: if its `require_*` flag is true → `Skip` with an
-/// actionable message; if false → record a degraded reason.  Search is checked
-/// first so its (more fundamental) outage produces the skip message.  When no
-/// dependency is required-and-down but at least one opted-out dependency is down,
-/// returns `Degraded`; otherwise `Proceed`.  Note: when `deps.analyze` is `None`
-/// (analyze client not wired in at all, e.g. the CLI compare path) the analyze
-/// requirement is treated as unmet exactly as if the daemon were down.
+/// subject.  `surface` decides the search-specific SAFE DEFAULT when the
+/// operator has not set an explicit `require_search` override (search-
+/// unreachable semantics fix): `Hosted` callers (the webhook bot, CLI
+/// GitHub-PR runs) stay strict; `Interactive` callers (MCP tool calls, CLI
+/// local-diff/--base/--source-root reviews) default to degrading instead of
+/// hard-skipping, since neither can post a context-free verdict to a real PR.
+/// What: probes search health and analyze readiness concurrently.  For search,
+/// the EFFECTIVE requirement is `config.context.effective_require_search(surface)`
+/// (explicit override wins; otherwise the surface default); for analyze it is
+/// the plain `config.context.require_analyze` (unaffected by `surface`, out of
+/// scope for this fix).  When a dependency is down and required → `Skip` with
+/// an actionable message; when down and not required → record a degraded
+/// reason.  Search is checked first so its (more fundamental) outage produces
+/// the skip message.  When no dependency is required-and-down but at least one
+/// opted-out dependency is down, returns `Degraded`; otherwise `Proceed`.  Note:
+/// when `deps.analyze` is `None` (analyze client not wired in at all, e.g. the
+/// CLI compare path) the analyze requirement is treated as unmet exactly as if
+/// the daemon were down.
 ///
 /// The search Degraded reason prefers the health probe's own
 /// `SearchClientError::Unavailable(reason)` text over the generic template
@@ -66,14 +78,26 @@ pub enum GateOutcome {
 /// how a `NullSearchClient`'s `--source-root`-specific notice (issue #2994's
 /// diff-only fallback) reaches the persisted review body via
 /// `degraded_banner` — a generic "trusty-search unavailable at {url}" message
-/// would otherwise discard that actionable text (re-review finding #2).
+/// would otherwise discard that actionable text (re-review finding #2). This
+/// composes with the surface default above: a `NullSearchClient` swapped in by
+/// the `--source-root` fallback always fails its `health()` probe, so it
+/// routes through this same Degraded branch (never `Proceed`) regardless of
+/// whether `surface` is `Hosted` or `Interactive` — only the reason text and
+/// the required-vs-degraded branch selection differ per surface.
 /// Test: `gate_tests::{skips_when_search_down, degraded_when_search_down_optout,
 /// skips_when_analyze_down, proceeds_when_both_healthy,
+/// interactive_surface_defaults_to_degraded_when_search_down,
+/// hosted_surface_defaults_to_skip_when_search_down,
 /// degraded_reason_prefers_health_error_detail}`.
-pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> GateOutcome {
+pub async fn preflight_context(
+    config: &ReviewConfig,
+    deps: &ReviewDeps,
+    surface: InvocationSurface,
+) -> GateOutcome {
     let search_url = &config.search_url;
     let analyzer_url = &config.analyzer_url;
     let index = &config.search_index;
+    let require_search = config.context.effective_require_search(surface);
 
     // Probe both dependencies concurrently — context retrieval is latency
     // sensitive and these are independent network calls.
@@ -106,7 +130,7 @@ pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> Gate
 
     // ── trusty-search gate (checked first: it is the more fundamental dep) ──
     if !search_ok {
-        if config.context.require_search {
+        if require_search {
             return GateOutcome::Skip(format!(
                 "trusty-search unreachable at {search_url} — start it (`trusty-search start`); \
                  refusing to review without code context (set \
@@ -115,7 +139,10 @@ pub async fn preflight_context(config: &ReviewConfig, deps: &ReviewDeps) -> Gate
             ));
         }
         info!(
-            "trusty-search unavailable but require_search=false — proceeding DEGRADED (non-authoritative)"
+            surface = ?surface,
+            "trusty-search unavailable and require_search is not effectively true for this \
+             surface (explicit opt-out or interactive-surface default) — proceeding DEGRADED \
+             (non-authoritative)"
         );
         let reason = match search_error_detail {
             Some(detail) => format!("trusty-search unavailable at {search_url} — {detail}"),

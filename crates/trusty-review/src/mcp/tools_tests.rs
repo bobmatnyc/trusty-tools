@@ -31,7 +31,7 @@ use super::{
     wrap_tool_error,
 };
 use crate::integrations::github::{AuthStrategy, RunMode};
-use crate::models::ReviewResult;
+use crate::models::{ReviewResult, ReviewStatus, Verdict};
 
 // ── Stub providers ────────────────────────────────────────────────────────────
 
@@ -353,6 +353,98 @@ fn wrap_result_no_fallback_omits_field() {
     assert!(
         payload.get("reviewer_model_fallback").is_none(),
         "no fallback → payload must NOT carry the marker"
+    );
+}
+
+// ── infra-unavailable Skip must be LOUD (search-unreachable semantics fix) ─────
+
+/// A `ReviewResult` with `status = Skipped` + `infra_unavailable = true` (the
+/// required-context gate's ONLY producer of `Skipped`) must come back
+/// `isError: true` with the `mcp_status: "infrastructure_unavailable"`
+/// sentinel — a caller must be forced to handle it explicitly rather than
+/// reading a verdict field, and it must be unambiguously different from BOTH a
+/// real verdict AND a policy skip.
+///
+/// Why: this is the core bug the fix closes — an MCP `tools/call` response
+/// with `isError: false` for a Skip is indistinguishable from a real gate
+/// verdict.
+/// What: constructs a `Skipped` + `infra_unavailable` result directly (as
+/// `run_review`'s gate branch does) and asserts both signals on the envelope.
+/// Test: this test itself.
+#[test]
+fn wrap_result_infra_unavailable_sets_error_and_sentinel() {
+    let mut result = ReviewResult::new("acme", "backend", 9, "Add Z", "https://example/pr/9");
+    result.status = ReviewStatus::Skipped;
+    result.infra_unavailable = true;
+    result.verdict = Verdict::Unknown;
+    result.error = Some("trusty-search unreachable at http://x — start it".to_string());
+
+    let envelope = wrap_result(&result, None);
+
+    assert_eq!(
+        envelope["isError"], true,
+        "an infra-unavailable Skip must set isError:true so no caller reads it \
+         as a successful tool result"
+    );
+    assert_eq!(
+        envelope["mcp_status"], "infrastructure_unavailable",
+        "envelope must carry the loud machine-readable sentinel"
+    );
+}
+
+/// A policy-style outcome (no `infra_unavailable` flag set) must stay
+/// `isError: false` even when `status == Skipped` — only a genuine infra
+/// outage gets the loud treatment, distinguishing it from a hypothetical
+/// future non-infra skip producer.
+///
+/// Why: guards the "only infra-unavailable gets the loud treatment" half of
+/// the fix — a policy skip must not regress into a false-alarm error envelope.
+/// What: constructs a `Skipped` result WITHOUT `infra_unavailable`; asserts the
+/// envelope stays clean.
+/// Test: this test itself.
+#[test]
+fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
+    let mut result = ReviewResult::new("acme", "backend", 10, "Add W", "https://example/pr/10");
+    result.status = ReviewStatus::Skipped;
+    // infra_unavailable intentionally left false (default) — simulates a
+    // hypothetical future policy-driven skip.
+
+    let envelope = wrap_result(&result, None);
+
+    assert_eq!(
+        envelope["isError"], false,
+        "a policy skip (no infra outage) must not be flagged as an MCP error"
+    );
+    assert!(
+        envelope.get("mcp_status").is_none(),
+        "a policy skip must not carry the infra-unavailable sentinel"
+    );
+}
+
+/// A `Degraded` review (real verdict, non-authoritative banner) must stay
+/// `isError: false` — it is a genuine (if loudly-labelled) result, not an
+/// infra failure the caller must special-case as an error.
+///
+/// Why: distinguishes the "opted-in / interactive-surface-defaulted degrade"
+/// path from the "infra Skip" path — both are non-authoritative, but only the
+/// Skip is a non-result.
+/// What: constructs a `Degraded` result; asserts the envelope stays clean.
+/// Test: this test itself.
+#[test]
+fn wrap_result_degraded_stays_is_error_false() {
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.status = ReviewStatus::Degraded;
+    result.verdict = Verdict::Approve;
+
+    let envelope = wrap_result(&result, None);
+
+    assert_eq!(
+        envelope["isError"], false,
+        "a degraded-but-real verdict must not be flagged as an MCP error"
+    );
+    assert!(
+        envelope.get("mcp_status").is_none(),
+        "a degraded (non-infra) result must not carry the infra sentinel"
     );
 }
 

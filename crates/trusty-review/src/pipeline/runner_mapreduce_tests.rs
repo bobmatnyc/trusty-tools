@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::config::ReviewConfig;
+use crate::config::{InvocationSurface, ReviewConfig};
 use crate::integrations::{
     analyze_client::{
         AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, ComplexityHotspot, Smell,
@@ -185,6 +185,7 @@ fn input(source: DiffSource) -> ReviewInput {
         run_mode: RunMode::Cli,
         allow_posting: false,
         caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
     }
 }
 

@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result};
 use tracing::warn;
 
 use trusty_review::{
-    config::{ReviewConfig, RoleCliOverrides, SourceRootOutcome},
+    config::{InvocationSurface, ReviewConfig, RoleCliOverrides, SourceRootOutcome},
     integrations::{
         NullAnalyzeClient, NullSearchClient,
         github::{AuthStrategy, GithubClient, RunMode},
@@ -171,6 +171,19 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         build_deps_async(&config_with_overrides, &reviewer_model, &default_provider).await?;
     apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
 
+    // Search-unreachable semantics fix: a local-diff/--base/--source-root
+    // review never posts to GitHub (the `owner == "local"` sentinel forces
+    // log-only downstream regardless of `allow_posting`), so it is safe and
+    // useful to default to a DEGRADED diff-only review when search is down.
+    // A GitHub-PR `run` invocation CAN post a live comment (same as the
+    // webhook bot), so it keeps the strict `Hosted` default — unchanged
+    // behaviour (zero regression for the gate use case).
+    let surface = if matches!(diff_source, DiffSource::Github { .. }) {
+        InvocationSurface::Hosted
+    } else {
+        InvocationSurface::Interactive
+    };
+
     let input = ReviewInput {
         diff_source,
         reviewer_model: reviewer_model.clone(),
@@ -180,6 +193,7 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         run_mode: RunMode::Cli,
         allow_posting: true,
         caller_context: CallerContext::default(),
+        surface,
     };
 
     let result = run_review(&config_with_overrides, input, deps).await;
