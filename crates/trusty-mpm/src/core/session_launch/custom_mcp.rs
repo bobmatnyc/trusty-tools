@@ -86,6 +86,18 @@
 //! attacker-controlled endpoint). Both scope loops call [`is_reserved_name`]
 //! before injecting.
 //!
+//! **Name charset enforcement (issue #3033, MEDIUM finding 1).**
+//! [`is_reserved_name`]'s exact-string comparison does NOT catch a
+//! case-variant (`Trusty-Memory`) or Unicode-confusable (a non-ASCII hyphen in
+//! place of ASCII `-`) typosquat of a reserved name — either shape sails past
+//! it untouched. [`inject_one_custom_entry`] additionally requires every
+//! candidate name (both scopes, since both loops route through it) to match
+//! `^[a-z0-9][a-z0-9-]*$` via [`is_valid_custom_mcp_name`], rejecting the
+//! typosquat class wholesale rather than chasing individual confusables.
+//! Test: `custom_project_scope_rejects_case_variant_of_reserved_name`,
+//! `custom_project_scope_rejects_unicode_hyphen_variant_of_reserved_name`,
+//! `custom_project_scope_accepts_valid_lowercase_hyphen_name`.
+//!
 //! **Consent gate for project-scope servers.** A project-scope `[mcp.custom]`
 //! entry ships with the CLONED REPO itself — unlike a user-scope registry
 //! entry, which the operator personally added via `tm mcp add` on their OWN
@@ -198,7 +210,10 @@ const INJECTABLE_REMOTE_FIELDS: &[&str] = &["type", "url"];
 /// `custom_project_scope_cannot_override_slack_mcp`,
 /// `custom_project_scope_skipped_when_project_untrusted`,
 /// `custom_project_scope_bridges_when_project_trusted`,
-/// `custom_project_scope_skipped_again_after_revoke`.
+/// `custom_project_scope_skipped_again_after_revoke`,
+/// `custom_project_scope_rejects_case_variant_of_reserved_name`,
+/// `custom_project_scope_rejects_unicode_hyphen_variant_of_reserved_name`,
+/// `custom_project_scope_accepts_valid_lowercase_hyphen_name`.
 pub(super) fn inject_custom_trusty_mcps(
     project_path: &Path,
     project_custom: &BTreeMap<String, CustomMcpServer>,
@@ -301,6 +316,34 @@ fn is_reserved_name(name: &str) -> bool {
     NATIVE_TRUSTY_MCP_SERVERS.contains(&name) || BUILTIN_MANAGED_MCP_SERVERS.contains(&name)
 }
 
+/// Whether `name` matches the strict custom-MCP-server charset
+/// `^[a-z0-9][a-z0-9-]*$` (issue #3033, MEDIUM finding 1).
+///
+/// Why: [`is_reserved_name`] does an exact, case-sensitive, codepoint-exact
+/// string comparison against the reserved-name tables — it does NOT catch a
+/// case-variant (`Trusty-Memory`) or a Unicode confusable (a non-ASCII hyphen
+/// U+2011 in place of ASCII `-`) typosquat of a reserved name. Either shape
+/// sails past `is_reserved_name` untouched, then renders in a UI or log line
+/// close enough to the real name to fool an operator. Restricting the
+/// ENTIRE custom-server namespace to lowercase ASCII letters, digits, and
+/// hyphens closes that typosquat class wholesale, independent of the
+/// reserved-name table's exact contents.
+/// What: `true` iff `name` is non-empty, its first character is an ASCII
+/// lowercase letter or digit, and every subsequent character is an ASCII
+/// lowercase letter, digit, or `-` (equivalent to the regex
+/// `^[a-z0-9][a-z0-9-]*$`, checked without a `regex` dependency).
+/// Test: `custom_project_scope_rejects_case_variant_of_reserved_name`,
+/// `custom_project_scope_rejects_unicode_hyphen_variant_of_reserved_name`,
+/// `custom_project_scope_accepts_valid_lowercase_hyphen_name`.
+fn is_valid_custom_mcp_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Validate and inject a single custom entry, dispatching on its declared
 /// transport.
 ///
@@ -325,6 +368,17 @@ fn inject_one_custom_entry(
     entry: &Value,
     secret_env: &mut BTreeMap<String, String>,
 ) -> Result<bool, PrepError> {
+    if !is_valid_custom_mcp_name(name) {
+        tracing::warn!(
+            server = name,
+            "refusing to bridge custom MCP server: name must match ^[a-z0-9][a-z0-9-]*$ \
+             (lowercase ASCII letters, digits, hyphens only, starting with a letter or digit) — \
+             this rejects case-variant and Unicode look-alike (e.g. non-ASCII hyphen) \
+             typosquats of a reserved name"
+        );
+        return Ok(false);
+    }
+
     let transport = entry.get("type").and_then(Value::as_str);
     match transport {
         Some("http") | Some("sse") => {

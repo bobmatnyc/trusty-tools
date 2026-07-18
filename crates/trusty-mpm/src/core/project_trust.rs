@@ -43,6 +43,24 @@
 //! `revoke_unknown_path_is_noop`, `is_trusted_after_trust_and_revoke`,
 //! `save_and_reload_round_trip`, `is_project_trusted_at_reflects_store`,
 //! `is_project_trusted_at_fails_closed_when_root_missing`.
+//!
+//! **Trust is per-directory, NOT per-repo-content (issue #3033, MEDIUM
+//! finding 2 — read this before relying on a trust decision).** [`normalize`]
+//! canonicalizes and stores a filesystem PATH — it records nothing about what
+//! is checked out there (no commit hash, no remote URL, no content digest).
+//! Once a directory is trusted, EVERY future `[mcp.custom]` read from that
+//! same canonical path is honored, no matter what later replaces the
+//! directory's contents: `rm -rf` + `git clone <different-repo>` into the same
+//! path, `git checkout` to an attacker-controlled branch, or any other content
+//! swap all inherit the existing trust grant silently. To get a fresh consent
+//! decision for genuinely different content, either **clone to a new path**
+//! (a new canonical path is untrusted by default) or **explicitly
+//! `tm project trust --revoke <path>` before, and re-trust after, replacing a
+//! trusted directory's contents.** A future hardening — binding the trust
+//! record to the git remote URL and/or toplevel commit rather than the bare
+//! path — is tracked as a follow-up (issue #3051, filed fresh since #3045 is
+//! the unrelated stale-`.mcp.json`-entry-pruning tracker) and is deliberately
+//! NOT implemented here.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -124,10 +142,14 @@ impl ProjectTrustStore {
     ///
     /// Why: an atomic write-then-rename avoids ever leaving a half-written
     /// trust file (this file gates a security decision, so a torn write must
-    /// never be silently read back as "trusted").
+    /// never be silently read back as "trusted"). On Unix, the file is also
+    /// restricted to owner-only `0o600` (issue #3033, LOW finding) — it is a
+    /// security-decision record under the operator's own `$HOME`, so it should
+    /// never be group/world-readable on a shared machine.
     /// What: creates parent directories if absent, serialises the sorted path
-    /// list to pretty JSON, and writes atomically via `rename`.
-    /// Test: `save_and_reload_round_trip`.
+    /// list to pretty JSON, writes atomically via `rename`, then (Unix only)
+    /// sets the final file's permissions to `0o600`.
+    /// Test: `save_and_reload_round_trip`, `save_sets_owner_only_perms_on_unix`.
     pub fn save(&self) -> anyhow::Result<()> {
         if let Some(parent) = self.file_path.parent() {
             std::fs::create_dir_all(parent)
@@ -148,6 +170,17 @@ impl ProjectTrustStore {
                 tmp_path.display(),
                 self.file_path.display()
             ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.file_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to set owner-only permissions on {}: {e}",
+                        self.file_path.display()
+                    )
+                })?;
         }
         Ok(())
     }
@@ -363,6 +396,25 @@ mod tests {
         store.save().expect("save");
 
         assert!(is_project_trusted_at(project.path(), root.path()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_sets_owner_only_perms_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().expect("tmpdir");
+        let project = TempDir::new().expect("project dir");
+        let mut store = make_store(&root);
+        store.trust(project.path());
+        store.save().expect("save");
+
+        let meta = std::fs::metadata(root.path().join("project-trust.json")).expect("metadata");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "project-trust.json must be owner-read/write only, got {mode:o}"
+        );
     }
 
     #[test]

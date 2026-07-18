@@ -33,6 +33,14 @@ pub(crate) enum ProjectAction {
     /// operator explicitly runs this command. Trust is recorded in USER-scope
     /// state under `~/.trusty-tools/trusty-mpm/project-trust.json` — never
     /// inside the repo — so a cloned repo can never self-trust.
+    ///
+    /// IMPORTANT: trust is PER-DIRECTORY (a canonicalized path), not
+    /// per-repo-content. Replacing what's checked out at an already-trusted
+    /// path (re-cloning a different repo into the same path, or checking out
+    /// an attacker-controlled branch/remote in place) silently inherits the
+    /// existing grant. If you replace a trusted directory's contents,
+    /// `--revoke` first and re-trust afterward — or clone to a new path,
+    /// which starts untrusted by default.
     Trust {
         /// Project directory to trust or revoke (defaults to the cwd).
         #[arg(long)]

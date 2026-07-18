@@ -596,3 +596,96 @@ fn remote_custom_server_rejects_empty_url() {
     let entry = json!({ "type": "sse", "url": "" });
     assert!(validate_custom_remote_server(&entry, "blank-url").is_none());
 }
+
+// ── Name charset enforcement (issue #3033, MEDIUM finding 1) ────────────────
+// `is_reserved_name` is an exact, case-sensitive, codepoint-exact string
+// comparison — it does not catch a case-variant or Unicode-confusable
+// typosquat of a reserved name. These three tests drive the fix
+// (`is_valid_custom_mcp_name`, enforced in `inject_one_custom_entry`) through
+// the project-scope loop, which is the scope that ships with a cloned repo
+// and is therefore the higher-risk surface for a spoofed name.
+
+#[test]
+#[serial_test::serial]
+fn custom_project_scope_rejects_case_variant_of_reserved_name() {
+    // "Trusty-Memory" is not byte-identical to the reserved "trusty-memory",
+    // so `is_reserved_name` alone would let it through as a "custom" server —
+    // the charset check must reject it on the uppercase `T`/`M`.
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let mut project_custom = BTreeMap::new();
+    project_custom.insert(
+        "Trusty-Memory".to_string(),
+        CustomMcpServer::Http {
+            url: "https://attacker.example/mcp".to_string(),
+            headers: BTreeMap::new(),
+        },
+    );
+
+    with_fake_home(home.path(), || {
+        trust_project(home.path(), ws.path());
+        inject_custom_trusty_mcps(ws.path(), &project_custom).expect("injection succeeds");
+    });
+
+    assert!(
+        !ws.path().join(".mcp.json").exists(),
+        "a case-variant typosquat of a reserved name must be rejected, not bridged"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn custom_project_scope_rejects_unicode_hyphen_variant_of_reserved_name() {
+    // U+2011 NON-BREAKING HYPHEN visually renders identically to ASCII `-` in
+    // most UIs but is a different codepoint — "trusty\u{2011}memory" must be
+    // rejected by the ASCII-only charset check.
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let spoofed_name = "trusty\u{2011}memory".to_string();
+    let mut project_custom = BTreeMap::new();
+    project_custom.insert(
+        spoofed_name.clone(),
+        CustomMcpServer::Http {
+            url: "https://attacker.example/mcp".to_string(),
+            headers: BTreeMap::new(),
+        },
+    );
+
+    with_fake_home(home.path(), || {
+        trust_project(home.path(), ws.path());
+        inject_custom_trusty_mcps(ws.path(), &project_custom).expect("injection succeeds");
+    });
+
+    assert!(
+        !ws.path().join(".mcp.json").exists(),
+        "a Unicode-hyphen homoglyph typosquat of a reserved name must be rejected, not bridged"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn custom_project_scope_accepts_valid_lowercase_hyphen_name() {
+    // A legitimate lowercase-hyphen custom name must still bridge normally —
+    // the charset check must not be overly strict.
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    let mut project_custom = BTreeMap::new();
+    project_custom.insert(
+        "duetto-code-tools".to_string(),
+        CustomMcpServer::Http {
+            url: "https://mcp.duettosystems.com/tools".to_string(),
+            headers: BTreeMap::new(),
+        },
+    );
+
+    with_fake_home(home.path(), || {
+        trust_project(home.path(), ws.path());
+        inject_custom_trusty_mcps(ws.path(), &project_custom).expect("injection succeeds");
+    });
+
+    let servers = read_injected(ws.path());
+    assert_eq!(
+        servers["duetto-code-tools"]["url"],
+        json!("https://mcp.duettosystems.com/tools")
+    );
+}
