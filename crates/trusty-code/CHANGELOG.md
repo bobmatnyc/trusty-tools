@@ -25,6 +25,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **REST resource gateway — `session.*` write routes (#2983, #587, Slice 3).**
+  New `POST`/`PUT`/`DELETE` routes on `tcode serve --http`, each a thin
+  `axum` handler calling `rest::respond` (or the new `respond_created` for
+  the one route that returns a non-`200` success status) against its
+  `session.*` JSON-RPC twin — zero duplicated business logic:
+  - `POST /sessions` -> `session.create` (`201 Created` — the only route in
+    this slice that mints a brand-new resource; every other route below
+    acts on an existing one and keeps `200` on success)
+  - `POST /sessions/{id}/messages` -> `session.send`
+  - `POST /sessions/{id}/cancel` -> `session.cancel`
+  - `PUT /sessions/{id}/goal` -> `session.set_goal`
+  - `DELETE /sessions/{id}/goal` -> `session.clear_goal`
+
+  An unknown `id` returns a real HTTP `404` with a `session_not_found`
+  JSON-RPC error envelope; a malformed JSON body never reaches a handler at
+  all — axum's `Json` extractor rejects it (`400`/`422`) before any
+  `session.*` method runs. New `crate::serve::rest::sessions_write` module
+  (tests split into a sibling `sessions_write_tests.rs`, mirroring
+  `session::registry`'s `registry_tests.rs` convention, purely for the
+  500-SLOC production cap), merged into
+  `crate::serve::http::build_axum_router` alongside `POST /rpc`,
+  `GET /health`, `GET /sessions/{id}/events`, and Slice 2's read routes.
 - **REST resource gateway — `session.*` read routes (#2983, #587, Slice 2).**
   New `GET` routes on `tcode serve --http`, each a thin `axum` handler calling
   `rest::respond` (new: wraps `rest::call` + `rpc_error_to_status` into the

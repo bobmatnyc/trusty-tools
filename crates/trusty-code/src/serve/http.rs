@@ -77,8 +77,8 @@ struct HttpState {
 }
 
 /// Build the pure axum router (no listener bound) exposing `POST /rpc`,
-/// `GET /health`, `GET /sessions/{id}/events`, and (#2983 Slice 2) the
-/// `GET /sessions*` REST resource group.
+/// `GET /health`, `GET /sessions/{id}/events`, and (#2983 Slice 2 + Slice 3)
+/// the full `/sessions*` REST resource group.
 ///
 /// Why: kept separate from [`run_http`] so unit tests exercise routing and
 /// dispatch via `tower::util::ServiceExt::oneshot` without opening a real
@@ -89,8 +89,11 @@ struct HttpState {
 /// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
 /// session's ring-buffer replay then live events as SSE; `crate::serve::rest`
 /// merges in the `session.*` REST read routes (`GET /sessions`,
-/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`) —
-/// none of which collide with the paths registered directly on this router.
+/// `GET /sessions/{id}`, `.../transcript`, `.../readiness`, `.../goals`) and
+/// (Slice 3) the write routes (`POST /sessions`,
+/// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
+/// `PUT`/`DELETE /sessions/{id}/goal`) — none of which collide with the
+/// paths registered directly on this router.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
@@ -106,7 +109,9 @@ pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) ->
         .route("/health", get(health_handler))
         .route("/sessions/{id}/events", get(session_events_sse))
         .with_state(state);
-    let app = core.merge(rest::sessions::routes(router));
+    let app = core
+        .merge(rest::sessions::routes(router.clone()))
+        .merge(rest::sessions_write::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
