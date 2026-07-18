@@ -2,10 +2,11 @@
 //! read tools, both cursor-paginated (issue #2996).
 //!
 //! Why: a busy, long-lived channel or a long thread exceeds any single Slack
-//! API page. Both tools now accept the same `cursor`/`limit` pagination shape
-//! (`read_channel` additionally accepts an `oldest`/`latest` time window) and
-//! return `next_cursor`/`has_more` so a caller can walk full history across
-//! repeated calls instead of being capped at one page.
+//! API page. Both tools accept the same `cursor`/`limit`/`oldest`/`latest`
+//! pagination shape (both wrap `conversations.*` methods that accept an
+//! identical time-window/cursor contract) and return `next_cursor`/`has_more`
+//! so a caller can walk full history across repeated calls instead of being
+//! capped at one page.
 //! What: [`read_channel`] wraps `conversations.history`; [`read_thread`] wraps
 //! `conversations.replies`. Both markup-escape returned message text via
 //! [`super::clean::clean_messages`] before it reaches the model.
@@ -34,10 +35,12 @@ use crate::slack::server::ToolCallError;
 /// markup-escaped before it reaches the model.
 /// What: requires `channel`; honours `limit` (default [`DEFAULT_READ_LIMIT`],
 /// clamped to `MIN_PAGE_SIZE..=MAX_CONVERSATION_PAGE_SIZE`) and optional
-/// `cursor`/`oldest`/`latest`, forwarded verbatim to `conversations.history`;
-/// returns `{channel, count, messages:[{user, ts, text}], next_cursor,
-/// has_more}` with escaped text. `next_cursor` is `null` once Slack reports no
-/// further pages — pass it back as `cursor` to continue.
+/// `cursor` (opaque, forwarded verbatim) plus `oldest`/`latest` (Slack ts
+/// strings, validated via [`super::args::opt_ts`] before being forwarded to
+/// `conversations.history`); returns `{channel, count, messages:[{user, ts,
+/// text}], next_cursor, has_more}` with escaped text. `next_cursor` is `null`
+/// once Slack reports no further pages — pass it back as `cursor` to
+/// continue.
 /// Test: `tests/tools_http.rs::read_channel_escapes_message_text`,
 /// `::read_channel_paginates_with_cursor`.
 pub(super) async fn read_channel(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
@@ -47,7 +50,7 @@ pub(super) async fn read_channel(client: &BaseClient, args: Value) -> Result<Val
         MAX_CONVERSATION_PAGE_SIZE,
     );
     let mut body = json!({ "channel": channel.as_str(), "limit": limit });
-    apply_pagination_args(&mut body, &args);
+    apply_pagination_args(&mut body, &args)?;
     let resp = client.call_method(CONVERSATIONS_HISTORY, &body).await?;
     let messages = clean_messages(&resp);
     Ok(json!({
@@ -70,9 +73,11 @@ pub(super) async fn read_channel(client: &BaseClient, args: Value) -> Result<Val
 /// malformed value fails fast with an actionable message instead of a
 /// confusing Slack `invalid_arguments`); honours `limit` (default
 /// [`DEFAULT_READ_LIMIT`], clamped to
-/// `MIN_PAGE_SIZE..=MAX_CONVERSATION_PAGE_SIZE`) and optional `cursor`;
-/// returns `{channel, thread_ts, count, messages:[{user, ts, text}],
-/// next_cursor, has_more}` with escaped text.
+/// `MIN_PAGE_SIZE..=MAX_CONVERSATION_PAGE_SIZE`) and optional
+/// `cursor`/`oldest`/`latest` (the latter two validated the same way as
+/// `thread_ts` via [`super::args::opt_ts`]); returns `{channel, thread_ts,
+/// count, messages:[{user, ts, text}], next_cursor, has_more}` with escaped
+/// text.
 /// Test: `tests/tools_http.rs::read_thread_returns_replies`,
 /// `::read_thread_paginates_with_cursor`,
 /// `::read_thread_rejects_malformed_thread_ts`.
@@ -84,7 +89,7 @@ pub(super) async fn read_thread(client: &BaseClient, args: Value) -> Result<Valu
         MAX_CONVERSATION_PAGE_SIZE,
     );
     let mut body = json!({ "channel": channel.as_str(), "ts": thread_ts.as_str(), "limit": limit });
-    apply_pagination_args(&mut body, &args);
+    apply_pagination_args(&mut body, &args)?;
     let resp = client.call_method(CONVERSATIONS_REPLIES, &body).await?;
     let messages = clean_messages(&resp);
     Ok(json!({

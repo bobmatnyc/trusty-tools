@@ -274,6 +274,117 @@ async fn read_thread_rejects_malformed_thread_ts() {
 }
 
 #[tokio::test]
+async fn read_thread_rejects_malformed_oldest_or_latest() {
+    // slack_read_thread now advertises + forwards oldest/latest (issue #2996
+    // review); a malformed value must fail fast pre-network exactly like
+    // thread_ts, never reach conversations.replies.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.replies"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+
+    let err = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "oldest": "1616703000",
+        }),
+    )
+    .await
+    .expect_err("malformed oldest must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => assert!(msg.contains("oldest"), "{msg}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+
+    let err = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "latest": "not-a-ts",
+        }),
+    )
+    .await
+    .expect_err("malformed latest must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => assert!(msg.contains("latest"), "{msg}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_channel_rejects_malformed_oldest_or_latest() {
+    // Same pre-network validation applies to slack_read_channel, which shares
+    // apply_pagination_args with slack_read_thread.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.history"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_read_channel",
+        json!({ "channel": "C1", "oldest": "1616703000" }),
+    )
+    .await
+    .expect_err("malformed oldest must error before any network call");
+    match err {
+        ToolCallError::InvalidArgs(msg) => assert!(msg.contains("oldest"), "{msg}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_thread_forwards_oldest_and_latest_to_conversations_replies() {
+    // The tool schema advertises oldest/latest on read_thread; this pins that
+    // the handler actually forwards them (not just accepts and drops them).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.replies"))
+        .and(body_partial_json(json!({
+            "channel": "C1",
+            "ts": "1616703000.216300",
+            "oldest": "1600000000.000000",
+            "latest": "1700000000.000000",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "messages": [ { "user": "U1", "ts": "1650000000.000100", "text": "windowed reply" } ],
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_read_thread",
+        json!({
+            "channel": "C1",
+            "thread_ts": "1616703000.216300",
+            "oldest": "1600000000.000000",
+            "latest": "1700000000.000000",
+        }),
+    )
+    .await
+    .expect("windowed thread read should succeed");
+
+    assert_eq!(out["count"], 1);
+}
+
+#[tokio::test]
 async fn list_channels_returns_entries() {
     let server = MockServer::start().await;
     mount_ok(

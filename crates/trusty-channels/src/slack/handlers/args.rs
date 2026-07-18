@@ -75,13 +75,39 @@ pub(super) fn require_ts(args: &Value, key: &str) -> Result<String, ToolCallErro
     if is_valid_slack_ts(&raw) {
         Ok(raw)
     } else {
-        Err(ToolCallError::InvalidArgs(format!(
-            "'{key}' must be a Slack timestamp string 'seconds.microseconds' \
-             (e.g. '1616703000.216300'); got '{raw}'. If this value came from \
-             re-formatting a number, precision may have been lost — pass the \
-             original ts string unchanged."
-        )))
+        Err(ts_shape_error(key, &raw))
     }
+}
+
+/// Read an optional Slack timestamp ("ts") string argument, validating its
+/// shape only when present.
+///
+/// Why: `oldest`/`latest` (the `conversations.history` /
+/// `conversations.replies` time-window bounds) are exact-match ts strings
+/// exactly like `thread_ts` — the same float-precision-loss failure mode
+/// applies, so it deserves the same pre-network validation. Unlike
+/// `thread_ts` they are optional, so absence is not an error.
+/// What: `None` when the argument is absent; `Some(String)` when present and
+/// valid; [`ToolCallError::InvalidArgs`] when present but malformed.
+/// Test: `opt_ts_accepts_absent_and_valid`, `opt_ts_rejects_malformed`.
+pub(super) fn opt_ts(args: &Value, key: &str) -> Result<Option<String>, ToolCallError> {
+    match opt_str(args, key) {
+        None => Ok(None),
+        Some(raw) if is_valid_slack_ts(&raw) => Ok(Some(raw)),
+        Some(raw) => Err(ts_shape_error(key, &raw)),
+    }
+}
+
+/// Build the shared "not a Slack ts" error, naming the field and the expected
+/// format. Shared by [`require_ts`] and [`opt_ts`] so the two validation
+/// paths never drift on wording.
+fn ts_shape_error(key: &str, raw: &str) -> ToolCallError {
+    ToolCallError::InvalidArgs(format!(
+        "'{key}' must be a Slack timestamp string 'seconds.microseconds' \
+         (e.g. '1616703000.216300'); got '{raw}'. If this value came from \
+         re-formatting a number, precision may have been lost — pass the \
+         original ts string unchanged."
+    ))
 }
 
 /// Whether `s` has the Slack ts shape: one or more digits, a literal `.`, then
@@ -106,21 +132,29 @@ pub(super) fn is_valid_slack_ts(s: &str) -> bool {
 /// Why: `read::read_channel` and `read::read_thread` both page through
 /// `conversations.history` / `conversations.replies`, which accept the same
 /// three optional pagination parameters; centralising avoids the two handlers
-/// drifting on which params they forward.
-/// What: mutates `body` in place, setting `cursor`/`oldest`/`latest` only when
-/// the corresponding string argument is present in `args`.
+/// drifting on which params they forward. `oldest`/`latest` are Slack ts
+/// strings with the same float-precision-loss failure mode as `thread_ts`
+/// (issue #2996 review), so they are validated via [`opt_ts`] — a malformed
+/// value fails fast here rather than being forwarded to Slack. `cursor` is an
+/// opaque Slack-issued token with no fixed shape, so it is passed through
+/// unvalidated.
+/// What: mutates `body` in place, setting `cursor` when present (unvalidated)
+/// and `oldest`/`latest` when present and a valid Slack ts; returns
+/// [`ToolCallError::InvalidArgs`] on the first malformed `oldest`/`latest`.
 /// Test: `apply_pagination_args_forwards_present_fields`,
-/// `apply_pagination_args_omits_absent_fields`.
-pub(super) fn apply_pagination_args(body: &mut Value, args: &Value) {
+/// `apply_pagination_args_omits_absent_fields`,
+/// `apply_pagination_args_rejects_malformed_oldest_or_latest`.
+pub(super) fn apply_pagination_args(body: &mut Value, args: &Value) -> Result<(), ToolCallError> {
     if let Some(cursor) = opt_str(args, "cursor") {
         body["cursor"] = json!(cursor);
     }
-    if let Some(oldest) = opt_str(args, "oldest") {
+    if let Some(oldest) = opt_ts(args, "oldest")? {
         body["oldest"] = json!(oldest);
     }
-    if let Some(latest) = opt_str(args, "latest") {
+    if let Some(latest) = opt_ts(args, "latest")? {
         body["latest"] = json!(latest);
     }
+    Ok(())
 }
 
 /// Extract Slack's next-page cursor from a paged response, if any.
@@ -269,7 +303,8 @@ mod tests {
         apply_pagination_args(
             &mut body,
             &json!({ "cursor": "dXNlcjpVMDYxTkZUVDI=", "oldest": "1.0", "latest": "2.0" }),
-        );
+        )
+        .expect("valid pagination args must not error");
         assert_eq!(body["cursor"], "dXNlcjpVMDYxTkZUVDI=");
         assert_eq!(body["oldest"], "1.0");
         assert_eq!(body["latest"], "2.0");
@@ -278,10 +313,48 @@ mod tests {
     #[test]
     fn apply_pagination_args_omits_absent_fields() {
         let mut body = json!({ "channel": "C1" });
-        apply_pagination_args(&mut body, &json!({}));
+        apply_pagination_args(&mut body, &json!({})).expect("absent args must not error");
         assert!(body.get("cursor").is_none());
         assert!(body.get("oldest").is_none());
         assert!(body.get("latest").is_none());
+    }
+
+    #[test]
+    fn apply_pagination_args_rejects_malformed_oldest_or_latest() {
+        // A malformed `oldest`/`latest` (the classic float-precision-loss
+        // failure mode already guarded for `thread_ts`) must fail fast with
+        // an actionable InvalidArgs error before any network call.
+        let mut body = json!({ "channel": "C1" });
+        let err = apply_pagination_args(&mut body, &json!({ "oldest": "1616703000" }))
+            .expect_err("malformed oldest must error");
+        match err {
+            ToolCallError::InvalidArgs(msg) => assert!(msg.contains("oldest"), "{msg}"),
+            other => panic!("expected InvalidArgs, got {other:?}"),
+        }
+
+        let mut body = json!({ "channel": "C1" });
+        let err = apply_pagination_args(&mut body, &json!({ "latest": "not-a-ts" }))
+            .expect_err("malformed latest must error");
+        match err {
+            ToolCallError::InvalidArgs(msg) => assert!(msg.contains("latest"), "{msg}"),
+            other => panic!("expected InvalidArgs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opt_ts_accepts_absent_and_valid() {
+        assert_eq!(opt_ts(&json!({}), "oldest").unwrap(), None);
+        assert_eq!(
+            opt_ts(&json!({ "oldest": "1616703000.216300" }), "oldest").unwrap(),
+            Some("1616703000.216300".to_string())
+        );
+    }
+
+    #[test]
+    fn opt_ts_rejects_malformed() {
+        let err = opt_ts(&json!({ "oldest": "1616703000" }), "oldest")
+            .expect_err("malformed oldest must error");
+        assert!(matches!(err, ToolCallError::InvalidArgs(_)));
     }
 
     #[test]

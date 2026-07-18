@@ -124,7 +124,8 @@ pub fn tool_list_response() -> Value {
             "slack_read_thread",
             "Read replies in a Slack thread. Supports cursor pagination for long \
              threads: pass the previous call's `next_cursor` back as `cursor` to \
-             fetch the next page; `next_cursor` is null once there are no more.",
+             fetch the next page, or bound the window with `oldest`/`latest`; \
+             `next_cursor` is null once there are no more.",
             json!({
                 "channel": channel_prop(),
                 "thread_ts": {
@@ -144,6 +145,16 @@ pub fn tool_list_response() -> Value {
                     "type": "string",
                     "description": "Opaque pagination cursor from a previous \
                         call's `next_cursor`; fetches the next page.",
+                },
+                "oldest": {
+                    "type": "string",
+                    "description": "Only replies after this Slack ts \
+                        (seconds.microseconds, e.g. '1616703000.216300').",
+                },
+                "latest": {
+                    "type": "string",
+                    "description": "Only replies before this Slack ts \
+                        (seconds.microseconds).",
                 },
             }),
             &["channel", "thread_ts"],
@@ -274,5 +285,56 @@ mod tests {
             assert!(is_known_tool(name), "{name} must be a known tool");
         }
         assert!(!is_known_tool("slack_not_a_tool"));
+    }
+
+    #[test]
+    fn read_thread_schema_advertises_full_pagination_shape() {
+        // read::read_thread actually forwards cursor/oldest/latest to
+        // conversations.replies (via apply_pagination_args, shared with
+        // read_channel) — the schema must advertise every param the handler
+        // accepts, not just cursor (issue #2996 review).
+        let v = tool_list_response();
+        let read_thread = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "slack_read_thread")
+            .expect("slack_read_thread is a known tool");
+        let props = &read_thread["inputSchema"]["properties"];
+        for key in ["thread_ts", "limit", "cursor", "oldest", "latest"] {
+            assert!(
+                props.get(key).is_some(),
+                "slack_read_thread schema must declare '{key}'"
+            );
+        }
+    }
+
+    #[test]
+    fn read_channel_and_read_thread_share_the_same_pagination_property_names() {
+        // Both tools are backed by the same apply_pagination_args helper, so
+        // their pagination-related schema properties must match exactly.
+        let v = tool_list_response();
+        let props_for = |name: &str| {
+            v["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap()["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>()
+        };
+        let pagination_keys: HashSet<&str> = ["cursor", "oldest", "latest"].into_iter().collect();
+        let channel_props = props_for("slack_read_channel");
+        let thread_props = props_for("slack_read_thread");
+        for key in pagination_keys {
+            assert!(
+                channel_props.contains(key) && thread_props.contains(key),
+                "'{key}' must be declared on both slack_read_channel and slack_read_thread"
+            );
+        }
     }
 }
