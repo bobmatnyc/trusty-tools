@@ -337,6 +337,24 @@ async fn main() -> anyhow::Result<()> {
     // The gateway path routes all `tm` traffic through the unified web UI while
     // preserving full direct-fallback behaviour when the console is absent.
     // Stale TRUSTY_MPM_URL values (#1731) are still probed before falling back.
+    //
+    // #1737 note: this top-level resolution is deliberately NOT gated on
+    // explicit-URL reachability, even though an explicit override never falls
+    // back here (step (a) of the gateway resolver returns it verbatim — see
+    // that function's doc). Several dispatch targets below have an
+    // intentional FAIL-OPEN contract that must survive an unreachable
+    // `--url`/`TRUSTY_MPM_URL`: the bare `tm` guided default (daemon down is a
+    // normal, recoverable state — see `commands::guided`'s module doc) and
+    // `tm hook` (a Claude Code hook must never fail the user's turn because
+    // the best-effort daemon POST could not connect — see
+    // `tests/tm_hook_idle_parking.rs`, which asserts exit 0 even for
+    // `--url http://127.0.0.1:1`). A blanket probe-and-abort here would
+    // regress both. Callers that specifically need "explicit URL must be
+    // reachable, error otherwise" semantics (issue #1737) should use
+    // [`trusty_mpm::core::resolve_daemon_url_for_cli`] themselves — it and
+    // [`trusty_mpm::core::resolve_daemon_url_probing`] were fixed to error
+    // rather than silently fall back to the lock file / default when an
+    // EXPLICIT URL fails its reachability probe.
     let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, cli.url.as_deref()).await;
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
