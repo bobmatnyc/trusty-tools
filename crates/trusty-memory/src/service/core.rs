@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::{
     recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
-    recall_with_default_embedder,
+    recall_with_default_embedder, RememberOptions,
 };
 use trusty_common::memory_core::PalaceRegistry;
 use uuid::Uuid;
@@ -492,10 +492,16 @@ impl MemoryService {
     ///
     /// Why: HTTP and chat both need the auto-KG-extraction follow-up; this
     /// method keeps that side-effect chain in one place.
-    /// What: opens the palace, stores the drawer via `PalaceHandle::remember`,
+    /// What: opens the palace, stores the drawer via
+    /// `PalaceHandle::remember_with_options` (issue #3225: `body.force`
+    /// threads through as `RememberOptions::force`, letting a caller bypass
+    /// the QUALITY gates only — `allow_secret_like` is left at its default
+    /// `false`, so secret detection always still runs, `force` or not),
     /// emits `DrawerAdded` + `StatusChanged`, then triggers
     /// `tools::auto_extract_and_assert`. Returns the new drawer id.
-    /// Test: `http_create_drawer_runs_auto_kg_extraction`.
+    /// Test: `http_create_drawer_runs_auto_kg_extraction`,
+    /// `create_drawer_rejects_json_content_without_force`,
+    /// `create_drawer_force_bypasses_quality_gate_for_json_content`.
     pub async fn create_drawer(
         &self,
         id: &str,
@@ -510,6 +516,7 @@ impl MemoryService {
             .map(RoomType::parse)
             .unwrap_or(RoomType::General);
         let importance = body.importance.unwrap_or(0.5);
+        let force = body.force.unwrap_or(false);
         let content_preview = drawer_content_preview(&body.content);
         let mut tags_with_creator = body.tags;
         // Issue #202: project a bare-UUID session tag (when the caller
@@ -524,7 +531,16 @@ impl MemoryService {
         let tags_for_kg = tags_with_creator.clone();
         let room_label_for_kg = crate::tools::room_label(&room);
         let drawer_id = handle
-            .remember(body.content, room, tags_with_creator, importance)
+            .remember_with_options(
+                body.content,
+                room,
+                tags_with_creator,
+                importance,
+                RememberOptions {
+                    force,
+                    ..Default::default()
+                },
+            )
             .await
             .map_err(|e| ServiceError::internal(format!("remember: {e:#}")))?;
         let drawer_count = handle.drawers.read().len();
