@@ -26,8 +26,9 @@
 //!
 //! What: [`register`] wires `workstream.create`, `workstream.get`,
 //! `workstream.list`, `workstream.close`, `workstream.activate`,
-//! `workstream.deactivate` onto a [`crate::jsonrpc::Router`], all sharing one
-//! [`SharedWorkstreamStore`]. Every verb that takes a wire `id` parses it via
+//! `workstream.deactivate`, `workstream.rename` (Phase C, issue #3300) onto
+//! a [`crate::jsonrpc::Router`], all sharing one [`SharedWorkstreamStore`].
+//! Every verb that takes a wire `id` parses it via
 //! [`parse_id`] (a manual `Uuid::parse_str` + `-32602 Invalid params` on
 //! failure) rather than deserializing straight into a [`WorkstreamId`] —
 //! chosen as the ONE id-parsing style for this file since #3294 landed it
@@ -103,12 +104,21 @@ pub fn register(router: &mut Router, store: SharedWorkstreamStore) {
         },
     );
 
-    let s = store;
+    let s = store.clone();
     router.register(
         "workstream.deactivate",
         move |params: Value, ctx: ConnectionContext| {
             let s = s.clone();
             async move { deactivate(&s, params, ctx).await }
+        },
+    );
+
+    let s = store;
+    router.register(
+        "workstream.rename",
+        move |params: Value, ctx: ConnectionContext| {
+            let s = s.clone();
+            async move { rename(&s, params, ctx).await }
         },
     );
 }
@@ -205,6 +215,13 @@ struct ActivateParams {
     id: String,
     #[serde(default)]
     force: bool,
+}
+
+/// `params` shape for `workstream.rename` (DOC-48 §5.1, Phase C).
+#[derive(Deserialize)]
+struct RenameParams {
+    id: String,
+    name: String,
 }
 
 /// `workstream.create{name?} -> {id: UUID}` (DOC-48 §5.1, AC-2.1).
@@ -385,6 +402,33 @@ async fn deactivate(
             other => RpcError::internal(format!("unexpected activation error: {other}")),
         })?;
     Ok(json!({}))
+}
+
+/// `workstream.rename{id, name} -> Workstream` (DOC-48 §5.1, Phase C, issue
+/// #3300).
+///
+/// Why: the RPC entry point for the GUI switcher's rename action — the one
+/// verb DOC-48 §5.1 marked "future, Phase C" when Phase 1A shipped; this
+/// issue is that phase.
+/// What: `-32002 not_found` if `id` is unknown; otherwise the updated
+/// [`WorkstreamView`] (matching `get`'s response shape, since a client that
+/// just renamed a record typically wants the fresh view without a second
+/// round-trip). An empty `name` is accepted — matching `workstream.create`'s
+/// own "name defaults to empty" tolerance rather than inventing a new
+/// validation rule this spec never states.
+/// Test: `protocol_tests::rename_succeeds_and_returns_updated_view`,
+/// `protocol_tests::rename_unknown_id_maps_to_not_found`.
+async fn rename(
+    store: &SharedWorkstreamStore,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: RenameParams = parse(params, "workstream.rename")?;
+    let id = parse_id(&p.id, "workstream.rename")?;
+    let mut store = store.lock().await;
+    let ws = store.rename(id, p.name).await.map_err(map_store_err)?;
+    let active_id = store.active_workstream_id().await.map_err(map_store_err)?;
+    Ok(json!(WorkstreamView::new(ws, active_id)))
 }
 
 #[cfg(test)]

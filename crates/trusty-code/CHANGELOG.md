@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`workstream.rename` RPC + REST verb (issue #3300, DOC-48 §5.1, Phase C).**
+  `workstream.rename{id, name} -> Workstream` overwrites a workstream's name
+  and refreshes `updated_at`; `-32002 not_found` for an unknown `id`. REST
+  twin: `POST /workstreams/{id}/rename` (JSON body `{"name": string}`),
+  mapped `404` for the same case. Renaming a closed workstream is allowed —
+  closure only rejects new session bindings (§4.4), not label edits. DOC-48
+  §5.1 marked this verb "future, Phase C" when Phase 1A shipped; this is
+  that phase's first caller, the GUI workstream switcher.
 - **`tcode workstream` / `tcode ws` CLI family (issue #3296, DOC-48 §5.4,
   epic #3292).** `list [--include-closed]` (tmux-`list-sessions`-style
   table: id prefix, state, session count, humanized age, name — `*` marks

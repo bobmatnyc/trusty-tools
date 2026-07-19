@@ -311,6 +311,54 @@ async fn close_is_idempotent() {
     assert!(second.is_closed());
 }
 
+/// Renaming must overwrite `name`, refresh `updated_at`, and persist across
+/// a reload.
+#[tokio::test]
+async fn rename_updates_name_and_persists() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = store_file(&dir);
+    let mut store = WorkstreamStore::load(&path).await.expect("load");
+    let id = store.create("original").await.expect("create");
+    let before = store.get(id).await.expect("get before rename");
+
+    let renamed = store.rename(id, "renamed").await.expect("rename");
+    assert_eq!(renamed.name, "renamed");
+    assert!(renamed.updated_at >= before.updated_at);
+
+    let mut reloaded = WorkstreamStore::load(&path).await.expect("reload");
+    let ws = reloaded.get(id).await.expect("get after reload");
+    assert_eq!(ws.name, "renamed", "rename must be persisted");
+}
+
+/// Renaming an unknown id must return `NotFound`.
+#[tokio::test]
+async fn rename_missing_id_returns_not_found() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let missing = WorkstreamId::new();
+    assert!(matches!(
+        store.rename(missing, "new name").await,
+        Err(StoreError::NotFound(_))
+    ));
+}
+
+/// A closed workstream is still renamable — closure only rejects new
+/// session bindings (§4.4), not label edits.
+#[tokio::test]
+async fn rename_closed_workstream_succeeds() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("original").await.expect("create");
+    store.close(id).await.expect("close");
+
+    let renamed = store
+        .rename(id, "renamed after close")
+        .await
+        .expect("rename closed");
+    assert_eq!(renamed.name, "renamed after close");
+    assert!(renamed.is_closed(), "rename must not clear the closed flag");
+}
+
 #[tokio::test]
 async fn store_reload_noop_when_unchanged() {
     let dir = TempDir::new().expect("tempdir");

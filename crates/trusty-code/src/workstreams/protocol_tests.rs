@@ -91,8 +91,9 @@ async fn register_wires_create_get_list_close() {
     let id = resp.result.unwrap()["id"].clone();
 
     for (method, params) in [
-        ("workstream.get", json!({"id": id})),
+        ("workstream.get", json!({"id": id.clone()})),
         ("workstream.list", json!({})),
+        ("workstream.rename", json!({"id": id.clone(), "name": "B"})),
         ("workstream.close", json!({"id": id})),
     ] {
         let resp = router.dispatch(req(method, params), &test_ctx()).await;
@@ -468,4 +469,43 @@ async fn close_unknown_id_maps_to_not_found() {
     .await
     .unwrap_err();
     assert_eq!(err.code, -32002);
+}
+
+/// `workstream.rename` (issue #3300, Phase C) must overwrite `name` and
+/// return the updated view.
+#[tokio::test]
+async fn rename_succeeds_and_returns_updated_view() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+
+    let renamed = rename(&store, json!({"id": id, "name": "B"}), test_ctx())
+        .await
+        .expect("rename");
+    assert_eq!(renamed["name"], "B");
+    assert_eq!(renamed["state"], "idle");
+}
+
+#[tokio::test]
+async fn rename_unknown_id_maps_to_not_found() {
+    let (store, _dir) = shared_store().await;
+    let err = rename(
+        &store,
+        json!({"id": WorkstreamId::new().to_string(), "name": "B"}),
+        test_ctx(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32002);
+}
+
+#[tokio::test]
+async fn rename_invalid_params_maps_to_invalid_params() {
+    let (store, _dir) = shared_store().await;
+    let err = rename(&store, json!({"id": "not-a-uuid", "name": "B"}), test_ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
 }
