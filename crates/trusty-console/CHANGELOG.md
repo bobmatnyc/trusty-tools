@@ -10,6 +10,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Security (P1):** the write-origin (CSRF) guard is now applied
+  router-wide via `Router::layer` instead of a route-scoped `route_layer`, so
+  it also covers the reverse-proxied upstream daemon routes
+  (`/api/{service}/{*path}`, `/proxy/{daemon}/{*path}`) — previously a
+  cross-origin page could reach destructive daemon endpoints (index deletion,
+  daemon shutdown) through the proxy unguarded (closes #3268).
+- the same guard is now bind-aware: in Tailscale bind mode the console's own
+  resolved non-loopback bind address is trusted as an additional self-origin
+  (narrowly, not the whole CGNAT range), fixing 403s on the console's own
+  write UI when bound on a Tailscale address (closes #3269).
 - the cross-crate `default_port_does_not_collide_with_known_siblings`
   port-contract table now also tracks trusty-embedderd's `--http` mode
   default (7890) and trusty-review's corrected default (7891), closing the
