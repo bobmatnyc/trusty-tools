@@ -427,3 +427,33 @@ async fn close_unknown_id_maps_to_not_found() {
     .unwrap_err();
     assert_eq!(err.code, -32002);
 }
+
+/// `workstream.close` must publish `WorkstreamStateInferred{state: closed}`
+/// onto the workstream-level bus (issue #3297).
+#[tokio::test]
+async fn close_publishes_state_inferred() {
+    use futures_util::StreamExt;
+
+    let (store, _dir) = shared_store().await;
+    let id = seed_workstream(&store, "a").await;
+    let mut stream = crate::workstreams::events::subscribe_workstream_bus();
+
+    close(&store, json!({"id": id.to_string()}), test_ctx())
+        .await
+        .expect("close");
+
+    let found = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let env = stream.next().await.expect("bus must not close");
+            if env.event_type == "workstream_state_inferred"
+                && env.payload["workstream_id"] == json!(id)
+            {
+                return env;
+            }
+        }
+    })
+    .await
+    .expect("expected WorkstreamStateInferred within timeout");
+
+    assert_eq!(found.payload["state"], json!("closed"));
+}

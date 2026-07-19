@@ -1,8 +1,38 @@
 //! Tests for `activation::activate`/`activation::deactivate` (DOC-48 §6,
-//! issue #3294).
+//! issue #3294; #3297's activation-changed/state-inferred publication).
 
-use super::*;
+use std::time::Duration;
+
+use futures_util::StreamExt;
+use serde_json::json;
 use tempfile::tempdir;
+
+use super::super::events::{EventStream, WorkstreamEventEnvelope, subscribe_workstream_bus};
+use super::*;
+
+/// Read `stream` until an envelope satisfying `matches` arrives, or `None`
+/// if none does within `timeout` — used both to assert a specific event WAS
+/// published (expect `Some`) and that one was NOT (expect `None`), since
+/// `WORKSTREAM_BUS` is process-global and other tests publish concurrently
+/// (mirrors `crate::events_tests`' established tolerance for that sharing;
+/// filtering on a real `WorkstreamId` generated fresh per test keeps this
+/// deterministic against cross-test noise).
+async fn recv_matching(
+    stream: &mut EventStream,
+    timeout: Duration,
+    matches: impl Fn(&WorkstreamEventEnvelope) -> bool,
+) -> Option<WorkstreamEventEnvelope> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let env = stream.next().await.expect("bus must not close");
+            if matches(&env) {
+                return env;
+            }
+        }
+    })
+    .await
+    .ok()
+}
 
 /// Build a fresh [`SharedWorkstreamStore`] backed by a tempfile path (never
 /// created ahead of time — `WorkstreamStore::load` treats a missing file as
@@ -168,4 +198,101 @@ async fn activate_persists_across_store_reload() {
         Some(id),
         "active pointer must persist across a fresh load"
     );
+}
+
+/// A fresh activation (no prior active workstream) must publish both
+/// `WorkstreamActivationChanged{new_active_id: id, prior_id: null}` and
+/// `WorkstreamStateInferred{workstream_id: id, state: active}` (issue #3297).
+#[tokio::test]
+async fn activate_publishes_activation_changed_and_state_inferred() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    let mut stream = subscribe_workstream_bus();
+
+    activate(&store, id, false).await.expect("activate");
+
+    let changed = recv_matching(&mut stream, Duration::from_secs(2), |e| {
+        e.event_type == "workstream_activation_changed" && e.payload["new_active_id"] == json!(id)
+    })
+    .await
+    .expect("expected WorkstreamActivationChanged");
+    assert_eq!(changed.payload["prior_id"], serde_json::Value::Null);
+
+    let inferred = recv_matching(&mut stream, Duration::from_secs(2), |e| {
+        e.event_type == "workstream_state_inferred" && e.payload["workstream_id"] == json!(id)
+    })
+    .await
+    .expect("expected WorkstreamStateInferred");
+    assert_eq!(inferred.payload["state"], json!("active"));
+}
+
+/// Re-activating the ALREADY-active workstream must publish NOTHING onto the
+/// workstream bus — it is not a state transition (AC-3.3: clients learn when
+/// the active workstream CHANGES).
+#[tokio::test]
+async fn activate_idempotent_does_not_publish() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    activate(&store, id, false).await.expect("first activate");
+
+    // Subscribe only AFTER the first (real) activation, so its own events
+    // are never seen here — only the second, idempotent call is observed.
+    let mut stream = subscribe_workstream_bus();
+    activate(&store, id, false)
+        .await
+        .expect("idempotent re-activate");
+
+    let spurious = recv_matching(&mut stream, Duration::from_millis(300), |e| {
+        e.payload.get("workstream_id") == Some(&json!(id))
+            || e.payload.get("new_active_id") == Some(&json!(id))
+    })
+    .await;
+    assert!(
+        spurious.is_none(),
+        "idempotent re-activation must not publish an event referencing {id}, got {spurious:?}"
+    );
+}
+
+/// A `force: true` switch must publish `WorkstreamStateInferred` for BOTH
+/// the newly-active workstream (`active`) and the prior one (`idle`), plus
+/// `WorkstreamActivationChanged` carrying both ids.
+#[tokio::test]
+async fn activate_force_switch_publishes_state_inferred_for_both() {
+    let (store, _dir) = shared_store().await;
+    let a = create(&store, "a").await;
+    let b = create(&store, "b").await;
+    activate(&store, a, false).await.expect("activate a");
+
+    let mut stream = subscribe_workstream_bus();
+    activate(&store, b, true).await.expect("force switch");
+
+    let a_idle = recv_matching(&mut stream, Duration::from_secs(2), |e| {
+        e.event_type == "workstream_state_inferred"
+            && e.payload["workstream_id"] == json!(a)
+            && e.payload["state"] == json!("idle")
+    })
+    .await;
+    assert!(a_idle.is_some(), "expected prior workstream to go idle");
+}
+
+/// Deactivating the active workstream must publish `WorkstreamStateInferred`
+/// (`state: idle`, `reason: "deactivated"`) but NOT
+/// `WorkstreamActivationChanged` (the spec's `new_active_id` field is a
+/// required `UUID` — there is no "new active workstream" when deactivating).
+#[tokio::test]
+async fn deactivate_publishes_state_inferred() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    activate(&store, id, false).await.expect("activate");
+
+    let mut stream = subscribe_workstream_bus();
+    deactivate(&store, id).await.expect("deactivate");
+
+    let inferred = recv_matching(&mut stream, Duration::from_secs(2), |e| {
+        e.event_type == "workstream_state_inferred" && e.payload["workstream_id"] == json!(id)
+    })
+    .await
+    .expect("expected WorkstreamStateInferred");
+    assert_eq!(inferred.payload["state"], json!("idle"));
+    assert_eq!(inferred.payload["reason"], json!("deactivated"));
 }

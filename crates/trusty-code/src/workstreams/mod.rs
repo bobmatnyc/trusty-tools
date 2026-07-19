@@ -39,22 +39,30 @@
 //! **Scope note (Phase 1A):** #3293 built ONLY the domain model and
 //! persistence layer (this module's `model`/`path`/`store` submodules);
 //! #3294 added the activation-lock RPC semantics (`activation`, plus
-//! `activate`/`deactivate` in [`protocol`]); #3295 (this ticket) added the
-//! rest of `protocol`'s surface (`create`/`get`/`list`/`close`) and the REST
-//! wrappers (`crate::serve::rest::workstreams`). The CLI (#3296) and the SSE
-//! aggregation route (#3297) remain out of scope and land in their own
-//! follow-up tickets against this foundation.
+//! `activate`/`deactivate` in [`protocol`]); #3295 added the rest of
+//! `protocol`'s surface (`create`/`get`/`list`/`close`) and the REST wrappers
+//! (`crate::serve::rest::workstreams`); #3297 (this ticket) adds
+//! [`events`] — the harness-agnostic SSE aggregation layer
+//! (`crate::serve::rest::workstream_events`) — and wires
+//! `WorkstreamActivationChanged`/`WorkstreamStateInferred` publication into
+//! [`activation`] and [`protocol::close`]. The CLI (#3296) remains out of
+//! scope.
 //!
 //! Test: `cargo test -p trusty-code workstreams::` exercises every submodule
 //! in place; see each submodule's own `Test:` line for specifics.
 
 pub mod activation;
+pub mod events;
 pub mod model;
 mod path;
 pub mod protocol;
 pub mod store;
 
 pub use activation::{ActivateOutcome, ActivationError, SharedWorkstreamStore};
+pub use events::{
+    EventStream, RegistrySessionEventSource, SessionEventSource, WorkstreamEventEnvelope,
+    aggregate, publish_activation_changed, publish_state_inferred, subscribe_workstream_bus,
+};
 pub use model::{Workstream, WorkstreamId, WorkstreamState};
 pub use path::{default_data_dir, store_path};
 pub use store::{ReconcileOutcome, StoreError, WorkstreamStore};

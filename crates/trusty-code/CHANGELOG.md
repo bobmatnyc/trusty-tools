@@ -10,6 +10,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workstream SSE event aggregation route (issue #3297, DOC-48 §5.3/§5.3.1,
+  epic #3292).** New `GET /workstreams/{id}/events` endpoint: fans out over a
+  workstream's bound `session_ids`, replaying then live-streaming each
+  session's events tagged with the generic `{session_id, event_type,
+  payload}` envelope, merged with a new daemon-global workstream-level bus
+  carrying `WorkstreamActivationChanged`/`WorkstreamStateInferred` — both now
+  published by `workstream.activate`/`.../deactivate`/`.../close`. 404s for an
+  unknown workstream; a zero-session workstream keeps the stream open,
+  emitting workstream-level events only. The fan-out/merge layer
+  (`workstreams::events::{SessionEventSource, aggregate}`) is designed
+  against an abstract session-id trait (AC-7.1) so it can be lifted into
+  `trusty-agents-common` (#3299) without rework. `SessionAdded`/
+  `SessionActivityUpdate` and dynamic (post-subscribe) membership changes are
+  deferred to #3298 (session binding), documented in the module.
 - **Workstream activation lock: `workstream.activate`/`workstream.deactivate`
   RPC + REST, `ActiveConflict` (issue #3294, DOC-48 §5/§6, epic #3292).**
   Daemon-enforced singleton active-workstream invariant on top of #3293's

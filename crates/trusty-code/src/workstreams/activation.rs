@@ -39,6 +39,20 @@
 //!     from "never existed" without an extra lookup the spec does not ask
 //!     for).
 //!
+//! (Issue #3297) Every branch that ACTUALLY flips the persisted active
+//! pointer also publishes onto [`super::events`]'s workstream-level bus —
+//! never the idempotent re-activation branch, since nothing transitioned
+//! there (AC-3.3 says clients learn when the active workstream CHANGES, and
+//! re-activating yourself is not a change): `WorkstreamActivationChanged`
+//! (`{new_active_id, prior_id}`, DOC-48 §5.3's table — `prior_id` only
+//! `Some` on a force-switch) and `WorkstreamStateInferred` once per
+//! workstream whose computed state actually transitioned (the newly-active
+//! id always, plus the prior id on a force-switch, since it moves `Active`
+//! -> `Idle`). [`deactivate`] publishes only `WorkstreamStateInferred` (no
+//! `WorkstreamActivationChanged` — the spec's `new_active_id` field is a
+//! required `UUID`, not optional, so the event models "switched to a
+//! specific new workstream", not "nothing is active now").
+//!
 //! Test: `activation_tests`.
 
 use std::sync::Arc;
@@ -46,7 +60,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use super::model::WorkstreamId;
+use super::events::{publish_activation_changed, publish_state_inferred};
+use super::model::{WorkstreamId, WorkstreamState};
 use super::store::{StoreError, WorkstreamStore};
 
 /// Shared, lock-wrapped handle to a project's workstream store.
@@ -115,11 +130,17 @@ pub struct ActivateOutcome {
 /// `force: false` -> `ActivationError::ActiveConflict`; a DIFFERENT
 /// workstream active and `force: true` -> persist the switch, `prior_id:
 /// Some(previous)`.
+/// (Issue #3297) publishes `WorkstreamActivationChanged` + one
+/// `WorkstreamStateInferred` per transitioned workstream on every branch
+/// EXCEPT the idempotent re-activation — see module docs.
 /// Test: `activation_tests::activate_with_no_prior_active_succeeds`,
 /// `activation_tests::activate_already_active_is_idempotent`,
 /// `activation_tests::activate_without_force_returns_active_conflict`,
 /// `activation_tests::activate_with_force_switches_and_reports_prior`,
-/// `activation_tests::activate_unknown_id_returns_not_found`.
+/// `activation_tests::activate_unknown_id_returns_not_found`,
+/// `activation_tests::activate_publishes_activation_changed_and_state_inferred`,
+/// `activation_tests::activate_idempotent_does_not_publish`,
+/// `activation_tests::activate_force_switch_publishes_state_inferred_for_both`.
 pub async fn activate(
     store: &SharedWorkstreamStore,
     id: WorkstreamId,
@@ -140,6 +161,9 @@ pub async fn activate(
         Some(active) if !force => Err(ActivationError::ActiveConflict(active)),
         Some(active) => {
             store.set_active(Some(id)).await?;
+            publish_activation_changed(id, Some(active));
+            publish_state_inferred(id, WorkstreamState::Active, "activated (force-switch)");
+            publish_state_inferred(active, WorkstreamState::Idle, "deactivated (force-switch)");
             Ok(ActivateOutcome {
                 active_id: id,
                 prior_id: Some(active),
@@ -147,6 +171,8 @@ pub async fn activate(
         }
         None => {
             store.set_active(Some(id)).await?;
+            publish_activation_changed(id, None);
+            publish_state_inferred(id, WorkstreamState::Active, "activated");
             Ok(ActivateOutcome {
                 active_id: id,
                 prior_id: None,
@@ -163,9 +189,12 @@ pub async fn activate(
 /// when `id` is the CURRENTLY active workstream; otherwise a no-op success
 /// returning `None` — deactivating an idle, closed, or even nonexistent id
 /// is idempotent by design (§4.3), so this never looks the id up in
-/// `workstreams[]` at all.
+/// `workstreams[]` at all. (Issue #3297) publishes `WorkstreamStateInferred`
+/// only on the actual-deactivation branch — see module docs for why no
+/// `WorkstreamActivationChanged` fires here.
 /// Test: `activation_tests::deactivate_active_clears_pointer`,
-/// `activation_tests::deactivate_non_active_is_idempotent_noop`.
+/// `activation_tests::deactivate_non_active_is_idempotent_noop`,
+/// `activation_tests::deactivate_publishes_state_inferred`.
 pub async fn deactivate(
     store: &SharedWorkstreamStore,
     id: WorkstreamId,
@@ -173,6 +202,7 @@ pub async fn deactivate(
     let mut store = store.lock().await;
     if store.active_workstream_id().await? == Some(id) {
         store.set_active(None).await?;
+        publish_state_inferred(id, WorkstreamState::Idle, "deactivated");
         Ok(Some(id))
     } else {
         Ok(None)

@@ -53,7 +53,10 @@
 //! #3292) and `POST /workstreams/{id}/activate`,
 //! `POST /workstreams/{id}/deactivate` (DOC-48 §5.2/§6, issue #3294) — see
 //! its module docs for why the paths are unprefixed rather than DOC-48
-//! §5.2's literal `/api/v1/workstreams`. Every slice reuses
+//! §5.2's literal `/api/v1/workstreams`. [`workstream_events`] (issue #3297)
+//! adds the one SSE route, `GET /workstreams/{id}/events` — the only route in
+//! this gateway that isn't a plain [`respond`] wrapper, since it composes
+//! `crate::workstreams::events::aggregate` instead. Every other slice reuses
 //! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
@@ -66,6 +69,7 @@ pub mod search_audit;
 pub mod sessions;
 pub mod sessions_write;
 pub mod tasks;
+pub mod workstream_events;
 pub mod workstreams;
 
 use axum::Json;
