@@ -12,9 +12,11 @@
 //! unknown-provider 400, the claude-code/non-Anthropic runner conflict via
 //! an explicit prefixed model (rejection) and an explicit `provider_id`
 //! (acceptance), the same conflict via a *bare* unprefixed model_id (the
-//! fail-shut/no-fail-open case, #3287 review), provider-only defaulting,
-//! malformed on-disk TOML (500, not a panic), and preservation of unrelated
-//! TOML content (comments + untouched keys).
+//! fail-shut/no-fail-open case, #3287 review), the positive counterpart
+//! where a bare model_id is accepted because an on-disk `provider_id`
+//! already resolves to Anthropic, provider-only defaulting, malformed
+//! on-disk TOML (500, not a panic), and preservation of unrelated TOML
+//! content (comments + untouched keys).
 //! Test: This module IS the test.
 
 use axum::Router;
@@ -44,6 +46,18 @@ name = "pm"
 role = "orchestrator"
 runner = "claude-code"
 model = "claude-sonnet-4-6"
+description = "PM persona"
+"#;
+
+/// Same as [`CLAUDE_CODE_FIXTURE`] but with `provider_id = "anthropic"`
+/// already persisted from a prior patch — the on-disk-fallback source in
+/// `agent_patch.rs:180-189`.
+const CLAUDE_CODE_WITH_PROVIDER_FIXTURE: &str = r#"[agent]
+name = "pm"
+role = "orchestrator"
+runner = "claude-code"
+model = "claude-sonnet-4-6"
+provider_id = "anthropic"
 description = "PM persona"
 "#;
 
@@ -232,6 +246,54 @@ async fn patch_agent_claude_code_rejects_bare_non_anthropic_model() {
     assert_eq!(
         on_disk, CLAUDE_CODE_FIXTURE,
         "rejected write must not land on disk"
+    );
+}
+
+/// Why: The on-disk `provider_id` fallback (`agent_patch.rs:180-189`) exists
+/// so a follow-up patch that only changes `model_id` doesn't have to repeat
+/// a `provider_id` a prior patch already established. This is the positive
+/// counterpart to `patch_agent_claude_code_rejects_bare_non_anthropic_model`:
+/// the same bare, unprefixed `model_id` with no `provider_id` in the
+/// request must be ACCEPTED when the file already carries
+/// `provider_id = "anthropic"`, because that on-disk value resolves the
+/// provider unambiguously to Anthropic.
+/// What: PATCHes a bare Anthropic model_id (no provider_id in the request)
+/// against [`CLAUDE_CODE_WITH_PROVIDER_FIXTURE`]; asserts `200` and that the
+/// new model persisted (both in the response and on disk).
+#[tokio::test]
+async fn patch_agent_claude_code_model_only_inherits_ondisk_anthropic_provider() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture(tmp.path(), "pm", CLAUDE_CODE_WITH_PROVIDER_FIXTURE);
+
+    let resp = patch_agent_at(
+        tmp.path(),
+        "pm",
+        PatchAgentRequest {
+            model_id: Some("claude-opus-4-6".to_string()),
+            provider_id: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a bare model_id must be accepted when an on-disk provider_id already resolves to Anthropic"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["model"], "claude-opus-4-6");
+    assert_eq!(body["provider_id"], "anthropic");
+
+    let on_disk = std::fs::read_to_string(tmp.path().join("pm.toml")).unwrap();
+    assert!(
+        on_disk.contains("model = \"claude-opus-4-6\""),
+        "on-disk model not updated: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("provider_id = \"anthropic\""),
+        "on-disk provider_id should still be present: {on_disk}"
     );
 }
 
