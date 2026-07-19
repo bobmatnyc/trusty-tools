@@ -11,7 +11,9 @@
 //! code uses.
 //! What: `cancel_running_task_marks_cancelled`, `cancel_unknown_id_404`,
 //! `cancel_already_done_409`, `clear_context_now_aborts_running_task`,
-//! `cancel_survives_fifo_eviction_pressure`.
+//! `cancel_survives_fifo_eviction_pressure`,
+//! `finalize_task_does_not_clobber_cancelled`,
+//! `register_handle_skips_already_terminal_task`.
 //! Test: This module IS the test.
 
 use std::sync::Arc;
@@ -24,7 +26,7 @@ use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::api::server::routes::build_router;
-use crate::api::server::state::{AppState, MAX_RETAINED};
+use crate::api::server::state::{AppState, CancelOutcome, MAX_RETAINED};
 use crate::api::types::{PmResponse, PmStatus};
 
 fn router(state: AppState) -> Router {
@@ -204,5 +206,59 @@ async fn cancel_survives_fifo_eviction_pressure() {
     assert!(
         !completed.load(Ordering::SeqCst),
         "the surviving task's AbortHandle must still be live and effective"
+    );
+}
+
+/// Direct unit test of `AppState::finalize_task`'s cancellation guard
+/// (#3063 code review), isolated from `spawn_fake_running_task`'s
+/// abort-timing race: `cancel_running_task_marks_cancelled` above proves the
+/// end-to-end abort path stops the future before it ever calls
+/// `finalize_task`, so it never actually exercises the `already_cancelled`
+/// branch inside `finalize_task` itself. This test calls `finalize_task`
+/// directly, after the record is already `Cancelled`, to prove the guard
+/// itself — not just that abort prevents the call from happening at all.
+#[tokio::test]
+async fn finalize_task_does_not_clobber_cancelled() {
+    let state = AppState::default();
+    state
+        .upsert("task-4".to_string(), PmResponse::running("task-4"))
+        .await;
+    let outcome = state.try_cancel("task-4").await;
+    assert!(matches!(outcome, CancelOutcome::Cancelled));
+
+    // Simulate a late `finalize_task` call from a background future that
+    // raced the cancel and lost — it must not overwrite the cancelled
+    // record with its own (fabricated) success result.
+    let mut late = PmResponse::running("task-4");
+    late.status = PmStatus::Success;
+    state.finalize_task("task-4".to_string(), late).await;
+
+    let stored = state.get("task-4").await.unwrap();
+    assert_eq!(
+        stored.status,
+        PmStatus::Cancelled,
+        "finalize_task must not clobber an already-cancelled record"
+    );
+}
+
+/// Direct unit test of `AppState::register_handle`'s terminal-status guard
+/// (#3063 code review): registering a handle for a task whose stored
+/// response already reached a terminal status (a pathologically fast task
+/// completing before `register_handle` runs after `tokio::spawn`) must be a
+/// no-op, not silently orphan the handle in `handles` forever.
+#[tokio::test]
+async fn register_handle_skips_already_terminal_task() {
+    let state = AppState::default();
+    let mut done = PmResponse::running("task-5");
+    done.status = PmStatus::Success;
+    state.upsert("task-5".to_string(), done).await;
+
+    let join = tokio::spawn(async { tokio::time::sleep(Duration::from_secs(30)).await });
+    state.register_handle("task-5", join.abort_handle()).await;
+    join.abort();
+
+    assert!(
+        !state.inner.lock().await.handles.contains_key("task-5"),
+        "register_handle must skip storing a handle for an already-terminal task"
     );
 }

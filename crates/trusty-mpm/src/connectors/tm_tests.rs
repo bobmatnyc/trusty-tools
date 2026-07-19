@@ -128,6 +128,17 @@ fn local_bare_repo() -> (TempDir, String) {
     (scratch, url)
 }
 
+/// `TmConnector::new` is a thin wrapper around `resolve_daemon_url(None)` —
+/// assert the delegation actually happens (both compute to the same value
+/// independently) rather than re-testing `resolve_daemon_url`'s own
+/// explicit-override/lock-file/default priority chain, which has its own
+/// dedicated coverage in `core::discovery`.
+#[test]
+fn new_resolves_default_daemon_url() {
+    let connector = TmConnector::new();
+    assert_eq!(connector.daemon_url, resolve_daemon_url(None));
+}
+
 /// `CreateSessionReq::backend` carrying `BackendParams::Tcode` must be
 /// rejected client-side, before any HTTP call — a caller bug, not a daemon
 /// round-trip.

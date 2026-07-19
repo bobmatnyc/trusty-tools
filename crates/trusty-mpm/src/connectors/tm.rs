@@ -142,7 +142,8 @@ impl WorkstreamConnector for TmConnector {
     /// fields; `agent` has no equivalent on tm's spawn request and is
     /// silently ignored (see [`CreateSessionReq`]'s docs on why that's
     /// intentional, not a data-loss bug).
-    /// Test: `tm_tests::create_session_spawns_and_appears_in_list`,
+    /// Test: `tm_tests::create_session_full_lifecycle` (create -> list ->
+    /// status -> send_input via `ConnectorTestKit::assert_basic_lifecycle`),
     /// `tm_tests::create_session_wrong_backend_params_is_invalid_request`.
     async fn create_session(&self, req: CreateSessionReq) -> Result<SessionInfo, ConnectorError> {
         let CreateSessionReq {
@@ -198,7 +199,8 @@ impl WorkstreamConnector for TmConnector {
     /// Why: mirrors `daemon::managed_routes::list_managed_sessions`.
     /// What: unwraps the `{"sessions": [...]}` envelope and maps each
     /// `ManagedSessionSummary` onto a portable `SessionInfo`.
-    /// Test: `tm_tests::create_session_spawns_and_appears_in_list`,
+    /// Test: `tm_tests::create_session_full_lifecycle` (covers `list_sessions`
+    /// returning the just-created session),
     /// `tm_tests::list_sessions_empty_fleet_returns_empty_vec`.
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, ConnectorError> {
         let url = format!("{}/api/v1/sessions/managed", self.daemon_url);
@@ -216,7 +218,8 @@ impl WorkstreamConnector for TmConnector {
     /// What: a 404 maps to [`ConnectorError::NotFound`] via
     /// [`map_error_response`]; otherwise the summary's `state` and
     /// `pending_decision` populate the [`SessionStatus`].
-    /// Test: `tm_tests::session_status_returns_state_for_known_session`,
+    /// Test: `tm_tests::create_session_full_lifecycle` (covers `session_status`
+    /// for a known session),
     /// `tm_tests::session_status_unknown_id_is_not_found`.
     async fn session_status(&self, session_id: &str) -> Result<SessionStatus, ConnectorError> {
         let url = format!("{}/api/v1/sessions/managed/{session_id}", self.daemon_url);
@@ -268,7 +271,8 @@ impl WorkstreamConnector for TmConnector {
     /// What: wraps the daemon's `attach_cmd` string in
     /// [`AttachHandle::ShellCommand`]. A 404 (unknown session) maps to
     /// [`ConnectorError::NotFound`].
-    /// Test: `tm_tests::attach_returns_shell_command_for_known_session`,
+    /// Test: `tm_tests::create_session_full_lifecycle` (covers `attach`'s
+    /// `ShellCommand` shape for a known session),
     /// `tm_tests::attach_unknown_id_is_not_found`.
     async fn attach(&self, session_id: &str) -> Result<AttachHandle, ConnectorError> {
         let url = format!(
@@ -313,7 +317,8 @@ impl WorkstreamConnector for TmConnector {
     /// `isError: true` into [`ConnectorError::Backend`] (`"no such
     /// session"`/circuit-breaker-open messages land here) and a malformed
     /// envelope into [`ConnectorError::Transport`].
-    /// Test: `tm_tests::delegate_records_a_delegation`,
+    /// Test: `tm_tests::create_session_full_lifecycle` (covers `delegate`
+    /// recording a delegation against a live session),
     /// `tm_tests::delegate_unknown_session_is_backend_error`.
     async fn delegate(
         &self,
