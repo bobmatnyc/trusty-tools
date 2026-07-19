@@ -49,13 +49,21 @@ We take security seriously. If you discover a security vulnerability, **do not o
 
 ## Dependency Security
 
-The project uses `cargo audit` to scan for known vulnerabilities in dependencies:
+`cargo audit` scans dependencies for known vulnerabilities against the RustSec
+advisory database. It runs automatically on a **weekly schedule** via
+[`.github/workflows/cargo-audit.yml`](.github/workflows/cargo-audit.yml)
+(Monday 03:00 UTC, plus manual `workflow_dispatch`). This scan is
+visibility-only — it is not wired to `push`/`pull_request`, so it never
+blocks a PR merge; a failing scheduled run means an advisory needs triage,
+not that CI is broken.
+
+You can also run it locally at any time:
 
 ```bash
 cargo audit
 ```
 
-This is run in CI on every commit. Dependencies are kept up-to-date as part of regular maintenance.
+Dependencies are kept up-to-date as part of regular maintenance.
 
 ## Secure Coding Practices
 
