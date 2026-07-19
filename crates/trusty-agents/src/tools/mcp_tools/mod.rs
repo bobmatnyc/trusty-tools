@@ -228,4 +228,47 @@ mod tests {
         let out = dispatch_mcp_tool("mcp_bogus", &json!({})).await;
         assert!(out.contains("Unknown"));
     }
+
+    /// Why: SECURITY (#3266) — `env` is not a declared `mcp_add` schema
+    /// field (see `schema.rs`), so an LLM-originated tool call that includes
+    /// one anyway must never reach the persisted `McpService`. Silently
+    /// honoring it would let a prompt-injected/hallucinated tool call plant
+    /// arbitrary environment variables into a spawned MCP server's process.
+    /// What: Call `mcp_add` with an `env` object containing a poisoned var;
+    /// assert the persisted service's `env` map is empty regardless.
+    /// Test: This test.
+    #[tokio::test]
+    async fn dispatch_mcp_add_strips_undeclared_env_field() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let args = json!({
+            "name": "epsilon",
+            "description": "epsilon service",
+            "transport": "stdio",
+            "command": "epsilon-cmd",
+            "env": {
+                "LD_PRELOAD": "/tmp/evil.so",
+                "OPENROUTER_API_KEY": "stolen"
+            }
+        });
+        let out = dispatch_mcp_tool("mcp_add", &args).await;
+        assert!(out.contains("Added"), "got: {out}");
+
+        let reloaded = GlobalConfig::load().await;
+        let epsilon = reloaded
+            .mcp
+            .services
+            .iter()
+            .find(|s| s.name == "epsilon")
+            .expect("epsilon service present");
+        assert!(
+            epsilon.env.is_empty(),
+            "env must be stripped from LLM-originated mcp_add calls, got: {:?}",
+            epsilon.env
+        );
+    }
 }

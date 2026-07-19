@@ -24,8 +24,11 @@
 //! adding the async live-discovery step at the call site instead of inside
 //! it avoids a disruptive signature change while still giving both assembly
 //! points the same discovered tool set). Specs are gathered by
-//! `spec::gather_specs` (config `discover = true` services + `.mcp.json`,
-//! config wins on name collision); each surviving spec is spawned via a
+//! `spec::gather_specs` (config `discover = true` services always; a
+//! project's `.mcp.json` ONLY when the operator has opted in via
+//! `mcp.trust_project_mcp_json = true`, since `.mcp.json` is untrusted
+//! repo-controlled content — see #3266 and `spec::gather_specs` docs; config
+//! wins on name collision); each surviving spec is spawned via a
 //! `mcp_service_tools::ServiceClient` (same lazy-spawn-and-cache shape the
 //! static path uses — one subprocess per server, reused across calls) and
 //! `tools/list` is called eagerly at registry-build time (discovery
@@ -48,6 +51,7 @@
 //! integration tests below (discovery, execute round-trip, duplicate
 //! policy, spawn-failure skip).
 
+mod cache;
 mod executor;
 mod spec;
 
@@ -56,10 +60,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use executor::{LiveMcpTool, build_tool_schema};
+use futures::future::join_all;
 pub use spec::{McpServerSpec, SpecSource, gather_specs};
 
 use crate::mcp::config::GlobalConfig;
-use crate::tools::mcp_service_tools::ServiceClient;
 use crate::tools::traits::ToolExecutor;
 
 /// Build live-discovered `ToolExecutor`s for every eligible MCP server.
@@ -83,6 +87,20 @@ pub async fn live_mcp_tool_executors(
 
 /// Pure(ish) helper split out so tests can feed synthetic specs without
 /// touching `~/.trusty-agents/config.toml` or a real project directory.
+///
+/// Why: #3266 DoS remediation — this used to discover each spec
+/// sequentially with no cap on a single server's discovery time, so N
+/// servers could cost up to N*60s on every persona turn. Discovery is now
+/// fanned out concurrently via `join_all`, with each server's spawn +
+/// `initialize` + `tools/list` individually bounded by
+/// `cache::DISCOVERY_TIMEOUT` and served from `cache::SERVER_CACHE` across
+/// turns when the spec is unchanged — see `cache` module docs.
+/// What: Runs `cache::discover_one` concurrently for every spec, then
+/// processes results in the original spec order (so duplicate-name
+/// first-wins semantics stay deterministic even though discovery itself is
+/// concurrent).
+/// Test: `discovery_registers_advertised_tools_as_executors` and friends
+/// below; cache/timeout behavior is covered by `cache::tests`.
 async fn build_executors_from_specs(
     specs: Vec<McpServerSpec>,
     existing_names: &HashSet<String>,
@@ -90,24 +108,11 @@ async fn build_executors_from_specs(
     let mut executors: Vec<Arc<dyn ToolExecutor>> = Vec::new();
     let mut seen: HashSet<String> = existing_names.clone();
 
-    for spec in specs {
-        let client = Arc::new(ServiceClient::with_parts(
-            spec.name.clone(),
-            spec.command.clone(),
-            spec.args.clone(),
-            spec.env.clone(),
-        ));
-        let tools = match client.list_tools().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(
-                    server = %spec.name,
-                    source = ?spec.source,
-                    error = %e,
-                    "mcp_live: discovery failed (spawn/initialize/tools-list); skipping server"
-                );
-                continue;
-            }
+    let discoveries = join_all(specs.iter().map(cache::discover_one)).await;
+
+    for (spec, discovered) in specs.iter().zip(discoveries) {
+        let Some((client, tools)) = discovered else {
+            continue;
         };
 
         let mut registered_for_server = 0usize;

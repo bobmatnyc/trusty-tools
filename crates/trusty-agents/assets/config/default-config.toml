@@ -5,6 +5,16 @@
 # Agent roles that receive MCP tool descriptions in their system prompt
 inject_for_roles = ["ctrl", "pm", "research", "observe"]
 
+# SECURITY (#3266): whether live MCP discovery is allowed to auto-spawn
+# servers declared in a project's `.mcp.json`. Defaults to false — a
+# project's `.mcp.json` is repo-controlled, untrusted content; cloning a
+# hostile repo must never cause trusty-agents to execute arbitrary binaries
+# on every persona turn. The supported opt-in path is a per-server
+# `[[mcp.services]]` entry with `discover = true` below, which is an
+# explicit, operator-curated allowlist and is unaffected by this flag. Only
+# set this to true if you trust every project you point trusty-agents at.
+trust_project_mcp_json = false
+
 # Service-tier MCPs agents can reference. Local native integrations
 # (kuzu-memory, mcp-vector-search) are handled by the harness directly and
 # do not appear here.

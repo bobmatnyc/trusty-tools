@@ -113,15 +113,22 @@ fn parse_service_from_args(args: &Value) -> Result<McpService> {
         .get("discover")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let env: std::collections::HashMap<String, String> = args
-        .get("env")
-        .and_then(Value::as_object)
-        .map(|o| {
-            o.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
+    // SECURITY (#3266): `env` is intentionally NOT read from `args` here.
+    // `mcp_add` is dispatched from LLM-originated tool calls (the persona's
+    // model decides the arguments); `env` is not declared in this tool's
+    // schema (`mcp_tool_definitions` in `schema.rs`), so any `env` object an
+    // LLM call includes is undeclared input. Silently honoring it would let
+    // a prompt-injected or hallucinated tool call inject arbitrary
+    // environment variables (credentials, `LD_PRELOAD`-style hijacks, proxy
+    // overrides) into a spawned MCP server's process environment. Services
+    // that genuinely need env vars are configured by a human editing
+    // `~/.trusty-agents/config.toml` directly, not via this LLM-facing tool.
+    let env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if args.get("env").is_some() {
+        tracing::warn!(
+            "mcp_add: rejected undeclared 'env' field from LLM-originated tool call; service added with no env vars"
+        );
+    }
     let tools = args
         .get("tools")
         .and_then(Value::as_array)

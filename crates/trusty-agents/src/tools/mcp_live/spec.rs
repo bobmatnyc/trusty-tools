@@ -45,14 +45,24 @@ pub struct McpServerSpec {
 /// both wire through "the same construction helper").
 /// What: Walks `global.mcp.services` for `enabled && discover` entries
 /// (stdio transport, non-empty command only — same graceful-skip rules as
-/// the static path in `mcp_service_tools`), then walks `.mcp.json` files
-/// found via `discover_mcp_json_paths(project_dir)` (project file before
-/// `~/.claude/.mcp.json`). A `.mcp.json` entry whose name collides with an
-/// already-collected config-service name is skipped (config wins);
-/// otherwise first-file-wins for `.mcp.json`-vs-`.mcp.json` collisions.
+/// the static path in `mcp_service_tools`). `.mcp.json` files (found via
+/// `discover_mcp_json_paths(project_dir)`, project file before
+/// `~/.claude/.mcp.json`) are walked ONLY when
+/// `global.mcp.trust_project_mcp_json` is `true` — a project's `.mcp.json`
+/// is untrusted, repo-controlled content, and auto-spawning whatever it
+/// declares is a remote-code-execution vector for anyone who clones a
+/// hostile repo (#3266 security remediation). The default-false gate means
+/// the only opt-in path for a `.mcp.json`-declared server is an explicit,
+/// operator-curated `[[mcp.services]]` entry with `discover = true` — those
+/// are unaffected by this gate since they never touch `.mcp.json`. A
+/// `.mcp.json` entry whose name collides with an already-collected
+/// config-service name is skipped (config wins); otherwise first-file-wins
+/// for `.mcp.json`-vs-`.mcp.json` collisions.
 /// Test: `gather_specs_includes_discover_services`,
 /// `gather_specs_config_service_wins_over_mcp_json_by_name`,
-/// `gather_specs_skips_non_stdio_and_empty_command`.
+/// `gather_specs_skips_non_stdio_and_empty_command`,
+/// `gather_specs_skips_mcp_json_when_untrusted`,
+/// `gather_specs_includes_mcp_json_when_trusted`.
 pub async fn gather_specs(global: &GlobalConfig, project_dir: &Path) -> Vec<McpServerSpec> {
     let mut specs: Vec<McpServerSpec> = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
@@ -84,6 +94,13 @@ pub async fn gather_specs(global: &GlobalConfig, project_dir: &Path) -> Vec<McpS
             env: svc.env.clone(),
             source: SpecSource::ConfigService,
         });
+    }
+
+    if !global.mcp.trust_project_mcp_json {
+        tracing::debug!(
+            "mcp_live: mcp.trust_project_mcp_json is false (default); skipping .mcp.json auto-spawn entirely"
+        );
+        return specs;
     }
 
     for path in discover_mcp_json_paths(project_dir) {
@@ -214,7 +231,9 @@ mod tests {
 
     /// Why: #3238's documented precedence — a `[[mcp.services]]
     /// discover=true` entry must win over a `.mcp.json` entry of the same
-    /// name, since the config is the operator-curated source.
+    /// name, since the config is the operator-curated source. This test
+    /// explicitly opts into `trust_project_mcp_json = true` since `.mcp.json`
+    /// entries are gated off by default (#3266 security remediation).
     /// What: Config declares `shared` (discover=true); project `.mcp.json`
     /// also declares `shared` with a different command. Assert exactly one
     /// spec named `shared`, sourced from config, with the config's command.
@@ -237,6 +256,7 @@ mod tests {
 
         let mut global = GlobalConfig::default();
         global.mcp.services = vec![discover_service("shared", "from-config")];
+        global.mcp.trust_project_mcp_json = true;
 
         let specs = gather_specs(&global, project.path()).await;
         assert_eq!(specs.len(), 2);
@@ -246,5 +266,72 @@ mod tests {
         let json_only = specs.iter().find(|s| s.name == "json-only").unwrap();
         assert_eq!(json_only.command, "json-only-bin");
         assert_eq!(json_only.source, SpecSource::McpJson);
+    }
+
+    /// Why: SECURITY (#3266) — `GlobalConfig::default()` must leave
+    /// `trust_project_mcp_json` at `false`, and `gather_specs` must not
+    /// auto-spawn anything from `.mcp.json` in that state. This is the
+    /// default-deny proof: a hostile repo's `.mcp.json` must never cause a
+    /// spawn without an explicit operator opt-in.
+    /// What: Project declares a `.mcp.json` server with no corresponding
+    /// `[[mcp.services]]` entry, default config (untrusted). Assert zero
+    /// specs come back even though the file parses fine and the command is
+    /// non-empty.
+    /// Test: This test.
+    #[tokio::test]
+    async fn gather_specs_skips_mcp_json_when_untrusted() {
+        let project = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            project.path().join(".mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "hostile": {"command": "rm", "args": ["-rf", "/"]}
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let global = GlobalConfig::default();
+        assert!(!global.mcp.trust_project_mcp_json, "default must be false");
+
+        let specs = gather_specs(&global, project.path()).await;
+        assert!(
+            specs.is_empty(),
+            "untrusted .mcp.json must not auto-spawn: {specs:?}"
+        );
+    }
+
+    /// Why: The trust gate must be a real opt-in, not a permanently-closed
+    /// door — an operator who explicitly sets
+    /// `trust_project_mcp_json = true` still gets the pre-#3266 merge
+    /// behavior.
+    /// What: Same untrusted-repo fixture as the previous test, but
+    /// `trust_project_mcp_json = true`; assert the `.mcp.json` entry now
+    /// comes back.
+    /// Test: This test.
+    #[tokio::test]
+    async fn gather_specs_includes_mcp_json_when_trusted() {
+        let project = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            project.path().join(".mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "trusted-entry": {"command": "trusted-bin", "args": []}
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let mut global = GlobalConfig::default();
+        global.mcp.trust_project_mcp_json = true;
+
+        let specs = gather_specs(&global, project.path()).await;
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "trusted-entry");
+        assert_eq!(specs[0].source, SpecSource::McpJson);
     }
 }

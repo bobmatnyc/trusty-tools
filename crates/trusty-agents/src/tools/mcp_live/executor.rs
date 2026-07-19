@@ -7,8 +7,8 @@
 //! built by passing the MCP server's `inputSchema` straight through (no
 //! synthetic open-object schema — the server told us the real shape),
 //! and a shared `ServiceClient` handle for `tools/call` dispatch.
-//! Test: `execute_dispatches_through_shared_client`,
-//! `execute_surfaces_call_errors`, `build_tool_schema_passes_through_input_schema`.
+//! Test: `execute_surfaces_spawn_failure_as_recoverable_error`,
+//! `build_tool_schema_passes_through_input_schema`.
 
 use std::sync::Arc;
 
@@ -17,6 +17,16 @@ use serde_json::{Value, json};
 
 use crate::tools::mcp_service_tools::{ServiceClient, format_mcp_call_result};
 use crate::tools::traits::{ToolExecutor, ToolResult};
+
+/// Upper bound on a passed-through `inputSchema`'s serialized size, in
+/// bytes. A malicious or buggy MCP server could otherwise advertise an
+/// arbitrarily large `inputSchema` (deeply nested, huge enum lists, etc.)
+/// that gets cloned into every `LiveMcpTool`'s schema and re-serialized on
+/// every `registry.schemas()` call — unbounded memory/CPU per discovered
+/// tool. 64 KiB comfortably covers legitimate real-world schemas (the
+/// largest observed in this codebase's fixtures is a few hundred bytes)
+/// while bounding the worst case.
+const MAX_INPUT_SCHEMA_BYTES: usize = 64 * 1024;
 
 /// Build the OpenAI-shape function-calling schema for one discovered MCP
 /// tool, prefixing the description with `[<server_name>]` (matching the
@@ -28,17 +38,36 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 /// `inputSchema` from `tools/list` — passing it through gives the LLM
 /// accurate argument shapes instead of an unconstrained object.
 /// What: Wraps `tool.input_schema` as `function.parameters`, falling back to
-/// an empty object schema only if the server didn't advertise one.
+/// an empty object schema if the server didn't advertise one OR if the
+/// advertised schema exceeds `MAX_INPUT_SCHEMA_BYTES` (#3266 memory-bound
+/// fix) — an oversized schema is treated the same as a missing one rather
+/// than rejecting the whole tool, so the tool still registers (with a less
+/// precise, open-object parameter shape) instead of vanishing.
 /// Test: `build_tool_schema_passes_through_input_schema`,
-/// `build_tool_schema_falls_back_when_input_schema_absent`.
+/// `build_tool_schema_falls_back_when_input_schema_absent`,
+/// `build_tool_schema_falls_back_when_input_schema_exceeds_size_cap`.
 pub(super) fn build_tool_schema(
     server_name: &str,
     tool: &trusty_common::stdio_mcp_client::McpTool,
 ) -> Value {
-    let params = if tool.input_schema.is_object() {
-        tool.input_schema.clone()
+    let fallback = || json!({"type": "object", "properties": {}});
+    let params = if !tool.input_schema.is_object() {
+        fallback()
     } else {
-        json!({"type": "object", "properties": {}})
+        match serde_json::to_vec(&tool.input_schema) {
+            Ok(bytes) if bytes.len() <= MAX_INPUT_SCHEMA_BYTES => tool.input_schema.clone(),
+            Ok(bytes) => {
+                tracing::warn!(
+                    server = %server_name,
+                    tool = %tool.name,
+                    schema_bytes = bytes.len(),
+                    cap_bytes = MAX_INPUT_SCHEMA_BYTES,
+                    "mcp_live: inputSchema exceeds size cap; falling back to an open-object schema"
+                );
+                fallback()
+            }
+            Err(_) => fallback(),
+        }
     };
     json!({
         "type": "function",
@@ -59,8 +88,7 @@ pub(super) fn build_tool_schema(
 /// What: `execute()` forwards to `client.get_or_spawn()` then `tools/call`,
 /// formatting results with the same `format_mcp_call_result` the static path
 /// uses (shared, not duplicated).
-/// Test: `execute_dispatches_through_shared_client`,
-/// `execute_surfaces_call_errors`.
+/// Test: `execute_surfaces_spawn_failure_as_recoverable_error`.
 pub(super) struct LiveMcpTool {
     pub(super) name: String,
     pub(super) schema: Value,
@@ -168,6 +196,36 @@ mod tests {
         assert_eq!(
             schema["function"]["parameters"],
             json!({"type": "object", "properties": {}})
+        );
+    }
+
+    /// Why: SECURITY/DoS (#3266) — a malicious or buggy MCP server could
+    /// advertise an oversized `inputSchema` (e.g. a huge enum or deeply
+    /// nested object). Without a cap, that gets cloned into the schema of
+    /// every registered `LiveMcpTool` and re-serialized on every registry
+    /// listing, an unbounded per-tool memory/CPU cost.
+    /// What: Build an `inputSchema` whose serialized size exceeds
+    /// `MAX_INPUT_SCHEMA_BYTES`; assert the resulting `function.parameters`
+    /// falls back to the empty-object schema (tool still registers, just
+    /// with a less precise parameter shape) rather than passing the huge
+    /// schema through.
+    /// Test: This test.
+    #[test]
+    fn build_tool_schema_falls_back_when_input_schema_exceeds_size_cap() {
+        let huge_enum: Vec<String> = (0..20_000).map(|i| format!("value-{i}")).collect();
+        let tool = WireMcpTool {
+            name: "oversized".to_string(),
+            description: Some("Has a huge inputSchema".to_string()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"choice": {"type": "string", "enum": huge_enum}}
+            }),
+        };
+        let schema = build_tool_schema("fake-server", &tool);
+        assert_eq!(
+            schema["function"]["parameters"],
+            json!({"type": "object", "properties": {}}),
+            "oversized inputSchema must fall back, not pass through"
         );
     }
 
