@@ -105,12 +105,24 @@ impl SelfOrigins {
 /// host check keeps the policy in one tested place.
 /// What: parses the scheme-qualified `Origin` (e.g. `http://127.0.0.1:7070`),
 /// extracts the host (dropping scheme and `:port`, unwrapping `[…]` IPv6
-/// brackets), and returns `true` for `localhost`, any `127.x.x.x` IPv4, or the
-/// `::1` IPv6 loopback. Anything else (including a missing host) is `false`.
-/// Test: `origin_is_loopback_*` below.
+/// brackets), and returns `true` for `localhost` or any host that PARSES as a
+/// loopback IP — all of `127.0.0.0/8` (IPv4) and `::1` (IPv6). Anything that is
+/// not `localhost` and does not parse as a loopback IP (including a missing host,
+/// a hostname, or an IP-prefixed DNS name like `127.0.0.1.evil.com`) is `false`.
+///
+/// The host MUST be parsed as an `IpAddr`, not prefix-matched: a `host.starts_with("127.")`
+/// check accepts the attacker-controlled DNS name `127.0.0.1.evil.com` (and
+/// `127.attacker.com`) as "loopback", defeating the CSRF guard. `IpAddr::from_str`
+/// rejects any string that is not a bare IP literal.
+/// Test: `origin_is_loopback_*` below, incl. `_rejects_ip_prefixed_dns_names`.
 pub fn origin_is_loopback(origin: &str) -> bool {
     match parse_origin_authority(origin) {
-        Some((host, _port)) => host == "localhost" || host == "::1" || host.starts_with("127."),
+        Some((host, _port)) => {
+            host == "localhost"
+                || IpAddr::from_str(host)
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        }
         None => false,
     }
 }
@@ -267,6 +279,26 @@ mod tests {
         assert!(!origin_is_loopback("http://10.0.0.5:7070"));
         assert!(!origin_is_loopback("http://100.64.1.2:7070")); // tailnet CGNAT IP
         assert!(!origin_is_loopback("http://127evil.com")); // not a 127.x host
+    }
+
+    /// Why: SECURITY — the loopback check MUST parse the host as an IP, not
+    /// prefix-match on `"127."`. A prefix match accepts the attacker-controlled
+    /// DNS names `127.0.0.1.evil.com` / `127.attacker.com`, which resolve to a
+    /// remote host but are treated as trusted loopback, defeating the CSRF
+    /// guard. These MUST be rejected. (The original prefix-match survived because
+    /// the suite only covered the no-dot `127evil.com` variant — this closes
+    /// that blind spot; the live bypass shipped in #3280.)
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_rejects_ip_prefixed_dns_names() {
+        assert!(!origin_is_loopback("http://127.0.0.1.evil.com"));
+        assert!(!origin_is_loopback("http://127.0.0.1.evil.com:7070"));
+        assert!(!origin_is_loopback("http://127.attacker.com"));
+        assert!(!origin_is_loopback("http://127.0.0.1x.com"));
+        // `localhost`-prefixed DNS names must not be trusted either.
+        assert!(!origin_is_loopback("http://localhost.evil.com"));
+        // A bracketed IPv6 loopback still parses and is trusted.
+        assert!(origin_is_loopback("http://[::1]"));
     }
 
     /// Why: a value with no scheme is not a well-formed Origin; treat as
