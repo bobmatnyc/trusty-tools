@@ -58,29 +58,34 @@
   });
 </script>
 
-<section class="rounded-lg border border-trusty-border bg-trusty-surface/60 p-4">
-  <div class="flex items-center justify-between">
-    <h2 class="text-sm font-semibold text-trusty-text">tcode daemon</h2>
+<section class="rounded border-1.5 border-trusty-border bg-trusty-card">
+  <div
+    class="flex items-center justify-between border-b border-trusty-border bg-trusty-raised px-4 py-2.5"
+  >
+    <h2 class="font-display text-xs font-bold uppercase tracking-wide text-trusty-text">
+      tcode daemon
+    </h2>
     <span
-      class={`flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
+      class={`rounded-sm px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide ${
         connected ? 'bg-status-ok/15 text-status-ok' : 'bg-status-error/15 text-status-error'
       }`}
     >
-      <span class={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-status-ok' : 'bg-status-error'}`}
-      ></span>
-      {connected ? 'Connected' : 'Disconnected'}
+      {connected ? 'connected' : 'disconnected'}
     </span>
   </div>
 
-  <p class="mt-1 text-xs text-trusty-text/60">{base}</p>
+  <div class="p-4">
+    <p class="font-mono text-xs text-trusty-text-muted">{base}</p>
 
-  {#if connected}
-    <pre class="mt-3 overflow-x-auto rounded bg-trusty-border/20 p-2 text-xs text-trusty-text">{JSON.stringify(
-        payload,
-        null,
-        2,
-      )}</pre>
-  {:else if error}
-    <p class="mt-3 text-xs text-status-error">{error}</p>
-  {/if}
+    {#if connected}
+      <pre
+        class="mt-3 overflow-x-auto rounded-sm border border-trusty-border bg-trusty-raised p-2 font-mono text-xs text-trusty-text">{JSON.stringify(
+          payload,
+          null,
+          2,
+        )}</pre>
+    {:else if error}
+      <p class="mt-3 text-xs text-status-error">{error}</p>
+    {/if}
+  </div>
 </section>

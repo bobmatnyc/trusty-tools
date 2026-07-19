@@ -2,56 +2,82 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Why: issue #3133 — light + dark themes that follow the OS appearance
- * live, with no manual toggle. Every themed color the components use
- * (via `tailwind.config.js`'s `trusty-*`/`status-*` tokens) reads one of
- * these custom properties, so this is the SINGLE place either theme's
- * actual values live.
+/* Why: Foundry retheme (issue #3153, docs/design/UI/design-system/tokens.css)
+ * — replaces the placeholder slate/indigo palette #3133 shipped with the
+ * Foundry rust-on-paper (light) / Night Shift (dark) values, 1:1 with the
+ * design system's hex values converted to space-separated RGB triples (see
+ * the format note below). Every themed color the components use (via
+ * `tailwind.config.js`'s `trusty-*`/`status-*` tokens) reads one of these
+ * custom properties, so this is the SINGLE place either theme's actual
+ * values live.
  * What: each `--color-*` value is a SPACE-SEPARATED RGB triple (`"R G B"`,
  * not `"#rrggbb"`) — required by `tailwind.config.js`'s
  * `rgb(var(--color-*) / <alpha-value>)` format, the only way Tailwind can
  * still generate opacity-modified utilities (`bg-status-ok/15`,
  * `text-trusty-text/60`, used throughout every component) for a
  * CSS-variable-backed color. `:root` sets the light theme as the default
- * (`color-scheme: light dark` tells the UA both are supported, with no
- * assumption about which is "native"); `@media (prefers-color-scheme:
- * dark)` overrides every variable for dark. This is *system-following
- * only* — there is no persisted preference and no manual light/dark switch
- * (explicitly out of scope for issue #3133); the values simply track the
- * OS setting live, including inside the Tauri webview: WebKit re-evaluates
- * `prefers-color-scheme` on the native "Appearance changed" notification
- * without a reload, the same mechanism a browser tab uses.
+ * (`color-scheme: light dark` tells the UA both are supported); the
+ * `[data-theme='dark']` block overrides every variable for dark.
+ *
+ * Activation (DOC-39 addendum AC-27): Foundry activates dark via
+ * `<html data-theme="dark">`, not directly off `prefers-color-scheme` — the
+ * OS-appearance → attribute bridge lives in `lib/theme-bootstrap.ts`, run
+ * once from `main.ts` before the shell mounts, with a `change` listener for
+ * live OS-appearance switching. System-following stays the only behavior
+ * (no manual toggle, no persisted preference — both out of scope for this
+ * pass); the bootstrap simply keeps the attribute in sync with the OS
+ * setting. No `@media (prefers-color-scheme: dark)` fallback is kept here:
+ * `<body>` has no paintable content before `main.ts` mounts `App.svelte`
+ * into `#app` (there's nothing on the page to flash), so a CSS-only
+ * fallback would only add a second place these values could drift apart —
+ * see the README guardrail this file's own hygiene test enforces.
  * Test: `lib/theme.test.ts` pins that both blocks exist, that the dark
  * override actually differs from the light default (real theming, not a
- * no-op), and that an opacity-modified utility class actually compiles a
- * rule in the built CSS (regression guard — a bare `var()` value passes
- * silently with zero opacity rules generated, which is exactly the bug this
- * RGB-triple format fixes). Manual verification: toggle System Settings >
- * Appearance while `pnpm tauri dev` is running and confirm the window
- * recolors. */
+ * no-op), that an opacity-modified utility class actually compiles a rule in
+ * the built CSS, and that activation is attribute-based (`[data-theme=
+ * 'dark']`), not a bare media query. Manual verification: toggle System
+ * Settings > Appearance while `pnpm tauri dev` is running and confirm the
+ * window recolors. */
 :root {
   color-scheme: light dark;
 
-  --color-primary: 79 70 229; /* indigo-600 (#4f46e5) */
-  --color-surface: 255 255 255; /* white */
-  --color-border: 226 232 240; /* slate-200 */
-  --color-text: 15 23 42; /* slate-900 */
-  --color-status-ok: 22 163 74; /* green-600 — darker for contrast on a light surface */
-  --color-status-error: 220 38 38; /* red-600 */
-  --color-status-warn: 217 119 6; /* amber-600 */
-  --color-status-neutral: 100 116 139; /* slate-500 */
+  --color-primary: 183 65 14; /* rust accent #B7410E */
+  --color-primary-hover: 138 47 11; /* #8A2F0B */
+  --color-surface: 245 239 231; /* warm paper #F5EFE7 */
+  --color-card: 255 253 249; /* #FFFDF9 */
+  --color-raised: 239 230 216; /* header strip / raised surface #EFE6D8 */
+  --color-border: 216 201 180; /* #D8C9B4 */
+  --color-border-strong: 196 176 150; /* #C4B096 */
+  --color-text: 43 28 18; /* #2B1C12 */
+  --color-text-secondary: 110 88 67; /* #6E5843 */
+  --color-text-muted: 138 116 96; /* #8A7460 */
+  --color-text-inverse: 255 255 255;
+  --color-status-ok: 63 111 42; /* #3F6F2A */
+  --color-status-error: 194 51 31; /* #C2331F */
+  --color-status-warn: 176 125 16; /* #B07D10 */
+  --color-status-neutral: 138 116 96; /* reuses text-muted — no new hue, per README guardrail */
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-surface: 15 23 42; /* slate-900 */
-    --color-border: 51 65 85; /* slate-700 */
-    --color-text: 241 245 249; /* slate-100 */
-    --color-status-ok: 34 197 94; /* green-500 — brighter for contrast on a dark surface */
-    --color-status-error: 239 68 68; /* red-500 */
-    --color-status-warn: 245 158 11; /* amber-500 */
-    --color-status-neutral: 100 116 139; /* unchanged — already mid-contrast both ways */
-  }
+[data-theme='dark'] {
+  /* Night Shift — same rust hue family, accent brightens one step to hold
+   * contrast on oxide paper; soft/translucent fills (the `/NN` opacity
+   * modifiers every component already uses) carry the overlay treatment
+   * automatically since they derive from these same base values. */
+  --color-primary: 217 119 66; /* #D97742 */
+  --color-primary-hover: 232 144 92; /* #E8905C */
+  --color-surface: 32 22 18; /* #201612 */
+  --color-card: 43 28 18; /* #2B1C12 */
+  --color-raised: 56 37 19; /* #382513 */
+  --color-border: 70 49 31; /* #46311F */
+  --color-border-strong: 92 65 38; /* #5C4126 */
+  --color-text: 240 231 216; /* #F0E7D8 */
+  --color-text-secondary: 203 182 156; /* #CBB69C */
+  --color-text-muted: 165 138 107; /* #A58A6B */
+  --color-text-inverse: 32 22 18; /* #201612 */
+  --color-status-ok: 143 191 106; /* #8FBF6A */
+  --color-status-error: 224 106 82; /* #E06A52 */
+  --color-status-warn: 217 168 58; /* #D9A83A */
+  --color-status-neutral: 165 138 107; /* reuses dark text-muted */
 }
 
 html,

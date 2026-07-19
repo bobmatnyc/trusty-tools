@@ -257,86 +257,96 @@
   }
 </script>
 
-<section class="mt-4 rounded-lg border border-trusty-border bg-trusty-surface/60 p-4">
-  <h2 class="text-sm font-semibold text-trusty-text">session monitor</h2>
+<section class="mt-4 rounded border-1.5 border-trusty-border bg-trusty-card">
+  <div class="border-b border-trusty-border bg-trusty-raised px-4 py-2.5">
+    <h2 class="font-display text-xs font-bold uppercase tracking-wide text-trusty-text">
+      session monitor
+    </h2>
+  </div>
 
-  {#if phase === 'connecting'}
-    <p class="mt-2 text-xs text-trusty-text/50">connecting…</p>
-  {:else if phase === 'daemon-unreachable'}
-    <p class="mt-2 flex items-center gap-1.5 text-xs text-status-error">
-      <span class="h-1.5 w-1.5 rounded-full bg-status-error"></span>
-      daemon unreachable{error ? ` — ${error}` : ''}
-    </p>
-  {:else if phase === 'no-session'}
-    <p class="mt-2 flex items-center gap-1.5 text-xs text-trusty-text/60">
-      <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
-      no active session to monitor
-    </p>
-  {:else if session}
-    <div class="mt-2 flex items-center gap-2 text-xs">
-      <span class={`h-1.5 w-1.5 rounded-full ${statusDotClass(session.status)}`}></span>
-      <span class="font-medium text-trusty-text">{session.status}</span>
-      <span class="text-trusty-text/30">·</span>
-      <span class="text-trusty-text/60">{formatElapsed(session.created_at, now)}</span>
-      <span class="text-trusty-text/30">·</span>
-      <span class="truncate text-trusty-text/40" title={session.id}>{session.id.slice(0, 8)}</span>
-    </div>
+  <div class="p-4">
+    {#if phase === 'connecting'}
+      <p class="text-xs text-trusty-text-muted">connecting…</p>
+    {:else if phase === 'daemon-unreachable'}
+      <p class="flex items-center gap-1.5 text-xs text-status-error">
+        <span class="h-1.5 w-1.5 rounded-full bg-status-error"></span>
+        daemon unreachable{error ? ` — ${error}` : ''}
+      </p>
+    {:else if phase === 'no-session'}
+      <p class="flex items-center gap-1.5 text-xs text-trusty-text-muted">
+        <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
+        no active session to monitor
+      </p>
+    {:else if session}
+      <div class="flex items-center gap-2 font-mono text-xs">
+        <span class={`h-1.5 w-1.5 rounded-full ${statusDotClass(session.status)}`}></span>
+        <span class="font-semibold uppercase tracking-wide text-trusty-text">{session.status}</span>
+        <span class="text-trusty-text-muted">·</span>
+        <span class="text-trusty-text-secondary">{formatElapsed(session.created_at, now)}</span>
+        <span class="text-trusty-text-muted">·</span>
+        <span class="truncate text-trusty-text-muted" title={session.id}>{session.id.slice(0, 8)}</span>
+      </div>
 
-    <p class="mt-2 truncate text-sm text-trusty-text" title={session.task}>{session.task}</p>
+      <p class="mt-2 truncate text-sm text-trusty-text" title={session.task}>{session.task}</p>
 
-    <div class="mt-3 space-y-1 text-xs">
-      {#if tailEntries.length === 0}
-        <p class="text-trusty-text/40">no turns recorded yet</p>
-      {:else}
-        {#each tailEntries as entry, i (i)}
-          <p class="text-trusty-text/70">
-            <span class="font-medium text-trusty-text/90">{entry.agent}</span>: {entry.preview}
-          </p>
-        {/each}
-      {/if}
-    </div>
-
-    {#if error}
-      <p class="mt-2 text-xs text-status-error">{error}</p>
-    {/if}
-
-    <div class="mt-3 flex items-center gap-2">
-      {#if canCancel}
-        {#if cancelPhase === 'idle'}
-          <button
-            type="button"
-            class="rounded border border-trusty-border px-2 py-1 text-xs text-trusty-text/70 hover:bg-trusty-border/20"
-            onclick={() => (cancelPhase = 'confirming')}
-          >
-            Cancel
-          </button>
-        {:else if cancelPhase === 'confirming'}
-          <span class="text-xs text-trusty-text/60">Confirm cancel?</span>
-          <button
-            type="button"
-            class="rounded border border-status-error px-2 py-1 text-xs text-status-error hover:bg-status-error/10"
-            onclick={doCancel}
-          >
-            Confirm cancel
-          </button>
-          <button
-            type="button"
-            class="rounded border border-trusty-border px-2 py-1 text-xs text-trusty-text/70 hover:bg-trusty-border/20"
-            onclick={() => (cancelPhase = 'idle')}
-          >
-            Never mind
-          </button>
+      <div class="mt-3 space-y-1 text-xs">
+        {#if tailEntries.length === 0}
+          <p class="text-trusty-text-muted">no turns recorded yet</p>
         {:else}
-          <span class="text-xs text-trusty-text/50">cancelling…</span>
+          {#each tailEntries as entry, i (i)}
+            <p class="text-trusty-text-secondary">
+              <span class="font-mono font-semibold text-trusty-text">{entry.agent}</span>: {entry.preview}
+            </p>
+          {/each}
         {/if}
-      {/if}
-    </div>
+      </div>
 
-    <p
-      class="mt-3 text-[11px] text-trusty-text/30"
-      title={`DOC-39 §4.6 AC-6.3's live search/memory-recall monitor (lane/query/hit_count/latency, docked-rail → inline settle) is not implemented here — GET /sessions/{id}/search-audit now exists (issue #3072) but this card has not been wired to it yet. Tracked at ${SEARCH_RECALL_GAP_ISSUE}`}
-    >
-      search/recall monitor (AC-6.3): not yet implemented — see issue #3108
-    </p>
-  {/if}
+      {#if error}
+        <p class="mt-2 text-xs text-status-error">{error}</p>
+      {/if}
+
+      <div class="mt-3 flex items-center gap-2">
+        {#if canCancel}
+          {#if cancelPhase === 'idle'}
+            <button
+              type="button"
+              class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+              onclick={() => (cancelPhase = 'confirming')}
+            >
+              cancel
+            </button>
+          {:else if cancelPhase === 'confirming'}
+            <span class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted"
+              >confirm cancel?</span
+            >
+            <button
+              type="button"
+              class="rounded-sm border-1.5 border-trusty-primary bg-trusty-primary/10 px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-primary-hover hover:bg-trusty-primary hover:text-trusty-text-inverse"
+              onclick={doCancel}
+            >
+              confirm cancel
+            </button>
+            <button
+              type="button"
+              class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+              onclick={() => (cancelPhase = 'idle')}
+            >
+              never mind
+            </button>
+          {:else}
+            <span class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted"
+              >cancelling…</span
+            >
+          {/if}
+        {/if}
+      </div>
+
+      <p
+        class="mt-3 text-[11px] text-trusty-text-muted"
+        title={`DOC-39 §4.6 AC-6.3's live search/memory-recall monitor (lane/query/hit_count/latency, docked-rail → inline settle) is not implemented here — GET /sessions/{id}/search-audit now exists (issue #3072) but this card has not been wired to it yet. Tracked at ${SEARCH_RECALL_GAP_ISSUE}`}
+      >
+        search/recall monitor (AC-6.3): not yet implemented — see issue #3108
+      </p>
+    {/if}
+  </div>
 </section>
