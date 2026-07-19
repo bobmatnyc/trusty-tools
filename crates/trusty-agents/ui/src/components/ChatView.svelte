@@ -9,6 +9,8 @@
   } from '../stores/app';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
+  import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
+  import { workflowState } from '../stores/workflow';
 
   let scrollEl: HTMLDivElement | undefined;
   let unlistenProgress: UnlistenFn | null = null;
@@ -168,6 +170,16 @@
         </div>
       {/if}
     {/each}
+
+    {#if $workflowState.phases.length > 0}
+      <!-- #3218: inline RESEARCH/PLAN/IMPLEMENT/VERIFY checklist for the
+           active task, fed live by the structured workflow store. -->
+      <div class="flex justify-start ml-4">
+        <div class="max-w-[85%] w-full">
+          <WorkflowPhaseCard />
+        </div>
+      </div>
+    {/if}
 
     {#if $isRunning}
       <div class="flex items-center justify-start gap-2 text-xs text-foundry-teal">

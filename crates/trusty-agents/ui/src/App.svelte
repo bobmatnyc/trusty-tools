@@ -1,14 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import Sidebar from './components/Sidebar.svelte';
   import ChatView from './components/ChatView.svelte';
   import InputArea from './components/InputArea.svelte';
   import ProjectsView from './components/ProjectsView.svelte';
   import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
-  import { invoke, isDesktop, connectEventSource, emitWebEvent, type AppEvent } from './lib/transport';
+  import PersonalityPanel from './components/PersonalityPanel.svelte';
+  import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
   import { apiAuthRequired, getCurrentApiToken, setApiToken, addMessage } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
+  // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
+  // comment for the full rationale. Additive to the flattened webBus path
+  // below, never a replacement.
+  import { handleWorkflowEvent, applyTaskResult, resetWorkflow, workflowState } from './stores/workflow';
   // Why: Importing the theme store has the side-effect of running applyTheme()
   // for the persisted theme, ensuring the `dark` class on <html> tracks the
   // user's preference for the lifetime of the app (the inline <head> script
@@ -19,8 +25,37 @@
   let apiError = '';
   // Why: Top-level view selector. Chat is the default; Projects shows the
   // /api/projects panel. Kept as a simple tab toggle to avoid pulling in a
-  // router for two views. (#341)
-  let activeView: 'chat' | 'projects' = 'chat';
+  // router for two views. (#341) 'personality' (#3061) shows the
+  // personalization-overlay editor.
+  let activeView: 'chat' | 'projects' | 'personality' = 'chat';
+  // Why (#3198 code-critic HIGH): the {#if}/{:else if} tab router below
+  // unmounts PersonalityPanel on navigation away from it, which would
+  // silently discard an unsaved edit buffer. Bound from PersonalityPanel's
+  // exported `unsavedChanges` prop so `switchView` can guard the transition
+  // BEFORE it happens (confirm() runs while the component is still mounted).
+  let personalityUnsaved = false;
+
+  /**
+   * Why: Centralizes tab navigation so the one place that can discard
+   * PersonalityPanel's unsaved buffer (by unmounting it) is also the one
+   * place that asks first. Simplest correct guard: a native `confirm()`
+   * when leaving 'personality' with unsaved changes.
+   * What: No-ops (asks for confirmation) when navigating AWAY from
+   * 'personality' while `personalityUnsaved` is true; otherwise switches
+   * `activeView` immediately.
+   * Test: Manual — type in the Personality editor without saving, click
+   * another tab, confirm a browser confirm() dialog blocks the switch;
+   * Cancel keeps the tab and the buffer; OK switches and discards.
+   */
+  function switchView(view: 'chat' | 'projects' | 'personality') {
+    if (activeView === 'personality' && view !== 'personality' && personalityUnsaved) {
+      const discard = confirm(
+        'You have unsaved changes in Personality. Discard them and switch tabs?',
+      );
+      if (!discard) return;
+    }
+    activeView = view;
+  }
   let tokenInput = '';
   let tokenError = '';
   let probingToken = false;
@@ -170,7 +205,43 @@
    * "Recent tasks" updates without a page refresh and ChatView shows live
    * progress text.
    */
+  /**
+   * Why (#3257 code-critic HIGH): `workflowState.resetWorkflow()` previously
+   * only fired on the SSE `session_started` event — but Tauri desktop mode
+   * never opens the SSE stream (`startEventStream()` below no-ops when
+   * `isDesktop()`; "Tauri has its own listen() bridge already"), so
+   * `handleWorkflowEvent` never runs there. Without this, a new desktop task
+   * would keep showing the PREVIOUS task's phase checklist / agents / files
+   * until the new task's own `task-complete` finally overwrote them —
+   * actively misleading mid-run. `task-progress` is emitted in BOTH modes
+   * (browser fallback's own polling loop and the Tauri `send_message`
+   * command) and its very first firing for a task always carries that
+   * task's id, so it's the earliest per-task signal available without
+   * touching `InputArea.svelte` or `src-tauri/**`.
+   * What: Resets + adopts a new task id the moment it's first seen. No-op
+   * when the id matches what's already tracked (the common case — most
+   * `task-progress` ticks repeat the same id) so this never clobbers
+   * in-flight browser/SSE phase data for the task already running; in
+   * browser mode `session_started` still performs its own reset as before
+   * (this only changes behavior for desktop, where it was previously a
+   * no-op because nothing ever called `resetWorkflow()`).
+   * Test: Manual — start a desktop task, let it reach IMPLEMENT, submit a
+   * second task before the first's `task-complete` arrives, confirm the
+   * phase card clears instead of showing the first task's stale phases.
+   */
+  function maybeAdoptNewTask(taskId: string | null | undefined) {
+    if (!taskId) return;
+    const current = get(workflowState);
+    if (current.taskId !== taskId) {
+      resetWorkflow();
+      workflowState.update((s) => ({ ...s, taskId, status: 'running' }));
+    }
+  }
+
   function bridgeEventToWebBus(ev: AppEvent) {
+    // #3217: feed the structured workflow store first — additive, never
+    // short-circuits the flattened-text switch below.
+    handleWorkflowEvent(ev);
     switch (ev.type) {
       case 'session_started':
         emitWebEvent('task-progress', {
@@ -330,15 +401,35 @@
     bootstrap();
     const onUnload = () => stopEventStream();
     window.addEventListener('beforeunload', onUnload);
+    // #3217: `task-complete`'s payload is the full `PmResponse` in Tauri
+    // desktop mode (phases_completed/files_modified/metadata included) and
+    // a narrower {id,status,narrative} shape from the browser fallback;
+    // `applyTaskResult` merges whichever fields are present. This is the
+    // only source of per-phase elapsed/cost/note and the files/tokens
+    // sections in either transport mode.
+    let unlistenWorkflowComplete: (() => void) | null = null;
+    listenEvent('task-complete', applyTaskResult).then((fn) => {
+      unlistenWorkflowComplete = fn;
+    });
+    // #3257 code-critic HIGH: the earliest per-task signal available in
+    // both transport modes — see `maybeAdoptNewTask` doc comment above.
+    let unlistenWorkflowProgress: (() => void) | null = null;
+    listenEvent<{ task_id?: string }>('task-progress', (p) => {
+      maybeAdoptNewTask(p?.task_id);
+    }).then((fn) => {
+      unlistenWorkflowProgress = fn;
+    });
     return () => {
       window.removeEventListener('beforeunload', onUnload);
+      unlistenWorkflowComplete?.();
+      unlistenWorkflowProgress?.();
       stopEventStream();
     };
   });
 </script>
 
 <div class="flex flex-col h-screen w-full relative bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text overflow-hidden">
-  <Header />
+  <Header {activeView} {apiReady} on:switch-view={(e) => switchView(e.detail.view)} />
   <div class="flex flex-1 min-h-0 w-full overflow-hidden">
   {#if $apiAuthRequired && !apiReady}
     <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
@@ -404,42 +495,29 @@
   {:else}
     <Sidebar {apiReady} {apiError} />
     <main class="flex flex-1 flex-col bg-foundry-light-bg dark:bg-foundry-bg">
-      <nav class="flex items-center gap-1 border-b border-foundry-light-border dark:border-foundry-border px-4 py-1">
-        <button
-          type="button"
-          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'chat'
-            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => (activeView = 'chat')}
-        >
-          Chat
-        </button>
-        <button
-          type="button"
-          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'projects'
-            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => (activeView = 'projects')}
-        >
-          Projects
-        </button>
-      </nav>
+      <!-- #3220: the Chat/Projects/Personality tab nav that used to live
+           here has been consolidated into <Header/>, which now owns tab
+           rendering and dispatches `switch-view` back up to `switchView()`
+           above (still the single gate on the Personality unsaved-changes
+           guard). -->
       {#if activeView === 'chat'}
-        <ChatView />
-        <RecapPanel />
-        <InputArea />
+        <!-- #3219: RecapPanel is now a persistent right rail (own scroll,
+             AGENTS ACTIVE / FILES TOUCHED / TOKENS + folded recap summary),
+             so it sits beside the chat+input column rather than stacked
+             between them. -->
+        <div class="flex flex-1 min-h-0">
+          <div class="flex flex-1 flex-col min-w-0">
+            <ChatView />
+            <InputArea />
+          </div>
+          <RecapPanel />
+        </div>
+      {:else if activeView === 'projects'}
+        <ProjectsView on:navigate={(e) => switchView(e.detail.view)} />
       {:else}
-        <ProjectsView on:navigate={(e) => (activeView = e.detail.view)} />
+        <PersonalityPanel bind:unsavedChanges={personalityUnsaved} />
       {/if}
     </main>
   {/if}
   </div>
-  <span
-    class="absolute top-14 right-3 z-30 text-[10px] px-2 py-0.5 rounded-full {desktop
-      ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-      : 'bg-foundry-amber/20 text-foundry-amber'}"
-    title={desktop ? 'Running inside Tauri (IPC)' : 'Running in browser (HTTP /api)'}
-  >
-    {desktop ? '⊞ Desktop' : '⟳ Web'}
-  </span>
 </div>

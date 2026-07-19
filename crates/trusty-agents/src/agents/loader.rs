@@ -85,43 +85,60 @@ impl AgentConfig {
     /// per-name loader only tried `<name>/agent.toml` and `<name>.toml` — so a
     /// user's `~/.trusty-agents/agents/my-assistant.md` was visible in the
     /// registry roster but FILE-NOT-FOUND at dispatch (every runner loads via
-    /// `by_name`/`by_name_async`, not the informational registry). This adds the
-    /// missing flat-`.md` tier so the documented flow actually dispatches. The
+    /// `by_name`/`by_name_async`, not the informational registry). #3055 added
+    /// the missing flat-`.md` tier but ONLY under a single `agents_dir()` — which
+    /// has no `$HOME` awareness at all (unlike
+    /// [`agent_search_paths`](crate::agents::registry::agent_search_paths), which
+    /// DOES search `~/.trusty-agents/agents`). So a personalization overlay
+    /// dropped in `~/.trusty-agents/agents/` was STILL FILE-NOT-FOUND at dispatch
+    /// whenever `TAGENT_CONFIG_DIR` was unset and the process CWD wasn't the
+    /// project root (#3061). This tries every tier under EACH candidate
+    /// directory from [`agents_dir_candidates`] — primary (`TAGENT_CONFIG_DIR` /
+    /// project-local) first, `$HOME/.trusty-agents/agents` as a fallback tier —
+    /// so the documented flow actually dispatches regardless of CWD. The
     /// `from_package` flag feeds [`Self::extends_shadow_fallback`], which must
     /// not let an unresolvable directory package silently shadow a complete flat
-    /// `<name>.toml`.
-    /// What: tries, in order under `agents_dir()`: (1) the directory package
-    /// (`<name>/agent.toml` + `persona.md`), (2) flat `<name>.toml`, (3) flat
-    /// `<name>.md` via [`parse_md_agent`](crate::agents::registry::parse_md_agent),
-    /// (4) the synchronous claude-mpm `.md` fallback (kept in lock-step with the
-    /// async loader's tiers so ancestor resolution is symmetric — see the
-    /// async/sync drift note in `by_name_async_unresolved`). Returns
-    /// `(config, came_from_package)`.
+    /// `<name>.toml` — and, since the package itself may have resolved from ANY
+    /// candidate directory (not just the primary one), the shadow rescue must
+    /// also search every candidate directory for the shadowing flat file rather
+    /// than assuming it lives in the same (primary) tier as the package.
+    /// What: for each directory in [`agents_dir_candidates`], tries, in order:
+    /// (1) the directory package (`<name>/agent.toml` + `persona.md`), (2) flat
+    /// `<name>.toml`, (3) flat `<name>.md` via
+    /// [`parse_md_agent`](crate::agents::registry::parse_md_agent). Once every
+    /// candidate directory is exhausted, falls through to (4) the synchronous
+    /// claude-mpm `.md` fallback (kept in lock-step with the async loader's
+    /// tiers so ancestor resolution is symmetric — see the async/sync drift note
+    /// in `by_name_async_unresolved`). Returns `(config, came_from_package)`.
     /// Test: `by_name_flat_md_extends_dispatches`,
-    /// `by_name_package_extends_shadow_falls_back_to_flat` (tests.rs).
+    /// `by_name_package_extends_shadow_falls_back_to_flat`,
+    /// `by_name_finds_flat_md_in_home_tier_when_project_dir_misses` (tests.rs).
     fn by_name_unresolved_src(name: &str) -> Result<(Self, bool)> {
-        // #482: Prefer the directory-package format when present.
-        let dir = agents_dir();
-        if let Some(cfg) = load_agent_package(&dir, name)? {
-            return Ok((cfg, true));
-        }
-        let toml_path = dir.join(format!("{name}.toml"));
-        if toml_path.exists() {
-            return Ok((Self::load(&toml_path)?, false));
-        }
-        // #3055: flat `.md` personalization overlay — the primary user surface.
-        let md_path = dir.join(format!("{name}.md"));
-        if md_path.exists() {
-            let cfg = crate::agents::registry::parse_md_agent(&md_path)
-                .with_context(|| format!("failed to load agent md {}", md_path.display()))?;
-            return Ok((cfg, false));
+        let dirs = agents_dir_candidates();
+        for dir in &dirs {
+            // #482: Prefer the directory-package format when present.
+            if let Some(cfg) = load_agent_package(dir, name)? {
+                return Ok((cfg, true));
+            }
+            let toml_path = dir.join(format!("{name}.toml"));
+            if toml_path.exists() {
+                return Ok((Self::load(&toml_path)?, false));
+            }
+            // #3055: flat `.md` personalization overlay — the primary user surface.
+            let md_path = dir.join(format!("{name}.md"));
+            if md_path.exists() {
+                let cfg = crate::agents::registry::parse_md_agent(&md_path)
+                    .with_context(|| format!("failed to load agent md {}", md_path.display()))?;
+                return Ok((cfg, false));
+            }
         }
         // claude-mpm compatibility tier (sync), symmetric with the async loader.
         if let Some(cfg) = crate::agents::claude_mpm_loader::find_agent_sync(name) {
             return Ok((cfg, false));
         }
         // Preserve the historical missing-`<name>.toml` error shape when nothing
-        // resolved.
+        // resolved — report against the primary (highest-priority) directory.
+        let toml_path = dirs[0].join(format!("{name}.toml"));
         Ok((Self::load(&toml_path)?, false))
     }
 
@@ -135,30 +152,41 @@ impl AgentConfig {
     /// silent correctness/security hazard (a `[tools]`-less `izzie/agent.toml`
     /// shadowing a locked-down flat `izzie.toml`). Once the resolver works
     /// end-to-end the normal path resolves the package and this fires only on
-    /// genuine failures.
-    /// What: when the offending config came from a package AND a flat
-    /// `<name>.toml` exists alongside, logs a `warn` naming both paths and loads
-    /// the flat file (resolving its OWN `extends` if any, forcing `name` to bind
-    /// to the flat file rather than the shadowing package). Otherwise the
-    /// original resolution error is returned with context.
-    /// Test: `by_name_package_extends_shadow_falls_back_to_flat`.
+    /// genuine failures. #3198 code-critic fix: `by_name_unresolved_src` (and
+    /// its async twin) now resolve the offending package from ANY candidate
+    /// directory in [`agents_dir_candidates`] — e.g. the `$HOME` fallback tier
+    /// — not just the primary one. A single-tier `agents_dir()` lookup here
+    /// would therefore search the WRONG directory whenever the package came
+    /// from a non-primary tier, and hard-fail even though a valid flat
+    /// `<name>.toml` shadow exists right next to the package.
+    /// What: when the offending config came from a package, searches every
+    /// candidate directory (same order as [`agents_dir_candidates`]) for a flat
+    /// `<name>.toml`; on the first match, logs a `warn` naming both paths and
+    /// loads the flat file (resolving its OWN `extends` if any, forcing `name`
+    /// to bind to the flat file rather than the shadowing package). Otherwise
+    /// the original resolution error is returned with context.
+    /// Test: `by_name_package_extends_shadow_falls_back_to_flat`,
+    /// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`.
     fn extends_shadow_fallback(
         name: &str,
         from_package: bool,
         err: crate::agents::extends::AgentExtendsError,
     ) -> Result<Self> {
-        let dir = agents_dir();
-        let flat = dir.join(format!("{name}.toml"));
-        if from_package && flat.exists() {
-            tracing::warn!(
-                agent = %name,
-                package = %dir.join(name).display(),
-                flat = %flat.display(),
-                error = %err,
-                "directory-package `extends` failed to resolve; falling back to the \
-                 complete flat <name>.toml (refusing to serve the unresolved partial package)"
-            );
-            return Self::by_name_flat_toml(name, &flat);
+        if from_package {
+            for dir in agents_dir_candidates() {
+                let flat = dir.join(format!("{name}.toml"));
+                if flat.exists() {
+                    tracing::warn!(
+                        agent = %name,
+                        package = %dir.join(name).display(),
+                        flat = %flat.display(),
+                        error = %err,
+                        "directory-package `extends` failed to resolve; falling back to the \
+                         complete flat <name>.toml (refusing to serve the unresolved partial package)"
+                    );
+                    return Self::by_name_flat_toml(name, &flat);
+                }
+            }
         }
         Err(anyhow::Error::new(err))
             .with_context(|| format!("failed to resolve `extends` chain for agent '{name}'"))
@@ -248,8 +276,11 @@ impl AgentConfig {
         // loader uses sync `std::fs`; the reads are small config files, so
         // the blocking cost is negligible relative to the LLM dispatch that
         // follows.
-        let dir = agents_dir();
-        let (cfg, from_package) = Self::by_name_async_unresolved(name, &dir).await?;
+        // #3061: iterate every candidate directory (primary, then the
+        // `$HOME/.trusty-agents/agents` fallback tier) — mirrors the sync
+        // `by_name_unresolved_src` fix.
+        let dirs = agents_dir_candidates();
+        let (cfg, from_package) = Self::by_name_async_unresolved(name, &dirs).await?;
         // #3055: resolve `extends` at load time (DOC-41 §2.5). Base lookups use
         // the sync unresolved loader — which now carries the SAME tier set as
         // the async loader (package → flat toml → flat md → claude-mpm), so a
@@ -272,48 +303,58 @@ impl AgentConfig {
     /// Why: `by_name_async` needs the raw, still-`extends`-bearing child before
     /// it walks the chain.
     /// What: mirrors [`Self::by_name_unresolved_src`]'s tier ORDER exactly so
-    /// sync and async resolve the same agents: directory package → flat
-    /// `<name>.toml` → flat `<name>.md` (#3055 personalization overlay) →
-    /// claude-mpm `.md` fallback. Returns `(config, came_from_package)`.
+    /// sync and async resolve the same agents: for each candidate directory
+    /// (primary, then `$HOME/.trusty-agents/agents`, #3061) — directory package
+    /// → flat `<name>.toml` → flat `<name>.md` (#3055 personalization overlay)
+    /// — then, once all directories are exhausted, the claude-mpm `.md`
+    /// fallback. Returns `(config, came_from_package)`.
     /// Test: `by_name_async_loads_plan_agent`,
     /// `by_name_async_flat_md_extends_dispatches`.
-    async fn by_name_async_unresolved(name: &str, dir: &Path) -> Result<(Self, bool)> {
-        if let Some(cfg) = load_agent_package(dir, name)? {
-            return Ok((cfg, true));
-        }
-        let path = dir.join(format!("{name}.toml"));
-        match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => Ok((Self::from_toml_str(&raw, &path)?, false)),
-            Err(e) => {
-                // #3055: flat `.md` personalization overlay tier, BEFORE the
-                // claude-mpm fallback — matching `by_name_unresolved_src`.
-                let md_path = dir.join(format!("{name}.md"));
-                if md_path.exists() {
-                    let cfg =
-                        crate::agents::registry::parse_md_agent(&md_path).with_context(|| {
-                            format!("failed to load agent md {}", md_path.display())
-                        })?;
-                    return Ok((cfg, false));
+    async fn by_name_async_unresolved(name: &str, dirs: &[PathBuf]) -> Result<(Self, bool)> {
+        for dir in dirs {
+            if let Some(cfg) = load_agent_package(dir, name)? {
+                return Ok((cfg, true));
+            }
+            let path = dir.join(format!("{name}.toml"));
+            match tokio::fs::read_to_string(&path).await {
+                Ok(raw) => return Ok((Self::from_toml_str(&raw, &path)?, false)),
+                Err(_e) => {
+                    // #3055: flat `.md` personalization overlay tier, BEFORE the
+                    // claude-mpm fallback — matching `by_name_unresolved_src`.
+                    let md_path = dir.join(format!("{name}.md"));
+                    if md_path.exists() {
+                        let cfg = crate::agents::registry::parse_md_agent(&md_path).with_context(
+                            || format!("failed to load agent md {}", md_path.display()),
+                        )?;
+                        return Ok((cfg, false));
+                    }
+                    // Neither tier matched in this directory; try the next
+                    // candidate directory before giving up.
                 }
-                // #128: Fallback to claude-mpm agent format (.md + YAML
-                // frontmatter) discovered under `.claude/agents/` (project)
-                // or `~/.claude/agents/` (user). Lets operators drop in
-                // claude-mpm agents without converting to TOML.
-                let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                if let Some(agent) =
-                    crate::agents::claude_mpm_loader::find_agent(name, &project_dir).await
-                {
-                    tracing::info!(
-                        agent = %name,
-                        source = %agent.source_path.display(),
-                        "loaded claude-mpm agent (fallback from missing TOML)"
-                    );
-                    return Ok((agent.to_agent_config(), false));
-                }
-                Err(anyhow::Error::new(e))
-                    .with_context(|| format!("failed to read agent config {}", path.display()))
             }
         }
+        // #128: Fallback to claude-mpm agent format (.md + YAML
+        // frontmatter) discovered under `.claude/agents/` (project)
+        // or `~/.claude/agents/` (user). Lets operators drop in
+        // claude-mpm agents without converting to TOML.
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some(agent) = crate::agents::claude_mpm_loader::find_agent(name, &project_dir).await
+        {
+            tracing::info!(
+                agent = %name,
+                source = %agent.source_path.display(),
+                "loaded claude-mpm agent (fallback from missing TOML)"
+            );
+            return Ok((agent.to_agent_config(), false));
+        }
+        // Preserve the historical missing-`<name>.toml` error shape when
+        // nothing resolved — report against the primary (highest-priority)
+        // directory by re-attempting the read to surface the real io error.
+        let path = dirs[0].join(format!("{name}.toml"));
+        let raw = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("failed to read agent config {}", path.display()))?;
+        Ok((Self::from_toml_str(&raw, &path)?, false))
     }
 
     /// Shared parsing + adapter-resolution path used by both `load` and
@@ -493,6 +534,40 @@ fn agents_dir() -> PathBuf {
             new_dir
         }
     }
+}
+
+/// Candidate agent directories in priority order for per-name dispatch
+/// (`by_name` / `by_name_async`).
+///
+/// Why: `agents_dir()` resolves to a SINGLE directory — `TAGENT_CONFIG_DIR`
+/// when set, else the CWD-relative project-local `.trusty-agents/agents` — with
+/// no `$HOME` awareness at all. The registry ROSTER
+/// ([`agent_search_paths`](crate::agents::registry::agent_search_paths)) DOES
+/// search `~/.trusty-agents/agents`, so a personalization overlay dropped
+/// there shows up in listings but was FILE-NOT-FOUND at dispatch (#3061) —
+/// every runner loads via `by_name`/`by_name_async`, never the informational
+/// registry. This adds `$HOME/.trusty-agents/agents` as an explicit fallback
+/// TIER (searched only after the primary directory misses), preserving the
+/// documented precedence: explicit `TAGENT_CONFIG_DIR` > project-local >
+/// `$HOME`.
+/// What: Returns `[agents_dir()]`, plus `$HOME/.trusty-agents/agents` appended
+/// when `HOME` is set and differs from the primary directory (avoids a
+/// redundant duplicate tier when they already coincide).
+/// Test: `by_name_finds_flat_md_in_home_tier_when_project_dir_misses`,
+/// `by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses`,
+/// `same_name_project_local_shadows_home_tier` (+ async),
+/// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`
+/// (tests/loading.rs).
+fn agents_dir_candidates() -> Vec<PathBuf> {
+    let primary = agents_dir();
+    let mut dirs = vec![primary.clone()];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home_dir = PathBuf::from(home).join(".trusty-agents/agents");
+        if home_dir != primary {
+            dirs.push(home_dir);
+        }
+    }
+    dirs
 }
 
 // Why: Helper kept available for ad-hoc tooling that needs the flat

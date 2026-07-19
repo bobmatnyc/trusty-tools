@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 
 use crate::api::types::{PhaseProgress, PmResponse, PmStatus};
 use crate::events::{self, Event};
@@ -132,20 +133,119 @@ impl AppState {
     pub(super) async fn upsert(&self, id: String, resp: PmResponse) {
         let snapshot = {
             let mut store = self.inner.lock().await;
-            let was_absent = !store.responses.contains_key(&id);
-            store.responses.insert(id.clone(), resp);
-            if was_absent {
-                store.order.push(id);
-            }
-            // Trim to MAX_RETAINED by dropping the oldest entries.
-            while store.order.len() > MAX_RETAINED {
-                let old = store.order.remove(0);
-                store.responses.remove(&old);
-            }
-            store.responses.clone()
+            insert_and_trim(&mut store, id, resp)
         };
         // #212: Persist outside the lock — disk I/O shouldn't block readers.
         persist_tasks(&snapshot).await;
+    }
+
+    /// Store a background task's terminal result, unless the task was
+    /// already marked `Cancelled` by `DELETE /api/task/:id` (#3063).
+    ///
+    /// Why: `try_cancel` and a task's own completion race on the same
+    /// `AppState`: the client may call `DELETE /api/task/:id` at nearly the
+    /// same instant the background future finishes computing its result.
+    /// `AbortHandle::abort()` is cooperative — it only takes effect at the
+    /// task's next `.await` point — so a task that already produced its
+    /// final value before the abort signal lands would otherwise overwrite
+    /// the cancelled record with a stale success/failure a moment later.
+    /// Both `submit_task` code paths call this instead of `upsert` for their
+    /// final result so cancellation, once recorded, is sticky.
+    /// What: Removes the task's stored `AbortHandle` (it's done either way)
+    /// and, only if the current stored status isn't already `Cancelled`,
+    /// performs the same insert/trim/persist `upsert` does.
+    /// Test: `cancel_running_task_marks_cancelled` covers this directly —
+    /// its final assertions check that a late `finalize_task` call from an
+    /// aborted future does not clobber the already-cancelled record.
+    pub(super) async fn finalize_task(&self, id: String, resp: PmResponse) {
+        let snapshot = {
+            let mut store = self.inner.lock().await;
+            store.handles.remove(&id);
+            let already_cancelled = matches!(
+                store.responses.get(&id),
+                Some(r) if r.status == PmStatus::Cancelled
+            );
+            if already_cancelled {
+                None
+            } else {
+                Some(insert_and_trim(&mut store, id, resp))
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            persist_tasks(&snapshot).await;
+        }
+    }
+
+    /// Register the abort handle for a freshly spawned background task
+    /// (#3063).
+    ///
+    /// Why: `submit_task` calls this right after `tokio::spawn` so
+    /// `DELETE /api/task/:id` has something to abort. Registration happens
+    /// after spawn (the handle only exists once the `JoinHandle` does), so a
+    /// pathologically fast task could finish and call `finalize_task` before
+    /// this runs; we guard against orphaning the handle by skipping storage
+    /// when the task has already reached a terminal status by the time we
+    /// acquire the lock.
+    /// What: Inserts `handle` keyed by `id`, unless `id`'s stored response is
+    /// already non-`Running`.
+    /// Test: exercised indirectly by every test in `tests::cancel` via
+    /// `spawn_fake_running_task` (the normal not-yet-terminal insert path);
+    /// the pathologically-fast-completion terminal-skip guard itself has no
+    /// dedicated regression test yet.
+    pub(super) async fn register_handle(&self, id: &str, handle: AbortHandle) {
+        let mut store = self.inner.lock().await;
+        let terminal = matches!(
+            store.responses.get(id),
+            Some(r) if r.status != PmStatus::Running
+        );
+        if !terminal {
+            store.handles.insert(id.to_string(), handle);
+        }
+    }
+
+    /// Abort an in-flight task and mark it `Cancelled` (#3063).
+    ///
+    /// Why: The primitive behind `DELETE /api/task/:id`. Checking status and
+    /// removing/aborting the handle happen under a single lock acquisition
+    /// so a concurrent `finalize_task` can't race between the check and the
+    /// write.
+    /// What: 404-equivalent (`NotFound`) for unknown ids; `AlreadyTerminal`
+    /// (carrying the existing status) when the task isn't `Running`; on
+    /// `Running`, removes+aborts the stored handle (which, for the
+    /// subprocess path, triggers `Child`'s `kill_on_drop` and sends the OS
+    /// process a kill signal once the future is dropped), overwrites the
+    /// stored response with `PmResponse::cancelled(id)`, persists, and
+    /// publishes `Event::SessionCancelled`.
+    /// Test: `cancel_running_task_marks_cancelled`, `cancel_unknown_id_404`,
+    /// `cancel_already_done_409`.
+    pub(super) async fn try_cancel(&self, id: &str) -> CancelOutcome {
+        let (outcome, handle) = {
+            let mut store = self.inner.lock().await;
+            match store.responses.get(id) {
+                None => (CancelOutcome::NotFound, None),
+                Some(r) if r.status != PmStatus::Running => {
+                    (CancelOutcome::AlreadyTerminal(r.status.clone()), None)
+                }
+                Some(_) => {
+                    let handle = store.handles.remove(id);
+                    store
+                        .responses
+                        .insert(id.to_string(), PmResponse::cancelled(id));
+                    (CancelOutcome::Cancelled, handle)
+                }
+            }
+        };
+        if let Some(h) = handle {
+            h.abort();
+        }
+        if matches!(outcome, CancelOutcome::Cancelled) {
+            let snapshot = self.inner.lock().await.responses.clone();
+            persist_tasks(&snapshot).await;
+            events::publish(Event::SessionCancelled {
+                session_id: id.to_string(),
+            });
+        }
+        outcome
     }
 
     /// Fetch a stored response by id.
@@ -167,11 +267,18 @@ impl AppState {
     /// waiting for the workflow to finish.
     /// What: Looks up the response by `id`; if a progress entry with the same
     /// `name` already exists it's overwritten (so `running → done` collapses
-    /// into the latest state); otherwise it's appended.
+    /// into the latest state); otherwise it's appended. #3063: a task
+    /// already marked `Cancelled` ignores further progress — the subprocess
+    /// may emit a few more lines before its kill signal lands, and those
+    /// shouldn't resurrect detail onto a record pollers already treat as
+    /// terminal.
     /// Test: Unit-tested via `app_state_append_progress_replaces_by_name`.
     pub(super) async fn append_progress(&self, id: &str, ev: PhaseProgress) {
         let mut store = self.inner.lock().await;
         if let Some(resp) = store.responses.get_mut(id) {
+            if resp.status == PmStatus::Cancelled {
+                return;
+            }
             if let Some(slot) = resp.phases_completed.iter_mut().find(|p| p.name == ev.name) {
                 *slot = ev;
             } else {
@@ -200,27 +307,42 @@ impl AppState {
     /// Clear all tasks and return the count of tasks that were cancelled.
     ///
     /// Why: `POST /api/clear-context` lets the UI offer a one-click "start
-    /// fresh" action without restarting the server. Callers that had running
-    /// sessions receive a `SessionCancelled` event so SSE subscribers can
-    /// update their UI state before the page reloads.
-    /// What: Drains the task store, emits `SessionCancelled` for every task
-    /// that was still in `Running` state, and returns the cancellation count.
-    /// Test: Submit a task (status=running), call clear_tasks, assert list
-    /// returns empty and the count matches.
+    /// fresh" action without restarting the server. Before #3063 this only
+    /// wiped the in-memory record — spawned futures and subprocesses kept
+    /// running to completion, orphaned, which violated the obvious user
+    /// expectation that "clear" means "stop". Now it aborts every running
+    /// task's stored handle (same mechanism `DELETE /api/task/:id` uses)
+    /// before dropping the store, so in-process futures are dropped and
+    /// subprocess children are killed via `kill_on_drop`.
+    /// What: Drains the task store, aborts each running task's handle,
+    /// emits `SessionCancelled` for every task that was still in `Running`
+    /// state, and returns the cancellation count.
+    /// Test: `clear_context_now_aborts_running_task`.
     pub(super) async fn clear_tasks(&self) -> usize {
-        let mut store = self.inner.lock().await;
-        let running_ids: Vec<String> = store
-            .responses
-            .iter()
-            .filter(|(_, r)| r.status == PmStatus::Running)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let (running_ids, handles) = {
+            let mut store = self.inner.lock().await;
+            let running_ids: Vec<String> = store
+                .responses
+                .iter()
+                .filter(|(_, r)| r.status == PmStatus::Running)
+                .map(|(id, _)| id.clone())
+                .collect();
+            let handles: Vec<AbortHandle> = running_ids
+                .iter()
+                .filter_map(|id| store.handles.remove(id))
+                .collect();
+            store.responses.clear();
+            store.order.clear();
+            store.handles.clear();
+            (running_ids, handles)
+        };
+        for handle in handles {
+            handle.abort();
+        }
         let cancelled = running_ids.len();
         for id in running_ids {
             events::publish(Event::SessionCancelled { session_id: id });
         }
-        store.responses.clear();
-        store.order.clear();
         cancelled
     }
 }
@@ -230,7 +352,10 @@ impl AppState {
 /// Why: Backs `AppState` polling + listing with insertion-order tracking for
 /// LRU eviction.
 /// What: `responses` maps task_id → response; `order` records insertion
-/// order, newest last.
+/// order, newest last; `handles` (#3063) maps task_id → the abort handle for
+/// its still-running background future, so `DELETE /api/task/:id` and
+/// `clear_tasks` have something to abort. Entries are removed once a task
+/// reaches a terminal status (`finalize_task`, `try_cancel`, `clear_tasks`).
 /// Test: Exercised by `AppState` tests.
 #[derive(Default)]
 pub(super) struct TaskStore {
@@ -238,6 +363,80 @@ pub(super) struct TaskStore {
     pub(super) responses: HashMap<String, PmResponse>,
     /// Insertion order for eviction; newest last.
     pub(super) order: Vec<String>,
+    /// task_id -> abort handle for an in-flight background task (#3063).
+    pub(super) handles: HashMap<String, AbortHandle>,
+}
+
+/// Outcome of `AppState::try_cancel`.
+///
+/// Why: Gives `DELETE /api/task/:id` a typed result to translate into an
+/// HTTP status instead of re-deriving "is this cancellable" from a
+/// `PmResponse` after the fact.
+/// What: `NotFound` (404), `AlreadyTerminal` (409, carries the existing
+/// status), `Cancelled` (200 — the task was running and is now aborted).
+/// Test: `cancel_running_task_marks_cancelled`, `cancel_unknown_id_404`,
+/// `cancel_already_done_409`.
+pub(super) enum CancelOutcome {
+    NotFound,
+    AlreadyTerminal(PmStatus),
+    Cancelled,
+}
+
+/// Insert `resp` for `id`, tracking insertion order and trimming to
+/// `MAX_RETAINED`. Returns a clone of the resulting map for the caller to
+/// persist outside the lock.
+///
+/// Why: Shared by `upsert` (always overwrites) and `finalize_task` (which
+/// adds a cancellation guard before calling this). Keeping the
+/// insert/track/trim logic in one place avoids the two call sites drifting.
+/// A naive index-0 FIFO eviction would silently orphan a genuinely
+/// `Running` task once `MAX_RETAINED` unrelated tasks churn through the
+/// store: its `responses`/`order` row disappears while its `AbortHandle`
+/// stays in `handles` forever, and `try_cancel` (which looks the id up in
+/// `responses` first) then 404s a task that is very much still alive
+/// (issue #3063 code review).
+/// What: Inserts, appends to `order` iff the key was previously absent,
+/// then evicts entries past `MAX_RETAINED` — walking forward from the
+/// oldest to find the first entry whose status isn't `Running` and
+/// evicting that one instead of blindly evicting index 0, removing its
+/// `handles` entry too so the maps stay in lockstep. If every retained row
+/// happens to be `Running`, eviction is skipped entirely for this call
+/// (never kill a live task to make room) — in practice this only lets the
+/// store grow transiently, since concurrently `Running` tasks are rare.
+/// Test: `app_state_trims_to_max_retained` (via `upsert`, all-terminal
+/// case); `cancel_survives_fifo_eviction_pressure` (a `Running` task
+/// planted before `MAX_RETAINED` terminal tasks must still be reachable).
+fn insert_and_trim(
+    store: &mut TaskStore,
+    id: String,
+    resp: PmResponse,
+) -> HashMap<String, PmResponse> {
+    let was_absent = !store.responses.contains_key(&id);
+    store.responses.insert(id.clone(), resp);
+    if was_absent {
+        store.order.push(id);
+    }
+    while store.order.len() > MAX_RETAINED {
+        let mut evict_idx = None;
+        for (i, oid) in store.order.iter().enumerate() {
+            let is_running = matches!(
+                store.responses.get(oid),
+                Some(r) if r.status == PmStatus::Running
+            );
+            if !is_running {
+                evict_idx = Some(i);
+                break;
+            }
+        }
+        let Some(idx) = evict_idx else {
+            // Every retained row is Running — don't evict a live task.
+            break;
+        };
+        let old = store.order.remove(idx);
+        store.responses.remove(&old);
+        store.handles.remove(&old);
+    }
+    store.responses.clone()
 }
 
 /// Path where the task snapshot is persisted.
@@ -266,7 +465,11 @@ async fn load_persisted_tasks() -> Option<TaskStore> {
     let responses: HashMap<String, PmResponse> = serde_json::from_slice(&bytes).ok()?;
     let mut order: Vec<String> = responses.keys().cloned().collect();
     order.sort(); // deterministic, even if not original order
-    Some(TaskStore { responses, order })
+    Some(TaskStore {
+        responses,
+        order,
+        handles: HashMap::new(),
+    })
 }
 
 /// Persist the given task map to disk atomically.

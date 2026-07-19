@@ -153,6 +153,40 @@ pub mod agents;
 ///      submodule in place.
 pub mod skills;
 
+/// `WorkstreamConnector` trait + value types: the DOC-44 "engineering lead /
+/// virtual twin" architecture's Layer 1 tool-control surface (issue #3007,
+/// twin Phase 1).
+///
+/// Why: DOC-44 requires a unified, tool-agnostic session-control trait both
+/// `trusty-mpm` and `trusty-code` implement, living one level below both so
+/// neither harness crate has to depend on the other. See the module's own
+/// docs for the full DOC-44/DOC-42 naming-correction context.
+/// What: re-exports `WorkstreamConnector`, its request/response types, the
+/// `ConnectorError` failure enum, and `ConnectorTestKit`'s shared
+/// conformance assertions. The concrete tm/tcode implementations live in
+/// their owning crates, not here.
+/// Test: `cargo test -p trusty-agents-common connectors::` exercises every
+/// submodule in place.
+pub mod connectors;
+
+/// Heterogeneous workstream ledger: the DOC-44 "engineering lead / virtual
+/// twin" architecture's Layer 2 persisted state (issue #3008, twin Phase 2).
+///
+/// Why: DOC-44 §8 Phase 2 needs a harness-tagged (`tm`/`tcode`) registry the
+/// eventual lead agent uses to track workstreams across both tools, built
+/// directly on Phase 1's `connectors::BackendParams` tagging. See the
+/// module's own docs for the naming correction (issue title says "DOC-42",
+/// the correct id is DOC-44) and its relationship to `session_registry`
+/// (a different, narrower, already-wired registry — left untouched).
+/// What: `Workstream`/`Harness`/`WorkstreamStatus`/`Priority`/`NewWorkstream`
+/// value types, the JSON-backed `WorkstreamLedger` (create/list/get/query/
+/// update), `LedgerError`, and the `LedgerRecovery` seam
+/// (`JsonFileRecovery` default + `TrustyMemoryRecovery` stub, blocked on
+/// issue #3228).
+/// Test: `cargo test -p trusty-agents-common workstreams::` exercises every
+/// submodule in place.
+pub mod workstreams;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

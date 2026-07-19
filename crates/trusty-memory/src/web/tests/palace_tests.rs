@@ -196,6 +196,106 @@ async fn http_create_drawer_runs_auto_kg_extraction() {
     );
 }
 
+/// Issue #3225 — `POST .../drawers` runs the signal/noise QUALITY gate
+/// (`trusty_common::memory_core::filter`) on `content` by default, and a
+/// JSON-shaped payload is a designed rejection target: `non_alphabetic_ratio`
+/// counts braces/quotes/colons/digits as non-alphabetic, and the daemon's own
+/// `non_alpha_ratio_detects_json` unit test asserts a small JSON object
+/// crosses the 0.5 ratio it checks (well above the gate's 0.80 reject
+/// threshold). Without an opt-out, a caller that deliberately wants to store
+/// structured content verbatim (e.g. trusty-agents' `TrustyMemoryClient`,
+/// which JSON-serializes its payload as `content` for lossless round-tripping)
+/// gets a 500 on every write.
+///
+/// Why: proves the gate is still active (the safe default) for ordinary
+/// callers that don't opt in.
+/// What: posts a small JSON-object `content` with no `force` field and
+/// asserts the response is NOT 200 OK.
+/// Test: this test; paired with
+/// `create_drawer_force_bypasses_quality_gate_for_json_content` below.
+#[tokio::test]
+async fn create_drawer_rejects_json_content_without_force() {
+    let state = test_state();
+    let palace = Palace {
+        id: PalaceId::new("force-gate-reject"),
+        name: "force-gate-reject".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("force-gate-reject"),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create_palace");
+
+    let app = router().with_state(state.clone());
+    let body = json!({
+        "content": "{\"score\":0.42,\"id\":\"a1b2\",\"tier\":3}",
+    })
+    .to_string();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/force-gate-reject/drawers")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "JSON-shaped content without `force` must still be rejected by the quality gate"
+    );
+}
+
+/// Why: proves `force: true` on `CreateDrawerBody` (issue #3225) reaches
+/// `RememberOptions::force` and bypasses the QUALITY gate for the exact
+/// content shape the previous test proves is rejected without it.
+/// What: posts the same JSON-object `content` with `"force": true` and
+/// asserts 200 OK.
+/// Test: this test.
+#[tokio::test]
+async fn create_drawer_force_bypasses_quality_gate_for_json_content() {
+    let state = test_state();
+    let palace = Palace {
+        id: PalaceId::new("force-gate-accept"),
+        name: "force-gate-accept".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("force-gate-accept"),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create_palace");
+
+    let app = router().with_state(state.clone());
+    let body = json!({
+        "content": "{\"score\":0.42,\"id\":\"a1b2\",\"tier\":3}",
+        "force": true,
+    })
+    .to_string();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/force-gate-accept/drawers")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "`force: true` must bypass the quality gate for JSON-shaped content"
+    );
+}
+
 #[tokio::test]
 async fn create_then_list_palace() {
     let state = test_state();

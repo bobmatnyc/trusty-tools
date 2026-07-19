@@ -50,6 +50,17 @@ pub mod core;
 /// Test: URL construction and the command model are covered by the unit suite.
 pub mod client;
 
+/// tm's `WorkstreamConnector` implementation (DOC-44 twin Phase 1, #3007).
+///
+/// Why: the DOC-44 "engineering lead / virtual twin" architecture needs a
+/// tool-agnostic session-control surface; tm's implementation wraps the
+/// daemon's existing managed-session HTTP routes rather than duplicating
+/// their logic. See `connectors::tm` module docs for the full route mapping.
+/// What: [`connectors::TmConnector`] implements
+/// `trusty_agents_common::connectors::WorkstreamConnector`.
+/// Test: `cargo test -p trusty-mpm connectors::`.
+pub mod connectors;
+
 /// Managed session subsystem: records, persistence, lifecycle manager.
 ///
 /// Why: the session-manager MVP tracks every agent session the daemon spawns so
