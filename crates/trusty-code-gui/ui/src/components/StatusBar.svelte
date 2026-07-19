@@ -1,33 +1,38 @@
 <script lang="ts">
-  // Why: DOC-39 §6.2 Phase 1 UI — "the status bar (readiness + budget)".
-  // Both halves are pure wiring: `GET /sessions` + `GET /sessions/{id}/readiness`
-  // landed with REST Slice 2 (#2983, squash 15156b42), and `GET
-  // /sessions/{id}/budget` (issue #3015, PR #3042, squash 0bec593f) closed
-  // the budget data gap this component previously called out — this is a
-  // thin `fetch()` client over both, identically to `HealthPanel.svelte`
-  // (no Tauri command, no client-side computation of daemon state beyond
-  // the DOC-39 §4.5 AC-5.7 threshold classification in
-  // `lib/context-budget.ts`).
+  // Why: DOC-39 §6.2 Phase 1 UI — "the status bar (readiness + budget)",
+  // extended per the issue #3153 shell rebuild's segment list: "workstream
+  // state · PROJECT binding · SEARCH readiness · MEM · AGENTS mode ·
+  // TOKENS · COST". `GET /sessions` + `GET /sessions/{id}/readiness`
+  // landed with REST Slice 2 (#2983, squash 15156b42), `GET
+  // /sessions/{id}/budget` (issue #3015, PR #3042) supplies TOKENS, and
+  // this rebuild adds one more chained fetch — `GET /sessions/{id}` — for
+  // the fields already used elsewhere (`SessionMonitor.svelte`) that this
+  // bar didn't previously read: `project` (the PROJECT segment) and `agent`
+  // (the AGENTS-mode segment). MEM and COST have no daemon route yet
+  // (memory-palace stats need #3181's aggregation; live cost is #3254) —
+  // both render an honest static "n/a"/stub rather than a fabricated
+  // value, same discipline `budgetLabel`'s "no data yet" already
+  // established. `HealthPanel.svelte` is REMOVED (build brief: "fold
+  // daemon-unreachable signal into status bar") — this component's own
+  // `daemon-unreachable` phase already reports the identical fact.
   //
-  // What: Polls `GET /sessions` then `GET /sessions/{id}/readiness` and
-  // `GET /sessions/{id}/budget` for the session `pickActiveSession` selects,
-  // every `POLL_MS`, via a Svelte 5 `$effect` that returns its own teardown
-  // — no `onMount`/`onDestroy`. The teardown clears the interval AND aborts
-  // one `AbortController` shared by every poll's `fetch()` calls;
-  // `refresh()` also re-checks `signal.aborted` after each `await` before
-  // writing `phase`/`session`/`readiness`/`budget`/`error`, so an in-flight
-  // poll genuinely abandons its result on unmount (the network request is
-  // cancelled, not merely ignored) rather than racing a disposed effect
-  // scope. Renders one of four states: `daemon-unreachable` (the
-  // `/sessions` fetch itself failed), `no-session` (daemon reachable, zero
-  // sessions), `ready` (readiness + the budget slot — `recorded` renders the
-  // real working-context %, `never_recorded` renders a labeled "no data
-  // yet" rather than a fabricated `0%`), each as a `.statusbar` child —
-  // never hidden, per DOC-39 §4.4 AC-4.2's "locked, not hidden" chrome
-  // rule. A budget fetch failure (session reachable, budget route errors)
-  // degrades the budget slot to "no data yet" without dropping the whole
-  // status bar to `daemon-unreachable`, mirroring the existing readiness
-  // partial-failure handling below.
+  // What: Polls `GET /sessions`, then `GET /sessions/{id}`,
+  // `GET /sessions/{id}/readiness`, and `GET /sessions/{id}/budget` for the
+  // session `pickActiveSession` selects, every `POLL_MS`, via a Svelte 5
+  // `$effect` that returns its own teardown — no `onMount`/`onDestroy`. The
+  // teardown clears the interval AND aborts one `AbortController` shared by
+  // every poll's `fetch()` calls; `refresh()` also re-checks
+  // `signal.aborted` after each `await` before writing state, so an
+  // in-flight poll genuinely abandons its result on unmount. Renders one of
+  // four phases: `daemon-unreachable` (the `/sessions` fetch itself
+  // failed), `no-session` (daemon reachable, zero sessions), `ready` (all
+  // seven segments — each as a `.statusbar` child, never hidden, per
+  // DOC-39 §4.4 AC-4.2's "locked, not hidden" chrome rule). A detail/
+  // readiness/budget fetch failure (session reachable, one sub-route
+  // errors) degrades that ONE segment to "no data yet"/"n/a" without
+  // dropping the whole status bar to `daemon-unreachable` — the existing
+  // readiness partial-failure discipline, now applied uniformly to every
+  // segment.
   //
   // Test: `session-status.test.ts` covers `pickActiveSession`;
   // `context-budget.test.ts` covers `classifyBudget`/`budgetLabel`/
@@ -45,6 +50,7 @@
   import {
     pickActiveSession,
     type ReadinessQuery,
+    type SessionDetail,
     type SessionListResponse,
     type SessionSummary,
   } from '../lib/session-status';
@@ -55,6 +61,7 @@
 
   let phase = $state<Phase>('connecting');
   let session = $state<SessionSummary | null>(null);
+  let detail = $state<SessionDetail | null>(null);
   let readiness = $state<ReadinessQuery | null>(null);
   let budget = $state<ContextBudgetQuery | null>(null);
   let error = $state<string | null>(null);
@@ -82,6 +89,7 @@
       if (!signal.aborted) {
         phase = 'daemon-unreachable';
         session = null;
+        detail = null;
         readiness = null;
         budget = null;
         error = e instanceof Error ? e.message : String(e);
@@ -94,12 +102,39 @@
     if (!active) {
       phase = 'no-session';
       session = null;
+      detail = null;
       readiness = null;
       budget = null;
       error = null;
       return;
     }
     session = active;
+
+    try {
+      const res = await fetch(`${base}/sessions/${active.id}`, { signal });
+      if (res.status === 404) {
+        // Reachable daemon, just-listed session vanished mid-poll — same
+        // partial-case handling every other poller in this codebase applies.
+        if (!signal.aborted) {
+          phase = 'no-session';
+          session = null;
+          detail = null;
+          readiness = null;
+          budget = null;
+          error = null;
+        }
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as SessionDetail;
+      if (!signal.aborted) detail = body;
+    } catch {
+      // PROJECT/AGENTS-mode segments degrade to "n/a" — the session is
+      // reachable (we just listed it), so this is a partial failure, not
+      // "no daemon".
+      if (!signal.aborted) detail = null;
+    }
+    if (signal.aborted) return;
 
     try {
       const res = await fetch(`${base}/sessions/${active.id}/readiness`, { signal });
@@ -184,18 +219,25 @@
       no active session
     </span>
   {:else}
-    <div class="flex items-center gap-4">
+    <div class="flex items-center gap-4 overflow-x-auto">
+      <span title={session?.id}>workstream: {session?.status ?? 'unknown'}</span>
+      <span title={detail?.task}>project: {detail?.project ?? session?.project ?? 'projectless'}</span>
       <span class="flex items-center gap-1.5" title={session?.id}>
         <span class={`h-1.5 w-1.5 rounded-full ${readinessDotClass()}`}></span>
-        readiness: {readinessLabel()}
+        search: {readinessLabel()}
       </span>
+      <span title="Memory-palace stats need #3181's service-status aggregation — not built yet">
+        mem: n/a
+      </span>
+      <span>agents: {detail?.agent ?? 'n/a'}</span>
       <span
         class={`flex items-center gap-1.5 ${classifyBudget(budget) === 'warn' ? 'text-status-error' : ''}`}
         title={budgetTitle(budget)}
       >
         <span class={`h-1.5 w-1.5 rounded-full ${budgetDotClass(budget)}`}></span>
-        budget: {budgetLabel(budget)}
+        tokens: {budgetLabel(budget)}
       </span>
+      <span title="Live cost tracking is issue #3254 — not built yet">cost: —</span>
     </div>
     {#if session}
       <span class="truncate normal-case text-trusty-text-muted" title={session.id}

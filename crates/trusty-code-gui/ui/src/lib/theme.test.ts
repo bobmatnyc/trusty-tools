@@ -112,7 +112,16 @@ describe('theme values (src/app.css) — issue #3153 Foundry palette', () => {
     // Unlike the prior #3133 palette (which kept --color-primary constant
     // across themes), Foundry's rust accent brightens one step in dark
     // (#B7410E -> #D97742, tokens.css), so every token this file defines is
-    // expected to differ — there is no "same in both themes" exception here.
+    // expected to differ...
+    //
+    // ...EXCEPT the two `.wsrail` chassis ink tokens (issue #3153 shell
+    // rebuild): `sidebar-text`/`sidebar-muted` are a dark chassis's own ink
+    // colors, not a themed surface — the rail stays a dark chassis in BOTH
+    // app themes (docs/design/UI/design-system/tokens.css ships the same
+    // hex for both), so there is nothing to invert. `sidebar-bg`/
+    // `sidebar-border`/`sidebar-active` still differ (the chassis itself
+    // steps one shade darker in Night Shift) and are NOT exempted.
+    const CONSTANT_ACROSS_THEMES = new Set(['color-sidebar-text', 'color-sidebar-muted']);
     const rootBlock = block(appCss, /:root\s*{([^}]*)}/);
     const darkBlock = block(appCss, /\[data-theme=['"]dark['"]\]\s*{([^}]*)}/);
     const valueOf = (css: string, varName: string): string | undefined =>
@@ -124,7 +133,11 @@ describe('theme values (src/app.css) — issue #3153 Foundry palette', () => {
       const dark = valueOf(darkBlock, varName);
       expect(light, `--${varName} missing from :root`).toBeTruthy();
       expect(dark, `--${varName} missing from [data-theme='dark']`).toBeTruthy();
-      expect(dark, `--${varName} should differ between light and dark`).not.toBe(light);
+      if (CONSTANT_ACROSS_THEMES.has(varName)) {
+        expect(dark, `--${varName} is a chassis ink token, expected constant`).toBe(light);
+      } else {
+        expect(dark, `--${varName} should differ between light and dark`).not.toBe(light);
+      }
     }
   });
 });
