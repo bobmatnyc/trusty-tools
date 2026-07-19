@@ -73,3 +73,4 @@ Proposed ──► Accepted ──► Superseded (by ADR-NNNN)
 | [0013](./0013-rename-trusty-controller-to-trusty-installer.md) | Rename `trusty-controller` → `trusty-installer`; add `tctl` transitional alias; build out interactive installer | Accepted |
 | [0014](./0014-native-mcp-support.md) | Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more) | Accepted |
 | [0015](./0015-three-product-agent-composition-model.md) | Unified agent composition: shared `.md`+YAML+`extends` format across trusty-agents, trusty-mpm, trusty-code | Proposed |
+| [0016](./0016-orchestration-hierarchy-lead-pm-assistant.md) | Orchestration hierarchy: Engineering Lead / PM / Assistant | Proposed |
