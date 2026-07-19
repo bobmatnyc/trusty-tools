@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `project` keeps today's process-boot-time binding unchanged (back-compat).
   This converges the two project-binding entry points epic #3174 needs for
   the project-first "pick a project and just start prompting" flow.
+  **Follow-up (code-critic HIGH finding, PR #3189):** when `session_id`
+  reuses an existing session, `project` may only RESTATE that session's own
+  persisted binding root — a `project` naming a DIFFERENT root is rejected
+  with `-32003 invalid_argument`/`400` rather than silently executing the run
+  against a project `session.status`/`session.list` would never agree the
+  session is bound to (`SessionRegistry` has no binding-update path).
 - **REST-pollable search/recall audit trail (issue #3072).** New
   `session.get_search_audit` RPC method and `GET /sessions/{id}/search-audit`
   REST route return a session's retained, capped (200 records) history of
