@@ -170,7 +170,7 @@ pub(super) async fn submit_task(
                 IntentClass::Implementation => "implementation",
             };
 
-            tokio::spawn(async move {
+            let join = tokio::spawn(async move {
                 let result = crate::ctrl::run_pm_task_with_session(
                     &project_path,
                     &task_text,
@@ -191,46 +191,47 @@ pub(super) async fn submit_task(
                     }
                 };
 
-                let status_str = match resp.status {
-                    PmStatus::Success => "success",
-                    PmStatus::Failed => "error",
-                    PmStatus::Partial => "partial",
-                    PmStatus::Running => "running",
-                }
-                .to_string();
-                state_bg.upsert(id_bg.clone(), resp).await;
+                let status_str = resp.status.as_str().to_string();
+                // #3063: finalize_task (not upsert) so a result that was
+                // still in flight when the client cancelled doesn't clobber
+                // the already-recorded Cancelled state.
+                state_bg.finalize_task(id_bg.clone(), resp).await;
                 maybe_emit_recap(&state_bg, &id_bg).await;
                 events::publish(Event::SessionDone {
                     session_id: id_bg,
                     status: status_str,
                 });
             });
+            // #3063: register the abort handle so DELETE /api/task/:id (or
+            // clear-context) can cancel this in-process future.
+            state.register_handle(&id, join.abort_handle()).await;
         }
         IntentClass::Implementation => {
             // Spawn the workflow in the background. We reuse the current binary so
             // the child inherits full env/init (build counter, tracing, run_id).
             let state_bg = state.clone();
             let id_bg = id.clone();
-            tokio::spawn(async move {
+            let join = tokio::spawn(async move {
                 let resp = run_task(&id_bg, req, state_bg.clone())
                     .await
                     .unwrap_or_else(|e| {
                         PmResponse::error(&id_bg, format!("server failed to run task: {e:#}"))
                     });
-                let status_str = match resp.status {
-                    PmStatus::Success => "success",
-                    PmStatus::Failed => "error",
-                    PmStatus::Partial => "partial",
-                    PmStatus::Running => "running",
-                }
-                .to_string();
-                state_bg.upsert(id_bg.clone(), resp).await;
+                let status_str = resp.status.as_str().to_string();
+                // #3063: see the Conversational/Research branch above for why
+                // finalize_task (not upsert) is used here.
+                state_bg.finalize_task(id_bg.clone(), resp).await;
                 maybe_emit_recap(&state_bg, &id_bg).await;
                 events::publish(Event::SessionDone {
                     session_id: id_bg,
                     status: status_str,
                 });
             });
+            // #3063: register the abort handle. Aborting this outer task
+            // drops `run_task`'s frame — including its `Child` — at whatever
+            // `.await` it's suspended at; `kill_on_drop` (set in
+            // `task_runner::run_task`) then kills the OS subprocess.
+            state.register_handle(&id, join.abort_handle()).await;
         }
     }
 

@@ -6,6 +6,7 @@
 // tokio multi-threaded test runtime keeps the lock from causing deadlock.
 #![allow(clippy::await_holding_lock)]
 
+mod cancel;
 mod ctrl_sessions;
 mod listing;
 
@@ -151,10 +152,17 @@ async fn tm_tell_returns_503_without_manager() {
 #[tokio::test]
 async fn app_state_trims_to_max_retained() {
     let state = AppState::default();
-    // Push MAX_RETAINED + 5.
+    // Push MAX_RETAINED + 5 terminal (non-Running) responses. #3063: FIFO
+    // trimming now exempts `Running` rows from eviction (see
+    // `insert_and_trim`'s doc comment), so this fixture uses `Success` to
+    // keep exercising the trim path rather than the "everything is running,
+    // skip eviction" edge case covered by
+    // `cancel::cancel_survives_fifo_eviction_pressure`.
     for i in 0..(MAX_RETAINED + 5) {
         let id = format!("id-{i}");
-        state.upsert(id.clone(), PmResponse::running(&id)).await;
+        let mut r = PmResponse::running(&id);
+        r.status = PmStatus::Success;
+        state.upsert(id, r).await;
     }
     let list = state.list().await;
     assert_eq!(list.len(), MAX_RETAINED);
