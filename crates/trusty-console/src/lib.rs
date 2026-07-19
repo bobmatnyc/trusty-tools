@@ -408,7 +408,13 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         }
     }
 
-    let router = server::build_router(state.clone());
+    // #3269: trust the console's own non-loopback bind address(es) (e.g. the
+    // Tailscale CGNAT address in `--tailscale` mode) as write-origin
+    // self-origins, so the console's own write UI served from that address is
+    // not 403'd by the same-origin guard. Loopback stays trusted unconditionally
+    // regardless of bind mode.
+    let self_origins = routes::origin_guard::SelfOrigins::from_bind_addrs(&addrs);
+    let router = server::build_router_with_self_origins(state.clone(), self_origins);
 
     // ── bind primary listener ───────────────────────────────────────────────
     let primary_addr = *addrs.first().context("bind address list is empty")?;
