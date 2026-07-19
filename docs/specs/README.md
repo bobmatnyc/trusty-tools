@@ -64,7 +64,7 @@ normative grammar — this note does not restate it.
 | DOC-41 | `SPEC-AGENTFW-01~draft` … `-06~draft` | [Eve-Style Agent Framework for trusty-agents](./trusty-agents-eve-style-agents-spec.md) | trusty-agents — agent definition / runtime / tool-calling / memory |
 | DOC-46 | `SPEC-ADR-01~draft` | [Architecture Decision Records (ADR) as First-Class Documentation Artifact](./DOC-46-adr-standard.md) | documentation standard — architecture governance / consistency vetting (cross-crate) |
 | DOC-47 | `SPEC-EVTING-01~draft` … `-04~draft` | [External Event Ingestion — Webhooks & Connector Push](./DOC-47-external-event-ingestion.md) | trusty-agents-common — event seam; trusty-mpm — webhook ingress + goal store; trusty-console — Tailscale Funnel binding |
-| DOC-48 | `SPEC-WS-01~draft` … `-09~draft` | [tcode Workstreams: Durable Named Work Aggregation](./DOC-48-tcode-workstreams.md) | trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces |
+| DOC-48 | `SPEC-WS-01~draft` … `-09~draft` | [tcode Workstreams: Durable Named Work Aggregation](./DOC-48-tcode-workstreams.md) | trusty-code — activation-lock exclusivity model, multi-client attach transport (shared with trusty-agents #3052), RPC/REST/CLI surfaces |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
