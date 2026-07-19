@@ -14,7 +14,19 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     // Inline choice picker: when the LLM offered a list and we surfaced it,
     // arrow keys navigate the choices, Enter commits the selection into the
     // input buffer (or clears for free-type on the "Other…" row), Esc
-    // dismisses. Other keys fall through so the user can keep typing.
+    // dismisses. Other keys fall through so the user can keep typing — and
+    // (#3325) dismiss a *stale picker* first, since `app.choices` otherwise
+    // stays populated indefinitely (it's set once per assistant turn by
+    // `push_assistant` -> `detect_choices`, or once by `/switch`, not
+    // per-keystroke) and would keep intercepting the *next* Enter as
+    // "confirm choice" (or, for `/switch`, silently dispatch a persona
+    // switch) instead of "submit the line I just typed", swallowing the
+    // whole typed message. This applies to BOTH the untagged
+    // (`choices_context == None`) LLM list AND the tagged `/switch` picker
+    // (`choices_context == Some("switch")`) — the only exemption is live
+    // slash-command completions, which are also untagged but rebuilt from
+    // `input_buf` on every keystroke by `update_slash_completions` below,
+    // so they must survive typing rather than being dismissed by it.
     if !app.choices.is_empty() {
         match key.code {
             KeyCode::Up => {
@@ -67,7 +79,24 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 app.choices_context = None;
                 return None;
             }
-            _ => { /* fall through to normal input editing */ }
+            _ => {
+                // Any other key means the user is editing/typing instead of
+                // navigating the picker. Dismiss a stale picker — the
+                // untagged LLM-offered list OR the tagged `/switch` list —
+                // so the normal input-editing match below runs unobstructed
+                // and a subsequent Enter submits the line instead of
+                // confirming a choice (#3325) or firing an unintended
+                // persona switch (#3325 follow-up). Leave live slash
+                // completions alone: `is_live_slash_completion` only ever
+                // matches the untagged, all-`/`-prefixed shape
+                // `update_slash_completions` produces, so it never
+                // shadows the tagged `/switch` picker.
+                if !is_live_slash_completion(app) {
+                    app.choices.clear();
+                    app.choice_cursor = 0;
+                    app.choices_context = None;
+                }
+            }
         }
     }
     // Ctrl combos.

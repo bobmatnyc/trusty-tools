@@ -259,12 +259,20 @@ fn slash_completions_clears_on_backspace_past_slash() {
     assert!(a.choices.is_empty(), "removing `/` must clear picker");
 }
 
-/// Why: Inline-picker context (e.g. `/switch` persona list) must NOT be
-/// stomped by the slash-completion helper — those choices have their
-/// own lifecycle and Enter-action.
-/// What: Set `choices_context = Some("switch")` with persona names;
-/// type a `/` char (which would normally trigger slash autocomplete);
-/// assert choices and context survive untouched.
+/// Why (#3325 follow-up): `update_slash_completions` must never REPLACE a
+/// context picker's choices with unrelated slash-command matches — but as
+/// of the #3325 fix, `handle_key`'s own dismiss-on-type guard now clears a
+/// stale `/switch` picker the moment the user types over it (see
+/// `repl_app_switch_picker_dismissed_on_typing_over_it` in
+/// `tests_input.rs` for the full user-visible regression this protects
+/// against: a typed message getting silently replaced by a persona
+/// switch). So after typing 'x', the `/switch` list must be gone
+/// entirely — cleared by the dismiss guard, not stomped-then-repopulated
+/// by the slash-completion helper — and the character must land in
+/// `input_buf` like ordinary typing.
+/// What: Set `choices_context = Some("switch")` with persona names; type a
+/// `/`-unrelated char; assert the picker and its context tag are both
+/// cleared and the character was inserted normally.
 /// Test: Self-contained.
 #[test]
 fn slash_completions_does_not_stomp_context_picker() {
@@ -277,8 +285,13 @@ fn slash_completions_does_not_stomp_context_picker() {
         &mut a,
         KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
     );
-    assert_eq!(a.choices, vec!["ctrl".to_string(), "Izzie".to_string()]);
-    assert_eq!(a.choices_context.as_deref(), Some("switch"));
+    assert!(
+        a.choices.is_empty(),
+        "typing over the /switch picker must dismiss it, not leave it \
+         showing (#3325 follow-up)"
+    );
+    assert!(a.choices_context.is_none());
+    assert_eq!(a.input_buf, "x", "the typed char must land in the editor");
 }
 
 /// Why: When the picker is open, ALL keys must be intercepted — typing a
