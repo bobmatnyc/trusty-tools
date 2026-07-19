@@ -10,6 +10,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workstream activation lock: `workstream.activate`/`workstream.deactivate`
+  RPC + REST, `ActiveConflict` (issue #3294, DOC-48 §5/§6, epic #3292).**
+  Daemon-enforced singleton active-workstream invariant on top of #3293's
+  `WorkstreamStore`: `workstream.activate{id, force?}` activates a
+  workstream, is idempotent when re-activating the already-active one, and
+  fails with the new `-32008 active_conflict` JSON-RPC error (`data.active_id`
+  carries the conflicting id; REST maps it to HTTP `409`) when a DIFFERENT
+  workstream is active and `force` was omitted; `force: true` deactivates the
+  prior workstream and switches, reporting both ids.
+  `workstream.deactivate{id}` clears the pointer only when `id` is the
+  currently-active workstream — otherwise an idempotent no-op, per spec.
+  REST twins: `POST /workstreams/{id}/activate` and
+  `POST /workstreams/{id}/deactivate`.
+- **Workstream CRUD RPC/REST surface (issue #3295, DOC-48 §5, Phase 1A for
+  epic #3292).** New JSON-RPC methods `workstream.create{name?}`,
+  `workstream.get{id}`, `workstream.list{include_closed?}`,
+  `workstream.close{id}`, sharing the SAME `SharedWorkstreamStore` handle
+  #3294's activation methods use. `workstream.list` returns
+  `{active_workstream_id, workstreams: [...]}`, each record paired with its
+  computed `state` (`active`/`idle`/`closed`); `include_closed` defaults to
+  `false`. `workstream.close` marks the record closed and, per §4.4,
+  auto-deactivates it if it was the active workstream — the store gains a
+  `WorkstreamStore::close` primitive for this. REST wrappers
+  (`POST`/`GET /workstreams`, `GET /workstreams/{id}`,
+  `POST /workstreams/{id}/close`) mirror the existing `rest::sessions`/
+  `rest::tasks` pattern; paths are intentionally unprefixed (not DOC-48
+  §5.2's literal `/api/v1/workstreams`) to match every other REST resource
+  group this crate ships. `tcode serve`'s router now loads and
+  boot-reconciles a project-scoped `WorkstreamStore` (`build_router` is now
+  `async`/fallible) and shares it across every `workstream.*` handler behind
+  a `tokio::sync::Mutex`. `WorkstreamActivationChanged` SSE emission and the
+  CLI (#3296) remain follow-up tickets.
 - **Workstream domain model + flat JSON storage + boot reconciliation
   (issue #3293, DOC-48 §2/§3, Phase 1A foundation for epic #3292).** New
   `workstreams` module: `Workstream`/`WorkstreamId`/`WorkstreamState` (state

@@ -148,6 +148,28 @@ impl RpcError {
     pub fn invalid_argument(message: impl Into<String>) -> Self {
         Self::domain(-32003, "invalid_argument", message)
     }
+
+    /// Build a `-32008 active_conflict` error (DOC-48 §5.2/§6.1, issue #3294).
+    ///
+    /// Why: `workstream.activate{id, force: false}` must fail when a
+    /// DIFFERENT workstream is already active, and the caller needs the
+    /// currently-active id to decide whether to retry with `force: true`
+    /// (§6.1: "the error includes the ID of the currently-active
+    /// workstream"). `-32008` is the next free slot after `-32007
+    /// session_not_found` in this crate's domain-error range — DOC-48
+    /// predates no reservation for it in the vision spec's §13.2 table, so
+    /// it is allocated here rather than colliding with the reserved-but-
+    /// unimplemented `-32004`/`-32005`/`-32006` (`timeout`/`cancelled`/
+    /// `provider_failure`).
+    /// What: `data = {"error_type": "active_conflict", "active_id": <uuid
+    /// string>}` — `active_id` rides alongside the standard `error_type` tag
+    /// so a client can read the conflicting id without re-parsing `message`.
+    /// Test: `rpc_error_active_conflict_sets_code_and_active_id`.
+    pub fn active_conflict(active_id: impl std::fmt::Display) -> Self {
+        let active_id = active_id.to_string();
+        Self::new(-32008, format!("another workstream is active: {active_id}"))
+            .with_data(json!({"error_type": "active_conflict", "active_id": active_id}))
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -238,5 +260,21 @@ mod tests {
         let e = RpcError::invalid_argument("task must not be empty");
         assert_eq!(e.code, -32003);
         assert_eq!(e.data, Some(json!({"error_type": "invalid_argument"})));
+    }
+
+    /// `active_conflict` must use `-32008`, tag `error_type`, and carry the
+    /// conflicting `active_id` in `data` (DOC-48 §6.1).
+    #[test]
+    fn rpc_error_active_conflict_sets_code_and_active_id() {
+        let e = RpcError::active_conflict("a1b2c3d4-e5f6-4748-9a0b-1c2d3e4f5a6b");
+        assert_eq!(e.code, -32008);
+        assert!(e.message.contains("a1b2c3d4-e5f6-4748-9a0b-1c2d3e4f5a6b"));
+        assert_eq!(
+            e.data,
+            Some(json!({
+                "error_type": "active_conflict",
+                "active_id": "a1b2c3d4-e5f6-4748-9a0b-1c2d3e4f5a6b",
+            }))
+        );
     }
 }

@@ -56,9 +56,36 @@ pub(crate) const HEALTH_PROBE_PALACE: &str = "__health_probe__";
 /// Build the public router with API routes + SPA asset fallback.
 ///
 /// Why: `run_http` calls this so the same router shape is used in tests.
-/// What: All API routes under `/api/v1`, fallback to the SPA shell.
+/// What: All API routes under `/api/v1`, fallback to the SPA shell. Trusts only
+/// loopback for the write guard (the `run_http_on` startup path uses
+/// [`router_with_self_origins`] with the resolved bind address).
 /// Test: `serves_index_html_fallback` and `status_endpoint_returns_payload`.
 pub fn router() -> Router<AppState> {
+    // #3304: loopback-only default. Every test keeps this entry point; the
+    // daemon startup passes its resolved bind address (see `http_server`).
+    router_with_self_origins(trusty_common::server::SelfOrigins::default())
+}
+
+/// Build the public router, additionally trusting the given bind-derived,
+/// non-loopback self-origins for the router-wide same-origin write guard (#3304).
+///
+/// Why: trusty-memory exposes DESTRUCTIVE write routes behind the permissive-CORS
+/// shared stack — `DELETE /api/v1/palaces/{id}` (palace deletion),
+/// `DELETE …/drawers/{drawer_id}` (drawer deletion), `POST /api/v1/admin/stop`,
+/// `POST /rpc` (the full JSON-RPC tool surface — every mutating MCP tool),
+/// `POST /api/v1/dream/run`, KG asserts/deletes. Without a same-origin guard any
+/// page the operator visits could drive them cross-origin (CSRF). This is the
+/// guarded entry point; `router` delegates here loopback-only so existing tests
+/// are unchanged. `run_http_on` passes the resolved bind address so a
+/// non-loopback bind trusts itself (#3269).
+/// What: identical router to `router`, except the final middleware is
+/// `with_guarded_middleware` (guard + standard stack) instead of
+/// `with_standard_middleware`.
+/// Test: `web::tests` guard tests (cross-origin `DELETE /api/v1/palaces/{id}` and
+/// `POST /rpc` → 403; loopback/missing-Origin → allowed; GET read unaffected).
+pub fn router_with_self_origins(
+    self_origins: trusty_common::server::SelfOrigins,
+) -> Router<AppState> {
     // axum 0.8 path syntax uses `{param}` instead of `:param`. The shared
     // `trusty_common::server::with_standard_middleware` layer brings in CORS,
     // tracing, and gzip (with SSE excluded) so we don't drift from sibling
@@ -183,9 +210,19 @@ pub fn router() -> Router<AppState> {
         // tool surface without learning the REST routes. The REST
         // routes above remain for backwards compatibility.
         .route("/rpc", post(rpc::rpc_handler))
+        // #3304: `/sse` (a GET event stream) is registered HERE, inside the
+        // router, so it sits UNDER the guard/standard-middleware layer applied
+        // below — not chained on by `run_http_on` AFTER the layer (where axum's
+        // `layer` contract would leave it middleware-less). It is a safe GET so
+        // the guard never blocks it; placing it here keeps "router-wide after
+        // all registration" literally true and avoids the layering footgun.
+        .route("/sse", get(crate::http_server::sse_handler))
         .fallback(static_assets::static_handler);
 
-    trusty_common::server::with_standard_middleware(router)
+    // #3304: router-wide same-origin write guard, applied AFTER all route
+    // registration so every destructive route (palace/drawer deletion, admin
+    // stop, the `/rpc` tool surface) is covered.
+    trusty_common::server::with_guarded_middleware(router, self_origins)
 }
 
 #[cfg(test)]

@@ -192,8 +192,6 @@ pub(crate) fn dotfile_http_addr_path() -> Option<PathBuf> {
 /// manual: `curl http://127.0.0.1:<port>/health` returns `ok` with `addr`.
 #[cfg(feature = "axum-server")]
 pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> Result<()> {
-    use axum::routing::get;
-
     // Issue #35: recompute the `data_root` disk footprint every 10 s on a
     // background task so `GET /health` reports `disk_bytes` without doing a
     // recursive directory walk on the request path.
@@ -267,9 +265,17 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     // the router below.
     let bm25_supervisor = state.bm25_supervisor.clone();
 
-    let app = crate::web::router()
-        .route("/sse", get(sse_handler))
-        .with_state(state);
+    // #3304: trust the resolved bind address as a self-origin (non-loopback
+    // binds only; `from_bind_addrs` drops loopback) for the router-wide write
+    // guard, so a non-loopback bind still serves its own write UI. The `/sse`
+    // route is now registered INSIDE `router_with_self_origins` (before the
+    // guard/middleware layer) rather than chained on here — see #3304 review:
+    // routes added after `.layer()` get no middleware per axum's contract.
+    let self_origins = match local {
+        Some(a) => trusty_common::server::SelfOrigins::from_bind_addrs(&[a]),
+        None => trusty_common::server::SelfOrigins::default(),
+    };
+    let app = crate::web::router_with_self_origins(self_origins).with_state(state);
 
     // Why (issue #534): bare axum::serve exits only on an internal error; SIGTERM
     // (launchctl bootout) would kill the process before the cleanup below had a

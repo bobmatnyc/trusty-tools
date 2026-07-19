@@ -47,7 +47,13 @@
 //! `GET /fs` -> `fs.list_dir`. Slice 6 ([`agents`]) adds
 //! `GET /sessions/{id}/agents` -> `session.get_agents`. Slice 7
 //! ([`search_audit`]) adds `GET /sessions/{id}/search-audit` ->
-//! `session.get_search_audit` (issue #3072). Every slice reuses
+//! `session.get_search_audit` (issue #3072). [`workstreams`] adds the full
+//! `workstream.*` surface: `POST /workstreams`, `GET /workstreams/{id}`,
+//! `GET /workstreams`, `POST /workstreams/{id}/close` (issue #3295, epic
+//! #3292) and `POST /workstreams/{id}/activate`,
+//! `POST /workstreams/{id}/deactivate` (DOC-48 §5.2/§6, issue #3294) — see
+//! its module docs for why the paths are unprefixed rather than DOC-48
+//! §5.2's literal `/api/v1/workstreams`. Every slice reuses
 //! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
@@ -60,6 +66,7 @@ pub mod search_audit;
 pub mod sessions;
 pub mod sessions_write;
 pub mod tasks;
+pub mod workstreams;
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -121,7 +128,8 @@ pub async fn call(
 /// What: matches on the numeric JSON-RPC error code: `-32002 not_found` ->
 /// 404, `-32001 permission_denied` -> 403, `-32003 invalid_argument` and
 /// `-32602 Invalid params` -> 400, `-32007 session_not_found` -> 404,
-/// `-32603 Internal error` -> 500. Any other/future code (including
+/// `-32008 active_conflict` (DOC-48 §5.2, issue #3294) -> 409, `-32603
+/// Internal error` -> 500. Any other/future code (including
 /// `-32601`/`-32600`, which a REST handler should never see because it
 /// calls `call` with a hardcoded, known-good method name) falls back to 500
 /// — an unmapped domain error is a bug to fix by adding a mapping, not a
@@ -136,6 +144,7 @@ pub fn rpc_error_to_status(err: &RpcError) -> axum::http::StatusCode {
         -32007 => StatusCode::NOT_FOUND,   // session_not_found
         -32001 => StatusCode::FORBIDDEN,   // permission_denied
         -32003 => StatusCode::BAD_REQUEST, // invalid_argument
+        -32008 => StatusCode::CONFLICT,    // active_conflict (DOC-48 §5.2)
         c if c == error_codes::INVALID_PARAMS => StatusCode::BAD_REQUEST,
         c if c == error_codes::INTERNAL_ERROR => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -305,6 +314,14 @@ mod tests {
         assert_eq!(
             rpc_error_to_status(&RpcError::internal("x")),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn status_mapping_active_conflict_is_409() {
+        assert_eq!(
+            rpc_error_to_status(&RpcError::active_conflict("ws-1")),
+            axum::http::StatusCode::CONFLICT
         );
     }
 

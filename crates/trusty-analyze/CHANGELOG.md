@@ -7,6 +7,18 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [Unreleased]
+
+### Security
+
+- **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
+  destructive write routes (`POST /indexes/{id}/scip`, `POST /review`,
+  `POST /analyze/deep`, `POST /facts`, `DELETE /facts/{id}`, the GitHub webhook)
+  are now guarded against cross-origin browser requests via the shared
+  `trusty_common::server::with_guarded_middleware`. Method-gated (GET reads and
+  `/sse` unaffected) and fail-open on a missing `Origin` (the console proxy,
+  `curl`, and GitHub's server-side webhook POST keep working).
+
 ## [0.7.3] — 2026-07-09
 
 ### Changed

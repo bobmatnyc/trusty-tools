@@ -19,7 +19,7 @@ spec_refs:
 **Status:** Draft (Rev 2)
 **Subsystem:** trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces
 **Owner:** Engineering (trusty-code)
-**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding)
+**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths)
 **Spec ID:** `SPEC-WS-01~draft` … `SPEC-WS-09~draft` (DOC-48)
 **Builds on:**
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-08~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-08~draft) §4B defines the Workstream domain object as a NEW prerequisite: "an infinite thread with state `active · idle · closed`… resumable across daemon restarts." This spec is the Phase 2+ implementation of that domain object and its persistence layer.
@@ -282,14 +282,16 @@ Per #2983 Slice 4, REST alternatives are provided alongside JSON-RPC for one-sho
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/workstreams` | → `workstream.create{name?}` |
-| `GET` | `/api/v1/workstreams/{id}` | → `workstream.get{id}` |
-| `GET` | `/api/v1/workstreams?include_closed=…` | → `workstream.list{…}` |
-| `POST` | `/api/v1/workstreams/{id}/activate` | → `workstream.activate{id, force?}` |
-| `POST` | `/api/v1/workstreams/{id}/deactivate` | → `workstream.deactivate{id}` |
-| `POST` | `/api/v1/workstreams/{id}/close` | → `workstream.close{id}` |
+| `POST` | `/workstreams` | → `workstream.create{name?}` |
+| `GET` | `/workstreams/{id}` | → `workstream.get{id}` |
+| `GET` | `/workstreams?include_closed=…` | → `workstream.list{…}` |
+| `POST` | `/workstreams/{id}/activate` | → `workstream.activate{id, force?}` |
+| `POST` | `/workstreams/{id}/deactivate` | → `workstream.deactivate{id}` |
+| `POST` | `/workstreams/{id}/close` | → `workstream.close{id}` |
 
 All endpoints return JSON. Errors are HTTP 4xx/5xx with a JSON error body (matching existing tcode error conventions).
+
+**Path convention:** REST groups in trusty-code mount unprefixed (e.g., `/workstreams/`, `/sessions/`, `/tasks/`, `/fs/`) per the crate's existing convention; there is no `/api/v1` versioned prefix.
 
 **Error codes:**
 - `ActiveConflict{active_id}` (HTTP 409): returned by `activate{force: false}` when another workstream is active. Includes the ID of the currently-active workstream so the client can decide whether to retry with `force: true`.
@@ -299,16 +301,16 @@ All endpoints return JSON. Errors are HTTP 4xx/5xx with a JSON error body (match
 Clients (CLI, GUI, or agent) observe a workstream via a **workstream-level SSE endpoint** that aggregates events from all sessions bound to that workstream:
 
 ```
-GET /api/v1/workstreams/{id}/events
+GET /workstreams/{id}/events
 ```
 
 **Workstream event aggregation (key architecture):** The workstream-level endpoint is NOT a direct session-registry lookup. Instead, the daemon **fan-outs over the workstream's bound `session_ids`** internally:
 
-1. On subscription to `/api/v1/workstreams/{id}/events`, the daemon identifies all sessions in `workstreams[id].session_ids`.
+1. On subscription to `/workstreams/{id}/events`, the daemon identifies all sessions in `workstreams[id].session_ids`.
 2. The daemon internally subscribes to the event streams for each session (via the per-session SSE subscriber registry, which IS session-keyed per AC-7.3).
 3. Events from each session are tagged with `{session_id, event_type, payload}` and forwarded to the workstream-level subscriber.
 4. When sessions are added to the workstream (§4.1), new sessions are dynamically added to the fan-out.
-5. When the workstream is deactivated (§4.2), clients reconnect to the new active workstream's `/api/v1/workstreams/{new_id}/events` endpoint.
+5. When the workstream is deactivated (§4.2), clients reconnect to the new active workstream's `/workstreams/{new_id}/events` endpoint.
 
 **Multi-client observation:** Multiple clients (CLI, GUI, agent) may observe the same workstream's events simultaneously (like `tmux attach-session` — any number of terminal clients can attach to one session). No per-client exclusive leases; the fan-out is daemon-managed.
 
@@ -403,7 +405,7 @@ When a client calls `workstream.activate{id, force: true}` and another workstrea
 - All connected clients receive a `WorkstreamActivationChanged` event (§5.3).
 - The prior workstream transitions from `active` to `idle`.
 - The new workstream becomes `active`.
-- Clients that were observing the prior workstream should reconnect to the new active workstream's events (the SSE endpoint path changes from `/api/v1/workstreams/{old_id}/events` to `/api/v1/workstreams/{new_id}/events`).
+- Clients that were observing the prior workstream should reconnect to the new active workstream's events (the SSE endpoint path changes from `/workstreams/{old_id}/events` to `/workstreams/{new_id}/events`).
 
 This preserves DOC-40's "never silently multiplex" principle at the activation level: when the active workstream changes, all clients are informed explicitly, never silently.
 
@@ -657,7 +659,7 @@ curl -X POST http://localhost:7881/rpc \
 - [ ] Boot reconciliation: loads all records, restores `active_workstream_id`, clears no stale data (persistence is deterministic, no TTL-based expiry).
 - [ ] RPC methods implemented: `workstream.create`, `workstream.get`, `workstream.list`, `workstream.activate`, `workstream.deactivate`, `workstream.close` (NO attach/detach/heartbeat).
 - [ ] REST endpoints wrap the RPC methods (POST /workstreams, GET /workstreams/{id}, POST /workstreams/{id}/activate, etc.).
-- [ ] **NEW route**: `GET /api/v1/workstreams/{id}/events` — workstream-level SSE endpoint that fan-outs over bound session_ids with event tagging `{session_id, event_type, payload}`.
+- [ ] **NEW route**: `GET /workstreams/{id}/events` — workstream-level SSE endpoint that fan-outs over bound session_ids with event tagging `{session_id, event_type, payload}`.
 - [ ] CLI commands: `tcode workstream list/get/create/activate/deactivate/close` (NO attach/detach; ws short alias works).
 - [ ] State inference: workstream state is `active` IFF its id == `active_workstream_id` (not computed from session activity). Otherwise `idle` or `closed`.
 - [ ] Activation-lock exclusivity: `activate{force: false}` returns `ActiveConflict{active_id}` if another workstream is active. `activate{force: true}` deactivates prior and activates new.

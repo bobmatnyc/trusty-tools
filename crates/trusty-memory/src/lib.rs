@@ -178,7 +178,7 @@ pub use http_server::{run_http, run_http_dynamic, run_http_on};
 // (`lib_tests`, `web::tests`), so gate the re-export on `cfg(test)` to avoid an
 // unused-import warning in the normal (non-test) build.
 #[cfg(all(test, feature = "axum-server"))]
-pub(crate) use http_server::{dotfile_http_addr_path, sse_handler, write_http_addr_file};
+pub(crate) use http_server::{dotfile_http_addr_path, write_http_addr_file};
 
 /// Maximum bytes retained in the trigger-prompt excerpt embedded on a
 /// `HookFired` event.

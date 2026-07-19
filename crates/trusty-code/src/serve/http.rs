@@ -94,9 +94,13 @@ struct HttpState {
 /// (Slice 3) the write routes (`POST /sessions`,
 /// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
 /// `PUT`/`DELETE /sessions/{id}/goal`), (Slice 4) `POST /tasks`, (Slice 5)
-/// `GET /fs`, (Slice 6) `GET /sessions/{id}/agents`, and (Slice 7, issue
-/// #3072) `GET /sessions/{id}/search-audit` — none of which collide with the
-/// paths registered directly on this router or with each other.
+/// `GET /fs`, (Slice 6) `GET /sessions/{id}/agents`, (Slice 7, issue #3072)
+/// `GET /sessions/{id}/search-audit`, and the full `workstream.*` REST
+/// surface: `POST /workstreams`, `GET /workstreams/{id}`, `GET /workstreams`,
+/// `POST /workstreams/{id}/close` (issue #3295) plus
+/// `POST /workstreams/{id}/activate`/`.../deactivate` (DOC-48 §5.2, issue
+/// #3294) — none of which collide with the paths registered directly on
+/// this router or with each other.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
@@ -107,7 +111,8 @@ struct HttpState {
 /// `http_rest_get_fs_route_is_merged_in`,
 /// `http_rest_get_session_agents_route_is_merged_in`,
 /// `http_rest_get_session_budget_route_is_merged_in`,
-/// `http_rest_get_session_search_audit_route_is_merged_in`.
+/// `http_rest_get_session_search_audit_route_is_merged_in`,
+/// `http_rest_get_workstreams_route_is_merged_in`.
 pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
@@ -124,7 +129,8 @@ pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) ->
         .merge(rest::tasks::routes(router.clone()))
         .merge(rest::fs::routes(router.clone()))
         .merge(rest::agents::routes(router.clone()))
-        .merge(rest::search_audit::routes(router));
+        .merge(rest::search_audit::routes(router.clone()))
+        .merge(rest::workstreams::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
@@ -647,6 +653,45 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["search_audit"].as_array().unwrap().len(), 0);
+    }
+
+    /// `GET /workstreams` (issue #3295, `rest::workstreams`'s route group
+    /// `build_axum_router` merges above) must be reachable on the SAME
+    /// router `GET /sessions/{id}/events` is — proving the merge actually
+    /// wires `rest::workstreams::routes` rather than silently dropping it.
+    /// Per-route error/status-code behaviour is already covered by
+    /// `rest::workstreams::tests`; this test only pins the merge itself.
+    #[tokio::test]
+    async fn http_rest_get_workstreams_route_is_merged_in() {
+        let sessions = Arc::new(SessionRegistry::new());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            crate::workstreams::WorkstreamStore::load(dir.path().join("workstreams-test.json"))
+                .await
+                .expect("load");
+        let mut router = Router::new();
+        crate::serve::methods::register(&mut router);
+        crate::session::protocol::register(&mut router, sessions.clone());
+        crate::workstreams::protocol::register(
+            &mut router,
+            Arc::new(tokio::sync::Mutex::new(store)),
+        );
+        let app = build_axum_router(Arc::new(router), sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workstreams")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert!(v["workstreams"].is_array());
     }
 
     /// `GET /sessions/{id}/events` on an unknown session must 404 with a

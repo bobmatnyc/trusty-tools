@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **Daemon write guard extended from single-handler to router-wide**
+  ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)): previously
+  only `coordinator_chat` (`POST /api/v1/sessions/chat`) was origin-checked;
+  every other destructive route (`POST /sessions` spawn, `DELETE /sessions/{id}`,
+  `POST /api/v1/control/sessions/{id}/stop`, managed-session mutation,
+  `/claude-config/apply`, `/pair/*`) was exposed to cross-origin CSRF. The shared
+  `trusty_common` same-origin guard is now layered router-wide at the serve site
+  (`daemon::api::origin_guard::guard_router`), method-gated and fail-open on a
+  missing `Origin`. The `coordinator_chat` handler keeps its own finer-grained
+  origin check and `/rpc` keeps its loopback `ConnectInfo` gate (belt and
+  braces); the secondary Tailscale listener trusts its own bind address.
+
 ### Added
 
 - `tm sessions rename <id-or-name> <new-name>` (and in-session `tm sessions rename <new-name>` via `$TM_MANAGED_SESSION_ID`) renames a managed session, updating the record's `tmux_name` and the live tmux session, with collision + invalid-name guards

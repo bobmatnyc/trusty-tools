@@ -75,6 +75,104 @@ async fn health_response_includes_version() {
     assert!(!body["version"].as_str().unwrap().is_empty());
 }
 
+/// Why (#3304): `POST /facts` is a destructive write; a malicious cross-origin
+/// page must be rejected with `403` by the router-wide same-origin guard before
+/// the handler runs (CSRF defence).
+/// Test: this test.
+#[tokio::test]
+async fn write_route_rejects_cross_origin() {
+    let (state, _tmp) = make_state();
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/facts")
+                .header("origin", "http://evil.example.com")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "cross-origin POST /facts must be rejected by the write guard"
+    );
+}
+
+/// Why (#3304): the analyzer's own loopback-served UI and server-side callers
+/// (the console proxy / `curl` / the GitHub webhook, which send NO `Origin`)
+/// must keep driving writes — loopback and missing-Origin writes must NOT 403.
+/// Test: this test.
+#[tokio::test]
+async fn write_route_allows_loopback_and_missing_origin() {
+    let (state, _tmp) = make_state();
+    let app = build_router(state);
+    // Loopback origin → allowed.
+    let loopback = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/facts")
+                .header("origin", "http://127.0.0.1:7799")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        loopback.status(),
+        StatusCode::FORBIDDEN,
+        "loopback-origin POST /facts must pass the guard"
+    );
+    // No Origin (server-side caller) → allowed.
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/facts")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        missing.status(),
+        StatusCode::FORBIDDEN,
+        "missing-Origin POST /facts (server-side caller) must pass the guard"
+    );
+}
+
+/// Why (#3304): the guard is method-gated — a cross-origin GET read leaks no
+/// destructive capability and must NOT be blocked.
+/// Test: this test.
+#[tokio::test]
+async fn read_route_allows_cross_origin() {
+    let (state, _tmp) = make_state();
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/health")
+                .header("origin", "http://evil.example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "cross-origin GET /health must not be blocked by the write guard"
+    );
+}
+
 #[tokio::test]
 async fn sse_subscriber_receives_emitted_event() {
     // Why: confirms the broadcast wiring is correct end-to-end —

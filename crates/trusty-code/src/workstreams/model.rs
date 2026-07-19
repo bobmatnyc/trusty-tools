@@ -210,6 +210,24 @@ impl Workstream {
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
     }
+
+    /// Mark this workstream closed via the reserved metadata flag (DOC-48
+    /// §4.4, [`SPEC-WS-04~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-04~draft)).
+    ///
+    /// Why: `workstream.close` (#3295) is the sole call site that flips a
+    /// workstream irreversible-closed; centralising the mutation here keeps
+    /// the reserved `metadata["closed"]` key private to this module rather
+    /// than leaking its literal string to the store/RPC layers. Idempotent —
+    /// closing an already-closed workstream re-sets the same flag and simply
+    /// refreshes `updated_at`, since the spec never requires re-close to
+    /// error.
+    /// What: sets `metadata["closed"] = true`, then calls [`Self::touch`].
+    /// Test: `model_tests::mark_closed_sets_flag_and_touches`.
+    pub fn mark_closed(&mut self) {
+        self.metadata
+            .insert(CLOSED_METADATA_KEY.to_string(), Value::Bool(true));
+        self.touch();
+    }
 }
 
 #[cfg(test)]

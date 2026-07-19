@@ -149,7 +149,12 @@ pub async fn serve_http(
         info!("inproject-hygiene disabled via TRUSTY_MPM_INPROJECT_HYGIENE");
     }
 
-    let app = api::router(Arc::clone(&state));
+    // #3304: the primary listener is loopback; guard router-wide trusting only
+    // loopback. The secondary (Tailscale) listener trusts its own bind addr.
+    let app = api::origin_guard::guard_router(
+        api::router(Arc::clone(&state)),
+        trusty_common::server::SelfOrigins::default(),
+    );
     // Issue #2332: the startup banner carries the build version + PID so a
     // `~/Library/Logs/trusty-mpm/stderr.log` timeline can be correlated
     // against `cargo install` / restart events without guessing which
@@ -282,7 +287,17 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
 /// Test: covered indirectly — the primary listener path is exercised by the
 /// e2e suite and the secondary path reuses the same `api::router`.
 pub fn spawn_secondary_listener(state: Arc<DaemonState>, listener: tokio::net::TcpListener) {
-    let app = api::router(state);
+    // #3304: the secondary listener is the non-loopback (e.g. Tailscale) bind.
+    // Trust its own resolved address as a self-origin so the browser `/web`
+    // surface served from that address can POST to itself through the
+    // router-wide write guard, while genuinely cross-origin pages are still
+    // rejected (#3269). `from_bind_addrs` drops loopback, so a loopback
+    // secondary bind degrades to the loopback-only default.
+    let self_origins = match listener.local_addr() {
+        Ok(addr) => trusty_common::server::SelfOrigins::from_bind_addrs(&[addr]),
+        Err(_) => trusty_common::server::SelfOrigins::default(),
+    };
+    let app = api::origin_guard::guard_router(api::router(state), self_origins);
     tokio::spawn(async move {
         // Match the primary listener: expose ConnectInfo so the loopback-only
         // `POST /rpc` gate (#1221) works on this listener too. The Tailscale

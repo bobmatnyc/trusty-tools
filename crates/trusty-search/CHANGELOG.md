@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
+  destructive write routes (`POST /admin/stop`, `POST /indexes`,
+  `DELETE /indexes/{id}`, `POST /upgrade`, reindex) are now guarded against
+  cross-origin browser requests via the shared
+  `trusty_common::server::with_guarded_middleware`. Method-gated (GET reads and
+  SSE streams unaffected) and fail-open on a missing `Origin` (the console
+  reverse proxy, `curl`, and the MCP stdio bridge keep working); the daemon's
+  own resolved bind address is trusted so a non-loopback bind still serves its
+  UI.
+
 ### Added
 
 - skip_vector flag + runtime component toggle with catch-up (#2984 Phase 1) ([#3024](https://github.com/bobmatnyc/trusty-tools/pull/3024)) ([`0fe2b81`](https://github.com/bobmatnyc/trusty-tools/commit/0fe2b8160eb62e8ee265d0970555e67fec537a72))
