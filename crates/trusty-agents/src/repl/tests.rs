@@ -225,6 +225,121 @@ fn detect_agent_switch_no_false_positive_on_unrelated_text() {
     assert_eq!(detect_agent_switch("hello world", false), None);
 }
 
+/// #3303: serialises tests below that mutate the process-global
+/// `TAGENT_CONFIG_DIR` env var consumed by `AgentConfig::by_name` — mirrors
+/// the private `ENV_LOCK` pattern used by `agents::tests::loading` and
+/// `agents::persona::tests` (each module gets its own lock; see those
+/// modules' doc comments for the known cross-module-race caveat this
+/// convention accepts).
+static AGENT_COMMAND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Why (#3303): `handle_agent_command_into` must resolve a directory-package
+/// agent (`<name>/agent.toml` + `persona.md`, #482) — not just a flat
+/// `<name>.toml` — since the bundled `assistant` agent ships exactly that
+/// way. Regression test for the bug: the old code only ever checked
+/// `agents_dir.join("{name}.toml")`.
+/// What: Points `TAGENT_CONFIG_DIR` at a tempdir containing a `foo/`
+/// package, dispatches `/agent foo`, and asserts the persona activated.
+/// Test: Self-explanatory.
+#[test]
+fn handle_agent_command_resolves_directory_package_fixture() {
+    let _guard = AGENT_COMMAND_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg = tmp.path().join("foo");
+    std::fs::create_dir(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("agent.toml"),
+        r#"
+[agent]
+name = "foo"
+role = "assistant"
+model = "anthropic/claude-haiku-4-5"
+display_name = "Foo Persona"
+description = "test fixture"
+
+[llm]
+temperature = 0.5
+max_tokens = 1024
+"#,
+    )
+    .unwrap();
+    std::fs::write(pkg.join("persona.md"), "You are Foo.").unwrap();
+
+    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
+    }
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    let mut out = String::new();
+    repl.handle_agent_command_into("foo", &mut out);
+    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    assert!(
+        out.contains("Switched to: Foo Persona"),
+        "directory-package agent should activate: {out:?}"
+    );
+    assert_eq!(repl.active_persona, Some("foo".to_string()));
+}
+
+/// Why (#3303): the concrete regression from the issue — `/agent assistant`
+/// against the REAL bundled `assistant` directory package (shipped at
+/// `crates/trusty-agents/.trusty-agents/agents/assistant/`, no flat
+/// `assistant.toml` sibling) must activate the persona. `cargo test`'s
+/// working directory is the crate root, so the CWD-relative fallback in
+/// `AgentConfig::by_name` finds the bundled package with no env var needed.
+/// What: Clears `TAGENT_CONFIG_DIR` (so the CWD fallback fires), dispatches
+/// `/agent assistant`, asserts activation.
+/// Test: Self-explanatory.
+#[test]
+fn handle_agent_command_activates_bundled_assistant_package() {
+    let _guard = AGENT_COMMAND_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    let mut out = String::new();
+    repl.handle_agent_command_into("assistant", &mut out);
+
+    assert!(
+        out.contains("Switched to:"),
+        "bundled assistant package should activate: {out:?}"
+    );
+    assert_eq!(repl.active_persona, Some("assistant".to_string()));
+}
+
+/// Why (#3303): `/agent` with no argument must list the bundled `assistant`
+/// directory-package agent, not just flat `*.toml` files — otherwise a user
+/// has no way to discover the name to type.
+/// What: Clears `TAGENT_CONFIG_DIR`, calls `list_assistant_agents_into`
+/// directly, asserts "assistant" is in the listing.
+/// Test: Self-explanatory.
+#[test]
+fn list_assistant_agents_into_surfaces_directory_package() {
+    let _guard = AGENT_COMMAND_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let repl = TrustyAgentsRepl::new(None).unwrap();
+    let mut out = String::new();
+    repl.list_assistant_agents_into(&mut out);
+
+    assert!(
+        out.contains("assistant"),
+        "directory-package assistant agent should be listed: {out:?}"
+    );
+}
+
 #[test]
 fn discover_agent_names_reads_toml_stems() {
     let tmp = tempfile::tempdir().unwrap();
