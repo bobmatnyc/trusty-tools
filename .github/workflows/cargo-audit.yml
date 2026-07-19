@@ -1,0 +1,65 @@
+# Scheduled cargo-audit dependency vulnerability scan (architecture-review tranche 0).
+#
+# WHY this workflow exists:
+#   SECURITY.md claimed `cargo audit` ran in CI on every commit, but no such
+#   job existed — the claim was aspirational, not real. This workflow makes
+#   it real: a weekly visibility-only scan of Cargo.lock against the RustSec
+#   advisory database.
+#
+# WHAT it does:
+#   1. Checks out the repo.
+#   2. Installs cargo-audit (`cargo install cargo-audit --locked`), matching
+#      this repo's "single-path workflow" convention of plain `cargo install`
+#      over pulling in a third-party audit action.
+#   3. Runs `cargo audit`, which fails the job (non-zero exit) if any
+#      advisory matches a dependency in Cargo.lock.
+#
+# TRIGGERS:
+#   - schedule: weekly, Monday 03:00 UTC. Weekly is appropriate because
+#     advisory data changes at the pace of new RustSec publications, not
+#     per-commit — unlike e2e-docker.yml's nightly install-path check.
+#   - workflow_dispatch: manual trigger from the Actions UI, e.g. to
+#     re-check immediately after fixing a flagged advisory.
+#   NOT triggered on push/pull_request — this job never gates a PR merge.
+#     It is intentionally non-blocking: `cargo audit` is allowed to fail
+#     normally (no continue-on-error) so a red scheduled run is visible,
+#     but because it isn't wired to push/pull_request it can't block anyone
+#     from merging.
+#
+# KNOWN OPEN ADVISORIES (as of this PR — expect the first scheduled runs to
+# be RED until these are resolved; that is intentional, not a workflow bug):
+#   - #2433: serde_yml/libyml are unsound and unmaintained with no fix
+#     upstream (GHSA-gfxp-f68g-8x78, high) — requires migrating off
+#     serde_yml/libyml entirely, not a version bump.
+#   - #2434: legacy rustls 0.21 / rustls-webpki 0.101.7 pulled in via
+#     aws-smithy default features (GHSA-82j2-j2ch-gfr8, high) — DoS via
+#     panic on malformed CRL BIT STRING; requires dropping the legacy
+#     rustls-webpki from aws-smithy's default feature set.
+#   - #2437: nltk 3.9.4 path traversal, transitive via pipecat-ai in
+#     python/trusty-voice/uv.lock (GHSA-p4gq-832x-fm9v, high) — no patched
+#     version exists upstream yet.
+name: Cargo audit (scheduled)
+
+on:
+  schedule:
+    # Weekly, Monday 03:00 UTC — advisories don't change per-commit.
+    - cron: '0 3 * * 1'
+  workflow_dispatch: {}
+
+concurrency:
+  group: cargo-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo audit (dependency vulnerability scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cargo audit
