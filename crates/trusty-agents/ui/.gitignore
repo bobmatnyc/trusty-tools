@@ -1,9 +1,5 @@
 node_modules/
 dist/
-# pnpm-lock.yaml is intentionally untracked for now: the repo-wide
-# detect-secrets pre-commit hook flags npm integrity hashes as high-entropy
-# strings. Run `pnpm install` locally to regenerate.
-pnpm-lock.yaml
 dist-web/
 .vite/
 src-tauri/target/
