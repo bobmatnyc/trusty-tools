@@ -1,5 +1,6 @@
 //! Workstream-level SSE event aggregation route (DOC-48 §5.3, §5.3.1; issue
-//! #3297, epic #3292).
+//! #3297, epic #3292); thin `trusty-agents-common::transport` adapter (issue
+//! #3299, Phase 1B).
 //!
 //! # Spec References
 //!
@@ -20,21 +21,21 @@
 //! 4) — cheap in practice because `WorkstreamStore::get` only re-parses the
 //! backing file when its (mtime, len) fingerprint actually changed.
 //!
-//! **AC-7 harness-agnostic seam:** [`aggregate_live`] takes a
-//! [`WorkstreamId`] and a [`SharedWorkstreamStore`] and returns a stream of
-//! [`WorkstreamEventEnvelope`] — it never names `crate::session::Session` or
-//! any tcode-specific session type, only session ids as plain `String`s (the
-//! same abstraction AC-7.1 asks for). Phase 1A ships this as a tcode-private
-//! module, per §5.3.1's explicit allowance; **Phase 1B (issue #3299) must
-//! extract this function (plus [`WorkstreamEventEnvelope`] and a formal
-//! session-id-abstraction trait) to `trusty-agents-common`** so
-//! `trusty-agents` background sessions can reuse the same fan-out for epic
-//! #3052 — this module is that extraction's landing zone.
+//! **AC-7 harness-agnostic seam (Phase 1B, issue #3299):** the fan-out
+//! algorithm itself now lives in
+//! [`trusty_agents_common::transport::aggregate_live`] — this module is a
+//! thin adapter that implements the shared `EventSource`/`MembershipProvider`
+//! traits over `crate::events`/`SharedWorkstreamStore` and supplies the
+//! `classify` closure encoding tcode's two group-scoped bypass events
+//! (`WorkstreamActivationChanged`, `WorkstreamStateInferred`). Behavior is
+//! byte-for-byte identical to the Phase 1A implementation this replaces (see
+//! `sse_tests`, ported unchanged); only the fan-out combinator itself moved.
 //!
-//! What: [`WorkstreamEventEnvelope`] (the AC-7.2 wire shape),
-//! [`aggregate_live`] (the fan-out stream, no ring-buffer replay in Phase
-//! 1A — see its own docs), and [`routes`] (the single `GET
-//! /workstreams/{id}/events` axum route, merged into
+//! What: [`WorkstreamEventEnvelope`] (a type alias over the shared
+//! `EventEnvelope<Event>`), [`aggregate_live`] (this module's adapter
+//! function — constructs the two trait impls and the `classify` closure,
+//! then delegates to the shared combinator), and [`routes`] (the single
+//! `GET /workstreams/{id}/events` axum route, merged into
 //! `crate::serve::http::build_axum_router` alongside `rest::workstreams`).
 //! Unknown workstream id -> `404`; malformed (non-UUID) id -> `400`; a
 //! CLOSED workstream is still observable (`200`, not `404`) because its
@@ -48,13 +49,16 @@
 
 use std::convert::Infallible;
 
+use async_trait::async_trait;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Json, Router as AxumRouter};
 use futures_util::{Stream, StreamExt};
-use serde::Serialize;
 use tokio_stream::wrappers::BroadcastStream;
+use trusty_agents_common::transport::{
+    BoxEventStream, EventSource, MembershipProvider, SourceEvent,
+};
 use trusty_common::mcp::Response;
 use uuid::Uuid;
 
@@ -66,39 +70,79 @@ use super::model::WorkstreamId;
 use super::store::StoreError;
 
 /// The harness-agnostic wire envelope AC-7.2 requires: `{session_id,
-/// event_type, payload}` — deliberately distinct from
-/// `crate::events::SessionEventEnvelope` (which carries `seq`/`at`/`kind`/
-/// `event`, tuned for one session's ring-buffer replay), since this shape is
-/// the one destined for extraction to `trusty-agents-common` (see module
-/// docs) and must not carry tcode-specific ring-buffer bookkeeping.
-#[derive(Debug, Clone, Serialize)]
-pub struct WorkstreamEventEnvelope {
-    /// The session this event belongs to; empty string for a daemon-scoped
-    /// event with no owning session (currently only
-    /// `Event::WorkstreamActivationChanged` — see its own docs).
-    pub session_id: String,
-    /// Mirrors `Event::kind()` — the same stable string the per-session SSE
-    /// envelope's `kind` field carries, named `event_type` here to match
-    /// AC-7.2's literal wire shape.
-    pub event_type: String,
-    pub payload: Event,
+/// event_type, payload}` — a type alias over
+/// `trusty_agents_common::transport::EventEnvelope<Event>` (Phase 1B, issue
+/// #3299), deliberately distinct from `crate::events::SessionEventEnvelope`
+/// (which carries `seq`/`at`/`kind`/`event`, tuned for one session's
+/// ring-buffer replay).
+pub type WorkstreamEventEnvelope = trusty_agents_common::transport::EventEnvelope<Event>;
+
+/// [`EventSource`] adapter over `crate::events` — subscribes to the SAME
+/// daemon-global broadcast bus every per-session SSE connection already
+/// reads, wrapping each envelope into the shared crate's
+/// session-id/event-type/payload triple.
+struct TcodeEventSource;
+
+impl EventSource for TcodeEventSource {
+    type Payload = Event;
+
+    fn subscribe(&self) -> BoxEventStream<Event> {
+        Box::pin(
+            BroadcastStream::new(crate::events::subscribe()).filter_map(|item| async move {
+                item.ok().map(|envelope| SourceEvent {
+                    session_id: envelope.session_id.clone(),
+                    event_type: envelope.kind.clone(),
+                    payload: envelope.event.clone(),
+                })
+            }),
+        )
+    }
 }
 
-impl WorkstreamEventEnvelope {
-    fn from_session_event(envelope: &crate::events::SessionEventEnvelope) -> Self {
-        Self {
-            session_id: envelope.session_id.clone(),
-            event_type: envelope.kind.clone(),
-            payload: envelope.event.clone(),
-        }
-    }
+/// [`MembershipProvider`] adapter over [`SharedWorkstreamStore`] — "is this
+/// session currently in `workstream_id`'s `session_ids`" re-fetched from the
+/// store on every call (never a stale snapshot), matching §5.3's dynamic
+/// membership requirement. A store lookup failure (the workstream vanished
+/// from under an open connection — not reachable via any current mutation
+/// path, since `workstream.close` never removes a record) is treated as
+/// "no match" per this trait's documented contract, matching this route's
+/// "stay open" bias for a zero-session workstream.
+#[derive(Clone)]
+struct WorkstreamMembership(SharedWorkstreamStore);
 
-    fn daemon_scoped(event: Event) -> Self {
-        Self {
-            session_id: String::new(),
-            event_type: event.kind().to_string(),
-            payload: event,
+#[async_trait]
+impl MembershipProvider<WorkstreamId> for WorkstreamMembership {
+    async fn contains(&self, group: &WorkstreamId, session_id: &str) -> bool {
+        self.0
+            .lock()
+            .await
+            .get(*group)
+            .await
+            .map(|ws| ws.session_ids.iter().any(|s| s == session_id))
+            .unwrap_or(false)
+    }
+}
+
+/// The `classify` bypass: forwards `WorkstreamActivationChanged` iff it
+/// names `target` as its `new_active_id` OR `prior_id` (a workstream
+/// observer must learn when IT stops being active, not only when a session
+/// it owns emits, §6.3), and `WorkstreamStateInferred` iff its
+/// `workstream_id` names `target` (an observer must learn its own state
+/// changed — e.g. it was closed — even with zero bound sessions). Any other
+/// event falls through to [`WorkstreamMembership`] (`None`). `target` is
+/// `&str` (not `&WorkstreamId`) so [`aggregate_live`] can stringify the id
+/// ONCE at stream construction rather than on every event flowing over the
+/// daemon-global bus.
+fn classify(event: &Event, target: &str) -> Option<bool> {
+    match event {
+        Event::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } => Some(new_active_id.as_deref() == Some(target) || prior_id.as_deref() == Some(target)),
+        Event::WorkstreamStateInferred { workstream_id, .. } => {
+            Some(workstream_id.as_str() == target)
         }
+        _ => None,
     }
 }
 
@@ -108,23 +152,11 @@ impl WorkstreamEventEnvelope {
 /// Why: the single seam [`routes`]' handler drives; kept as a free function
 /// (not inlined into the handler) so a unit test can exercise the fan-out
 /// logic directly against a `SharedWorkstreamStore`, without going through
-/// axum at all.
-/// What: subscribes ONCE to `crate::events::subscribe()`, the SAME
-/// daemon-global bus every per-session SSE connection already reads. For
-/// each envelope that arrives: a `WorkstreamActivationChanged` event is
-/// forwarded iff it names `workstream_id` as its `new_active_id` OR
-/// `prior_id` (a workstream observer must learn when IT stops being active,
-/// not only when a session it owns emits, §6.3); a `WorkstreamStateInferred`
-/// event is forwarded iff its `workstream_id` names THIS workstream (an
-/// observer must learn its own state changed — e.g. it was closed — even
-/// with zero bound sessions); any other event is forwarded iff
-/// `workstream_id`'s CURRENT `session_ids` (re-fetched from `store` on every
-/// event, not a stale snapshot) contains the envelope's `session_id`. A store
-/// lookup failure (the workstream vanished from under an open connection —
-/// not possible via any current mutation path, since `workstream.close`
-/// never removes a record) is treated as "no match" rather than closing the
-/// stream, matching this route's "stay open" bias for a zero-session
-/// workstream.
+/// axum at all. As of Phase 1B (issue #3299) this is a thin adapter over
+/// [`trusty_agents_common::transport::aggregate_live`] — see this module's
+/// docs for the trait impls it supplies.
+/// What: delegates to the shared combinator with [`TcodeEventSource`],
+/// [`WorkstreamMembership`], and the [`classify`] bypass closure.
 /// Test: `sse_tests::fan_out_tags_events_from_bound_sessions_only`,
 /// `sse_tests::activation_changed_event_is_forwarded_regardless_of_session_binding`,
 /// `sse_tests::state_inferred_event_is_forwarded_for_this_workstream_only`,
@@ -133,39 +165,16 @@ pub fn aggregate_live(
     workstream_id: WorkstreamId,
     store: SharedWorkstreamStore,
 ) -> impl Stream<Item = WorkstreamEventEnvelope> {
+    // Stringified ONCE here (not per event): the classify closure runs for
+    // every event on the daemon-global bus, so it must not re-allocate the
+    // target id each time.
     let target = workstream_id.to_string();
-    BroadcastStream::new(crate::events::subscribe()).filter_map(move |item| {
-        let store = store.clone();
-        let target = target.clone();
-        async move {
-            let envelope = item.ok()?;
-            match &envelope.event {
-                Event::WorkstreamActivationChanged {
-                    new_active_id,
-                    prior_id,
-                } => {
-                    let relevant = new_active_id.as_deref() == Some(target.as_str())
-                        || prior_id.as_deref() == Some(target.as_str());
-                    return relevant
-                        .then(|| WorkstreamEventEnvelope::daemon_scoped(envelope.event.clone()));
-                }
-                Event::WorkstreamStateInferred { workstream_id, .. } => {
-                    let relevant = workstream_id.as_str() == target.as_str();
-                    return relevant
-                        .then(|| WorkstreamEventEnvelope::daemon_scoped(envelope.event.clone()));
-                }
-                _ => {}
-            }
-            let bound = store
-                .lock()
-                .await
-                .get(workstream_id)
-                .await
-                .map(|ws| ws.session_ids.contains(&envelope.session_id))
-                .unwrap_or(false);
-            bound.then(|| WorkstreamEventEnvelope::from_session_event(&envelope))
-        }
-    })
+    trusty_agents_common::transport::aggregate_live(
+        workstream_id,
+        TcodeEventSource,
+        WorkstreamMembership(store),
+        move |event: &Event, _group: &WorkstreamId| classify(event, &target),
+    )
 }
 
 /// Serialise one [`WorkstreamEventEnvelope`] as an SSE `data:` frame — mirrors

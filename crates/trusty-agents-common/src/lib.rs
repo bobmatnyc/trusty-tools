@@ -187,6 +187,23 @@ pub mod connectors;
 /// submodule in place.
 pub mod workstreams;
 
+/// Shared multi-client attach/fan-out transport (DOC-48 §5.3.1, AC-7; issue
+/// #3299, epic #3292; twin epic #3052).
+///
+/// Why: extracted from `trusty-code::workstreams::sse` (issue #3297) — DOC-48
+/// §5.3.1 designates the multi-client SSE fan-out algorithm as
+/// harness-agnostic, needed by both tcode workstream observation and a
+/// future `trusty-agents` background-session transport (epic #3052). See the
+/// module's own docs for the trait shapes and why they carry zero
+/// axum/tcode dependency.
+/// What: `EventSource`/`MembershipProvider` traits, `SourceEvent`/
+/// `EventEnvelope` (the AC-7.2 `{session_id, event_type, payload}` wire
+/// shape), and `aggregate_live` (the fan-out combinator). HTTP/SSE framing
+/// stays in each consumer.
+/// Test: `cargo test -p trusty-agents-common transport::` exercises every
+/// submodule in place.
+pub mod transport;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
