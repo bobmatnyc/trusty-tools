@@ -187,6 +187,7 @@ async fn save_and_reload_roundtrip() {
         description: "A test service".to_string(),
         command: "test-cmd".to_string(),
         args: vec!["arg1".to_string()],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
@@ -194,6 +195,7 @@ async fn save_and_reload_roundtrip() {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
         }],
+        discover: false,
     });
     cfg.save().await.expect("save should succeed");
     let reloaded = GlobalConfig::load().await;
@@ -218,10 +220,12 @@ async fn add_service_replaces_existing() {
         description: "first".to_string(),
         command: "a".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();
@@ -230,10 +234,12 @@ async fn add_service_replaces_existing() {
         description: "second".to_string(),
         command: "b".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();
@@ -255,10 +261,12 @@ async fn remove_service_returns_correct_bool() {
         description: "d".to_string(),
         command: "c".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();
@@ -280,10 +288,12 @@ async fn enable_disable_toggles_flag() {
         description: "d".to_string(),
         command: "c".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: false,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();

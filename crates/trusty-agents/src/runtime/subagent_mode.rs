@@ -317,6 +317,32 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         reg.register(Arc::new(tools::finish_task::FinishTaskTool::new()));
     }
 
+    // #3238: live-discover MCP servers (`[[mcp.services]] discover = true`
+    // and `.mcp.json`) and register whatever tools they advertise, using the
+    // same `tools::mcp_live::live_mcp_tool_executors` construction helper
+    // the persona-chat assembly point uses — kept as a step here (rather
+    // than folded into `build_registry_for_agent` itself) because that
+    // function is synchronous and called directly by ~10 existing
+    // `#[test]`s; doing async discovery at this async call site instead
+    // gives both assembly points the same discovered tool set without an
+    // invasive signature change.
+    {
+        let reg = registry.get_or_insert_with(ToolRegistry::new);
+        let existing_names: std::collections::HashSet<String> = reg
+            .schemas()
+            .iter()
+            .filter_map(|s| {
+                s.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            })
+            .collect();
+        for tool in tools::mcp_live::live_mcp_tool_executors(&cwd, &existing_names).await {
+            reg.register(tool);
+        }
+    }
+
     let result = if let Some(reg) = registry {
         super::subagent_exec::run_subagent_with_tools(
             &client,

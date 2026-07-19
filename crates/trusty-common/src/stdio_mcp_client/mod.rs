@@ -356,6 +356,33 @@ mod tests {
         assert!(r.is_err());
     }
 
+    /// Why: `spawn_with_env` exists so MCP servers that need credentials
+    /// (`API_KEY`, `DB_URL`, …) declared in `.mcp.json` or `[[mcp.services]]`
+    /// receive them without baking secrets into `args`. Verify the child
+    /// process actually observes the overlaid variable.
+    /// What: Spawns `sh -c 'echo $FOO_TEST_VAR'` with `FOO_TEST_VAR` set via
+    /// `spawn_with_env`, reads the raw line the shell printed to stdout, and
+    /// asserts it matches the value supplied (not empty / not inherited).
+    /// Test: This test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn spawn_with_env_makes_variable_visible_to_child() {
+        let mut envs = std::collections::HashMap::new();
+        envs.insert("FOO_TEST_VAR".to_string(), "bar-value-123".to_string());
+        let mut client = StdioMcpClient::spawn_with_env(
+            "sh",
+            &["-c", "echo \"$FOO_TEST_VAR\""],
+            "test-client",
+            &envs,
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        use tokio::io::AsyncBufReadExt;
+        client.stdout.read_line(&mut line).await.unwrap();
+        assert_eq!(line.trim(), "bar-value-123");
+    }
+
     /// Why: Issue #421 — if the MCP child dies between calls, writing to its
     /// stdin blocks for the full 30s timeout. `is_alive()` must report false
     /// so callers can respawn before writing.

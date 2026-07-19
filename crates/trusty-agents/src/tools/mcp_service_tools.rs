@@ -35,7 +35,11 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// Lazily-spawned MCP client for a single service. Multiple `McpServiceTool`
 /// instances belonging to the same service share one `ServiceClient` so we
-/// open exactly one subprocess per server.
+/// open exactly one subprocess per server. Shared (as `pub(crate)`) with
+/// `crate::tools::mcp_live`, which spawns the same kind of client for
+/// *live-discovered* services (#3238) — the caching/spawn shape is
+/// >80% identical between the static and live-discovery paths, so this is
+/// the single consolidated implementation rather than two near-duplicates.
 ///
 /// Why: Spawning a new MCP child per tool call would be wasteful and would
 /// break stateful servers. A `OnceCell<Mutex<StdioMcpClient>>` keyed off the
@@ -43,41 +47,84 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 /// reuse thereafter" semantics safely across tokio tasks.
 /// What: `get_or_spawn()` returns the cached client (running handshake on
 /// first call); subsequent calls return the same handle. The inner mutex
-/// serialises JSON-RPC requests, which `StdioMcpClient` requires.
-/// Test: Indirectly via `McpServiceTool::execute` — see integration tests.
-struct ServiceClient {
+/// serialises JSON-RPC requests, which `StdioMcpClient` requires. `env` is
+/// overlaid on the spawned process's environment (empty for services that
+/// don't need credentials).
+/// Test: Indirectly via `McpServiceTool::execute` — see integration tests;
+/// `crate::tools::mcp_live` tests exercise the `list_tools()` path.
+pub(crate) struct ServiceClient {
     name: String,
     command: String,
     args: Vec<String>,
+    env: HashMap<String, String>,
     cell: OnceCell<Arc<Mutex<StdioMcpClient>>>,
 }
 
 impl ServiceClient {
     fn new(service: &McpService) -> Self {
+        Self::with_parts(
+            service.name.clone(),
+            service.command.clone(),
+            service.args.clone(),
+            service.env.clone(),
+        )
+    }
+
+    /// Construct from primitive parts rather than a full `McpService` — used
+    /// by `mcp_live`, whose server specs may originate from `.mcp.json`
+    /// (no `McpService` involved).
+    pub(crate) fn with_parts(
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> Self {
         Self {
-            name: service.name.clone(),
-            command: service.command.clone(),
-            args: service.args.clone(),
+            name,
+            command,
+            args,
+            env,
             cell: OnceCell::new(),
         }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
     /// Spawn the MCP server subprocess (if not already) and return the shared
     /// client. Returns `Err` if the binary isn't on PATH, the handshake
     /// fails, or any I/O error occurs — callers convert this to a
-    /// `ToolResult::Error` for the LLM.
-    async fn get_or_spawn(&self) -> anyhow::Result<Arc<Mutex<StdioMcpClient>>> {
+    /// `ToolResult::Error` for the LLM (or, for `mcp_live` discovery, a
+    /// warn-and-skip for that server).
+    pub(crate) async fn get_or_spawn(&self) -> anyhow::Result<Arc<Mutex<StdioMcpClient>>> {
         self.cell
             .get_or_try_init(|| async {
                 let arg_refs: Vec<&str> = self.args.iter().map(String::as_str).collect();
-                let mut client =
-                    StdioMcpClient::spawn(&self.command, &arg_refs, "trusty-agents").await?;
+                let mut client = StdioMcpClient::spawn_with_env(
+                    &self.command,
+                    &arg_refs,
+                    "trusty-agents",
+                    &self.env,
+                )
+                .await?;
                 client.initialize().await?;
                 tracing::debug!(service = %self.name, "MCP service client spawned");
                 Ok::<_, anyhow::Error>(Arc::new(Mutex::new(client)))
             })
             .await
             .cloned()
+    }
+
+    /// Spawn (if needed) and return the tools the server advertises via
+    /// `tools/list`. Used only by the live-discovery path (`mcp_live`) —
+    /// the static path in this module gets its tool list from config.
+    pub(crate) async fn list_tools(
+        &self,
+    ) -> anyhow::Result<Vec<trusty_common::stdio_mcp_client::McpTool>> {
+        let client = self.get_or_spawn().await?;
+        let mut guard = client.lock().await;
+        guard.list_tools().await
     }
 }
 
@@ -149,10 +196,12 @@ impl ToolExecutor for McpServiceTool {
 /// Why: MCP returns `{ "content": [{ "type": "text", "text": "..." }, ...] }`.
 /// The LLM consumes our `ToolResult` as a string, so we concatenate the text
 /// frames. Non-text content (resource refs, images) falls back to JSON.
+/// Shared (as `pub(crate)`) with `crate::tools::mcp_live`, which formats
+/// `tools/call` results identically for live-discovered tools.
 /// What: If `content` is an array, joins its `text` fields with newlines;
 /// otherwise returns the full JSON serialization.
 /// Test: `format_mcp_call_result_*` unit tests.
-fn format_mcp_call_result(value: &Value) -> String {
+pub(crate) fn format_mcp_call_result(value: &Value) -> String {
     if let Some(items) = value.get("content").and_then(|v| v.as_array()) {
         let mut parts: Vec<String> = Vec::with_capacity(items.len());
         for item in items {
@@ -206,6 +255,13 @@ fn build_executors_from_services(services: &[McpService]) -> Vec<Arc<dyn ToolExe
 
     for svc in services {
         if !svc.enabled {
+            continue;
+        }
+        if svc.discover {
+            tracing::debug!(
+                service = %svc.name,
+                "MCP service has discover=true; skipping static tool list (crate::tools::mcp_live handles this service via live tools/list discovery)"
+            );
             continue;
         }
         if svc.tools.is_empty() {
@@ -286,6 +342,7 @@ mod tests {
             description: format!("{name} service"),
             command: format!("{name}-bin"),
             args: vec!["mcp".to_string()],
+            env: HashMap::new(),
             url: None,
             transport: "stdio".to_string(),
             enabled,
@@ -296,6 +353,7 @@ mod tests {
                     description: format!("{t} description"),
                 })
                 .collect(),
+            discover: false,
         }
     }
 
@@ -360,6 +418,21 @@ mod tests {
         let mut s = svc("http-svc", true, &["http_op"]);
         s.transport = "http".to_string();
         s.url = Some("https://example.com".to_string());
+        assert!(build_executors_from_services(&[s]).is_empty());
+    }
+
+    /// Why: #3238 — a service with `discover = true` opts entirely into the
+    /// live-discovery path (`crate::tools::mcp_live`); the static path here
+    /// must not ALSO register its `tools` list, or the same tool name would
+    /// be double-registered (triggering the debug-assert duplicate panic in
+    /// `ToolRegistry::register`).
+    /// What: Service has a non-empty static `tools` list AND `discover =
+    /// true`; assert the static builder contributes zero executors for it.
+    /// Test: This test.
+    #[test]
+    fn discover_services_skip_static_tool_list() {
+        let mut s = svc("discover-svc", true, &["static_tool"]);
+        s.discover = true;
         assert!(build_executors_from_services(&[s]).is_empty());
     }
 
@@ -440,6 +513,7 @@ mod tests {
             description: "missing".to_string(),
             command: "/nonexistent/mcp/binary/xyzzy-tool-test".to_string(),
             args: vec![],
+            env: HashMap::new(),
             url: None,
             transport: "stdio".to_string(),
             enabled: true,
@@ -447,6 +521,7 @@ mod tests {
                 name: "ghost_tool".to_string(),
                 description: "won't run".to_string(),
             }],
+            discover: false,
         }];
         let execs = build_executors_from_services(&services);
         assert_eq!(execs.len(), 1);
