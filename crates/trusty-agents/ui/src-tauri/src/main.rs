@@ -7,8 +7,8 @@
 //! (2) translate frontend `invoke(...)` calls into REST calls against that
 //! sidecar, and (3) emit `task-progress` / `task-complete` / `task-error`
 //! Tauri events so ChatView can stream a running task into its bubble.
-//! What: Six Tauri commands (`ensure_api_server`, `send_message`,
-//! `list_tasks`, `check_health`, `read_personalization_overlay`,
+//! What: Seven Tauri commands (`ensure_api_server`, `send_message`,
+//! `cancel_task`, `list_tasks`, `check_health`, `read_personalization_overlay`,
 //! `write_personalization_overlay`) plus a lightweight spawned-process
 //! registry to avoid double-starting the API server. As of #3059 the window
 //! runs in persistent/tray mode: closing the window only hides it (the
@@ -20,7 +20,11 @@
 //! the Personality panel can edit the user's `~/.trusty-agents/agents/*.md`
 //! overlay directly — both operate ONLY under that fixed `$HOME` directory,
 //! gated by a strict `[a-zA-Z0-9_-]+` slug check on `name` (no path
-//! separators, no `..` traversal).
+//! separators, no `..` traversal). #3063 adds `cancel_task`, proxying
+//! `DELETE /api/task/:id` so the frontend can Stop/Retask a running task; the
+//! existing `send_message` poll loop already detects the resulting
+//! `status: "cancelled"` as terminal, so no separate cancellation event path
+//! is needed on the Tauri side.
 //! Test: `cargo check` in `ui/src-tauri/` passes; launching the app and
 //! sending a message produces a chat bubble that grows while polling the
 //! task id. Tray hide/show/quit behavior is smoke-tested manually (see PR
@@ -360,15 +364,68 @@ async fn send_message(
 
         // Terminal state. Emit complete (even on error-status responses so
         // ChatView can display the failure narrative).
-        let narrative = response
+        //
+        // #3063: a cancelled task never produces a narrative (the run was
+        // aborted, not completed), so an empty string would render as
+        // ChatView's generic "(no narrative)" placeholder — give it a label
+        // that actually says what happened instead.
+        let raw_narrative = response
             .get("narrative")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
+        let narrative = if raw_narrative.is_empty() && status == "cancelled" {
+            "Task cancelled.".to_string()
+        } else {
+            raw_narrative.to_string()
+        };
 
         let _ = app.emit("task-complete", &response);
         return Ok(narrative);
     }
+}
+
+/// `DELETE /api/task/:id` — abort an in-flight task (#3063).
+///
+/// Why: The Stop button and the confirm-then-retask flow in InputArea both
+/// need a single awaitable call that maps cleanly onto the backend's
+/// `cancel_task` contract (`crates/trusty-agents/src/api/server/cancel.rs`):
+/// 200 on success, 404 for an unknown id, 409 when the task already reached
+/// a terminal state. Unlike `send_message`, this command must NOT turn a
+/// 404/409 into a Rust `Err` — those are expected races the frontend handles
+/// gracefully (no error toast), so folding the HTTP status into the `Ok`
+/// payload lets the JS side branch on `http_status` instead of parsing error
+/// strings.
+/// What: Issues `DELETE {api_base}/api/task/{task_id}`, and for any response
+/// in `{200, 404, 409}` returns the JSON body with an added `http_status`
+/// field. A transport failure or any other status code is a genuine `Err`.
+/// Test: Run `trusty-agents --api`, submit a long-running task, call this
+/// command with its id — assert `http_status: 200` and `GET /api/task/:id`
+/// subsequently reports `status: "cancelled"`. Call again with the same id —
+/// assert `http_status: 409`.
+#[tauri::command]
+async fn cancel_task(state: State<'_, SharedApi>, task_id: String) -> Result<Value, String> {
+    let port = state.port.lock().await.unwrap_or(8765);
+    let url = format!("{}/api/task/{}", api_base(port), task_id);
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(&url)
+        .send()
+        .await
+        .map_err(|e| format!("cancel_task request failed: {e}"))?;
+    let status_code = resp.status();
+    let ok_status = status_code.is_success()
+        || status_code == reqwest::StatusCode::NOT_FOUND
+        || status_code == reqwest::StatusCode::CONFLICT;
+    if !ok_status {
+        return Err(format!("cancel_task: HTTP {status_code}"));
+    }
+    let body: Value = resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    let mut obj = body.as_object().cloned().unwrap_or_default();
+    obj.insert(
+        "http_status".into(),
+        Value::Number(status_code.as_u16().into()),
+    );
+    Ok(Value::Object(obj))
 }
 
 /// Result payload for `read_personalization_overlay`.
@@ -531,6 +588,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ensure_api_server,
             send_message,
+            cancel_task,
             list_tasks,
             check_health,
             read_personalization_overlay,

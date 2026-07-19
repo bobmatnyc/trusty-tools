@@ -120,6 +120,21 @@ export const messages = writable<Map<string, Message[]>>(new Map());
 /** True while a task is in flight for the active project. Disables input. */
 export const isRunning = writable<boolean>(false);
 
+/**
+ * Why: InputArea needs to know which task id is currently in flight so the
+ * Stop button (#3063) can call `cancelTask(id)`, and Sidebar's "+ NEW TASK"
+ * button (#3222) can warn before clearing context out from under a running
+ * task. A plain writable (not per-project) matches the existing single
+ * global `isRunning` flag — the GUI only ever drives one task at a time.
+ * What: Set by InputArea when a submission starts (first to the client-side
+ * placeholder id, then swapped to the backend's real id once the first
+ * `task-progress` event reconciles it); cleared back to `null` once that
+ * submission reaches a terminal state (complete/error/cancelled).
+ * Test: Submit a message, assert `get(activeTaskId)` is non-null while
+ * running and `null` again after `task-complete`/`task-error` fires.
+ */
+export const activeTaskId = writable<string | null>(null);
+
 /** Recent tasks from the server's `/api/tasks` endpoint. */
 export const taskHistory = writable<TaskHistoryEntry[]>([]);
 
