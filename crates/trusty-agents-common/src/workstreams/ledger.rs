@@ -40,12 +40,21 @@
 //! single-writer-per-process assumption the issue asked for. Callers that
 //! need cross-process safety should route all ledger writes through one
 //! process (the eventual lead agent, DOC-44 Layer 2) rather than writing
-//! from multiple processes directly.
+//! from multiple processes directly. **Durability:** every write also
+//! fsyncs the temp file before the rename and best-effort fsyncs the parent
+//! directory after it (the standard durable-rename pattern — see
+//! [`WorkstreamLedger::write`]'s docs), so a mutation that returned `Ok` is
+//! guaranteed to survive an unclean shutdown of the writing process on any
+//! filesystem where directory fsync is honored; on filesystems/platforms
+//! that silently ignore directory fsync, the rename itself is still atomic
+//! (readers never see a torn file) but the very latest rename could
+//! theoretically be lost on crash, same as before this change.
 //! Test: `ledger::tests` covers create/list/get/query, `update_status` and
 //! `add_session` round-tripping through a fresh read, the `NotFound` and
 //! `ImmutableField` error paths, and `concurrent_creates_do_not_lose_writes`
 //! (proves the in-process mutex serializes concurrent creates).
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -64,6 +73,15 @@ const LEDGER_FILE: &str = "workstreams.json";
 /// Why: wrapping the array in a top-level object (matching
 /// `session_registry::SessionsFile`'s precedent) leaves room for future
 /// metadata (schema_version) without breaking parsing.
+///
+/// MUST REMEMBER (forward-looking, for whoever builds DOC-44 Phase 4): any
+/// new field added to [`Workstream`] later — e.g. Phase 4's deferred
+/// `lead_confidence`/`ConfidenceState` (see `types` module docs) — MUST be
+/// annotated `#[serde(default)]` (or wrapped in `Option<_>` with the same
+/// effect). Every record already written to an on-disk `workstreams.json`
+/// predates the new field; without a serde default, `WorkstreamLedger::read`
+/// would fail to deserialize every pre-existing ledger the moment the field
+/// lands, turning a routine schema addition into a hard migration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct LedgerFile {
     #[serde(default)]
@@ -257,8 +275,27 @@ impl WorkstreamLedger {
         }
     }
 
-    /// Write `file` atomically via temp-then-`rename` — see module docs'
-    /// "Concurrency model" for the guarantee this does and does not make.
+    /// Write `file` atomically via temp-then-`rename`, fsyncing both the temp
+    /// file (before the rename) and the parent directory (after the rename)
+    /// — see module docs' "Concurrency model" for the guarantee this does and
+    /// does not make.
+    ///
+    /// Why: `rename` alone is atomic (a reader never observes a half-written
+    /// file) but is NOT durable — on an unclean shutdown, a filesystem is
+    /// free to reorder the temp file's data write and the rename's directory
+    /// update however it likes unless both are explicitly synced, which could
+    /// lose the just-written mutation even though `write()` already returned
+    /// `Ok`. `tmp.sync_all()` forces the new content to stable storage before
+    /// the rename is issued; the parent-directory `sync_all()` after the
+    /// rename forces the directory-entry update (the rename itself) to
+    /// stable storage too — the standard POSIX "durable rename" pattern.
+    /// What: both fsyncs are best-effort (`let _ =`, matching the precedent
+    /// in `trusty-agents::state_writer::atomic_write`): some platforms/
+    /// filesystems reject `sync_all()` on a directory `File` handle, and a
+    /// hard failure there shouldn't turn a successful data write into a
+    /// reported error.
+    /// Test: `ledger::tests::write_survives_reread_after_sync` (sanity check
+    /// that a synced write is immediately visible to a fresh `read()`).
     fn write(&self, file: &LedgerFile) -> Result<(), LedgerError> {
         let bytes = serde_json::to_vec_pretty(file)?;
         let tmp = {
@@ -266,8 +303,21 @@ impl WorkstreamLedger {
             s.push(".tmp");
             PathBuf::from(s)
         };
-        std::fs::write(&tmp, &bytes)?;
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            // Force the new content to stable storage before the rename can
+            // make it visible under the real path — see the method docs.
+            let _ = f.sync_all();
+        }
         std::fs::rename(&tmp, &self.path)?;
+        // Force the directory-entry update (the rename) to stable storage
+        // too, completing the durable-rename pattern. Best-effort: see docs.
+        if let Some(parent) = self.path.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 }
@@ -450,5 +500,41 @@ mod tests {
         for ws in &created {
             assert!(all.iter().any(|w| w.id == ws.id));
         }
+    }
+
+    /// Sanity check for `write()`'s fsync-before-rename / fsync-parent-dir
+    /// durability change: a write that returned `Ok` must be immediately
+    /// visible to a brand-new `WorkstreamLedger` handle reading the same
+    /// path (i.e. the fsync calls didn't change the write's correctness,
+    /// only its durability guarantee — see `write()`'s doc comment).
+    #[test]
+    fn write_survives_reread_after_sync() {
+        let tmp = tempdir().unwrap();
+        let ledger = WorkstreamLedger::open(tmp.path()).unwrap();
+        let created = ledger.create(sample_new(Harness::Tm)).unwrap();
+
+        let reopened = WorkstreamLedger::open(tmp.path()).unwrap();
+        let fetched = reopened.get(&created.id).unwrap();
+        assert_eq!(fetched, created);
+    }
+
+    /// Proves the typed-error load path: garbage bytes on disk must surface
+    /// as `LedgerError::Json`, never a panic. Directly writes `b"{not json"`
+    /// to the ledger's backing file (bypassing `WorkstreamLedger::write`) to
+    /// simulate on-disk corruption (a truncated write, a hand-edited file,
+    /// disk bitrot).
+    #[test]
+    fn corrupt_ledger_file_returns_json_error_not_panic() {
+        let tmp = tempdir().unwrap();
+        let ledger = WorkstreamLedger::open(tmp.path()).unwrap();
+        // Force file creation, then clobber it with invalid JSON.
+        ledger.create(sample_new(Harness::Tm)).unwrap();
+        std::fs::write(ledger.path(), b"{not json").unwrap();
+
+        let list_err = ledger.list().unwrap_err();
+        assert!(matches!(list_err, LedgerError::Json(_)));
+
+        let get_err = ledger.get("anything").unwrap_err();
+        assert!(matches!(get_err, LedgerError::Json(_)));
     }
 }
