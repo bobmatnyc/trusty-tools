@@ -6,6 +6,8 @@
 //! - [`SPEC-WS-01~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-01~draft)
 //! - [`SPEC-WS-02~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-02~draft)
 //! - [`SPEC-WS-03~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-03~draft)
+//! - [`SPEC-WS-05~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-05~draft)
+//! - [`SPEC-WS-06~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-06~draft)
 //!
 //! Why: DOC-39 §4B introduced **Workstream** as a durable named grouping of
 //! sessions that must survive daemon restarts, but tcode's `SessionRegistry`
@@ -27,22 +29,30 @@
 //! [`Workstream`] (the domain record — see [`model`]); [`WorkstreamStore`]
 //! (the flat-JSON, atomic-write, fingerprint-reload store plus boot
 //! reconciliation — see [`store`]); path/filename derivation from the
-//! daemon's [`crate::binding::ProjectBinding`] (see [`path`]).
+//! daemon's [`crate::binding::ProjectBinding`] (see [`path`]); (issue #3294)
+//! [`activation`] — the activation-lock exclusivity layer above the store
+//! (`ActiveConflict`/force-switch semantics `WorkstreamStore::set_active`
+//! deliberately left out) — and [`protocol`], the `workstream.activate`/
+//! `workstream.deactivate` JSON-RPC handlers built on it.
 //!
-//! **Scope note (Phase 1A, issue #3293):** this module implements ONLY the
-//! domain model and persistence layer. Activation-lock RPC semantics
-//! (`workstream.activate{force}` / `ActiveConflict`, #3294), the RPC/REST
-//! surface (#3295), the CLI (#3296), and the SSE aggregation route (#3297)
-//! are explicitly out of scope and land in follow-up tickets against this
-//! foundation.
+//! **Scope note (Phase 1A):** #3293 built ONLY the domain model and
+//! persistence layer (this module's `model`/`path`/`store` submodules);
+//! #3294 (this ticket) adds the activation-lock RPC semantics
+//! (`activation`/`protocol`, above). The remaining `workstream.*` RPC/REST
+//! surface (`create`/`get`/`list`/`close`, #3295), the CLI (#3296), and the
+//! SSE aggregation route (#3297) land in their own follow-up tickets against
+//! this foundation.
 //!
 //! Test: `cargo test -p trusty-code workstreams::` exercises every submodule
 //! in place; see each submodule's own `Test:` line for specifics.
 
+pub mod activation;
 pub mod model;
 mod path;
+pub mod protocol;
 pub mod store;
 
+pub use activation::{ActivateOutcome, ActivationError, SharedWorkstreamStore};
 pub use model::{Workstream, WorkstreamId, WorkstreamState};
 pub use path::{default_data_dir, store_path};
 pub use store::{ReconcileOutcome, StoreError, WorkstreamStore};

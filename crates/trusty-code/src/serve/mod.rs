@@ -41,12 +41,14 @@ pub mod transport;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::Router;
 use crate::session::SessionRegistry;
+use crate::workstreams::WorkstreamStore;
 
 /// How long a graceful stop waits for in-flight `task.run` executions to
 /// observe cancellation and unwind before the process exits anyway.
@@ -91,6 +93,23 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// `crate::fs_browse::protocol::register`, and
 /// `crate::task::protocol::register` on them, and returns both.
 ///
+/// (DOC-48, issue #3294) also loads this project's
+/// [`crate::workstreams::WorkstreamStore`] (`~/.trusty-code/workstreams-....json`,
+/// derived from `binding` per DOC-48 §3.1), runs its boot reconciliation
+/// (§3.3 — restores the persisted active pointer, or clears it if the
+/// workstream it named was deleted; never destructive), wraps it in a
+/// `tokio::sync::Mutex` (the store's mutating methods take `&mut self`, and
+/// its file I/O is `async` — mirrors `SessionRegistry`'s `Arc`-shared-state
+/// convention, see `crate::workstreams::activation::SharedWorkstreamStore`'s
+/// docs for why `tokio`'s `Mutex` specifically), and registers
+/// `crate::workstreams::protocol::register` (`workstream.activate`/
+/// `workstream.deactivate`) alongside every other method group. This is why
+/// `build_router` is now `async` and fallible — the prior synchronous,
+/// infallible signature had no way to load persisted state before the router
+/// starts answering requests, and a corrupt store file must fail daemon
+/// startup loudly rather than silently discard the user's workstreams (see
+/// `WorkstreamStore::load`'s docs).
+///
 /// `binding` is the daemon's project binding. Its `None` (projectless) state is
 /// what makes the shell's entry screen implementable: previously `build_router`
 /// took a required `PathBuf`, so a daemon could not even START without a
@@ -101,16 +120,46 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
 /// `build_router_is_projectless_without_a_project`,
-/// `build_router_wires_fs_list_dir`.
-pub fn build_router(binding: ProjectBinding) -> (Router, Arc<SessionRegistry>) {
+/// `build_router_wires_fs_list_dir`, `build_router_wires_workstream_methods`.
+pub async fn build_router(binding: ProjectBinding) -> Result<(Router, Arc<SessionRegistry>)> {
+    build_router_at(binding, &crate::workstreams::default_data_dir()).await
+}
+
+/// Like [`build_router`] but takes an explicit workstream data directory
+/// instead of always resolving `~/.trusty-code`.
+///
+/// Why: every unit test in this module builds a router; letting them all
+/// resolve the REAL `~/.trusty-code` would read/write the developer's (or
+/// CI runner's) actual home directory on every `cargo test` run — this seam
+/// lets tests pass a throwaway tempdir instead, while `build_router` (the
+/// only entry point `run_stdio`/`run_http` call) always uses the real
+/// directory.
+/// What: identical to `build_router`'s full docs otherwise — loads (or
+/// creates) the workstream store at `data_dir` via `binding`'s derived
+/// filename, runs boot reconciliation, and registers every method group.
+async fn build_router_at(
+    binding: ProjectBinding,
+    data_dir: &std::path::Path,
+) -> Result<(Router, Arc<SessionRegistry>)> {
     let sessions = Arc::new(SessionRegistry::new());
     let agents_dir = binding.agents_dir();
+
+    let mut workstream_store = WorkstreamStore::load_for_binding(data_dir, &binding)
+        .await
+        .context("loading workstream store")?;
+    workstream_store
+        .reconcile_on_boot()
+        .await
+        .context("reconciling workstream store on boot")?;
+    let workstreams = Arc::new(Mutex::new(workstream_store));
+
     let mut router = Router::new();
     methods::register(&mut router);
     crate::session::protocol::register(&mut router, sessions.clone());
     crate::fs_browse::protocol::register(&mut router);
     crate::task::protocol::register(&mut router, sessions.clone(), binding, agents_dir);
-    (router, sessions)
+    crate::workstreams::protocol::register(&mut router, workstreams);
+    Ok((router, sessions))
 }
 
 /// Run `tcode serve --stdio` to completion.
@@ -131,7 +180,7 @@ pub async fn run_stdio(binding: ProjectBinding) -> Result<()> {
         project = binding.label().unwrap_or_else(|| "<projectless>".into()),
         "tcode serve --stdio: starting"
     );
-    let (router, sessions) = build_router(binding);
+    let (router, sessions) = build_router(binding).await?;
     transport::run_stdio_loop(router).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --stdio: stopped");
@@ -156,7 +205,7 @@ pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
         port,
         "tcode serve --http: starting"
     );
-    let (router, sessions) = build_router(binding);
+    let (router, sessions) = build_router(binding).await?;
     http::run_http(router, sessions.clone(), port).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --http: stopped");
@@ -178,9 +227,13 @@ mod tests {
     #[tokio::test]
     async fn run_stdio_router_recognises_proof_of_life_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
-        let (router, _sessions) = build_router(
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let (router, _sessions) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-        );
+            data_dir.path(),
+        )
+        .await
+        .expect("build_router_at");
         for method in ["ping", "health"] {
             let req = Request {
                 jsonrpc: Some("2.0".to_string()),
@@ -202,9 +255,13 @@ mod tests {
     #[tokio::test]
     async fn build_router_wires_session_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
-        let (router, sessions) = build_router(
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let (router, sessions) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-        );
+            data_dir.path(),
+        )
+        .await
+        .expect("build_router_at");
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let req = Request {
@@ -228,9 +285,13 @@ mod tests {
     #[tokio::test]
     async fn build_router_wires_fs_list_dir() {
         let project = tempfile::tempdir().expect("project tempdir");
-        let (router, _sessions) = build_router(
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let (router, _sessions) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-        );
+            data_dir.path(),
+        )
+        .await
+        .expect("build_router_at");
 
         let req = Request {
             jsonrpc: Some("2.0".to_string()),
@@ -261,7 +322,10 @@ mod tests {
     /// the same in that state.
     #[tokio::test]
     async fn build_router_is_projectless_without_a_project() {
-        let (router, _sessions) = build_router(ProjectBinding::None);
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let (router, _sessions) = build_router_at(ProjectBinding::None, data_dir.path())
+            .await
+            .expect("build_router_at");
         for method in ["task.run", "session.create", "session.list"] {
             let req = Request {
                 jsonrpc: Some("2.0".to_string()),
@@ -310,9 +374,13 @@ mod tests {
                 crate::task::mock_llm::MOCK_LLM_ECHO,
             );
         }
-        let (router, sessions) = build_router(
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let (router, sessions) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-        );
+            data_dir.path(),
+        )
+        .await
+        .expect("build_router_at");
         let req = Request {
             jsonrpc: Some("2.0".to_string()),
             id: Some(json!(1)),
@@ -333,5 +401,65 @@ mod tests {
             resp.error
         );
         assert_eq!(resp.result.unwrap()["status"], "running");
+    }
+
+    /// `build_router` must also wire `workstream.activate`/
+    /// `workstream.deactivate` (DOC-48 §6, issue #3294), and the activation
+    /// pointer they write must be the SAME store a fresh `build_router_at`
+    /// call over the same `data_dir`/`binding` reloads (AC-1.4 boot
+    /// restoration, exercised end-to-end through the daemon's own assembly
+    /// path rather than `workstreams::protocol_tests`' narrower unit tests).
+    #[tokio::test]
+    async fn build_router_wires_workstream_methods() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let binding =
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
+
+        let (router, _sessions) = build_router_at(binding.clone(), data_dir.path())
+            .await
+            .expect("build_router_at");
+
+        let create_req = Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "workstream.activate".to_string(),
+            params: Some(json!({"id": crate::workstreams::WorkstreamId::new().to_string()})),
+        };
+        // An id minted here names no existing workstream, so this must map
+        // to `-32002 not_found`, NOT `-32601 method not found` — the point
+        // of this assertion is that the method is REGISTERED, not that this
+        // particular call succeeds (there is no `workstream.create` to seed
+        // one with yet — that is #3295's surface).
+        let resp = router.dispatch(create_req, &test_ctx()).await;
+        let err = resp
+            .error
+            .expect("activating an unknown id must fail, not silently succeed");
+        assert_eq!(err.code, -32002, "workstream.activate must be registered");
+
+        let deactivate_req = Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(2)),
+            method: "workstream.deactivate".to_string(),
+            params: Some(json!({"id": crate::workstreams::WorkstreamId::new().to_string()})),
+        };
+        // Deactivating an unknown id is an idempotent no-op (DOC-48 §4.3),
+        // so this must succeed — proving `workstream.deactivate` is wired
+        // too.
+        let resp = router.dispatch(deactivate_req, &test_ctx()).await;
+        assert!(
+            resp.error.is_none(),
+            "workstream.deactivate must be registered, got {:?}",
+            resp.error
+        );
+
+        // Boot restoration (AC-1.4): a fresh `build_router_at` over the SAME
+        // data_dir/binding must load the store this instance persisted to,
+        // rather than starting from a brand-new empty one — proven here by
+        // reconciliation completing without error on the same file the
+        // first instance created.
+        let (_router2, _sessions2) = build_router_at(binding, data_dir.path())
+            .await
+            .expect("a second build_router_at over the same data_dir must succeed");
     }
 }

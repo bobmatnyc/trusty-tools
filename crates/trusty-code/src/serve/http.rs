@@ -94,9 +94,11 @@ struct HttpState {
 /// (Slice 3) the write routes (`POST /sessions`,
 /// `POST /sessions/{id}/messages`, `POST /sessions/{id}/cancel`,
 /// `PUT`/`DELETE /sessions/{id}/goal`), (Slice 4) `POST /tasks`, (Slice 5)
-/// `GET /fs`, (Slice 6) `GET /sessions/{id}/agents`, and (Slice 7, issue
-/// #3072) `GET /sessions/{id}/search-audit` — none of which collide with the
-/// paths registered directly on this router or with each other.
+/// `GET /fs`, (Slice 6) `GET /sessions/{id}/agents`, (Slice 7, issue
+/// #3072) `GET /sessions/{id}/search-audit`, and (DOC-48 §5.2, issue #3294)
+/// `POST /workstreams/{id}/activate`/`.../deactivate` — none of which
+/// collide with the paths registered directly on this router or with each
+/// other.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
@@ -124,7 +126,8 @@ pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) ->
         .merge(rest::tasks::routes(router.clone()))
         .merge(rest::fs::routes(router.clone()))
         .merge(rest::agents::routes(router.clone()))
-        .merge(rest::search_audit::routes(router));
+        .merge(rest::search_audit::routes(router.clone()))
+        .merge(rest::workstreams::routes(router));
     trusty_common::server::with_standard_middleware(app)
 }
 
