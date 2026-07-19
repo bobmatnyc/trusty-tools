@@ -77,9 +77,23 @@ struct SubmitResponse {
 /// is forwarded as the request body's `agent` field — the same field the
 /// `--direct <agent>` subprocess dispatch path already used — so the GUI's
 /// roster selection determines which persona answers.
+/// #3245 (model/provider picker, epic #3052): `model_id`/`provider_id`,
+/// when set, are forwarded verbatim as the request body's `model_id`/
+/// `provider_id` fields — the wire names `TaskRequest` (server-side)
+/// deserializes — so the GUI's model picker selection pins a model/
+/// credential-routing path for this turn. Tauri's `invoke()` maps
+/// camelCase JS arg names (`modelId`, `providerId`) to these snake_case
+/// Rust params automatically.
 /// Test: Run `trusty-agents --api` manually, call this command with `content=
 /// "echo hi"`, assert a sequence of progress events followed by
 /// `task-complete` and a non-empty narrative return value.
+// Why: Every parameter is a flat scalar Tauri maps 1:1 from the frontend's
+// `invoke()` args to this request body's JSON fields (mirrors the
+// `build_deployment_footer` allow in `trusty-agents/src/ctrl/pm_task/helpers.rs`
+// — bundling them into a struct just to satisfy the 7-argument heuristic
+// would obscure the `#[tauri::command]` call site without buying real
+// abstraction). Allow locally.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -88,6 +102,8 @@ pub async fn send_message(
     project_path: Option<String>,
     workflow: Option<String>,
     agent: Option<String>,
+    model_id: Option<String>,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
     let port = state.port.lock().await.unwrap_or(8765);
     let client = reqwest::Client::new();
@@ -103,6 +119,12 @@ pub async fn send_message(
     }
     if let Some(a) = agent.as_ref().filter(|s| !s.is_empty()) {
         body.insert("agent".into(), Value::String(a.clone()));
+    }
+    if let Some(m) = model_id.as_ref().filter(|s| !s.is_empty()) {
+        body.insert("model_id".into(), Value::String(m.clone()));
+    }
+    if let Some(p) = provider_id.as_ref().filter(|s| !s.is_empty()) {
+        body.insert("provider_id".into(), Value::String(p.clone()));
     }
 
     let submit_url = format!("{}/api/task", api_base(port));

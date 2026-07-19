@@ -63,6 +63,42 @@ pub struct TaskRequest {
     /// from a task that prints `std::env::current_dir()`).
     #[serde(default)]
     pub project_path: Option<String>,
+    /// GUI model/provider picker (#3245, epic #3052): pins a specific model
+    /// id for this turn, mirroring the REPL's `/model <id>` slash command.
+    ///
+    /// Why: `GET /api/models` (#3243) gives the picker a live catalog of
+    /// models the user can choose from; without this field the choice had
+    /// nowhere to go and the request always fell back to the agent
+    /// config's default model. Naming matches the `/api/models` response
+    /// shape (`ModelProviderEntry.default_model`'s selected value) so the
+    /// GUI can round-trip a catalog entry straight into the request body.
+    /// What: When `Some`, threaded into `SessionOverrides::model` and
+    /// applied to `cfg.agent.model` before dispatch. `None` (the default —
+    /// omitted entirely by existing callers) preserves the pre-#3245
+    /// behavior byte-for-byte: the agent config's own model is used.
+    /// Test: `session_overrides_for_passes_through_model_and_provider`,
+    /// `session_overrides_for_defaults_to_none`.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// GUI model/provider picker (#3245, epic #3052): pins a credential-
+    /// routing path for this turn, mirroring the REPL's `/provider <name>`
+    /// slash command.
+    ///
+    /// Why: Selecting a model from `GET /api/models` often implies a
+    /// specific provider (e.g. Bedrock vs. OpenRouter) rather than letting
+    /// the normal env-credential probe pick one. Only known values are
+    /// meaningful — see `resolve_overridden_credentials` for the accepted
+    /// set (`"claude-code"`, `"openrouter"`, `"bedrock"`, `"local"`); an
+    /// unrecognized value fails the turn with a clear error rather than
+    /// silently falling back, so a picker bug surfaces immediately instead
+    /// of routing through the wrong credential path.
+    /// What: When `Some`, threaded into `SessionOverrides::provider`.
+    /// `None` (the default) preserves the pre-#3245 behavior byte-for-byte:
+    /// the normal `pick_credentials()` env probe runs unchanged.
+    /// Test: `session_overrides_for_passes_through_model_and_provider`,
+    /// `session_overrides_for_defaults_to_none`.
+    #[serde(default)]
+    pub provider_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +200,34 @@ fn resolve_agent_for_chat(req: &TaskRequest, is_ctrl_command: bool) -> Option<St
     }
 }
 
+/// Build the model/provider `SessionOverrides` for a Conversational/Research
+/// dispatch (#3245, epic #3052).
+///
+/// Why: `TaskRequest.model_id`/`provider_id` let the GUI's model picker pin
+/// a model or credential-routing path for a single turn, mirroring the
+/// REPL's `/model`/`/provider` slash commands (see `SessionOverrides`'s own
+/// doc comment in `ctrl::config`). Extracted as its own pure function —
+/// following the `agent_override`/`resolve_agent_for_chat` pattern above —
+/// so the wire-field-to-override mapping is unit-testable without the HTTP
+/// router or an LLM call.
+/// What: `model` = `req.model_id` verbatim (`None` → the agent config's
+/// own `cfg.agent.model` is used, exactly as before this field existed).
+/// `provider` = `req.provider_id` verbatim (`None` → the normal
+/// `pick_credentials()` env probe runs unchanged; `Some` is validated by
+/// `resolve_overridden_credentials`, which errors clearly on an
+/// unrecognized value). `user` is always `None` — the HTTP path carries no
+/// authenticated caller identity to forward (unlike the Slack/Telegram
+/// bridges).
+/// Test: `session_overrides_for_defaults_to_none`,
+/// `session_overrides_for_passes_through_model_and_provider`.
+fn session_overrides_for(req: &TaskRequest) -> crate::ctrl::SessionOverrides {
+    crate::ctrl::SessionOverrides {
+        model: req.model_id.clone(),
+        provider: req.provider_id.clone(),
+        user: None,
+    }
+}
+
 /// `POST /api/task` — kick off a workflow/agent/conversational run.
 ///
 /// Why: Single entry point the WebUI / CLI hit to submit work; the server
@@ -234,6 +298,10 @@ pub(super) async fn submit_task(
     // ListProjectsTool, SetActiveProjectTool, StopTaskTool). The roster's
     // agent override only applies to ordinary conversational/research turns.
     let agent_for_chat = resolve_agent_for_chat(&req, is_ctrl_command);
+    // #3245: GUI model/provider picker overrides for this turn. Computed
+    // once so both Conversational/Research dispatch paths below (persona
+    // and session) apply the same selection.
+    let overrides = session_overrides_for(&req);
 
     match intent {
         IntentClass::Conversational | IntentClass::Research => {
@@ -256,6 +324,7 @@ pub(super) async fn submit_task(
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let agent_bg = agent_for_chat.clone();
+            let overrides_bg = overrides.clone();
             let intent_label = match intent {
                 IntentClass::Conversational => "conversational",
                 IntentClass::Research => "research",
@@ -270,14 +339,22 @@ pub(super) async fn submit_task(
                         &task_text,
                         &[],
                         Some(id_bg.clone()),
-                        crate::ctrl::SessionOverrides::default(),
+                        overrides_bg,
                     )
                     .await
                 } else {
-                    crate::ctrl::run_pm_task_with_session(
+                    // #3245: threading `overrides_bg` requires the
+                    // history-aware entry point — `run_pm_task_with_session`
+                    // hardcodes `SessionOverrides::default()` internally and
+                    // has no override parameter. This call is exactly what
+                    // `run_pm_task_with_session` does under the hood (empty
+                    // history, single turn) plus the model/provider pin.
+                    crate::ctrl::run_pm_task_with_history(
                         &project_path,
                         &task_text,
+                        &[],
                         Some(id_bg.clone()),
+                        overrides_bg,
                     )
                     .await
                 };
@@ -476,6 +553,8 @@ mod tests {
             task_file: None,
             agent: agent.map(str::to_string),
             project_path: None,
+            model_id: None,
+            provider_id: None,
         }
     }
 
@@ -534,5 +613,53 @@ mod tests {
             resolve_agent_for_chat(&base_request(Some("cto-assistant")), true),
             None
         );
+    }
+
+    /// #3245: omitting `model_id`/`provider_id` entirely (every pre-#3245
+    /// caller, and any GUI submission before the user touches the picker)
+    /// must produce a no-op `SessionOverrides`, so dispatch behaves exactly
+    /// as it did before this field existed — the agent config's own model
+    /// and the normal env-credential probe are used unchanged.
+    #[test]
+    fn session_overrides_for_defaults_to_none() {
+        let overrides = session_overrides_for(&base_request(None));
+        assert_eq!(overrides.model, None);
+        assert_eq!(overrides.provider, None);
+        assert!(overrides.user.is_none());
+    }
+
+    /// #3245: the GUI model/provider picker's selection threads through
+    /// verbatim — this is the field-mapping contract the frontend's
+    /// `POST /api/task` body relies on.
+    #[test]
+    fn session_overrides_for_passes_through_model_and_provider() {
+        let mut req = base_request(None);
+        req.model_id = Some("anthropic/claude-opus-4-6".to_string());
+        req.provider_id = Some("bedrock".to_string());
+        let overrides = session_overrides_for(&req);
+        assert_eq!(
+            overrides.model.as_deref(),
+            Some("anthropic/claude-opus-4-6")
+        );
+        assert_eq!(overrides.provider.as_deref(), Some("bedrock"));
+    }
+
+    /// `POST /api/task` must accept a body carrying `model_id`/`provider_id`
+    /// and a body omitting them entirely (serde `#[serde(default)]`) — the
+    /// omission case is what every existing caller (CLI, older GUI builds)
+    /// sends, and it must keep deserializing to `None` rather than erroring.
+    #[test]
+    fn task_request_deserializes_model_and_provider_fields() {
+        let with_fields: TaskRequest = serde_json::from_str(
+            r#"{"task":"hi","model_id":"claude-opus-4-6","provider_id":"openrouter"}"#,
+        )
+        .expect("should deserialize with model_id/provider_id present");
+        assert_eq!(with_fields.model_id.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(with_fields.provider_id.as_deref(), Some("openrouter"));
+
+        let without_fields: TaskRequest =
+            serde_json::from_str(r#"{"task":"hi"}"#).expect("should deserialize when omitted");
+        assert_eq!(without_fields.model_id, None);
+        assert_eq!(without_fields.provider_id, None);
     }
 }
