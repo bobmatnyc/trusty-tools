@@ -108,6 +108,26 @@ pub struct ReconcileOutcome {
 /// last-observed [`FileSig`] so a read can detect an external write (e.g. a
 /// second daemon process, or a test writing the file directly) and reload
 /// before answering.
+///
+/// **Concurrency model:** `create`/`set_active`/`reconcile_on_boot` are
+/// read-modify-write cycles (reload → mutate `self.data` → `save`) with NO
+/// cross-process lock — unlike
+/// [`trusty_agents_common::workstreams::WorkstreamLedger`], which at least
+/// serializes concurrent *threads within one process* behind an in-process
+/// `Mutex`, this store doesn't even do that; `&mut self` on every mutating
+/// method is the only serialization, so it is safe only for a single
+/// `WorkstreamStore` handle used from one task at a time. Two *processes*
+/// racing a read-modify-write on the same file can still lose an update: the
+/// last writer's atomic `rename` always leaves a whole, parseable file
+/// (never a torn one), but an interleaved writer can silently overwrite the
+/// other's change with a stale in-memory copy. This is inert today because
+/// DOC-48's architecture binds exactly one daemon process to one
+/// `ProjectBinding` (§2.3), and that daemon is the store's only writer; it
+/// becomes a real constraint only if a future caller opens a second
+/// `WorkstreamStore` over the same file from another process — such a
+/// caller must route writes through the owning daemon instead of writing
+/// directly, mirroring `WorkstreamLedger`'s documented callers-must-route-
+/// through-one-process caveat.
 /// Test: `store_tests::store_load_save_round_trip`,
 /// `store_tests::store_reload_picks_up_external_write`.
 #[derive(Debug)]
@@ -145,7 +165,7 @@ impl WorkstreamStore {
     /// Why: the entry point a daemon boot path (or a test standing in for
     /// one) calls — it never assembles the filename itself.
     /// What: `Self::load(store_path(data_dir, binding))`.
-    /// Test: `store_tests::load_for_binding_derives_filename`.
+    /// Test: `store_tests::store_load_for_binding_derives_filename`.
     pub async fn load_for_binding(
         data_dir: &Path,
         binding: &ProjectBinding,

@@ -184,7 +184,7 @@ impl Workstream {
     /// session liveness never gates this (§3.3: "it does NOT determine
     /// active/idle state").
     /// What: `Active` iff `active_workstream_id == Some(self.id)` (checked
-    /// FIRST, matching §3.3 step 3's literal ordering); otherwise `Closed` if
+    /// FIRST, matching §3.2's literal ordering); otherwise `Closed` if
     /// [`Self::is_closed`], else `Idle`.
     /// Test: `model_tests::state_is_active_iff_pointer_matches`,
     /// `model_tests::state_is_closed_when_metadata_flag_set`,

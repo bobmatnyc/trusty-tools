@@ -77,7 +77,7 @@ fn state_is_closed_when_metadata_flag_set() {
 
 #[test]
 fn active_pointer_beats_closed_flag() {
-    // Why: §3.3 step 3 checks the active pointer FIRST — a workstream whose
+    // Why: §3.2 checks the active pointer FIRST — a workstream whose
     // id happens to still equal the persisted pointer reports Active even if
     // it was also marked closed (an inconsistent state a future
     // `workstream.close` verb must avoid producing, but the read-side

@@ -59,14 +59,36 @@ fn store_filename_for_projectless() {
 
 #[test]
 fn store_filename_disambiguates_same_basename_different_roots() {
-    let dir_a = TempDir::new().expect("tempdir a");
-    let dir_b = TempDir::new().expect("tempdir b");
-    // Two distinct temp roots have distinct basenames already (random temp
-    // suffixes), which is enough to prove the hash component varies with the
-    // full root path rather than being a constant.
-    let binding_a = ProjectBinding::resolve(Some(dir_a.path().to_path_buf())).expect("resolve a");
-    let binding_b = ProjectBinding::resolve(Some(dir_b.path().to_path_buf())).expect("resolve b");
-    assert_ne!(store_filename(&binding_a), store_filename(&binding_b));
+    // Why: §3.1 — "a hash suffix disambiguates multiple checkouts of the
+    // same project" (e.g. two clones both named `acme-api`). This must
+    // construct an ACTUAL same-basename scenario: two directories that
+    // share the literal final path component under different temp roots, so
+    // the slug component is identical and only the hash can tell them apart.
+    let root_a = TempDir::new().expect("tempdir a");
+    let root_b = TempDir::new().expect("tempdir b");
+    let dir_a = root_a.path().join("acme-api");
+    let dir_b = root_b.path().join("acme-api");
+    std::fs::create_dir(&dir_a).expect("mkdir a");
+    std::fs::create_dir(&dir_b).expect("mkdir b");
+    assert_eq!(
+        dir_a.file_name(),
+        dir_b.file_name(),
+        "precondition: both roots must share the same basename"
+    );
+
+    let binding_a = ProjectBinding::resolve(Some(dir_a)).expect("resolve a");
+    let binding_b = ProjectBinding::resolve(Some(dir_b)).expect("resolve b");
+    let filename_a = store_filename(&binding_a);
+    let filename_b = store_filename(&binding_b);
+    assert_ne!(
+        filename_a, filename_b,
+        "same-basename projects at different roots must not collide on filename"
+    );
+    // Same-basename precondition means the slug component is identical; the
+    // difference must come from the hash, proving the hash actually varies
+    // with the full root path rather than being a constant.
+    assert!(filename_a.starts_with("workstreams-acme-api-"));
+    assert!(filename_b.starts_with("workstreams-acme-api-"));
 }
 
 #[test]
