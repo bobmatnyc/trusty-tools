@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- `events::tests::publish_round_trips_through_subscribe` (and sibling tests `bus_is_singleton`, `seq_is_monotonic`) now carry `#[serial_test::serial]` — these three tests share the process-global `HarnessEvent` broadcast bus, so a concurrent workspace test run could deliver an unrelated event or interleave `publish()` sequence numbers between them, causing an intermittent assertion failure (closes #2961; same pattern as the #2271 `bm25_client` fix).
+
 ### Added
 
 - new public `agents::builder_in_memory` module (`InMemorySources`, `build_in_memory_source_map`, `compose_agent_in_memory`): an in-memory counterpart to `agents::builder::compose_agent` that resolves `extends:` inheritance chains (including through BASE-* templates) against an embedded `name -> markdown` asset map instead of a filesystem `source_dir` (refs #2958, epic #2892 Slice E1 — the foundation for trusty-code embedding a curated tm agent roster as `include_str!` assets). Internally, `agents::builder::resolve` was generalised over a new `pub(crate)` `SourceLookup` trait so both the fs and in-memory paths share one chain-walk/cycle-detection/depth-limit implementation instead of forking it; the fs `compose_agent` API and its behavior are unchanged (verified by a byte-equivalence test comparing fs vs. in-memory composition of identical content). Additive only.
