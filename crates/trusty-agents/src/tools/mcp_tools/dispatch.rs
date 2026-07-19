@@ -109,6 +109,19 @@ fn parse_service_from_args(args: &Value) -> Result<McpService> {
         .unwrap_or_default();
     let url = args.get("url").and_then(Value::as_str).map(str::to_string);
     let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let discover = args
+        .get("discover")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let env: std::collections::HashMap<String, String> = args
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     let tools = args
         .get("tools")
         .and_then(Value::as_array)
@@ -131,9 +144,11 @@ fn parse_service_from_args(args: &Value) -> Result<McpService> {
         description,
         command,
         args: args_vec,
+        env,
         url,
         transport,
         enabled,
         tools,
+        discover,
     })
 }

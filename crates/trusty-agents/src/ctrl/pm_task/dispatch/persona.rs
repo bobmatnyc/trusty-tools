@@ -139,6 +139,30 @@ pub async fn run_pm_task_with_persona(
                 }
             }
 
+            // #3238: live-discover MCP servers (`[[mcp.services]] discover =
+            // true` and `.mcp.json`) and register whatever tools they
+            // actually advertise, on top of everything registered above.
+            // `existing_names` seeds the dedup set so a live-discovered tool
+            // never shadows a tool already registered from another source.
+            {
+                let existing_names: std::collections::HashSet<String> = registry
+                    .schemas()
+                    .iter()
+                    .filter_map(|s| {
+                        s.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(String::from)
+                    })
+                    .collect();
+                for tool in
+                    crate::tools::mcp_live::live_mcp_tool_executors(project_path, &existing_names)
+                        .await
+                {
+                    registry.register(tool);
+                }
+            }
+
             let all_names: Vec<String> = registry
                 .schemas()
                 .into_iter()

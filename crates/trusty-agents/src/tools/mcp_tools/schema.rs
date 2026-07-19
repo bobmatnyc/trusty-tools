@@ -49,6 +49,7 @@ pub fn mcp_tool_definitions() -> Vec<ChatCompletionTool> {
                     },
                     "url": {"type": "string", "description": "For http: service endpoint URL"},
                     "enabled": {"type": "boolean", "description": "Whether to enable immediately (default: true)"},
+                    "discover": {"type": "boolean", "description": "When true, ignore 'tools' and live-discover this service's tools via tools/list at registry-build time instead (stdio only, default: false)"},
                     "tools": {
                         "type": "array",
                         "description": "Optional list of tools this service provides",

@@ -72,10 +72,12 @@ mod tests {
             description: "alpha service".to_string(),
             command: "a".to_string(),
             args: vec![],
+            env: std::collections::HashMap::new(),
             url: None,
             transport: "stdio".to_string(),
             enabled: true,
             tools: vec![],
+            discover: false,
         })
         .await
         .unwrap();

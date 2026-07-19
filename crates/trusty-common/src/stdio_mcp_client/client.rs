@@ -38,7 +38,8 @@ impl StdioMcpClient {
     /// library name here would mislead MCP server logs and any server-side
     /// logic keyed on that field.
     /// What: Returns an unconnected client with the handshake NOT yet sent.
-    /// Call `initialize` next to complete the MCP handshake.
+    /// Call `initialize` next to complete the MCP handshake. Thin wrapper
+    /// over `spawn_with_env` with an empty environment overlay.
     /// Test: Indirectly via `#[ignore]`d e2e test; unit-test failure is
     /// covered by `spawn_missing_binary_errors` in `mod.rs`. The
     /// `initialize_envelope_is_well_formed` test verifies the supplied name
@@ -48,8 +49,32 @@ impl StdioMcpClient {
         args: &[&str],
         client_name: impl Into<String>,
     ) -> Result<Self> {
+        Self::spawn_with_env(binary, args, client_name, &std::collections::HashMap::new()).await
+    }
+
+    /// Spawn `binary` with `args` and an additional set of environment
+    /// variables overlaid on the inherited process environment.
+    ///
+    /// Why: Many MCP servers (e.g. those declared in a `.mcp.json`
+    /// `mcpServers` entry, or a `[[mcp.services]]` config block) need
+    /// credentials or config passed via env vars (`API_KEY`, `DB_URL`, …)
+    /// that must not be baked into `args` (they'd leak into process listings
+    /// and logs). `spawn` delegates here with an empty map so existing call
+    /// sites are unaffected.
+    /// What: Identical to `spawn` except `envs` is applied via
+    /// `Command::envs` before spawning, overlaying (not replacing) the
+    /// inherited environment.
+    /// Test: `spawn_with_env_makes_variable_visible_to_child` (unix-only,
+    /// spawns `sh -c 'echo $FOO'` and asserts the child observed the value).
+    pub async fn spawn_with_env(
+        binary: &str,
+        args: &[&str],
+        client_name: impl Into<String>,
+        envs: &std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
         let mut child = Command::new(binary)
             .args(args)
+            .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(plugin_stderr_stdio(binary))
