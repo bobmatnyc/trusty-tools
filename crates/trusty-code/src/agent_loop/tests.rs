@@ -1520,6 +1520,10 @@ mod batched_multi_tool;
 // live in a focused child module to keep this file under its SLOC cap.
 mod write_batch;
 
+// #2857 log-level regression guards (a silent cap is a forensic investigation)
+// live in a focused child module to keep this file under its SLOC cap.
+mod observability;
+
 /// Live OpenRouter test: trivial task through the real client + a real tool.
 ///
 /// Why: End-to-end confidence that the loop drives a real model to a final

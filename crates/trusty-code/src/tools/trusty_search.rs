@@ -475,6 +475,21 @@ impl ToolExecutor for TrustySearchTool {
                 } else {
                     "semantic"
                 };
+                // #2857: `info`, not `warn` — the run continues and the model
+                // is told, but it is now reasoning on materially different
+                // (exact-match, not semantic) results than it asked for. That
+                // is a degradation the model then acts on, and it silently
+                // shapes everything downstream of the query. Note the sibling
+                // failure paths here already `warn`; this SUCCESS path was the
+                // silent one precisely because it "worked".
+                tracing::info!(
+                    tool,
+                    mode,
+                    query = %parsed.query,
+                    "search_code degraded to the lexical lane: the {lane_label} index returned \
+                     STAGE_NOT_READY (still building), so the model is being served exact-match \
+                     results instead of the {mode} results it requested (#2783)"
+                );
                 return ToolResult::ok(format!(
                     "trusty-search's {lane_label} index is still building; \
                      showing lexical (exact-match) results instead:\n{text}"

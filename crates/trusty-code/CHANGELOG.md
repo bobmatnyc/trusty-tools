@@ -10,6 +10,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **A written log-level convention, in `logging`'s module docs.** The crate had
+  no stated rule for when a decision deserves a log, which is why 16 of ~100
+  source files emitted anything at all. The convention now has one organising
+  principle — *a decision that silently changes the run's outcome must not be
+  invisible to the operator* — and a load-bearing distinction: a **harness
+  policy decision** (we overrode the model) is `warn`; a **model input error**
+  (bad args, self-corrected next turn) is `debug`. Both surface identically as
+  a `ToolResult::err`, which is exactly why they were conflated. Degradations
+  the model or user then acts on are `info`; genuine faults are `error`
+  ([#2857](https://github.com/bobmatnyc/trusty-tools/issues/2857))
+- **Log-level regression guards** (`agent_loop::tests::observability`) pinning
+  the LEVEL, not just the presence, of the loop's outcome-changing decisions —
+  including the #2852-class acceptance test: a cap that kills a run must be
+  diagnosable from ONE run's stderr. A `warn` decaying to `debug`, or an `info`
+  creeping to `warn`, now both fail CI
+  ([#2857](https://github.com/bobmatnyc/trusty-tools/issues/2857))
+
 - **Build provenance in `--version` and `tcode_report.json`** — `tcode --version`
   now prints the git SHA and commit date alongside the semver
   (`tcode 0.2.0 (b20adfca 2026-07-16)`), and `tcode_report.json` carries a
@@ -28,6 +45,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **P0: `tcode` emitted NO log output whatsoever on a default run.**
+  `init_tracing` filtered with `EnvFilter::from_default_env()`, which builds an
+  **empty directive set** when `RUST_LOG` is unset — enabling nothing, at any
+  level. `DEFAULT_LOG_LEVEL = "info"` had documented itself as "the log level
+  used when no `RUST_LOG` env var is set" since the module was written, but no
+  code path ever read it: the documented default was fiction. This sits
+  *underneath* every individual missing log line and made the whole class of
+  invisibility bugs unfixable in principle — instrumenting a decision site
+  accomplishes nothing if the subscriber discards the event, so #2852's cap was
+  doubly invisible: it had no `warn!` to emit, and the default filter would have
+  dropped one anyway. Both init paths now resolve `RUST_LOG` when set and valid,
+  else `DEFAULT_LOG_LEVEL`; an INVALID `RUST_LOG` also falls back to the default
+  (with a notice) rather than silently disabling logging, since a typo'd filter
+  is the same invisibility failure triggered by the operator instead of the
+  default. Verified end-to-end: a `warn!` now reaches stderr with `RUST_LOG`
+  unset, and stdout stays clean for MCP JSON-RPC framing. This also removed a
+  real test flake — capture-based log assertions were order-dependent because
+  the empty global filter cached callsites as `Interest::never()`
+  ([#2857](https://github.com/bobmatnyc/trusty-tools/issues/2857))
+- **Silent control-flow: 13 decision sites that changed a run's outcome while
+  emitting nothing at any level.** Three separate investigations in one day were
+  caused by the harness computing something and then hiding it — the
+  re-delegation cap firing silently (#2852), the discarded `CadenceOutcome`, and
+  missing build provenance (#2823) — while the one mechanism that *was*
+  instrumented (index-file transients at `warn`) is precisely why "27 failures
+  across 23 files" was discoverable and became #2785. Logging worked exactly
+  where it existed. Now instrumented per the new convention:
+  - `warn` — the four terminal aborts in `agent_loop::run_inner`/`run_with_transcript`
+    (**turn-cap exhaustion**, **wall-clock deadline**, and the **stop-signal**
+    kill that is the *consumer* half of #2852 — its cause is logged at the cap
+    site, its effect was not); the **#2279 verify gate** overruling a
+    `finish_task`; the **#2683/#2805 completion-latch** refusing a delegation;
+    the **#2682 redundant-run suppression** (a test run that did NOT happen);
+    **RBAC denials** and **per-agent allowlist rejections** (security decisions
+    that left no audit trail); the **path-traversal guard** (you could not tell
+    whether an escape was ever attempted); cadence breaching its **overhead
+    budget floor** (the epic #2343 ≥60%-working-context guarantee was
+    unobservable); and `resolve_agent_model_slug` degrading to `"unknown"`
+    (silently mispricing a run's cost aggregation).
+  - `info` — degradations the model or user then acts on: the **#2783
+    `STAGE_NOT_READY` → lexical fallback** (the model is served exact-match
+    results instead of the semantic ones it asked for — the *failure* paths
+    already warned; the *success* path was silent precisely because it
+    "worked"), **`recall_session` token-budget truncation** (memories held back
+    from context), and user-requested **cancellation** (deliberately not `warn`
+    — the user got what they asked for).
+  - `debug` — routine cadence firing, which is the mechanism working.
+
+  `CadenceOutcome`'s own doc said it existed "for observability/tests"; its only
+  call site discarded it. It is now consumed
+  ([#2857](https://github.com/bobmatnyc/trusty-tools/issues/2857))
 - **`build.rs` re-ran on every single build, in every tree.** Its lone
   `cargo:rerun-if-changed=.git/HEAD` directive was a relative path, which Cargo
   resolves against the *package* root — i.e. `crates/trusty-code/.git/HEAD`,

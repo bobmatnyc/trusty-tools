@@ -391,10 +391,21 @@ impl AgentLoop {
 
         let mut result = match tokio::time::timeout(timeout, inner).await {
             Ok(result) => result,
-            Err(_elapsed) => Err(AgentLoopError::Timeout {
-                timeout_secs: self.config.timeout_secs,
-                partial: Box::new(build_output(transcript, &perf)),
-            }),
+            Err(_elapsed) => {
+                // #2857: the wall-clock deadline discards the whole loop into a
+                // partial. Without this line the only evidence is an exit code
+                // — indistinguishable from a model that produced nothing.
+                tracing::warn!(
+                    timeout_secs = self.config.timeout_secs,
+                    "wall-clock deadline of {}s exceeded — abandoning the run mid-turn and \
+                     returning the partial transcript",
+                    self.config.timeout_secs,
+                );
+                Err(AgentLoopError::Timeout {
+                    timeout_secs: self.config.timeout_secs,
+                    partial: Box::new(build_output(transcript, &perf)),
+                })
+            }
         };
 
         match &mut result {
@@ -436,13 +447,22 @@ impl AgentLoop {
     ) -> Result<AgentOutput, AgentLoopError> {
         let schemas = self.tool_definitions();
 
-        for _turn in 0..self.config.max_turns {
+        for turn in 0..self.config.max_turns {
             // #2056: checked at the top of every turn boundary — never
             // mid-tool-call — matching the vision spec's "cancellation is not
             // instantaneous" semantics (§12, 11.6).
             if let Some(cancel) = &self.cancel
                 && cancel.load(Ordering::Relaxed)
             {
+                // #2857: `info`, not `warn` — cancellation is the user getting
+                // what they asked for, not the harness overriding them. It is
+                // still logged because the run ends `partial` and the operator
+                // needs to distinguish "I cancelled this" from a harness abort.
+                tracing::info!(
+                    turn,
+                    max_turns = self.config.max_turns,
+                    "run cancelled at turn boundary — returning the partial transcript"
+                );
                 return Err(AgentLoopError::Cancelled {
                     partial: Box::new(build_output(transcript, perf)),
                 });
@@ -457,6 +477,20 @@ impl AgentLoop {
             if let Some(stop) = &self.stop_signal
                 && stop()
             {
+                // #2857: the CONSUMER side of the #2852 silence. Whoever
+                // latched the signal logs why they latched it (see
+                // `run_task::redelegation`); this logs that the PM loop is
+                // actually being killed by it — the part that decides the run's
+                // outcome. Both are needed: the cap site explains the cause,
+                // this explains the effect, and #2852 was undiagnosable
+                // because NEITHER existed.
+                tracing::warn!(
+                    turn,
+                    max_turns = self.config.max_turns,
+                    "external stop signal observed at turn boundary — stopping the PM loop with \
+                     {} turns of its budget unused; the run ends on the partial transcript",
+                    self.config.max_turns.saturating_sub(turn),
+                );
                 return Err(AgentLoopError::StoppedBySignal {
                     partial: Box::new(build_output(transcript, perf)),
                 });
@@ -514,6 +548,16 @@ impl AgentLoop {
             }
         }
 
+        // #2857: the loop ran out of turns without the model ever finishing.
+        // This is a harness cap silently deciding the run's outcome — the
+        // #2852 shape exactly — and it maps to a `Partial`/`RunFailure` exit
+        // that otherwise looks like the model simply gave up.
+        tracing::warn!(
+            max_turns = self.config.max_turns,
+            "turn cap exhausted: the loop used all {} turns without the model calling \
+             finish_task or ending its turn cleanly — aborting with the partial transcript",
+            self.config.max_turns,
+        );
         Err(AgentLoopError::TurnCapExceeded {
             max_turns: self.config.max_turns,
             partial: Box::new(build_output(transcript, perf)),
@@ -599,6 +643,20 @@ impl AgentLoop {
                 && crate::redundant_run::is_test_bash_call(call)
                 && crate::redundant_run::is_redundant_test_rerun(&transcript.messages(), &call.id)
             {
+                // #2857: a test run that did NOT happen. The model is told it
+                // passed, and the model is right — but "the suite passed" now
+                // means "the suite passed EARLIER and we asserted nothing
+                // changed". If the suppression predicate is ever wrong, the
+                // run reports green having executed nothing, and without this
+                // line there is no record the command was skipped. Harness
+                // policy overriding the model → `warn`.
+                tracing::warn!(
+                    tool = call.function.name.as_str(),
+                    call_id = call.id.as_str(),
+                    "suppressed a redundant full-suite test re-run (#2682): the identical \
+                     command already passed and no edit has landed since, so it was NOT \
+                     executed — the model is being handed the prior pass as the result"
+                );
                 ToolResult::ok(crate::redundant_run::REDUNDANT_RERUN_MESSAGE.to_string())
             } else {
                 self.registry.dispatch_gated(tool, args.clone(), None).await
@@ -614,6 +672,16 @@ impl AgentLoop {
                 && !result.is_error()
                 && let Some(reason) = self.finish_gate.as_ref().and_then(|gate| gate(transcript))
             {
+                // #2857: the model said it was DONE and the harness overruled
+                // it. This is the single highest-signal policy override in the
+                // loop — it converts a successful finish into another turn —
+                // and it fired with no operator-visible trace at all.
+                tracing::warn!(
+                    reason = %reason,
+                    "verify-before-finish gate (#2279) intercepted a successful finish_task: \
+                     the task names a test command the transcript shows was never run, so the \
+                     completion was downgraded to a recoverable error and the loop continues"
+                );
                 result = ToolResult::err(reason);
             }
 
@@ -744,12 +812,48 @@ impl AgentLoop {
             return;
         };
         let context_window = crate::provider::resolve_context_window(&self.config.model);
-        cadence::maybe_cadence_compress(
+        let outcome = cadence::maybe_cadence_compress(
             transcript,
             cadence_cfg,
             self.config.compaction.keep_last_messages,
             context_window,
         );
+
+        // #2857: `CadenceOutcome`'s own doc says it exists "for
+        // observability/tests" — but this, its only call site, discarded it,
+        // so the epic #2343 ">=60% working context at all times" guarantee was
+        // unobservable in a real run. Consuming it here is the whole point of
+        // computing it.
+        //
+        // Level discipline: a cadence fire is the mechanism WORKING and
+        // happens every `cadence_turns` turns, so it is `debug` — routine,
+        // high-volume, no outcome change. Breaching the budget floor is the
+        // guarantee being VIOLATED, so it is `warn`. `enforce_budget` already
+        // warns on the floor with its own local detail; this adds the caller's
+        // context (model, window, cap) that it cannot see.
+        //
+        // Note: this is a LOG (operator-facing, stderr), deliberately distinct
+        // from any `crate::events` telemetry for the UI. Events and logs are
+        // different consumers; both should exist.
+        if !outcome.within_budget {
+            tracing::warn!(
+                rounds = outcome.rounds,
+                cap_tokens = cadence_cfg.overhead_cap_tokens(context_window),
+                context_window,
+                model = %self.config.model,
+                "cadence could not bring the transcript under its overhead budget after {} \
+                 round(s) — working context is now below the {}% floor this run was sized for; \
+                 the model is operating on less context than intended",
+                outcome.rounds,
+                100 - cadence_cfg.max_overhead_fraction_pct,
+            );
+        } else if outcome.fired {
+            tracing::debug!(
+                rounds = outcome.rounds,
+                cap_tokens = cadence_cfg.overhead_cap_tokens(context_window),
+                "cadence compression fired on schedule and ended within budget"
+            );
+        }
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.

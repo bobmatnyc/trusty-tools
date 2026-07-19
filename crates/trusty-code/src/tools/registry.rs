@@ -99,6 +99,16 @@ impl ToolRegistry {
         if let Some(list) = allowed
             && !list.iter().any(|a| a == name)
         {
+            // #2857: a policy gate, not a model mistake — the agent's config
+            // decided this, so the model cannot self-correct into it. Logged
+            // so an over-tight allowlist is diagnosable from stderr rather
+            // than from wondering why an agent never uses a tool.
+            tracing::warn!(
+                tool = name,
+                "per-agent allowlist rejected tool '{name}': not in this agent's permitted set \
+                 ({}) — the call was refused without executing",
+                list.join(", "),
+            );
             return ToolResult::err(format!(
                 "Tool '{name}' is not permitted for this agent. Allowed: {}",
                 list.join(", ")
@@ -126,6 +136,16 @@ impl ToolRegistry {
         if let Some(tool) = self.tools.get(name)
             && !user.can_access_tier(tool.restricted_tiers())
         {
+            // #2857: an RBAC denial is a security decision and must always
+            // leave an audit trail. Without this, a run where an untrusted
+            // transport repeatedly probed restricted tools is
+            // indistinguishable from one where it never tried.
+            tracing::warn!(
+                tool = name,
+                tier = ?user.tier,
+                "RBAC denied tool '{name}': the caller's service tier is not permitted to \
+                 access it — the call was refused without executing"
+            );
             return ToolResult::err("This tool is not available for your access tier.");
         }
         self.dispatch_gated(name, args, allowed).await

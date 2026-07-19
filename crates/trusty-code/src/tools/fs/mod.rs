@@ -159,6 +159,17 @@ pub(crate) fn scoped_path(base_dir: &Path, raw_path: &Path) -> Result<PathBuf, F
     let resolved = resolve_candidate(&canonical_base, &joined)?;
 
     if !resolved.starts_with(&canonical_base) {
+        // #2857: a security guard firing must never be invisible. This rejects
+        // a model-supplied path that resolved outside the workspace — whether
+        // by a crafted `../..` or an unexpected symlink. Without a log you
+        // cannot tell, after the fact, that an escape was ever attempted.
+        tracing::warn!(
+            raw_path = %raw_path.display(),
+            resolved = %resolved.display(),
+            base = %canonical_base.display(),
+            "path-traversal guard rejected a file operation: the requested path resolves \
+             outside the workspace root — the operation was refused"
+        );
         return Err(FsError::PathTraversal(raw_path.to_path_buf()));
     }
 

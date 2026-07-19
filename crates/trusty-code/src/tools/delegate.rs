@@ -305,6 +305,16 @@ impl ToolExecutor for DelegateToAgentTool {
         if let Some(signal) = &self.completion_signal
             && signal.is_completed()
         {
+            // #2857: a harness policy refusal — the PM asked for a delegation
+            // and we overrode it. Not a model input error (the args are never
+            // even parsed), so `warn`, not `debug`: the run's trajectory just
+            // changed by our decision, and only stderr can record that.
+            tracing::warn!(
+                "delegate_to_agent refused: the completion latch (#2683/#2805) is set — the \
+                 delegated engineer already reported a successful finish_task, so this \
+                 delegation was rejected without invoking the runner; the PM is being \
+                 redirected to finish_task"
+            );
             return ToolResult::err(
                 "delegate_to_agent refused: the delegated engineer already reported a \
                  successful completion (finish_task with status=completed) for this run. \

@@ -160,6 +160,27 @@ fn render_results(query: &str, results: &[Value]) -> String {
         budget_used += entry_tokens;
         entries.push(content.to_string());
     }
+
+    // #2857: `info` — memories the daemon retrieved and scored as relevant are
+    // being held back from the model's context to fit the budget. The run
+    // continues and the model acts on what it got, never knowing more existed.
+    // A recall that silently drops half its hits looks identical, from the
+    // model's side, to a recall that found only half as much.
+    let dropped = results.len().saturating_sub(entries.len());
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            kept = entries.len(),
+            budget_used,
+            token_budget = TOKEN_BUDGET,
+            "recall_session truncated to the {TOKEN_BUDGET}-token injection budget: dropped the \
+             {dropped} lowest-scored result(s) of {}, keeping {} — the model will not see the \
+             dropped memories",
+            results.len(),
+            entries.len(),
+        );
+    }
+
     format!(
         "Session memory results for \"{query}\":\n\n{}",
         entries.join("\n\n---\n\n")

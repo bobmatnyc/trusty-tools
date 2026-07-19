@@ -480,6 +480,17 @@ pub fn resolve_agent_model_slug(
 ) -> String {
     let path = agents_dir.join(format!("{agent_name}.toml"));
     let Ok(config) = AgentConfig::load(&path) else {
+        // #2857: the degrade itself is deliberate (pricing accuracy, not the
+        // run, is what suffers) — but it was silent, so the literal string
+        // "unknown" flows into `aggregate_usage_per_role` and the run's cost
+        // is mispriced with nothing recording why. `warn` because the reported
+        // numbers are now wrong and no downstream consumer can tell.
+        tracing::warn!(
+            agent = agent_name,
+            path = %path.display(),
+            "could not load agent config for '{agent_name}' — falling back to the model slug \
+             \"unknown\"; this run's per-role cost aggregation will be mispriced"
+        );
         return "unknown".to_string();
     };
     match model_override {
