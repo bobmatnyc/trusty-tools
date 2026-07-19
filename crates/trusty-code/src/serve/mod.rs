@@ -93,7 +93,7 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// `crate::fs_browse::protocol::register`, and
 /// `crate::task::protocol::register` on them, and returns both.
 ///
-/// (DOC-48, issue #3294) also loads this project's
+/// (DOC-48, issues #3294/#3295) also loads this project's
 /// [`crate::workstreams::WorkstreamStore`] (`~/.trusty-code/workstreams-....json`,
 /// derived from `binding` per DOC-48 §3.1), runs its boot reconciliation
 /// (§3.3 — restores the persisted active pointer, or clears it if the
@@ -102,13 +102,14 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// its file I/O is `async` — mirrors `SessionRegistry`'s `Arc`-shared-state
 /// convention, see `crate::workstreams::activation::SharedWorkstreamStore`'s
 /// docs for why `tokio`'s `Mutex` specifically), and registers
-/// `crate::workstreams::protocol::register` (`workstream.activate`/
-/// `workstream.deactivate`) alongside every other method group. This is why
-/// `build_router` is now `async` and fallible — the prior synchronous,
-/// infallible signature had no way to load persisted state before the router
-/// starts answering requests, and a corrupt store file must fail daemon
-/// startup loudly rather than silently discard the user's workstreams (see
-/// `WorkstreamStore::load`'s docs).
+/// `crate::workstreams::protocol::register` — all six `workstream.*` methods
+/// (`create`/`get`/`list`/`close` from #3295, `activate`/`deactivate` from
+/// #3294) sharing this one store handle — alongside every other method
+/// group. This is why `build_router` is now `async` and fallible — the
+/// prior synchronous, infallible signature had no way to load persisted
+/// state before the router starts answering requests, and a corrupt store
+/// file must fail daemon startup loudly rather than silently discard the
+/// user's workstreams (see `WorkstreamStore::load`'s docs).
 ///
 /// `binding` is the daemon's project binding. Its `None` (projectless) state is
 /// what makes the shell's entry screen implementable: previously `build_router`
@@ -120,7 +121,8 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
 /// `build_router_is_projectless_without_a_project`,
-/// `build_router_wires_fs_list_dir`, `build_router_wires_workstream_methods`.
+/// `build_router_wires_fs_list_dir`, `build_router_wires_workstream_methods`,
+/// `build_router_reconciles_dangling_active_pointer_on_boot`.
 pub async fn build_router(binding: ProjectBinding) -> Result<(Router, Arc<SessionRegistry>)> {
     build_router_at(binding, &crate::workstreams::default_data_dir()).await
 }
@@ -215,7 +217,7 @@ pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use trusty_common::mcp::Request;
 
     fn test_ctx() -> crate::jsonrpc::ConnectionContext {
@@ -461,5 +463,60 @@ mod tests {
         let (_router2, _sessions2) = build_router_at(binding, data_dir.path())
             .await
             .expect("a second build_router_at over the same data_dir must succeed");
+    }
+
+    /// Boot reconciliation (DOC-48 §3.3, AC-1.4/AC-6.1/AC-6.2) must run
+    /// through the REAL daemon assembly path, not just
+    /// `WorkstreamStore::reconcile_on_boot` called directly (already covered
+    /// by `workstreams::store::store_tests::reconcile_clears_active_when_target_missing`).
+    /// A store file seeded on disk with a DANGLING `active_workstream_id`
+    /// (pointing at a workstream absent from `workstreams[]` — e.g. deleted
+    /// out from under the pointer, or hand-edited) must have that pointer
+    /// cleared by `build_router_at`'s `reconcile_on_boot()` call BEFORE the
+    /// router ever answers a request; `workstream.list` reporting
+    /// `active_workstream_id: null` is the end-to-end proof.
+    #[tokio::test]
+    async fn build_router_reconciles_dangling_active_pointer_on_boot() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let binding =
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
+
+        let store_path = crate::workstreams::store_path(data_dir.path(), &binding);
+        let dangling_id = crate::workstreams::WorkstreamId::new();
+        let raw = json!({
+            "version": "1.0",
+            "active_workstream_id": dangling_id,
+            "workstreams": [],
+        });
+        tokio::fs::create_dir_all(data_dir.path())
+            .await
+            .expect("mkdir data_dir");
+        tokio::fs::write(&store_path, serde_json::to_string_pretty(&raw).unwrap())
+            .await
+            .expect("seed raw store file with a dangling active_workstream_id");
+
+        let (router, _sessions) = build_router_at(binding, data_dir.path())
+            .await
+            .expect("build_router_at must reconcile the dangling pointer, not fail");
+
+        let req = Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "workstream.list".to_string(),
+            params: Some(json!({})),
+        };
+        let resp = router.dispatch(req, &test_ctx()).await;
+        assert!(
+            resp.error.is_none(),
+            "workstream.list must succeed, got {:?}",
+            resp.error
+        );
+        assert_eq!(
+            resp.result.unwrap()["active_workstream_id"],
+            Value::Null,
+            "boot reconciliation through build_router_at must clear a dangling \
+             active_workstream_id before the router answers requests"
+        );
     }
 }

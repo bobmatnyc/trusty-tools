@@ -32,16 +32,18 @@
 //! daemon's [`crate::binding::ProjectBinding`] (see [`path`]); (issue #3294)
 //! [`activation`] — the activation-lock exclusivity layer above the store
 //! (`ActiveConflict`/force-switch semantics `WorkstreamStore::set_active`
-//! deliberately left out) — and [`protocol`], the `workstream.activate`/
-//! `workstream.deactivate` JSON-RPC handlers built on it.
+//! deliberately left out) — and [`protocol`], the full `workstream.*`
+//! JSON-RPC surface (`create`/`get`/`list`/`close` from #3295 plus
+//! `activate`/`deactivate` from #3294, built on [`activation`]).
 //!
 //! **Scope note (Phase 1A):** #3293 built ONLY the domain model and
 //! persistence layer (this module's `model`/`path`/`store` submodules);
-//! #3294 (this ticket) adds the activation-lock RPC semantics
-//! (`activation`/`protocol`, above). The remaining `workstream.*` RPC/REST
-//! surface (`create`/`get`/`list`/`close`, #3295), the CLI (#3296), and the
-//! SSE aggregation route (#3297) land in their own follow-up tickets against
-//! this foundation.
+//! #3294 added the activation-lock RPC semantics (`activation`, plus
+//! `activate`/`deactivate` in [`protocol`]); #3295 (this ticket) added the
+//! rest of `protocol`'s surface (`create`/`get`/`list`/`close`) and the REST
+//! wrappers (`crate::serve::rest::workstreams`). The CLI (#3296) and the SSE
+//! aggregation route (#3297) remain out of scope and land in their own
+//! follow-up tickets against this foundation.
 //!
 //! Test: `cargo test -p trusty-code workstreams::` exercises every submodule
 //! in place; see each submodule's own `Test:` line for specifics.

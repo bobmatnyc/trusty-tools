@@ -47,11 +47,14 @@
 //! `GET /fs` -> `fs.list_dir`. Slice 6 ([`agents`]) adds
 //! `GET /sessions/{id}/agents` -> `session.get_agents`. Slice 7
 //! ([`search_audit`]) adds `GET /sessions/{id}/search-audit` ->
-//! `session.get_search_audit` (issue #3072). [`workstreams`] (DOC-48 §5.2,
-//! issue #3294) adds `POST /workstreams/{id}/activate` ->
-//! `workstream.activate` and `POST /workstreams/{id}/deactivate` ->
-//! `workstream.deactivate`. Every slice reuses [`respond`]/[`throwaway_ctx`]
-//! rather than reimplementing the glue.
+//! `session.get_search_audit` (issue #3072). [`workstreams`] adds the full
+//! `workstream.*` surface: `POST /workstreams`, `GET /workstreams/{id}`,
+//! `GET /workstreams`, `POST /workstreams/{id}/close` (issue #3295, epic
+//! #3292) and `POST /workstreams/{id}/activate`,
+//! `POST /workstreams/{id}/deactivate` (DOC-48 §5.2/§6, issue #3294) — see
+//! its module docs for why the paths are unprefixed rather than DOC-48
+//! §5.2's literal `/api/v1/workstreams`. Every slice reuses
+//! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
 //! assertion per `rpc_error_to_status` mapping. See `sessions::tests` for

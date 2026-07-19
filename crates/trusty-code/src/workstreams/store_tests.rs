@@ -244,6 +244,73 @@ async fn store_reload_picks_up_external_write() {
     );
 }
 
+/// §4.4: closing a non-active workstream just flips the metadata flag and
+/// persists it — the active pointer (if any, pointing elsewhere) is
+/// untouched.
+#[tokio::test]
+async fn close_marks_closed_and_persists() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = store_file(&dir);
+    let mut store = WorkstreamStore::load(&path).await.expect("load");
+    let a = store.create("A").await.expect("create A");
+    let b = store.create("B").await.expect("create B");
+    store.set_active(Some(a)).await.expect("activate A");
+
+    let closed = store.close(b).await.expect("close B");
+    assert!(closed.is_closed());
+    assert_eq!(
+        store.active_workstream_id().await.expect("active"),
+        Some(a),
+        "closing a non-active workstream must not touch the active pointer"
+    );
+
+    let mut reloaded = WorkstreamStore::load(&path).await.expect("reload");
+    let ws = reloaded.get(b).await.expect("get after reload");
+    assert!(ws.is_closed(), "closed flag must be persisted");
+}
+
+/// §4.4: closing the ACTIVE workstream must auto-deactivate it (clear
+/// `active_workstream_id` to `null`).
+#[tokio::test]
+async fn close_active_workstream_clears_active_pointer() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+    store.set_active(Some(id)).await.expect("activate");
+
+    store.close(id).await.expect("close active workstream");
+
+    assert_eq!(
+        store.active_workstream_id().await.expect("active"),
+        None,
+        "closing the active workstream must clear the active pointer"
+    );
+}
+
+#[tokio::test]
+async fn close_missing_id_returns_not_found() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let missing = WorkstreamId::new();
+    assert!(matches!(
+        store.close(missing).await,
+        Err(StoreError::NotFound(_))
+    ));
+}
+
+/// Closing an already-closed workstream is not an error (§4.4 does not
+/// require re-close to fail).
+#[tokio::test]
+async fn close_is_idempotent() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+
+    store.close(id).await.expect("first close");
+    let second = store.close(id).await.expect("second close must not error");
+    assert!(second.is_closed());
+}
+
 #[tokio::test]
 async fn store_reload_noop_when_unchanged() {
     let dir = TempDir::new().expect("tempdir");
