@@ -28,7 +28,7 @@
 //! same path errors), (c) auto-port selection when the requested port is
 //! taken.
 
-use crate::service::server::{build_router, SearchAppState};
+use crate::service::server::{build_router_with_self_origins, SearchAppState};
 use fs4::FileExt;
 use std::{
     fs::{File, OpenOptions},
@@ -465,7 +465,12 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     let flush_state = state.clone();
     // Issue #829: subscribe before moving state into build_router.
     let mut shutdown_rx = state.shutdown_tx.subscribe();
-    let router = build_router(state);
+    // #3304: trust the daemon's own resolved bind address as a self-origin so a
+    // non-loopback (Tailscale) bind still passes the router-wide write guard;
+    // `from_bind_addrs` drops loopback (already trusted), so a plain loopback
+    // bind yields the empty default.
+    let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[addr]);
+    let router = build_router_with_self_origins(state, self_origins);
 
     tracing::info!("daemon listening on {addr} (lock {})", lock_path.display());
 

@@ -14,6 +14,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
+  destructive write routes — `DELETE /api/v1/palaces/{id}` (palace deletion),
+  `DELETE …/drawers/{drawer_id}` (drawer deletion), `POST /api/v1/admin/stop`,
+  `POST /rpc` (the full JSON-RPC tool surface), `POST /api/v1/dream/run`, KG
+  asserts/deletes — are now guarded against cross-origin browser requests via
+  the shared `trusty_common::server::with_guarded_middleware`. Method-gated (GET
+  reads and `/sse` unaffected) and fail-open on a missing `Origin` (the console
+  proxy, the `serve --stdio` bridge, and `curl` keep working).
+
 ### Fixed
 
 - idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
