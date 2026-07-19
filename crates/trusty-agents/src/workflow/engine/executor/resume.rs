@@ -12,9 +12,7 @@
 //! matches the checkpointed phase list), reconstructs context, and delegates
 //! to `run_phase_loop`. `ResumeOutcome` distinguishes "already finished,
 //! nothing to resume" from "picked back up and ran".
-//! Test: `checkpoint_resume` submodule under `executor::tests` (see
-//! `resume_skips_completed_phases_and_reuses_their_output`,
-//! `resume_fails_closed_on_definition_change`).
+//! Test: `checkpoint_resume_tests` in the engine `tests` submodule.
 
 use std::path::PathBuf;
 
