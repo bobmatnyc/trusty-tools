@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "open-mpm",
+  "productName": "Trusty Assistant",
   "version": "0.1.0",
-  "identifier": "com.matsuoka.open-mpm",
+  "identifier": "com.trusty.assistant",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
@@ -15,7 +15,7 @@
     },
     "windows": [
       {
-        "title": "open-mpm",
+        "title": "Trusty Assistant",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

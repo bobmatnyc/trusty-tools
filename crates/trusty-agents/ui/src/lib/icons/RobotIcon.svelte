@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
-   * Why: The robot mark is the open-mpm visual identity — a friendly PM
-   * orchestrator face that appears in the sidebar header, splash, and badges.
-   * Centralizing it as a component lets us swap the entire brand mark in one
-   * place and reuse it at multiple sizes/variants without duplicating SVG.
+   * Why: The robot mark is the Trusty Assistant visual identity — a friendly
+   * PM orchestrator face that appears in the sidebar header, splash, and
+   * badges. Centralizing it as a component lets us swap the entire brand
+   * mark in one place and reuse it at multiple sizes/variants without
+   * duplicating SVG.
    * What: Renders a 32x32 robot face SVG (rounded-square head, two eyes,
    * `>_` terminal mouth, antenna w/ dot tip) in one of three variants:
    * - "full":  filled dark bg square + colored stroke/details (hero usage)
@@ -13,11 +14,11 @@
    * antenna dot, eyes, and `>_` mouth render at 32px without clipping.
    */
   export let size: number = 32;
-  export let color: string = '#3B4CCA';
+  export let color: string = '#B7410E';
   export let variant: 'full' | 'mono' | 'badge' = 'full';
 
   // Derived presentation tokens per variant.
-  $: bgFill = variant === 'full' ? '#1A1F3A' : variant === 'badge' ? color : 'none';
+  $: bgFill = variant === 'full' ? '#2B1C12' : variant === 'badge' ? color : 'none';
   $: stroke = variant === 'badge' ? '#FFFFFF' : color;
   $: dotFill = variant === 'badge' ? '#FFFFFF' : color;
 </script>
@@ -32,7 +33,7 @@
   stroke-width="1.5"
   stroke-linecap="round"
   stroke-linejoin="round"
-  aria-label="open-mpm robot"
+  aria-label="Trusty Assistant robot"
   role="img"
 >
   {#if variant === 'badge'}

@@ -14,20 +14,20 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     // Why: In `pnpm dev` browser mode there is no Tauri runtime, so the UI
-    // talks to `open-mpm --api` directly over HTTP. Without a proxy the
+    // talks to `tagent --api` directly over HTTP. Without a proxy the
     // browser would issue cross-origin requests to a different port and run
     // into CORS — by proxying `/api/*` to the API server we keep all
     // requests same-origin in dev and avoid baking the API host into client
-    // code. The port can be overridden via `VITE_OMPM_PORT` to match
+    // code. The port can be overridden via `VITE_TAGENT_PORT` to match
     // whatever `--port` the API server was launched with.
     // What: Forward every `/api/*` request from Vite (5173) to
-    // `http://localhost:<VITE_OMPM_PORT|7654>`.
+    // `http://localhost:<VITE_TAGENT_PORT|7654>`.
     // Test: Run `cargo run -- --api --port 7654` in one shell, `pnpm dev` in
     // another, then `curl http://localhost:5173/api/health` and assert it
     // returns the API server's health JSON.
     proxy: {
       '/api': {
-        target: `http://localhost:${process.env.VITE_OMPM_PORT ?? 7654}`,
+        target: `http://localhost:${process.env.VITE_TAGENT_PORT ?? 7654}`,
         changeOrigin: true,
       },
     },

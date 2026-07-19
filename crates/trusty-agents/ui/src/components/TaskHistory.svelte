@@ -55,31 +55,31 @@
 </script>
 
 <section>
-  <h2 class="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-ompm-teal">
+  <h2 class="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-foundry-teal">
     Recent tasks
   </h2>
 
   {#if errorMessage}
     <p class="px-2 text-xs text-red-500 dark:text-red-400">{errorMessage}</p>
   {:else if $taskHistory.length === 0}
-    <p class="px-2 text-xs text-ompm-light-muted dark:text-ompm-text/40">No tasks yet.</p>
+    <p class="px-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">No tasks yet.</p>
   {/if}
 
   <ul class="flex flex-col gap-1">
     {#each $taskHistory.filter(t => (t.task?.trim() || t.narrative?.trim()) || t.status !== 'running') as entry (entry.id)}
-      <li class="flex flex-col rounded-md px-2 py-1 hover:bg-ompm-primary/10">
-        <span class="truncate text-xs font-medium text-ompm-light-text dark:text-ompm-text" title={entry.task}>
+      <li class="flex flex-col rounded-md px-2 py-1 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10">
+        <span class="truncate text-xs font-medium text-foundry-light-text dark:text-foundry-text" title={entry.task}>
           {shortTask(entry.task)}
         </span>
-        <span class="flex items-center gap-2 text-[10px] text-ompm-light-muted dark:text-ompm-text/60">
+        <span class="flex items-center gap-2 text-[10px] text-foundry-light-muted dark:text-foundry-text/60">
           <span
             class="rounded px-1 py-0.5 font-medium {entry.status === 'running'
               ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
               : entry.status === 'completed' || entry.status === 'success'
-                ? 'bg-ompm-teal/20 text-ompm-teal'
+                ? 'bg-foundry-teal/20 text-foundry-teal'
                 : entry.status === 'failed' || entry.status === 'error'
                   ? 'bg-red-500/20 text-red-600 dark:text-red-400'
-                  : 'bg-ompm-light-border dark:bg-ompm-surface text-ompm-light-muted dark:text-ompm-text/70'}"
+                  : 'bg-foundry-light-border dark:bg-foundry-surface text-foundry-light-muted dark:text-foundry-text/70'}"
           >{entry.status}</span>
           {#if typeof entry.score === 'number' && typeof entry.score_max === 'number'}
             <span class="font-mono">{entry.score}/{entry.score_max}</span>

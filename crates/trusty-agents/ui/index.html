@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="description" content="open-mpm — AI agent orchestration" />
-    <meta name="theme-color" content="#3B4CCA" />
+    <meta name="description" content="Trusty Assistant — AI agent orchestration" />
+    <meta name="theme-color" content="#B7410E" />
     <meta name="color-scheme" content="light dark" />
-    <title>open-mpm</title>
+    <title>Trusty Assistant</title>
     <script>
       // Why: Apply the persisted theme before first paint so users don't see a
       // flash of the wrong palette during JS bootstrap. The theme store also
@@ -15,7 +15,7 @@
       // earlier (before any module evaluation).
       (function () {
         try {
-          var stored = localStorage.getItem('ompm-theme');
+          var stored = localStorage.getItem('foundry-theme');
           var theme = stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
           var isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
           if (isDark) document.documentElement.classList.add('dark');
@@ -23,28 +23,68 @@
       })();
     </script>
     <style>
-      /* System font stack — no external HTTP requests, renders immediately.
-         Tailwind font-sans maps to Inter; we fall through to system UI fonts
-         so the page never blocks on CDN availability. */
+      /* Foundry design system fonts (docs/design/gui/README.md install step),
+         self-hosted from public/fonts/ — no external HTTP requests, renders
+         immediately, never blocks on CDN availability. This is a desktop
+         Tauri app that must work fully offline.
+         Files: latin-subset woff2 downloaded once from fonts.gstatic.com
+         (OFL-1.1 licensed; see public/fonts/OFL-*.txt for the license text
+         of each family). IBM Plex Sans ships as a single variable-font file
+         covering weights 400-700 (Google serves one physical file for all
+         static weight instances of this family); Chakra Petch and IBM Plex
+         Mono ship as separate static files per weight actually used. */
       @font-face {
-        font-family: 'Inter';
+        font-family: 'Chakra Petch';
         font-style: normal;
-        font-weight: 100 900;
+        font-weight: 500;
         font-display: swap;
-        src: local('-apple-system'), local('BlinkMacSystemFont'), local('Segoe UI'),
-             local('Helvetica Neue'), local('Arial'), local('sans-serif');
+        src: url('/fonts/chakra-petch-500.woff2') format('woff2');
       }
       @font-face {
-        font-family: 'JetBrains Mono';
+        font-family: 'Chakra Petch';
         font-style: normal;
-        font-weight: 100 900;
+        font-weight: 600;
         font-display: swap;
-        src: local('SF Mono'), local('Monaco'), local('Cascadia Code'),
-             local('Consolas'), local('Liberation Mono'), local('monospace');
+        src: url('/fonts/chakra-petch-600.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'Chakra Petch';
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url('/fonts/chakra-petch-700.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Sans';
+        font-style: normal;
+        font-weight: 400 700;
+        font-display: swap;
+        src: url('/fonts/ibm-plex-sans-var.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+        src: url('/fonts/ibm-plex-mono-400.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+        src: url('/fonts/ibm-plex-mono-500.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Mono';
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url('/fonts/ibm-plex-mono-600.woff2') format('woff2');
       }
     </style>
   </head>
-  <body class="bg-ompm-light-bg text-ompm-light-text dark:bg-ompm-bg dark:text-ompm-text">
+  <body class="bg-foundry-light-bg text-foundry-light-text dark:bg-foundry-bg dark:text-foundry-text">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

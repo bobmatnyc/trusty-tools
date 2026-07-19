@@ -19,7 +19,7 @@
 </script>
 
 <div
-  class="flex items-center gap-1 rounded-lg bg-ompm-light-border dark:bg-ompm-border p-1"
+  class="flex items-center gap-1 rounded-lg bg-foundry-light-border dark:bg-foundry-border p-1"
   role="group"
   aria-label="Theme"
 >
@@ -28,8 +28,8 @@
       type="button"
       class="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
              {$theme === opt.value
-               ? 'bg-ompm-primary text-white'
-               : 'text-ompm-light-muted dark:text-ompm-muted hover:text-ompm-light-text dark:hover:text-ompm-text'}"
+               ? 'bg-foundry-light-primary dark:bg-foundry-primary text-white'
+               : 'text-foundry-light-muted dark:text-foundry-muted hover:text-foundry-light-text dark:hover:text-foundry-text'}"
       on:click={() => setTheme(opt.value)}
       title={opt.label}
       aria-pressed={$theme === opt.value}
