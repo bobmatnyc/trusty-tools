@@ -85,6 +85,35 @@ pub enum PmStatus {
     Partial,
     Failed,
     Running,
+    /// #3063: the client aborted this task via `DELETE /api/task/:id` (or it
+    /// was swept up by `POST /api/clear-context`) before it reached a
+    /// natural terminal state. Distinct from `Failed` so pollers can tell
+    /// "the client stopped this" apart from "the workflow itself errored".
+    Cancelled,
+}
+
+impl PmStatus {
+    /// Stable lowercase string form used in `SessionDone` events and the
+    /// cancel-response JSON body.
+    ///
+    /// Why: The status->string mapping was duplicated at two call sites in
+    /// `api::server::handlers` (one per intent-routing branch). Centralizing
+    /// it here means a new `PmStatus` variant is a single compile error to
+    /// fix instead of two, and keeps `Failed` mapping to the wire value
+    /// `"error"` (not `"failed"`, which is the pre-existing convention)
+    /// consistent everywhere.
+    /// What: `Success`->"success", `Failed`->"error", `Partial`->"partial",
+    /// `Running`->"running", `Cancelled`->"cancelled".
+    /// Test: `pm_status_as_str_matches_wire_values`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PmStatus::Success => "success",
+            PmStatus::Failed => "error",
+            PmStatus::Partial => "partial",
+            PmStatus::Running => "running",
+            PmStatus::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -149,6 +178,33 @@ impl PmResponse {
             files_modified: Vec::new(),
             out_dir: None,
             errors: vec![m],
+            phases_completed: Vec::new(),
+        }
+    }
+
+    /// Construct a terminal `cancelled` envelope (#3063).
+    ///
+    /// Why: `DELETE /api/task/:id` needs a stable terminal shape distinct
+    /// from `error()` so pollers can tell "the client aborted this" apart
+    /// from "the workflow itself failed" — `status` is the authoritative
+    /// field; `type` stays `Error` since no caller branches on `type` today
+    /// (see the #3063 PR body for the rationale) and adding a dedicated
+    /// `PmResponseType` variant would be surface area with no consumer yet.
+    /// What: Minimal envelope with `status = Cancelled` and a fixed
+    /// narrative; no phases/files/errors since the task never produced any.
+    /// Test: `cancelled_is_well_formed`.
+    pub fn cancelled(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            timestamp: now_iso8601(),
+            response_type: PmResponseType::Error,
+            status: PmStatus::Cancelled,
+            narrative: "Task cancelled by client request".to_string(),
+            metadata: PmMetadata::default(),
+            phases: Vec::new(),
+            files_modified: Vec::new(),
+            out_dir: None,
+            errors: Vec::new(),
             phases_completed: Vec::new(),
         }
     }
@@ -228,5 +284,24 @@ mod tests {
             s.contains('T'),
             "expected ISO8601 with T separator, got {s}"
         );
+    }
+
+    #[test]
+    fn cancelled_is_well_formed() {
+        let r = PmResponse::cancelled("abc");
+        assert_eq!(r.id, "abc");
+        assert_eq!(r.status, PmStatus::Cancelled);
+        assert!(r.errors.is_empty(), "cancellation is not an error");
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(j.contains("\"status\":\"cancelled\""), "got: {j}");
+    }
+
+    #[test]
+    fn pm_status_as_str_matches_wire_values() {
+        assert_eq!(PmStatus::Success.as_str(), "success");
+        assert_eq!(PmStatus::Failed.as_str(), "error");
+        assert_eq!(PmStatus::Partial.as_str(), "partial");
+        assert_eq!(PmStatus::Running.as_str(), "running");
+        assert_eq!(PmStatus::Cancelled.as_str(), "cancelled");
     }
 }

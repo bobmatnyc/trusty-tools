@@ -28,6 +28,10 @@ export default {
           primary: '#d97742',
           teal: '#7ba7c4',
           amber: '#d9a83a',
+          // --trusty-sidebar-accent (docs/design/gui/tokens.css) — the warm
+          // tan/gold used for section labels in dark-themed sidebars/rails
+          // (e.g. RecapPanel's AGENTS ACTIVE/FILES TOUCHED/TOKENS headers).
+          'sidebar-accent': '#e9b98a',
           // Light theme values (used via `dark:` prefix inversion, same
           // pattern the app already used pre-rebrand).
           'light-bg': '#f5efe7',

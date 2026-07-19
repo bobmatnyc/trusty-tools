@@ -8,7 +8,7 @@
 //! What: `GlobalConfig` is the on-disk schema (formerly `McpConfig`; renamed
 //! in #245 to reflect that it composes multiple subsystems — MCP registry +
 //! GitHub identities — rather than only MCP). `load_or_create()` creates the
-//! file with default content (native gworkspace-mcp enabled) when missing.
+//! file with default content (native trusty-mpm enabled, #3203) when missing.
 //! The registry only lists *remote/service-tier*
 //! MCPs that agents should know about — local native integrations
 //! (kuzu-memory, mcp-vector-search) are wired into the harness directly and
@@ -176,7 +176,7 @@ impl GlobalConfig {
     /// changes made via the `mcp_*` tools. When the file is missing the
     /// prompt-build path must not fail — and previously it returned an empty
     /// registry (`Self::default()`), which silently dropped the documented
-    /// native gworkspace-mcp defaults from in-memory state. We
+    /// native trusty-mpm defaults from in-memory state. We
     /// now parse `DEFAULT_CONFIG_TOML` so the in-memory defaults match what
     /// `load_or_create` would write to disk. Parse failure (a programmer
     /// error in the literal) falls back to `Self::default()` rather than

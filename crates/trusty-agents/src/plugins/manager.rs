@@ -1,12 +1,17 @@
 //! Plugin manager — owns the optional MCP plugin handles.
 //!
-//! Why: The harness needs a single place to ask "is search/memory available?"
-//! at runtime. Centralising spawn attempts and status reporting here keeps
-//! the agent and CLI layers free of plugin-specific bootstrapping.
+//! Why: The harness needs a single place to ask "is search available?" at
+//! runtime. Centralising spawn attempts and status reporting here keeps the
+//! agent and CLI layers free of plugin-specific bootstrapping.
 //! What: `PluginManager::init` tries to spawn each known plugin; binaries
 //! missing from PATH or failing the MCP handshake leave the slot as `None`.
 //! `status()` reports `Active` / `Unavailable` per plugin for the
 //! `om plugins status` CLI command.
+//! Issue #3225: the `trusty-memory` slot (a stdio-MCP `TrustyMemoryPlugin`
+//! wrapper) was retired — it was unreachable in production (its only caller
+//! was this module's own `status()` printer; nothing ever called
+//! `memory()`), and superseded by `crate::memory::trusty_client::TrustyMemoryClient`,
+//! an HTTP client against the real trusty-memory daemon API.
 //! Test: `PluginState` enum + `PluginStatus` formatting are unit tested
 //! below. End-to-end spawn is exercised opportunistically when the binaries
 //! are installed.
@@ -16,7 +21,6 @@ use std::sync::OnceLock;
 
 use tracing::{info, warn};
 
-use super::trusty_memory::TrustyMemoryPlugin;
 use super::trusty_search::TrustySearchPlugin;
 
 /// Process-wide singleton populated by `init_global()` at harness startup.
@@ -60,7 +64,6 @@ impl PluginState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginStatus {
     pub search: PluginState,
-    pub memory: PluginState,
 }
 
 /// Owns the spawned plugin processes for the lifetime of the harness.
@@ -68,12 +71,11 @@ pub struct PluginStatus {
 /// Why: Plugins are cheap to spawn but expensive to re-spawn per request —
 /// keeping one shared `Arc` per plugin lets multiple agents reuse the same
 /// child process safely (the underlying client serialises requests).
-/// What: Two optional `Arc`-wrapped plugin handles, populated lazily by
-/// `init`. Missing plugins remain `None` for the manager's lifetime.
+/// What: One optional `Arc`-wrapped plugin handle, populated lazily by
+/// `init`. A missing plugin remains `None` for the manager's lifetime.
 /// Test: `status_reports_unavailable_when_empty`, `status_reports_active`.
 pub struct PluginManager {
     search: Option<Arc<TrustySearchPlugin>>,
-    memory: Option<Arc<TrustyMemoryPlugin>>,
 }
 
 impl PluginManager {
@@ -81,19 +83,15 @@ impl PluginManager {
     ///
     /// Why: Plugins are optional; one missing plugin must not prevent the
     /// rest of the harness (or the other plugins) from coming up.
-    /// What: Calls `try_spawn` on each plugin in parallel and stores the
-    /// successful handles.
+    /// What: Calls `try_spawn` on each plugin and stores the successful
+    /// handle.
     /// Test: When no plugin binaries are on PATH (the default in CI), this
-    /// returns a manager with both slots `None` — covered indirectly by the
+    /// returns a manager with the slot `None` — covered indirectly by the
     /// CLI `plugins status` test path.
     pub async fn init() -> Self {
-        let (search, memory) = tokio::join!(
-            TrustySearchPlugin::try_spawn(),
-            TrustyMemoryPlugin::try_spawn()
-        );
+        let search = TrustySearchPlugin::try_spawn().await;
         Self {
             search: search.map(Arc::new),
-            memory: memory.map(Arc::new),
         }
     }
 
@@ -102,10 +100,7 @@ impl PluginManager {
     /// Why: Tests and unit-test setup want a deterministic, side-effect-free
     /// constructor.
     pub fn empty() -> Self {
-        Self {
-            search: None,
-            memory: None,
-        }
+        Self { search: None }
     }
 
     /// Borrow the search plugin handle, if active.
@@ -113,16 +108,10 @@ impl PluginManager {
         self.search.clone()
     }
 
-    /// Borrow the memory plugin handle, if active.
-    pub fn memory(&self) -> Option<Arc<TrustyMemoryPlugin>> {
-        self.memory.clone()
-    }
-
     /// Snapshot the activation state of each plugin.
     pub fn status(&self) -> PluginStatus {
         PluginStatus {
             search: state_of(self.search.is_some()),
-            memory: state_of(self.memory.is_some()),
         }
     }
 }
@@ -151,14 +140,6 @@ pub async fn init_global() -> Arc<PluginManager> {
         warn!(
             "plugins: trusty-search UNAVAILABLE (binary not on PATH or handshake failed); \
              agents will not be able to call search tools. Install: cargo install trusty-search"
-        );
-    }
-    if status.memory == PluginState::Active {
-        info!("plugins: trusty-memory ACTIVE");
-    } else {
-        warn!(
-            "plugins: trusty-memory UNAVAILABLE (binary not on PATH or handshake failed); \
-             agents will not be able to call memory tools. Install: cargo install trusty-memory"
         );
     }
     // OnceLock::set returns Err if another thread won the race; fall back to
@@ -200,7 +181,6 @@ mod tests {
         let mgr = PluginManager::empty();
         let s = mgr.status();
         assert_eq!(s.search, PluginState::Unavailable);
-        assert_eq!(s.memory, PluginState::Unavailable);
     }
 
     /// Why: The CLI prints `state.label()` directly; pin the strings so a

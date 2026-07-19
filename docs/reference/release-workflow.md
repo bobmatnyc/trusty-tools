@@ -18,12 +18,19 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 2. Update any dependent crates that pin that version.
 
 > **Convenience helper:** `scripts/bump-version.sh <crate-dir> <major|minor|patch>`
-> automates step 1 and the changelog staging. It reads the current package
-> `version` from `crates/<crate-dir>/Cargo.toml`, computes the next semver,
-> rewrites the package version line in place (dependency `version =` pins are
-> left untouched), calls `scripts/generate-changelog.sh <crate-dir> <tag-prefix>`
-> to prepend the unreleased `CHANGELOG.md` section, then **prints — but does not
-> run —** the `git tag <prefix>-v<version>` and `git push origin <prefix>-v<version>`
+> automates step 1, the Cargo.lock sync, and the changelog staging. It reads
+> the current package `version` from `crates/<crate-dir>/Cargo.toml`, computes
+> the next semver, rewrites the package version line in place (dependency
+> `version =` pins are left untouched), runs
+> `cargo update -p <package-name> --precise <next-version>` so the root
+> `Cargo.lock` entry for that package matches the bumped manifest (resolving
+> `<package-name>` from the crate's `[package] name` field, which can differ
+> from the crates/ directory name — see the `tga` note below; this closes
+> issue #3199, where every release PR previously failed CI's `--locked` build
+> until a human pushed a manual lock-sync follow-up commit), calls
+> `scripts/generate-changelog.sh <crate-dir> <tag-prefix>` to prepend the
+> unreleased `CHANGELOG.md` section, then **prints — but does not run —** the
+> `git tag <prefix>-v<version>` and `git push origin <prefix>-v<version>`
 > commands. This preserves the manual-tag convention (the human reviews and
 > tags). The tag prefix defaults to the crate-dir name, with the one documented
 > exception baked in: `trusty-git-analytics` (package name `tga`) releases under

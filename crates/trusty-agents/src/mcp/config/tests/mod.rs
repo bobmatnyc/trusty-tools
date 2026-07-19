@@ -44,23 +44,31 @@ async fn load_or_create_writes_default_when_absent() {
         "config file should exist after load_or_create"
     );
 
-    // Defaults after ADR-0014 (#256, native-MCP retire): gworkspace-mcp
-    // (enabled, native), granola-notes (enabled), duetto-memory (disabled).
-    // slack-user-proxy was retired as a dead external stub.
+    // Defaults after ADR-0014 (#256, native-MCP retire) + #3203/#3204:
+    // trusty-mpm (enabled, native), granola-notes (enabled), duetto-memory
+    // (disabled). slack-user-proxy was retired as a dead external stub;
+    // gworkspace-mcp was removed (#3204) — its static tool list had drifted
+    // from the real binary and is superseded by the OpenRPC "gworkspace"
+    // tool_registry.endpoints entry.
     assert_eq!(cfg.mcp.services.len(), 3);
-    let gw = cfg
+    let tm = cfg
         .mcp
         .services
         .iter()
-        .find(|s| s.name == "gworkspace-mcp")
-        .expect("gworkspace-mcp present in defaults");
-    assert!(gw.enabled);
+        .find(|s| s.name == "trusty-mpm")
+        .expect("trusty-mpm present in defaults (#3203)");
+    assert!(tm.enabled);
     assert!(
         !cfg.mcp
             .services
             .iter()
             .any(|s| s.name == "slack-user-proxy"),
         "slack-user-proxy retired per ADR-0014"
+    );
+    assert!(
+        !cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"),
+        "gworkspace-mcp mcp.services entry removed (#3204); live path is the \
+         OpenRPC tool_registry.endpoints \"gworkspace\" entry"
     );
     let granola = cfg
         .mcp
@@ -137,7 +145,7 @@ enabled = true
 #[tokio::test]
 async fn load_returns_documented_defaults_when_absent() {
     // (#244, #245) load() must not create the file (unlike load_or_create),
-    // but must return the documented defaults (native gworkspace-mcp,
+    // but must return the documented defaults (native trusty-mpm,
     // granola-notes, duetto-memory) so prompt-build paths see the same registry
     // that `load_or_create` would write.
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -148,10 +156,12 @@ async fn load_returns_documented_defaults_when_absent() {
     let cfg = GlobalConfig::load().await;
     let path = home.join(".trusty-agents").join("config.toml");
     assert!(!path.exists(), "load() must not create the config file");
-    // #245/#256 + ADR-0014: defaults mirror DEFAULT_CONFIG_TOML — 3 services
-    // (gworkspace-mcp, granola-notes, duetto-memory) after slack-user-proxy retire.
+    // #245/#256 + ADR-0014 + #3203/#3204: defaults mirror DEFAULT_CONFIG_TOML —
+    // 3 services (trusty-mpm, granola-notes, duetto-memory) after
+    // slack-user-proxy retire and gworkspace-mcp removal.
     assert_eq!(cfg.mcp.services.len(), 3);
-    assert!(cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"));
+    assert!(cfg.mcp.services.iter().any(|s| s.name == "trusty-mpm"));
+    assert!(!cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"));
     assert!(
         !cfg.mcp
             .services
@@ -177,6 +187,7 @@ async fn save_and_reload_roundtrip() {
         description: "A test service".to_string(),
         command: "test-cmd".to_string(),
         args: vec!["arg1".to_string()],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
@@ -184,6 +195,7 @@ async fn save_and_reload_roundtrip() {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
         }],
+        discover: false,
     });
     cfg.save().await.expect("save should succeed");
     let reloaded = GlobalConfig::load().await;
@@ -208,10 +220,12 @@ async fn add_service_replaces_existing() {
         description: "first".to_string(),
         command: "a".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();
@@ -220,10 +234,12 @@ async fn add_service_replaces_existing() {
         description: "second".to_string(),
         command: "b".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();
@@ -245,10 +261,12 @@ async fn remove_service_returns_correct_bool() {
         description: "d".to_string(),
         command: "c".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: true,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();
@@ -270,10 +288,12 @@ async fn enable_disable_toggles_flag() {
         description: "d".to_string(),
         command: "c".to_string(),
         args: vec![],
+        env: std::collections::HashMap::new(),
         url: None,
         transport: "stdio".to_string(),
         enabled: false,
         tools: vec![],
+        discover: false,
     })
     .await
     .unwrap();

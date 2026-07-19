@@ -7,6 +7,8 @@
 //! `McpTool`, plus the `serde` default helpers they share.
 //! Test: Defaults + round-trips exercised in `config::tests`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Default agent roles that receive MCP tool descriptions in their prompt.
@@ -132,6 +134,25 @@ pub struct McpSection {
     pub inject_for_roles: Vec<String>,
     #[serde(default)]
     pub services: Vec<McpService>,
+    /// Trust gate for auto-spawning servers discovered from a project's
+    /// `.mcp.json` (security-critical, see #3266 BLOCK remediation).
+    ///
+    /// Why: A `.mcp.json` file is project-controlled, not operator-curated —
+    /// cloning a hostile repo that ships a malicious `.mcp.json` would
+    /// otherwise cause trusty-agents to auto-spawn arbitrary binaries on
+    /// every persona turn with zero gating. Defaulting this to `false`
+    /// means live discovery only ever sources servers from the
+    /// operator-curated `[[mcp.services]]` allowlist (`discover = true`
+    /// entries) unless the operator explicitly opts a project in.
+    /// What: When `false` (the default), `mcp_live::spec::gather_specs`
+    /// skips `.mcp.json` entirely and only considers `[[mcp.services]]`
+    /// `discover = true` entries. When `true`, `.mcp.json` entries are
+    /// merged in as before (config-service entries still win on name
+    /// collision).
+    /// Test: `mcp_live::spec::tests::gather_specs_skips_mcp_json_when_untrusted`,
+    /// `gather_specs_includes_mcp_json_when_trusted`.
+    #[serde(default)]
+    pub trust_project_mcp_json: bool,
 }
 
 impl Default for McpSection {
@@ -139,6 +160,7 @@ impl Default for McpSection {
         Self {
             inject_for_roles: default_inject_roles(),
             services: Vec::new(),
+            trust_project_mcp_json: false,
         }
     }
 }
@@ -152,6 +174,11 @@ pub struct McpService {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables overlaid on the spawned server's process
+    /// environment (e.g. API keys). Empty by default — most services need
+    /// nothing beyond the inherited environment.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
     /// For HTTP-transport services, the endpoint URL. Stdio services leave
     /// this `None` and use `command` + `args` instead.
     #[serde(default)]
@@ -162,6 +189,13 @@ pub struct McpService {
     pub enabled: bool,
     #[serde(default)]
     pub tools: Vec<McpTool>,
+    /// When `true`, ignore `tools` (the static list above) entirely and
+    /// live-discover the server's tools via `tools/list` at registry-build
+    /// time instead (#3238). Requires `transport = "stdio"` and a non-empty
+    /// `command` — non-stdio or command-less services with `discover = true`
+    /// are skipped with a warning, same as the static path.
+    #[serde(default)]
+    pub discover: bool,
 }
 
 /// A single tool advertised by an MCP service.

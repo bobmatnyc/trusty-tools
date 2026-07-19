@@ -53,34 +53,21 @@ pub async fn run_pm_task_with_persona(
 
     let sid = session_id.unwrap_or_default();
 
-    let project_persona = project_path
-        .join(".trusty-agents")
-        .join("agents")
-        .join(format!("{}.toml", persona_name));
-    let mut persona_cfg = if project_persona.is_file() {
-        AgentConfig::load(&project_persona)?
-    } else if let Some(home) = dirs::home_dir() {
-        let user_persona = home
-            .join(".trusty-agents")
-            .join("agents")
-            .join(format!("{}.toml", persona_name));
-        if user_persona.is_file() {
-            AgentConfig::load(&user_persona)?
-        } else {
-            anyhow::bail!(
-                "persona agent '{}' not found at {} or {}",
-                persona_name,
-                project_persona.display(),
-                user_persona.display()
-            );
-        }
-    } else {
-        anyhow::bail!(
-            "persona agent '{}' not found at {}",
-            persona_name,
-            project_persona.display()
-        );
-    };
+    // #3223/#3224 (Trusty Assistant agent roster, epic #3052): resolve
+    // through the canonical `AgentConfig::by_name_async` loader instead of
+    // the hand-rolled project/$HOME `.toml`-only lookup this function used
+    // to do inline. `by_name_async` walks the SAME tier order the old code
+    // did (project `.trusty-agents/agents/` then `$HOME/.trusty-agents/agents`,
+    // #3061) but ALSO resolves flat `.md` personalization overlays (with
+    // their `extends:` chain, #3055) and directory-package agents — neither
+    // of which the old inline lookup understood. Practically: a roster
+    // entry backed by a user's `~/.trusty-agents/agents/<slug>.md` overlay
+    // (written by the personalization editor) now dispatches correctly
+    // through this persona-chat path, not just the subprocess `--direct`
+    // path that already used `by_name_async` internally.
+    let mut persona_cfg = AgentConfig::by_name_async(persona_name)
+        .await
+        .with_context(|| format!("persona agent '{persona_name}' not found"))?;
 
     if let Some(ref m) = overrides.model {
         tracing::debug!(persona = %persona_name, model = %m, "applying /model override");
@@ -149,6 +136,30 @@ pub async fn run_pm_task_with_persona(
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
                     registry.register(std::sync::Arc::clone(tool));
+                }
+            }
+
+            // #3238: live-discover MCP servers (`[[mcp.services]] discover =
+            // true` and `.mcp.json`) and register whatever tools they
+            // actually advertise, on top of everything registered above.
+            // `existing_names` seeds the dedup set so a live-discovered tool
+            // never shadows a tool already registered from another source.
+            {
+                let existing_names: std::collections::HashSet<String> = registry
+                    .schemas()
+                    .iter()
+                    .filter_map(|s| {
+                        s.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(String::from)
+                    })
+                    .collect();
+                for tool in
+                    crate::tools::mcp_live::live_mcp_tool_executors(project_path, &existing_names)
+                        .await
+                {
+                    registry.register(tool);
                 }
             }
 
@@ -278,4 +289,38 @@ pub async fn run_pm_task_with_persona(
     );
 
     Ok(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #3223: `run_pm_task_with_persona` now resolves the agent via
+    /// `AgentConfig::by_name_async` instead of a hand-rolled `.toml`-only
+    /// lookup. A name that exists in neither the project dir nor the
+    /// `$HOME` tier must still fail fast with a "not found"-shaped error —
+    /// and critically, fail BEFORE any credential resolution or network/LLM
+    /// call (the `by_name_async` call is the very first thing this function
+    /// does), so this test needs no API keys/credentials and stays fast.
+    #[tokio::test]
+    async fn run_pm_task_with_persona_errs_for_unknown_agent() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "t3223-persona-missing-{}-{}",
+            std::process::id(),
+            "run_pm_task_with_persona_errs_for_unknown_agent"
+        ));
+        let result = run_pm_task_with_persona(
+            &project_dir,
+            "definitely-not-a-real-agent-3223",
+            "hello",
+            &[],
+            None,
+            SessionOverrides::default(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "unknown persona must error, not silently fall back to some other agent"
+        );
+    }
 }

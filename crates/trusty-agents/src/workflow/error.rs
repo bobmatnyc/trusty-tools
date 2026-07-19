@@ -44,4 +44,64 @@ pub enum WorkflowError {
         agent: String,
         consecutive_turns: u32,
     },
+
+    /// #3062 (SPEC-AGENTFW-02 §3.5): `tagent resume <run-id>` was asked for a
+    /// run id with no `checkpoint.json` on disk.
+    #[error(
+        "no checkpoint found for run '{run_id}'; resumable runs: {}",
+        if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+    )]
+    CheckpointNotFound {
+        run_id: String,
+        available: Vec<String>,
+    },
+
+    /// #3062 (SPEC-AGENTFW-02 §3.5): the checkpoint file exists but is not
+    /// parseable JSON (or does not match `CheckpointRecord`'s shape). Fails
+    /// closed rather than silently starting a fresh run under the same id.
+    #[error("checkpoint at {path} is corrupt: {source}")]
+    CheckpointCorrupt {
+        path: String,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// #3062: the checkpoint parses but was written by an incompatible
+    /// journal schema version. See `checkpoint::CHECKPOINT_SCHEMA_VERSION`.
+    #[error(
+        "checkpoint at {path} has schema_version {found}, expected {expected}; \
+         it was written by an incompatible version of trusty-agents"
+    )]
+    CheckpointSchemaMismatch {
+        path: String,
+        found: u32,
+        expected: u32,
+    },
+
+    /// #3062 (SPEC-AGENTFW-02 §3.4): the on-disk workflow JSON's phase list no
+    /// longer matches the checkpoint's `phase_names` snapshot. Resume MUST
+    /// fail closed rather than run a different pipeline than the one that was
+    /// checkpointed.
+    #[error(
+        "workflow '{workflow}' definition changed since checkpoint '{run_id}' was written: \
+         phase list no longer matches (checkpoint: {checkpoint_phases:?}, current: {current_phases:?})"
+    )]
+    ResumeDefinitionChanged {
+        run_id: String,
+        workflow: String,
+        checkpoint_phases: Vec<String>,
+        current_phases: Vec<String>,
+    },
+
+    /// #3062 (code-critic finding, PR #3244): a second `tagent resume` for
+    /// the same `run_id` tried to start while an earlier resume already
+    /// holds the exclusive `resume.lock` for that run's checkpoint
+    /// directory. Fails closed immediately (non-blocking `try_lock`) rather
+    /// than queuing — two concurrent resumes of the same run would race on
+    /// dispatching phases and corrupt the checkpoint's phase ordering.
+    #[error(
+        "run '{run_id}' is already being resumed by another process (lock held at {lock_path}); \
+         wait for it to finish or investigate a stale lock if no resume is actually running"
+    )]
+    ResumeAlreadyInProgress { run_id: String, lock_path: String },
 }

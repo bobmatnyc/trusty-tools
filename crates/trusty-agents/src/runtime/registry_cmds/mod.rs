@@ -317,6 +317,11 @@ impl eval::EvalLlmClient for LiveEvalClient {
 /// Why: Shared by `list`, `status`, and `check` so output stays consistent.
 /// What: Initialises a `PluginManager`, prints one line per known plugin
 /// with state and either the discovered binary path or an install hint.
+/// Issue #3225: the `trusty-memory` row was removed along with the dead
+/// stdio-MCP `TrustyMemoryPlugin` wrapper it reported on (retired — see
+/// `plugins::manager` module docs). Daemon-backed memory now goes through
+/// `crate::memory::trusty_client::TrustyMemoryClient` (HTTP), which isn't a
+/// `PluginManager`-managed child process and has no row here.
 async fn print_plugins_status() {
     use plugins::PluginState;
     // #424: Reuse the process-wide manager when one is already initialised
@@ -331,7 +336,6 @@ async fn print_plugins_status() {
     let s = mgr.status();
     println!("Plugin Status:");
     print_plugin_row("trusty-search", s.search, "cargo install trusty-search");
-    print_plugin_row("trusty-memory", s.memory, "cargo install trusty-memory");
 
     fn print_plugin_row(name: &str, state: PluginState, install_hint: &str) {
         let detail = match state {

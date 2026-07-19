@@ -24,12 +24,14 @@
 //! `protocol::tests::*`; end-to-end over the real daemon in
 //! `tests/session_e2e.rs` and (#2058) `tests/task_e2e.rs`.
 
+pub mod connector;
 pub mod memory_sink;
 pub mod model;
 pub mod protocol;
 pub mod registry;
 pub mod transcript;
 
+pub use connector::TcodeConnector;
 pub use memory_sink::TurnMemorySink;
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;

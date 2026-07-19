@@ -169,7 +169,14 @@ mod tests {
 
     // ---- bus + seq ----
 
+    /// Why: `bus()` returns a process-global singleton broadcast channel, so
+    /// any other test sending on it concurrently can deliver an unrelated
+    /// event to this test's receiver before the expected `Ping` arrives.
+    /// `#[serial]` serialises this against the other global-bus tests in this
+    /// module (issue #2961), matching the #2271 `bm25_client` precedent.
+    /// Test: this test itself.
     #[test]
+    #[serial_test::serial]
     fn bus_is_singleton() {
         let a = bus();
         let b = bus();
@@ -179,7 +186,15 @@ mod tests {
         assert!(matches!(got.payload, HarnessPayload::Ping));
     }
 
+    /// Why: `subscribe()`/`publish()` operate on the same process-global
+    /// broadcast bus as `bus_is_singleton` and `seq_is_monotonic`. Without
+    /// serialisation, a concurrent `publish()` from a sibling test can land on
+    /// this test's receiver ahead of (or instead of) the expected event,
+    /// causing the `got.seq == seq` assertion to intermittently fail under
+    /// parallel workspace test runs (issue #2961).
+    /// Test: this test itself.
     #[tokio::test]
+    #[serial_test::serial]
     async fn publish_round_trips_through_subscribe() {
         let mut rx = subscribe();
         let seq = publish(
@@ -202,7 +217,14 @@ mod tests {
         }
     }
 
+    /// Why: `publish()` increments a process-global sequence counter shared
+    /// with the other global-bus tests in this module. `#[serial]` keeps this
+    /// test's three consecutive `publish()` calls from interleaving with a
+    /// sibling test's `publish()` calls (issue #2961) — the monotonic-order
+    /// assertion only holds for this test's own sequence values.
+    /// Test: this test itself.
     #[test]
+    #[serial_test::serial]
     fn seq_is_monotonic() {
         let s1 = publish(HarnessSource::Agents, None, HarnessPayload::Ping);
         let s2 = publish(HarnessSource::Agents, None, HarnessPayload::Ping);

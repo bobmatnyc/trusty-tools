@@ -59,6 +59,16 @@ allow = [
     "get_gmail_message_content",
     "modify_gmail_messages",
     "create_draft",
+    # trusty-mpm (#3203) — full curated set; cto-assistant already has a
+    # broader write-capable posture (create_ticket, modify_gmail_messages,
+    # create_task, ...), so session_send (drive a pane) and agent_delegate
+    # (tracking/gating only) are included alongside the read-only tools.
+    "session_list",
+    "session_status",
+    "session_send",
+    "project_list",
+    "agent_delegate",
+    "console_metrics",
 ]
 
 [system_prompt]
