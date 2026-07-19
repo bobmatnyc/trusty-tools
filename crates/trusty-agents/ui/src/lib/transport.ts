@@ -117,20 +117,19 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
         }
         const resp = await r.json();
         if (resp.status && resp.status !== 'running') {
-          // #3063: a cancelled task has no narrative (the run was aborted
-          // mid-flight, not completed) — the backend's `PmResponse.narrative`
-          // is a plain `String`, so it serializes as `""` rather than being
-          // omitted, meaning a `?? ` nullish check would NOT catch it. Check
-          // emptiness explicitly. `JSON.stringify(resp)` remains the fallback
-          // for every other terminal status so a genuinely blank narrative
-          // elsewhere is still debuggable rather than silently blanked.
+          // #3063: under the current backend contract every terminal status
+          // — including `cancelled`, via `PmResponse::cancelled()` in
+          // `crates/trusty-agents/src/api/types.rs`, which always sets
+          // narrative to the fixed string "Task cancelled by client
+          // request" — carries a non-empty `narrative`. The length check
+          // below is defense-in-depth (a plain `??` would miss the failure
+          // mode it guards against: `narrative` is a `String`, not
+          // `Option<String>`, so it serializes as `""` rather than being
+          // omitted) and should be unreachable in practice; `JSON.stringify`
+          // is a debuggable last resort if some future status ever ships an
+          // empty narrative.
           const rawNarrative = typeof resp.narrative === 'string' ? resp.narrative : '';
-          const narrative =
-            rawNarrative.length > 0
-              ? rawNarrative
-              : resp.status === 'cancelled'
-                ? 'Task cancelled.'
-                : JSON.stringify(resp);
+          const narrative = rawNarrative.length > 0 ? rawNarrative : JSON.stringify(resp);
           emitWeb('task-complete', {
             id,
             narrative,

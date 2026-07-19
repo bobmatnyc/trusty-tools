@@ -10,10 +10,10 @@
     replaceMessageTaskId,
     setProjectStatus,
     updateMessageByTask,
-    type Message,
     type Project,
   } from '../stores/app';
-  import { cancelTask, invoke, listenEvent } from '../lib/transport';
+  import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
+  import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
 
   let input = '';
   let textareaEl: HTMLTextAreaElement;
@@ -31,28 +31,48 @@
   let submissionSeq = 0;
 
   /**
-   * Why: Retasking (#3063) aborts the in-flight run and starts a brand-new
-   * agent invocation — there is no mid-flight message-injection channel (see
-   * `cancel.rs`'s design note), so continuity has to be rebuilt by hand. The
-   * PM-locked design is "abort + resubmit with history": we fold the visible
-   * conversation (already held client-side in the `messages` store) into the
-   * new task text so the fresh invocation isn't starting from a blank slate.
-   * What: Renders prior user/assistant turns as a plain transcript, flags
-   * that the previous task was interrupted, then appends the new
-   * instruction. Falls back to the bare instruction when there's no prior
-   * history. This only affects the payload sent to the backend — the chat
-   * bubble still shows just what the user typed (via `addMessage` in
-   * `submitTask`, called with the unmodified `content`).
-   * Test: Manual — start a task, retask mid-run, observe the new run's
-   * narrative reflects awareness of the earlier turn.
+   * Why: `handleStop` needs a way to queue a cancel against a submission
+   * that's still on its client-side `pending-<ts>` placeholder id (code-
+   * critic finding on #3259: firing `cancelTask` against the placeholder
+   * 404s and silently no-ops while the task keeps running). Rather than
+   * disabling the Stop button until reconciliation — which would make it
+   * look broken for the ~1.5s window most tasks spend there — we let the
+   * click register immediately and fire the real cancel the moment the
+   * submission's `task-progress` listener reconciles the placeholder to a
+   * real id.
+   * What: Set to the in-flight submission's `queueCancel` callback (and
+   * cleared back to `null`) by `submitTask`; `null` when no submission is
+   * active. `handleStop` calls it instead of `cancelTask` directly whenever
+   * `activeTaskId` is still a placeholder.
    */
-  function buildRetaskPayload(history: Message[], newContent: string): string {
-    const turns = history
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .filter((m) => m.content.trim().length > 0)
-      .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`);
-    if (turns.length === 0) return newContent;
-    return `${turns.join('\n')}\n\n[The previous task was stopped before completion.]\nUser: ${newContent}`;
+  let queueCancelForCurrentSubmission: (() => void) | null = null;
+
+  /**
+   * Why: Consumes `CancelTaskResult.http_status` (previously an unwired
+   * field — code-critic LOW finding on #3259) to log a status-appropriate
+   * diagnostic rather than just discarding the outcome. Not user-facing —
+   * per #3063, 404/409 are expected races and must NOT toast — but a debug
+   * trail is cheap and helps when triaging a "Stop didn't seem to work"
+   * report.
+   * What: Logs at `debug` for the 200/404/409 outcomes the backend
+   * contract documents, `warn` for anything else.
+   * Test: Manual — observe console output for each of the three documented
+   * outcomes.
+   */
+  function logCancelOutcome(result: CancelTaskResult): void {
+    switch (result.http_status) {
+      case 200:
+        console.debug('[InputArea] cancelTask: cancelled', result.id);
+        break;
+      case 404:
+        console.debug('[InputArea] cancelTask: unknown task id (already gone)', result.id);
+        break;
+      case 409:
+        console.debug('[InputArea] cancelTask: task already reached a terminal state', result);
+        break;
+      default:
+        console.warn('[InputArea] cancelTask: unexpected http_status', result);
+    }
   }
 
   /**
@@ -101,13 +121,28 @@
     activeTaskId.set(placeholderTaskId);
     setProjectStatus(projectId, 'running');
 
+    // Why (code-critic finding on #3259): a Stop/retask click that lands
+    // before the real task id is known would otherwise fire `cancelTask`
+    // against the `pending-<ts>` placeholder, which the backend has never
+    // heard of — a silent 404 no-op while the task keeps running. `queueCancel`
+    // lets `handleStop`/`handleSubmit` register "cancel as soon as you know
+    // the real id" instead. Assigned synchronously (no `await` between here
+    // and the isRunning/activeTaskId writes above) so there's no window where
+    // a click could see a stale `null`.
+    let cancelQueued = false;
+    const queueCancel = () => {
+      cancelQueued = true;
+    };
+    queueCancelForCurrentSubmission = queueCancel;
+
     // Why: `send_message` only resolves with the real task id at the END of
     // the run. In the meantime, `task-progress` events fire with the real
     // backend id — but the placeholder bubble is tagged with `pending-<ts>`,
     // so `updateMessageByTask` would never match and progress would silently
     // drop. We attach a one-shot listener that catches the first progress
     // event for THIS submission and swaps the placeholder id for the real
-    // one, after which subsequent progress events route correctly.
+    // one, after which subsequent progress events route correctly. It's also
+    // the reconciliation point for a queued cancel (see `queueCancel` above).
     let reconciled = false;
     let unlistenReconcile: (() => void) | null = null;
     const unlistenP = await listenEvent<{ task_id: string; message: string }>(
@@ -119,6 +154,15 @@
         // Apply the message that triggered the swap so it isn't lost.
         updateMessageByTask(projectId, p.task_id, p.message);
         activeTaskId.set(p.task_id);
+        if (cancelQueued) {
+          cancelQueued = false;
+          cancelTask(p.task_id)
+            .then((result) => logCancelOutcome(result))
+            .catch((e) => console.error('[InputArea] queued cancelTask failed:', e))
+            .finally(() => {
+              cancelling = false;
+            });
+        }
         unlistenReconcile?.();
       },
     );
@@ -148,6 +192,16 @@
       if (mySeq === submissionSeq) {
         isRunning.set(false);
         activeTaskId.set(null);
+      }
+      if (queueCancelForCurrentSubmission === queueCancel) {
+        queueCancelForCurrentSubmission = null;
+      }
+      if (cancelQueued) {
+        // The submission ended (error, or completed with no intervening
+        // task-progress event) before the reconcile handler above ever ran
+        // — there's no real id to cancel and nothing left to reconcile
+        // against, so clear the "Stopping…" state here instead.
+        cancelling = false;
       }
     }
   }
@@ -181,9 +235,17 @@
 
       const runningId = $activeTaskId;
       input = '';
-      if (runningId) {
+      if (runningId && isPendingTaskId(runningId)) {
+        // Same 404-no-op race as Stop (see `handleStop`/`queueCancel`): the
+        // real backend id isn't known yet, so queue instead of firing
+        // against the placeholder. Best-effort either way — we proceed with
+        // the resubmit regardless of whether the queued cancel ultimately
+        // lands.
+        queueCancelForCurrentSubmission?.();
+      } else if (runningId) {
         try {
-          await cancelTask(runningId);
+          const result = await cancelTask(runningId);
+          logCancelOutcome(result);
         } catch (e) {
           // Best-effort: proceed with the resubmit regardless — the user's
           // intent (move on to the new instruction) still stands even if the
@@ -202,27 +264,41 @@
 
   /**
    * Why: The Stop control for #3063 — lets the user abort a runaway or
-   * no-longer-wanted task without waiting for it to finish. Deliberately
-   * thin: it only fires the cancel request. `submitTask`'s own `finally`
-   * block (see above) is what flips `isRunning`/`activeTaskId` back to idle,
-   * once the aborted run's poll loop (Tauri: Rust; browser: `fetchFallback`)
-   * observes the resulting `status: "cancelled"` on its next tick — bounded
-   * by the 1.5s poll interval in both transports.
-   * What: Calls `cancelTask`; 404 (already gone) and 409 (already terminal)
-   * are both treated as success-adjacent per the backend contract — no error
-   * toast, since the aborted run's own terminal-state handling in
-   * `submitTask` reconciles the UI regardless. Only a genuine transport
-   * failure is logged.
+   * no-longer-wanted task without waiting for it to finish. `submitTask`'s
+   * own `finally` block (see above) is what flips `isRunning`/`activeTaskId`
+   * back to idle, once the aborted run's poll loop (Tauri: Rust; browser:
+   * `fetchFallback`) observes the resulting `status: "cancelled"` on its
+   * next tick — bounded by the 1.5s poll interval in both transports.
+   * What: If `activeTaskId` is still the client-side `pending-<ts>`
+   * placeholder (real backend id not yet reconciled — code-critic finding
+   * on #3259), queues the cancel via `queueCancelForCurrentSubmission`
+   * instead of firing it against an id the backend has never heard of
+   * (which would 404 and silently no-op while the task keeps running); the
+   * button stays disabled/"Stopping…" until the queued cancel actually
+   * fires from `submitTask`'s reconcile listener. Otherwise cancels
+   * immediately. 404 (already gone) and 409 (already terminal) are both
+   * treated as success-adjacent per the backend contract — no error toast,
+   * since the aborted run's own terminal-state handling in `submitTask`
+   * reconciles the UI regardless. Only a genuine transport failure is
+   * logged as an error; every outcome is logged via `logCancelOutcome`.
    * Test: Manual — start a long task, click Stop, observe the input
    * re-enables and the bubble shows "Task cancelled." within ~1.5s. Click
-   * Stop twice quickly — second call 409s silently, no toast.
+   * Stop twice quickly — second call 409s silently, no toast. Click Stop
+   * immediately after Send (before the first `task-progress` event) —
+   * observe the button shows "Stopping…" and the task is still cancelled
+   * once reconciled, rather than silently doing nothing.
    */
   async function handleStop() {
     const id = $activeTaskId;
     if (!id || cancelling) return;
     cancelling = true;
+    if (isPendingTaskId(id)) {
+      queueCancelForCurrentSubmission?.();
+      return;
+    }
     try {
-      await cancelTask(id);
+      const result = await cancelTask(id);
+      logCancelOutcome(result);
     } catch (e) {
       console.error('[InputArea] cancelTask failed:', e);
     } finally {

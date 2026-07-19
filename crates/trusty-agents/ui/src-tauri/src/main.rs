@@ -365,19 +365,16 @@ async fn send_message(
         // Terminal state. Emit complete (even on error-status responses so
         // ChatView can display the failure narrative).
         //
-        // #3063: a cancelled task never produces a narrative (the run was
-        // aborted, not completed), so an empty string would render as
-        // ChatView's generic "(no narrative)" placeholder — give it a label
-        // that actually says what happened instead.
-        let raw_narrative = response
+        // #3063: `PmResponse::cancelled()` (crates/trusty-agents/src/api/
+        // types.rs) always sets narrative to the fixed string "Task
+        // cancelled by client request", so a cancelled task's narrative is
+        // never empty under the current backend contract — no
+        // status-specific special-casing needed here.
+        let narrative = response
             .get("narrative")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let narrative = if raw_narrative.is_empty() && status == "cancelled" {
-            "Task cancelled.".to_string()
-        } else {
-            raw_narrative.to_string()
-        };
+            .unwrap_or("")
+            .to_string();
 
         let _ = app.emit("task-complete", &response);
         return Ok(narrative);
