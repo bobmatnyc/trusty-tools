@@ -195,7 +195,15 @@ describe('CreateSessionForm submit gating', () => {
     expect(submitButton().disabled).toBe(false); // re-enabled after failure
   });
 
-  it('surfaces the per-call project-mismatch 400 from the daemon verbatim (#3178, PR #3189)', async () => {
+  // Renamed (PR #3250 critic review, cosmetic MEDIUM): the prior name
+  // ("surfaces the per-call project-mismatch 400...") implied this test
+  // exercises project-mismatch-SPECIFIC handling in the component. It
+  // doesn't — there is none. This is the SAME generic `error.message`
+  // passthrough the preceding test already covers ('task must not be
+  // empty'); it just replays that generic path with a real-world
+  // project-mismatch payload (#3178, PR #3189) as the example content, to
+  // confirm the generic path also covers that message verbatim.
+  it('surfaces an arbitrary daemon 400 error message verbatim, exercised with a project-mismatch payload (#3178, PR #3189)', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

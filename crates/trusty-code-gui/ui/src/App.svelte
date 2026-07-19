@@ -1,59 +1,146 @@
 <script lang="ts">
-  // Why: Minimal scaffold shell (issue #2983, DOC-39) — proves the desktop
-  // app connects to the tcode daemon and gives the next UI slice a layout to
-  // extend. Phase 1 adds the status bar (DOC-39 §6.2), the 8b session
-  // monitor card (DOC-39 §4.6, refs #2983), the 10d Search tab (DOC-39
-  // §4.7, refs #3072), and `CreateSessionForm` — the 7a folder picker +
-  // task-input flow (DOC-39 §4.2.1, §6.2 item 6) — closing the gap that
-  // made the GUI observe-and-cancel only: there was previously no way to
-  // start a session from the desktop shell at all. `body`'s prior
-  // `ActivityPlaceholder` explicitly said its purpose was "session list /
-  // activity view... coming once GET /sessions lands" — that has now
-  // landed and `SessionMonitor` covers "what's happening in the active
-  // session" more concretely than the placeholder's static text did, so it
-  // is REPLACED here rather than shown alongside it (a still-unbuilt
-  // session-LIST/picker view, distinct from monitoring the one active
-  // session, is a separate Phase 2+ surface per DOC-39 §6.3, not something
-  // this placeholder was actually standing in for once GET /sessions is
-  // live).
-  // What: Renders a header, a `.body` region (the daemon HealthPanel smoke
-  // connection, the create-session form, the session monitor card — new
-  // session before monitor since it's the entry action and the monitor
-  // reflects the result — then the search audit tab), and `StatusBar` — the
-  // readiness+budget chrome — as a DIRECT SIBLING of `.body`, never nested
-  // inside it. DOC-39 §8.1 / AC-18.1 calls this out explicitly: nesting
-  // `.statusbar` inside `.body` has regressed the wireframe twice ("This bit
-  // us twice… assert it in a test") because it steals the body's row width.
-  // `App.test.ts` asserts the DOM invariant this markup encodes.
-  // Test: Launch under Tauri or `pnpm dev` in a browser — both show the same
-  // connected/disconnected state (DOC-39 §2.1 web/Tauri parity) plus the
-  // status bar's readiness indicator, the create-session form, the session
-  // monitor card, and the search tab. `App.test.ts::statusbar-is-sibling-of-body`
-  // pins the structural invariant; `App.test.ts` also pins each card's
-  // inside-`.body` placement (create-session form, session monitor, search
-  // tab).
-  import CreateSessionForm from './components/CreateSessionForm.svelte';
-  import HealthPanel from './components/HealthPanel.svelte';
+  // Why: DOC-39 §8's Foundry shell skeleton (issue #3153 shell rebuild,
+  // build brief archived at
+  // https://github.com/bobmatnyc/trusty-tools/issues/3153#issuecomment-5015805597)
+  // — the prior scaffold (#2983) was a single flat `.body` stack of cards.
+  // This is the STRUCTURAL rebuild the brief scopes: the Foundry retheme
+  // (PR #3197) already landed the visual system; what was still a flat
+  // stack becomes the real one-flex-column skeleton — `.hdr` → `.body`
+  // (`.wsrail` + `.actpane` = `.wsnav` + `.actbody`) → `.statusbar` —
+  // DOC-39 §8.1/AC-18.1's nesting invariant (`.statusbar` a SIBLING of
+  // `.body`, never inside it) is carried forward verbatim; it is the one
+  // piece of this skeleton with a pinned regression test and has regressed
+  // twice before.
+  //
+  // `HealthPanel` is REMOVED per the build brief ("no mockup home; fold
+  // daemon-unreachable signal into status bar") — `StatusBar`'s own
+  // `phase === 'daemon-unreachable'` branch already reports the identical
+  // signal (a failed `GET /sessions` call), so the smoke-test panel was a
+  // second surface for the same fact, not a distinct one.
+  //
+  // `hasProject`/`isGitRepo` drive `ServiceNav`'s AC-4.2 ("locked, not
+  // hidden") / AC-9.4 (Workflow "hidden, not locked") rules. Phase 1 has no
+  // workstream/project registry (§6.3/7B) or `project.status` aggregation
+  // (#3181) — the only daemon-owned fact available today is the active
+  // session's own `project` field (`GET /sessions`, already polled
+  // elsewhere in this codebase 3x over for the identical reason: each
+  // component polls independently, the established house convention). No
+  // wire field carries git-repo-ness for an EXISTING session (only
+  // `CreateSessionForm`'s pre-submit directory listing has `is_git_repo`,
+  // and that's ephemeral, pre-binding, client-only state) — `isGitRepo` is
+  // therefore always `false` here until a real `project.status`-style route
+  // exists, which per AC-9.4 keeps Workflow hidden in Phase 1 rather than
+  // guessing. This is a real API gap, not a UI shortcut (DOC-39 §2.1 C-2).
+  //
+  // What: `.app` renders `AppHeader`, then `.body` (`WorkstreamRail` +
+  // `.actpane` = `ServiceNav` + `.actbody` hosting the selected tab's
+  // component), then `StatusBar` as `.body`'s sibling. A single `$effect`
+  // polls `GET /sessions` (same `AbortController`-per-lifetime shape as
+  // every other poller in this codebase) purely to derive `hasProject`/
+  // `activeSession`/`sessionRunning` for the nav and rail — it renders
+  // nothing of its own.
+  // Test: `App.test.ts` pins the `.statusbar`-sibling-of-`.body` DOM
+  // invariant (AC-18.1, unchanged), the default Workstream tab's content,
+  // and tab-switching to Search through `ServiceNav`'s buttons.
+  import AppHeader from './components/AppHeader.svelte';
+  import ServiceNav from './components/ServiceNav.svelte';
+  import WorkstreamRail from './components/WorkstreamRail.svelte';
+  import WorkstreamTab from './components/WorkstreamTab.svelte';
+  import ProjectTab from './components/ProjectTab.svelte';
+  import AgentsTab from './components/AgentsTab.svelte';
+  import MemoryTab from './components/MemoryTab.svelte';
   import SearchTab from './components/SearchTab.svelte';
-  import SessionMonitor from './components/SessionMonitor.svelte';
+  import WorkflowTab from './components/WorkflowTab.svelte';
+  import FilesTab from './components/FilesTab.svelte';
   import StatusBar from './components/StatusBar.svelte';
+  import { apiBase } from './lib/api-config';
+  import {
+    pickActiveSession,
+    TERMINAL_SESSION_STATUSES,
+    type SessionListResponse,
+    type SessionSummary,
+  } from './lib/session-status';
+  import type { TabId } from './lib/nav-tabs';
+
+  const POLL_MS = 5000;
+
+  let activeTab = $state<TabId>('workstream');
+  let railCollapsed = $state(false);
+  let activeSession = $state<SessionSummary | null>(null);
+
+  // See the module doc above: no wire field carries git-repo-ness for an
+  // existing session yet, so this stays `false` until a real API exists.
+  const isGitRepo = false;
+
+  async function refreshNavState(signal: AbortSignal) {
+    let base: string;
+    try {
+      base = await apiBase();
+    } catch {
+      if (!signal.aborted) activeSession = null;
+      return;
+    }
+    if (signal.aborted) return;
+
+    try {
+      const res = await fetch(`${base}/sessions`, { signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as SessionListResponse;
+      if (signal.aborted) return;
+      activeSession = pickActiveSession(body.sessions);
+    } catch {
+      if (!signal.aborted) activeSession = null;
+    }
+  }
+
+  $effect(() => {
+    const controller = new AbortController();
+    void refreshNavState(controller.signal);
+    const timer = setInterval(() => void refreshNavState(controller.signal), POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+  });
+
+  let hasProject = $derived(activeSession?.project != null);
+  let sessionRunning = $derived(
+    activeSession !== null && !TERMINAL_SESSION_STATUSES.has(activeSession.status),
+  );
 </script>
 
-<main class="app flex min-h-screen flex-col bg-trusty-surface text-trusty-text">
-  <header class="p-6 pb-0">
-    <h1 class="font-display text-lg font-bold uppercase tracking-wide text-trusty-text">
-      trusty-code
-    </h1>
-    <p class="text-xs text-trusty-text-muted">
-      Desktop shell — thin client over the tcode daemon
-    </p>
-  </header>
+<main class="app flex h-screen flex-col overflow-hidden bg-trusty-surface text-trusty-text">
+  <AppHeader />
 
-  <div class="body flex flex-1 flex-col gap-4 p-6">
-    <HealthPanel />
-    <CreateSessionForm />
-    <SessionMonitor />
-    <SearchTab />
+  <div class="body flex flex-1 overflow-hidden">
+    <WorkstreamRail
+      collapsed={railCollapsed}
+      onToggleCollapse={() => (railCollapsed = !railCollapsed)}
+      {activeSession}
+      onSwitchToWorkstream={() => (activeTab = 'workstream')}
+    />
+
+    <div class="actpane flex flex-1 flex-col overflow-hidden">
+      <ServiceNav {activeTab} {hasProject} {isGitRepo} {sessionRunning} onSelect={(t) => (activeTab = t)} />
+
+      <div class="actbody flex-1 overflow-y-auto p-6">
+        {#if activeTab === 'workstream'}
+          <WorkstreamTab />
+        {:else if activeTab === 'project'}
+          <ProjectTab />
+        {:else if activeTab === 'agents'}
+          <AgentsTab />
+        {:else if activeTab === 'memory'}
+          <MemoryTab />
+        {:else if activeTab === 'search'}
+          <SearchTab />
+        {:else if activeTab === 'workflow'}
+          <WorkflowTab />
+        {:else if activeTab === 'files'}
+          <FilesTab />
+        {/if}
+      </div>
+    </div>
   </div>
 
   <StatusBar />

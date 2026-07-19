@@ -8,6 +8,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Shell rebuild to the DOC-39 §8 Foundry skeleton (closes #3153). `App.svelte`
+  was a flat `.body` stack of cards (`HealthPanel`/`CreateSessionForm`/
+  `SessionMonitor`/`SearchTab`); it is now the real one-flex-column shell:
+  `.hdr` (new `AppHeader.svelte` — brand, a read-only workstream label plus a
+  disabled placeholder control reserving the workstream-switcher slot DOC-48
+  (PR #3284) will fill, and a tokens/cost stub) → `.body` (`.wsrail`, new
+  `WorkstreamRail.svelte` — a 240px/46px collapsible rail with a
+  Workstream|Project segmented toggle over a card list, `--trusty-sidebar-*`
+  chassis tokens ported from `docs/design/UI/design-system/tokens.css` — plus
+  `.actpane` = `.wsnav`, new `ServiceNav.svelte`, the 7 canonical tabs
+  (Workstream/Project/Agents/Memory/Search/Workflow/Files) — and `.actbody`,
+  the per-tab content host) → `.statusbar`, still `.body`'s sibling per the
+  AC-18.1 nesting invariant (unchanged, still pinned by `App.test.ts`).
+  `HealthPanel.svelte` is removed — its sole signal (daemon reachability) is
+  already reported by `StatusBar`'s own `daemon-unreachable` phase.
+  `CreateSessionForm`/`SessionMonitor` now mount inside the Workstream tab
+  (new `WorkstreamTab.svelte`); `SearchTab` mounts as the Search tab's
+  content, unchanged otherwise. New `lib/nav-tabs.ts` (`tabVisibility`, unit
+  tested in `nav-tabs.test.ts`) is the pure decision logic behind two nav
+  rules the build brief calls out: AC-4.2 — every project-scoped tab renders
+  **locked, not hidden** (disabled + tooltip) while the workstream is
+  projectless; AC-9.4 — Workflow is the one exception, **hidden** (not
+  locked) unless a project is bound to an actual git repo (Phase 1 has no
+  wire field for an existing session's git-repo-ness, so Workflow stays
+  hidden until a real `project.status`-style route exists — a documented API
+  gap, not a guess). `StatusBar.svelte` gains the PROJECT and AGENTS-mode
+  segments the brief's status-line spec calls for (`workstream state ·
+  PROJECT binding · SEARCH readiness · MEM · AGENTS mode · TOKENS · COST`),
+  fetching `GET /sessions/{id}` alongside its existing readiness/budget
+  calls; MEM and COST have no daemon route yet (#3181, #3254) and render an
+  honest stub rather than fabricated data. Project/Agents/Memory/Workflow/
+  Files tabs ship as Foundry-style empty-state stubs (idle mark + mono label
+  + one line of guidance naming the gap) — no mockup content for these lands
+  in this structural pass. **Scope note (not completed, documented rather
+  than silently dropped):** the Workstream tab does not implement mockup
+  8a's literal thread+docked-rail ~16/37/28 split — there is no thread/chat
+  surface anywhere in this codebase yet (a separate, unbuilt feature), and
+  8a's docked rail specifically needs the SSE consumer tracked as #3251,
+  which the build brief itself defers. Goal slots (DOC-39 §4.5) are also not
+  wired in this pass, left as a follow-up slice per the brief's own
+  "engineer's judgment, appears in no mockup" framing.
+- Renamed a `CreateSessionForm.test.ts` case (PR #3250 critic review,
+  cosmetic MEDIUM): `'surfaces the per-call project-mismatch 400 from the
+  daemon verbatim'` implied the component special-cases a project mismatch.
+  It doesn't — it's the same generic `error.message` passthrough the
+  preceding test already covers, just replayed with a project-mismatch
+  payload as real-world example content. Renamed to `'surfaces an arbitrary
+  daemon 400 error message verbatim, exercised with a project-mismatch
+  payload'`.
+
 ### Fixed
 
 - GUI-created sessions were inert (closes #3177): the create-session form

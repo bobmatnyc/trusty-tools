@@ -56,6 +56,18 @@
   --color-status-error: 194 51 31; /* #C2331F */
   --color-status-warn: 176 125 16; /* #B07D10 */
   --color-status-neutral: 138 116 96; /* reuses text-muted — no new hue, per README guardrail */
+
+  /* Issue #3153 shell rebuild — `.wsrail` chassis tokens, 1:1 with
+   * docs/design/UI/design-system/tokens.css's `--trusty-sidebar-*` hex
+   * values. `sidebar-text`/`sidebar-muted` are INTENTIONALLY identical to
+   * their dark-theme counterparts below (see that block's comment) — the
+   * rail is a dark chassis in both app themes, so its ink color doesn't
+   * invert with the rest of the UI the way every other token here does. */
+  --color-sidebar-bg: 43 28 18; /* #2B1C12 */
+  --color-sidebar-text: 230 216 200; /* #E6D8C8 */
+  --color-sidebar-muted: 165 138 107; /* #A58A6B */
+  --color-sidebar-border: 70 49 31; /* #46311F */
+  --color-sidebar-active: 70 49 31; /* #46311F */
 }
 
 [data-theme='dark'] {
@@ -78,6 +90,16 @@
   --color-status-error: 224 106 82; /* #E06A52 */
   --color-status-warn: 217 168 58; /* #D9A83A */
   --color-status-neutral: 165 138 107; /* reuses dark text-muted */
+
+  /* `.wsrail` chassis — bg/border/active step one shade darker in Night
+   * Shift (same chassis, slightly deeper); text/muted stay IDENTICAL to
+   * :root's values by design (dark-on-dark chassis ink, not a themed
+   * surface) — see :root's comment on this block. */
+  --color-sidebar-bg: 23 16 9; /* #171009 */
+  --color-sidebar-text: 230 216 200; /* #E6D8C8 — same as light, see :root comment */
+  --color-sidebar-muted: 165 138 107; /* #A58A6B — same as light, see :root comment */
+  --color-sidebar-border: 56 37 19; /* #382513 */
+  --color-sidebar-active: 56 37 19; /* #382513 */
 }
 
 html,

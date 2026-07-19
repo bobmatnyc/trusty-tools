@@ -56,6 +56,17 @@ export default {
         'status-error': 'rgb(var(--color-status-error) / <alpha-value>)',
         'status-warn': 'rgb(var(--color-status-warn) / <alpha-value>)', // DOC-39 §8: amber = inferred/warming
         'status-neutral': 'rgb(var(--color-status-neutral) / <alpha-value>)', // no-session / never-probed
+        // Issue #3153 shell rebuild: the workstream rail (`.wsrail`) is a
+        // fixed dark chassis in BOTH app themes (docs/design/UI/design-system/
+        // tokens.css's `--trusty-sidebar-*` set, PM ruling "Foundry wins on
+        // visuals" over the PDF's fixed-constant proposal) — `sidebar-bg`
+        // still tracks the app theme (a touch darker in Night Shift) even
+        // though the chassis itself never goes light.
+        'trusty-sidebar-bg': 'rgb(var(--color-sidebar-bg) / <alpha-value>)',
+        'trusty-sidebar-text': 'rgb(var(--color-sidebar-text) / <alpha-value>)',
+        'trusty-sidebar-muted': 'rgb(var(--color-sidebar-muted) / <alpha-value>)',
+        'trusty-sidebar-border': 'rgb(var(--color-sidebar-border) / <alpha-value>)',
+        'trusty-sidebar-active': 'rgb(var(--color-sidebar-active) / <alpha-value>)',
       },
       fontFamily: {
         sans: ['"IBM Plex Sans"', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'sans-serif'],
