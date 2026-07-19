@@ -265,3 +265,25 @@ input[type='checkbox'], .checkbox { accent-color: var(--trusty-accent); }
   color: var(--trusty-text-secondary);
   font: 500 11px var(--trusty-mono);
 }
+
+/* Robot activity animation — event-driven mark states.
+ * Markup: .robot > .robot-eye (x2), .robot-antenna-tip; add .robot-ring spans for receiving.
+ * States: .robot-idle (slow blink) / .robot-receiving (antenna pings, throttle to <=2/s)
+ * / .robot-working (double-blink + tilt). */
+@keyframes foundry-blink { 0%, 94%, 100% { transform: scaleY(1); } 96%, 98% { transform: scaleY(0.12); } }
+@keyframes foundry-blink-busy { 0%, 86%, 100% { transform: scaleY(1); } 88%, 90% { transform: scaleY(0.12); } 92% { transform: scaleY(1); } 94%, 96% { transform: scaleY(0.12); } }
+@keyframes foundry-ping { 0% { transform: translateX(-50%) scale(0.3); opacity: 0.9; } 100% { transform: translateX(-50%) scale(2.6); opacity: 0; } }
+@keyframes foundry-tilt { 0%, 100% { transform: rotate(0); } 40% { transform: rotate(-4deg); } 60% { transform: rotate(4deg); } }
+.robot-idle .robot-eye { animation: foundry-blink 4s infinite; transform-origin: center; }
+.robot-working .robot-eye { animation: foundry-blink-busy 2.2s infinite; transform-origin: center; }
+.robot-working { animation: foundry-tilt 2.8s ease-in-out infinite; }
+.robot-receiving .robot-ring {
+  position: absolute; left: 50%; top: -16px; width: 8px; height: 8px;
+  border-radius: 50%; border: 2px solid var(--trusty-accent);
+  animation: foundry-ping 1.4s ease-out infinite;
+}
+.robot-receiving .robot-ring:nth-child(2) { animation-delay: 0.7s; border-color: var(--trusty-sidebar-accent); }
+@media (prefers-reduced-motion: reduce) {
+  .robot-idle .robot-eye, .robot-working .robot-eye, .robot-working { animation: none; }
+  .robot-receiving .robot-ring { animation: none; opacity: 0.4; transform: translateX(-50%) scale(1.6); }
+}

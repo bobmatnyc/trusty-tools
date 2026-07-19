@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #e8e9ee; font-family: 'Inter', system-ui, sans-serif; }
+  a { color: #6366f1; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</helmet>
+<div style="display:flex; gap:48px; padding:48px; align-items:flex-start;">
+
+  <!-- ══ SCREEN: Dashboard ══ -->
+  <div data-screen-label="Current: Dashboard" style="flex:0 0 auto;">
+    <div style="font:600 13px 'JetBrains Mono',monospace; color:#64748b; margin-bottom:10px;">current / dashboard</div>
+    <div style="width:1440px; height:900px; display:flex; background:#f8f9fc; box-shadow:0 10px 25px rgba(0,0,0,0.1); overflow:hidden; font-size:14px; color:#1e293b;">
+      <!-- sidebar -->
+      <aside style="width:240px; flex:0 0 240px; background:#1e1e2e; color:#cdd6f4; display:flex; flex-direction:column; border-right:1px solid #313244;">
+        <div style="padding:20px; display:flex; align-items:center; gap:12px; border-bottom:1px solid #313244;">
+          <div style="width:36px; height:36px; border-radius:8px; background:#6366f1; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:18px;">T</div>
+          <div>
+            <div style="font-weight:600; font-size:15px; color:#fff;">Trusty Search</div>
+            <div style="font-size:11px; color:#7f849c;">Code Search</div>
+          </div>
+        </div>
+        <nav style="padding:16px 12px; flex:1; display:flex; flex-direction:column; gap:4px;">
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; background:#313244; color:#89b4fa; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">◇</span><span>Dashboard</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">⌕</span><span>Search</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">▣</span><span>Indexes</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">♥</span><span>Health</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">☰</span><span>Logs</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">⚙</span><span>Config</span></div>
+        </nav>
+        <div style="padding:16px 20px; border-top:1px solid #313244; font-size:12px; color:#7f849c;">Trusty Suite</div>
+      </aside>
+      <!-- main -->
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+        <header style="height:60px; flex:0 0 60px; background:#fff; border-bottom:1px solid #e2e8f0; display:flex; align-items:center; justify-content:space-between; padding:0 32px; gap:12px;">
+          <div style="display:flex; align-items:center; gap:8px; font-size:14px;"><span style="font-weight:600; color:#1e293b;">Dashboard</span></div>
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div style="display:flex; gap:4px;">
+              <button style="display:inline-flex; align-items:center; padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Stop</button>
+              <button style="display:inline-flex; align-items:center; padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-weight:500; font-family:inherit;">Restart</button>
+            </div>
+            <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">v0.4.2</span>
+          </div>
+        </header>
+        <div style="padding:24px 32px; flex:1; overflow:auto;">
+          <h1 style="font-size:1.5rem; margin:0 0 24px 0; font-weight:600;">Dashboard</h1>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px;">
+            <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:24px; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+              <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:#64748b; margin-bottom:8px;">Indexes</div>
+              <div style="font-size:2rem; font-weight:700;">4</div>
+              <div style="font-size:12px; color:#64748b; margin-top:4px;">registered</div>
+            </div>
+            <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:24px; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+              <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:#64748b; margin-bottom:8px;">Documents</div>
+              <div style="font-size:2rem; font-weight:700;">128,441</div>
+              <div style="font-size:12px; color:#64748b; margin-top:4px;">indexed chunks</div>
+            </div>
+            <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:24px; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+              <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:#64748b; margin-bottom:8px;">Uptime</div>
+              <div style="font-size:2rem; font-weight:700;">3d</div>
+              <div style="font-size:12px; color:#64748b; margin-top:4px;">daemon</div>
+            </div>
+            <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:24px; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+              <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:#64748b; margin-bottom:8px;">Version</div>
+              <div style="font-size:1.125rem; font-weight:700; font-family:'JetBrains Mono',monospace;">0.4.2</div>
+              <div style="font-size:12px; margin-top:4px;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-weight:500; background:#dcfce7; color:#22c55e;">healthy</span></div>
+            </div>
+          </div>
+          <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,0.04); margin-top:16px;">
+            <div style="padding:16px 24px; border-bottom:1px solid #e2e8f0; font-weight:600; display:flex; justify-content:space-between; align-items:center;">
+              <span>Recent indexes</span>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #6366f1; border-radius:8px; background:#6366f1; color:#fff; font-weight:500; font-family:inherit;">Manage all</button>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:0.875rem;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Name</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Documents</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Root path</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>trusty-tools</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">48,213</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/trusty-tools</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">ready</span></td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>memory-palace</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">31,870</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/memory-palace</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">ready</span></td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>gitflow-rs</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">27,904</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/gitflow-rs</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#fee2e2; color:#ef4444;">error</span></td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>docs-site</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">20,454</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/docs-site</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">ready</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ SCREEN: Search ══ -->
+  <div data-screen-label="Current: Search" style="flex:0 0 auto;">
+    <div style="font:600 13px 'JetBrains Mono',monospace; color:#64748b; margin-bottom:10px;">current / search</div>
+    <div style="width:1440px; height:900px; display:flex; background:#f8f9fc; box-shadow:0 10px 25px rgba(0,0,0,0.1); overflow:hidden; font-size:14px; color:#1e293b;">
+      <aside style="width:240px; flex:0 0 240px; background:#1e1e2e; color:#cdd6f4; display:flex; flex-direction:column; border-right:1px solid #313244;">
+        <div style="padding:20px; display:flex; align-items:center; gap:12px; border-bottom:1px solid #313244;">
+          <div style="width:36px; height:36px; border-radius:8px; background:#6366f1; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:18px;">T</div>
+          <div>
+            <div style="font-weight:600; font-size:15px; color:#fff;">Trusty Search</div>
+            <div style="font-size:11px; color:#7f849c;">Code Search</div>
+          </div>
+        </div>
+        <nav style="padding:16px 12px; flex:1; display:flex; flex-direction:column; gap:4px;">
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">◇</span><span>Dashboard</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; background:#313244; color:#89b4fa; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">⌕</span><span>Search</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">▣</span><span>Indexes</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">♥</span><span>Health</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">☰</span><span>Logs</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">⚙</span><span>Config</span></div>
+        </nav>
+        <div style="padding:16px 20px; border-top:1px solid #313244; font-size:12px; color:#7f849c;">Trusty Suite</div>
+      </aside>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+        <header style="height:60px; flex:0 0 60px; background:#fff; border-bottom:1px solid #e2e8f0; display:flex; align-items:center; justify-content:space-between; padding:0 32px; gap:12px;">
+          <div style="display:flex; align-items:center; gap:8px; font-size:14px;"><span style="font-weight:600; color:#1e293b;">Search</span></div>
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div style="display:flex; gap:4px;">
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Stop</button>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-weight:500; font-family:inherit;">Restart</button>
+            </div>
+            <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">v0.4.2</span>
+          </div>
+        </header>
+        <div style="padding:24px 32px; flex:1; overflow:auto;">
+          <h1 style="font-size:1.5rem; margin:0 0 24px 0; font-weight:600;">Search</h1>
+          <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,0.04); margin-bottom:16px;">
+            <div style="padding:24px;">
+              <div style="display:flex; gap:8px; align-items:stretch;">
+                <input value="fn authenticate" style="flex:1; padding:8px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-family:inherit; font-size:inherit;">
+                <input value="10" style="width:80px; flex:0 0 80px; padding:8px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-family:inherit; font-size:inherit;">
+                <button style="display:inline-flex; align-items:center; padding:8px 14px; border:1px solid #6366f1; border-radius:8px; background:#6366f1; color:#fff; font-weight:500; font-family:inherit; font-size:inherit;">Search</button>
+              </div>
+              <div style="display:flex; gap:12px; align-items:center; margin-top:12px;">
+                <span style="color:#64748b; font-size:0.875rem;">Searches 4 indexes.</span>
+                <span style="color:#64748b; font-size:0.875rem;">· 8ms</span>
+                <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#e0f2fe; color:#0ea5e9;">Definition</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px;">
+            <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:16px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:12px;">
+                <div style="display:flex; align-items:center; gap:8px; min-width:0; flex:1;">
+                  <span style="font-family:'JetBrains Mono',monospace; font-size:0.875rem;">src/auth/service.rs</span>
+                  <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#f1f5f9; color:#64748b;">authenticate</span>
+                  <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#e0f2fe; color:#0ea5e9;">trusty-tools</span>
+                  <span style="color:#64748b; font-size:12px;">L42–88</span>
+                </div>
+                <div style="display:flex; flex-direction:column; align-items:flex-end; flex-shrink:0;">
+                  <span style="font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:0.06em;">score</span>
+                  <span style="font-family:'JetBrains Mono',monospace; font-weight:600;">0.913</span>
+                </div>
+              </div>
+              <pre style="margin:0; padding:12px; background:#f8f9fc; border-radius:8px; white-space:pre-wrap; word-break:break-word; font-size:12px; color:#475569; line-height:1.5; font-family:'JetBrains Mono',monospace;">pub async fn authenticate(&amp;self, token: &amp;str) -&gt; Result&lt;Session&gt; {
+    let claims = self.verify_jwt(token)?;
+    self.sessions.get_or_create(claims.sub).await
+}</pre>
+            </div>
+            <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:16px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:12px;">
+                <div style="display:flex; align-items:center; gap:8px; min-width:0; flex:1;">
+                  <span style="font-family:'JetBrains Mono',monospace; font-size:0.875rem;">src/auth/middleware.rs</span>
+                  <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#e0f2fe; color:#0ea5e9;">trusty-tools</span>
+                  <span style="color:#64748b; font-size:12px;">L12–31</span>
+                </div>
+                <div style="display:flex; flex-direction:column; align-items:flex-end; flex-shrink:0;">
+                  <span style="font-size:12px; color:#64748b; text-transform:uppercase; letter-spacing:0.06em;">score</span>
+                  <span style="font-family:'JetBrains Mono',monospace; font-weight:600;">0.847</span>
+                </div>
+              </div>
+              <pre style="margin:0; padding:12px; background:#f8f9fc; border-radius:8px; white-space:pre-wrap; word-break:break-word; font-size:12px; color:#475569; line-height:1.5; font-family:'JetBrains Mono',monospace;">let session = state.auth.authenticate(bearer.token()).await
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;</pre>
+            </div>
+          </div>
+          <div style="margin-top:32px; border-top:1px solid #e2e8f0; padding-top:24px; display:flex; flex-direction:column; gap:12px;">
+            <div style="display:flex; align-items:center; gap:16px;">
+              <h2 style="font-size:1.125rem; font-weight:600; margin:0;">Chat</h2>
+              <div style="display:flex; align-items:center; gap:12px; flex:1;">
+                <span style="font-size:0.875rem; font-weight:500; color:#475569;">Index</span>
+                <select style="min-width:160px; padding:4px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-family:inherit; font-size:0.875rem;"><option>trusty-tools</option></select>
+              </div>
+            </div>
+            <div style="background:#f8f9fc; border:1px solid #e2e8f0; border-radius:8px; min-height:140px; padding:12px 16px; display:flex; flex-direction:column; gap:12px;">
+              <div style="display:flex; justify-content:flex-end;">
+                <div style="max-width:78%; padding:12px 16px; border-radius:12px; border-bottom-right-radius:4px; background:#6366f1; color:#fff; line-height:1.6; font-size:0.875rem;">Where is the session store created?</div>
+              </div>
+              <div style="display:flex; justify-content:flex-start;">
+                <div style="max-width:78%; padding:12px 16px; border-radius:12px; border-bottom-left-radius:4px; background:#fff; border:1px solid #e2e8f0; line-height:1.6; font-size:0.875rem;">The session store is created in <span style="font-family:'JetBrains Mono',monospace; font-size:0.85em;">src/auth/service.rs</span> inside <span style="font-family:'JetBrains Mono',monospace; font-size:0.85em;">AuthService::new</span>, backed by the SQLite pool.</div>
+              </div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:flex-end;">
+              <textarea rows="2" placeholder="Ask a question… (Enter to send, Shift+Enter for newline)" style="flex:1; resize:none; border:1px solid #e2e8f0; border-radius:8px; padding:8px 12px; font-family:'Inter',sans-serif; font-size:0.875rem; color:#1e293b; background:#fff; line-height:1.5;"></textarea>
+              <button style="flex-shrink:0; min-width:68px; padding:8px 14px; border:1px solid #6366f1; border-radius:8px; background:#6366f1; color:#fff; font-weight:500; font-family:inherit;">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ SCREEN: Indexes ══ -->
+  <div data-screen-label="Current: Indexes" style="flex:0 0 auto;">
+    <div style="font:600 13px 'JetBrains Mono',monospace; color:#64748b; margin-bottom:10px;">current / indexes</div>
+    <div style="width:1440px; height:900px; display:flex; background:#f8f9fc; box-shadow:0 10px 25px rgba(0,0,0,0.1); overflow:hidden; font-size:14px; color:#1e293b;">
+      <aside style="width:240px; flex:0 0 240px; background:#1e1e2e; color:#cdd6f4; display:flex; flex-direction:column; border-right:1px solid #313244;">
+        <div style="padding:20px; display:flex; align-items:center; gap:12px; border-bottom:1px solid #313244;">
+          <div style="width:36px; height:36px; border-radius:8px; background:#6366f1; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:18px;">T</div>
+          <div>
+            <div style="font-weight:600; font-size:15px; color:#fff;">Trusty Search</div>
+            <div style="font-size:11px; color:#7f849c;">Code Search</div>
+          </div>
+        </div>
+        <nav style="padding:16px 12px; flex:1; display:flex; flex-direction:column; gap:4px;">
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">◇</span><span>Dashboard</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">⌕</span><span>Search</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; background:#313244; color:#89b4fa; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">▣</span><span>Indexes</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">♥</span><span>Health</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">☰</span><span>Logs</span></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-radius:6px; font-size:14px; font-weight:500;"><span style="width:16px; text-align:center;">⚙</span><span>Config</span></div>
+        </nav>
+        <div style="padding:16px 20px; border-top:1px solid #313244; font-size:12px; color:#7f849c;">Trusty Suite</div>
+      </aside>
+      <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+        <header style="height:60px; flex:0 0 60px; background:#fff; border-bottom:1px solid #e2e8f0; display:flex; align-items:center; justify-content:space-between; padding:0 32px; gap:12px;">
+          <div style="display:flex; align-items:center; gap:8px; font-size:14px;"><span style="font-weight:600; color:#1e293b;">Indexes</span></div>
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div style="display:flex; gap:4px;">
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Stop</button>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-weight:500; font-family:inherit;">Restart</button>
+            </div>
+            <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">v0.4.2</span>
+          </div>
+        </header>
+        <div style="padding:24px 32px; flex:1; overflow:auto;">
+          <h1 style="font-size:1.5rem; margin:0 0 24px 0; font-weight:600;">Indexes</h1>
+          <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,0.04); margin-bottom:16px;">
+            <div style="padding:16px 24px; border-bottom:1px solid #e2e8f0; font-weight:600;">Register a new index</div>
+            <div style="padding:24px;">
+              <div style="display:grid; grid-template-columns:1fr 2fr auto; gap:8px; align-items:stretch;">
+                <input placeholder="Index id (e.g. my-project)" style="padding:8px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-family:inherit; font-size:inherit;">
+                <input placeholder="Absolute root path (e.g. /Users/me/code/my-project)" style="padding:8px 12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-family:inherit; font-size:inherit;">
+                <button style="padding:8px 14px; border:1px solid #6366f1; border-radius:8px; background:#6366f1; color:#fff; font-weight:500; font-family:inherit; font-size:inherit; opacity:0.55;">Create</button>
+              </div>
+            </div>
+          </div>
+          <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+            <div style="padding:16px 24px; border-bottom:1px solid #e2e8f0; font-weight:600; display:flex; justify-content:space-between; align-items:center;">
+              <span>Registered indexes</span>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-weight:500; font-family:inherit;">Refresh</button>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; padding:8px 16px; background:#f5f5f5; border-bottom:1px solid #e2e8f0;">
+              <span style="font-size:0.875rem; font-weight:600; margin-right:4px;">2 selected</span>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; color:#1e293b; font-weight:500; font-family:inherit;">Reindex selected</button>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Delete selected</button>
+              <button style="padding:4px 10px; font-size:12px; border:1px solid transparent; border-radius:8px; background:transparent; color:#64748b; font-weight:500; font-family:inherit;">Clear selection</button>
+            </div>
+            <table style="width:100%; border-collapse:collapse; font-size:0.875rem;">
+              <thead>
+                <tr>
+                  <th style="width:36px; padding:12px 0 12px 12px; border-bottom:1px solid #e2e8f0; background:#f8f9fc;"><input type="checkbox" style="width:15px; height:15px; accent-color:#3b82f6;"></th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Name</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Documents</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Disk</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Last indexed</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Root path</th>
+                  <th style="text-align:left; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Status</th>
+                  <th style="text-align:right; padding:12px 16px; border-bottom:1px solid #e2e8f0; font-weight:600; color:#64748b; text-transform:uppercase; font-size:12px; letter-spacing:0.04em; background:#f8f9fc;">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="background:rgba(59,130,246,0.07);">
+                  <td style="width:36px; padding:12px 0 12px 12px; border-bottom:1px solid #e2e8f0;"><input type="checkbox" checked="checked" style="width:15px; height:15px; accent-color:#3b82f6;"></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>trusty-tools</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">48,213</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px;">412.6 MB</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-size:12px; color:#64748b;">7/18/2026, 9:14:02 AM</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/trusty-tools</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">ready</span></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; text-align:right; white-space:nowrap;">
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">⚙ Settings</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">Reindex</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Delete</button>
+                  </td>
+                </tr>
+                <tr style="background:rgba(59,130,246,0.07);">
+                  <td style="width:36px; padding:12px 0 12px 12px; border-bottom:1px solid #e2e8f0;"><input type="checkbox" checked="checked" style="width:15px; height:15px; accent-color:#3b82f6;"></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>memory-palace</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">31,870</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px;">268.1 MB</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-size:12px; color:#64748b;">7/17/2026, 6:40:11 PM</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/memory-palace</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#e0f2fe; color:#0ea5e9;"><span style="width:10px; height:10px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; display:inline-block;"></span>1,204/31,870</span></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; text-align:right; white-space:nowrap;">
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">⚙ Settings</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit; opacity:0.55;">Working…</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Delete</button>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="width:36px; padding:12px 0 12px 12px; border-bottom:1px solid #e2e8f0;"><input type="checkbox" style="width:15px; height:15px; accent-color:#3b82f6;"></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>gitflow-rs</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">27,904</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px;">231.9 MB</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-size:12px; color:#64748b;">7/12/2026, 2:03:44 PM</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/gitflow-rs</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#fee2e2; color:#ef4444;">error</span></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; text-align:right; white-space:nowrap;">
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">⚙ Settings</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">Reindex</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Delete</button>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="width:36px; padding:12px 0 12px 12px; border-bottom:1px solid #e2e8f0;"><input type="checkbox" style="width:15px; height:15px; accent-color:#3b82f6;"></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><strong>docs-site</strong></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;">20,454</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px;">166.3 MB</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-size:12px; color:#64748b;">7/16/2026, 11:52:08 AM</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; font-family:'JetBrains Mono',monospace; font-size:12px; color:#64748b;">/Users/mo/code/docs-site</td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0;"><span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:500; background:#dcfce7; color:#22c55e;">ready</span></td>
+                  <td style="padding:12px 16px; border-bottom:1px solid #e2e8f0; text-align:right; white-space:nowrap;">
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">⚙ Settings</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #e2e8f0; border-radius:8px; background:#fff; font-weight:500; font-family:inherit;">Reindex</button>
+                    <button style="padding:4px 10px; font-size:12px; border:1px solid #fee2e2; border-radius:8px; background:#fff; color:#ef4444; font-weight:500; font-family:inherit;">Delete</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

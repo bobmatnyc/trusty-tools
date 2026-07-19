@@ -73,3 +73,52 @@
   --trusty-space-6: 32px;
 }
 </content>
+
+
+/*
+ * Dark theme — "NIGHT SHIFT". Activate with <html data-theme="dark"> or the
+ * .dark class. Same rust hue family; surfaces flip to oxide chassis, the
+ * accent brightens one step (#D97742) to hold contrast on dark paper.
+ */
+[data-theme='dark'], .dark {
+  /* Sidebar (deepest chassis) */
+  --trusty-sidebar-bg: #171009;
+  --trusty-sidebar-text: #e6d8c8;
+  --trusty-sidebar-muted: #a58a6b;
+  --trusty-sidebar-accent: #e9b98a;
+  --trusty-sidebar-active: #382513;
+  --trusty-sidebar-border: #382513;
+
+  /* Content (dark oxide) */
+  --trusty-content-bg: #201612;
+  --trusty-card-bg: #2b1c12;
+  --trusty-border: #46311f;
+  --trusty-border-strong: #5c4126;
+  --trusty-surface-raised: #382513;
+  --trusty-surface-hover: rgba(217, 119, 66, 0.09);
+
+  /* Text */
+  --trusty-text-primary: #f0e7d8;
+  --trusty-text-secondary: #cbb69c;
+  --trusty-text-muted: #a58a6b;
+  --trusty-text-inverse: #201612;
+
+  /* Accents — rust brightens one step on dark */
+  --trusty-accent: #d97742;
+  --trusty-accent-hover: #e8905c;
+  --trusty-accent-soft: rgba(217, 119, 66, 0.16);
+  --trusty-primary: #d97742;
+  --trusty-primary-soft: rgba(217, 119, 66, 0.10);
+  --trusty-success: #8fbf6a;
+  --trusty-success-soft: rgba(143, 191, 106, 0.14);
+  --trusty-warning: #d9a83a;
+  --trusty-warning-soft: rgba(217, 168, 58, 0.14);
+  --trusty-danger: #e06a52;
+  --trusty-danger-soft: rgba(224, 106, 82, 0.14);
+  --trusty-info: #7ba7c4;
+  --trusty-info-soft: rgba(123, 167, 196, 0.14);
+
+  /* Surface */
+  --trusty-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --trusty-shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.55);
+}

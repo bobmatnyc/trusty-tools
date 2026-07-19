@@ -60,6 +60,18 @@ DO NOT
   12px sans.
 - No zebra-striped tables; row hover uses --trusty-surface-hover.
 
+## Dark theme ("Night Shift")
+
+tokens.css ships both palettes. Light is :root; dark activates via
+`<html data-theme="dark">` (or a `.dark` class). Rules:
+
+- Same rust hue family in both themes; the accent brightens one step on
+  dark (#B7410E -> #D97742) to hold contrast.
+- Soft status fills become translucent overlays on dark (never opaque
+  pastels on oxide surfaces).
+- Components reference tokens only — a component that hardcodes a hex
+  breaks theming and fails review.
+
 ## Component states quick-reference
 
 - Buttons: PRIMARY solid rust · SECONDARY card bg · TERTIARY raised bg ·
