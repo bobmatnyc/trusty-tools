@@ -447,22 +447,3 @@ async fn bind_session_rejects_closed_workstream() {
         Err(BindError::Closed(_))
     ));
 }
-
-#[tokio::test]
-async fn find_binding_returns_owning_workstream() {
-    let dir = TempDir::new().expect("tempdir");
-    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
-    let id = store.create("A").await.expect("create");
-    store.bind_session(id, "s-1").await.expect("bind");
-
-    assert_eq!(store.find_binding("s-1").await.expect("find"), Some(id));
-}
-
-#[tokio::test]
-async fn find_binding_returns_none_for_unbound_session() {
-    let dir = TempDir::new().expect("tempdir");
-    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
-    store.create("A").await.expect("create");
-
-    assert_eq!(store.find_binding("s-nope").await.expect("find"), None);
-}

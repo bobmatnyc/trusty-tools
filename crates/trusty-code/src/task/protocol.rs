@@ -148,7 +148,9 @@ struct TaskRunRequestParams {
 /// (`session_id` absent), resolves the EFFECTIVE workstream target —
 /// `workstream_id` explicit param wins, else the daemon's active workstream
 /// is the ambient default (§4.2), else the session stays projectless — and
-/// persists it via `crate::workstreams::protocol::resolve_and_bind_session`
+/// persists it via `crate::workstreams::protocol::resolve_validate_bind`
+/// (validated BEFORE the session is minted — see that helper's docs on the
+/// PR #3354 phantom-session fix)
 /// before this session is used further. On the reuse path (`session_id`
 /// present), the session's own persisted `workstream_id` is authoritative;
 /// `crate::workstreams::protocol::check_workstream_immutable` rejects a
@@ -259,22 +261,32 @@ async fn task_run(
             id.clone()
         }
         None => {
-            let session = registry.create(
-                p.task_description.clone(),
-                Some(agent_name.clone()),
-                binding.clone(),
-            );
-            if let Some(ws_id) = crate::workstreams::protocol::resolve_and_bind_session(
+            // (PR #3354 code-critic HIGH 2) Validate the workstream target
+            // BEFORE minting: `SessionRegistry` has no delete/rollback, so
+            // a rejected bind (malformed/unknown/closed `workstream_id`)
+            // must fire while no session exists yet — the mint runs as a
+            // closure inside `resolve_validate_bind`, only after validation
+            // passes, under the same store lock (TOCTOU-free; see that
+            // helper's docs).
+            let (session_id, target) = crate::workstreams::protocol::resolve_validate_bind(
                 &workstreams,
                 p.workstream_id.as_deref(),
-                &session.id,
                 "task.run",
+                || {
+                    registry
+                        .create(
+                            p.task_description.clone(),
+                            Some(agent_name.clone()),
+                            binding.clone(),
+                        )
+                        .id
+                },
             )
-            .await?
-            {
-                registry.bind_workstream(&session.id, ws_id)?;
+            .await?;
+            if let Some(ws_id) = target {
+                registry.bind_workstream(&session_id, ws_id)?;
             }
-            session.id
+            session_id
         }
     };
 

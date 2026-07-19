@@ -267,21 +267,24 @@ fn parse<T: DeserializeOwned>(params: Value, method: &str) -> Result<T, RpcError
 /// `protocol::tests::create_binds_a_real_directory`,
 /// `protocol::tests::create_rejects_a_label_that_is_not_a_directory`.
 ///
-/// **(Issue #3298, DOC-48 §4.1/§4.2) Workstream binding.** Resolves the
-/// EFFECTIVE workstream target via
-/// `crate::workstreams::protocol::resolve_and_bind_session` — an explicit
+/// **(Issue #3298, DOC-48 §4.1/§4.2) Workstream binding.** Resolves and
+/// VALIDATES the EFFECTIVE workstream target via
+/// `crate::workstreams::protocol::resolve_validate_bind` — an explicit
 /// `workstream_id` param wins; otherwise the daemon's active workstream is
 /// the ambient default (§4.2); if neither applies the session stays
-/// projectless (valid). Resolution/binding happens AFTER the session is
-/// minted (the store needs the fresh id to bind), but BEFORE the response is
-/// returned, so a caller never observes an unbound `Session` that is about
-/// to be bound moments later. A malformed/unknown/closed `workstream_id`
-/// fails the whole call — see that function's docs for the exact error
-/// mapping.
-/// Test: `binding_tests::create_binds_ambient_active_workstream`,
-/// `binding_tests::create_binds_explicit_workstream_overriding_ambient`,
-/// `binding_tests::create_stays_projectless_without_explicit_or_active`,
-/// `binding_tests::create_rejects_closed_explicit_workstream`.
+/// projectless (valid). **Validation happens BEFORE the session is minted**
+/// (PR #3354 code-critic HIGH 1): `SessionRegistry` has no delete/rollback,
+/// so a malformed/unknown/closed `workstream_id` must reject the call while
+/// nothing has been created yet — otherwise every rejected bind would
+/// strand an orphaned, caller-invisible session in the registry for the
+/// daemon lifetime. The mint runs as a closure inside that helper, under
+/// the SAME store lock as validation and the subsequent bind, keeping the
+/// whole sequence TOCTOU-free (see the helper's docs).
+/// Test: `workstream_binding_tests::create_binds_ambient_active_workstream`,
+/// `workstream_binding_tests::create_binds_explicit_workstream_overriding_ambient`,
+/// `workstream_binding_tests::create_stays_projectless_without_explicit_or_active`,
+/// `workstream_binding_tests::create_rejects_closed_explicit_workstream`,
+/// `workstream_binding_tests::create_rejected_bind_leaves_no_phantom_session`.
 async fn create(
     registry: &SessionRegistry,
     workstreams: &SharedWorkstreamStore,
@@ -294,13 +297,12 @@ async fn create(
     }
     let binding = ProjectBinding::resolve(p.project)
         .map_err(|e| RpcError::invalid_argument(format!("session.create: {e}")))?;
-    let session = registry.create(p.task, p.agent, binding);
-    protocol_workstream::bind_and_snapshot(
+    protocol_workstream::mint_bound_session(
         registry,
         workstreams,
-        &session.id,
         p.workstream_id.as_deref(),
         "session.create",
+        || registry.create(p.task, p.agent, binding).id,
     )
     .await
 }

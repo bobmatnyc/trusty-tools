@@ -109,3 +109,52 @@ async fn create_rejects_closed_explicit_workstream() {
     .expect_err("closed workstream must reject the bind");
     assert_eq!(err.code, -32003);
 }
+
+/// (PR #3354 code-critic HIGH 1 regression) A rejected bind must leave the
+/// `SessionRegistry` UNCHANGED — no phantom, caller-invisible session may
+/// survive the error — for ALL THREE caller-triggerable failure modes:
+/// closed workstream, unknown workstream, malformed id.
+#[tokio::test]
+async fn create_rejected_bind_leaves_no_phantom_session() {
+    let registry = SessionRegistry::new();
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let closed = workstreams
+        .lock()
+        .await
+        .create("closed")
+        .await
+        .expect("create");
+    workstreams.lock().await.close(closed).await.expect("close");
+
+    let cases: &[(&str, String, i32)] = &[
+        ("closed workstream", closed.to_string(), -32003),
+        (
+            "unknown workstream",
+            crate::workstreams::WorkstreamId::new().to_string(),
+            -32002,
+        ),
+        ("malformed id", "not-a-uuid".to_string(), -32602),
+    ];
+    for (label, ws_id, expected_code) in cases {
+        let before = registry.list().len();
+        let err = create(
+            &registry,
+            &workstreams,
+            json!({"task": "t", "workstream_id": ws_id}),
+            ctx(),
+        )
+        .await
+        .expect_err("bind must be rejected");
+        assert_eq!(err.code, *expected_code, "{label}: wrong error code");
+        assert_eq!(
+            registry.list().len(),
+            before,
+            "{label}: a rejected bind must not leave a phantom session"
+        );
+    }
+    assert_eq!(
+        registry.list().len(),
+        0,
+        "no session may exist after three rejected creates"
+    );
+}

@@ -438,32 +438,6 @@ impl WorkstreamStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))
     }
 
-    /// Find which workstream (if any) `session_id` is already bound to.
-    ///
-    /// Why: the read-side counterpart [`Self::bind_session`] needs to enforce
-    /// "a session appears in at most one workstream" (DOC-48 §2), and the
-    /// session-creation call sites (`session::protocol::create`,
-    /// `task::protocol::task_run`) need the same lookup for the immutability
-    /// check on a REUSED session (AC-1.3: a differing `workstream_id` on a
-    /// later call is rejected).
-    /// What: reloads first, then a linear scan of every record's
-    /// `session_ids` — the store has no reverse index; this is fine at the
-    /// scale a single project's workstream count implies (§2.3).
-    /// Test: `store_tests::find_binding_returns_owning_workstream`,
-    /// `store_tests::find_binding_returns_none_for_unbound_session`.
-    pub async fn find_binding(
-        &mut self,
-        session_id: &str,
-    ) -> Result<Option<WorkstreamId>, StoreError> {
-        self.reload_if_changed().await?;
-        Ok(self
-            .data
-            .workstreams
-            .iter()
-            .find(|w| w.session_ids.iter().any(|s| s == session_id))
-            .map(|w| w.id))
-    }
-
     /// Bind `session_id` to `workstream_id`, persisting the append (DOC-48
     /// §4.1, issue #3298).
     ///

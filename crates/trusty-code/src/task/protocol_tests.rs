@@ -684,3 +684,57 @@ async fn task_run_mismatched_workstream_on_reuse_is_rejected() {
     assert_eq!(err.code, -32003);
     assert_ne!(bound_id, other_id);
 }
+
+/// (PR #3354 code-critic HIGH 2 regression) A rejected bind on `task.run`'s
+/// mint path must leave the `SessionRegistry` UNCHANGED — no phantom,
+/// caller-invisible session may survive the error — for ALL THREE
+/// caller-triggerable failure modes: closed workstream, unknown workstream,
+/// malformed id. No mock-LLM env is needed: the rejection fires before
+/// `build_llm_client` is ever reached.
+#[tokio::test]
+async fn task_run_rejected_bind_leaves_no_phantom_session() {
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let closed = workstreams
+        .lock()
+        .await
+        .create("closed")
+        .await
+        .expect("create");
+    workstreams.lock().await.close(closed).await.expect("close");
+
+    let cases: &[(&str, String, i32)] = &[
+        ("closed workstream", closed.to_string(), -32003),
+        (
+            "unknown workstream",
+            crate::workstreams::WorkstreamId::new().to_string(),
+            -32002,
+        ),
+        ("malformed id", "not-a-uuid".to_string(), -32602),
+    ];
+    for (label, ws_id, expected_code) in cases {
+        let before = registry.list().len();
+        let err = task_run(
+            Arc::clone(&registry),
+            json!({"task_description": "say hi", "workstream_id": ws_id}),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+            agents.path().to_path_buf(),
+            workstreams.clone(),
+        )
+        .await
+        .expect_err("bind must be rejected");
+        assert_eq!(err.code, *expected_code, "{label}: wrong error code");
+        assert_eq!(
+            registry.list().len(),
+            before,
+            "{label}: a rejected bind must not leave a phantom session"
+        );
+    }
+    assert_eq!(
+        registry.list().len(),
+        0,
+        "no session may exist after three rejected task.run calls"
+    );
+}

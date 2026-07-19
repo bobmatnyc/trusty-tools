@@ -153,8 +153,10 @@ impl WorkstreamView {
     }
 }
 
-/// Resolve the EFFECTIVE workstream target for a freshly-minted session and
-/// persist the binding (DOC-48 §4.1/§4.2, issue #3298).
+/// Resolve + VALIDATE the EFFECTIVE workstream target, then mint a session
+/// and persist its binding — all under one store lock (DOC-48 §4.1/§4.2,
+/// issue #3298; validate-before-mint ordering per PR #3354 code-critic
+/// HIGH findings 1 & 2).
 ///
 /// Why: `session::protocol::create` and `task::protocol::task_run` (minting
 /// a NEW session) both need this exact resolution — an explicit
@@ -165,51 +167,86 @@ impl WorkstreamView {
 /// is the same "one place, both callers" precedent
 /// `crate::binding::ProjectBinding::resolve` already set for project
 /// binding.
-/// What: `explicit` is the caller's raw wire `workstream_id` string, if any.
-/// `Ok(None)` — no explicit param and no active workstream. `Ok(Some(id))` —
-/// after `WorkstreamStore::bind_session` has persisted the append.
+///
+/// **Why the `mint` closure (atomicity):** `SessionRegistry` has no
+/// delete/rollback — a session, once minted, exists for the daemon
+/// lifetime. The first cut of this function took an ALREADY-minted
+/// `session_id` and could then fail (closed/unknown/malformed target),
+/// leaving an orphaned, caller-invisible session in the registry on every
+/// rejected bind — a retry-amplified memory-growth vector (code-critic
+/// HIGH, PR #3354). Now every caller-triggerable failure mode (malformed
+/// id, unknown id, closed workstream) is validated BEFORE `mint()` runs, so
+/// a rejected bind mints nothing. Holding the ONE store lock across
+/// resolve -> validate -> mint -> bind keeps the sequence TOCTOU-free: no
+/// concurrent `workstream.close`/`deactivate` can invalidate the target
+/// between its validation and the bind.
+/// What: `explicit` is the caller's raw wire `workstream_id` string, if
+/// any; `mint` mints the session (infallible — `SessionRegistry::create`
+/// never fails) and returns its id, called EXACTLY ONCE, and only after
+/// validation passes. Returns `(session_id, bound_workstream)` —
+/// `(id, None)` when no explicit param was given and no workstream is
+/// active (projectless mint); `(id, Some(ws))` after
+/// `WorkstreamStore::bind_session` persisted the append.
 /// `Err(-32602 invalid_params)` — `explicit` is not a valid UUID.
 /// `Err(-32002 not_found)` — `explicit` names no workstream.
 /// `Err(-32003 invalid_argument)` — the target (explicit OR ambient) is
-/// closed (§4.1: "new sessions may not bind to it"). `StoreError::AlreadyBound`
-/// maps to `-32603 internal` — unreachable in practice, since `session_id`
-/// here is always a just-minted, globally-unique id that cannot already
-/// appear in any workstream's `session_ids`.
-/// Test: `protocol_tests::resolve_and_bind_session_explicit_wins_over_active`,
-/// `protocol_tests::resolve_and_bind_session_falls_back_to_active`,
-/// `protocol_tests::resolve_and_bind_session_none_when_nothing_active`,
-/// `protocol_tests::resolve_and_bind_session_rejects_closed_explicit_target`,
-/// `protocol_tests::resolve_and_bind_session_rejects_unknown_explicit_id`.
-pub async fn resolve_and_bind_session(
+/// closed (§4.1: "new sessions may not bind to it"). All three fire before
+/// `mint`. The residual post-mint failure surface is `bind_session`'s
+/// save-to-disk I/O error (`-32603 internal`) — a daemon-side storage
+/// fault, not caller-triggerable; `BindError::NotFound`/`Closed`/
+/// `AlreadyBound` are unreachable post-validation under the held lock and
+/// map to `-32603 internal` defensively.
+/// Test: `protocol_tests::resolve_validate_bind_explicit_wins_over_active`,
+/// `protocol_tests::resolve_validate_bind_falls_back_to_active`,
+/// `protocol_tests::resolve_validate_bind_none_when_nothing_active`,
+/// `protocol_tests::resolve_validate_bind_rejects_closed_target_without_minting`,
+/// `protocol_tests::resolve_validate_bind_rejects_unknown_id_without_minting`,
+/// `protocol_tests::resolve_validate_bind_rejects_malformed_id_without_minting`;
+/// the end-to-end no-phantom-session regression at both RPC surfaces in
+/// `session::protocol::workstream_binding_tests::create_rejected_bind_leaves_no_phantom_session`
+/// and `task::protocol::tests::task_run_rejected_bind_leaves_no_phantom_session`.
+pub async fn resolve_validate_bind<F>(
     store: &SharedWorkstreamStore,
     explicit: Option<&str>,
-    session_id: &str,
     method: &str,
-) -> Result<Option<WorkstreamId>, RpcError> {
+    mint: F,
+) -> Result<(String, Option<WorkstreamId>), RpcError>
+where
+    F: FnOnce() -> String,
+{
     let mut store = store.lock().await;
     let target = match explicit {
         Some(raw) => Some(parse_id(raw, method)?),
         None => store.active_workstream_id().await.map_err(map_store_err)?,
     };
-    let Some(id) = target else {
-        return Ok(None);
-    };
-    store
-        .bind_session(id, session_id)
-        .await
-        .map_err(|e| match e {
-            super::store::BindError::NotFound(id) => {
-                RpcError::not_found(format!("workstream not found: {id}"))
-            }
-            super::store::BindError::Closed(id) => RpcError::invalid_argument(format!(
+    // Validate the target BEFORE minting — every caller-triggerable
+    // rejection must happen while nothing has been created yet.
+    if let Some(id) = target {
+        let ws = store.get(id).await.map_err(map_store_err)?;
+        if ws.is_closed() {
+            return Err(RpcError::invalid_argument(format!(
                 "workstream {id} is closed; new sessions may not bind to it"
-            )),
-            super::store::BindError::AlreadyBound(sid) => RpcError::internal(format!(
-                "unexpected: freshly-minted session `{sid}` already bound to a workstream"
-            )),
-            super::store::BindError::Store(e) => map_store_err(e),
-        })?;
-    Ok(Some(id))
+            )));
+        }
+    }
+    let session_id = mint();
+    if let Some(id) = target {
+        store
+            .bind_session(id, &session_id)
+            .await
+            .map_err(|e| match e {
+                // Post-validation, under the same lock, only a storage I/O
+                // fault can land here; the caller-shaped variants are
+                // defensively mapped to internal rather than silently
+                // reusing their pre-mint codes (which would misreport an
+                // impossible state as a caller error).
+                super::store::BindError::Store(e) => map_store_err(e),
+                other => RpcError::internal(format!(
+                    "unexpected post-validation bind failure for session `{session_id}`: {other}"
+                )),
+            })?;
+    }
+    Ok((session_id, target))
 }
 
 /// Enforce DOC-48 §4.1's binding immutability on a REUSED session (AC-1.3,
