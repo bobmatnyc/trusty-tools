@@ -19,6 +19,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use super::agent_patch::patch_agent_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
 use super::ctrl_sessions::{
@@ -87,9 +88,16 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
     // to all of them (curl/oneshot tests never hit it since CORS preflight is
     // browser-enforced). Adding the new `DELETE /api/task/:id` cancellation
     // route in the same PR made fixing it the smallest correct move.
+    // #3246: PATCH added for `/api/agents/:name`.
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     let auth_required = token.is_some();
@@ -115,6 +123,12 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
         .route("/api/projects/{name}", get(get_project_config))
         // #407: agent + session listing for the web UI / CLI clients.
         .route("/api/agents", get(list_agents_route))
+        // #3246: persist a per-agent model/provider override, validated
+        // against the inference registry + runner constraints.
+        .route(
+            "/api/agents/{name}",
+            axum::routing::patch(patch_agent_route),
+        )
         .route("/api/sessions", get(list_sessions_route))
         // #371: session recap retrieval
         .route("/api/sessions/{id}/recap", get(get_session_recap))

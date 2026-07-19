@@ -18,7 +18,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::handlers::projects_config_dir;
+use super::handlers::{agents_dir, projects_config_dir};
 use super::state::AppState;
 use crate::registry::{ProjectEntry, ProjectRegistry, discover_active_projects};
 use crate::tm::project::TmProject;
@@ -246,17 +246,47 @@ async fn load_tm_projects_from_disk() -> Vec<TmProject> {
 /// `scan_agents_dir` and returns the `{"agents": [...]}` envelope.
 /// Test: `list_agents_returns_agents_envelope`.
 pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<serde_json::Value> {
-    Json(
-        serde_json::json!({ "agents": scan_agents_dir(&std::path::PathBuf::from(".trusty-agents/agents")).await }),
-    )
+    Json(serde_json::json!({ "agents": scan_agents_dir(&agents_dir()).await }))
+}
+
+/// Parse one agent TOML file's `[agent]` table into the JSON shape shared by
+/// `GET /api/agents` and `PATCH /api/agents/:name` (#3246).
+///
+/// Why: Extracted from `scan_agents_dir` so the PATCH handler
+/// (`super::agent_patch`) can return the freshly-written agent through the
+/// exact same field-extraction logic instead of duplicating it — keeping the
+/// two routes' response shapes from drifting apart.
+/// What: Parses `raw` as TOML; reads `[agent]`'s `name` (falling back to
+/// `fallback_name`, typically the file stem), `role`, `model`, `runner`,
+/// `provider_id`, and `description` (each defaulting to `""` when absent).
+/// Returns `None` when `raw` fails to parse as TOML.
+/// Test: `scan_agents_dir_parses_toml`, `patch_agent_persists_model_and_round_trips`.
+pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_json::Value> {
+    let parsed: toml::Value = toml::from_str(raw).ok()?;
+    let agent = parsed.get("agent");
+    let get_str = |key: &str| -> Option<String> {
+        agent
+            .and_then(|a| a.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let name = get_str("name").unwrap_or_else(|| fallback_name.to_string());
+    Some(serde_json::json!({
+        "name": name,
+        "role": get_str("role").unwrap_or_default(),
+        "model": get_str("model").unwrap_or_default(),
+        "runner": get_str("runner").unwrap_or_default(),
+        "provider_id": get_str("provider_id").unwrap_or_default(),
+        "description": get_str("description").unwrap_or_default(),
+    }))
 }
 
 /// Scan an agents directory and return a parsed JSON array.
 ///
 /// Why: Extracted from `list_agents_route` so unit tests can drive it
 /// against a `tempfile::TempDir` without juggling process cwd.
-/// What: Reads `*.toml` files, extracts `[agent]` fields (name, role, model,
-/// runner, description), sorts by name. Skips unreadable / unparseable files.
+/// What: Reads `*.toml` files, delegates each to [`parse_agent_toml`], sorts
+/// by name. Skips unreadable / unparseable files.
 /// Test: `scan_agents_dir_parses_toml` — see tests module.
 pub(super) async fn scan_agents_dir(dir: &std::path::Path) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -280,33 +310,16 @@ pub(super) async fn scan_agents_dir(dir: &std::path::Path) -> Vec<serde_json::Va
                 continue;
             }
         };
-        let parsed: toml::Value = match toml::from_str(&raw) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(?e, path = %path.display(), "list_agents: parse failed");
-                continue;
+        let fallback_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        match parse_agent_toml(&raw, fallback_name) {
+            Some(v) => out.push(v),
+            None => {
+                tracing::debug!(path = %path.display(), "list_agents: parse failed");
             }
-        };
-        let agent = parsed.get("agent");
-        let get_str = |key: &str| -> Option<String> {
-            agent
-                .and_then(|a| a.get(key))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
-        let name = get_str("name").unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
-        out.push(serde_json::json!({
-            "name": name,
-            "role": get_str("role").unwrap_or_default(),
-            "model": get_str("model").unwrap_or_default(),
-            "runner": get_str("runner").unwrap_or_default(),
-            "description": get_str("description").unwrap_or_default(),
-        }));
+        }
     }
     out.sort_by(|a, b| {
         a.get("name")
