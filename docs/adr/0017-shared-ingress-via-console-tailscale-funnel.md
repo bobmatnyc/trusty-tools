@@ -18,7 +18,7 @@ External event ingestion (DOC-47) requires a public HTTPS endpoint to receive we
 
 - **ADR-0011** established trusty-console as the single HTTP surface for the entire platform. All internal and external HTTP traffic flows through console's reverse proxy (`ANY /api/{service}/{*path}`).
 - **trusty-console/bind.rs** already supports `--tailscale` (tailnet-only binding) via Tailscale's local API socket.
-- **trusty-mpm/daemon/api.rs** has a precedent `POST /hooks` handler for Claude Code hooks (issue #1970).
+- **trusty-mpm/daemon/api.rs** has a precedent `POST /hooks` handler for Claude Code hooks.
 - **Project context** (CLAUDE.md) specifies zero cloud infrastructure as the default; documented later upgrade paths (phase 2) are acceptable.
 
 ### Design Alternatives
@@ -108,12 +108,18 @@ Specifically:
 
 **Consistency vetting (DOC-46 §3):**
 
-| ADR/Spec | Decision | Verdict | Notes |
+| ADR | Decision | Verdict | Notes |
 |---|---|---|---|
 | ADR-0011 | trusty-console is the single HTTP surface | **Consistent / Extends** | This ADR is a direct application of 0011's principle; webhook ingress routes through console's reverse proxy, reinforcing the pattern |
 | ADR-0005 | Shared HarnessEvent bus with External payload arm | **Consistent** | External events ingested here flow onto the bus via the new External arm; 0017 does not change the bus design, only specifies ingress transport |
 | ADR-0004 | Three harnesses on shared event-driven trusty-common | **Consistent** | External events from external integrations become inputs to trusty-mpm (one of the three harnesses); consistent with the shared foundation model |
-| DOC-47 | External event ingestion spec | **Supersedes** | This ADR (0017) captures the load-bearing architectural choices referenced by DOC-47. Both the spec and ADR are normative; ADR documents the "why" and trade-offs; spec is prescriptive |
-| DOC-45 | Remote MCP credential delivery | **Consistent** | Webhook signing secrets follow DOC-45's credential model (environment variables, per-integration config, never URL-embedded) |
+| ADR-0001 (implicit) | All documentation lives in docs/ | **Consistent** | This ADR is documented in docs/adr/; related spec DOC-47 is in docs/specs/ |
+
+**Related Specifications:**
+
+This ADR documents the ingress decision referenced by DOC-47 (external event ingestion spec). The spec is normative and prescriptive; the ADR documents the "why" and architectural trade-offs of the chosen approach (shared ingress via console + Tailscale Funnel).
+
+**Related Specs (informational):**
+- **DOC-45** (Remote MCP credential delivery) — Webhook signing secrets follow DOC-45's credential model (environment variables, per-integration config, never URL-embedded)
 
 No conflicts detected. The decision to use shared ingress via console + Tailscale Funnel is compatible with all prior accepted decisions.

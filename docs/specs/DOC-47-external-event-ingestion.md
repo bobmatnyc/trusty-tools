@@ -3,8 +3,8 @@
 **Status:** Draft  
 **Spec ID:** `SPEC-EVTING-01~draft` (and -02~draft below)  
 **Scope:** Workspace-wide (trusty-agents-common, trusty-mpm, trusty-console, adapters)  
-**Tracking Issue:** #3090  
-**Related:** ADR-0014 (shared ingress via console + Tailscale Funnel), ADR-0005 (event bus)
+**Tracking Issue:** #3191  
+**Related:** ADR-0017 (shared ingress via console + Tailscale Funnel), ADR-0005 (event bus)
 
 ---
 
@@ -113,9 +113,9 @@ Examples:
 - `POST /api/webhooks/slack` — Slack Events API (optional; Socket Mode is primary)
 - `POST /api/webhooks/gmail` — Google Cloud Pub/Sub push (optional; IMAP IDLE is primary)
 
-**Transport:** Routed through `trusty-console`'s existing reverse proxy (crates/trusty-console/src/server.rs, `ANY /api/{service}/{*path}`), which forwards to a new webhook receiver mounted in `trusty-mpm`'s daemon API (`crates/trusty-mpm/src/daemon/api.rs`, beside the existing `POST /hooks` handler, see issue #1970 for precedent).
+**Transport:** Routed through `trusty-console`'s existing reverse proxy (crates/trusty-console/src/server.rs, `ANY /api/{service}/{*path}`), which forwards to a new webhook receiver mounted in `trusty-mpm`'s daemon API (`crates/trusty-mpm/src/daemon/api.rs`, beside the existing `POST /hooks` handler for Claude Code hooks).
 
-**Public Access:** Via `trusty-console`'s `BindMode` (crates/trusty-console/src/bind.rs), extended with a **Tailscale Funnel mode** (issue #3089):
+**Public Access:** Via `trusty-console`'s `BindMode` (crates/trusty-console/src/bind.rs), extended with a **Tailscale Funnel mode**:
 - `--tailscale` existing mode: tailnet-only access
 - `--funnel` new mode (default when internet-facing): public relay via Tailscale's regional funnel servers, zero local inbound firewall rules, 1:1 forwarding, upstream-signed TLS
 - Fallback: A documented later upgrade path (phase 2) is a thin cloud relay (receive + queue + outbound-forward), not in scope of this spec
@@ -193,7 +193,7 @@ impl ProjectResolver {
     /// Test: crates/trusty-mpm/src/project/resolver/tests.rs covers GitHub owner/repo matching,
     /// JIRA project key matching, Slack workspace/channel matching, and fallback to global inbox.
     pub async fn resolve_from_event(&self, event: &ExternalEvent) -> Result<Project> {
-        // Match against project registry entries (issue #3091: registry schema)
+        // Match against project registry entries
         // Priority: exact repo/project match > workspace-scoped > global inbox
         todo!()
     }
@@ -517,7 +517,7 @@ Extend `crates/trusty-agents/src/`:
 
 ### 5. trusty-mpm Project Registry (NEW: schema & resolver)
 
-Issue #3091: Design the project registry schema to support per-project GitHub org/repo, JIRA project key, Slack workspace/channel, Telegram chat list, Gmail account, Calendar subscription list. The resolver (issue #3090) uses this to bind external events to projects.
+Design the project registry schema to support per-project GitHub org/repo, JIRA project key, Slack workspace/channel, Telegram chat list, Gmail account, Calendar subscription list. The resolver uses this to bind external events to projects (issue #3191).
 
 ---
 
@@ -527,7 +527,7 @@ Issue #3091: Design the project registry schema to support per-project GitHub or
 - **Provides transport for #3065** (inbound-routing decision, Eve §10.7) — events ingested here are the input feed for routing logic
 - **Foundation for SM integration #2109** (tm-manager epic) — goals created here are spawned into sessions by the SM
 - **Cites ADR-0005** (event bus) — all external events flow through the shared `HarnessEvent` bus with the new `External` payload arm
-- **Deferred: trusty-mcp-service adapters (#2733, DOC-27)** — concrete adapter implementations will eventually migrate to trusty-mcp-service when it materializes; this spec defines the contract they conform to
+- **Deferred: trusty-mcp-service adapters (DOC-27)** — concrete adapter implementations will eventually migrate to trusty-mcp-service when it materializes; this spec defines the contract they conform to
 
 ---
 
@@ -549,25 +549,25 @@ Issue #3091: Design the project registry schema to support per-project GitHub or
 
 ## Follow-Up Work
 
-**Implementation phases (tracked separately, see epic #3092):**
+**Implementation phases (tracked separately, see epic #3193):**
 
-1. **Phase 1: EventSource + External payload arm** (issue #3090)
+1. **Phase 1: EventSource + External payload arm**
    - Add EventSource trait, ExternalEvent struct, HarnessPayload::External to trusty-agents-common
    - Unit tests for bus integration
    - Estimate: 2–3 days
 
-2. **Phase 2: GitHub App webhook receiver + Funnel binding** (issue #3093)
+2. **Phase 2: GitHub App webhook receiver + Funnel binding**
    - Implement /api/webhooks/github with X-Hub-Signature-256 verification
    - Add Tailscale Funnel mode to trusty-console
    - Goal store integration (create, deduplicate)
    - Estimate: 3–4 days
 
-3. **Phase 3: JIRA automation webhook receiver** (issue #3094)
+3. **Phase 3: JIRA automation webhook receiver**
    - Implement /api/webhooks/jira with X-Atlassian-Signature verification
    - Support automation-rules path (zero install)
    - Estimate: 2–3 days
 
-4. **Phase 4: Connector bus publishing** (issue #3095)
+4. **Phase 4: Connector bus publishing**
    - Slack Socket Mode → HarnessEvent bus publishing
    - Telegram long-poll → HarnessEvent bus publishing
    - Gmail IMAP IDLE adapter (Phase 1)
