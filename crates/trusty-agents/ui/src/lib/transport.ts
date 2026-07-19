@@ -117,12 +117,25 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
         }
         const resp = await r.json();
         if (resp.status && resp.status !== 'running') {
+          // #3063: under the current backend contract every terminal status
+          // — including `cancelled`, via `PmResponse::cancelled()` in
+          // `crates/trusty-agents/src/api/types.rs`, which always sets
+          // narrative to the fixed string "Task cancelled by client
+          // request" — carries a non-empty `narrative`. The length check
+          // below is defense-in-depth (a plain `??` would miss the failure
+          // mode it guards against: `narrative` is a `String`, not
+          // `Option<String>`, so it serializes as `""` rather than being
+          // omitted) and should be unreachable in practice; `JSON.stringify`
+          // is a debuggable last resort if some future status ever ships an
+          // empty narrative.
+          const rawNarrative = typeof resp.narrative === 'string' ? resp.narrative : '';
+          const narrative = rawNarrative.length > 0 ? rawNarrative : JSON.stringify(resp);
           emitWeb('task-complete', {
             id,
-            narrative: resp.narrative ?? JSON.stringify(resp),
+            narrative,
             status: resp.status,
           });
-          return resp.narrative ?? JSON.stringify(resp);
+          return narrative;
         }
         const elapsedS = Math.round((Date.now() - startMs) / 1000);
         emitWeb('task-progress', {
@@ -133,6 +146,21 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       const timeoutErr = 'send_message timed out after 10m';
       emitWeb('task-error', { task_id: id, error: timeoutErr });
       throw new Error(timeoutErr);
+    }
+    case 'cancel_task': {
+      const id = String(args?.taskId ?? '');
+      const r = await fetch(`${base}/api/task/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      let body: Record<string, unknown> = {};
+      try {
+        body = await r.json();
+      } catch {
+        // 204/empty bodies aren't expected from this endpoint, but don't
+        // let a malformed response mask the http_status below.
+      }
+      return { ...body, http_status: r.status };
     }
     case 'ensure_api_server': {
       // In browser mode the API server is already running externally.
@@ -165,6 +193,34 @@ export async function invoke<T = unknown>(
 
 export function isDesktop(): boolean {
   return isTauri;
+}
+
+/**
+ * Why: `DELETE /api/task/:id` (#3063) is the Stop/Retask primitive — the
+ * backend contract (`crates/trusty-agents/src/api/server/cancel.rs`) returns
+ * 200 on success, 404 for an unknown id, and 409 when the task already
+ * reached a terminal state. Callers (InputArea's Stop button and the
+ * confirm-then-retask flow) need to branch on that outcome WITHOUT treating
+ * 404/409 as thrown errors — both are expected races (the run finished right
+ * as the user clicked Stop) that should be handled gracefully, not surfaced
+ * as an error toast.
+ * What: Returns a structured result carrying `http_status` alongside
+ * whatever JSON body the endpoint returned, for both transports. Only a
+ * genuine transport failure (network error, 5xx) rejects the promise.
+ * Test: `cancel_running_task_marks_cancelled` / `cancel_unknown_id_404` /
+ * `cancel_already_done_409` (backend, `super::tests::cancel`); manual: click
+ * Stop mid-task, observe `http_status: 200`; click twice quickly, observe
+ * the second call's `http_status: 409` with no error toast.
+ */
+export interface CancelTaskResult {
+  id?: string;
+  status?: string;
+  error?: string;
+  http_status: number;
+}
+
+export async function cancelTask(taskId: string): Promise<CancelTaskResult> {
+  return invoke<CancelTaskResult>('cancel_task', { taskId });
 }
 
 // Event listening: in Tauri we proxy to `@tauri-apps/api/event.listen`; in the

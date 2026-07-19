@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Folder, Terminal, Loader2 } from 'lucide-svelte';
-  import { projects, activeProjectId } from '../stores/app';
+  import { Folder, Terminal, Loader2, Plus } from 'lucide-svelte';
+  import { apiBase } from '../lib/api-config';
+  import { projects, activeProjectId, isRunning, getCurrentApiToken } from '../stores/app';
   import TaskHistory from './TaskHistory.svelte';
   import LogoMark from '../lib/icons/LogoMark.svelte';
 
@@ -15,17 +16,40 @@
   }
 
   /**
+   * Why: `POST /api/clear-context` now aborts any in-flight task as of
+   * #3196, whereas it used to just wipe the in-memory task store. Both
+   * "Clear Context" (footer) and "+ NEW TASK" (#3222, above) route through
+   * this same call, so warning the user before silently killing a running
+   * task belongs here once rather than duplicated per caller.
+   * What: Returns true immediately when nothing is running; otherwise shows
+   * a native `confirm()` and returns the user's choice.
+   * Test: Manual — start a task, click either button, confirm the dialog
+   * appears and Cancel leaves the task running.
+   */
+  function confirmIfRunning(): boolean {
+    if (!$isRunning) return true;
+    return confirm('A task is currently running. This will stop it and clear the chat. Continue?');
+  }
+
+  /**
    * Why: Lets users wipe accumulated task history and in-flight sessions
-   * without restarting the server — a common need during iterative development.
-   * What: POSTs to /api/clear-context then reloads the page so the UI reflects
-   * the empty task store.
+   * without restarting the server — a common need during iterative
+   * development, and (#3222) the target of the "+ NEW TASK" button.
+   * What: POSTs to `/api/clear-context` then reloads the page so the UI
+   * reflects the empty task store. Uses `apiBase()` (not a bare relative
+   * path) so this also works under Tauri, where the webview's own origin is
+   * NOT the `trusty-agents --api` sidecar's `127.0.0.1:8765` — a relative
+   * fetch would silently 404/fail to reach the server there.
    * Test: Click button, confirm network request returns {cleared:true}, confirm
    * page reloads and task list is empty.
    */
   async function handleClearContext() {
+    if (!confirmIfRunning()) return;
     clearing = true;
     try {
-      await fetch('/api/clear-context', { method: 'POST' });
+      const token = getCurrentApiToken();
+      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      await fetch(`${apiBase()}/api/clear-context`, { method: 'POST', headers });
     } finally {
       window.location.reload();
     }
@@ -54,6 +78,23 @@
       {/if}
     </div>
   </header>
+
+  <!-- #3222: "+ NEW TASK" — Foundry mockup (docs/design/gui/Foundry
+       Ecosystem.dc.html:167), full-width rectangular button above TASK
+       HISTORY. Reuses the same clear-context flow as the footer's "Clear
+       Context" button (both now confirm first when a task is running, since
+       #3196 made clear-context abort in-flight work). -->
+  <div class="px-3 pt-3 pb-1">
+    <button
+      type="button"
+      class="flex w-full items-center justify-center gap-1.5 rounded-md border border-foundry-light-primary dark:border-foundry-primary bg-foundry-light-primary dark:bg-foundry-primary px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
+      disabled={clearing}
+      on:click={handleClearContext}
+    >
+      <Plus class="h-3.5 w-3.5" />
+      New Task
+    </button>
+  </div>
 
   <nav class="flex flex-col gap-1 px-2 py-3">
     <h2 class="mb-1 px-2 text-xs font-semibold uppercase tracking-wide text-foundry-teal">
