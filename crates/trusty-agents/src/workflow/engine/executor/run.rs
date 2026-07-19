@@ -127,9 +127,17 @@ impl WorkflowEngine {
         // #3062: `TAGENT_RUN_ID`/`OPEN_MPM_RUN_ID` is the existing run-id
         // convention (already threaded through `emit_progress_event` and
         // `HistoryIndexer`) — reused verbatim as the checkpoint journal's
-        // `run_id`, no new ID scheme.
+        // `run_id`, no new ID scheme. `startup::run_startup_init` always sets
+        // this env var before `run()` dispatches to a workflow, so this
+        // fallback only fires for library callers that construct/run a
+        // `WorkflowEngine` directly without going through the CLI startup
+        // path (e.g. tests, embedders). Code-critic finding (PR #3244
+        // MEDIUM): a fixed `"unknown"` fallback would collide every such
+        // caller onto the same `runs/unknown/` checkpoint directory, so
+        // generate a fresh id instead — same `uuid::Uuid::new_v4()` pattern
+        // `startup.rs:327` uses for the primary env-var generation path.
         let run_id = crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
-            .unwrap_or_else(|_| "unknown".to_string());
+            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         let started_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
         let seed = PhaseLoopSeed {

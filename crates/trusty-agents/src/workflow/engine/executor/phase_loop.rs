@@ -112,6 +112,13 @@ fn write_checkpoint(
         code_dir: meta.code_dir.clone(),
         task: meta.task.clone(),
         phase_outputs: ctx.phase_outputs.clone().into_iter().collect(),
+        // Code-critic finding (PR #3244): persist the SUMMARY map alongside
+        // the full-content map. `render_template` injects `phase_summaries`
+        // into downstream `{{phase_name}}` substitutions, not
+        // `phase_outputs` — replaying only `phase_outputs` on resume would
+        // silently blow up every downstream prompt with raw, un-digested
+        // phase content.
+        phase_summaries: ctx.phase_summaries.clone().into_iter().collect(),
         goal_block: ctx.goal_block.clone(),
         qa_retry_count,
         qa_failure_feedback: qa_failure_feedback.clone(),

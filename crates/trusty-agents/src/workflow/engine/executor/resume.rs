@@ -78,6 +78,14 @@ impl WorkflowEngine {
         run_id: &str,
     ) -> Result<ResumeOutcome, WorkflowError> {
         let project_dir = crate::usage::project_dir();
+
+        // Code-critic finding (PR #3244): hold an exclusive advisory lock for
+        // the ENTIRE resume, not just the checkpoint writes inside it — two
+        // concurrent `tagent resume` calls for the same run_id must not both
+        // dispatch phases. Fails closed immediately (non-blocking) rather
+        // than queuing. Held until this function returns (drop releases it).
+        let _resume_lock = checkpoint::acquire_resume_lock(&project_dir, run_id)?;
+
         let record = checkpoint::load_checkpoint(&project_dir, run_id)?;
 
         if matches!(record.state, RunState::Done) {
@@ -149,13 +157,18 @@ impl WorkflowEngine {
             .build();
         ctx.goal_block = record.goal_block.clone();
         // Replay every already-complete phase's output verbatim — NOT
-        // re-dispatched. `record_phase(name, content, None)` defaults the
-        // summary to the content; the original run's extracted summary isn't
-        // preserved in the journal (documented simplification, see
-        // `checkpoint::CheckpointRecord` doc comment).
+        // re-dispatched. Code-critic finding (PR #3244): pass the PERSISTED
+        // SUMMARY (not `None`) so `ctx.phase_summaries` — the map
+        // `render_template` actually injects into downstream
+        // `{{phase_name}}` substitutions — carries the original ~500-word
+        // digest, not the full raw content. Falling back to `None` (which
+        // defaults the summary to the full content) would silently re-inflate
+        // every downstream prompt for exactly the long-running,
+        // content-heavy workflows checkpointing exists to protect.
         for phase_def in &def.phases[..resume_index.min(def.phases.len())] {
             if let Some(content) = record.phase_outputs.get(&phase_def.name) {
-                ctx.record_phase(&phase_def.name, content.clone(), None);
+                let summary = record.phase_summaries.get(&phase_def.name).cloned();
+                ctx.record_phase(&phase_def.name, content.clone(), summary);
             }
         }
 

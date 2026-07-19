@@ -187,10 +187,19 @@ impl WorkflowEngine {
         }
 
         // #3062 (SPEC-AGENTFW-02 §3.3 "Deletion"): a full-success run reaches
-        // `RunState::Done` here — its checkpoint journal has no further
-        // durability value, so remove `.trusty-agents/state/runs/<run_id>/`
-        // entirely. Best-effort/non-fatal, matching every other finalize hook.
-        checkpoint::delete_run_dir(&crate::usage::project_dir(), &run_id);
+        // `RunState::Done` here. Code-critic finding (PR #3244 HIGH): write
+        // the `Done` transition to disk BEFORE attempting deletion — if
+        // `delete_run_dir` then fails (e.g. a transient permission/lock
+        // issue), the journal is left at `Done`, not a stale
+        // `PhaseComplete{last}` that a subsequent `tagent resume` would
+        // misinterpret as "still in flight" and re-run `finalize_run` a
+        // second time (duplicate perf flush / auto-push / ticket hooks). See
+        // `checkpoint::mark_done_before_delete` for the full rationale.
+        // Both calls are best-effort/non-fatal, matching every other
+        // finalize hook.
+        let project_dir = crate::usage::project_dir();
+        checkpoint::mark_done_before_delete(&project_dir, &run_id);
+        checkpoint::delete_run_dir(&project_dir, &run_id);
 
         Ok((ctx, perf_record))
     }

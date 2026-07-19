@@ -92,4 +92,16 @@ pub enum WorkflowError {
         checkpoint_phases: Vec<String>,
         current_phases: Vec<String>,
     },
+
+    /// #3062 (code-critic finding, PR #3244): a second `tagent resume` for
+    /// the same `run_id` tried to start while an earlier resume already
+    /// holds the exclusive `resume.lock` for that run's checkpoint
+    /// directory. Fails closed immediately (non-blocking `try_lock`) rather
+    /// than queuing — two concurrent resumes of the same run would race on
+    /// dispatching phases and corrupt the checkpoint's phase ordering.
+    #[error(
+        "run '{run_id}' is already being resumed by another process (lock held at {lock_path}); \
+         wait for it to finish or investigate a stale lock if no resume is actually running"
+    )]
+    ResumeAlreadyInProgress { run_id: String, lock_path: String },
 }

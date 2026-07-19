@@ -18,6 +18,8 @@ use super::*;
 fn sample_record(run_id: &str) -> CheckpointRecord {
     let mut phase_outputs = BTreeMap::new();
     phase_outputs.insert("research".to_string(), "research output".to_string());
+    let mut phase_summaries = BTreeMap::new();
+    phase_summaries.insert("research".to_string(), "research summary".to_string());
     CheckpointRecord {
         schema_version: CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
@@ -28,6 +30,7 @@ fn sample_record(run_id: &str) -> CheckpointRecord {
         code_dir: "/tmp/code".into(),
         task: "[hacker] do the thing".to_string(),
         phase_outputs,
+        phase_summaries,
         goal_block: None,
         qa_retry_count: 0,
         qa_failure_feedback: None,
@@ -72,7 +75,57 @@ fn checkpoint_record_round_trips_through_json() {
         back.phase_outputs.get("research"),
         Some(&"research output".to_string())
     );
+    // Code-critic finding (PR #3244): phase_summaries must round-trip
+    // separately from phase_outputs — this is what resume replays into
+    // downstream `{{phase_name}}` template substitutions.
+    assert_eq!(
+        back.phase_summaries.get("research"),
+        Some(&"research summary".to_string())
+    );
     assert_eq!(back.schema_version, CHECKPOINT_SCHEMA_VERSION);
+}
+
+/// Code-critic finding (PR #3244): a v1 journal (schema_version 1, written
+/// before `phase_summaries` existed) must fail closed with a CLEAR
+/// "incompatible schema" message via `CheckpointSchemaMismatch` — not
+/// silently deserialize with an empty `phase_summaries` map and let a
+/// resumed run replay full raw content into downstream prompts.
+#[test]
+fn v1_journal_without_phase_summaries_fails_closed_via_schema_mismatch() {
+    let tmp = TempDir::new().unwrap();
+    // Hand-write a v1-shaped journal: schema_version 1, no phase_summaries
+    // key at all (simulating what PR #3244's original implementation wrote
+    // before this fix).
+    let v1_json = r#"{
+        "schema_version": 1,
+        "run_id": "run-v1",
+        "workflow": "prescriptive",
+        "state": {"phase_complete": {"phase_index": 0}},
+        "phase_names": ["research", "plan"],
+        "out_dir": "/tmp/out",
+        "code_dir": "/tmp/code",
+        "task": "do the thing",
+        "phase_outputs": {"research": "research output"},
+        "goal_block": null,
+        "qa_retry_count": 0,
+        "qa_failure_feedback": null,
+        "started_at": "2026-07-19T00:00:00Z",
+        "updated_at": "2026-07-19T00:01:00Z"
+    }"#;
+    let dir = run_dir(tmp.path(), "run-v1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("checkpoint.json"), v1_json).unwrap();
+
+    let err = load_checkpoint(tmp.path(), "run-v1").unwrap_err();
+    match err {
+        WorkflowError::CheckpointSchemaMismatch {
+            found, expected, ..
+        } => {
+            assert_eq!(found, 1);
+            assert_eq!(expected, CHECKPOINT_SCHEMA_VERSION);
+        }
+        other => panic!("expected CheckpointSchemaMismatch, got {other:?}"),
+    }
 }
 
 /// `run_dir` / `checkpoint_path` join `project_dir` / `.trusty-agents/state/
@@ -205,4 +258,78 @@ fn list_resumable_runs_finds_only_dirs_with_checkpoint() {
 fn list_resumable_runs_empty_when_no_runs_dir() {
     let tmp = TempDir::new().unwrap();
     assert!(list_resumable_runs(tmp.path()).is_empty());
+}
+
+/// Code-critic finding (PR #3244 MEDIUM): `finalize_run`'s pre-delete step —
+/// an existing `PhaseComplete` checkpoint is flipped to `Done` in place,
+/// with `updated_at` refreshed, and everything else preserved.
+#[test]
+fn mark_done_before_delete_transitions_existing_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let record = sample_record("run-finishing");
+    record.write(tmp.path()).unwrap();
+
+    mark_done_before_delete(tmp.path(), "run-finishing");
+
+    let loaded = load_checkpoint(tmp.path(), "run-finishing").unwrap();
+    assert_eq!(loaded.state, RunState::Done);
+    // Everything else survives the transition untouched.
+    assert_eq!(loaded.run_id, "run-finishing");
+    assert_eq!(loaded.phase_outputs, record.phase_outputs);
+    assert_eq!(loaded.phase_summaries, record.phase_summaries);
+}
+
+/// `mark_done_before_delete` on a run id with no checkpoint at all is a
+/// silent no-op — the workflow already succeeded, and there is nothing safe
+/// to "flip"; this must never fail the run over journal bookkeeping.
+#[test]
+fn mark_done_before_delete_is_noop_when_absent() {
+    let tmp = TempDir::new().unwrap();
+    mark_done_before_delete(tmp.path(), "never-existed");
+    // Reaching here without panicking is the assertion; nothing was created.
+    assert!(!checkpoint_path(tmp.path(), "never-existed").exists());
+}
+
+/// Code-critic finding (PR #3244 MEDIUM): `acquire_resume_lock` fails closed
+/// immediately (non-blocking) when another holder already has the lock for
+/// the same run id — two concurrent `tagent resume` calls on the same run
+/// must never both proceed.
+#[test]
+fn resume_lock_blocks_concurrent_acquisition() {
+    let tmp = TempDir::new().unwrap();
+    let _first =
+        acquire_resume_lock(tmp.path(), "run-locked").expect("first acquisition must succeed");
+
+    let second = acquire_resume_lock(tmp.path(), "run-locked");
+    assert!(
+        matches!(second, Err(WorkflowError::ResumeAlreadyInProgress { .. })),
+        "expected ResumeAlreadyInProgress while the first guard is held, got {second:?}"
+    );
+}
+
+/// Dropping the lock guard releases the OS-level advisory lock, so a
+/// subsequent acquisition (e.g. a retried resume after the first one
+/// finished) succeeds.
+#[test]
+fn resume_lock_released_on_drop() {
+    let tmp = TempDir::new().unwrap();
+    {
+        let _guard = acquire_resume_lock(tmp.path(), "run-reacquire").expect("first acquisition");
+        // Guard drops at the end of this block.
+    }
+    let reacquired = acquire_resume_lock(tmp.path(), "run-reacquire");
+    assert!(
+        reacquired.is_ok(),
+        "expected re-acquisition to succeed after the first guard dropped: {reacquired:?}"
+    );
+}
+
+/// Two DIFFERENT run ids never contend for the same lock — the lock is
+/// scoped to `<run_dir>/resume.lock`, per run id.
+#[test]
+fn resume_lock_is_scoped_per_run_id() {
+    let tmp = TempDir::new().unwrap();
+    let _a = acquire_resume_lock(tmp.path(), "run-a").expect("run-a lock");
+    let b = acquire_resume_lock(tmp.path(), "run-b");
+    assert!(b.is_ok(), "distinct run ids must not contend: {b:?}");
 }
