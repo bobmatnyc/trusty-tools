@@ -25,6 +25,12 @@
   // push channel today (a real API gap: DOC-39 §2.1 C-2 — per-workstream SSE
   // requires already knowing which workstream to subscribe to), so polling
   // stays the AUTHORITATIVE source and SSE is purely a latency optimization.
+  // Every `refresh()` call is guarded by a monotonic sequence number
+  // (`requestSeq`, code-critic PR #3356 review MEDIUM 1) — the poll interval
+  // and an SSE-triggered refresh share one `AbortController`, so neither
+  // aborts the other, and a slow earlier call resolving AFTER a fresher
+  // later one must not clobber it; only the call that is still the MOST
+  // RECENTLY STARTED one by the time it resolves is allowed to commit.
   //
   // Renders a trigger button (state dot + name, `▾`) that opens a dropdown
   // panel listing every workstream with an active indicator. Clicking a
@@ -35,11 +41,18 @@
   // never silent, and DOC-48's own wording for this issue's scope is
   // "surface it, offer refresh"). Rename swaps a row into an inline
   // text-input edit (no `window.prompt()` — see `SessionMonitor.svelte`'s
-  // identical rationale). Close requires the same two-step in-row confirm
-  // `SessionMonitor.svelte`'s cancel action already establishes (no
-  // `window.confirm()`).
+  // identical rationale); allowed on a closed row too, matching the
+  // backend's `rename_closed_workstream_succeeds` contract (§4.4: closure
+  // only rejects new session bindings, never label edits). Close requires
+  // the same two-step in-row confirm `SessionMonitor.svelte`'s cancel action
+  // already establishes (no `window.confirm()`). `resetRowState()` clears
+  // every armed rename/close/conflict control at EVERY open-state
+  // transition (code-critic PR #3356 review, HIGH) — both `toggleOpen()`
+  // directions, the backdrop-dismiss button, and a successful activation —
+  // so an armed control can never survive a dismiss-and-reopen cycle.
   //
-  // Test: `WorkstreamSwitcher.test.ts` covers every phase/interaction;
+  // Test: `WorkstreamSwitcher.test.ts` covers every phase/interaction, the
+  // backdrop-dismiss row-state reset, and the out-of-order refresh guard;
   // `lib/workstreams.test.ts` covers the network/pure-logic layer this
   // component calls into; `App.test.ts` pins that `AppHeader` (and by
   // extension this component) mounts inside `.hdr`.
@@ -76,32 +89,48 @@
 
   let pollController: AbortController | null = null;
 
+  // Monotonic guard against out-of-order `refresh()` resolution (code-critic
+  // PR #3356 review, MEDIUM 1): the poll interval and the SSE-triggered
+  // refresh share one `AbortController`/signal, so neither call aborts the
+  // other — a slow earlier fetch (e.g. an interval tick) can resolve AFTER a
+  // later, fresher one (e.g. an SSE-triggered refresh right after a mutation)
+  // and clobber it with stale data. Every `refresh()` call stamps its own
+  // sequence number and only commits `list`/`phase`/`error` if it is still
+  // the MOST RECENTLY STARTED call by the time it resolves — an in-flight
+  // call that a newer one has since superseded silently drops its result
+  // instead of overwriting fresher state (the newer call already committed,
+  // or will).
+  let requestSeq = 0;
+
   function msg(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
   }
 
   async function refresh(signal: AbortSignal) {
+    const seq = ++requestSeq;
+    const stale = () => signal.aborted || seq !== requestSeq;
+
     let base: string;
     try {
       base = await apiBase();
     } catch (e) {
-      if (!signal.aborted) {
+      if (!stale()) {
         phase = 'daemon-unreachable';
         list = null;
         error = msg(e);
       }
       return;
     }
-    if (signal.aborted) return;
+    if (stale()) return;
 
     try {
       const body = await fetchWorkstreams(base, signal);
-      if (signal.aborted) return;
+      if (stale()) return;
       list = body;
       phase = 'ready';
       error = null;
     } catch (e) {
-      if (!signal.aborted) {
+      if (!stale()) {
         phase = 'daemon-unreachable';
         list = null;
         error = msg(e);
@@ -177,13 +206,30 @@
     return 'bg-status-neutral';
   }
 
+  // Clears every armed per-row destructive/edit control (code-critic PR
+  // #3356 review, HIGH): rename-in-progress, close-confirm-armed, and any
+  // conflict banner. Called at EVERY open-state transition (both directions
+  // of `toggleOpen()`, the backdrop-dismiss button, and the post-activation
+  // success path in `onActivateClick`) — not just "closing via the trigger"
+  // — so a row armed via `closeConfirmId`/`renameId` can never survive a
+  // dismiss-and-reopen cycle (repro: open -> arm close on row B ->
+  // backdrop-dismiss -> reopen used to still show row B pre-armed).
+  function resetRowState() {
+    renameId = null;
+    renameDraft = '';
+    closeConfirmId = null;
+    conflictMessage = null;
+  }
+
   function toggleOpen() {
     if (phase !== 'ready' || !list || list.workstreams.length === 0) return;
     open = !open;
-    if (!open) {
-      renameId = null;
-      closeConfirmId = null;
-    }
+    resetRowState();
+  }
+
+  function closePanel() {
+    open = false;
+    resetRowState();
   }
 
   async function onActivateClick(w: Workstream) {
@@ -193,7 +239,7 @@
     try {
       const base = await apiBase();
       await activateWorkstream(base, w.id);
-      open = false;
+      closePanel();
       if (pollController) await refresh(pollController.signal);
     } catch (e) {
       if (e instanceof ActiveConflictError) {
@@ -274,7 +320,7 @@
       type="button"
       class="fixed inset-0 z-10 cursor-default"
       aria-label="close workstream switcher"
-      onclick={() => (open = false)}
+      onclick={closePanel}
     ></button>
 
     <div
@@ -354,7 +400,6 @@
                 type="button"
                 class="shrink-0 px-1 font-mono text-[11px] text-trusty-text-muted hover:text-trusty-primary disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={`rename ${workstreamLabel(w)}`}
-                disabled={w.state === 'closed'}
                 onclick={() => startRename(w)}
               >
                 ✎

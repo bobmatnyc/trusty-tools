@@ -274,7 +274,7 @@ The daemon adds the following JSON-RPC methods (to `crates/trusty-code/src/serve
 | `workstream.activate` | `{id: UUID, force?: bool} → {active_id: UUID, prior_id?: UUID}` | Activate this workstream (make it the active workstream). Default `force = false`. If another workstream is active, return `ActiveConflict{active_id}` (fail) unless `force: true`. When `force: true`, deactivates the prior workstream. Returns the new active ID and the prior ID (if any). This is an **explicit switch**, never silent (DOC-40 principle). |
 | `workstream.deactivate` | `{id: UUID} → {}` | Deactivate the active workstream. Only the active workstream may be deactivated; deactivating an `idle` workstream is idempotent. Sets `active_workstream_id` to `null`. |
 | `workstream.close` | `{id: UUID} → {}` | Irreversibly close a workstream. Rejects new session bindings; existing sessions remain valid. If the closed workstream is the active one, it is automatically deactivated. |
-| `workstream.rename` | `{id: UUID, name: String} → Workstream` | Rename a workstream. Shipped with the Phase C GUI switcher (issue #3300); out of scope for Phase 1A. |
+| `workstream.rename` | `{id: UUID, name: String} → Workstream` | Rename a workstream. Shipped in Phase C (issue #3300) — was deferred from Phase 1A. |
 
 ### 5.2 REST endpoints (wrappers around JSON-RPC)
 

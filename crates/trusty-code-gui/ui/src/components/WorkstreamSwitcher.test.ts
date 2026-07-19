@@ -278,3 +278,125 @@ describe('WorkstreamSwitcher close', () => {
     expect(target.querySelector('.wsswitch-panel')?.textContent).toContain('Token rotation');
   });
 });
+
+// code-critic PR #3356 review, HIGH: `renameId`/`closeConfirmId` were only
+// cleared in `toggleOpen()`'s "closing" branch, so dismissing via the
+// backdrop (a DIFFERENT code path) — or a successful activation — left them
+// armed, and reopening never reset them. Repro: open -> arm close on row B
+// -> backdrop-dismiss -> reopen -> row B must show its normal icons again,
+// not a pre-armed "confirm / never mind".
+describe('WorkstreamSwitcher backdrop-dismiss resets armed row state (code-critic HIGH)', () => {
+  it('clears an armed close-confirm on backdrop-dismiss, so reopening shows normal icons', async () => {
+    const { fetchMock } = fakeDaemon(
+      [ws('ws-1', 'Token rotation', 'idle'), ws('ws-2', 'Schema migration', 'idle')],
+      'ws-1',
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    instance = mount(WorkstreamSwitcher, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => trigger().textContent?.includes('Token rotation') ?? false);
+
+    trigger().click();
+    flushSync();
+    const armCloseButton = Array.from(target.querySelectorAll('button')).find(
+      (b) => b.getAttribute('aria-label') === 'close Schema migration',
+    ) as HTMLButtonElement;
+    armCloseButton.click();
+    flushSync();
+    expect(target.textContent).toContain('never mind');
+
+    // Dismiss via the BACKDROP, not the trigger — the code path the HIGH
+    // finding says was missing the reset.
+    const backdrop = target.querySelector(
+      '[aria-label="close workstream switcher"]',
+    ) as HTMLButtonElement;
+    backdrop.click();
+    flushSync();
+    expect(target.querySelector('.wsswitch-panel')).toBeNull();
+
+    trigger().click();
+    flushSync();
+    const panel = target.querySelector('.wsswitch-panel') as HTMLElement;
+    expect(panel.textContent).not.toContain('never mind');
+    const closeButtonAfterReopen = Array.from(panel.querySelectorAll('button')).find(
+      (b) => b.getAttribute('aria-label') === 'close Schema migration',
+    );
+    expect(closeButtonAfterReopen).toBeTruthy();
+  });
+});
+
+// code-critic PR #3356 review, MEDIUM 1: the poll interval and an
+// SSE-triggered refresh share one `AbortController`, so neither aborts the
+// other — a slow EARLIER call can resolve AFTER a fresher LATER one and
+// overwrite it. This pins the monotonic-sequence guard: an interval tick
+// that resolves after a subsequent tick must not clobber the subsequent
+// tick's already-committed state.
+describe('WorkstreamSwitcher out-of-order refresh guard (code-critic MEDIUM 1)', () => {
+  function deferredResponse(): {
+    promise: Promise<Response>;
+    resolve: (r: Response) => void;
+  } {
+    let resolve!: (r: Response) => void;
+    const promise = new Promise<Response>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it('a slow, earlier poll response must not overwrite a fresher, later one', async () => {
+    vi.useFakeTimers();
+    try {
+      const stale = deferredResponse();
+      const fresh = deferredResponse();
+      let call = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (!url.endsWith('/workstreams')) throw new Error(`unexpected fetch: ${url}`);
+        call += 1;
+        return call === 1 ? stale.promise : fresh.promise;
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      instance = mount(WorkstreamSwitcher, { target }) as unknown as Record<string, unknown>;
+
+      // Flush the initial mount `$effect`: issues the FIRST request, which
+      // stays pending (not yet resolved).
+      await vi.advanceTimersByTimeAsync(0);
+      expect(call).toBe(1);
+      expect(trigger().textContent).toContain('connecting');
+
+      // Advance past POLL_MS (5000ms) to fire the interval's SECOND request
+      // while the first is still in flight.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(call).toBe(2);
+
+      // The SECOND (later-started) request resolves FIRST, with fresh data.
+      fresh.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active_workstream_id: 'ws-2',
+          workstreams: [ws('ws-2', 'Fresh workstream', 'active')],
+        }),
+      } as Response);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(trigger().textContent).toContain('Fresh workstream');
+
+      // The FIRST (earlier-started) request finally resolves, late, with
+      // stale data — it must NOT clobber the fresher state already shown.
+      stale.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active_workstream_id: 'ws-1',
+          workstreams: [ws('ws-1', 'Stale workstream', 'active')],
+        }),
+      } as Response);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(trigger().textContent).toContain('Fresh workstream');
+      expect(trigger().textContent).not.toContain('Stale workstream');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
