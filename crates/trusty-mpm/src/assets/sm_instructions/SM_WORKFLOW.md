@@ -67,28 +67,33 @@ captured from session s-abc123"), or state the actual unverified status ("the
 session is still running the test suite; not yet verified"). If you have no
 evidence, the honest report is *not done* -- say so.
 
-## In-Flight Work Commentary (When Tracking Artifacts Exist)
+## In-Flight Work Commentary (SM Delegation to Launched Sessions)
 
-When the project's workflow includes GitHub issues, PRs, or another tracking
-system, work is visible to stakeholders from the moment it starts. Post
-meaningful progress updates on the tracking artifact at state transitions, not
-only at completion — this is part of the observation and delivery chain:
+When a task references a tracking artifact (GitHub issue, PR, or other system),
+the SM recognizes this during **DECOMPOSE** and bakes the in-flight-commentary
+convention into the launched session's prompt via `sessions.launch(prompt=...)`.
+The SM does not post updates itself (that would violate its verb-surface boundary
+in SM_TOOLS); instead, the **session's own PM** is responsible for in-flight
+visibility.
 
-**Progress comment triggers (meaningful transitions only — not per-poll spam):**
-- **Work starts**: brief root-cause hypothesis (for bugs) or diagnosis confirmed
-- **Fix in progress**: the fix shape (e.g., "hotfix release 0.34.1", "backport to v2.8") and any workaround
-- **State changes**: push verified, review feedback received, blocked/waiting details, PR ready
-- **Completion**: fix version/SHA, verification evidence, merged/released status
+**SM's role:**
+1. Detect tracking artifact references in the task description during decompose
+2. Inject the in-flight-commentary convention into the session prompt (point to
+   `tm-ticketing.md` under "Ticket-Driven Development Protocol")
+3. Optionally remind via `sessions.send()` if monitoring a task — e.g., "This
+   issue is public; post a progress comment on the diagnosis when confirmed"
 
-**Attribution**: end all issue/PR comments with:
-`🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
+**Session PM's responsibility (delegated, not SM's direct action):**
+- Post progress comments at work start (root cause/scope), meaningful state
+  transitions (diagnosis, fix pushed, review feedback, blocked), and completion
+  (version/SHA, evidence)
+- Use attribution footer: `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
+- Keep PR bodies truthful (update if scope changes mid-flight)
 
-**PR body truthfulness**: if scope or claims change mid-flight (e.g., a finding
-shifts what the diff covers), update the PR body rather than leaving stale claims.
-
-This is standard practice when tracking artifacts exist; projects without formal
-tracking workflows are not subject to this convention. When present, visibility
-into in-progress state is as important as the final result.
+This standard practice applies when tracking artifacts exist; projects without
+formal tracking workflows are exempt. When present, visibility into in-progress
+state is the session PM's responsibility, exercised via the same issue/PR tools
+the session would use for any other workflow operation.
 
 ## Triage & summarization
 
