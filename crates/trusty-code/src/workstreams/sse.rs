@@ -129,19 +129,18 @@ impl MembershipProvider<WorkstreamId> for WorkstreamMembership {
 /// it owns emits, §6.3), and `WorkstreamStateInferred` iff its
 /// `workstream_id` names `target` (an observer must learn its own state
 /// changed — e.g. it was closed — even with zero bound sessions). Any other
-/// event falls through to [`WorkstreamMembership`] (`None`).
-fn classify(event: &Event, target: &WorkstreamId) -> Option<bool> {
-    let target = target.to_string();
+/// event falls through to [`WorkstreamMembership`] (`None`). `target` is
+/// `&str` (not `&WorkstreamId`) so [`aggregate_live`] can stringify the id
+/// ONCE at stream construction rather than on every event flowing over the
+/// daemon-global bus.
+fn classify(event: &Event, target: &str) -> Option<bool> {
     match event {
         Event::WorkstreamActivationChanged {
             new_active_id,
             prior_id,
-        } => Some(
-            new_active_id.as_deref() == Some(target.as_str())
-                || prior_id.as_deref() == Some(target.as_str()),
-        ),
+        } => Some(new_active_id.as_deref() == Some(target) || prior_id.as_deref() == Some(target)),
         Event::WorkstreamStateInferred { workstream_id, .. } => {
-            Some(workstream_id.as_str() == target.as_str())
+            Some(workstream_id.as_str() == target)
         }
         _ => None,
     }
@@ -166,11 +165,15 @@ pub fn aggregate_live(
     workstream_id: WorkstreamId,
     store: SharedWorkstreamStore,
 ) -> impl Stream<Item = WorkstreamEventEnvelope> {
+    // Stringified ONCE here (not per event): the classify closure runs for
+    // every event on the daemon-global bus, so it must not re-allocate the
+    // target id each time.
+    let target = workstream_id.to_string();
     trusty_agents_common::transport::aggregate_live(
         workstream_id,
         TcodeEventSource,
         WorkstreamMembership(store),
-        classify,
+        move |event: &Event, _group: &WorkstreamId| classify(event, &target),
     )
 }
 

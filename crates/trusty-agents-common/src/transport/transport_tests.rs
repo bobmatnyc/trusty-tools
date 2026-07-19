@@ -167,6 +167,81 @@ async fn classify_bypass_skips_membership_check() {
     );
 }
 
+/// Cross-subscriber isolation — the property epic #3052's multiple
+/// concurrent iOS attaches depend on: TWO `aggregate_live` streams over
+/// clones of ONE broadcast sender, scoped to different groups with disjoint
+/// membership sets, must each receive exactly their own events from a
+/// single shared publish batch — never the other subscriber's, and one
+/// subscriber's presence must not consume or suppress events destined for
+/// the other (broadcast semantics: every subscriber sees every published
+/// event; scoping happens per-stream in the combinator).
+#[tokio::test]
+async fn concurrent_streams_over_one_source_stay_isolated() {
+    let (tx, _rx) = tokio::sync::broadcast::channel(16);
+    let membership_a = ToyMembership(Arc::new(Mutex::new(vec!["sa".to_string()])));
+    let membership_b = ToyMembership(Arc::new(Mutex::new(vec!["sb".to_string()])));
+    let mut stream_a = std::pin::pin!(aggregate_live(
+        "ga".to_string(),
+        ToySource(tx.clone()),
+        membership_a,
+        classify
+    ));
+    let mut stream_b = std::pin::pin!(aggregate_live(
+        "gb".to_string(),
+        ToySource(tx.clone()),
+        membership_b,
+        classify
+    ));
+
+    // One shared publish batch, interleaving both groups' traffic plus a
+    // group-scoped broadcast naming only ga.
+    tx.send(source_event("sa", ToyPayload::Turn(1))).unwrap();
+    tx.send(source_event("sb", ToyPayload::Turn(2))).unwrap();
+    tx.send(source_event(
+        "",
+        ToyPayload::GroupBroadcast {
+            target_group: "ga".to_string(),
+        },
+    ))
+    .unwrap();
+
+    // Stream A sees sa's turn then ga's broadcast — in publish order.
+    let a1 = tokio::time::timeout(Duration::from_secs(2), stream_a.next())
+        .await
+        .expect("timed out on a1")
+        .expect("stream a ended early");
+    assert_eq!(a1.session_id, "sa");
+    assert_eq!(a1.payload, ToyPayload::Turn(1));
+    let a2 = tokio::time::timeout(Duration::from_secs(2), stream_a.next())
+        .await
+        .expect("timed out on a2")
+        .expect("stream a ended early");
+    assert_eq!(
+        a2.payload,
+        ToyPayload::GroupBroadcast {
+            target_group: "ga".to_string()
+        }
+    );
+
+    // Stream B sees ONLY sb's turn — sa's event and ga's broadcast never
+    // reach it, even though all three flowed over the same sender.
+    let b1 = tokio::time::timeout(Duration::from_secs(2), stream_b.next())
+        .await
+        .expect("timed out on b1")
+        .expect("stream b ended early");
+    assert_eq!(b1.session_id, "sb");
+    assert_eq!(b1.payload, ToyPayload::Turn(2));
+
+    // Neither stream has anything further pending.
+    let a_rest = tokio::time::timeout(Duration::from_millis(200), stream_a.next()).await;
+    assert!(a_rest.is_err(), "stream a must not receive b-scoped events");
+    let b_rest = tokio::time::timeout(Duration::from_millis(200), stream_b.next()).await;
+    assert!(
+        b_rest.is_err(),
+        "stream b must not receive a-scoped events or ga's broadcast"
+    );
+}
+
 /// A `MembershipProvider::contains` implementation that treats an unresolvable
 /// group as "no match" (per this module's documented contract) must not
 /// panic or close the stream — it just yields nothing for that event.

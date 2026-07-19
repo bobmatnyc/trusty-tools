@@ -109,6 +109,19 @@ pub type BoxEventStream<P> = Pin<Box<dyn Stream<Item = SourceEvent<P>> + Send>>;
 /// What: one method, `subscribe`, called once per logical attach
 /// (`aggregate_live` calls it exactly once — matching Phase 1A's "subscribe
 /// ONCE to the daemon-global bus" design, not once per group member).
+///
+/// # Delivery guarantees
+///
+/// **At-most-once.** An implementor MAY silently drop events under
+/// backpressure — e.g. the reference `trusty-code` adapter wraps a
+/// `tokio::sync::broadcast` receiver and discards `Lagged(n)` errors, so a
+/// slow subscriber simply misses the overwritten events. Callers that need
+/// reliable delivery must layer their own buffering/replay on top;
+/// reconnect/replay semantics (SSE ring-buffer replay etc., DOC-48 §5.3.1)
+/// are deliberately the adopter's concern, not this trait's. Surfacing lag
+/// to callers (a `Result<_, SourceLag>` item type) was considered and
+/// deferred until `trusty-agents` adopts this seam (epic #3052), to avoid
+/// speculatively complicating every implementor today.
 /// Test: `transport_tests` implements this over a `tokio::sync::broadcast`
 /// channel, the same primitive `trusty-code`'s adapter uses.
 pub trait EventSource: Send + Sync {
@@ -157,7 +170,9 @@ pub trait MembershipProvider<Group>: Send + Sync {
 /// Test: `transport_tests::forwards_event_when_membership_matches`,
 /// `transport_tests::filters_event_when_membership_does_not_match`,
 /// `transport_tests::classify_bypass_skips_membership_check`,
-/// `transport_tests::membership_lookup_failure_is_treated_as_no_match`.
+/// `transport_tests::membership_lookup_failure_is_treated_as_no_match`,
+/// `transport_tests::concurrent_streams_over_one_source_stay_isolated`
+/// (multi-client cross-subscriber isolation — epic #3052's property).
 pub fn aggregate_live<Group, Src, Mem, Classify>(
     group: Group,
     source: Src,
