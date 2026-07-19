@@ -24,6 +24,7 @@ This index is the **single source of truth** for the ADR corpus. It serves as a 
 | [0014](./0014-native-mcp-support.md) | Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more) | Accepted | Consolidate MCP framework in trusty-common; ship native MCP servers for all integrations | Workspace |
 | [0015](./0015-three-product-agent-composition-model.md) | Unified agent composition: shared `.md`+YAML+`extends` format across trusty-agents, trusty-mpm, trusty-code | Proposed | Single agent-composition format across all three orchestration engines | Workspace |
 | [0016](./0016-orchestration-hierarchy-lead-pm-assistant.md) | Orchestration Hierarchy: Engineering Lead / PM / Assistant | Proposed | Three-tier agent orchestration hierarchy: Engineering Lead leads cross-tool workstreams; PM orchestrates projects; Assistant executes delegated tasks | Workspace |
+| [0017](./0017-shared-ingress-via-console-tailscale-funnel.md) | Shared webhook ingress via trusty-console + Tailscale Funnel | Proposed | External webhooks flow through one /api/webhooks/{source} endpoint, reverse-proxied by trusty-console, exposed publicly via Tailscale Funnel | Workspace |
 
 ## Notes
 
