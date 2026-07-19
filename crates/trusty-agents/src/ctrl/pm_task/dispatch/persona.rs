@@ -8,36 +8,93 @@
 //! Test: Manual via tmux — `/agent personal-assistant` then "who are you?".
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
 use crate::agents::AgentConfig;
 use crate::llm;
-use crate::tools::ToolRegistry;
+use crate::subprocess::SubprocessAgentRunner;
+use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
     SessionOverrides, apply_credential_routing, build_user_context_prefix,
     resolve_overridden_credentials,
 };
-use super::super::super::handlers::register_ticketing_tools;
+use super::super::super::handlers::{
+    AddProjectTool, CreateDirTool, ListProjectsTool, MoveFileTool, RemoveProjectTool,
+    SetActiveProjectTool, StopTaskTool, register_ticketing_tools,
+};
 use super::super::super::state::ConversationTurn;
 use super::super::helpers::match_any_glob;
+
+/// Narrow a persona's full candidate tool-name list down to what it may
+/// actually reach on this turn (#3285).
+///
+/// Why: `run_pm_task_with_persona` now registers the FULL delegation/CTRL/
+/// filesystem/search/shell/MCP tool surface into every persona's registry —
+/// tool parity with the session path. Without a second, independent gate a
+/// persona would suddenly gain every tool the PM has, regardless of what its
+/// TOML declares. This function is that gate: it is the single place that
+/// decides which of the registered tools are actually advertised to the LLM,
+/// so it is pulled out as a pure function precisely so the allow/scope
+/// security property can be pinned by fast unit tests instead of only being
+/// exercised end-to-end.
+/// What: Keeps a name only when it matches at least one glob in `patterns`
+/// (a persona's `[tools].allow` list — see `match_any_glob`) AND is present
+/// in `allowed_by_tier` (the RBAC-tier filter derived from
+/// `registry.filter_tools_for_user`). Order-preserving; both gates must pass
+/// independently, mirroring how `registry`+`allowed_tools` combine in
+/// `chat_with_tools_gated`.
+/// Test: `filter_persona_tool_names_respects_allow_globs`,
+/// `filter_persona_tool_names_new_delegation_tools_require_explicit_allow`,
+/// `filter_persona_tool_names_delegation_tools_surface_when_allowed`,
+/// `filter_persona_tool_names_respects_rbac_tier`.
+fn filter_persona_tool_names(
+    all_names: Vec<String>,
+    patterns: &[String],
+    allowed_by_tier: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    all_names
+        .into_iter()
+        .filter(|name| match_any_glob(name, patterns) && allowed_by_tier.contains(name))
+        .collect()
+}
 
 /// Run a single conversation turn against a persona agent (#254).
 ///
 /// Why: The REPL `/agent` command lets the user switch the active ctrl
 /// conversation to a non-coding persona (e.g. `personal-assistant` /
-/// `cto-assistant`). These personas should NOT have delegation tools wired
-/// up — they're intended as direct chat partners with their own system
-/// prompt and model.
+/// `cto-assistant`). #3285 (Bob decision, 2026-07-19): named personas must
+/// be able to call tools directly, so this path now reaches TOOL PARITY
+/// with the session path (`run_pm_task_with_history`) — the same
+/// delegation (`delegate_to_agent`), CTRL project-management
+/// (`add_project`, `list_projects`, `remove_project`, `stop_task`,
+/// `set_active_project`), filesystem (`move_file`, `create_dir`), search
+/// (`search_code`), shell (`run_bash`), ticketing, `tm`, and live-MCP tools
+/// are all REGISTERED into the persona's registry below. Registering a tool
+/// is not the same as granting it, though: what actually reaches the LLM is
+/// still gated per persona by `filter_persona_tool_names`, which keeps only
+/// names matching the persona's `[tools].allow` glob list AND passing the
+/// RBAC-tier filter (`registry.filter_tools_for_user`) — a persona can only
+/// reach what it explicitly declares. A persona with no `[tools].allow`
+/// section at all still gets zero tools (see the `else` arm below),
+/// preserving the original tools-OFF-by-default posture for personas that
+/// don't opt in. Full `[tools].scopes` (OpenRPC scope-pattern) enforcement
+/// is tracked separately by #3208 and is not implemented here; this change
+/// does not widen a persona's reach beyond its declared `allow` list.
 /// What: Loads `<project>/.trusty-agents/agents/<persona_name>.toml`, builds the
-/// same date/time-injected system prompt the default ctrl path uses, then
-/// makes a tools-OFF `chat_with_tools_gated` call carrying the prior
-/// conversation history. Returns the assistant text.
-/// Test: Manual via tmux — `/agent personal-assistant` then "who are you?"
-/// → identifies as Izzie, knows Masa.
+/// same date/time-injected system prompt the default ctrl path uses, arms a
+/// `ToolRegistry` filtered per the persona's declared `allow` globs, then
+/// makes a `chat_with_tools_gated` call carrying the prior conversation
+/// history. Returns the assistant text.
+/// Test: `filter_persona_tool_names_respects_allow_globs`,
+/// `filter_persona_tool_names_new_delegation_tools_require_explicit_allow`,
+/// `filter_persona_tool_names_delegation_tools_surface_when_allowed`,
+/// `filter_persona_tool_names_respects_rbac_tier` pin the allow/scope
+/// gating at the unit level. Manual via tmux — `/agent personal-assistant`
+/// then "who are you?" → identifies as Izzie, knows Masa.
 pub async fn run_pm_task_with_persona(
     project_path: &Path,
     persona_name: &str,
@@ -129,6 +186,45 @@ pub async fn run_pm_task_with_persona(
             }
             register_ticketing_tools(&mut registry).await;
 
+            // #3285: tool parity with the session path
+            // (`run_pm_task_with_history`) — delegation, CTRL
+            // project-management, filesystem, search, and shell tools are
+            // now registered here too. Whether a persona can actually reach
+            // any of them is still decided below by `filter_persona_tool_names`
+            // against `patterns` (the persona's `[tools].allow` globs), so
+            // registering them here does not by itself grant access.
+            let config_dir = project_path.join(".trusty-agents").join("agents");
+            let runner: Arc<dyn AgentRunner> =
+                Arc::new(SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())));
+            registry.register(Arc::new(
+                DelegateToAgentTool::new(runner).with_config_dir(config_dir.clone()),
+            ));
+            registry.register(Arc::new(AddProjectTool));
+            registry.register(Arc::new(ListProjectsTool));
+            registry.register(Arc::new(RemoveProjectTool));
+            registry.register(Arc::new(StopTaskTool {
+                snapshot: Vec::new(),
+                pending_stop: Arc::new(Mutex::new(None)),
+            }));
+            registry.register(Arc::new(SetActiveProjectTool {
+                active_project: Arc::new(Mutex::new(None)),
+            }));
+            registry.register(Arc::new(MoveFileTool));
+            registry.register(Arc::new(CreateDirTool));
+            {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let search_tool = crate::tools::native_search::SearchCodeTool::new_auto(&cwd).await;
+                registry.register(Arc::new(search_tool));
+            }
+            {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                registry.register(Arc::new(crate::tools::run_bash::RunBashTool::new(cwd)));
+            }
+            {
+                let state_dir = project_path.join(".trusty-agents").join("state");
+                crate::tools::tm_tools::register_tm_tools_for_state_dir(&mut registry, &state_dir);
+            }
+
             registry.register(Arc::new(
                 crate::tools::web_search::BraveSearchTool::from_env(),
             ));
@@ -173,10 +269,6 @@ pub async fn run_pm_task_with_persona(
                         .map(String::from)
                 })
                 .collect();
-            let mut kept: Vec<String> = all_names
-                .into_iter()
-                .filter(|name| match_any_glob(name, &patterns))
-                .collect();
             let rbac_user = overrides.user.clone().unwrap_or_default();
             let allowed_by_tier: std::collections::HashSet<String> = registry
                 .filter_tools_for_user(&rbac_user)
@@ -189,7 +281,7 @@ pub async fn run_pm_task_with_persona(
                         .map(String::from)
                 })
                 .collect();
-            kept.retain(|name| allowed_by_tier.contains(name));
+            let kept = filter_persona_tool_names(all_names, &patterns, &allowed_by_tier);
             tracing::info!(
                 persona = %persona_name,
                 tools = ?kept,
@@ -322,5 +414,126 @@ mod tests {
             result.is_err(),
             "unknown persona must error, not silently fall back to some other agent"
         );
+    }
+
+    /// #3285: with a persona-typical `allow` list (globs alongside a couple
+    /// of exact names), only names matching a pattern survive — mirrors the
+    /// glob semantics `match_any_glob` implements and pins the first half of
+    /// the allow/scope gate `run_pm_task_with_persona` now relies on.
+    #[test]
+    fn filter_persona_tool_names_respects_allow_globs() {
+        let all_names = vec![
+            "delegate_to_agent".to_string(),
+            "add_project".to_string(),
+            "list_projects".to_string(),
+            "git_log".to_string(),
+            "git_status".to_string(),
+            "mcp_list".to_string(),
+            "run_bash".to_string(),
+        ];
+        let patterns = vec!["git_*".to_string(), "mcp_list".to_string()];
+        let allowed_by_tier: std::collections::HashSet<String> =
+            all_names.iter().cloned().collect();
+
+        let kept = filter_persona_tool_names(all_names, &patterns, &allowed_by_tier);
+
+        assert_eq!(
+            kept,
+            vec![
+                "git_log".to_string(),
+                "git_status".to_string(),
+                "mcp_list".to_string(),
+            ]
+        );
+    }
+
+    /// #3285's core security property: `run_pm_task_with_persona` now
+    /// REGISTERS the delegation/CTRL tools (`delegate_to_agent`,
+    /// `add_project`, …) into every persona's registry for tool parity with
+    /// the session path — but registering a tool must not be conflated with
+    /// granting it. A persona whose `[tools].allow` list (e.g. today's
+    /// `personal-assistant.toml`) never names those tools must not have them
+    /// surfaced, even though they're now present in the underlying registry.
+    #[test]
+    fn filter_persona_tool_names_new_delegation_tools_require_explicit_allow() {
+        let all_names = vec![
+            "delegate_to_agent".to_string(),
+            "add_project".to_string(),
+            "list_projects".to_string(),
+            "remove_project".to_string(),
+            "stop_task".to_string(),
+            "set_active_project".to_string(),
+            "move_file".to_string(),
+            "create_dir".to_string(),
+            "search_code".to_string(),
+            "run_bash".to_string(),
+            "git_log".to_string(),
+        ];
+        // A narrow persona allowlist that never mentions the newly-wired
+        // delegation/CTRL tools.
+        let patterns = vec!["git_log".to_string()];
+        let allowed_by_tier: std::collections::HashSet<String> =
+            all_names.iter().cloned().collect();
+
+        let kept = filter_persona_tool_names(all_names, &patterns, &allowed_by_tier);
+
+        assert_eq!(kept, vec!["git_log".to_string()]);
+        for forbidden in [
+            "delegate_to_agent",
+            "add_project",
+            "list_projects",
+            "remove_project",
+            "stop_task",
+            "set_active_project",
+            "move_file",
+            "create_dir",
+            "search_code",
+            "run_bash",
+        ] {
+            assert!(
+                !kept.iter().any(|k| k == forbidden),
+                "{forbidden} must not surface without an explicit allow entry"
+            );
+        }
+    }
+
+    /// The flip side of the previous test: an "assistant" persona configured
+    /// WITH delegation rights (an explicit `delegate_to_agent` / `add_project`
+    /// entry in `[tools].allow`) DOES get those tools surfaced — proving the
+    /// #3285 parity wiring actually takes effect once a persona opts in.
+    #[test]
+    fn filter_persona_tool_names_delegation_tools_surface_when_allowed() {
+        let all_names = vec![
+            "delegate_to_agent".to_string(),
+            "add_project".to_string(),
+            "git_log".to_string(),
+        ];
+        let patterns = vec!["delegate_to_agent".to_string(), "add_project".to_string()];
+        let allowed_by_tier: std::collections::HashSet<String> =
+            all_names.iter().cloned().collect();
+
+        let kept = filter_persona_tool_names(all_names, &patterns, &allowed_by_tier);
+
+        assert_eq!(
+            kept,
+            vec!["delegate_to_agent".to_string(), "add_project".to_string()]
+        );
+    }
+
+    /// RBAC tier filtering is an independent second gate — even a
+    /// `[tools].allow` glob of `"*"` must not surface a name the tier filter
+    /// excludes. Mirrors how `allowed_by_tier` (derived from
+    /// `registry.filter_tools_for_user`) combines with the glob allowlist in
+    /// production.
+    #[test]
+    fn filter_persona_tool_names_respects_rbac_tier() {
+        let all_names = vec!["delegate_to_agent".to_string(), "git_log".to_string()];
+        let patterns = vec!["*".to_string()];
+        let allowed_by_tier: std::collections::HashSet<String> =
+            ["git_log".to_string()].into_iter().collect();
+
+        let kept = filter_persona_tool_names(all_names, &patterns, &allowed_by_tier);
+
+        assert_eq!(kept, vec!["git_log".to_string()]);
     }
 }
