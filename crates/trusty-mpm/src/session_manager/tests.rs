@@ -89,6 +89,11 @@ pub struct FakeTmuxDriver {
     /// session name), so a test can assert the pane-scoped path returns
     /// pane-owned content distinct from a session-keyed response (#2468).
     pub pane_capture_calls: Mutex<Vec<(String, String)>>,
+    /// Records every `rename_session` call as `(old_name, new_name)`.
+    pub rename_calls: Mutex<Vec<(String, String)>>,
+    /// Names to report from `attached_session_names` (seed to simulate a
+    /// client being attached to a session for `tm ls` reconciliation tests).
+    pub attached_names: Mutex<Vec<String>>,
 }
 
 impl FakeTmuxDriver {
@@ -109,6 +114,8 @@ impl FakeTmuxDriver {
             pane_literal_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
             pane_capture_calls: Mutex::new(Vec::new()),
+            rename_calls: Mutex::new(Vec::new()),
+            attached_names: Mutex::new(Vec::new()),
         })
     }
 }
@@ -130,6 +137,26 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         self.kill_calls.lock().unwrap().push(name.to_owned());
         self.sessions.lock().unwrap().remove(name);
         Ok(())
+    }
+
+    /// Rename a live session in the in-memory map and record the call, so a
+    /// rename test can assert the tmux entity followed the record's new name.
+    fn rename_session(&self, old: &str, new: &str) -> Result<(), ManagedError> {
+        self.rename_calls
+            .lock()
+            .unwrap()
+            .push((old.to_owned(), new.to_owned()));
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(workdir) = sessions.remove(old) {
+            sessions.insert(new.to_owned(), workdir);
+        }
+        Ok(())
+    }
+
+    /// Report the seeded attached-session names (empty by default), so a
+    /// `tm ls` reconciliation test can simulate a client being attached.
+    fn attached_session_names(&self) -> Vec<String> {
+        self.attached_names.lock().unwrap().clone()
     }
 
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
@@ -1578,6 +1605,51 @@ async fn prune_decommissioned_compacts() {
     );
 }
 
+/// The Deleted prune COMPACTS the store (removes `--deleted--` tombstones) (#2012).
+///
+/// Why: `tm sessions delete` now SOFT-deletes (marks `--deleted--`, keeps the
+/// record); operators need a permanent-removal path, and `prune --state deleted`
+/// is it. A `Deleted` record is a terminal tombstone, so prune must COMPACT it
+/// (remove), not re-run a decommission teardown.
+/// What: seeds two `Deleted` tombstones + one `Stopped` session, prunes
+/// `Deleted`, and asserts both tombstones are GONE while the Stopped survives,
+/// each reported as `Removed`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_deleted_compacts() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let d1 = ManagedSessionId::new();
+    let d2 = ManagedSessionId::new();
+    let stopped = ManagedSessionId::new();
+    seed_record(&mgr, &dir, d1, ManagedSessionState::Deleted, false).await;
+    seed_record(&mgr, &dir, d2, ManagedSessionState::Deleted, false).await;
+    seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
+
+    let outcome = mgr
+        .prune_managed(crate::session_manager::PruneFilter::Deleted, false, false)
+        .await
+        .expect("compact deleted");
+    assert_eq!(outcome.count(), 2, "both deleted tombstones compacted");
+    assert!(
+        outcome
+            .sessions
+            .iter()
+            .all(|s| s.action == crate::session_manager::PruneAction::Removed),
+        "deleted prune reports Removed"
+    );
+    assert!(matches!(
+        mgr.get(&d1).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+    assert_eq!(
+        mgr.list().await.len(),
+        1,
+        "only the Stopped session remains"
+    );
+}
+
 /// `All` targets every NON-running record (#1508).
 ///
 /// Why: the legacy purge needs ONE sweep that tears down stopped/errored/ephemeral
@@ -1672,6 +1744,7 @@ fn prune_filter_parse_round_trip() {
         PruneFilter::Ephemeral,
         PruneFilter::Stopped,
         PruneFilter::Decommissioned,
+        PruneFilter::Deleted,
         PruneFilter::All,
     ] {
         assert_eq!(PruneFilter::parse(f.as_str()).unwrap(), f);

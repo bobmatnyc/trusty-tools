@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan};
 use crate::core::update_check::CatalogHashes;
 use crate::session_manager::{
-    InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
+    InjectionStatus, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionRecord,
 };
 
 use super::SessionSummary;
@@ -115,6 +115,89 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         injection_status: injection_status_wire(r.injection_status),
         unresumable: false,
         stale_assets: false,
+        // `attached` is a live-tmux reconciliation only the list handler
+        // computes (see [`super::list_managed_sessions`]); every other summary
+        // builder leaves it at its `false` default.
+        attached: false,
+    }
+}
+
+/// Reconcile each summary's displayed `state`/`attached` against LIVE tmux.
+///
+/// Why: a record's PERSISTED `state` can read `stopped` after a daemon restart
+/// (before the reconcile pass runs) even though its tmux session is alive and a
+/// client is attached — the `tm ls` picker then wrongly showed EVERY session
+/// `(stopped)` and offered a destructive `restart`. Real tmux is the
+/// authoritative signal, so the list handler probes it once and corrects the
+/// DISPLAYED state here (read-time reconciliation, mirroring how
+/// `unresumable`/`stale_assets` are computed without mutating the store).
+/// What: for each summary whose record is in the transient `Active`/`Stopped`
+/// pair, sets `state` to `"active"` when its tmux session is in `live` (else
+/// `"stopped"`), and sets `attached` when its session is in `attached`.
+/// Terminal states (`Decommissioned`/`Deleted`), `Provisioning`, and `Errored`
+/// are left as persisted — a live tmux name must never resurrect a
+/// deleted/decommissioned record's label, and `errored`/`provisioning` carry
+/// information a bare liveness probe would erase.
+/// Test: `reconcile_live_state_flips_stopped_to_active_when_alive`,
+/// `reconcile_live_state_leaves_terminal_states` in `super::tests`; end-to-end
+/// coverage in the `session_lifecycle` integration suite.
+pub(super) fn reconcile_live_state(
+    summaries: &mut [SessionSummary],
+    records: &[SessionRecord],
+    live: &std::collections::HashSet<String>,
+    attached: &std::collections::HashSet<String>,
+) {
+    for (summary, record) in summaries.iter_mut().zip(records.iter()) {
+        let name = &record.tmux_name;
+        let is_live = live.contains(name);
+        summary.attached = is_live && attached.contains(name);
+        if matches!(
+            record.state,
+            ManagedSessionState::Active | ManagedSessionState::Stopped
+        ) {
+            summary.state = if is_live { "active" } else { "stopped" }.to_string();
+        }
+    }
+}
+
+/// Probe live tmux ONCE and reconcile every summary's displayed state in place.
+///
+/// Why: both `list_managed_sessions` (the fleet list) AND `get_managed_session`
+/// (the single-record fetch that `tm session resume <id>` reads) must reconcile
+/// the persisted state against real tmux — otherwise the highest-consequence
+/// path (`resume`) can act on a stale `stopped` for a live session and
+/// destructively recreate its pane (code-critic HIGH). Centralising the probe
+/// here keeps the two call sites a single line each and, crucially, keeps the
+/// FAIL-CLOSED contract in ONE place: a transient tmux enumeration error must
+/// NOT collapse to "zero live sessions" (which would reconcile every Active
+/// record to `stopped` and offer fleet-wide destructive restarts). On error we
+/// SKIP reconciliation entirely and serve the persisted state unchanged.
+/// What: calls [`ManagedTmuxDriver::list_sessions`]; on `Ok`, gathers the live +
+/// attached name sets and applies [`reconcile_live_state`]; on `Err`, logs a
+/// warning and leaves `summaries` at their persisted state.
+/// Test: `reconcile_against_tmux_fails_closed_on_enumeration_error` in
+/// `super::tests` (the fail-closed path); the success path is covered by
+/// `reconcile_live_state_flips_stopped_to_active_when_alive` and end-to-end by
+/// the `session_lifecycle` integration suite.
+pub(super) fn reconcile_against_tmux(
+    tmux: &dyn ManagedTmuxDriver,
+    summaries: &mut [SessionSummary],
+    records: &[SessionRecord],
+) {
+    match tmux.list_sessions() {
+        Ok(names) => {
+            let live: std::collections::HashSet<String> = names.into_iter().collect();
+            let attached: std::collections::HashSet<String> =
+                tmux.attached_session_names().into_iter().collect();
+            reconcile_live_state(summaries, records, &live, &attached);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "tmux session enumeration failed ({e}); serving persisted session \
+                 state WITHOUT live reconciliation (fail-closed — never treat a \
+                 probe error as 'all sessions stopped')"
+            );
+        }
     }
 }
 

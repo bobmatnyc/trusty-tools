@@ -9,6 +9,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `tm sessions rename <id-or-name> <new-name>` (and in-session `tm sessions rename <new-name>` via `$TM_MANAGED_SESSION_ID`) renames a managed session, updating the record's `tmux_name` and the live tmux session, with collision + invalid-name guards
+- `tm sessions delete` now marks a session `--deleted--` (a new persisted `Deleted` state shown in the master list) instead of silently dropping the record; `tm sessions prune --state deleted` compacts the tombstones
 - per-project gh account pinning via GH_TOKEN spawn-env injection (closes #3025) ([#3040](https://github.com/bobmatnyc/trusty-tools/pull/3040)) ([`53d0a54`](https://github.com/bobmatnyc/trusty-tools/commit/53d0a5433c9e42b2c49f11f943de8cfc2c7f4696))
 - bridge custom remote+local MCP servers into fleet sessions at project/user scope ([#3033](https://github.com/bobmatnyc/trusty-tools/pull/3033)) ([`07cb73f`](https://github.com/bobmatnyc/trusty-tools/commit/07cb73f6bc236f753bb8e920ebab20b5cd9658c5))
 - per-session asset staleness + tm sessions sync-assets ([#2980](https://github.com/bobmatnyc/trusty-tools/pull/2980)) ([`c8d137a`](https://github.com/bobmatnyc/trusty-tools/commit/c8d137a632275e85709e745176a39253e62d6e3b))
@@ -17,6 +19,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - disclaim TCC responsibility on the TUI health screen's `[S]`-key `cargo run` spawn — the last undisclaimed spawn site in the TUI/session-launch call graph from the #2997 sweep; two remaining sites elsewhere in the crate tracked as #2997 part 6 (closes #3126)
+- `tm ls` / the session picker no longer report running/attached sessions as `(stopped)`: the list handler now reconciles each session's displayed state against live tmux (`active`/`attached` when the tmux session exists, `stopped` only when it is truly gone) so the offered action (connect vs restart) matches reality
 - disclaim TCC responsibility on session-launch spawns so Claude Code isn't attributed to trusty-mpm (closes #2997) ([#3037](https://github.com/bobmatnyc/trusty-tools/pull/3037)) ([`d481a0c`](https://github.com/bobmatnyc/trusty-tools/commit/d481a0cd7e264b20109e1c92122ba972db828222))
 - teach user-scope MCP registration via tm mcp add in tm-cli-operations (closes #3020) ([#3021](https://github.com/bobmatnyc/trusty-tools/pull/3021)) ([`f6223aa`](https://github.com/bobmatnyc/trusty-tools/commit/f6223aacc1c030055440cea93c5ae52c1c4d231f))
 - write_project_hooks uses write_json_atomic for torn-write parity (closes #2972) ([#3018](https://github.com/bobmatnyc/trusty-tools/pull/3018)) ([`32e805d`](https://github.com/bobmatnyc/trusty-tools/commit/32e805d609e15bbcc02ab4212f606e0e34b20293))

@@ -394,6 +394,11 @@ pub(crate) async fn session(
         SessionAction::Delete { id, force } => {
             crate::commands::delete::session_delete(client, url, id, force).await?
         }
+        // Rename a managed session. Direct HTTP (PATCH), like `delete` — a
+        // distinct store+tmux mutation, not a chat-core intent.
+        SessionAction::Rename { arg1, arg2 } => {
+            crate::commands::rename::session_rename(client, url, arg1, arg2).await?
+        }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).
         action @ (SessionAction::ManagedStop { .. }

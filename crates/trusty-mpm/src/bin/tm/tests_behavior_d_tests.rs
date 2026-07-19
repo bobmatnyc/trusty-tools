@@ -398,6 +398,39 @@ fn cli_parses_session_delete() {
 }
 
 #[test]
+fn cli_parses_sessions_rename_two_args() {
+    // From the list: `rename <id-or-name> <new-name>` — arg1 is the target,
+    // arg2 the new name.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "rename", "tm-old-01", "tm-new-01"])
+        .unwrap();
+    match cli.command.unwrap() {
+        Command::Sessions {
+            action: SessionAction::Rename { arg1, arg2 },
+        } => {
+            assert_eq!(arg1, "tm-old-01");
+            assert_eq!(arg2.as_deref(), Some("tm-new-01"));
+        }
+        other => panic!("expected sessions rename, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessions_rename_in_session() {
+    // In-session: `rename <new-name>` — arg1 is the new name, arg2 is None
+    // (target resolved from $TM_MANAGED_SESSION_ID at runtime).
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "rename", "tm-new-name"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Sessions {
+            action: SessionAction::Rename { arg1, arg2 },
+        } => {
+            assert_eq!(arg1, "tm-new-name");
+            assert_eq!(arg2, None);
+        }
+        other => panic!("expected sessions rename, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_session_prune_idle() {
     // `prune-idle` (#1313) accepts both flags; defaults are false.
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-idle", "--dry-run", "--json"])

@@ -110,6 +110,13 @@ pub enum TmuxCommand {
         /// Session name to kill.
         name: String,
     },
+    /// `rename-session -t <old> <new>` — rename a session in place.
+    RenameSession {
+        /// Current session name.
+        old: String,
+        /// New session name.
+        new: String,
+    },
     /// `has-session -t <name>` — probe whether a session exists.
     HasSession {
         /// Session name to probe.
@@ -267,6 +274,14 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
         }
         TmuxCommand::KillSession { name } => {
             vec!["kill-session".into(), "-t".into(), name.clone()]
+        }
+        TmuxCommand::RenameSession { old, new } => {
+            vec![
+                "rename-session".into(),
+                "-t".into(),
+                old.clone(),
+                new.clone(),
+            ]
         }
         TmuxCommand::HasSession { name } => {
             vec!["has-session".into(), "-t".into(), name.clone()]
@@ -492,6 +507,15 @@ mod tests {
             literal: true,
         });
         assert_eq!(argv, ["send-keys", "-t", "s", "-l", "claude --help"]);
+    }
+
+    #[test]
+    fn rename_session_argv() {
+        let argv = tmux_argv(&TmuxCommand::RenameSession {
+            old: "tm-old-01".into(),
+            new: "tm-new-01".into(),
+        });
+        assert_eq!(argv, ["rename-session", "-t", "tm-old-01", "tm-new-01"]);
     }
 
     #[test]

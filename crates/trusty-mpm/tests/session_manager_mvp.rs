@@ -89,7 +89,7 @@ impl ManagedTmuxDriver for RecordingTmux {
 /// `create_session`/`kill_session`/`list_sessions` (and therefore the trait's
 /// default `session_exists`). Used via
 /// `DaemonState::with_root_isolated_managed_and_driver`.
-/// Test: `delete_route_removes_record`, `delete_route_refuses_running_without_force`,
+/// Test: `delete_route_marks_deleted`, `delete_route_refuses_running_without_force`,
 /// `delete_route_force_bypasses_guard`.
 struct LiveTrackingTmux {
     live: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -1502,18 +1502,20 @@ async fn prune_route_rejects_bad_state() {
 // `with_root_isolated_managed_and_driver` + `LiveTrackingTmux` instead of the
 // stateless `FakeNoopTmuxDriver` the other handler tests in this file use.
 
-/// POST …/{id}/delete removes a NON-running record from the store (#2012).
+/// POST …/{id}/delete SOFT-deletes a NON-running record — marks it `--deleted--` (#2012).
 ///
 /// Why: the common case — an operator deleting an already-stopped session's
-/// record — must succeed without `--force` and actually drop it from the store
-/// (not merely tombstone it).
+/// record — must succeed without `--force` and REFLECT the deletion in the
+/// master list (state `Deleted`, rendered `--deleted--`) rather than dropping
+/// the row from the store.
 /// What: seeds a session (registering it as live on `LiveTrackingTmux`), stops
 /// it (which kills the tracked tmux session, so it is genuinely no longer
 /// running), calls [`delete_managed_session`] with `force=false`, asserts `200`
-/// with `deleted: true`, and confirms the record is gone (`SessionNotFound`).
+/// with `deleted: true`, and confirms the record is STILL present with state
+/// `Deleted`.
 /// Test: this function IS the test.
 #[tokio::test]
-async fn delete_route_removes_record() {
+async fn delete_route_marks_deleted() {
     use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
 
     let root = TempDir::new().unwrap();
@@ -1560,10 +1562,11 @@ async fn delete_route_removes_record() {
 
     assert_eq!(status, axum::http::StatusCode::OK, "body={body}");
     assert_eq!(body["deleted"], serde_json::json!(true));
-    assert!(matches!(
-        mgr.get(&id).await,
-        Err(ManagedError::SessionNotFound(_))
-    ));
+    assert_eq!(
+        mgr.get(&id).await.expect("record still tracked").state,
+        trusty_mpm::session_manager::ManagedSessionState::Deleted,
+        "delete must mark the record --deleted--, keeping it in the store"
+    );
 }
 
 /// POST …/{id}/delete REFUSES a RUNNING session without `--force` (#2012).
@@ -1638,7 +1641,7 @@ async fn delete_route_refuses_running_without_force() {
 /// session backing it is genuinely still live (`LiveTrackingTmux`, #2022).
 /// What: seeds a running session, calls [`delete_managed_session`] with
 /// `force=true`, asserts `200` with `deleted: true`, and confirms the record is
-/// gone from the store.
+/// marked `Deleted` (kept in the store).
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delete_route_force_bypasses_guard() {
@@ -1684,10 +1687,11 @@ async fn delete_route_force_bypasses_guard() {
 
     assert_eq!(status, axum::http::StatusCode::OK, "body={body}");
     assert_eq!(body["deleted"], serde_json::json!(true));
-    assert!(matches!(
-        mgr.get(&id).await,
-        Err(ManagedError::SessionNotFound(_))
-    ));
+    assert_eq!(
+        mgr.get(&id).await.expect("record still tracked").state,
+        trusty_mpm::session_manager::ManagedSessionState::Deleted,
+        "forced delete must mark the record --deleted--, keeping it in the store"
+    );
 }
 
 // ── #1730: list_managed_sessions ?source_id= filter + serialization ───────────

@@ -267,12 +267,12 @@ async fn proxy_unfocus_route_clears_and_reports_none_when_absent() {
 
 #[tokio::test]
 async fn proxy_message_route_auto_unfocuses_when_session_decommissioned() {
-    // Focus a real session, HARD-DELETE its record out from under the focus
-    // (decommission alone leaves a tombstone the resolver still finds — a
-    // deliberately different, non-"not found" failure mode; a hard delete is
-    // what genuinely makes `resolve_target` report "not found"), then confirm
-    // the message route auto-unfocuses (the same guarantee the Telegram
-    // binding relies on) rather than failing forever.
+    // Focus a real session, then COMPACT its record out of the store entirely
+    // (decommission and the soft `delete` both leave a tombstone the resolver
+    // still finds — a deliberately different, non-"not found" failure mode;
+    // compacting the record is what genuinely makes `resolve_target` report
+    // "not found"), then confirm the message route auto-unfocuses (the same
+    // guarantee the Telegram binding relies on) rather than failing forever.
     let (state, name) = seeded_state().await;
     decode_response(
         proxy_focus(
@@ -293,9 +293,9 @@ async fn proxy_message_route_auto_unfocuses_when_session_decommissioned() {
         .find(|r| r.tmux_name == name)
         .expect("seeded session present")
         .id;
-    mgr.delete_record(&id, true)
+    mgr.compact_record(&id)
         .await
-        .expect("hard-delete seeded session");
+        .expect("compact (hard-remove) seeded session");
 
     let body = decode_response(
         proxy_message(

@@ -40,9 +40,22 @@ pub(crate) async fn session_delete(
     use super::picker_delete::DeleteReport;
     match super::picker_delete::delete_managed_then_local(client, url, &id, force).await? {
         DeleteReport::Deleted {
-            name, prior_state, ..
+            name,
+            prior_state,
+            local,
         } => {
-            println!("deleted {id} ({name}) [was {prior_state}] — record removed from store");
+            if local {
+                // The legacy project-session store has no `--deleted--` state; a
+                // local delete genuinely removes the record.
+                println!("deleted {id} ({name}) [was {prior_state}] — removed from project store");
+            } else {
+                // Managed sessions are soft-deleted: marked `--deleted--`, still
+                // listed. `tm sessions prune --state deleted` drops the tombstone.
+                println!(
+                    "deleted {id} ({name}) [was {prior_state}] — marked --deleted-- \
+                     (still listed; `tm sessions prune --state deleted` to remove)"
+                );
+            }
             Ok(())
         }
         DeleteReport::NotFound => {

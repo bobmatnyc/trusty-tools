@@ -28,6 +28,36 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Kill the tmux session named `name`.
     fn kill_session(&self, name: &str) -> Result<(), ManagedError>;
 
+    /// Rename the live tmux session `old` → `new`.
+    ///
+    /// Why: `tm sessions rename` keeps the tmux entity's name in sync with the
+    /// record's `tmux_name` so `tmux attach`/`list-sessions` show the new name.
+    /// What: the default FAILS CLOSED — a driver that cannot rename must not
+    /// silently succeed and let the stored name drift from the live session;
+    /// [`super::real_tmux::RealTmuxDriver`] runs `tmux rename-session`.
+    /// Test: `RealTmuxDriver` override via the `#[ignore]` live test;
+    /// `FakeTmuxDriver` overrides to rename in its in-memory session map.
+    fn rename_session(&self, old: &str, new: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "rename-session not implemented for this driver ({old} -> {new})"
+        )))
+    }
+
+    /// Names of tmux sessions with a client currently ATTACHED.
+    ///
+    /// Why: the `tm ls` list reconciliation distinguishes an ATTACHED session
+    /// from a merely-live detached one so the picker renders `attached` and
+    /// offers connect rather than a destructive restart.
+    /// What: the default is EMPTY (best-effort — a driver that cannot report
+    /// attachment simply never marks a session attached);
+    /// [`super::real_tmux::RealTmuxDriver`] overrides it via tmux
+    /// `#{session_attached}`.
+    /// Test: `RealTmuxDriver` override is exercised by the `#[ignore]` live
+    /// test; `FakeTmuxDriver` seeds attachment for `list_reconciles_*` coverage.
+    fn attached_session_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Send literal text followed by Enter to the session named `name`.
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError>;
 

@@ -861,6 +861,7 @@ fn make_session(
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        attached: false,
     }
 }
 
@@ -1025,6 +1026,34 @@ fn guided_resume_plan_provisioning_no_tmux_reconciles_then_restarts() {
         plan_resume("provisioning", false),
         ResumeAction::ReconcileThenRestart,
         "provisioning + no tmux must reconcile then restart"
+    );
+}
+
+#[test]
+fn plan_resume_refuses_terminal_states() {
+    // code-critic CRITICAL: a terminal tombstone must NEVER be resumed —
+    // neither via the zombie-reconcile path (tmux_live=false, which used to
+    // resurrect a Deleted record) NOR via a bare Attach (tmux_live=true, the
+    // "force-deleted-while-live" variant). Both must resolve to Terminal.
+    for state in ["deleted", "decommissioned"] {
+        for tmux_live in [false, true] {
+            assert_eq!(
+                plan_resume(state, tmux_live),
+                ResumeAction::Terminal,
+                "{state} (tmux_live={tmux_live}) must be refused as Terminal, never resumed"
+            );
+        }
+    }
+}
+
+#[test]
+fn is_zombie_false_for_terminal_states() {
+    // A terminal tombstone with no live tmux must NOT read as a resurrectable
+    // zombie (the exact chain that resurrected a Deleted session).
+    assert!(!is_zombie("deleted", false), "deleted is never a zombie");
+    assert!(
+        !is_zombie("decommissioned", false),
+        "decommissioned is never a zombie"
     );
 }
 
@@ -1533,6 +1562,21 @@ fn picker_filter_live_state_excludes_decommissioned() {
         is_live_session_state("provisioning"),
         "provisioning must be included in default view"
     );
+}
+
+#[test]
+fn is_live_session_state_excludes_deleted() {
+    // code-critic CRITICAL: a `--deleted--` tombstone is TERMINAL — it must be
+    // excluded from the default picker/list exactly like `decommissioned`, so it
+    // is never offered as a resume target (which would resurrect it).
+    assert!(
+        !is_live_session_state("deleted"),
+        "deleted must be excluded from the default picker/list view"
+    );
+    // Both terminal tombstones are excluded; every live state is kept.
+    assert!(!is_live_session_state("decommissioned"));
+    assert!(is_live_session_state("active"));
+    assert!(is_live_session_state("stopped"));
 }
 
 #[test]

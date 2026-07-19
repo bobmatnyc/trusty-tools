@@ -50,9 +50,10 @@ pub const MAX_EPHEMERAL_AGE_HOURS: i64 = 24;
 /// (`Active`/`Provisioning`) record unless explicitly forced — in one place.
 /// What: [`Ephemeral`](PruneFilter::Ephemeral) selects `ephemeral == true`
 /// non-terminal records; [`Stopped`](PruneFilter::Stopped) selects `Stopped`
-/// records; [`Decommissioned`](PruneFilter::Decommissioned) selects existing
-/// tombstones (for compaction only); [`All`](PruneFilter::All) selects every
-/// NON-running record (ephemeral + stopped + errored + decommissioned).
+/// records; [`Decommissioned`](PruneFilter::Decommissioned) and
+/// [`Deleted`](PruneFilter::Deleted) select existing tombstones (for compaction
+/// only); [`All`](PruneFilter::All) selects every NON-running record (ephemeral,
+/// stopped, errored, decommissioned, and deleted).
 /// Test: `prune_filter_parse_round_trip`, and the per-filter `prune_*` tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PruneFilter {
@@ -62,7 +63,11 @@ pub enum PruneFilter {
     Stopped,
     /// Only `Decommissioned` tombstones — compacted (removed) from the store.
     Decommissioned,
-    /// Every NON-running record: ephemeral, stopped, errored, and decommissioned.
+    /// Only `Deleted` tombstones (`--deleted--`) — compacted (removed) from the
+    /// store. The permanent-removal path for soft-deleted records (#2012).
+    Deleted,
+    /// Every NON-running record: ephemeral, stopped, errored, decommissioned,
+    /// and deleted.
     All,
 }
 
@@ -82,9 +87,10 @@ impl PruneFilter {
             "ephemeral" => Ok(Self::Ephemeral),
             "stopped" => Ok(Self::Stopped),
             "decommissioned" => Ok(Self::Decommissioned),
+            "deleted" => Ok(Self::Deleted),
             "all" => Ok(Self::All),
             other => Err(format!(
-                "unknown prune filter `{other}` (expected: ephemeral | stopped | decommissioned | all)"
+                "unknown prune filter `{other}` (expected: ephemeral | stopped | decommissioned | deleted | all)"
             )),
         }
     }
@@ -99,6 +105,7 @@ impl PruneFilter {
             Self::Ephemeral => "ephemeral",
             Self::Stopped => "stopped",
             Self::Decommissioned => "decommissioned",
+            Self::Deleted => "deleted",
             Self::All => "all",
         }
     }
@@ -244,6 +251,7 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
         }
         PruneFilter::Stopped => record.state == ManagedSessionState::Stopped,
         PruneFilter::Decommissioned => record.state == ManagedSessionState::Decommissioned,
+        PruneFilter::Deleted => record.state == ManagedSessionState::Deleted,
         PruneFilter::All => true,
     }
 }
@@ -387,7 +395,13 @@ impl SessionManager {
 
         let mut sessions = Vec::with_capacity(targets.len());
         for record in targets {
-            let is_tombstone = record.state == ManagedSessionState::Decommissioned;
+            // Both `Decommissioned` and `Deleted` (`--deleted--`) are terminal
+            // tombstones: prune COMPACTS (removes) them rather than re-running a
+            // decommission teardown.
+            let is_tombstone = matches!(
+                record.state,
+                ManagedSessionState::Decommissioned | ManagedSessionState::Deleted
+            );
             let action = if is_tombstone {
                 PruneAction::Removed
             } else {

@@ -112,7 +112,11 @@ impl FleetMetrics {
                 ManagedSessionState::Active => m.active += 1,
                 ManagedSessionState::Stopped => m.stopped += 1,
                 ManagedSessionState::Errored => m.errored += 1,
-                ManagedSessionState::Decommissioned => m.decommissioned += 1,
+                // `Deleted` tombstones are counted alongside `Decommissioned`
+                // tombstones (both are terminal, non-live records).
+                ManagedSessionState::Decommissioned | ManagedSessionState::Deleted => {
+                    m.decommissioned += 1
+                }
             }
             if let Some(ref question) = r.pending_decision {
                 m.pending_decisions.push(PendingDecision {

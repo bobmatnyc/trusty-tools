@@ -71,20 +71,29 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
 /// projection step — means every downstream consumer (`sessions_nav`'s
 /// selection model, the Sessions pane render, the `(N)` header) sees only
 /// live rows and never has to special-case a dead one.
-/// What: keeps every session whose `state` is not exactly `"decommissioned"`
-/// and projects each survivor via [`session_to_row`]. A session later
-/// replaced by a new session that reuses its `name` (different `id`) can
-/// never ghost or duplicate: this rebuilds the row list wholesale from the
-/// daemon's current fleet snapshot on every tick rather than diffing against
-/// the previous tick's rows, so the decommissioned original (filtered out)
+/// What: keeps every session whose `state` is not TERMINAL (`decommissioned`
+/// OR `deleted`, #2012) and projects each survivor via [`session_to_row`]. The
+/// terminal check is driven off [`ManagedSessionState::is_terminal`] (via
+/// [`ManagedSessionState::from_wire`]) — the SAME enum source of truth
+/// `managed::is_live_session_state` uses — so a new terminal variant (like the
+/// `--deleted--` tombstone) can never silently slip past a hardcoded
+/// `== "decommissioned"` string and clutter the pane / inflate its `(N)` count.
+/// A session later replaced by a new session that reuses its `name` (different
+/// `id`) can never ghost or duplicate: this rebuilds the row list wholesale
+/// from the daemon's current fleet snapshot on every tick rather than diffing
+/// against the previous tick's rows, so the terminal original (filtered out)
 /// and the new session (kept, its own row) never coexist.
 /// Test: `live_session_rows_drops_decommissioned`,
+/// `live_session_rows_drops_deleted`,
 /// `live_session_rows_keeps_live_states`,
 /// `live_session_rows_same_name_replacement_is_clean`.
 pub(crate) fn live_session_rows(sessions: Vec<ManagedSessionSummary>) -> Vec<SessionRow> {
     sessions
         .into_iter()
-        .filter(|s| s.state != "decommissioned")
+        .filter(|s| {
+            !crate::session_manager::ManagedSessionState::from_wire(&s.state)
+                .is_some_and(|st| st.is_terminal())
+        })
         .map(session_to_row)
         .collect()
 }
@@ -205,6 +214,7 @@ mod tests {
             injection_status: None,
             unresumable: false,
             stale_assets: false,
+            attached: false,
         }
     }
 
@@ -290,6 +300,21 @@ mod tests {
             1,
             "decommissioned row must be dropped: {rows:?}"
         );
+        assert_eq!(rows[0].id, "a1111111");
+    }
+
+    #[test]
+    fn live_session_rows_drops_deleted() {
+        // #2012: a soft-deleted (`--deleted--`) session is TERMINAL and must be
+        // dropped from the Sessions pane exactly like a decommissioned one — a
+        // permanently-visible tombstone row would clutter the pane and inflate
+        // its `(N)` header count.
+        let sessions = vec![
+            summary("a1111111", "active"),
+            summary("d2222222", "deleted"),
+        ];
+        let rows = live_session_rows(sessions);
+        assert_eq!(rows.len(), 1, "deleted row must be dropped: {rows:?}");
         assert_eq!(rows[0].id, "a1111111");
     }
 

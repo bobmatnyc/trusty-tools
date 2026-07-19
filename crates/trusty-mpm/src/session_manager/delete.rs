@@ -1,42 +1,49 @@
-//! Single-record hard-delete for managed sessions (#2012).
+//! Single-record soft-delete for managed sessions (#2012, `--deleted--` marker).
 //!
 //! Why: `decommission` stops the runtime and (when owned) removes the
 //! workspace, but ALWAYS leaves a `Decommissioned` tombstone behind — an
 //! operator with a mis-provisioned or duplicate record has no single-record
-//! verb to drop it from the store outright. `tm session delete` fills that gap.
-//! Extracted into its own file (mirroring `adopt.rs`/`decommission.rs`/`prune.rs`)
-//! so [`super::prune`] — which already hosts the tombstone-compaction primitive
-//! this delegates to — stays under the 500-SLOC production cap.
+//! verb to mark it gone. `tm sessions delete` fills that gap. Rather than
+//! silently dropping the record from the store (which made a deleted session
+//! VANISH from the master list), delete now marks it
+//! [`ManagedSessionState::Deleted`] — rendered `--deleted--` — so the record is
+//! still tracked and visible, honouring the "fully-tracked lifecycle, no
+//! fire-and-forget" project standard. Permanent removal from the store then
+//! happens through the existing prune path (`tm sessions prune --state deleted`
+//! / `--state all`). Extracted into its own file (mirroring
+//! `adopt.rs`/`decommission.rs`/`prune.rs`) so [`super::prune`] stays under the
+//! 500-SLOC production cap.
 //! What: an inherent `impl SessionManager` block adding
-//! [`SessionManager::delete_record`], which wraps
-//! [`SessionManager::compact_record`](super::prune) with the SAME fail-closed
-//! running guard `super::prune::is_running` enforces elsewhere — a real tmux
-//! liveness probe, not a persisted-state check (#2022).
+//! [`SessionManager::delete_record`], guarded by the SAME fail-closed running
+//! guard `super::prune::is_running` enforces elsewhere — a real tmux liveness
+//! probe, not a persisted-state check (#2022).
 //! Test: `delete_record_*` in `super::delete_tests`.
+
+use chrono::Utc;
 
 use super::manager::{ManagedError, SessionManager};
 use super::prune::is_running;
-use super::record::{ManagedSessionId, SessionRecord};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
 impl SessionManager {
-    /// Hard-delete a single managed session RECORD (#2012).
+    /// Soft-delete a single managed session RECORD — mark it `--deleted--` (#2012).
     ///
     /// Why: distinct from `decommission` (stops the runtime and may remove the
-    /// workspace, but always leaves a `Decommissioned` tombstone) — this
-    /// permanently drops the record itself via the existing
-    /// [`compact_record`](Self::compact_record) (tombstone-removal) primitive,
-    /// guarded by the SAME fail-closed running-state check
-    /// [`prune_managed`](Self::prune_managed) already enforces, so a live
-    /// session can never be hard-deleted out from under its runtime by accident.
+    /// workspace, always leaving a `Decommissioned` tombstone) — this marks the
+    /// record [`ManagedSessionState::Deleted`] (rendered `--deleted--`) so the
+    /// operator's master list REFLECTS the deletion rather than the row
+    /// silently vanishing. Guarded by the SAME fail-closed running-state check
+    /// [`prune_managed`](Self::prune_managed) enforces, so a live session can
+    /// never be deleted out from under its runtime by accident.
     ///
-    /// SAFETY: this is a STORE-ONLY operation — it calls `compact_record`, which
-    /// calls [`super::store::SessionStore::remove`], which only ever mutates the
-    /// in-memory map and the persisted `sessions.json`. It never touches
-    /// `workspace_path` on disk (unlike `decommission`, which may `remove_dir_all`
-    /// an owned workspace). Deleting the record is deliberately NOT the same
-    /// operation as tearing down the workspace; an operator who also wants the
-    /// workspace gone should `decommission` first (or accept an orphaned
-    /// directory, exactly as a stale `Decommissioned` tombstone would leave one).
+    /// SAFETY: this is a STORE-ONLY state transition — it re-`upsert`s the record
+    /// with `state = Deleted`, mutating only the in-memory map and the persisted
+    /// `sessions.json`. It never touches `workspace_path` on disk (unlike
+    /// `decommission`, which may `remove_dir_all` an owned workspace). Marking
+    /// the record deleted is deliberately NOT the same operation as tearing down
+    /// the workspace; an operator who also wants the workspace gone should
+    /// `decommission` first. To drop the tombstone from the store entirely, use
+    /// `tm sessions prune --state deleted` (or `--state all`).
     ///
     /// What: looks up the record (a missing id surfaces as
     /// [`ManagedError::SessionNotFound`]). When `force` is `false` (the default)
@@ -46,10 +53,10 @@ impl SessionManager {
     /// operator to stop the session first or pass `--force` — no record is
     /// touched. A record whose `state` still says `Active`/`Provisioning` but
     /// whose tmux session is actually gone is NOT running by this probe, so it
-    /// deletes cleanly without `--force`. Otherwise removes the record via
-    /// `compact_record` and returns the pre-deletion [`SessionRecord`] snapshot
-    /// (so callers can render its identity after it is gone from the store).
-    /// Test: `delete_record_removes_from_store`,
+    /// deletes cleanly without `--force`. Otherwise transitions the record to
+    /// `Deleted`, persists it, and returns the PRE-deletion [`SessionRecord`]
+    /// snapshot (so callers can render the state it was in before deletion).
+    /// Test: `delete_record_marks_deleted`,
     /// `delete_record_refuses_running_without_force`,
     /// `delete_record_force_bypasses_running_guard`,
     /// `delete_record_never_touches_workspace_dir`,
@@ -72,7 +79,13 @@ impl SessionManager {
                 ),
             ));
         }
-        self.compact_record(id).await?;
+        // Soft-delete: mark the record `Deleted` (rendered `--deleted--`) and
+        // persist. The record stays in the store — visible in the master list —
+        // rather than being dropped outright.
+        let mut updated = record.clone();
+        updated.state = ManagedSessionState::Deleted;
+        updated.last_activity_at = Some(Utc::now());
+        self.store.write().await.upsert(updated).await?;
         Ok(record)
     }
 }

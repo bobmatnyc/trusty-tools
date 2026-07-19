@@ -55,8 +55,10 @@ use trusty_mpm::core::session::{Session, SessionStatus};
 /// callers' behaviour.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeleteReport {
-    /// Record removed. `local` is true when it fell through to the project-session
-    /// `DELETE /sessions/{id}` path (not in the managed store).
+    /// Delete succeeded. For a managed session (`local = false`) this is a
+    /// SOFT delete — the record is marked `--deleted--` and kept in the store
+    /// (#2012 marker); for a project session (`local = true`, the fallthrough to
+    /// `DELETE /sessions/{id}`) the record is genuinely removed.
     Deleted {
         /// Best-effort display name (falls back to the id).
         name: String,
@@ -358,12 +360,18 @@ pub(crate) async fn confirm_and_delete(
             prior_state,
             local,
         } => {
-            let store = if local {
-                "project store"
+            if local {
+                eprintln!(
+                    "tm: deleted '{name}' [was {prior_state}] — removed from the project store."
+                );
             } else {
-                "managed store"
-            };
-            eprintln!("tm: deleted '{name}' [was {prior_state}] — removed from the {store}.");
+                // Managed sessions are soft-deleted (#2012 marker): marked
+                // `--deleted--` and kept in the list, not dropped.
+                eprintln!(
+                    "tm: '{name}' [was {prior_state}] marked --deleted-- \
+                     (still listed; `tm sessions prune --state deleted` to remove)."
+                );
+            }
             Ok(true)
         }
         DeleteReport::Refused(msg) => {

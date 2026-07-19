@@ -82,6 +82,18 @@ fn format_state_column_leaves_healthy_state_unchanged() {
 }
 
 #[test]
+fn format_state_column_renders_deleted_marker() {
+    // A soft-deleted record renders the `--deleted--` marker (#2012) instead of
+    // the raw `deleted` state, so the master list REFLECTS the deletion.
+    assert_eq!(format_state_column("deleted", false, false), "--deleted--");
+    // Markers still compose on top of the deleted base.
+    assert_eq!(
+        format_state_column("deleted", true, false),
+        "--deleted-- [dead]"
+    );
+}
+
+#[test]
 fn short_timestamp_formats_correctly() {
     assert_eq!(short_timestamp("2025-06-27T14:32:00Z"), "2025-06-27 14:32");
     assert_eq!(short_timestamp("short"), "short");

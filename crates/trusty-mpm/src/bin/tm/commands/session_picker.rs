@@ -351,9 +351,17 @@ pub(crate) async fn run_tty_picker(
                 }
                 // Show "restart" for sessions that are stopped/errored — they have no
                 // live tmux session and will be restarted via the daemon (#1742).
+                // The state is reconciled against live tmux by the daemon list
+                // handler, so a running/attached session reads "active"/"attached"
+                // here and is offered "resume" (connect), never a stale "restart".
                 let stopped = matches!(s.state.as_str(), "stopped" | "errored");
                 let verb = if stopped { "restart" } else { "resume" };
-                eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
+                let shown_state = if s.attached {
+                    "attached"
+                } else {
+                    s.state.as_str()
+                };
+                eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, shown_state);
             }
             eprintln!("tm:   [{new_idx}] launch new session");
             eprintln!("tm:   [d<N>] delete session N (e.g. d1)");

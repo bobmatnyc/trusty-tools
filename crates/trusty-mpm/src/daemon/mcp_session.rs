@@ -472,14 +472,16 @@ mod tests {
         // The record must still be present after the refusal.
         assert!(mgr.get(&id).await.is_ok(), "record must survive refusal");
 
-        // `force: true` bypasses the guard and hard-deletes the record.
+        // `force: true` bypasses the guard and soft-deletes the record.
         let value = session_delete(&s, &id.to_string(), true)
             .await
             .expect("force must bypass the running guard");
         assert_eq!(value["deleted"], serde_json::json!(true));
-        assert!(
-            matches!(mgr.get(&id).await, Err(ManagedError::SessionNotFound(_))),
-            "record must be gone from the store after forced delete"
+        // Soft-delete (#2012): the record is marked `--deleted--`, kept in store.
+        assert_eq!(
+            mgr.get(&id).await.expect("record still tracked").state,
+            crate::session_manager::ManagedSessionState::Deleted,
+            "record must be marked --deleted-- after forced delete"
         );
     }
 

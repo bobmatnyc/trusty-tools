@@ -477,10 +477,25 @@ impl SessionManager {
     /// window, then reclaim the pane — #1975) so the process can flush state
     /// before it dies, marks the record `Stopped` (workspace path untouched), and
     /// persists.
-    /// Test: `manager_stop_keeps_workspace` — asserts state is `Stopped` and
-    /// workspace dir still exists on disk.
+    /// A TERMINAL record (`Decommissioned`/`Deleted`) is REFUSED with
+    /// [`ManagedError::InvalidState`] — mirroring [`resume`](Self::resume)'s
+    /// state guard — so a stale zombie-reconcile path (`runtime-stop` then
+    /// `resume`) can never flip a deleted/decommissioned tombstone back to a
+    /// live `Stopped` state and resurrect it (code-critic CRITICAL).
+    /// Test: `manager_stop_keeps_workspace`; `stop_refuses_terminal_record`
+    /// (a Deleted record cannot be stopped) in `delete_tests`.
     pub async fn stop(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
+        if record.state.is_terminal() {
+            return Err(ManagedError::InvalidState(
+                id.to_string(),
+                format!(
+                    "cannot stop a session in terminal state '{}'; \
+                     a decommissioned/deleted record is gone for good",
+                    record.state
+                ),
+            ));
+        }
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
         // Graceful teardown (#1975): give the claude process a SIGTERM + grace
         // window to checkpoint before its tmux pane is reclaimed, instead of an
