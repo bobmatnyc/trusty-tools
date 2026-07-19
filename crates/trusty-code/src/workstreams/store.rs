@@ -369,6 +369,46 @@ impl WorkstreamStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))
     }
 
+    /// Rename a workstream (DOC-48 §5.1 `workstream.rename`, Phase C —
+    /// issue #3300).
+    ///
+    /// Why: the persistence primitive `workstream.rename` calls. The domain
+    /// model has always documented `name` as mutable ("future rename
+    /// support, Phase C" — [`Workstream`]'s own doc comment); this is that
+    /// support landing. Renaming a closed workstream is allowed — closure
+    /// only rejects new session bindings (§4.4), it says nothing about the
+    /// label, and forbidding it would leave a typo permanently unfixable.
+    /// What: reloads first, overwrites `name` and calls
+    /// [`Workstream::touch`] to refresh `updated_at`, persists, and returns
+    /// the updated record. `NotFound` if `id` does not exist.
+    /// Test: `store_tests::rename_updates_name_and_persists`,
+    /// `store_tests::rename_missing_id_returns_not_found`,
+    /// `store_tests::rename_closed_workstream_succeeds`.
+    pub async fn rename(
+        &mut self,
+        id: WorkstreamId,
+        name: impl Into<String>,
+    ) -> Result<Workstream, StoreError> {
+        self.reload_if_changed().await?;
+        {
+            let ws = self
+                .data
+                .workstreams
+                .iter_mut()
+                .find(|w| w.id == id)
+                .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+            ws.name = name.into();
+            ws.touch();
+        }
+        self.save().await?;
+        self.data
+            .workstreams
+            .iter()
+            .find(|w| w.id == id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))
+    }
+
     /// Boot-time reconciliation (DOC-48 §3.3, AC-1.4, AC-6.1, AC-6.2).
     ///
     /// Why: a daemon restart must never silently change which workstream is

@@ -274,7 +274,7 @@ The daemon adds the following JSON-RPC methods (to `crates/trusty-code/src/serve
 | `workstream.activate` | `{id: UUID, force?: bool} → {active_id: UUID, prior_id?: UUID}` | Activate this workstream (make it the active workstream). Default `force = false`. If another workstream is active, return `ActiveConflict{active_id}` (fail) unless `force: true`. When `force: true`, deactivates the prior workstream. Returns the new active ID and the prior ID (if any). This is an **explicit switch**, never silent (DOC-40 principle). |
 | `workstream.deactivate` | `{id: UUID} → {}` | Deactivate the active workstream. Only the active workstream may be deactivated; deactivating an `idle` workstream is idempotent. Sets `active_workstream_id` to `null`. |
 | `workstream.close` | `{id: UUID} → {}` | Irreversibly close a workstream. Rejects new session bindings; existing sessions remain valid. If the closed workstream is the active one, it is automatically deactivated. |
-| `workstream.rename` | `{id: UUID, name: String} → Workstream` | Rename a workstream (future, Phase C). Out of scope for Phase 1A. |
+| `workstream.rename` | `{id: UUID, name: String} → Workstream` | Rename a workstream. Shipped with the Phase C GUI switcher (issue #3300); out of scope for Phase 1A. |
 
 ### 5.2 REST endpoints (wrappers around JSON-RPC)
 
@@ -287,6 +287,7 @@ Per #2983 Slice 4, REST alternatives are provided alongside JSON-RPC for one-sho
 | `GET` | `/workstreams?include_closed=…` | → `workstream.list{…}` |
 | `POST` | `/workstreams/{id}/activate` | → `workstream.activate{id, force?}` |
 | `POST` | `/workstreams/{id}/deactivate` | → `workstream.deactivate{id}` |
+| `POST` | `/workstreams/{id}/rename` | → `workstream.rename{id, name}` (issue #3300, Phase C) |
 | `POST` | `/workstreams/{id}/close` | → `workstream.close{id}` |
 
 All endpoints return JSON. Errors are HTTP 4xx/5xx with a JSON error body (matching existing tcode error conventions).
@@ -497,11 +498,14 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
 - Session-creation UI wiring to bind to workstream (§4.1)
 - Ambient default-target logic: new work targets the active workstream (§4.2)
 
-### Phase C (future, blocked on #3153) — GUI workstream switcher
+### Phase C (issue #3300) — GUI workstream switcher
 
-- Visual workstream switcher in the header (DOC-39 §2, principle 3)
-- State display, rename, close actions
-- Activation UI (switch between workstreams)
+- [x] Visual workstream switcher in the header (DOC-39 §2, principle 3)
+- [x] State display, rename, close actions
+- [x] Activation UI (switch between workstreams), including the
+      `ActiveConflict` (409) surfacing + refresh affordance
+- [x] `workstream.rename` RPC/REST verb (previously deferred, now shipped
+      alongside its first caller)
 
 ---
 
@@ -657,7 +661,7 @@ curl -X POST http://localhost:7881/rpc \
 **Rev 2 contract:**
 - [ ] Workstream storage: single flat `workstreams-{project_slug}-{hash}.json` file (atomic temp+rename), with `version`, `active_workstream_id`, and `workstreams[]` array.
 - [ ] Boot reconciliation: loads all records, restores `active_workstream_id`, clears no stale data (persistence is deterministic, no TTL-based expiry).
-- [ ] RPC methods implemented: `workstream.create`, `workstream.get`, `workstream.list`, `workstream.activate`, `workstream.deactivate`, `workstream.close` (NO attach/detach/heartbeat).
+- [ ] RPC methods implemented: `workstream.create`, `workstream.get`, `workstream.list`, `workstream.activate`, `workstream.deactivate`, `workstream.close`, `workstream.rename` (Phase C, issue #3300; NO attach/detach/heartbeat).
 - [ ] REST endpoints wrap the RPC methods (POST /workstreams, GET /workstreams/{id}, POST /workstreams/{id}/activate, etc.).
 - [ ] **NEW route**: `GET /workstreams/{id}/events` — workstream-level SSE endpoint that fan-outs over bound session_ids with event tagging `{session_id, event_type, payload}`.
 - [ ] CLI commands: `tcode workstream list/get/create/activate/deactivate/close` (NO attach/detach; ws short alias works).
