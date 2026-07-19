@@ -9,10 +9,17 @@
 //! Tauri events so ChatView can stream a running task into its bubble.
 //! What: Four Tauri commands (`ensure_api_server`, `send_message`,
 //! `list_tasks`, `check_health`) plus a lightweight spawned-process registry
-//! to avoid double-starting the API server.
+//! to avoid double-starting the API server. As of #3059 the window runs in
+//! persistent/tray mode: closing the window only hides it (the sidecar stays
+//! alive so in-flight tasks keep running); a tray icon with Show/Quit lets
+//! the user bring the window back or fully quit. The sidecar is only reaped
+//! on a real quit (tray "Quit", Cmd+Q, or app-menu Quit — all surface as
+//! `RunEvent::ExitRequested`).
 //! Test: `cargo check` in `ui/src-tauri/` passes; launching the app and
 //! sending a message produces a chat bubble that grows while polling the
-//! task id.
+//! task id. Tray hide/show/quit behavior is smoke-tested manually (see PR
+//! description) — Tauri's window-manager event loop isn't unit-testable
+//! from this crate.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -20,7 +27,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
@@ -355,12 +364,40 @@ async fn send_message(
     }
 }
 
+/// Reap the spawned `trusty-agents --api` sidecar, exactly once.
+///
+/// Why: The tray "Quit" item and the real-quit `RunEvent::ExitRequested`
+/// path (Cmd+Q, app-menu Quit) both need to kill the sidecar before the app
+/// goes away, and they can race each other (the Quit item itself calls
+/// `AppHandle::exit`, which raises a fresh `ExitRequested`). `guard.take()`
+/// empties the slot on first use, so a second caller finds `None` and is a
+/// safe no-op — no double-kill, no error.
+/// What: Locks `state.child`, takes the `Child` if present, sends it a kill
+/// signal and awaits reaping.
+/// Test: Manually — quit via the tray item, confirm the sidecar process
+/// exits (`ps` shows no `trusty-agents --api`); quit via Cmd+Q, same check.
+async fn kill_sidecar(state: &SharedApi) {
+    let mut guard = state.child.lock().await;
+    if let Some(mut child) = guard.take() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
+/// Show and focus the main window (tray "Show" item / tray icon click).
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 fn main() {
     // Best-effort tracing init; errors (e.g. subscriber already set in tests)
     // are safe to ignore.
     let _ = tracing_subscriber_try_init();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage::<SharedApi>(Arc::new(ApiServerState::default()))
         .invoke_handler(tauri::generate_handler![
@@ -369,24 +406,112 @@ fn main() {
             list_tasks,
             check_health,
         ])
+        .setup(|app| {
+            // Tray icon + menu (#3059): lets the user bring the hidden main
+            // window back or fully quit the app (which is otherwise no
+            // longer reachable once the window is hidden, since there's no
+            // dock-icon-click affordance guarantee across platforms).
+            let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            let tray_icon =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+
+            TrayIconBuilder::new()
+                .icon(tray_icon)
+                .icon_as_template(true)
+                .tooltip("trusty-agents")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => {
+                        // Reap the sidecar fully before exiting so we don't
+                        // race the process teardown, then trigger the real
+                        // exit (which also fires `RunEvent::ExitRequested`,
+                        // but `kill_sidecar` is idempotent by then).
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(state) = handle.try_state::<SharedApi>() {
+                                kill_sidecar(&state).await;
+                            }
+                            handle.exit(0);
+                        });
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                // Reap the spawned trusty-agents sidecar on window close so we
-                // don't leak a listener port between app restarts.
-                if let Some(api) = window.app_handle().try_state::<SharedApi>() {
-                    let api = api.inner().clone();
-                    tauri::async_runtime::spawn(async move {
-                        let mut guard = api.child.lock().await;
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.start_kill();
-                            let _ = child.wait().await;
-                        }
-                    });
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // This app currently has exactly one window ("main", per
+                // tauri.conf.json). Guard on the label explicitly so a
+                // future secondary window (settings/about/etc.) does not
+                // silently inherit hide-on-close — only "main" participates
+                // in persistent/tray mode.
+                if window.label() != "main" {
+                    return;
                 }
+                // Persistent/tray mode (#3059): closing the window must NOT
+                // kill the sidecar or the app — hide it instead. The tray
+                // "Show" item / tray-icon click brings it back without
+                // re-spawning the API server (ensure_api_server's health
+                // check short-circuits since it's still running).
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::ExitRequested { api, .. } = event {
+            // Real quit path: Cmd+Q or the app-menu Quit item (the tray
+            // "Quit" item already reaped the sidecar itself before calling
+            // `exit`, so this is a no-op in that case thanks to `take()`).
+            // We must not block this callback on the async mutex — the
+            // runtime checks for a pending `prevent_exit()` via a
+            // synchronous `try_recv()` immediately after this closure
+            // returns, so a bare fire-and-forget spawn here can lose the
+            // race and let the process exit before `kill_sidecar` runs.
+            // Try a non-blocking lock first (the common case); if it's
+            // contended, call `prevent_exit()` synchronously *before*
+            // returning, finish the kill asynchronously, then trigger the
+            // real exit ourselves once it's done — mirroring the tray
+            // "Quit" pattern above.
+            if let Some(state) = app_handle.try_state::<SharedApi>() {
+                match state.child.try_lock() {
+                    Ok(mut guard) => {
+                        if let Some(mut child) = guard.take() {
+                            let _ = child.start_kill();
+                        }
+                    }
+                    Err(_) => {
+                        api.prevent_exit();
+                        let state = state.inner().clone();
+                        let handle = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            kill_sidecar(&state).await;
+                            handle.exit(0);
+                        });
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Wrapper so we can ignore the Result without pulling in `tracing-subscriber`
