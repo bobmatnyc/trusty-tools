@@ -12,6 +12,7 @@
 //!   - `routes`       → router assembly + `serve*` bootstrap
 //!   - `handlers`     → task / health / docs core handlers
 //!   - `cancel`       → task cancellation (`DELETE /api/task/:id`, #3063)
+//!   - `models`       → inference provider catalog (`GET /api/models`, #3243)
 //!   - `projects`     → project / session / agent listing handlers
 //!   - `project_registration` → project register + per-project config lookup
 //!   - `ctrl_sessions`→ CTRL session CRUD (`om session …`)
@@ -26,6 +27,7 @@ mod cancel;
 mod ctrl_sessions;
 mod events_sse;
 mod handlers;
+mod models;
 mod project_registration;
 mod projects;
 mod routes;

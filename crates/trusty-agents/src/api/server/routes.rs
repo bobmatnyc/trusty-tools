@@ -29,6 +29,7 @@ use super::events_sse::events_handler;
 use super::handlers::{
     clear_context, docs_search, get_session_recap, get_task, health, list_tasks, submit_task,
 };
+use super::models::get_models;
 use super::project_registration::{connect_project, get_project_config};
 use super::projects::{list_agents_route, list_projects, list_sessions_route};
 use super::state::AppState;
@@ -104,6 +105,10 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
         .route("/api/health", get(health))
         .route("/api/config", config_route)
         .route("/api/docs/search", get(docs_search))
+        // #3243: inference provider catalog for the Assistant-MVP model
+        // picker (epic #3052) — never returns credential values, only
+        // whether one resolves.
+        .route("/api/models", get(get_models))
         .route("/api/projects", get(list_projects).post(connect_project))
         // #451: per-project TOML config lookup (mirrors the on-disk shape of
         // `.trusty-agents/projects/<name>.toml` rather than the global registry).
