@@ -69,19 +69,23 @@ pub struct ModelsCatalogResponse {
 
 /// Whether the *current legacy chat dispatch* can reach `id` today.
 ///
-/// Why: The unified registry (#2400) already knows about seven providers,
-/// but `crate::llm::adapter::adapter_for_model` — the code path actual chat
-/// turns run through — only routes to OpenRouter (the default fallback),
-/// Anthropic (direct, when `ANTHROPIC_API_KEY` is set), and Bedrock
-/// (`bedrock/` prefix) today; Fireworks/Together/AtlasCloud/OpenAI-direct are
-/// registered in the unified layer but the legacy dispatch has no branch for
-/// them yet. Surfacing this distinction keeps the picker honest instead of
+/// Why: The unified registry (#2400) already knows about seven providers, but
+/// `crate::llm::adapter::adapter_for_model` — the code path actual chat turns
+/// run through — only resolves OpenRouter (the default fallback), Anthropic
+/// (direct, when `ANTHROPIC_API_KEY` is set), and Bedrock (`bedrock/` prefix)
+/// to a working adapter today. OpenAI/Fireworks/Together/AtlasCloud DO fall
+/// through a branch in that dispatch — but only as far as the OpenRouter
+/// endpoint, which then receives each provider's bare (un-prefixed) model-id
+/// slug. OpenRouter doesn't recognize those bare slugs as its own routes, so
+/// the call fails: the gap is a model-ID / endpoint mismatch, not a missing
+/// branch. Surfacing this distinction keeps the picker honest instead of
 /// implying every registry entry is immediately usable.
 /// What: `true` for OpenRouter, Bedrock, Anthropic; `false` for the
-/// unified-layer-only providers. Flip an entry to `true` here as its legacy
-/// dispatch branch lands (tracked by #2410); this function is the one place
-/// that needs to change.
-/// Test: `super::tests::models::reachable_today_matches_legacy_dispatch_set`.
+/// providers whose legacy dispatch falls through to OpenRouter with an
+/// unresolvable model-id slug. Flip an entry to `true` here once its legacy
+/// dispatch branch resolves to the correct provider-native endpoint (tracked
+/// by #2410); this function is the one place that needs to change.
+/// Test: `super::tests::models::reachable_today_matches_documented_set`.
 fn reachable_today(id: ProviderId) -> bool {
     matches!(
         id,
