@@ -9,17 +9,34 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tower::util::ServiceExt;
+use uuid::Uuid;
 
 use super::*;
 use crate::events::{Event, SessionEventEnvelope};
 use crate::workstreams::WorkstreamStore;
+
+/// Mint a session id unique to this test invocation.
+///
+/// Why: `crate::events::bus()` is a process-wide singleton shared by every
+/// concurrently-running test (issue #3297 CI: `cargo test` runs tests in
+/// parallel by default). A literal id like `"s1"` collides with any OTHER
+/// test in this file using the same literal for its own, differently-bound
+/// workstream — confirmed by CI: two concurrently-running tests both using
+/// `"s1"` caused one test's fan-out to forward the OTHER's event, since
+/// membership is checked by string equality alone. A fresh UUID suffix per
+/// test makes cross-test collision practically impossible, mirroring how
+/// `session::registry_tests`' real `SessionRegistry::create` calls get
+/// unique ids for free.
+fn unique_session_id(label: &str) -> String {
+    format!("{label}-{}", Uuid::new_v4())
+}
 
 /// Build a `SharedWorkstreamStore` seeded with one workstream directly on
 /// disk (bypassing the store's public API, which has no session-binding
 /// method yet — session binding is issue #3298's scope, not this ticket's;
 /// see `workstreams::model::Workstream::session_ids`'s field docs).
 async fn seeded_store(
-    session_ids: Vec<&str>,
+    session_ids: Vec<String>,
 ) -> (SharedWorkstreamStore, WorkstreamId, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("workstreams-test.json");
@@ -63,28 +80,35 @@ fn session_started(session_id: &str) -> SessionEventEnvelope {
 /// third, unbound session.
 #[tokio::test]
 async fn fan_out_tags_events_from_bound_sessions_only() {
-    let (store, id, _dir) = seeded_store(vec!["s1", "s2"]).await;
+    let s1 = unique_session_id("s1");
+    let s2 = unique_session_id("s2");
+    let s3 = unique_session_id("s3"); // deliberately NOT added to session_ids below
+    let (store, id, _dir) = seeded_store(vec![s1.clone(), s2.clone()]).await;
     let mut stream = std::pin::pin!(aggregate_live(id, store));
 
-    crate::events::publish(session_started("s1"));
-    crate::events::publish(session_started("s2"));
-    crate::events::publish(session_started("s3")); // not bound — must be filtered out
+    crate::events::publish(session_started(&s1));
+    crate::events::publish(session_started(&s2));
+    crate::events::publish(session_started(&s3)); // not bound — must be filtered out
 
     let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("timed out")
         .expect("stream ended early");
-    assert_eq!(first.session_id, "s1");
+    assert_eq!(first.session_id, s1);
     assert_eq!(first.event_type, "session_started");
 
     let second = tokio::time::timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("timed out")
         .expect("stream ended early");
-    assert_eq!(second.session_id, "s2");
+    assert_eq!(second.session_id, s2);
 
     // s3's event must never arrive — confirmed by a bounded wait timing out.
-    let third = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
+    // Any OTHER concurrently-running test's unrelated event is filtered out
+    // upstream by `aggregate_live`'s own `session_ids.contains` check (this
+    // workstream only binds s1/s2), so a stray foreign envelope cannot
+    // masquerade as "the third event" here.
+    let third = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
     assert!(
         third.is_err(),
         "an event from an unbound session must not be forwarded"
@@ -110,6 +134,10 @@ async fn activation_changed_event_is_forwarded_regardless_of_session_binding() {
         event,
     ));
 
+    // `id` is a fresh UUID minted by `seeded_store` for this test alone, so
+    // filtering the stream for the first matching envelope is robust to any
+    // OTHER concurrently-running test's own `WorkstreamActivationChanged` —
+    // `aggregate_live` already only forwards events naming THIS `id`.
     let forwarded = tokio::time::timeout(Duration::from_secs(2), stream.next())
         .await
         .expect("timed out waiting for the activation-changed event")
@@ -177,16 +205,18 @@ async fn empty_workstream_stream_yields_nothing() {
     let (store, id, _dir) = seeded_store(vec![]).await;
     let mut stream = std::pin::pin!(aggregate_live(id, store));
 
-    crate::events::publish(session_started("unrelated"));
+    crate::events::publish(session_started(&unique_session_id("unrelated")));
 
-    let outcome = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
+    let outcome = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
     assert!(
         outcome.is_err(),
         "an empty workstream must not forward any session's events"
     );
 }
 
-async fn app_with_store(session_ids: Vec<&str>) -> (axum::Router, WorkstreamId, tempfile::TempDir) {
+async fn app_with_store(
+    session_ids: Vec<String>,
+) -> (axum::Router, WorkstreamId, tempfile::TempDir) {
     let (store, id, dir) = seeded_store(session_ids).await;
     (routes(store), id, dir)
 }
@@ -238,7 +268,8 @@ async fn malformed_id_returns_400() {
 /// stream a live event tagged for one of them as an SSE `data:` frame.
 #[tokio::test]
 async fn route_streams_live_tagged_event_for_bound_session() {
-    let (app, id, _dir) = app_with_store(vec!["s1"]).await;
+    let s1 = unique_session_id("s1");
+    let (app, id, _dir) = app_with_store(vec![s1.clone()]).await;
 
     let resp = app
         .oneshot(
@@ -256,12 +287,13 @@ async fn route_streams_live_tagged_event_for_bound_session() {
     // subscribe()` synchronously while building the response (before
     // `.oneshot()`'s future resolves), so the subscription is already live
     // by the time this `.await` above returns — no race to guard against.
-    crate::events::publish(session_started("s1"));
+    crate::events::publish(session_started(&s1));
 
+    let want = format!("\"session_id\":\"{s1}\"");
     let mut stream = resp.into_body().into_data_stream();
     let mut collected = Vec::new();
     let read = tokio::time::timeout(Duration::from_secs(5), async {
-        while !String::from_utf8_lossy(&collected).contains("session_started") {
+        while !String::from_utf8_lossy(&collected).contains(&want) {
             match stream.next().await {
                 Some(Ok(chunk)) => collected.extend_from_slice(&chunk),
                 _ => break,
@@ -272,10 +304,7 @@ async fn route_streams_live_tagged_event_for_bound_session() {
 
     assert!(read.is_ok(), "timed out waiting for the tagged SSE frame");
     let text = String::from_utf8(collected).unwrap();
-    assert!(
-        text.contains("\"session_id\":\"s1\""),
-        "body so far: {text}"
-    );
+    assert!(text.contains(&want), "body so far: {text}");
     assert!(
         text.contains("\"event_type\":\"session_started\""),
         "body so far: {text}"

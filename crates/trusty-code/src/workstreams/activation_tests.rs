@@ -1,28 +1,114 @@
 //! Tests for `activation::activate`/`activation::deactivate` (DOC-48 §6,
-//! issue #3294; the `Event::WorkstreamActivationChanged` publication tests
-//! are issue #3297).
+//! issue #3294; the `Event::WorkstreamActivationChanged`/
+//! `WorkstreamStateInferred` publication tests are issue #3297).
 
 use std::time::Duration;
 
 use super::*;
 use tempfile::tempdir;
 
-/// Read the next event off `rx`, failing the test if none arrives within 2s.
-async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>) -> Event {
-    tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timed out waiting for a published event")
-        .expect("event bus channel closed")
-        .event
+/// Read from the process-global event bus until a `WorkstreamActivationChanged`
+/// naming `id` (as either `new_active_id` or `prior_id`) arrives, ignoring
+/// anything else.
+///
+/// Why: `crate::events::bus()` is a single process-wide singleton shared by
+/// every test in this binary — `cargo test` runs tests concurrently by
+/// default, so a raw `rx.recv().await` can observe another test's unrelated
+/// envelope interleaved on the same subscription (confirmed by PR #3343 CI:
+/// a foreign workstream's `WorkstreamActivationChanged` leaked into this
+/// file's tests under parallel execution). Unlike
+/// `session::registry_tests::next_event_for` (which filters on the
+/// envelope's OWN `session_id` field), these events are daemon-scoped — the
+/// envelope's `session_id` is always the empty string (see
+/// `Event::WorkstreamActivationChanged`'s docs) — so the filter reads into
+/// the EVENT's own id fields instead. Bounded by a 2s timeout so a genuine
+/// bug (event never published) still fails fast instead of hanging.
+async fn next_activation_changed_for(
+    rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>,
+    id: WorkstreamId,
+) -> (Option<String>, Option<String>) {
+    let id = id.to_string();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            if let Event::WorkstreamActivationChanged {
+                new_active_id,
+                prior_id,
+            } = envelope.event
+                && (new_active_id.as_deref() == Some(id.as_str())
+                    || prior_id.as_deref() == Some(id.as_str()))
+            {
+                return (new_active_id, prior_id);
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for WorkstreamActivationChanged naming this workstream")
 }
 
-/// Assert NO event arrives on `rx` within a short window — used to prove the
-/// idempotent no-op branches of `activate`/`deactivate` do not publish.
-async fn assert_no_event(rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>) {
-    let result = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+/// Read from the process-global event bus until a `WorkstreamStateInferred`
+/// naming `id` arrives, ignoring anything else — see
+/// [`next_activation_changed_for`]'s docs for the shared-bus-interleaving
+/// rationale.
+async fn next_state_inferred_for(
+    rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>,
+    id: WorkstreamId,
+) -> (String, String) {
+    let id = id.to_string();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            if let Event::WorkstreamStateInferred {
+                workstream_id,
+                state,
+                reason,
+            } = envelope.event
+                && workstream_id == id
+            {
+                return (state, reason);
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for WorkstreamStateInferred naming this workstream")
+}
+
+/// Assert that NO `WorkstreamActivationChanged`/`WorkstreamStateInferred`
+/// naming `id` arrives within a short window — used to prove the idempotent
+/// no-op branches of `activate`/`deactivate` do not publish. Drains (and
+/// discards) any unrelated envelope from another concurrently-running test
+/// rather than treating one as evidence of publication (see
+/// [`next_activation_changed_for`]'s docs).
+async fn assert_no_event_for(
+    rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>,
+    id: WorkstreamId,
+) {
+    let id = id.to_string();
+    let result = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            let matches = match &envelope.event {
+                Event::WorkstreamActivationChanged {
+                    new_active_id,
+                    prior_id,
+                } => {
+                    new_active_id.as_deref() == Some(id.as_str())
+                        || prior_id.as_deref() == Some(id.as_str())
+                }
+                Event::WorkstreamStateInferred { workstream_id, .. } => workstream_id == &id,
+                _ => false,
+            };
+            if matches {
+                return;
+            }
+            // Unrelated envelope from another concurrently-running test —
+            // ignore and keep draining until the timeout below fires.
+        }
+    })
+    .await;
     assert!(
         result.is_err(),
-        "expected no event to be published, but got one"
+        "expected no event naming workstream {id}, but got one"
     );
 }
 
@@ -203,16 +289,9 @@ async fn activate_with_no_prior_active_publishes_activation_changed() {
 
     activate(&store, id, false).await.expect("activate");
 
-    match recv_event(&mut rx).await {
-        Event::WorkstreamActivationChanged {
-            new_active_id,
-            prior_id,
-        } => {
-            assert_eq!(new_active_id, Some(id.to_string()));
-            assert_eq!(prior_id, None);
-        }
-        other => panic!("expected WorkstreamActivationChanged, got {other:?}"),
-    }
+    let (new_active_id, prior_id) = next_activation_changed_for(&mut rx, id).await;
+    assert_eq!(new_active_id, Some(id.to_string()));
+    assert_eq!(prior_id, None);
 }
 
 /// A force-switch must publish `WorkstreamActivationChanged` naming BOTH the
@@ -227,16 +306,9 @@ async fn activate_with_force_publishes_activation_changed_with_prior() {
     let mut rx = crate::events::subscribe();
     activate(&store, b, true).await.expect("force switch");
 
-    match recv_event(&mut rx).await {
-        Event::WorkstreamActivationChanged {
-            new_active_id,
-            prior_id,
-        } => {
-            assert_eq!(new_active_id, Some(b.to_string()));
-            assert_eq!(prior_id, Some(a.to_string()));
-        }
-        other => panic!("expected WorkstreamActivationChanged, got {other:?}"),
-    }
+    let (new_active_id, prior_id) = next_activation_changed_for(&mut rx, b).await;
+    assert_eq!(new_active_id, Some(b.to_string()));
+    assert_eq!(prior_id, Some(a.to_string()));
 }
 
 /// Re-activating the already-active workstream is a true no-op (§6.1) — it
@@ -252,7 +324,7 @@ async fn activate_already_active_does_not_publish() {
         .await
         .expect("idempotent re-activate");
 
-    assert_no_event(&mut rx).await;
+    assert_no_event_for(&mut rx, id).await;
 }
 
 /// Deactivating the active workstream must publish `WorkstreamActivationChanged{new_active_id: None, prior_id: Some(id)}`.
@@ -265,16 +337,9 @@ async fn deactivate_active_publishes_activation_changed() {
     let mut rx = crate::events::subscribe();
     deactivate(&store, id).await.expect("deactivate");
 
-    match recv_event(&mut rx).await {
-        Event::WorkstreamActivationChanged {
-            new_active_id,
-            prior_id,
-        } => {
-            assert_eq!(new_active_id, None);
-            assert_eq!(prior_id, Some(id.to_string()));
-        }
-        other => panic!("expected WorkstreamActivationChanged, got {other:?}"),
-    }
+    let (new_active_id, prior_id) = next_activation_changed_for(&mut rx, id).await;
+    assert_eq!(new_active_id, None);
+    assert_eq!(prior_id, Some(id.to_string()));
 }
 
 /// Deactivating a non-active (idle or unknown) workstream is a no-op (§4.3)
@@ -289,12 +354,11 @@ async fn deactivate_non_active_does_not_publish() {
     let mut rx = crate::events::subscribe();
     deactivate(&store, b).await.expect("deactivate idle b");
 
-    assert_no_event(&mut rx).await;
+    assert_no_event_for(&mut rx, b).await;
 }
 
 /// (issue #3297) A fresh activation must ALSO publish
-/// `WorkstreamStateInferred{workstream_id: id, state: "active"}` right after
-/// `WorkstreamActivationChanged`.
+/// `WorkstreamStateInferred{workstream_id: id, state: "active"}`.
 #[tokio::test]
 async fn activate_with_no_prior_active_publishes_state_inferred() {
     let (store, _dir) = shared_store().await;
@@ -303,18 +367,8 @@ async fn activate_with_no_prior_active_publishes_state_inferred() {
 
     activate(&store, id, false).await.expect("activate");
 
-    let _ = recv_event(&mut rx).await; // WorkstreamActivationChanged, covered above
-    match recv_event(&mut rx).await {
-        Event::WorkstreamStateInferred {
-            workstream_id,
-            state,
-            ..
-        } => {
-            assert_eq!(workstream_id, id.to_string());
-            assert_eq!(state, "active");
-        }
-        other => panic!("expected WorkstreamStateInferred, got {other:?}"),
-    }
+    let (state, _reason) = next_state_inferred_for(&mut rx, id).await;
+    assert_eq!(state, "active");
 }
 
 /// A force-switch must publish `WorkstreamStateInferred` for BOTH the
@@ -329,34 +383,14 @@ async fn activate_with_force_publishes_state_inferred_for_both() {
     let mut rx = crate::events::subscribe();
     activate(&store, b, true).await.expect("force switch");
 
-    let _ = recv_event(&mut rx).await; // WorkstreamActivationChanged
-    match recv_event(&mut rx).await {
-        Event::WorkstreamStateInferred {
-            workstream_id,
-            state,
-            ..
-        } => {
-            assert_eq!(workstream_id, b.to_string());
-            assert_eq!(state, "active");
-        }
-        other => panic!("expected WorkstreamStateInferred for b, got {other:?}"),
-    }
-    match recv_event(&mut rx).await {
-        Event::WorkstreamStateInferred {
-            workstream_id,
-            state,
-            ..
-        } => {
-            assert_eq!(workstream_id, a.to_string());
-            assert_eq!(state, "idle");
-        }
-        other => panic!("expected WorkstreamStateInferred for a, got {other:?}"),
-    }
+    let (b_state, _) = next_state_inferred_for(&mut rx, b).await;
+    assert_eq!(b_state, "active");
+    let (a_state, _) = next_state_inferred_for(&mut rx, a).await;
+    assert_eq!(a_state, "idle");
 }
 
 /// Deactivating the active workstream must ALSO publish
-/// `WorkstreamStateInferred{state: "idle"}` right after
-/// `WorkstreamActivationChanged`.
+/// `WorkstreamStateInferred{state: "idle"}`.
 #[tokio::test]
 async fn deactivate_active_publishes_state_inferred_idle() {
     let (store, _dir) = shared_store().await;
@@ -366,16 +400,6 @@ async fn deactivate_active_publishes_state_inferred_idle() {
     let mut rx = crate::events::subscribe();
     deactivate(&store, id).await.expect("deactivate");
 
-    let _ = recv_event(&mut rx).await; // WorkstreamActivationChanged
-    match recv_event(&mut rx).await {
-        Event::WorkstreamStateInferred {
-            workstream_id,
-            state,
-            ..
-        } => {
-            assert_eq!(workstream_id, id.to_string());
-            assert_eq!(state, "idle");
-        }
-        other => panic!("expected WorkstreamStateInferred, got {other:?}"),
-    }
+    let (state, _reason) = next_state_inferred_for(&mut rx, id).await;
+    assert_eq!(state, "idle");
 }

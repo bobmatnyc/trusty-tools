@@ -431,21 +431,30 @@ async fn close_publishes_state_inferred() {
         .await
         .expect("close");
 
-    let envelope = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timed out waiting for the state-inferred event")
-        .expect("event bus channel closed");
-    match envelope.event {
-        crate::events::Event::WorkstreamStateInferred {
-            workstream_id,
-            state,
-            ..
-        } => {
-            assert_eq!(workstream_id, ws_id.to_string());
-            assert_eq!(state, "closed");
+    // `crate::events::bus()` is a process-wide singleton shared by every
+    // concurrently-running test (issue #3297 CI: `cargo test` runs tests in
+    // parallel by default, so a raw `rx.recv().await` can observe another
+    // test's unrelated envelope first) — loop past anything that doesn't
+    // name THIS test's own workstream id, mirroring
+    // `workstreams::activation_tests::next_state_inferred_for`.
+    let target = ws_id.to_string();
+    let (state, _reason) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            if let crate::events::Event::WorkstreamStateInferred {
+                workstream_id,
+                state,
+                reason,
+            } = envelope.event
+                && workstream_id == target
+            {
+                return (state, reason);
+            }
         }
-        other => panic!("expected WorkstreamStateInferred, got {other:?}"),
-    }
+    })
+    .await
+    .expect("timed out waiting for WorkstreamStateInferred naming this workstream");
+    assert_eq!(state, "closed");
 }
 
 #[tokio::test]
