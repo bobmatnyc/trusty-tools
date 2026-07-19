@@ -225,59 +225,52 @@ fn detect_agent_switch_no_false_positive_on_unrelated_text() {
     assert_eq!(detect_agent_switch("hello world", false), None);
 }
 
-/// #3303: serialises tests below that mutate the process-global
-/// `TAGENT_CONFIG_DIR` env var consumed by `AgentConfig::by_name` — mirrors
-/// the private `ENV_LOCK` pattern used by `agents::tests::loading` and
-/// `agents::persona::tests` (each module gets its own lock; see those
-/// modules' doc comments for the known cross-module-race caveat this
-/// convention accepts).
-static AGENT_COMMAND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Write a minimal directory-package agent fixture (`<dir>/<name>/agent.toml`
+/// + `persona.md`) with `role = "assistant"`, for the `#3303` tests below.
+fn write_package_fixture(parent: &Path, name: &str, display_name: &str) {
+    let pkg = parent.join(name);
+    std::fs::create_dir(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("agent.toml"),
+        format!(
+            r#"
+[agent]
+name = "{name}"
+role = "assistant"
+model = "anthropic/claude-haiku-4-5"
+display_name = "{display_name}"
+description = "test fixture"
+
+[llm]
+temperature = 0.5
+max_tokens = 1024
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(pkg.join("persona.md"), format!("You are {display_name}.")).unwrap();
+}
 
 /// Why (#3303): `handle_agent_command_into` must resolve a directory-package
 /// agent (`<name>/agent.toml` + `persona.md`, #482) — not just a flat
 /// `<name>.toml` — since the bundled `assistant` agent ships exactly that
 /// way. Regression test for the bug: the old code only ever checked
 /// `agents_dir.join("{name}.toml")`.
-/// What: Points `TAGENT_CONFIG_DIR` at a tempdir containing a `foo/`
-/// package, dispatches `/agent foo`, and asserts the persona activated.
+/// What: Points `repl.agents_dir` (NOT `TAGENT_CONFIG_DIR` — resolution is
+/// anchored to the REPL's own resolved dir per the code-critic HIGH-1 fix,
+/// see `candidate_agent_dirs`) at a tempdir containing a `foo/` package,
+/// dispatches `/agent foo`, and asserts the persona activated. No env
+/// mutation, so no lock needed.
 /// Test: Self-explanatory.
 #[test]
 fn handle_agent_command_resolves_directory_package_fixture() {
-    let _guard = AGENT_COMMAND_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
-    let pkg = tmp.path().join("foo");
-    std::fs::create_dir(&pkg).unwrap();
-    std::fs::write(
-        pkg.join("agent.toml"),
-        r#"
-[agent]
-name = "foo"
-role = "assistant"
-model = "anthropic/claude-haiku-4-5"
-display_name = "Foo Persona"
-description = "test fixture"
+    write_package_fixture(tmp.path(), "foo", "Foo Persona");
 
-[llm]
-temperature = 0.5
-max_tokens = 1024
-"#,
-    )
-    .unwrap();
-    std::fs::write(pkg.join("persona.md"), "You are Foo.").unwrap();
-
-    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
-    unsafe {
-        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
-    }
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    repl.agents_dir = tmp.path().to_path_buf();
     let mut out = String::new();
     repl.handle_agent_command_into("foo", &mut out);
-    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
-    unsafe {
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-    }
 
     assert!(
         out.contains("Switched to: Foo Persona"),
@@ -286,24 +279,60 @@ max_tokens = 1024
     assert_eq!(repl.active_persona, Some("foo".to_string()));
 }
 
+/// Why (#3303 code-critic HIGH-1): `/agent <name>` must activate an agent
+/// that `list_assistant_agents_into` just listed, even when the process CWD
+/// (what the pre-fix `AgentConfig::by_name` searched by default) has NO
+/// `.trusty-agents/agents/` of its own — the exact "standalone launch"
+/// scenario `repl/mod.rs::new`'s `detect_self_project`/`current_exe` walk-up
+/// exists to handle. Before the fix, `handle_agent_command_into` called
+/// `AgentConfig::by_name` directly, which ignores `self.agents_dir` entirely
+/// and re-derives its own dirs from `TAGENT_CONFIG_DIR`/CWD — so a name only
+/// resolvable via the REPL's own resolved `agents_dir` would list but not
+/// activate.
+/// What: Proves the CWD-side has nothing named `standalone-fixture` (so a
+/// CWD-anchored resolver could not find it), sets `repl.agents_dir` to a
+/// tempdir package fixture, and asserts `/agent standalone-fixture` still
+/// activates purely via `self.agents_dir`.
+/// Test: Self-explanatory.
+#[test]
+fn handle_agent_command_resolves_when_standalone_cwd_lacks_agents_dir() {
+    let cwd_shadow = std::env::current_dir()
+        .unwrap()
+        .join(".trusty-agents")
+        .join("agents")
+        .join("standalone-fixture");
+    assert!(
+        !cwd_shadow.exists(),
+        "fixture name must not collide with a real bundled agent at {}",
+        cwd_shadow.display()
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    write_package_fixture(tmp.path(), "standalone-fixture", "Standalone Fixture");
+
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    repl.agents_dir = tmp.path().to_path_buf();
+    let mut out = String::new();
+    repl.handle_agent_command_into("standalone-fixture", &mut out);
+
+    assert!(
+        out.contains("Switched to: Standalone Fixture"),
+        "self.agents_dir-resolved agent should activate even though CWD lacks it: {out:?}"
+    );
+    assert_eq!(repl.active_persona, Some("standalone-fixture".to_string()));
+}
+
 /// Why (#3303): the concrete regression from the issue — `/agent assistant`
 /// against the REAL bundled `assistant` directory package (shipped at
 /// `crates/trusty-agents/.trusty-agents/agents/assistant/`, no flat
 /// `assistant.toml` sibling) must activate the persona. `cargo test`'s
-/// working directory is the crate root, so the CWD-relative fallback in
-/// `AgentConfig::by_name` finds the bundled package with no env var needed.
-/// What: Clears `TAGENT_CONFIG_DIR` (so the CWD fallback fires), dispatches
-/// `/agent assistant`, asserts activation.
+/// working directory is the crate root, so `TrustyAgentsRepl::new`'s own
+/// project-dir detection resolves `agents_dir` to the bundled dir with no
+/// setup needed.
+/// What: Dispatches `/agent assistant`, asserts activation.
 /// Test: Self-explanatory.
 #[test]
 fn handle_agent_command_activates_bundled_assistant_package() {
-    let _guard = AGENT_COMMAND_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
-    unsafe {
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-    }
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
     let mut out = String::new();
     repl.handle_agent_command_into("assistant", &mut out);
@@ -318,25 +347,32 @@ fn handle_agent_command_activates_bundled_assistant_package() {
 /// Why (#3303): `/agent` with no argument must list the bundled `assistant`
 /// directory-package agent, not just flat `*.toml` files — otherwise a user
 /// has no way to discover the name to type.
-/// What: Clears `TAGENT_CONFIG_DIR`, calls `list_assistant_agents_into`
-/// directly, asserts "assistant" is in the listing.
+/// What: Calls `list_assistant_agents_into` directly and asserts the
+/// SUCCESS-path header plus a padded `assistant` row are present — not just
+/// a bare `out.contains("assistant")`, which the empty/failure message
+/// ("No assistant-role agents found...") also happens to contain (code-critic
+/// MEDIUM finding).
 /// Test: Self-explanatory.
 #[test]
 fn list_assistant_agents_into_surfaces_directory_package() {
-    let _guard = AGENT_COMMAND_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // SAFETY: guarded by AGENT_COMMAND_ENV_LOCK.
-    unsafe {
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-    }
     let repl = TrustyAgentsRepl::new(None).unwrap();
     let mut out = String::new();
     repl.list_assistant_agents_into(&mut out);
 
     assert!(
-        out.contains("assistant"),
-        "directory-package assistant agent should be listed: {out:?}"
+        out.contains("Available assistant agents:"),
+        "expected the success-path header: {out:?}"
+    );
+    assert!(
+        !out.contains("No assistant-role agents found"),
+        "must not hit the empty-listing path: {out:?}"
+    );
+    let has_assistant_row = out
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some("assistant"));
+    assert!(
+        has_assistant_row,
+        "expected a padded 'assistant' row in the listing: {out:?}"
     );
 }
 

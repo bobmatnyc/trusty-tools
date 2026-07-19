@@ -10,33 +10,66 @@
 //! unit tests in `mod.rs` (which remain there via `use super::*`).
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use super::{TrustyAgentsRepl, discover_agent_names};
 
 impl TrustyAgentsRepl {
+    /// Candidate agent directories for this REPL instance, primary first
+    /// (#3303 code-critic HIGH-1 fix).
+    ///
+    /// Why: `AgentConfig::by_name`'s default dirs (`agents_dir_candidates()`
+    /// in loader.rs) are derived from `TAGENT_CONFIG_DIR`/literal process CWD
+    /// — process-global state that ignores how THIS REPL instance actually
+    /// resolved its `agents_dir` (`repl/mod.rs::new`, which walks up via
+    /// `detect_self_project`/`current_exe` so a standalone launch outside the
+    /// project root still finds the bundled agents). Anchoring resolution to
+    /// `self.agents_dir` instead means `/agent <name>` always finds exactly
+    /// what `list_assistant_agents_into` just listed — the previous version
+    /// called `AgentConfig::by_name` directly, which could disagree with
+    /// `self.agents_dir` in that standalone-launch case (list finds it,
+    /// activate can't).
+    /// What: `[self.agents_dir, $HOME/.trusty-agents/agents]`, deduped when
+    /// they coincide — the same two-tier shape `agents_dir_candidates()`
+    /// uses, just anchored to the REPL's own resolved dir instead of CWD.
+    /// Test: `handle_agent_command_resolves_when_standalone_cwd_lacks_agents_dir`.
+    fn candidate_agent_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.agents_dir.clone()];
+        if let Some(home) = dirs::home_dir() {
+            let home_dir = home.join(".trusty-agents").join("agents");
+            if home_dir != self.agents_dir {
+                dirs.push(home_dir);
+            }
+        }
+        dirs
+    }
+
     /// Resolve and activate a persona (or list assistants), writing output to `out`.
     ///
     /// Why (#3303): the old hand-rolled resolver only checked
     /// `agents_dir.join("{name}.toml")` (with a `$HOME` flat-file fallback),
     /// so it never found directory-package agents (`<name>/agent.toml`, #482)
     /// — `/agent assistant` failed even though the bundled `assistant` agent
-    /// is a valid, dispatch-ready package. `AgentConfig::by_name` is the same
-    /// sync, directory-package + `extends` aware loader the one-shot
-    /// `--direct` path already uses (loader.rs `by_name_unresolved_src`),
-    /// and its `agents_dir_candidates()` already covers the project dir plus
-    /// the `$HOME/.trusty-agents/agents` fallback tier the old code hand-rolled.
-    /// What: Delegates name resolution entirely to `AgentConfig::by_name`
+    /// is a valid, dispatch-ready package. `AgentConfig::by_name_in` is the
+    /// same directory-package + `extends` aware loader the one-shot
+    /// `--direct` path's `AgentConfig::by_name` uses, but scoped to THIS
+    /// REPL's resolved `candidate_agent_dirs()` rather than process-global
+    /// CWD/env state, so activation always agrees with what `/agent` (no
+    /// arg) just listed.
+    /// What: Delegates name resolution entirely to `AgentConfig::by_name_in`
     /// (still sync — safe to call from this sync slash-command handler inside
     /// an async runtime).
     /// Test: `handle_agent_command_resolves_directory_package_fixture`,
-    /// `handle_agent_command_activates_bundled_assistant_package`.
+    /// `handle_agent_command_activates_bundled_assistant_package`,
+    /// `handle_agent_command_resolves_when_standalone_cwd_lacks_agents_dir`.
     pub(crate) fn handle_agent_command_into(&mut self, arg: &str, out: &mut String) {
         if arg.is_empty() {
             self.list_assistant_agents_into(out);
             return;
         }
 
-        match crate::agents::AgentConfig::by_name(arg) {
+        let dirs = self.candidate_agent_dirs();
+        match crate::agents::AgentConfig::by_name_in(&dirs, arg) {
             Ok(cfg) => self.activate_persona_into(arg, &cfg, out),
             Err(e) => {
                 let _ = writeln!(out, "agent '{}' not found: {e:#}", arg);
@@ -137,19 +170,28 @@ impl TrustyAgentsRepl {
     /// Why (#3303): the old scan was non-recursive `*.toml`-only, so a
     /// directory-package agent (`<name>/agent.toml`, #482) — e.g. the
     /// bundled `assistant` — never appeared, even though `/agent assistant`
-    /// can dispatch it once resolution goes through `AgentConfig::by_name`.
-    /// What: For each entry in `agents_dir`, resolves a candidate stem from
-    /// either a flat `<name>.toml` file or a `<name>/agent.toml` directory
-    /// package, then loads it via `AgentConfig::by_name` (so package +
-    /// `extends` resolution matches what `/agent <name>` will actually
-    /// activate) and keeps it when `role == "assistant"`. A `BTreeMap` both
-    /// sorts by name and dedupes the rare case where a name exists as both
-    /// a flat file and a package (e.g. bundled `cto-assistant`).
+    /// can dispatch it once resolution goes through `AgentConfig::by_name_in`.
+    /// Scanning (and resolving) the SAME `candidate_agent_dirs()` set that
+    /// `handle_agent_command_into` activates through keeps listing and
+    /// activation consistent — a name this lists is guaranteed to resolve.
+    /// What: For each entry in each candidate dir, resolves a candidate stem
+    /// from either a flat `<name>.toml` file or a `<name>/agent.toml`
+    /// directory package, then loads it via `AgentConfig::by_name_in(&dirs,
+    /// stem)` (so package + `extends` resolution matches what `/agent
+    /// <name>` will actually activate) and keeps it when `role ==
+    /// "assistant"`. A `BTreeMap` both sorts by name and dedupes the rare
+    /// case where a name exists as both a flat file and a package (e.g.
+    /// bundled `cto-assistant`) or shows up in more than one candidate dir
+    /// (primary dir wins, matching loader tier precedence).
     /// Test: `list_assistant_agents_into_surfaces_directory_package`.
     pub(crate) fn list_assistant_agents_into(&self, out: &mut String) {
+        let dirs = self.candidate_agent_dirs();
         let mut found: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
-        if let Ok(entries) = std::fs::read_dir(&self.agents_dir) {
+        for dir in &dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 let stem = if path.is_dir() {
@@ -166,7 +208,7 @@ impl TrustyAgentsRepl {
                 if found.contains_key(stem) {
                     continue;
                 }
-                if let Ok(cfg) = crate::agents::AgentConfig::by_name(stem)
+                if let Ok(cfg) = crate::agents::AgentConfig::by_name_in(&dirs, stem)
                     && cfg.agent.role == "assistant"
                 {
                     found.insert(stem.to_string(), cfg.agent.description.clone());
