@@ -24,13 +24,22 @@
 //! fakes every tmux operation (create/send/capture/list), so no real tmux is
 //! ever touched.
 //! Test: this file IS the test module (`#[path = "tm_tests.rs"] mod tests;`
-//! in `tm.rs`).
+//! in `tm.rs`). The unknown-id/not-found and create->list->status->send_input
+//! assertions run through [`ConnectorTestKit`] (shared with
+//! `crates/trusty-code/tests/connector_e2e.rs`) rather than being hand-rolled
+//! here — only `attach`'s tm-specific `ShellCommand` shape and `delegate`'s
+//! tm-specific gate+record semantics (which the kit deliberately does not
+//! model — see [`ConnectorTestKit::assert_delegate_not_supported`]'s docs,
+//! written for tcode's `NotSupported` contract, not tm's actually-supported
+//! one) stay hand-rolled.
 
 use std::future::IntoFuture;
 use std::process::Command;
 
 use tempfile::TempDir;
-use trusty_agents_common::connectors::{AgentSpec, BackendParams, CreateSessionReq};
+use trusty_agents_common::connectors::{
+    AgentSpec, BackendParams, ConnectorTestKit, CreateSessionReq,
+};
 
 use super::*;
 
@@ -148,26 +157,28 @@ async fn list_sessions_empty_fleet_returns_empty_vec() {
     assert!(sessions.is_empty(), "fresh daemon must have no sessions");
 }
 
+/// Shared conformance assertion — see [`ConnectorTestKit::assert_status_not_found_for_unknown_id`].
 #[tokio::test]
 async fn session_status_unknown_id_is_not_found() {
     let url = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
-    let err = connector
-        .session_status("00000000-0000-0000-0000-000000000000")
-        .await
-        .unwrap_err();
-    assert!(err.is_not_found(), "expected NotFound, got {err:?}");
+    ConnectorTestKit::assert_status_not_found_for_unknown_id(
+        &connector,
+        "00000000-0000-0000-0000-000000000000",
+    )
+    .await;
 }
 
+/// Shared conformance assertion — see [`ConnectorTestKit::assert_send_not_found_for_unknown_id`].
 #[tokio::test]
 async fn send_input_unknown_id_is_not_found() {
     let url = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
-    let err = connector
-        .send_input("00000000-0000-0000-0000-000000000000", "hi")
-        .await
-        .unwrap_err();
-    assert!(err.is_not_found(), "expected NotFound, got {err:?}");
+    ConnectorTestKit::assert_send_not_found_for_unknown_id(
+        &connector,
+        "00000000-0000-0000-0000-000000000000",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -204,7 +215,8 @@ async fn delegate_unknown_session_is_backend_error() {
     );
 }
 
-/// End-to-end: create -> list -> status -> send_input -> attach -> delegate,
+/// End-to-end: create -> list -> status -> send_input (via
+/// [`ConnectorTestKit::assert_basic_lifecycle`]) -> attach -> delegate,
 /// against a REAL daemon spawn (real git clone via `RealGitBackend`, faked
 /// tmux via `FakeNoopTmuxDriver`).
 #[tokio::test]
@@ -224,29 +236,12 @@ async fn create_session_full_lifecycle() {
             ephemeral: true,
         },
     };
-    let info = connector
-        .create_session(req)
-        .await
-        .expect("create_session must succeed against a real local git repo");
-    assert!(!info.id.is_empty(), "created session must have an id");
-    assert_eq!(info.task.as_deref(), Some("list files"));
-
-    let listed = connector.list_sessions().await.expect("list_sessions");
-    assert!(
-        listed.iter().any(|s| s.id == info.id),
-        "list_sessions must include the just-created session"
+    let info = ConnectorTestKit::assert_basic_lifecycle(&connector, req, "echo hello").await;
+    assert_eq!(
+        info.task.as_deref(),
+        Some("list files"),
+        "the kit's lifecycle assertion doesn't check task content — do it here"
     );
-
-    let status = connector
-        .session_status(&info.id)
-        .await
-        .expect("session_status");
-    assert_eq!(status.id, info.id);
-
-    connector
-        .send_input(&info.id, "echo hello")
-        .await
-        .expect("send_input must succeed for a live session");
 
     let attach = connector.attach(&info.id).await.expect("attach");
     match attach {

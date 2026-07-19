@@ -12,16 +12,21 @@
 //! What: create -> list -> status -> send_input -> attach against a live
 //! daemon, plus the unknown-id error-mapping and the two backend-parameter/
 //! `delegate` checks that need no daemon at all (both are rejected/refused
-//! before any HTTP call is made).
+//! before any HTTP call is made). The unknown-id/not-found, `delegate`-
+//! unsupported, and create->list->status->send_input assertions run through
+//! [`ConnectorTestKit`] (shared with
+//! `crates/trusty-mpm/src/connectors/tm_tests.rs`) rather than being
+//! hand-rolled — only `attach`'s tcode-specific `EventStream` shape (which
+//! the kit deliberately does not model, since tm's `attach` returns a
+//! different shape entirely) stays hand-rolled here.
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared with every other `*_e2e.rs` file in this crate.
 
 mod support;
 
-use std::path::PathBuf;
-
 use trusty_agents_common::connectors::{
-    AgentSpec, AttachHandle, BackendParams, ConnectorError, CreateSessionReq, WorkstreamConnector,
+    AgentSpec, AttachHandle, BackendParams, ConnectorError, ConnectorTestKit, CreateSessionReq,
+    WorkstreamConnector,
 };
 use trusty_code::session::TcodeConnector;
 
@@ -49,7 +54,8 @@ async fn create_session_wrong_backend_params_is_invalid_request() {
 }
 
 /// `delegate` must always be `NotSupported`, with no daemon call at all —
-/// works even against an address nothing is listening on.
+/// works even against an address nothing is listening on. Shared conformance
+/// assertion — see [`ConnectorTestKit::assert_delegate_not_supported`].
 #[tokio::test]
 async fn delegate_is_not_supported() {
     let connector = TcodeConnector::with_daemon_url("http://127.0.0.1:0");
@@ -58,14 +64,7 @@ async fn delegate_is_not_supported() {
         task: "find the bug".into(),
         tier: None,
     };
-    let err = connector
-        .delegate("does-not-matter", &spec)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, ConnectorError::NotSupported(_)),
-        "expected NotSupported, got {err:?}"
-    );
+    ConnectorTestKit::assert_delegate_not_supported(&connector, "does-not-matter", &spec).await;
 }
 
 #[tokio::test]
@@ -76,26 +75,20 @@ async fn list_sessions_empty_fleet_returns_empty_vec() {
     assert!(sessions.is_empty(), "fresh daemon must have no sessions");
 }
 
+/// Shared conformance assertion — see [`ConnectorTestKit::assert_status_not_found_for_unknown_id`].
 #[tokio::test]
 async fn session_status_unknown_id_is_not_found() {
     let daemon = support::spawn_http_daemon().await;
     let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
-    let err = connector
-        .session_status("does-not-exist")
-        .await
-        .unwrap_err();
-    assert!(err.is_not_found(), "expected NotFound, got {err:?}");
+    ConnectorTestKit::assert_status_not_found_for_unknown_id(&connector, "does-not-exist").await;
 }
 
+/// Shared conformance assertion — see [`ConnectorTestKit::assert_send_not_found_for_unknown_id`].
 #[tokio::test]
 async fn send_input_unknown_id_is_not_found() {
     let daemon = support::spawn_http_daemon().await;
     let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
-    let err = connector
-        .send_input("does-not-exist", "hi")
-        .await
-        .unwrap_err();
-    assert!(err.is_not_found(), "expected NotFound, got {err:?}");
+    ConnectorTestKit::assert_send_not_found_for_unknown_id(&connector, "does-not-exist").await;
 }
 
 #[tokio::test]
@@ -106,45 +99,35 @@ async fn attach_unknown_id_is_not_found() {
     assert!(err.is_not_found(), "expected NotFound, got {err:?}");
 }
 
-/// End-to-end: create -> list -> status -> send_input -> attach, against a
-/// REAL `tcode serve --http` daemon.
+/// End-to-end: create -> list -> status -> send_input (via
+/// [`ConnectorTestKit::assert_basic_lifecycle`]) -> attach, against a REAL
+/// `tcode serve --http` daemon.
 #[tokio::test]
 async fn create_session_full_lifecycle() {
     let daemon = support::spawn_http_daemon().await;
     let connector = TcodeConnector::with_daemon_url(daemon.base_url.clone());
-    let project: PathBuf = std::env::temp_dir();
+    // A dedicated tempdir (not the shared OS temp root) held alive for the
+    // whole test, mirroring `tm_tests.rs::local_bare_repo`'s TempDir-guard
+    // pattern — `session.create`'s `ProjectBinding::resolve` just needs SOME
+    // real, exclusively-ours directory to bind to.
+    let project_dir = tempfile::tempdir().expect("project tempdir");
 
     let req = CreateSessionReq {
         task: "list files".into(),
         name_hint: None,
         agent: None,
-        backend: BackendParams::Tcode { project },
+        backend: BackendParams::Tcode {
+            project: project_dir.path().to_path_buf(),
+        },
     };
-    let info = connector
-        .create_session(req)
-        .await
-        .expect("create_session must succeed against a real project directory");
-    assert!(!info.id.is_empty(), "created session must have an id");
+    let info =
+        ConnectorTestKit::assert_basic_lifecycle(&connector, req, "hello from the connector").await;
     assert_eq!(info.state, "running", "M1 sessions go straight to running");
-    assert_eq!(info.task.as_deref(), Some("list files"));
-
-    let listed = connector.list_sessions().await.expect("list_sessions");
-    assert!(
-        listed.iter().any(|s| s.id == info.id),
-        "list_sessions must include the just-created session"
+    assert_eq!(
+        info.task.as_deref(),
+        Some("list files"),
+        "the kit's lifecycle assertion doesn't check task content — do it here"
     );
-
-    let status = connector
-        .session_status(&info.id)
-        .await
-        .expect("session_status");
-    assert_eq!(status.id, info.id);
-    assert_eq!(status.state, "running");
-
-    connector
-        .send_input(&info.id, "hello from the connector")
-        .await
-        .expect("send_input must succeed for a live session");
 
     let attach = connector.attach(&info.id).await.expect("attach");
     match attach {

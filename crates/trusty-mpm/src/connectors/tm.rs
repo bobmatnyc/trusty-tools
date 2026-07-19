@@ -375,9 +375,17 @@ impl WorkstreamConnector for TmConnector {
                 ConnectorError::Transport("agent_delegate result missing delegation_id".to_string())
             })?
             .to_string();
-        let note = parsed
-            .get("circuit")
-            .map(|v| format!("circuit breaker state: {v}"));
+        // `v.as_str()` unwraps the JSON string cleanly (the daemon's `circuit`
+        // field is a plain string, e.g. "closed"); `to_string()` is only a
+        // fallback for a non-string value, avoiding embedded `"quotes"` from
+        // `Value`'s `Display` impl in the common case.
+        let note = parsed.get("circuit").map(|v| {
+            let rendered = v
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string());
+            format!("circuit breaker state: {rendered}")
+        });
         Ok(DelegateHandle { delegate_id, note })
     }
 }
