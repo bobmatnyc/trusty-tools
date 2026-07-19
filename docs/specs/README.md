@@ -65,6 +65,7 @@ normative grammar — this note does not restate it.
 | DOC-46 | `SPEC-ADR-01~draft` | [Architecture Decision Records (ADR) as First-Class Documentation Artifact](./DOC-46-adr-standard.md) | documentation standard — architecture governance / consistency vetting (cross-crate) |
 | DOC-47 | `SPEC-EVTING-01~draft` … `-04~draft` | [External Event Ingestion — Webhooks & Connector Push](./DOC-47-external-event-ingestion.md) | trusty-agents-common — event seam; trusty-mpm — webhook ingress + goal store; trusty-console — Tailscale Funnel binding |
 | DOC-48 | `SPEC-WS-01~draft` … `-09~draft` | [tcode Workstreams: Durable Named Work Aggregation](./DOC-48-tcode-workstreams.md) | trusty-code — activation-lock exclusivity model, multi-client attach transport (shared with trusty-agents #3052), RPC/REST/CLI surfaces |
+| DOC-49 | `SPEC-SWM-01~draft` … `-10~draft` | [Tranche 2: Shared PM Working-Model Layer & Harness-Identity Correction](./DOC-49-tranche-2-shared-working-model.md) | trusty-agents-common — shared working-model layer; trusty-code — harness identity / provider layer; trusty-mpm — circuit/trust migration source; trusty-agents — CTO-assistant migration target |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -78,15 +79,18 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-49`** (re-scan of the whole `docs/` tree, 2026-07-19): the
-> highest cataloged number is now **DOC-48** ([tcode Workstreams](./DOC-48-tcode-workstreams.md),
-> the entry above), which claimed the next free number after **DOC-47**
-> ([External Event Ingestion](./DOC-47-external-event-ingestion.md)) per the
+> **Next free `DOC-N` = `DOC-50`** (re-scan of the whole `docs/` tree, 2026-07-19): the
+> highest cataloged number is now **DOC-49** ([Tranche 2: Shared PM Working-Model
+> Layer & Harness-Identity Correction](./DOC-49-tranche-2-shared-working-model.md),
+> the entry above), which claimed the next free number after **DOC-48**
+> ([tcode Workstreams](./DOC-48-tcode-workstreams.md)) per the
 > scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
-> note is a *hint, not authority*; the scan is authoritative). DOC-44/45 are claimed by the
-> unmerged `spec-twin-lead-architecture` branch ([DOC-44 Engineering Lead Twin Orchestration](https://github.com/bobmatnyc/trusty-tools/tree/spec-twin-lead-architecture));
+> note is a *hint, not authority*; the scan is authoritative). DOC-43 is claimed by the
+> unmerged `spec-requirements` branch; DOC-44/45 are claimed by the
+> unmerged `spec-twin-lead-architecture` / `spec-remote-mcp-credentials` branches
+> ([DOC-44 Engineering Lead Twin Orchestration](https://github.com/bobmatnyc/trusty-tools/tree/spec-twin-lead-architecture));
 > DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
-> #1999 — still a catalog gap), DOC-35/36/38/39/40/41/46/47/48 are cataloged, and **DOC-37** is
+> #1999 — still a catalog gap), DOC-35/36/38/39/40/41/46/47/48/49 are cataloged, and **DOC-37** is
 > self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
 > (`SPEC-SEARCHREPO-01~draft`…, uncataloged). What was open PR #2792 (Eve-style agent framework
 > for trusty-agents) previously also self-labeled `DOC-37` for this unrelated spec — that

@@ -1,14 +1,16 @@
 # trusty-code
 
-**Harness role:** The **Coding Harness** — per-project, Claude-Code-compatible
-MPM orchestration. See
+**Harness role:** The **Coding Harness** — per-project MPM orchestration that
+reads the same `.claude/`-shaped config format as Claude Code. See
 [docs/architecture/harnesses.md](../../docs/architecture/harnesses.md) for the
 full three-harness architecture and delegation graph.
 
 Why: Each project needs a harness that is already wired to its own `.claude/`
 configuration — agents, skills, MCP connections, `CLAUDE.md`, and permissions.
-`trusty-code` fills that role. It is the Claude-Code-native orchestration entry
-point that runs the PM main-loop, enforces the mandatory workflow (research →
+`trusty-code` fills that role. It is an original orchestration entry point,
+provider-agnostic (not bound to Anthropic's models or the claude-code
+binary), that reads the same `.claude/`-shaped config format and runs the
+PM main-loop, enforces the mandatory workflow (research →
 plan → implement → verify), and delegates authority to typed coding sub-agents
 according to MPM protocols.
 
@@ -98,7 +100,7 @@ tracked in epic #587.
 
 | Binary | Description |
 |--------|-------------|
-| `tcode` | Per-project Claude-Code-compatible MPM orchestration harness |
+| `tcode` | Per-project MPM orchestration harness reading `.claude/`-shaped config |
 
 ## Subcommands (Phase 0 surface — stubs)
 
@@ -118,8 +120,10 @@ cargo test -p trusty-code
 
 ## Design Constraints
 
-- **Claude-Code compatible** — reads `.claude/` config, agents, skills, MCP
-  descriptors, `CLAUDE.md`, and permission grants exactly as Claude Code does.
+- **Reads `.claude/`-shaped config format** — agents, skills, MCP
+  descriptors, `CLAUDE.md`, and permission grants, exactly as Claude Code
+  lays them out on disk. Not bound to Anthropic's models or the claude-code
+  binary — see [DOC-49 §2](../../docs/specs/DOC-49-tranche-2-shared-working-model.md).
 - **Per-agent model routing** — each agent may specify its own model
   (AWS Bedrock or OpenRouter).
 - **Single-instance per project** — one `tcode serve` process per `.claude/`

@@ -54,9 +54,11 @@ procedures (those live in the crate-level README and `docs/<crate>/`).
 **Crate:** `crates/trusty-code/` — package `-p trusty-code`, binary `tcode`
 **Analogy:** Claude Code — a per-project coding orchestration harness.
 
-**Purpose:** Provides the per-project Claude-Code-compatible MPM orchestration
-entry point. One `tcode serve` process runs per project root (identified by a
-`.claude/` directory). It runs the PM main loop, enforces the mandatory
+**Purpose:** Provides the per-project MPM orchestration entry point, reading
+the same `.claude/`-shaped configuration format as Claude Code (not bound to
+Anthropic's models or the claude-code binary — see
+[DOC-49 §2](../specs/DOC-49-tranche-2-shared-working-model.md)). One `tcode serve`
+process runs per project root (identified by a `.claude/` directory). It runs the PM main loop, enforces the mandatory
 workflow (research → plan → implement → verify), and delegates authority to
 typed coding sub-agents (engineer, QA, ticketing, security) via MCP and/or
 subprocess IPC.

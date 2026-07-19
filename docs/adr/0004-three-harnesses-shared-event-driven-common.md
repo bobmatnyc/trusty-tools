@@ -12,7 +12,9 @@ orchestration crates that serve fundamentally different principals and
 have different responsibilities:
 
 1. **`trusty-code`** — per-project coding orchestration (`tcode` binary), the
-   Claude-Code-compatible harness. Currently a Phase 0 scaffold
+   harness that reads the same `.claude/`-shaped config format as Claude
+   Code (not bound to Anthropic's models or the claude-code binary — see
+   [DOC-49 §2](../specs/DOC-49-tranche-2-shared-working-model.md)). Currently a Phase 0 scaffold
    (`crates/trusty-code/`); full extraction from `open-mpm` is tracked in
    epic #587.
 

@@ -22,7 +22,7 @@ While the **parity-spec** (`docs/trusty-code/parity-spec.md`) remains normative 
 
 - A **long-running, per-project daemon** (`tcode serve`) that orchestrates code-generation, edit, test, and verification cycles via the PM main loop and typed sub-agents.
 - A **JSON-RPC/STDIO + HTTP API gateway** surface (like `trusty-memory` and `trusty-search`), with a **thin CLI client** that attaches to live running sessions.
-- A **Claude-Code-compatible configuration reader** for agents, skills, MCP servers, CLAUDE.md, permissions, and settings.
+- A **configuration reader for the `.claude/`-shaped format** — agents, skills, MCP servers, CLAUDE.md, permissions, and settings — the same on-disk layout Claude Code uses, read independently of any Anthropic runtime.
 - A **token-efficient coding orchestrator** with repo-map, edit-format selection, progressive-disclosure skills, non-destructive compaction, and structured output.
 - A **foundation for later UI layers**: TUI, TELGUI (Telegram UI), REST — all thin clients over the same JSON-RPC surface.
 
@@ -33,6 +33,31 @@ While the **parity-spec** (`docs/trusty-code/parity-spec.md`) remains normative 
 - NOT a knowledge-worker assistant (that is trusty-agents).
 - NOT a one-shot CLI tool (the `run-task` CLI is one of many entry points; the daemon is primary).
 - NOT a weak benchmarking utility — it is a production daily-driver with power-user token-optimization features.
+
+### Harness Identity (owner-decided, canonized in DOC-49)
+
+Three identity decisions, binding for all future work on this crate (full
+rationale and the corrective-wording sweep across this repo's docs:
+[DOC-49 §1–§2](../specs/DOC-49-tranche-2-shared-working-model.md)):
+
+1. **trusty-code shares trusty-mpm's PM + instructions + subagents working
+   model.** The two harnesses' delegation routing, workflow phases, circuit
+   breaking, and trust gating are converging onto one shared implementation
+   in `trusty-agents-common`, not two independently maintained ones (DOC-49
+   §3–§6).
+2. **trusty-code is NOT bound to Anthropic's models or the claude-code
+   harness.** It reads the same `.claude/`-shaped **configuration format**
+   Claude Code uses — that is a file-format compatibility, not a product or
+   model-provider dependency. tcode's own `Provider` trait (§4.6) routes to
+   OpenRouter today and Bedrock once implemented; nothing in tcode requires
+   the `claude` binary or an Anthropic API key to run.
+3. **The goal of trusty-code is to build the harness around the mpm working
+   model and workflow** — not to re-derive an independent PM loop that
+   happens to look similar. Where this document's older language ("Claude-
+   Code-native," "Claude-Code-compatible…harness") described tcode as bound
+   to Claude Code as a product, that language was inaccurate and has been
+   corrected repo-wide per DOC-49 §2.2; only "reads the same `.claude/`-shaped
+   config format" is retained, since that claim is true and intentional.
 
 ---
 
