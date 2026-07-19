@@ -153,6 +153,22 @@ pub mod agents;
 ///      submodule in place.
 pub mod skills;
 
+/// `WorkstreamConnector` trait + value types: the DOC-44 "engineering lead /
+/// virtual twin" architecture's Layer 1 tool-control surface (issue #3007,
+/// twin Phase 1).
+///
+/// Why: DOC-44 requires a unified, tool-agnostic session-control trait both
+/// `trusty-mpm` and `trusty-code` implement, living one level below both so
+/// neither harness crate has to depend on the other. See the module's own
+/// docs for the full DOC-44/DOC-42 naming-correction context.
+/// What: re-exports `WorkstreamConnector`, its request/response types, the
+/// `ConnectorError` failure enum, and `ConnectorTestKit`'s shared
+/// conformance assertions. The concrete tm/tcode implementations live in
+/// their owning crates, not here.
+/// Test: `cargo test -p trusty-agents-common connectors::` exercises every
+/// submodule in place.
+pub mod connectors;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
