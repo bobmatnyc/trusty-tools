@@ -46,7 +46,11 @@
 //! inherited-stdio path (`standalone::run::build_launch_command` /
 //! `build_login_command`), AND the daemon's default actor-managed session
 //! backend ([`crate::control::backend::stream_json::StreamJsonBackend`]) —
-//! every known `claude`-spawning call site in the crate now disclaims.
+//! every known `claude`-spawning call site in the crate now disclaims. As of
+//! #3126 [`disclaimed_spawn_detached`] adds the TUI health screen's `[S]` key
+//! (`tui::event_loop::health_start`, a detached `cargo run` child never
+//! waited on) — the last undisclaimed spawn site found by the #2997 part 5
+//! sweep.
 //! Test: `disclaimed_output_captures_stdout`,
 //! `disclaimed_output_captures_stderr_and_nonzero_exit`,
 //! `disclaimed_output_saturates_stdout_and_stderr_without_deadlock`,
@@ -58,7 +62,11 @@
 //! in this module's `tests`); `spawn_piped_disclaimed_writes_and_reads_via_cat`
 //! and its siblings in `macos::piped` (piped path, macOS-only);
 //! `disclaimed_piped_spawn_native_path_round_trips` (piped path, any OS —
-//! exercises the exact code path Linux always takes).
+//! exercises the exact code path Linux always takes);
+//! `disclaimed_spawn_detached_returns_ok_for_true`,
+//! `disclaimed_spawn_detached_reports_spawn_error_for_missing_binary`,
+//! `disclaimed_spawn_detached_disable_env_forces_plain_path` (macOS-only,
+//! this module's `tests`).
 
 /// Environment variable that, when set to any value, forces
 /// [`disclaimed_output`]/[`disclaimed_status`]/[`disclaimed_piped_spawn`]
@@ -134,6 +142,46 @@ pub fn disclaimed_status(
         }
     }
     cmd.status()
+}
+
+/// Spawn `program` with `args` detached from the current process — a
+/// fire-and-forget spawn, matching `Command::spawn()`'s semantics of
+/// returning immediately without waiting for the child — and, on macOS,
+/// disclaim TCC responsibility exactly like [`disclaimed_output`]/
+/// [`disclaimed_status`].
+///
+/// Why: the TUI health screen's `[S]` key (`tui::event_loop::health_start`)
+/// launches a detached `cargo run -p trusty-search -- start` / `cargo run -p
+/// trusty-memory` child and never waits on it, so it fit none of the other
+/// three disclaim shapes (capture-to-completion, wait-for-status, or
+/// long-lived piped) — the last undisclaimed `Command::new(..).spawn()` call
+/// site in the crate (issue #2997 part 5, #3126).
+/// What: on macOS, builds a `Command` for `program`/`args` with stdio left at
+/// the default (inherited from the caller, matching the pre-existing
+/// `.spawn()` call this replaces) and spawns it via `posix_spawnp` with the
+/// disclaim attribute set, discarding the pid without waiting on it — the
+/// child is reaped later either by an unrelated `waitpid` or, once `tm`
+/// itself exits, by init/launchd, exactly as the un-awaited
+/// `std::process::Child` this replaces already behaved (its caller dropped
+/// the `Child` without calling `wait()`). On non-macOS, or with
+/// [`DISABLE_ENV`] set, delegates straight to `Command::spawn()` and drops
+/// the `Child` the same way.
+/// Test: `disclaimed_spawn_detached_returns_ok_for_true`,
+/// `disclaimed_spawn_detached_reports_spawn_error_for_missing_binary`,
+/// `disclaimed_spawn_detached_disable_env_forces_plain_path`.
+pub fn disclaimed_spawn_detached(program: &str, args: &[&str]) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var_os(DISABLE_ENV).is_none() {
+            let mut cmd = std::process::Command::new(program);
+            cmd.args(args);
+            return macos::spawn_detached_disclaimed(&mut cmd);
+        }
+    }
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Trait-object alias for a spawned child's writable stdin, uniform across
@@ -533,6 +581,37 @@ mod tests {
         // the pid (the SAFETY comment in start_kill establishes this is the
         // only code path that could touch a reused pid).
         assert!(spawned.handle.start_kill().is_ok());
+    }
+
+    // --- disclaimed_spawn_detached (issue #3126: TUI health-screen `[S]` cargo spawn) ---
+
+    #[test]
+    #[serial_test::serial]
+    fn disclaimed_spawn_detached_returns_ok_for_true() {
+        // `/usr/bin/true` exits immediately; a detached spawn must report
+        // `Ok(())` without blocking on the child's exit.
+        assert!(disclaimed_spawn_detached("/usr/bin/true", &[]).is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disclaimed_spawn_detached_reports_spawn_error_for_missing_binary() {
+        let err = disclaimed_spawn_detached("/nonexistent/definitely-not-a-real-binary-3126", &[])
+            .expect_err("spawning a missing binary must error, not hang or panic");
+        assert!(matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::Other
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disclaimed_spawn_detached_disable_env_forces_plain_path() {
+        // SAFETY: single-threaded test setup around the env toggle.
+        unsafe { std::env::set_var(DISABLE_ENV, "1") };
+        let result = disclaimed_spawn_detached("/usr/bin/true", &[]);
+        unsafe { std::env::remove_var(DISABLE_ENV) };
+        assert!(result.is_ok());
     }
 }
 

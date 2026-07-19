@@ -1,5 +1,7 @@
 //! Inherited-stdio disclaimed spawn — the macOS implementation behind
-//! [`super::super::disclaimed_status`] (issue #2997, `tm run`/`tm login`).
+//! [`super::super::disclaimed_status`] (issue #2997, `tm run`/`tm login`) AND
+//! [`super::super::disclaimed_spawn_detached`] (issue #3126, the TUI health
+//! screen's detached `cargo run` spawn).
 //!
 //! Why: `standalone::run::build_launch_command`/`build_login_command` (the
 //! `tm run <alias>`/`tm login` interactive drivers) spawn `claude` directly
@@ -7,20 +9,28 @@
 //! the tmux-hosted disclaim in [`super::capture`]/
 //! [`crate::core::tmux::run_tmux_with_bin`] entirely — so this session-launch
 //! path still reproduced the #2819/#2721 TCC mis-attribution storm.
-//! What: [`spawn_status_inherit_disclaimed`] reconstructs argv from
-//! `cmd.get_program()`/`cmd.get_args()`, chdirs to `cmd.get_current_dir()`
-//! when set (via [`super::posix_spawn_file_actions_addchdir_np`]), and
-//! rebuilds envp as the current process environment with `cmd.get_envs()`'s
-//! overrides/removals layered on top — matching what `Command` itself would
-//! hand the child. No stdin/stdout/stderr file actions are added, so the
-//! child inherits the caller's fds directly (`Stdio::inherit()` semantics —
-//! this fn assumes `cmd` was built that way; it does not read back `cmd`'s
-//! stdio config, since `std::process::Command` exposes no accessor for it).
-//! Sets the disclaim attribute when the private SPI resolves (via
-//! [`super::resolve_disclaim_fn`]), spawns via `posix_spawnp`, and reaps the
-//! child via [`super::wait_for`].
-//! Test: `disclaimed_status_*` in `super::super`'s test module (this module
-//! has no tests of its own — see that module's doc for why).
+//! `tui::event_loop::health_start` spawns a detached `cargo run` child with
+//! the same inherited-stdio shape but never waits on it, so it needs the
+//! identical argv/envp/cwd/disclaim setup minus the final reap.
+//! What: [`spawn_pid_inherit_disclaimed`] does the shared setup — reconstructs
+//! argv from `cmd.get_program()`/`cmd.get_args()`, chdirs to
+//! `cmd.get_current_dir()` when set (via
+//! [`super::posix_spawn_file_actions_addchdir_np`]), rebuilds envp as the
+//! current process environment with `cmd.get_envs()`'s overrides/removals
+//! layered on top (matching what `Command` itself would hand the child), sets
+//! the disclaim attribute when the private SPI resolves (via
+//! [`super::resolve_disclaim_fn`]), and spawns via `posix_spawnp`. No
+//! stdin/stdout/stderr file actions are added, so the child inherits the
+//! caller's fds directly (`Stdio::inherit()` semantics — this fn assumes
+//! `cmd` was built that way; it does not read back `cmd`'s stdio config,
+//! since `std::process::Command` exposes no accessor for it).
+//! [`spawn_status_inherit_disclaimed`] reaps the pid via [`super::wait_for`]
+//! before returning; [`spawn_detached_disclaimed`] discards the pid instead,
+//! leaving the child un-reaped exactly like the un-awaited
+//! `std::process::Child` it replaces.
+//! Test: `disclaimed_status_*` and `disclaimed_spawn_detached_*` in
+//! `super::super`'s test module (this module has no tests of its own — see
+//! that module's doc for why).
 
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
@@ -30,13 +40,18 @@ use std::process::{Command, ExitStatus};
 
 use super::{posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn, wait_for};
 
-/// Spawn `cmd` with stdio inherited (fds 0/1/2 left untouched) and TCC
-/// responsibility disclaimed.
+/// Build argv/envp/cwd from `cmd`, disclaim TCC responsibility when the SPI
+/// resolves, and `posix_spawnp` with stdio left untouched (fds 0/1/2 pass
+/// through — `Stdio::inherit()` semantics). Returns the child's pid WITHOUT
+/// waiting on it — callers decide whether to reap immediately
+/// ([`spawn_status_inherit_disclaimed`]) or leave it detached
+/// ([`spawn_detached_disclaimed`]).
 ///
-/// Why: see the module docs.
-/// What: see the module docs.
-/// Test: `super::super::tests::disclaimed_status_*`.
-pub(crate) fn spawn_status_inherit_disclaimed(cmd: &mut Command) -> io::Result<ExitStatus> {
+/// Why/What: see the module docs.
+/// Test: exercised transitively by both public wrappers' callers
+/// (`super::super::tests::disclaimed_status_*` and
+/// `disclaimed_spawn_detached_*`).
+fn spawn_pid_inherit_disclaimed(cmd: &Command) -> io::Result<libc::pid_t> {
     let prog_c = CString::new(cmd.get_program().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "program contains NUL"))?;
 
@@ -147,5 +162,35 @@ pub(crate) fn spawn_status_inherit_disclaimed(cmd: &mut Command) -> io::Result<E
         }
     };
 
+    Ok(pid)
+}
+
+/// Spawn `cmd` with stdio inherited (fds 0/1/2 left untouched), TCC
+/// responsibility disclaimed, and reap it before returning.
+///
+/// Why: see the module docs.
+/// What: see the module docs.
+/// Test: `super::super::tests::disclaimed_status_*`.
+pub(crate) fn spawn_status_inherit_disclaimed(cmd: &mut Command) -> io::Result<ExitStatus> {
+    let pid = spawn_pid_inherit_disclaimed(cmd)?;
     wait_for(pid)
+}
+
+/// Spawn `cmd` with stdio inherited and TCC responsibility disclaimed,
+/// WITHOUT waiting for the child to exit (fire-and-forget) — the macOS
+/// implementation behind [`super::super::disclaimed_spawn_detached`].
+///
+/// Why: issue #3126 — the TUI health screen's `[S]` key spawns a detached
+/// `cargo run` child it never waits on, so it needs the disclaim setup
+/// without the blocking [`wait_for`] that [`spawn_status_inherit_disclaimed`]
+/// performs.
+/// What: identical setup to [`spawn_status_inherit_disclaimed`] (argv/envp/
+/// cwd/disclaim via [`spawn_pid_inherit_disclaimed`]) but discards the pid
+/// after a successful `posix_spawnp` instead of reaping it — matching the
+/// un-awaited `std::process::Child` this replaces, whose caller already
+/// dropped it without calling `wait()`.
+/// Test: `super::super::tests::disclaimed_spawn_detached_*`.
+pub(crate) fn spawn_detached_disclaimed(cmd: &mut Command) -> io::Result<()> {
+    spawn_pid_inherit_disclaimed(cmd)?;
+    Ok(())
 }

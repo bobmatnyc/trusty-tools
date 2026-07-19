@@ -1,8 +1,8 @@
 //! macOS-only spawn primitives shared by [`super::disclaimed_output`] (the
 //! capture-to-completion shape, [`capture`]), [`super::disclaimed_status`]
-//! (the inherited-stdio shape, [`status`]), and
-//! [`super::disclaimed_piped_spawn`] (the long-lived async piped shape,
-//! [`piped`]).
+//! and [`super::disclaimed_spawn_detached`] (the inherited-stdio shapes,
+//! [`status`]), and [`super::disclaimed_piped_spawn`] (the long-lived async
+//! piped shape, [`piped`]).
 //!
 //! Why: all three spawn shapes need the SAME low-level building blocks —
 //! resolving the private disclaim SPI, reaping a pid, and (for two of the
@@ -26,7 +26,7 @@ mod status;
 
 pub(crate) use capture::spawn_capture_disclaimed;
 pub(crate) use piped::spawn_piped_disclaimed;
-pub(crate) use status::spawn_status_inherit_disclaimed;
+pub(crate) use status::{spawn_detached_disclaimed, spawn_status_inherit_disclaimed};
 
 use std::io;
 use std::os::unix::process::ExitStatusExt;
