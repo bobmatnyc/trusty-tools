@@ -1,0 +1,377 @@
+//! Shared same-origin (CSRF) guard for destructive daemon write routes.
+//!
+//! Lifted verbatim (semantics-preserving) from `trusty-console`'s
+//! `routes::origin_guard` — landed router-wide in #3280, `route_layer`→`.layer()`
+//! fix from #3268, bind-aware since #3269 — into `trusty-common` so every
+//! trusty-* daemon can consume ONE implementation instead of each rolling its
+//! own (architecture review tranche 1, #3304).
+//!
+//! Why: the trusty-* daemons serve their HTTP APIs behind
+//! [`CorsLayer::permissive()`](super::with_standard_middleware) (CORS is
+//! intentionally open so local SPAs, the console proxy, tailnet clients, and
+//! tooling can read state). That is fine for the GET/read surface, but the
+//! state-changing write routes — daemon shutdown, index/palace/drawer deletion,
+//! session spawn/stop, the full JSON-RPC (`/rpc`) tool surface — are
+//! DESTRUCTIVE. A permissive CORS policy plus no auth means any web page the
+//! operator visits could fire a cross-origin `fetch` (a classic CSRF vector)
+//! and reach those endpoints. These daemons are loopback/tailnet operator
+//! tools, so the proportionate, minimal defence (not full auth) is a
+//! same-origin check: a browser always sends an `Origin` header on cross-origin
+//! state-changing requests, so we reject a write whose `Origin` is present and
+//! is NOT one of the trusted self-origins. Requests with no `Origin` (curl, a
+//! daemon's own server-side calls, the console reverse proxy, native MCP stdio
+//! bridges) are allowed — they are not the CSRF threat model.
+//!
+//! The guard is meant to be applied **router-wide** via `Router::layer` (see
+//! [`super::with_guarded_middleware`]), never `route_layer` — the latter only
+//! covers routes registered before it in the same chain (the root cause of
+//! #3268: routes declared after a `route_layer` call go unguarded). A single
+//! router-wide `.layer()` covers every route, including routes merged in later.
+//!
+//! Trusted self-origins are not limited to loopback: when a daemon binds on a
+//! non-loopback address (e.g. a Tailscale CGNAT `100.64.0.0/10` address, #3269),
+//! the server's own actually-resolved bind addresses are passed in as an
+//! additional allowlist (see [`SelfOrigins`]) so the daemon's own write UI,
+//! served from that address, is not 403'd. This does NOT open the guard to
+//! arbitrary non-loopback origins — only the exact addresses the server itself
+//! is listening on.
+//!
+//! What: [`guard_write_origin`] is an axum middleware: it takes a [`SelfOrigins`]
+//! allowlist via `State` and inspects the `Origin` header; absent → pass
+//! through; present and matching loopback OR a trusted self-origin → pass
+//! through; otherwise → `403`. [`origin_is_loopback`] classifies loopback hosts;
+//! [`origin_matches_self`] additionally checks the bind-derived allowlist.
+//! Test: `origin_is_loopback_*` / `origin_matches_self_*` unit tests below
+//! classify hosts; the middleware itself is exercised end-to-end by each
+//! consuming crate's integration tests (trusty-console `server/tests.rs`, plus
+//! the per-daemon regression tests added in #3304).
+
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
+use std::sync::Arc;
+
+use axum::extract::{Request, State};
+use axum::http::{StatusCode, header::ORIGIN};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
+/// The set of non-loopback addresses a daemon itself is bound to.
+///
+/// Why: #3269 — the origin guard must trust the daemon's own served origin even
+/// when it is not loopback (Tailscale bind mode), without opening the door to
+/// arbitrary remote origins. Wrapping the bind-derived addresses in a dedicated
+/// `Arc`-backed type keeps the allowlist cheap to clone into the middleware
+/// closure and keeps its provenance explicit (always derived from resolved bind
+/// addresses, never user input).
+/// What: An `Arc<HashSet<SocketAddr>>` newtype with `Default` (empty — the
+/// loopback-only behaviour used by every loopback-bound daemon and `Local` bind
+/// mode) and `From<&[SocketAddr]>` / `FromIterator` constructors.
+/// Test: `origin_matches_self_*` below; consuming crates' guard integration
+/// tests.
+#[derive(Debug, Clone, Default)]
+pub struct SelfOrigins(Arc<HashSet<SocketAddr>>);
+
+impl FromIterator<SocketAddr> for SelfOrigins {
+    fn from_iter<T: IntoIterator<Item = SocketAddr>>(iter: T) -> Self {
+        Self(Arc::new(iter.into_iter().collect()))
+    }
+}
+
+impl SelfOrigins {
+    /// Build a `SelfOrigins` allowlist from the server's resolved bind
+    /// addresses, keeping only non-loopback entries (loopback is always trusted
+    /// by [`origin_is_loopback`], so it need not be duplicated here).
+    ///
+    /// Why: a daemon's bind resolution returns every address the server binds
+    /// (loopback plus, in Tailscale mode, the tailnet address); the guard only
+    /// needs the non-loopback ones as extra trust anchors.
+    /// What: Filters `addrs` to non-loopback `SocketAddr`s and collects them.
+    /// Test: `origin_matches_self_trusts_bind_derived_tailscale_addr` below.
+    pub fn from_bind_addrs(addrs: &[SocketAddr]) -> Self {
+        addrs
+            .iter()
+            .copied()
+            .filter(|a| !a.ip().is_loopback())
+            .collect()
+    }
+}
+
+/// Classify whether an `Origin` header value names a loopback host.
+///
+/// Why: the same-origin guard must permit the legitimate operator surface (a
+/// daemon SPA served from `http://127.0.0.1:<port>` or `http://localhost:…`)
+/// while rejecting genuinely cross-origin browser requests. Centralising the
+/// host check keeps the policy in one tested place.
+/// What: parses the scheme-qualified `Origin` (e.g. `http://127.0.0.1:7070`),
+/// extracts the host (dropping scheme and `:port`, unwrapping `[…]` IPv6
+/// brackets), and returns `true` for `localhost` or any host that PARSES as a
+/// loopback IP — all of `127.0.0.0/8` (IPv4) and `::1` (IPv6). Anything that is
+/// not `localhost` and does not parse as a loopback IP (including a missing host,
+/// a hostname, or an IP-prefixed DNS name like `127.0.0.1.evil.com`) is `false`.
+///
+/// The host MUST be parsed as an `IpAddr`, not prefix-matched: a `host.starts_with("127.")`
+/// check accepts the attacker-controlled DNS name `127.0.0.1.evil.com` (and
+/// `127.attacker.com`) as "loopback", defeating the CSRF guard. `IpAddr::from_str`
+/// rejects any string that is not a bare IP literal.
+/// Test: `origin_is_loopback_*` below, incl. `_rejects_ip_prefixed_dns_names`.
+pub fn origin_is_loopback(origin: &str) -> bool {
+    match parse_origin_authority(origin) {
+        Some((host, _port)) => {
+            host == "localhost"
+                || IpAddr::from_str(host)
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+/// Check whether an `Origin` header value matches one of the daemon's own
+/// bind-derived, non-loopback addresses (#3269).
+///
+/// Why: in Tailscale bind mode a daemon's legitimate write UI is served from a
+/// non-loopback address, so loopback-only matching (above) 403s the operator's
+/// own traffic. This function extends trust to exactly the addresses the server
+/// resolved for its own listeners — nothing broader.
+/// What: parses the `Origin` host/port, parses the host as an `IpAddr`
+/// (hostnames never match — the allowlist is IP-derived from resolved bind
+/// addresses), and returns `true` if `(ip, port)` is a member of `self_origins`.
+/// Test: `origin_matches_self_*` below.
+pub fn origin_matches_self(origin: &str, self_origins: &SelfOrigins) -> bool {
+    let Some((host, port)) = parse_origin_authority(origin) else {
+        return false;
+    };
+    let Ok(ip) = IpAddr::from_str(host) else {
+        return false;
+    };
+    let Some(port) = port.and_then(|p| p.parse::<u16>().ok()) else {
+        return false;
+    };
+    self_origins.0.contains(&SocketAddr::new(ip, port))
+}
+
+/// Extract `(host, port)` from a scheme-qualified `Origin` header value.
+///
+/// Why: shared parsing core for [`origin_is_loopback`] and
+/// [`origin_matches_self`] — keeps the (fiddly, IPv6-bracket-aware) authority
+/// parsing in exactly one place.
+/// What: strips the `scheme://` prefix, takes everything up to the first `/`
+/// as the authority, and splits it into host and optional port, unwrapping
+/// `[…]` IPv6 literals. Returns `None` for a value with no `://`.
+/// Test: exercised indirectly via `origin_is_loopback_*` and
+/// `origin_matches_self_*`.
+fn parse_origin_authority(origin: &str) -> Option<(&str, Option<&str>)> {
+    let after_scheme = origin.split_once("://").map(|(_, rest)| rest)?;
+    let authority = after_scheme.split('/').next().unwrap_or("");
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        // Bracketed IPv6 literal: `[::1]:7070` → host `::1`, port `7070`.
+        let (host, remainder) = rest.split_once(']')?;
+        let port = remainder.strip_prefix(':');
+        Some((host, port))
+    } else {
+        // host[:port] — split at the FIRST `:` (`split_once`). For a
+        // well-formed, non-bracketed authority (IPv4 dotted-quad or hostname
+        // plus an optional `:port`) there is at most one `:`, so first and
+        // last coincide; a bare host has no `:` at all. A raw (unbracketed)
+        // IPv6 literal — which should never appear in a well-formed
+        // `Origin` — would produce a garbage `host` here, but that only
+        // degrades to a safe rejection in `origin_is_loopback` /
+        // `origin_matches_self`, never a false accept.
+        match authority.split_once(':') {
+            Some((h, p)) => Some((h, Some(p))),
+            None => Some((authority, None)),
+        }
+    }
+}
+
+/// axum middleware that rejects cross-origin requests to destructive routes,
+/// trusting loopback plus the bind-derived self-origins passed in as state.
+///
+/// Why: applied router-wide (#3268/#3304 — see module docs) so a malicious page
+/// cannot use the operator's authenticated-by-locality daemon to mutate state
+/// (delete an index/palace, stop the daemon, spawn/stop a session, drive the
+/// `/rpc` tool surface) via CSRF. Read routes are unaffected — they leak no
+/// destructive capability. Taking `self_origins` via `State` (bound with
+/// [`axum::middleware::from_fn_with_state`] in [`super::with_guarded_middleware`])
+/// lets Tailscale-bound deployments trust their own non-loopback origin without
+/// opening the guard to arbitrary remote origins (#3269).
+/// What: Only acts on state-changing methods (`POST`/`PUT`/`PATCH`/`DELETE`) so
+/// it can be layered on a router that also serves safe `GET`/`HEAD` reads
+/// (including SSE/WebSocket upgrade routes, which are `GET`) without blocking
+/// them. For a guarded method, if the request carries an `Origin` header that is
+/// present, valid UTF-8, and neither loopback nor a member of `self_origins`,
+/// responds `403 FORBIDDEN` with a short JSON body and does not call the inner
+/// handler. Absent / unreadable Origin on a trusted host, and all safe methods,
+/// pass through to `next`.
+/// Test: unit tests below plus consuming crates' integration tests.
+pub async fn guard_write_origin(
+    State(self_origins): State<SelfOrigins>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // Safe (non-state-changing) methods are never CSRF-relevant — pass through
+    // so this middleware can sit on a mixed read/write router.
+    if !req.method().is_safe()
+        && let Some(origin) = req.headers().get(ORIGIN)
+    {
+        match origin.to_str() {
+            Ok(value)
+                if !origin_is_loopback(value) && !origin_matches_self(value, &self_origins) =>
+            {
+                tracing::warn!(
+                    origin = %value,
+                    "daemon write route rejected cross-origin request (same-origin guard)"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({
+                        "error": "cross-origin write requests are not allowed",
+                    })),
+                )
+                    .into_response();
+            }
+            // Loopback or trusted self-origin → allowed.
+            Ok(_) => {}
+            // Non-UTF-8 Origin is malformed; reject to be safe.
+            Err(_) => {
+                tracing::warn!("daemon write route rejected request with non-UTF-8 Origin header");
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({
+                        "error": "malformed Origin header",
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: a daemon SPA's own origins (localhost / 127.x / ::1, with or without
+    /// a port) must be classified as loopback so the guard never blocks the
+    /// legitimate operator surface.
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_accepts_local_hosts() {
+        assert!(origin_is_loopback("http://127.0.0.1:7070"));
+        assert!(origin_is_loopback("http://127.0.0.1"));
+        assert!(origin_is_loopback("http://localhost:7070"));
+        assert!(origin_is_loopback("http://localhost"));
+        assert!(origin_is_loopback("http://127.5.6.7:9000"));
+        assert!(origin_is_loopback("http://[::1]:7070"));
+        assert!(origin_is_loopback("https://localhost:443"));
+    }
+
+    /// Why: genuinely remote / cross-origin hosts (the CSRF threat) must be
+    /// classified as non-loopback so the guard rejects them.
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_rejects_remote_hosts() {
+        assert!(!origin_is_loopback("http://evil.example.com"));
+        assert!(!origin_is_loopback("https://evil.example.com:8443"));
+        assert!(!origin_is_loopback("http://10.0.0.5:7070"));
+        assert!(!origin_is_loopback("http://100.64.1.2:7070")); // tailnet CGNAT IP
+        assert!(!origin_is_loopback("http://127evil.com")); // not a 127.x host
+    }
+
+    /// Why: SECURITY — the loopback check MUST parse the host as an IP, not
+    /// prefix-match on `"127."`. A prefix match accepts the attacker-controlled
+    /// DNS names `127.0.0.1.evil.com` / `127.attacker.com`, which resolve to a
+    /// remote host but are treated as trusted loopback, defeating the CSRF
+    /// guard. These MUST be rejected. (The original prefix-match survived because
+    /// the suite only covered the no-dot `127evil.com` variant — this closes
+    /// that blind spot; the live bypass shipped in #3280.)
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_rejects_ip_prefixed_dns_names() {
+        assert!(!origin_is_loopback("http://127.0.0.1.evil.com"));
+        assert!(!origin_is_loopback("http://127.0.0.1.evil.com:7070"));
+        assert!(!origin_is_loopback("http://127.attacker.com"));
+        assert!(!origin_is_loopback("http://127.0.0.1x.com"));
+        // `localhost`-prefixed DNS names must not be trusted either.
+        assert!(!origin_is_loopback("http://localhost.evil.com"));
+        // A bracketed IPv6 loopback still parses and is trusted.
+        assert!(origin_is_loopback("http://[::1]"));
+    }
+
+    /// Why: a value with no scheme is not a well-formed Origin; treat as
+    /// non-loopback (reject) rather than silently allowing it.
+    /// Test: this test.
+    #[test]
+    fn origin_is_loopback_rejects_malformed() {
+        assert!(!origin_is_loopback("127.0.0.1:7070")); // no scheme
+        assert!(!origin_is_loopback(""));
+        assert!(!origin_is_loopback("garbage"));
+    }
+
+    /// Why: #3269 regression guard — a Tailscale bind's own resolved address
+    /// must be trusted as a self-origin so the write UI served from it works.
+    /// Test: this test.
+    #[test]
+    fn origin_matches_self_trusts_bind_derived_tailscale_addr() {
+        let addrs = [
+            SocketAddr::from(([127, 0, 0, 1], 7070)),
+            SocketAddr::from(([100, 64, 1, 2], 7070)),
+        ];
+        let self_origins = SelfOrigins::from_bind_addrs(&addrs);
+        assert!(origin_matches_self("http://100.64.1.2:7070", &self_origins));
+    }
+
+    /// Why: the allowlist must not blanket-trust the whole 100.64.0.0/10 CGNAT
+    /// range — only the exact address(es) the server itself resolved.
+    /// Test: this test.
+    #[test]
+    fn origin_matches_self_rejects_other_hosts_in_cgnat_range() {
+        let addrs = [SocketAddr::from(([100, 64, 1, 2], 7070))];
+        let self_origins = SelfOrigins::from_bind_addrs(&addrs);
+        assert!(!origin_matches_self(
+            "http://100.64.9.9:7070",
+            &self_origins
+        ));
+    }
+
+    /// Why: a matching host on the wrong port is not the server's own origin.
+    /// Test: this test.
+    #[test]
+    fn origin_matches_self_rejects_wrong_port() {
+        let addrs = [SocketAddr::from(([100, 64, 1, 2], 7070))];
+        let self_origins = SelfOrigins::from_bind_addrs(&addrs);
+        assert!(!origin_matches_self(
+            "http://100.64.1.2:9999",
+            &self_origins
+        ));
+    }
+
+    /// Why: an empty allowlist (the `Default` used by loopback-only daemons and
+    /// every loopback test) must never match any non-loopback origin.
+    /// Test: this test.
+    #[test]
+    fn origin_matches_self_empty_allowlist_matches_nothing() {
+        let self_origins = SelfOrigins::default();
+        assert!(!origin_matches_self(
+            "http://100.64.1.2:7070",
+            &self_origins
+        ));
+        assert!(!origin_matches_self("http://127.0.0.1:7070", &self_origins));
+    }
+
+    /// Why: `from_bind_addrs` must drop loopback entries — they are already
+    /// covered by `origin_is_loopback` and should not be duplicated.
+    /// Test: this test.
+    #[test]
+    fn self_origins_from_bind_addrs_drops_loopback() {
+        let addrs = [
+            SocketAddr::from(([127, 0, 0, 1], 7070)),
+            SocketAddr::from(([100, 64, 1, 2], 7070)),
+        ];
+        let self_origins = SelfOrigins::from_bind_addrs(&addrs);
+        assert_eq!(self_origins.0.len(), 1);
+    }
+}

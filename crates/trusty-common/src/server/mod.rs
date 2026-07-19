@@ -7,6 +7,9 @@
 //!
 //! What: pure helpers — no global state.
 //!   - [`with_standard_middleware`] layers CORS/Trace/Compression on a router.
+//!   - [`with_guarded_middleware`] additionally applies the router-wide
+//!     same-origin write guard ([`origin_guard`], #3304) so destructive daemon
+//!     write routes are not exposed to cross-origin CSRF.
 //!   - [`daemon_http_client`] builds a reqwest client with short timeouts so
 //!     CLI commands never hang on a missing daemon.
 //!
@@ -26,6 +29,10 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
+
+pub mod origin_guard;
+
+pub use origin_guard::{SelfOrigins, guard_write_origin};
 
 /// Apply the standard trusty-* middleware stack to an axum router.
 ///
@@ -61,6 +68,45 @@ where
         .layer(compress)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+}
+
+/// Apply the standard middleware stack PLUS the router-wide same-origin write
+/// guard (#3304).
+///
+/// Why: the sibling trusty-* daemons (search, memory, analyze, mpm) inherit the
+/// permissive-CORS [`with_standard_middleware`] stack, which leaves their
+/// DESTRUCTIVE write routes (daemon shutdown, index/palace/drawer deletion,
+/// session spawn/stop, the `/rpc` JSON-RPC surface) open to cross-origin CSRF
+/// from any page the operator visits. This helper composes
+/// [`guard_write_origin`] into that stack so every daemon adopts the console's
+/// proven guard (#3280) router-wide with a one-line change, instead of each
+/// re-implementing it (architecture review tranche 1).
+/// What: layers [`guard_write_origin`] (via
+/// [`axum::middleware::from_fn_with_state`] carrying `self_origins`) as the
+/// INNERMOST middleware — closest to the routes, so it wraps every route
+/// including those merged in later — then applies [`with_standard_middleware`]
+/// (compression/trace/CORS) on top. The guard is method-gated (only
+/// POST/PUT/PATCH/DELETE), so `GET` reads and SSE/WebSocket upgrades pass
+/// through untouched; it fails open on a missing `Origin` header, so all
+/// server-side callers (the console reverse proxy, `curl`, the MCP stdio
+/// bridge) keep working. Pass `SelfOrigins::default()` for a loopback-only bind
+/// or `SelfOrigins::from_bind_addrs(&addrs)` to additionally trust the daemon's
+/// own non-loopback (e.g. Tailscale) bind address (#3269).
+/// Test: `with_guarded_middleware_composes` below; consuming crates' per-daemon
+/// guard regression tests.
+pub fn with_guarded_middleware<S>(router: Router<S>, self_origins: SelfOrigins) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    // #3304: guard applied FIRST (innermost) so it sits directly in front of the
+    // routes — the #3268 lesson is that a route-scoped `route_layer` mid-chain
+    // misses routes registered afterwards, whereas a router-wide `.layer()`
+    // covers them all.
+    let guarded = router.layer(axum::middleware::from_fn_with_state(
+        self_origins,
+        guard_write_origin,
+    ));
+    with_standard_middleware(guarded)
 }
 
 /// Build a `reqwest::Client` configured for daemon-to-daemon calls.
@@ -118,6 +164,14 @@ mod tests {
         // Smoke test: layering compiles and returns a Router we can finalize.
         let router: Router = Router::new().route("/ping", get(|| async { "pong" }));
         let _wrapped = with_standard_middleware(router);
+    }
+
+    #[test]
+    fn with_guarded_middleware_composes() {
+        // #3304 smoke test: the guarded stack layers and finalizes on a
+        // stateless router with a default (loopback-only) allowlist.
+        let router: Router = Router::new().route("/ping", get(|| async { "pong" }));
+        let _wrapped = with_guarded_middleware(router, SelfOrigins::default());
     }
 
     #[tokio::test]
