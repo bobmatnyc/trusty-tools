@@ -10,15 +10,18 @@
 //! What: [`render_session_table`] (a fixed-width table for `session list`),
 //! [`render_event_line`] (one line per streamed [`SessionEventEnvelope`],
 //! used by `attach`/`run-task`), [`render_transcript_human`] (a readable
-//! turn-by-turn view for `transcript`), and [`exit_code_for_status`] (maps a
-//! terminal `SessionStatus` onto the SAME `run_task::ExitCode` values the
-//! legacy in-process `run-task` path already used, so scripts checking `$?`
-//! see a consistent contract regardless of which path produced the run).
+//! turn-by-turn view for `transcript`), [`render_workstream_table`] (a
+//! tmux-`list-sessions`-style table for `tcode workstream list`, #3296), and
+//! [`exit_code_for_status`] (maps a terminal `SessionStatus` onto the SAME
+//! `run_task::ExitCode` values the legacy in-process `run-task` path already
+//! used, so scripts checking `$?` see a consistent contract regardless of
+//! which path produced the run).
 //! Test: `render::tests::*`.
 
 use crate::events::{Event, SessionEventEnvelope};
 use crate::run_task::ExitCode;
 use crate::session::{Session, SessionStatus, TranscriptRecord};
+use crate::workstreams::{WorkstreamId, WorkstreamState};
 
 /// Render a fixed-width table of sessions for `tcode session list`.
 ///
@@ -165,6 +168,109 @@ pub fn render_transcript_human(record: &TranscriptRecord) -> String {
     ));
     out.pop();
     out
+}
+
+/// One row of `workstream.list`'s wire response, as needed to render
+/// [`render_workstream_table`] (#3296, DOC-48 §5.4).
+///
+/// Why: the daemon's `workstream.list` response nests each record as
+/// `crate::workstreams::protocol::WorkstreamView` — private to that module,
+/// and carrying fields (`metadata`, `created_at`) the table never displays.
+/// This is the CLI's own minimal read-only projection of that wire shape;
+/// serde's default "ignore unknown fields" behavior means it deserializes
+/// straight out of the same JSON without the protocol module needing to
+/// expose anything new.
+/// What: `id`/`state` reuse the library's own [`WorkstreamId`]/
+/// [`WorkstreamState`] types (both already `pub` from `crate::workstreams`)
+/// so the table can never disagree with the domain model on what "active"
+/// means; `session_ids` is only read for its length (live session count).
+/// Test: `tests::render_workstream_table_marks_the_active_row`.
+#[derive(Debug, serde::Deserialize)]
+pub struct WorkstreamRow {
+    pub id: WorkstreamId,
+    #[serde(default)]
+    pub name: String,
+    pub state: WorkstreamState,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Render a tmux-`list-sessions`-style table of workstreams for
+/// `tcode workstream list` (DOC-48 §5.4, AC-5.1, issue #3296).
+///
+/// Why: rhymes with `tm`'s session-listing conventions (fixed-width columns,
+/// a leading marker for "the one that's current") WITHOUT importing from
+/// `trusty-mpm` — this crate has no dependency on it, so the shape is
+/// reinvented small and pure here. The leading `*` marker mirrors tmux's own
+/// `list-sessions` attached-session convention, which DOC-48 §5.3 already
+/// cites as the mental model for workstream observation ("tmux-attach-like
+/// behavior").
+/// What: one header line + one row per workstream: a leading `*` on the
+/// active workstream (blank otherwise), an 8-hex-char id prefix (DISPLAY
+/// ONLY — `tcode workstream get`/`activate`/`close` still require the full
+/// id; see `crate::cli::workstream`'s module docs in the `tcode` binary for
+/// why prefix resolution isn't implemented client-side), the computed
+/// state, the live session count, a humanized `updated_at` age, and the
+/// name (`(untitled)` when empty, DOC-48 §5.1: "Name is initially empty").
+/// An empty list renders one explanatory line instead of a bare header.
+/// Test: `tests::render_workstream_table_marks_the_active_row`,
+/// `tests::render_workstream_table_handles_empty_list`.
+pub fn render_workstream_table(rows: &[WorkstreamRow]) -> String {
+    if rows.is_empty() {
+        return "(no workstreams)".to_string();
+    }
+    let mut out = String::from("  ID        STATE   SESSIONS  UPDATED   NAME\n");
+    for r in rows {
+        let marker = if r.state == WorkstreamState::Active {
+            '*'
+        } else {
+            ' '
+        };
+        let id_prefix: String = r.id.to_string().chars().take(8).collect();
+        let name = if r.name.is_empty() {
+            "(untitled)"
+        } else {
+            &r.name
+        };
+        out.push_str(&format!(
+            "{marker} {:<9} {:<7} {:<9} {:<9} {}\n",
+            id_prefix,
+            r.state.to_string(),
+            r.session_ids.len(),
+            humanize_age(r.updated_at),
+            truncate(name, 40),
+        ));
+    }
+    out.pop(); // drop the trailing newline; callers add their own via println!
+    out
+}
+
+/// Render a compact "time ago" string for a past UTC timestamp.
+///
+/// Why: `updated_at`'s raw ISO-8601 timestamp is hard to scan at a glance;
+/// an operator wants "how stale is this workstream" in one short token.
+/// What: buckets the age into `just now` (<60s), `<N>m ago` (<1h), `<N>h ago`
+/// (<24h), `<N>d ago` (<30d), or `<N>w ago` beyond that. Never panics on a
+/// future timestamp (clock skew) — `signed_duration_since` is clamped to a
+/// minimum of zero seconds.
+/// Test: `tests::humanize_age_buckets_common_durations`.
+fn humanize_age(at: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = chrono::Utc::now()
+        .signed_duration_since(at)
+        .num_seconds()
+        .max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
+    } else if secs < 30 * 86_400 {
+        format!("{}d ago", secs / 86_400)
+    } else {
+        format!("{}w ago", secs / (7 * 86_400))
+    }
 }
 
 /// Map a terminal `SessionStatus` onto the CLI process exit code.
@@ -352,6 +458,81 @@ mod tests {
         let out = render_transcript_human(&record);
         assert!(out.contains("s-1"));
         assert!(out.contains("has not run"));
+    }
+
+    #[test]
+    fn render_workstream_table_marks_the_active_row() {
+        use uuid::Uuid;
+
+        let active_id =
+            WorkstreamId(Uuid::parse_str("a1b2c3d4-e5f6-4748-9a0b-1c2d3e4f5a6b").unwrap());
+        let idle_id =
+            WorkstreamId(Uuid::parse_str("b2c3d4e5-f6a1-4748-9a0b-1c2d3e4f5a6b").unwrap());
+        let rows = vec![
+            WorkstreamRow {
+                id: active_id,
+                name: "Token rotation hardening".to_string(),
+                state: WorkstreamState::Active,
+                session_ids: vec!["s-1".to_string(), "s-2".to_string()],
+                updated_at: Utc::now(),
+            },
+            WorkstreamRow {
+                id: idle_id,
+                name: String::new(),
+                state: WorkstreamState::Idle,
+                session_ids: vec![],
+                updated_at: Utc::now() - chrono::Duration::hours(2),
+            },
+        ];
+        let table = render_workstream_table(&rows);
+        assert!(
+            table.contains('*'),
+            "active row must carry the marker: {table}"
+        );
+        assert!(
+            table.contains("a1b2c3d4"),
+            "expected the 8-char id prefix: {table}"
+        );
+        assert!(table.contains("active"));
+        assert!(table.contains("Token rotation hardening"));
+        assert!(
+            table.contains("(untitled)"),
+            "an empty name must render a placeholder: {table}"
+        );
+        assert!(
+            table.contains("2h ago"),
+            "expected a humanized age: {table}"
+        );
+        assert!(
+            table.contains('2'),
+            "active row's session count must be 2: {table}"
+        );
+    }
+
+    #[test]
+    fn render_workstream_table_handles_empty_list() {
+        assert_eq!(render_workstream_table(&[]), "(no workstreams)");
+    }
+
+    #[test]
+    fn humanize_age_buckets_common_durations() {
+        assert_eq!(humanize_age(Utc::now()), "just now");
+        assert_eq!(
+            humanize_age(Utc::now() - chrono::Duration::minutes(5)),
+            "5m ago"
+        );
+        assert_eq!(
+            humanize_age(Utc::now() - chrono::Duration::hours(3)),
+            "3h ago"
+        );
+        assert_eq!(
+            humanize_age(Utc::now() - chrono::Duration::days(2)),
+            "2d ago"
+        );
+        assert_eq!(
+            humanize_age(Utc::now() - chrono::Duration::days(45)),
+            "6w ago"
+        );
     }
 
     #[test]
