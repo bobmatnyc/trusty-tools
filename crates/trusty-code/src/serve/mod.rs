@@ -48,7 +48,7 @@ use tracing::info;
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::Router;
 use crate::session::SessionRegistry;
-use crate::workstreams::WorkstreamStore;
+use crate::workstreams::{SharedWorkstreamStore, WorkstreamStore};
 
 /// How long a graceful stop waits for in-flight `task.run` executions to
 /// observe cancellation and unwind before the process exits anyway.
@@ -118,12 +118,21 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// resolves via `ProjectBinding::agents_dir`, which falls back to the
 /// user-level `~/.claude/agents` when projectless rather than to the process
 /// CWD (which would silently bind a directory nobody chose).
+/// (issue #3297) Also returns the [`SharedWorkstreamStore`] itself (not just
+/// the `Router` it registered `workstream.*` against) — `run_http` needs the
+/// SAME handle to hand to `crate::serve::http::run_http`, which merges
+/// `crate::workstreams::sse::routes` (the `GET /workstreams/{id}/events`
+/// aggregation route) alongside the JSON-RPC-backed REST surface. This is
+/// why the return type grew a third element rather than staying a 2-tuple.
+///
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
 /// `build_router_is_projectless_without_a_project`,
 /// `build_router_wires_fs_list_dir`, `build_router_wires_workstream_methods`,
 /// `build_router_reconciles_dangling_active_pointer_on_boot`.
-pub async fn build_router(binding: ProjectBinding) -> Result<(Router, Arc<SessionRegistry>)> {
+pub async fn build_router(
+    binding: ProjectBinding,
+) -> Result<(Router, Arc<SessionRegistry>, SharedWorkstreamStore)> {
     build_router_at(binding, &crate::workstreams::default_data_dir()).await
 }
 
@@ -142,7 +151,7 @@ pub async fn build_router(binding: ProjectBinding) -> Result<(Router, Arc<Sessio
 async fn build_router_at(
     binding: ProjectBinding,
     data_dir: &std::path::Path,
-) -> Result<(Router, Arc<SessionRegistry>)> {
+) -> Result<(Router, Arc<SessionRegistry>, SharedWorkstreamStore)> {
     let sessions = Arc::new(SessionRegistry::new());
     let agents_dir = binding.agents_dir();
 
@@ -160,8 +169,8 @@ async fn build_router_at(
     crate::session::protocol::register(&mut router, sessions.clone());
     crate::fs_browse::protocol::register(&mut router);
     crate::task::protocol::register(&mut router, sessions.clone(), binding, agents_dir);
-    crate::workstreams::protocol::register(&mut router, workstreams);
-    Ok((router, sessions))
+    crate::workstreams::protocol::register(&mut router, workstreams.clone());
+    Ok((router, sessions, workstreams))
 }
 
 /// Run `tcode serve --stdio` to completion.
@@ -182,7 +191,7 @@ pub async fn run_stdio(binding: ProjectBinding) -> Result<()> {
         project = binding.label().unwrap_or_else(|| "<projectless>".into()),
         "tcode serve --stdio: starting"
     );
-    let (router, sessions) = build_router(binding).await?;
+    let (router, sessions, _workstreams) = build_router(binding).await?;
     transport::run_stdio_loop(router).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --stdio: stopped");
@@ -207,8 +216,8 @@ pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
         port,
         "tcode serve --http: starting"
     );
-    let (router, sessions) = build_router(binding).await?;
-    http::run_http(router, sessions.clone(), port).await?;
+    let (router, sessions, workstreams) = build_router(binding).await?;
+    http::run_http(router, sessions.clone(), workstreams, port).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --http: stopped");
     Ok(())
@@ -230,7 +239,7 @@ mod tests {
     async fn run_stdio_router_recognises_proof_of_life_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, _sessions) = build_router_at(
+        let (router, _sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -258,7 +267,7 @@ mod tests {
     async fn build_router_wires_session_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, sessions) = build_router_at(
+        let (router, sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -288,7 +297,7 @@ mod tests {
     async fn build_router_wires_fs_list_dir() {
         let project = tempfile::tempdir().expect("project tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, _sessions) = build_router_at(
+        let (router, _sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -325,9 +334,10 @@ mod tests {
     #[tokio::test]
     async fn build_router_is_projectless_without_a_project() {
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, _sessions) = build_router_at(ProjectBinding::None, data_dir.path())
-            .await
-            .expect("build_router_at");
+        let (router, _sessions, _workstreams) =
+            build_router_at(ProjectBinding::None, data_dir.path())
+                .await
+                .expect("build_router_at");
         for method in ["task.run", "session.create", "session.list"] {
             let req = Request {
                 jsonrpc: Some("2.0".to_string()),
@@ -377,7 +387,7 @@ mod tests {
             );
         }
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, sessions) = build_router_at(
+        let (router, sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -418,7 +428,7 @@ mod tests {
         let binding =
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
 
-        let (router, _sessions) = build_router_at(binding.clone(), data_dir.path())
+        let (router, _sessions, _workstreams) = build_router_at(binding.clone(), data_dir.path())
             .await
             .expect("build_router_at");
 
@@ -460,7 +470,7 @@ mod tests {
         // rather than starting from a brand-new empty one — proven here by
         // reconciliation completing without error on the same file the
         // first instance created.
-        let (_router2, _sessions2) = build_router_at(binding, data_dir.path())
+        let (_router2, _sessions2, _workstreams2) = build_router_at(binding, data_dir.path())
             .await
             .expect("a second build_router_at over the same data_dir must succeed");
     }
@@ -496,7 +506,7 @@ mod tests {
             .await
             .expect("seed raw store file with a dangling active_workstream_id");
 
-        let (router, _sessions) = build_router_at(binding, data_dir.path())
+        let (router, _sessions, _workstreams) = build_router_at(binding, data_dir.path())
             .await
             .expect("build_router_at must reconcile the dangling pointer, not fail");
 

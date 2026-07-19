@@ -415,6 +415,39 @@ async fn close_succeeds_and_clears_active_pointer() {
     assert_eq!(list_result["active_workstream_id"], Value::Null);
 }
 
+/// (issue #3297) `workstream.close` must publish
+/// `Event::WorkstreamStateInferred{state: "closed"}`.
+#[tokio::test]
+async fn close_publishes_state_inferred() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+    let ws_id: WorkstreamId = serde_json::from_value(id.clone()).unwrap();
+
+    let mut rx = crate::events::subscribe();
+    close(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("close");
+
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for the state-inferred event")
+        .expect("event bus channel closed");
+    match envelope.event {
+        crate::events::Event::WorkstreamStateInferred {
+            workstream_id,
+            state,
+            ..
+        } => {
+            assert_eq!(workstream_id, ws_id.to_string());
+            assert_eq!(state, "closed");
+        }
+        other => panic!("expected WorkstreamStateInferred, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn close_unknown_id_maps_to_not_found() {
     let (store, _dir) = shared_store().await;

@@ -1,8 +1,30 @@
 //! Tests for `activation::activate`/`activation::deactivate` (DOC-48 §6,
-//! issue #3294).
+//! issue #3294; the `Event::WorkstreamActivationChanged` publication tests
+//! are issue #3297).
+
+use std::time::Duration;
 
 use super::*;
 use tempfile::tempdir;
+
+/// Read the next event off `rx`, failing the test if none arrives within 2s.
+async fn recv_event(rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>) -> Event {
+    tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for a published event")
+        .expect("event bus channel closed")
+        .event
+}
+
+/// Assert NO event arrives on `rx` within a short window — used to prove the
+/// idempotent no-op branches of `activate`/`deactivate` do not publish.
+async fn assert_no_event(rx: &mut tokio::sync::broadcast::Receiver<SessionEventEnvelope>) {
+    let result = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        result.is_err(),
+        "expected no event to be published, but got one"
+    );
+}
 
 /// Build a fresh [`SharedWorkstreamStore`] backed by a tempfile path (never
 /// created ahead of time — `WorkstreamStore::load` treats a missing file as
@@ -168,4 +190,192 @@ async fn activate_persists_across_store_reload() {
         Some(id),
         "active pointer must persist across a fresh load"
     );
+}
+
+/// (issue #3297, DOC-48 AC-3.3) Activating with no prior active workstream
+/// must publish `WorkstreamActivationChanged{new_active_id: Some(id),
+/// prior_id: None}`.
+#[tokio::test]
+async fn activate_with_no_prior_active_publishes_activation_changed() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    let mut rx = crate::events::subscribe();
+
+    activate(&store, id, false).await.expect("activate");
+
+    match recv_event(&mut rx).await {
+        Event::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } => {
+            assert_eq!(new_active_id, Some(id.to_string()));
+            assert_eq!(prior_id, None);
+        }
+        other => panic!("expected WorkstreamActivationChanged, got {other:?}"),
+    }
+}
+
+/// A force-switch must publish `WorkstreamActivationChanged` naming BOTH the
+/// new active id and the prior one.
+#[tokio::test]
+async fn activate_with_force_publishes_activation_changed_with_prior() {
+    let (store, _dir) = shared_store().await;
+    let a = create(&store, "a").await;
+    let b = create(&store, "b").await;
+    activate(&store, a, false).await.expect("activate a");
+
+    let mut rx = crate::events::subscribe();
+    activate(&store, b, true).await.expect("force switch");
+
+    match recv_event(&mut rx).await {
+        Event::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } => {
+            assert_eq!(new_active_id, Some(b.to_string()));
+            assert_eq!(prior_id, Some(a.to_string()));
+        }
+        other => panic!("expected WorkstreamActivationChanged, got {other:?}"),
+    }
+}
+
+/// Re-activating the already-active workstream is a true no-op (§6.1) — it
+/// must NOT publish an activation-changed event.
+#[tokio::test]
+async fn activate_already_active_does_not_publish() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    activate(&store, id, false).await.expect("first activate");
+
+    let mut rx = crate::events::subscribe();
+    activate(&store, id, false)
+        .await
+        .expect("idempotent re-activate");
+
+    assert_no_event(&mut rx).await;
+}
+
+/// Deactivating the active workstream must publish `WorkstreamActivationChanged{new_active_id: None, prior_id: Some(id)}`.
+#[tokio::test]
+async fn deactivate_active_publishes_activation_changed() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    activate(&store, id, false).await.expect("activate");
+
+    let mut rx = crate::events::subscribe();
+    deactivate(&store, id).await.expect("deactivate");
+
+    match recv_event(&mut rx).await {
+        Event::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } => {
+            assert_eq!(new_active_id, None);
+            assert_eq!(prior_id, Some(id.to_string()));
+        }
+        other => panic!("expected WorkstreamActivationChanged, got {other:?}"),
+    }
+}
+
+/// Deactivating a non-active (idle or unknown) workstream is a no-op (§4.3)
+/// — it must NOT publish an activation-changed event.
+#[tokio::test]
+async fn deactivate_non_active_does_not_publish() {
+    let (store, _dir) = shared_store().await;
+    let a = create(&store, "a").await;
+    let b = create(&store, "b").await;
+    activate(&store, a, false).await.expect("activate a");
+
+    let mut rx = crate::events::subscribe();
+    deactivate(&store, b).await.expect("deactivate idle b");
+
+    assert_no_event(&mut rx).await;
+}
+
+/// (issue #3297) A fresh activation must ALSO publish
+/// `WorkstreamStateInferred{workstream_id: id, state: "active"}` right after
+/// `WorkstreamActivationChanged`.
+#[tokio::test]
+async fn activate_with_no_prior_active_publishes_state_inferred() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    let mut rx = crate::events::subscribe();
+
+    activate(&store, id, false).await.expect("activate");
+
+    let _ = recv_event(&mut rx).await; // WorkstreamActivationChanged, covered above
+    match recv_event(&mut rx).await {
+        Event::WorkstreamStateInferred {
+            workstream_id,
+            state,
+            ..
+        } => {
+            assert_eq!(workstream_id, id.to_string());
+            assert_eq!(state, "active");
+        }
+        other => panic!("expected WorkstreamStateInferred, got {other:?}"),
+    }
+}
+
+/// A force-switch must publish `WorkstreamStateInferred` for BOTH the
+/// newly-active workstream (`"active"`) and the prior one (`"idle"`).
+#[tokio::test]
+async fn activate_with_force_publishes_state_inferred_for_both() {
+    let (store, _dir) = shared_store().await;
+    let a = create(&store, "a").await;
+    let b = create(&store, "b").await;
+    activate(&store, a, false).await.expect("activate a");
+
+    let mut rx = crate::events::subscribe();
+    activate(&store, b, true).await.expect("force switch");
+
+    let _ = recv_event(&mut rx).await; // WorkstreamActivationChanged
+    match recv_event(&mut rx).await {
+        Event::WorkstreamStateInferred {
+            workstream_id,
+            state,
+            ..
+        } => {
+            assert_eq!(workstream_id, b.to_string());
+            assert_eq!(state, "active");
+        }
+        other => panic!("expected WorkstreamStateInferred for b, got {other:?}"),
+    }
+    match recv_event(&mut rx).await {
+        Event::WorkstreamStateInferred {
+            workstream_id,
+            state,
+            ..
+        } => {
+            assert_eq!(workstream_id, a.to_string());
+            assert_eq!(state, "idle");
+        }
+        other => panic!("expected WorkstreamStateInferred for a, got {other:?}"),
+    }
+}
+
+/// Deactivating the active workstream must ALSO publish
+/// `WorkstreamStateInferred{state: "idle"}` right after
+/// `WorkstreamActivationChanged`.
+#[tokio::test]
+async fn deactivate_active_publishes_state_inferred_idle() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, "a").await;
+    activate(&store, id, false).await.expect("activate");
+
+    let mut rx = crate::events::subscribe();
+    deactivate(&store, id).await.expect("deactivate");
+
+    let _ = recv_event(&mut rx).await; // WorkstreamActivationChanged
+    match recv_event(&mut rx).await {
+        Event::WorkstreamStateInferred {
+            workstream_id,
+            state,
+            ..
+        } => {
+            assert_eq!(workstream_id, id.to_string());
+            assert_eq!(state, "idle");
+        }
+        other => panic!("expected WorkstreamStateInferred, got {other:?}"),
+    }
 }
