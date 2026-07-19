@@ -8,6 +8,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Foundry retheme (refs #3153, DOC-39 addendum AC-27): the placeholder
+  slate/indigo Tailwind palette is replaced wholesale with the now-normative
+  Foundry design system (`docs/design/UI/design-system/`) — rust-on-paper
+  light theme, "Night Shift" dark theme. `tailwind.config.js` keeps the
+  `rgb(var(--color-*) / <alpha-value>)` CSS-variable plumbing #3133
+  established (still the only way Tailwind can generate the
+  `bg-status-ok/15`-style opacity modifiers every component relies on) but
+  the token set grew from four bare colors to the full Foundry set
+  (`trusty-primary(-hover)`, `trusty-surface`, `trusty-card`,
+  `trusty-raised`, `trusty-border(-strong)`, `trusty-text(-secondary|-muted|
+  -inverse)`, `status-ok/error/warn/neutral`) plus a `fontFamily` mapping for
+  the three Foundry faces and an extended `borderRadius`/`borderWidth` scale
+  (3/5/8px radii, 1px dividers / 1.5px containers, per the design system's
+  guardrails). `src/app.css` carries the actual light/dark RGB-triple values.
+  **Activation reconciliation:** Foundry activates dark via
+  `<html data-theme="dark">`, not a bare `prefers-color-scheme` media query —
+  new `lib/theme-bootstrap.ts` bridges OS appearance to that attribute
+  (`initThemeBootstrap`, called once from `main.ts` before the shell mounts),
+  with a `matchMedia` `change` listener for live OS-appearance switching.
+  System-following remains the only behavior (no manual toggle, no persisted
+  preference — both explicitly out of scope for this pass). No CSS-only
+  `@media` fallback was kept: `<body>` has no paintable content before
+  `main.ts` mounts `App.svelte`, so there is nothing for a pre-JS flash to
+  show, and a second value-defining mechanism would only risk the two
+  drifting apart. **Fonts are bundled locally**, not linked from Google
+  Fonts: `ui/public/fonts/` now carries the same self-hosted IBM Plex
+  Sans/Mono + Chakra Petch woff2 files (OFL-1.1, license text alongside)
+  already vetted for `crates/trusty-agents/ui/public/fonts/`, loaded via
+  `@font-face` rules inline in `index.html` — required for this Tauri app to
+  render correctly fully offline and to avoid ever needing a remote-origin
+  CSP allowance. All five components (`App`, `StatusBar`, `HealthPanel`,
+  `SessionMonitor`, `SearchTab`, `CreateSessionForm`) were restyled to
+  Foundry: 1.5px card borders, raised header strips (`bg-trusty-raised`) on
+  every card, button tiers per the design system's quick reference (primary
+  solid rust / secondary card / tertiary raised / danger soft-rust — never
+  two transparent buttons side by side), rectangular mono badges (never
+  pills), and machine-readable text (ids, counts, labels, table headers) in
+  `font-mono` uppercase tracking-wide, reserving `font-display` (Chakra
+  Petch) for headings. No component hardcodes a hex color — every color
+  routes through a `trusty-*`/`status-*` token. `lib/theme.test.ts` is
+  rewritten for the new token set/values and the attribute-based activation
+  mechanism (asserting `[data-theme='dark']`, not
+  `@media (prefers-color-scheme: dark)`), plus new coverage for
+  `theme-bootstrap.ts`'s immediate-apply/change-listener/no-matchMedia-guard
+  behavior and the font self-hosting invariant; the existing no-raw-color
+  and no-`<style>`-block hygiene scans are preserved and extended with a
+  hardcoded-hex scan.
+
 ### Fixed
 
 - GUI smoke-test UX feedback (Bob, 2026-07-18): three fixes to

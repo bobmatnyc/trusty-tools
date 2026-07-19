@@ -185,75 +185,79 @@
   });
 </script>
 
-<section class="mt-4 rounded-lg border border-trusty-border bg-trusty-surface/60 p-4">
-  <h2 class="text-sm font-semibold text-trusty-text">search</h2>
-  <p class="mt-1 text-xs text-trusty-text/50">
-    "Search" here isn't a box you type in — this tab is the audit trail of the searches
-    your agents performed.
-  </p>
+<section class="mt-4 rounded border-1.5 border-trusty-border bg-trusty-card">
+  <div class="border-b border-trusty-border bg-trusty-raised px-4 py-2.5">
+    <h2 class="font-display text-xs font-bold uppercase tracking-wide text-trusty-text">search</h2>
+    <p class="mt-0.5 text-xs text-trusty-text-muted">
+      "Search" here isn't a box you type in — this tab is the audit trail of the searches
+      your agents performed.
+    </p>
+  </div>
 
-  {#if phase === 'connecting'}
-    <p class="mt-2 text-xs text-trusty-text/50">connecting&hellip;</p>
-  {:else if phase === 'daemon-unreachable'}
-    <p class="mt-2 flex items-center gap-1.5 text-xs text-status-error">
-      <span class="h-1.5 w-1.5 rounded-full bg-status-error"></span>
-      daemon unreachable{error ? ` — ${error}` : ''}
-    </p>
-  {:else if phase === 'no-session'}
-    <p class="mt-2 flex items-center gap-1.5 text-xs text-trusty-text/60">
-      <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
-      no active session — nothing to audit yet
-    </p>
-  {:else if session}
-    <div class="mt-3 overflow-x-auto">
-      <table class="w-full text-left font-mono text-xs">
-        <thead>
-          <tr class="text-trusty-text/40">
-            <th class="pb-1 pr-3 font-normal">lane</th>
-            <th class="pb-1 pr-3 font-normal">query</th>
-            <th class="pb-1 pr-3 font-normal">hits</th>
-            <th class="pb-1 pr-3 font-normal">latency</th>
-            <th class="pb-1 pr-3 font-normal">agent</th>
-            <th class="pb-1 font-normal">age</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#if auditError}
-            <tr>
-              <td colspan="6" class="pt-2 text-status-error">
-                audit unavailable — {auditError}
-              </td>
+  <div class="p-4">
+    {#if phase === 'connecting'}
+      <p class="text-xs text-trusty-text-muted">connecting&hellip;</p>
+    {:else if phase === 'daemon-unreachable'}
+      <p class="flex items-center gap-1.5 text-xs text-status-error">
+        <span class="h-1.5 w-1.5 rounded-full bg-status-error"></span>
+        daemon unreachable{error ? ` — ${error}` : ''}
+      </p>
+    {:else if phase === 'no-session'}
+      <p class="flex items-center gap-1.5 text-xs text-trusty-text-muted">
+        <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
+        no active session — nothing to audit yet
+      </p>
+    {:else if session}
+      <div class="overflow-x-auto">
+        <table class="w-full text-left font-mono text-xs">
+          <thead>
+            <tr class="border-b border-trusty-border text-trusty-text-muted">
+              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">lane</th>
+              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">query</th>
+              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">hits</th>
+              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">latency</th>
+              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">agent</th>
+              <th class="pb-2 text-[10px] font-semibold uppercase tracking-wide">age</th>
             </tr>
-          {:else if auditRows.length === 0 && auditOmittedCount === 0}
-            <tr>
-              <td colspan="6" class="pt-2 text-trusty-text/40">no searches recorded yet</td>
-            </tr>
-          {:else}
-            {#each auditRows as record, i (`${record.at}-${record.agent_id}-${i}`)}
-              <tr class="text-trusty-text/80">
-                <td class="py-0.5 pr-3">{auditLaneLabel(record)}</td>
-                <td class="py-0.5 pr-3 truncate" title={record.query}>{record.query}</td>
-                <td class="py-0.5 pr-3">{auditHitsLabel(record)}</td>
-                <td class="py-0.5 pr-3">{auditLatencyLabel(record)}</td>
-                <td class="py-0.5 pr-3">{record.agent}</td>
-                <td class="py-0.5">{formatElapsed(record.at, now)}</td>
-              </tr>
-            {/each}
-            {#if auditOmittedCount > 0}
+          </thead>
+          <tbody>
+            {#if auditError}
               <tr>
-                <td
-                  colspan="6"
-                  class="pt-2 text-trusty-text/40"
-                  title="One or more search-audit records from the daemon didn't match a known shape (malformed or an unrecognized future kind) and were left out rather than crashing the tab."
-                >
-                  {auditOmittedCount}
-                  {auditOmittedCount === 1 ? 'row' : 'rows'} omitted (unrecognized record shape)
+                <td colspan="6" class="pt-2 text-status-error">
+                  audit unavailable — {auditError}
                 </td>
               </tr>
+            {:else if auditRows.length === 0 && auditOmittedCount === 0}
+              <tr>
+                <td colspan="6" class="pt-2 text-trusty-text-muted">no searches recorded yet</td>
+              </tr>
+            {:else}
+              {#each auditRows as record, i (`${record.at}-${record.agent_id}-${i}`)}
+                <tr class="text-trusty-text-secondary hover:bg-trusty-raised">
+                  <td class="py-1 pr-3">{auditLaneLabel(record)}</td>
+                  <td class="py-1 pr-3 truncate" title={record.query}>{record.query}</td>
+                  <td class="py-1 pr-3">{auditHitsLabel(record)}</td>
+                  <td class="py-1 pr-3">{auditLatencyLabel(record)}</td>
+                  <td class="py-1 pr-3">{record.agent}</td>
+                  <td class="py-1">{formatElapsed(record.at, now)}</td>
+                </tr>
+              {/each}
+              {#if auditOmittedCount > 0}
+                <tr>
+                  <td
+                    colspan="6"
+                    class="pt-2 text-trusty-text-muted"
+                    title="One or more search-audit records from the daemon didn't match a known shape (malformed or an unrecognized future kind) and were left out rather than crashing the tab."
+                  >
+                    {auditOmittedCount}
+                    {auditOmittedCount === 1 ? 'row' : 'rows'} omitted (unrecognized record shape)
+                  </td>
+                </tr>
+              {/if}
             {/if}
-          {/if}
-        </tbody>
-      </table>
-    </div>
-  {/if}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </div>
 </section>

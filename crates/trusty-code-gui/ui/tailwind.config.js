@@ -1,12 +1,15 @@
 /** @type {import('tailwindcss').Config} */
-// Why: issue #3133 — the GUI needs light + dark themes that follow the OS
-// appearance (`prefers-color-scheme`), not a manual toggle. Every
+// Why: Foundry retheme (issue #3153, docs/design/UI/design-system/). Every
 // `trusty-*`/`status-*` color token used across the components
 // (App/StatusBar/HealthPanel/SessionMonitor/SearchTab/CreateSessionForm)
-// now resolves to a CSS custom property instead of a hardcoded hex
-// literal — the actual light/dark VALUES live in `src/app.css`'s `:root`
-// block (light default) and its `@media (prefers-color-scheme: dark)`
-// override.
+// resolves to a CSS custom property rather than a hardcoded hex literal —
+// the actual light/dark VALUES live in `src/app.css`'s `:root` block (light
+// default) and its `[data-theme='dark']` override. This keeps the
+// rgb-triple/<alpha-value> Tailwind plumbing issue #3133 established (see
+// the format note below); only the token set and the actual color values
+// changed, from the placeholder slate/indigo palette to Foundry's
+// rust-on-paper (light) / Night Shift (dark) palette
+// (docs/design/UI/design-system/tokens.css).
 //
 // CRITICAL format note: each color is `rgb(var(--color-*) / <alpha-value>)`,
 // NOT a bare `var(--color-*)`. This is Tailwind's documented CSS-variable
@@ -18,29 +21,56 @@
 // alpha-value */` placeholder only works when the referenced custom
 // property holds space-separated RGB channel numbers (`"15 23 42"`, not
 // `"#0f172a"`) — see `app.css`'s custom-property declarations.
-// What: `darkMode` is intentionally OMITTED — no component ever used a
-// `dark:` variant (there is no manual toggle to key off), and the previous
-// `darkMode: 'class'` config was dead weight: nothing in this codebase ever
-// added a `.dark` class to `<html>`, so the old `html:not(.dark)` override
-// in `app.css` silently won every render regardless of OS appearance. Theme
-// switching is handled entirely by the CSS custom properties + media query
-// in `app.css`.
+// What: `darkMode` is intentionally OMITTED — activation is the
+// `[data-theme='dark']` attribute `lib/theme-bootstrap.ts` manages directly
+// in `app.css`'s custom properties, not a Tailwind `dark:` variant strategy
+// (no component ever needs a `dark:` prefix — every color already resolves
+// through a CSS var that itself changes value under `[data-theme='dark']`).
+// `borderRadius`/`borderWidth` extend (not replace) Tailwind's defaults with
+// the Foundry scale — 3/5/8px radii, 1px dividers / 1.5px containers
+// (docs/design/UI/design-system/README.md guardrails) — and `fontFamily`
+// wires the three self-hosted Foundry faces (`index.html`'s `@font-face`
+// rules) with system-font fallbacks first so text renders immediately
+// before the woff2 loads.
 // Test: `lib/theme.test.ts` pins the `rgb(var(--color-*) / <alpha-value>)`
 // format and that opacity-modified utilities actually compile (regression
-// guard for the silent-no-rule failure mode above).
+// guard for the silent-no-rule failure mode above), plus the Foundry token
+// values/activation mechanism.
 export default {
   content: ['./index.html', './src/**/*.{svelte,js,ts}'],
   theme: {
     extend: {
       colors: {
         'trusty-primary': 'rgb(var(--color-primary) / <alpha-value>)',
+        'trusty-primary-hover': 'rgb(var(--color-primary-hover) / <alpha-value>)',
         'trusty-surface': 'rgb(var(--color-surface) / <alpha-value>)',
+        'trusty-card': 'rgb(var(--color-card) / <alpha-value>)',
+        'trusty-raised': 'rgb(var(--color-raised) / <alpha-value>)',
         'trusty-border': 'rgb(var(--color-border) / <alpha-value>)',
+        'trusty-border-strong': 'rgb(var(--color-border-strong) / <alpha-value>)',
         'trusty-text': 'rgb(var(--color-text) / <alpha-value>)',
+        'trusty-text-secondary': 'rgb(var(--color-text-secondary) / <alpha-value>)',
+        'trusty-text-muted': 'rgb(var(--color-text-muted) / <alpha-value>)',
+        'trusty-text-inverse': 'rgb(var(--color-text-inverse) / <alpha-value>)',
         'status-ok': 'rgb(var(--color-status-ok) / <alpha-value>)',
         'status-error': 'rgb(var(--color-status-error) / <alpha-value>)',
         'status-warn': 'rgb(var(--color-status-warn) / <alpha-value>)', // DOC-39 §8: amber = inferred/warming
         'status-neutral': 'rgb(var(--color-status-neutral) / <alpha-value>)', // no-session / never-probed
+      },
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'sans-serif'],
+        display: ['"Chakra Petch"', '"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+        mono: ['"IBM Plex Mono"', 'ui-monospace', 'Menlo', 'Consolas', 'monospace'],
+      },
+      borderRadius: {
+        sm: '3px',
+        DEFAULT: '5px',
+        md: '5px',
+        lg: '8px',
+      },
+      borderWidth: {
+        DEFAULT: '1px',
+        1.5: '1.5px',
       },
     },
   },

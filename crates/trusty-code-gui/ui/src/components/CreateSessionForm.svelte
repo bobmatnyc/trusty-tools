@@ -248,123 +248,140 @@
   let dirEntries = $derived(listing?.entries.filter((e) => e.is_dir) ?? []);
 </script>
 
-<section class="mt-4 rounded-lg border border-trusty-border bg-trusty-surface/60 p-4">
-  <h2 class="text-sm font-semibold text-trusty-text">new session</h2>
+<section class="mt-4 rounded border-1.5 border-trusty-border bg-trusty-card">
+  <div class="border-b border-trusty-border bg-trusty-raised px-4 py-2.5">
+    <h2 class="font-display text-xs font-bold uppercase tracking-wide text-trusty-text">
+      new session
+    </h2>
+  </div>
 
-  <div class="mt-3">
-    <p class="text-xs text-trusty-text/60">project folder</p>
-
-    {#if listingPhase === 'error' && !listing}
-      <p class="mt-1 text-xs text-status-error">
-        daemon unreachable{listingError ? ` — ${listingError}` : ''}
+  <div class="p-4">
+    <div>
+      <p class="font-mono text-[10px] font-semibold uppercase tracking-wide text-trusty-text-muted">
+        project folder
       </p>
-    {:else if listing}
-      <div class="mt-1 flex items-center gap-2 text-xs text-trusty-text/70">
-        <button
-          type="button"
-          disabled={!listing.parent}
-          onclick={goUp}
-          class="rounded border border-trusty-border px-1.5 py-0.5 disabled:cursor-not-allowed disabled:opacity-30"
-        >
-          ↑ up
-        </button>
-        <span class="truncate font-mono" title={listing.path}>{listing.display_path}</span>
-        {#if listingPhase === 'loading'}
-          <span class="text-trusty-text/30">loading…</span>
-        {/if}
-      </div>
 
-      <ul class="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
-        {#each dirEntries as entry (entry.path)}
-          <!-- issue #3134: the "use" (picker) button sits DIRECTLY adjacent
-               to the directory name it acts on. The prior markup put
-               `flex-1` on the name button and `justify-between` on the
-               row, which stretched the name button to fill the row and
-               shoved "use" to the row's far right — for a short name that
-               left a wide, disorienting gap between the name and the
-               control that binds it. `min-w-0 max-w-[65%]` still bounds
-               the name button's width so `truncate` keeps working on long
-               names, but without `flex-1`/`justify-between` the row's
-               default `flex items-center` packs both buttons together at
-               the left, so "use" always immediately follows the name
-               (any leftover row width is simply unused space at the end,
-               not a gap in the middle). -->
-          <li class="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-trusty-border/10">
-            <button
-              type="button"
-              class="flex min-w-0 max-w-[65%] items-center gap-1.5 truncate text-left"
-              onclick={() => openEntry(entry)}
-            >
-              <span class="truncate">{entry.name}</span>
-              <span
-                class={`rounded px-1 text-[10px] ${
-                  entry.is_git_repo ? 'bg-status-ok/15 text-status-ok' : 'text-trusty-text/30'
-                }`}
+      {#if listingPhase === 'error' && !listing}
+        <p class="mt-1 text-xs text-status-error">
+          daemon unreachable{listingError ? ` — ${listingError}` : ''}
+        </p>
+      {:else if listing}
+        <div class="mt-1 flex items-center gap-2 text-xs text-trusty-text-secondary">
+          <button
+            type="button"
+            disabled={!listing.parent}
+            onclick={goUp}
+            class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-wide disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            ↑ up
+          </button>
+          <span class="truncate font-mono" title={listing.path}>{listing.display_path}</span>
+          {#if listingPhase === 'loading'}
+            <span class="text-trusty-text-muted">loading…</span>
+          {/if}
+        </div>
+
+        <ul class="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
+          {#each dirEntries as entry (entry.path)}
+            <!-- issue #3134: the "use" (picker) button sits DIRECTLY adjacent
+                 to the directory name it acts on. The prior markup put
+                 `flex-1` on the name button and `justify-between` on the
+                 row, which stretched the name button to fill the row and
+                 shoved "use" to the row's far right — for a short name that
+                 left a wide, disorienting gap between the name and the
+                 control that binds it. `min-w-0 max-w-[65%]` still bounds
+                 the name button's width so `truncate` keeps working on long
+                 names, but without `flex-1`/`justify-between` the row's
+                 default `flex items-center` packs both buttons together at
+                 the left, so "use" always immediately follows the name
+                 (any leftover row width is simply unused space at the end,
+                 not a gap in the middle). -->
+            <li class="flex items-center gap-2 rounded-sm px-1.5 py-1 hover:bg-trusty-raised">
+              <button
+                type="button"
+                class="flex min-w-0 max-w-[65%] items-center gap-1.5 truncate text-left text-trusty-text"
+                onclick={() => openEntry(entry)}
               >
-                {entry.is_git_repo ? 'git' : '—'}
-              </span>
-            </button>
-            <button
-              type="button"
-              class="shrink-0 rounded border border-trusty-border px-1.5 py-0.5 text-trusty-text/70 hover:bg-trusty-border/20"
-              onclick={() => selectEntry(entry)}
-            >
-              use
-            </button>
-          </li>
-        {/each}
-        {#if dirEntries.length === 0}
-          <li class="text-trusty-text/40">no subdirectories</li>
+                <span class="truncate">{entry.name}</span>
+                <span
+                  class={`rounded-sm px-1 font-mono text-[10px] uppercase tracking-wide ${
+                    entry.is_git_repo ? 'bg-status-ok/15 text-status-ok' : 'text-trusty-text-muted'
+                  }`}
+                >
+                  {entry.is_git_repo ? 'git' : '—'}
+                </span>
+              </button>
+              <button
+                type="button"
+                class="shrink-0 rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+                onclick={() => selectEntry(entry)}
+              >
+                use
+              </button>
+            </li>
+          {/each}
+          {#if dirEntries.length === 0}
+            <li class="text-trusty-text-muted">no subdirectories</li>
+          {/if}
+        </ul>
+      {:else}
+        <p class="mt-1 text-xs text-trusty-text-muted">loading…</p>
+      {/if}
+
+      <p class="mt-2 text-xs text-trusty-text-secondary">
+        selected: <span class="font-mono">{bindingLabel(selectedProject)}</span>
+        {#if selectedProject}
+          <button
+            type="button"
+            class="ml-2 font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
+            onclick={clearSelection}
+          >
+            clear
+          </button>
         {/if}
-      </ul>
-    {:else}
-      <p class="mt-1 text-xs text-trusty-text/50">loading…</p>
+      </p>
+    </div>
+
+    <div class="mt-3">
+      <label
+        class="font-mono text-[10px] font-semibold uppercase tracking-wide text-trusty-text-muted"
+        for="new-session-task"
+      >
+        task
+      </label>
+      <textarea
+        id="new-session-task"
+        bind:value={task}
+        onkeydown={handleTaskKeydown}
+        rows="3"
+        placeholder="Describe what this session should do… (Enter to submit, Shift+Enter for a new line)"
+        class="mt-1 w-full rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card p-2 text-xs text-trusty-text"
+      ></textarea>
+    </div>
+
+    <p
+      class="mt-2 text-[11px] text-trusty-text-muted"
+      title="session.get_agents (GET /sessions/{'{'}id{'}'}/agents) requires an existing session — there is no pre-session roster route, so this form omits `agent` and the daemon applies its own default (DOC-39 §5.4)."
+    >
+      agent: daemon default — no pre-session roster endpoint exists yet
+    </p>
+
+    {#if submitError}
+      <p class="mt-2 text-xs text-status-error">{submitError}</p>
+    {/if}
+    {#if successMessage}
+      <p class="mt-2 text-xs text-status-ok">{successMessage}</p>
     {/if}
 
-    <p class="mt-2 text-xs text-trusty-text/70">
-      selected: <span class="font-mono">{bindingLabel(selectedProject)}</span>
-      {#if selectedProject}
-        <button type="button" class="ml-2 text-trusty-text/40 underline" onclick={clearSelection}>
-          clear
-        </button>
-      {/if}
-    </p>
-  </div>
-
-  <div class="mt-3">
-    <label class="text-xs text-trusty-text/60" for="new-session-task">task</label>
-    <textarea
-      id="new-session-task"
-      bind:value={task}
-      onkeydown={handleTaskKeydown}
-      rows="3"
-      placeholder="Describe what this session should do… (Enter to submit, Shift+Enter for a new line)"
-      class="mt-1 w-full rounded border border-trusty-border bg-trusty-surface/40 p-2 text-xs text-trusty-text"
-    ></textarea>
-  </div>
-
-  <p
-    class="mt-2 text-[11px] text-trusty-text/30"
-    title="session.get_agents (GET /sessions/{'{'}id{'}'}/agents) requires an existing session — there is no pre-session roster route, so this form omits `agent` and the daemon applies its own default (DOC-39 §5.4)."
-  >
-    agent: daemon default — no pre-session roster endpoint exists yet
-  </p>
-
-  {#if submitError}
-    <p class="mt-2 text-xs text-status-error">{submitError}</p>
-  {/if}
-  {#if successMessage}
-    <p class="mt-2 text-xs text-status-ok">{successMessage}</p>
-  {/if}
-
-  <div class="mt-3">
-    <button
-      type="button"
-      disabled={!canSubmitCreate(task, submitPhase)}
-      onclick={submit}
-      class="rounded border border-trusty-border px-3 py-1.5 text-xs font-medium text-trusty-text hover:bg-trusty-border/20 disabled:cursor-not-allowed disabled:opacity-40"
-    >
-      {submitPhase === 'submitting' ? 'creating…' : 'create session'}
-    </button>
+    <div class="mt-3">
+      <button
+        type="button"
+        disabled={!canSubmitCreate(task, submitPhase)}
+        onclick={submit}
+        class="rounded-sm border-1.5 border-trusty-primary-hover bg-trusty-primary px-3 py-1.5 font-mono text-xs font-semibold uppercase tracking-wide text-trusty-text-inverse hover:bg-trusty-primary-hover disabled:cursor-not-allowed disabled:border-trusty-border disabled:bg-trusty-raised disabled:text-trusty-text-muted"
+      >
+        {submitPhase === 'submitting' ? 'creating…' : 'create session'}
+      </button>
+    </div>
   </div>
 </section>

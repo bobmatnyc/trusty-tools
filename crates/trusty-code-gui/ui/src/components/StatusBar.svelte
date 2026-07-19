@@ -169,17 +169,17 @@
 </script>
 
 <footer
-  class="statusbar flex items-center justify-between gap-4 border-t border-trusty-border bg-trusty-surface/80 px-4 py-2 font-mono text-xs"
+  class="statusbar flex items-center justify-between gap-4 border-t border-trusty-border bg-trusty-raised px-4 py-2 font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary"
 >
   {#if phase === 'connecting'}
-    <span class="text-trusty-text/50">connecting…</span>
+    <span class="text-trusty-text-muted">connecting…</span>
   {:else if phase === 'daemon-unreachable'}
     <span class="flex items-center gap-1.5 text-status-error">
       <span class="h-1.5 w-1.5 rounded-full bg-status-error"></span>
       daemon unreachable{error ? ` — ${error}` : ''}
     </span>
   {:else if phase === 'no-session'}
-    <span class="flex items-center gap-1.5 text-trusty-text/60">
+    <span class="flex items-center gap-1.5 text-trusty-text-muted">
       <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
       no active session
     </span>
@@ -198,7 +198,9 @@
       </span>
     </div>
     {#if session}
-      <span class="truncate text-trusty-text/40">session {session.id.slice(0, 8)}</span>
+      <span class="truncate normal-case text-trusty-text-muted" title={session.id}
+        >session {session.id.slice(0, 8)}</span
+      >
     {/if}
   {/if}
 </footer>

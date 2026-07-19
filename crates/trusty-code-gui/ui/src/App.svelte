@@ -41,8 +41,12 @@
 
 <main class="app flex min-h-screen flex-col bg-trusty-surface text-trusty-text">
   <header class="p-6 pb-0">
-    <h1 class="text-lg font-semibold">trusty-code</h1>
-    <p class="text-xs text-trusty-text/60">Desktop shell — thin client over the tcode daemon</p>
+    <h1 class="font-display text-lg font-bold uppercase tracking-wide text-trusty-text">
+      trusty-code
+    </h1>
+    <p class="text-xs text-trusty-text-muted">
+      Desktop shell — thin client over the tcode daemon
+    </p>
   </header>
 
   <div class="body flex flex-1 flex-col gap-4 p-6">
