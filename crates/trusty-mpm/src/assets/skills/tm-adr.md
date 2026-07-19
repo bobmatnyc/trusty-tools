@@ -11,7 +11,7 @@ effort: medium
 # /tm-adr
 
 Architecture Decision Records (ADRs) are a **first-class documentation artifact**,
-peer to Specs (DOC-38) and Requirements (DOC-43). They capture *why* a significant
+peer to Specs (DOC-38) and Requirements (DOC-43, future). They capture *why* a significant
 architectural decision was made — not just what was decided. They live alongside
 the code so future contributors understand the constraints and trade-offs that
 shaped the system.
@@ -20,7 +20,7 @@ shaped the system.
 significant enough to shape the system, it is significant enough to record. The
 decision itself is required; creating a record of it is also required.
 
-See **[DOC-31 — ADR Standard](../../docs/specs/DOC-31-adr-standard.md)** for the
+See **[DOC-46 — ADR Standard](../../docs/specs/DOC-46-adr-standard.md)** for the
 complete formal specification, including the consistency-vetting protocol, governance,
 and CI gates.
 
@@ -125,7 +125,7 @@ section is the most valuable part.
 
 **Vetting required before acceptance.** Sweep `docs/adr/INDEX.md` and prior ADRs;
 record verdict codes (Consistent, Extends, Supersedes, Conflict) for each affected
-prior decision (see DOC-31 §3).
+prior decision (see DOC-46 §3).
 
 Vetted against prior ADRs on [DATE]:
 
@@ -172,7 +172,7 @@ If no prior decisions are affected: "No prior decisions to vet against."
 
 ## References
 
-- **[DOC-31 — ADR Standard](../../docs/specs/DOC-31-adr-standard.md)** — the formal spec
+- **[DOC-46 — ADR Standard](../../docs/specs/DOC-46-adr-standard.md)** — the formal spec
 - Michael Nygard, "Documenting Architecture Decisions" (2011)
 - `docs/adr/README.md` — convention doc for this repo
 - `docs/adr/INDEX.md` — index of all ADRs (consistency vetting surface)

@@ -1,10 +1,10 @@
-# DOC-31 — Architecture Decision Records (ADR) as First-Class Documentation Artifact
+# DOC-46 — Architecture Decision Records (ADR) as First-Class Documentation Artifact
 
 **Status:** DRAFT
 **Subsystem:** Documentation / Architecture governance
 **Owner:** Architecture / Technical Leadership
 **Last-updated:** 2026-07-19
-**Spec ID:** `SPEC-ADR-01` (DOC-31)
+**Spec ID:** `SPEC-ADR-01` (DOC-46)
 **Builds on:** `docs/adr/README.md` (existing ADR convention); DOC-38 (Spec-Linked Documentation / SLD); DOC-30 (Project Manager vision — decision vetting); the tm-adr bundled skill (`crates/trusty-mpm/src/assets/skills/tm-adr.md`)
 
 ---
@@ -205,7 +205,9 @@ Propose a new script: `scripts/check_adr.sh` (or fold into an extended `scripts/
 3. **Status field validity:** Status is one of {Proposed, Accepted, Rejected, Superseded by NNNN, Amended by NNNN}.
 4. **Supersedes bidirectionality:** if ADR-0003 says "Superseded by 0010", then ADR-0010 must cite ADR-0003 in its "Related Decisions" section. (Detect orphaned supersedes links.)
 5. **INDEX.md in sync:** every ADR file in `docs/adr/` with number NNNN ≥ 0001 must have an entry in `docs/adr/INDEX.md`; conversely, every index entry must have a corresponding file on disk.
-6. **No silent contradictions:** (advanced) if two Accepted ADRs make mutually exclusive claims, flag as warning and require manual resolution in "Related Decisions" or status change.
+
+**Phase 2 (Human/LLM Review, NOT Mechanical Check):**
+- **Semantic consistency:** if two Accepted ADRs make mutually exclusive claims, identify the contradiction and require manual resolution in "Related Decisions" or status change. This check is advisory and requires human or LLM judgment — not automated.
 
 **Recommended command-line interface:**
 
@@ -371,11 +373,13 @@ rather than in ephemeral tmux panes or disk-based SQLite.
 
 Vetted against prior ADRs on 2026-07-19:
 
-- **ADR-0005 (Unified harness event bus):** Consistent. Session state is orthogonal to event-bus decision.
-- **ADR-0011 (tctl owns service lifecycle):** Consistent. tctl still owns service lifecycle; this ADR only specifies *where* state lives.
-- **ADR-0012 (Per-instance GUID identity):** Extends. Per-instance GUIDs are keys in trusty-memory for session-state lookup.
+- **ADR-0099 (Hypothetical: Use X for caching):** Consistent. Session persistence is orthogonal to caching strategy.
+- **ADR-0100 (Hypothetical: Daemon lifecycle model):** Extends. This ADR refines daemon lifecycle per ADR-0100's overall model; no conflict.
+- **ADR-0101 (Hypothetical: Instance identity scheme):** Extends. Per-session GUIDs are keys for lookups per ADR-0101's scheme.
 
 No conflicts. Ready to accept.
+
+*(Example uses fictional ADR numbers 0099–0101 to illustrate verdict codes; these are not real decisions.)*
 ```
 
 ---
@@ -385,10 +389,10 @@ No conflicts. Ready to accept.
 This spec is successful when:
 
 1. **ADRs are first-class** — treated as peer to Specs and Reqs in documentation governance
-2. **Consistency is enforced** — new ADRs are vetted against priors before acceptance; no silent contradictions land
+2. **Consistency is enforced** — new ADRs are vetted against priors before acceptance; "Related Decisions" section prevents silent contradictions
 3. **Discovery is cheap** — `docs/adr/INDEX.md` is the quick reference; anyone can scan for related decisions in seconds
-4. **Workflow is clear** — PMs and architects follow a consistent process: draft → vet → approve → accept
-5. **CI catches violations** — `scripts/check_adr.sh` runs on all ADR PRs and fails if numbering, status, or contradiction rules are broken
+4. **Workflow is clear** — PMs and architects follow a consistent process: draft → vet (consistency check) → approve → accept
+5. **CI catches violations** — `scripts/check_adr.sh` runs on all ADR PRs and fails if numbering, status, or bidirectional-link rules are broken (checks 1–5 in §6)
 
 ---
 
@@ -396,13 +400,12 @@ This spec is successful when:
 
 | File | Change |
 |---|---|
-| `docs/adr/README.md` | Update: reflect formal status; replace "opt-in" with "mandatory"; link to DOC-31 |
+| `docs/adr/README.md` | Update: reflect formal status; replace "opt-in" with "mandatory"; link to DOC-46 |
 | `docs/adr/INDEX.md` | NEW: seeded from existing ADRs, format per §5 |
 | `docs/adr/template.md` | Update: add "Related Decisions" section; add frontmatter fields (Status, Scope, Reversibility Cost, Decision Drivers) |
 | `docs/reference/documentation-layout.md` | Update: mention ADRs alongside Specs and Reqs as first-class artifacts |
-| `.claude/skills/tm-adr/SKILL.md` | Update: remove "opt-in" framing; link to DOC-31 for formal standard |
-| `crates/trusty-mpm/src/assets/skills/tm-adr.md` | Update: mirror bundled asset changes |
-| `CHANGELOG.md` | Entry (per CHANGELOG-per-PR convention): "docs(spec): DOC-31 — formalize ADRs as first-class artifact with consistency-vetting protocol" |
+| `crates/trusty-mpm/src/assets/skills/tm-adr.md` | Update: remove "opt-in" framing; link to DOC-46 for formal standard (bundled asset v2.0.0) |
+| `CHANGELOG.md` | Entry (per CHANGELOG-per-PR convention): "docs(spec): DOC-46 — formalize ADRs as first-class artifact with consistency-vetting protocol" |
 | `scripts/check_adr.sh` | FUTURE (follow-up issue): implement linting checks |
 
 ---

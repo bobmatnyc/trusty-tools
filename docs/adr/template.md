@@ -28,11 +28,11 @@ about the cost and risks.
 ## Related Decisions
 
 **Vetting required before acceptance.** Sweep `docs/adr/INDEX.md` and prior decisions;
-record the outcome per the consistency-vetting protocol (see DOC-31 §3).
+record the outcome per the consistency-vetting protocol (see DOC-46 §3).
 
 Vetted against prior ADRs on [DATE]:
 
-- **ADR-NNNN (Title):** [Consistent | Extends | Supersedes | Conflict(resolved)] — brief explanation
+- **ADR-NNNN (Example: Use X for Y):** [Consistent | Extends | Supersedes | Conflict(resolved)] — brief explanation
 - ...
 
 If no prior decisions are affected, state: "No prior decisions to vet against."

@@ -2,9 +2,9 @@
 
 This directory holds the **workspace-wide** Architecture Decision Records for
 trusty-tools — a **first-class documentation artifact, peer to Specs (DOC-38)
-and Requirements (DOC-43)**.
+and Requirements (DOC-43, future)**.
 
-See **[DOC-31](../specs/DOC-31-adr-standard.md)** for the formal ADR standard,
+See **[DOC-46](../specs/DOC-46-adr-standard.md)** for the formal ADR standard,
 including the consistency-vetting protocol and governance rules.
 
 ## What is an ADR?
@@ -15,7 +15,7 @@ ADRs are immutable once accepted — a decision is changed by writing a *new* AD
 that supersedes the old one, never by editing history. We use the
 [Nygard format](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions)
 (Title, Status, Context, Decision, Consequences) plus a **"Related Decisions"**
-section documenting consistency vetting (see DOC-31 §3).
+section documenting consistency vetting (see DOC-46 §3).
 
 ## When to write one (the bar)
 
@@ -68,7 +68,7 @@ Proposed ──► Accepted ──► Superseded by NNNN
 
 1. Copy [`template.md`](./template.md) to the next free `NNNN-kebab-title.md`.
 2. Fill in Title, Status, Context, Decision, Consequences.
-3. **Critical: Add a "Related Decisions" section** (see DOC-31 §3) — sweep `docs/adr/INDEX.md` and prior decisions; record verdict codes (Consistent, Extends, Supersedes, Conflict) for each relevant prior ADR. **Do not accept an ADR with an empty "Related Decisions" section.**
+3. **Critical: Add a "Related Decisions" section** (see DOC-46 §3) — sweep `docs/adr/INDEX.md` and prior decisions; record verdict codes (Consistent, Extends, Supersedes, Conflict) for each relevant prior ADR. **Do not accept an ADR with an empty "Related Decisions" section.**
 4. Open it as **Proposed**; flip to **Accepted** when the decision is agreed and consistency vetting is complete.
 
 See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick reference for vetting.
@@ -78,5 +78,3 @@ See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick referen
 See [`INDEX.md`](./INDEX.md) for the complete, machine-readable index of all ADRs
 (Accepted, Proposed, Rejected, and Superseded). Use it as a quick reference for
 consistency vetting when writing new ADRs.
-| [0014](./0014-native-mcp-support.md) | Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more) | Accepted |
-| [0015](./0015-three-product-agent-composition-model.md) | Unified agent composition: shared `.md`+YAML+`extends` format across trusty-agents, trusty-mpm, trusty-code | Proposed |

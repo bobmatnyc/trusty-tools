@@ -53,10 +53,10 @@ artifacts (code, config, Markdown) to the spec sections that govern them. The
 
 Workspace-wide architectural decisions live under [`docs/adr/`](../adr/README.md).
 ADRs capture *why* a choice was made among alternatives, including consequences and
-trade-offs. See **[DOC-31 — ADR Standard](../specs/DOC-31-adr-standard.md)** for the
+trade-offs. See **[DOC-46 — ADR Standard](../specs/DOC-46-adr-standard.md)** for the
 formal specification, including the consistency-vetting protocol that ensures new ADRs
 do not silently contradict accepted decisions. The `check_adr.sh` gate (proposed in
-DOC-31 §6) will enforce numbering, status validity, and bidirectional supersedes links.
+DOC-46 §6) will enforce numbering, status validity, and bidirectional supersedes links.
 
 ### Requirements (Reqs)
 
