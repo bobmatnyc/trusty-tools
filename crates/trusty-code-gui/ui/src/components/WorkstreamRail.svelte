@@ -18,20 +18,27 @@
   //
   // What: A collapsible (240px / 46px via the `«`/`»` toggle) rail: a
   // segmented `railView` toggle (hidden while collapsed), then the
-  // Workstream or Project card list for whichever view is selected.
-  // Test: no dedicated component test yet — every branch here is static
-  // Phase-1 stub content (no pure/branchy logic to isolate); `App.test.ts`
-  // pins the `.wsrail` sibling position in the shell skeleton.
+  // Workstream or Project card list for whichever view is selected. The
+  // Project view's "+ add project" card calls `onSwitchToWorkstream` — it
+  // does not run its own picker (one picker, one owner, per the Why block
+  // above); `App.svelte` wires that callback to `activeTab = 'workstream'`.
+  // Test: `WorkstreamRail.test.ts` covers the collapse toggle's width
+  // class, the `railView` segmented toggle swapping list content, the
+  // Workstream view's active-session-present/absent rendering, and the
+  // add-project button invoking `onSwitchToWorkstream`; `App.test.ts` pins
+  // the `.wsrail` sibling position in the shell skeleton.
   import type { SessionSummary } from '../lib/session-status';
 
   let {
     collapsed,
     onToggleCollapse,
     activeSession = null,
+    onSwitchToWorkstream,
   }: {
     collapsed: boolean;
     onToggleCollapse: () => void;
     activeSession?: SessionSummary | null;
+    onSwitchToWorkstream: () => void;
   } = $props();
 
   type RailView = 'workstream' | 'project';
@@ -103,6 +110,7 @@
       {:else}
         <button
           type="button"
+          onclick={onSwitchToWorkstream}
           title="Browse a project folder from the Workstream tab's picker — recents (#3187) and clone-from-URL are stub"
           class="w-full rounded-sm border-1.5 border-dashed border-trusty-sidebar-border px-2 py-2 text-center font-mono text-[11px] text-trusty-sidebar-muted hover:text-trusty-sidebar-text"
         >

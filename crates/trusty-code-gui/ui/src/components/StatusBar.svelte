@@ -221,7 +221,9 @@
   {:else}
     <div class="flex items-center gap-4 overflow-x-auto">
       <span title={session?.id}>workstream: {session?.status ?? 'unknown'}</span>
-      <span title={detail?.task}>project: {detail?.project ?? session?.project ?? 'projectless'}</span>
+      <span title={detail?.project ?? session?.project ?? 'no project bound to this session'}>
+        project: {detail?.project ?? session?.project ?? 'projectless'}
+      </span>
       <span class="flex items-center gap-1.5" title={session?.id}>
         <span class={`h-1.5 w-1.5 rounded-full ${readinessDotClass()}`}></span>
         search: {readinessLabel()}

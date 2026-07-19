@@ -117,6 +117,7 @@
       collapsed={railCollapsed}
       onToggleCollapse={() => (railCollapsed = !railCollapsed)}
       {activeSession}
+      onSwitchToWorkstream={() => (activeTab = 'workstream')}
     />
 
     <div class="actpane flex flex-1 flex-col overflow-hidden">
