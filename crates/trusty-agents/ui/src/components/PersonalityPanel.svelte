@@ -59,6 +59,12 @@ context it should always remember. This text is appended after the base
   let justSaved = false;
   let justSavedTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Why (#3198 code-critic HIGH): exported (not just local) so App.svelte can
+  // `bind:unsavedChanges` and guard tab switches — the {#if}/{:else if} tab
+  // router unmounts this component on navigation, which would otherwise
+  // silently discard an unsaved buffer despite the "Unsaved" badge shown
+  // below.
+  export let unsavedChanges = false;
   $: unsavedChanges = content !== savedContent;
 
   interface OverlayResult {
@@ -96,9 +102,16 @@ context it should always remember. This text is appended after the base
   async function save() {
     saving = true;
     saveError = '';
+    // Why (#3198 code-critic MEDIUM): snapshot the buffer BEFORE the await.
+    // If the user keeps typing during the IPC round-trip, `content` can
+    // change while `write_personalization_overlay` is in flight; comparing
+    // against a snapshot (and marking only that snapshot saved) means
+    // keystrokes typed mid-save correctly stay flagged as unsaved instead of
+    // being silently treated as persisted.
+    const toSave = content;
     try {
-      await invoke('write_personalization_overlay', { name: AGENT_NAME, content });
-      savedContent = content;
+      await invoke('write_personalization_overlay', { name: AGENT_NAME, content: toSave });
+      savedContent = toSave;
       notFound = false;
       justSaved = true;
       if (justSavedTimer) clearTimeout(justSavedTimer);

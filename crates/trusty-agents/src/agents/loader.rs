@@ -98,7 +98,10 @@ impl AgentConfig {
     /// so the documented flow actually dispatches regardless of CWD. The
     /// `from_package` flag feeds [`Self::extends_shadow_fallback`], which must
     /// not let an unresolvable directory package silently shadow a complete flat
-    /// `<name>.toml`.
+    /// `<name>.toml` — and, since the package itself may have resolved from ANY
+    /// candidate directory (not just the primary one), the shadow rescue must
+    /// also search every candidate directory for the shadowing flat file rather
+    /// than assuming it lives in the same (primary) tier as the package.
     /// What: for each directory in [`agents_dir_candidates`], tries, in order:
     /// (1) the directory package (`<name>/agent.toml` + `persona.md`), (2) flat
     /// `<name>.toml`, (3) flat `<name>.md` via
@@ -149,30 +152,41 @@ impl AgentConfig {
     /// silent correctness/security hazard (a `[tools]`-less `izzie/agent.toml`
     /// shadowing a locked-down flat `izzie.toml`). Once the resolver works
     /// end-to-end the normal path resolves the package and this fires only on
-    /// genuine failures.
-    /// What: when the offending config came from a package AND a flat
-    /// `<name>.toml` exists alongside, logs a `warn` naming both paths and loads
-    /// the flat file (resolving its OWN `extends` if any, forcing `name` to bind
-    /// to the flat file rather than the shadowing package). Otherwise the
-    /// original resolution error is returned with context.
-    /// Test: `by_name_package_extends_shadow_falls_back_to_flat`.
+    /// genuine failures. #3198 code-critic fix: `by_name_unresolved_src` (and
+    /// its async twin) now resolve the offending package from ANY candidate
+    /// directory in [`agents_dir_candidates`] — e.g. the `$HOME` fallback tier
+    /// — not just the primary one. A single-tier `agents_dir()` lookup here
+    /// would therefore search the WRONG directory whenever the package came
+    /// from a non-primary tier, and hard-fail even though a valid flat
+    /// `<name>.toml` shadow exists right next to the package.
+    /// What: when the offending config came from a package, searches every
+    /// candidate directory (same order as [`agents_dir_candidates`]) for a flat
+    /// `<name>.toml`; on the first match, logs a `warn` naming both paths and
+    /// loads the flat file (resolving its OWN `extends` if any, forcing `name`
+    /// to bind to the flat file rather than the shadowing package). Otherwise
+    /// the original resolution error is returned with context.
+    /// Test: `by_name_package_extends_shadow_falls_back_to_flat`,
+    /// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`.
     fn extends_shadow_fallback(
         name: &str,
         from_package: bool,
         err: crate::agents::extends::AgentExtendsError,
     ) -> Result<Self> {
-        let dir = agents_dir();
-        let flat = dir.join(format!("{name}.toml"));
-        if from_package && flat.exists() {
-            tracing::warn!(
-                agent = %name,
-                package = %dir.join(name).display(),
-                flat = %flat.display(),
-                error = %err,
-                "directory-package `extends` failed to resolve; falling back to the \
-                 complete flat <name>.toml (refusing to serve the unresolved partial package)"
-            );
-            return Self::by_name_flat_toml(name, &flat);
+        if from_package {
+            for dir in agents_dir_candidates() {
+                let flat = dir.join(format!("{name}.toml"));
+                if flat.exists() {
+                    tracing::warn!(
+                        agent = %name,
+                        package = %dir.join(name).display(),
+                        flat = %flat.display(),
+                        error = %err,
+                        "directory-package `extends` failed to resolve; falling back to the \
+                         complete flat <name>.toml (refusing to serve the unresolved partial package)"
+                    );
+                    return Self::by_name_flat_toml(name, &flat);
+                }
+            }
         }
         Err(anyhow::Error::new(err))
             .with_context(|| format!("failed to resolve `extends` chain for agent '{name}'"))
@@ -540,7 +554,9 @@ fn agents_dir() -> PathBuf {
 /// when `HOME` is set and differs from the primary directory (avoids a
 /// redundant duplicate tier when they already coincide).
 /// Test: `by_name_finds_flat_md_in_home_tier_when_project_dir_misses`,
-/// `by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses`
+/// `by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses`,
+/// `same_name_project_local_shadows_home_tier` (+ async),
+/// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`
 /// (tests/loading.rs).
 fn agents_dir_candidates() -> Vec<PathBuf> {
     let primary = agents_dir();

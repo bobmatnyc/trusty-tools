@@ -731,14 +731,17 @@ allowed = ["locked_tool"]
 /// `~/.trusty-agents/agents`. So a personalization overlay dropped in
 /// `~/.trusty-agents/agents/` showed up in listings but was FILE-NOT-FOUND at
 /// dispatch. This proves `agents_dir_candidates()`'s `$HOME` fallback tier
-/// fixes it: the primary (project-local) directory here genuinely lacks the
-/// agent (unique per-process name), so resolution can only succeed by falling
-/// through to the `$HOME` tier.
+/// fixes it. #3198 code-critic: `TAGENT_CONFIG_DIR` is pinned to a dedicated,
+/// deliberately-empty tempdir (rather than left unset to fall back on the
+/// real project-local `.trusty-agents/agents/`) — deterministic primary-tier
+/// isolation, matching the sibling `TAGENT_CONFIG_DIR`-pinning tests in this
+/// file, and independent of `cargo test`'s CWD.
 #[test]
 fn by_name_finds_flat_md_in_home_tier_when_project_dir_misses() {
     let _guard = ENV_LOCK.blocking_lock();
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let home_agents = tmp.path().join(".trusty-agents").join("agents");
+    let primary_tmp = tempfile::tempdir().expect("primary temp dir");
+    let home_tmp = tempfile::tempdir().expect("home temp dir");
+    let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
     std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
     let unique_name = format!("home-tier-agent-{}", std::process::id());
     std::fs::write(
@@ -751,13 +754,15 @@ fn by_name_finds_flat_md_in_home_tier_when_project_dir_misses() {
     let prev_home = std::env::var_os("HOME");
     // SAFETY: guarded by ENV_LOCK.
     unsafe {
-        // Force the project-local primary tier (which lacks this name).
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-        std::env::set_var("HOME", tmp.path());
+        // Primary tier is a fresh, empty tempdir — deliberately isolated from
+        // the real project-local `.trusty-agents/agents/`.
+        std::env::set_var("TAGENT_CONFIG_DIR", primary_tmp.path());
+        std::env::set_var("HOME", home_tmp.path());
     }
     let result = AgentConfig::by_name(&unique_name);
     // SAFETY: guarded by ENV_LOCK.
     unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
         match &prev_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
@@ -775,8 +780,9 @@ fn by_name_finds_flat_md_in_home_tier_when_project_dir_misses() {
 #[tokio::test]
 async fn by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses() {
     let _guard = ENV_LOCK.lock().await;
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let home_agents = tmp.path().join(".trusty-agents").join("agents");
+    let primary_tmp = tempfile::tempdir().expect("primary temp dir");
+    let home_tmp = tempfile::tempdir().expect("home temp dir");
+    let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
     std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
     let unique_name = format!("home-tier-agent-async-{}", std::process::id());
     std::fs::write(
@@ -789,12 +795,13 @@ async fn by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses() {
     let prev_home = std::env::var_os("HOME");
     // SAFETY: guarded by ENV_LOCK across the await below.
     unsafe {
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("TAGENT_CONFIG_DIR", primary_tmp.path());
+        std::env::set_var("HOME", home_tmp.path());
     }
     let result = AgentConfig::by_name_async(&unique_name).await;
     // SAFETY: guarded by ENV_LOCK.
     unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
         match &prev_home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
@@ -803,4 +810,163 @@ async fn by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses() {
 
     let cfg = result.expect("by_name_async must find the overlay via the $HOME fallback tier");
     assert_eq!(cfg.system_prompt.content, "HOME TIER ASYNC PROSE");
+}
+
+/// #3198 code-critic MEDIUM fix: proves `agents_dir_candidates()` preserves
+/// the documented precedence (explicit `TAGENT_CONFIG_DIR`/project-local >
+/// `$HOME`) rather than e.g. merging fields or preferring `$HOME` — when the
+/// SAME agent name exists as a flat `.md` in BOTH the primary directory and
+/// the `$HOME` fallback tier, the primary tier's content must win.
+#[test]
+fn same_name_project_local_shadows_home_tier() {
+    let _guard = ENV_LOCK.blocking_lock();
+    let primary_tmp = tempfile::tempdir().expect("primary temp dir");
+    let home_tmp = tempfile::tempdir().expect("home temp dir");
+    let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
+
+    let unique_name = format!("shadow-agent-{}", std::process::id());
+    std::fs::write(
+        primary_tmp.path().join(format!("{unique_name}.md")),
+        format!("---\nname: {unique_name}\nrole: agent\n---\nPRIMARY TIER PROSE"),
+    )
+    .expect("write primary overlay");
+    std::fs::write(
+        home_agents.join(format!("{unique_name}.md")),
+        format!("---\nname: {unique_name}\nrole: agent\n---\nHOME TIER PROSE"),
+    )
+    .expect("write home overlay");
+
+    clear_model_env(&unique_name);
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", primary_tmp.path());
+        std::env::set_var("HOME", home_tmp.path());
+    }
+    let result = AgentConfig::by_name(&unique_name);
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+        match &prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    let cfg = result.expect("by_name must resolve when both tiers have the name");
+    assert_eq!(cfg.system_prompt.content, "PRIMARY TIER PROSE");
+}
+
+/// Async counterpart of `same_name_project_local_shadows_home_tier`.
+#[tokio::test]
+async fn by_name_async_same_name_project_local_shadows_home_tier() {
+    let _guard = ENV_LOCK.lock().await;
+    let primary_tmp = tempfile::tempdir().expect("primary temp dir");
+    let home_tmp = tempfile::tempdir().expect("home temp dir");
+    let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
+
+    let unique_name = format!("shadow-agent-async-{}", std::process::id());
+    std::fs::write(
+        primary_tmp.path().join(format!("{unique_name}.md")),
+        format!("---\nname: {unique_name}\nrole: agent\n---\nPRIMARY TIER ASYNC PROSE"),
+    )
+    .expect("write primary overlay");
+    std::fs::write(
+        home_agents.join(format!("{unique_name}.md")),
+        format!("---\nname: {unique_name}\nrole: agent\n---\nHOME TIER ASYNC PROSE"),
+    )
+    .expect("write home overlay");
+
+    clear_model_env(&unique_name);
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: guarded by ENV_LOCK across the await below.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", primary_tmp.path());
+        std::env::set_var("HOME", home_tmp.path());
+    }
+    let result = AgentConfig::by_name_async(&unique_name).await;
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+        match &prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    let cfg = result.expect("by_name_async must resolve when both tiers have the name");
+    assert_eq!(cfg.system_prompt.content, "PRIMARY TIER ASYNC PROSE");
+}
+
+/// #3198 code-critic HIGH fix regression: when a directory-package agent
+/// resolves from the `$HOME` fallback tier (not the primary directory) and
+/// its `extends` fails to resolve, the flat `<name>.toml` shadow-rescue
+/// (`extends_shadow_fallback`) must search that SAME tier rather than only
+/// the (empty) primary directory. Before the fix this hard-failed even
+/// though a valid flat shadow sat right next to the package in `$HOME`.
+#[test]
+fn extends_shadow_fallback_searches_home_tier_when_package_resolved_there() {
+    let _guard = ENV_LOCK.blocking_lock();
+    let primary_tmp = tempfile::tempdir().expect("primary temp dir");
+    let home_tmp = tempfile::tempdir().expect("home temp dir");
+    let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
+
+    let unique_name = format!("home-shadow-agent-{}", std::process::id());
+
+    // Package with an UNRESOLVABLE extends and NO [tools], living ONLY in
+    // the $HOME tier.
+    let pkg = home_agents.join(&unique_name);
+    std::fs::create_dir(&pkg).expect("mk pkg");
+    std::fs::write(
+        pkg.join("agent.toml"),
+        format!(
+            "\n[agent]\nname = \"{unique_name}\"\nrole = \"assistant\"\n\
+             model = \"anthropic/claude-sonnet-4-6\"\ndescription = \"partial package\"\n\
+             extends = \"ghost-base\"\n\n[llm]\ntemperature = 0.0\nmax_tokens = 1024\n"
+        ),
+    )
+    .expect("write pkg agent.toml");
+    std::fs::write(pkg.join("persona.md"), "PARTIAL PACKAGE").expect("write persona");
+
+    // Complete flat <name>.toml alongside it, in the SAME $HOME tier.
+    std::fs::write(
+        home_agents.join(format!("{unique_name}.toml")),
+        format!(
+            "\n[agent]\nname = \"{unique_name}\"\nrole = \"assistant\"\n\
+             model = \"anthropic/claude-sonnet-4-6\"\ndescription = \"complete flat\"\n\n\
+             [llm]\ntemperature = 0.0\nmax_tokens = 1024\n\n\
+             [system_prompt]\ncontent = \"HOME SHADOW FLAT\"\n\n\
+             [tools]\nallowed = [\"locked_tool\"]\n"
+        ),
+    )
+    .expect("write flat toml");
+
+    clear_model_env(&unique_name);
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        // Primary tier is a fresh, empty tempdir — the package/flat pair
+        // exists ONLY under the $HOME tier.
+        std::env::set_var("TAGENT_CONFIG_DIR", primary_tmp.path());
+        std::env::set_var("HOME", home_tmp.path());
+    }
+    let result = AgentConfig::by_name(&unique_name);
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+        match &prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    let cfg = result.expect("shadow fallback must search the $HOME tier, not just primary");
+    assert_eq!(cfg.system_prompt.content, "HOME SHADOW FLAT");
+    assert_eq!(
+        cfg.tools.allowed.as_deref(),
+        Some(&["locked_tool".to_string()][..])
+    );
 }
