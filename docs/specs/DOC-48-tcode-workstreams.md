@@ -177,7 +177,7 @@ When the daemon boots or when `workstream.list` is called:
 When `tcode serve` starts:
 1. Load the stored `active_workstream_id` from `workstreams-….json`.
 2. Restore that workstream as the active workstream (if it exists).
-3. Infer state: if any session in the active workstream is live, the workstream is `active`; else `idle`.
+3. The restored workstream is `active` per the persisted pointer, independent of whether sessions are live.
 
 **This ensures:** A daemon restart **never silently changes which workstream is active**. If the daemon was running workstream A, it resumes with workstream A active (assuming it still exists). If the workstream was deleted, or the user wants to switch, they must explicitly call `workstream.activate{id, force: true}`.
 
@@ -188,8 +188,8 @@ When `tcode serve` starts, it **reconciles the stored workstream records against
 1. **Load workstreams.json** from the file path (§3.1).
 2. **Load all live session IDs** from the `SessionRegistry`.
 3. **For each workstream record:**
-   - If `session_ids` is empty, mark as `idle`.
-   - If `session_ids` is non-empty, check if any session is live. If yes, the workstream *may* be `active` (if it is the stored `active_workstream_id`); else mark as `idle`.
+   - Determine state: if its id == `active_workstream_id` pointer, state is `active`; else `idle` (or `closed` if marked closed).
+   - Session activity feeds only `SessionActivityUpdate` and `WorkstreamStateInferred` telemetry events; it does NOT determine active/idle state.
    - Do NOT delete any workstream record (non-destructive).
 
 4. **Restore `active_workstream_id`:** Load the stored pointer; if the referenced workstream still exists, restore it as active (see §3.2). If the workstream was deleted, set `active_workstream_id` to `null`.
@@ -403,7 +403,7 @@ When a client calls `workstream.activate{id, force: true}` and another workstrea
 - All connected clients receive a `WorkstreamActivationChanged` event (§5.3).
 - The prior workstream transitions from `active` to `idle`.
 - The new workstream becomes `active`.
-- Clients that were observing the prior workstream should reconnect to the new active workstream's events (the SSE endpoint path changes from `/api/v1/sessions/{old_id}/events` to `/api/v1/sessions/{new_id}/events`).
+- Clients that were observing the prior workstream should reconnect to the new active workstream's events (the SSE endpoint path changes from `/api/v1/workstreams/{old_id}/events` to `/api/v1/workstreams/{new_id}/events`).
 
 This preserves DOC-40's "never silently multiplex" principle at the activation level: when the active workstream changes, all clients are informed explicitly, never silently.
 
