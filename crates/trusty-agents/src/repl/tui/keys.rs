@@ -14,7 +14,18 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     // Inline choice picker: when the LLM offered a list and we surfaced it,
     // arrow keys navigate the choices, Enter commits the selection into the
     // input buffer (or clears for free-type on the "Other…" row), Esc
-    // dismisses. Other keys fall through so the user can keep typing.
+    // dismisses. Other keys fall through so the user can keep typing — and
+    // (#3325) dismiss a *stale LLM-offered list* first, since `app.choices`
+    // otherwise stays populated indefinitely (it's set once per assistant
+    // turn by `push_assistant` -> `detect_choices`, not per-keystroke) and
+    // would keep intercepting the *next* Enter as "confirm choice" instead
+    // of "submit the line I just typed", silently discarding the whole
+    // typed message. This only applies to the untagged (`choices_context ==
+    // None`) LLM list: live slash-command completions (also untagged, but
+    // rebuilt from `input_buf` on every keystroke by
+    // `update_slash_completions` below) and the tagged `/switch` picker
+    // (`choices_context == Some("switch")`, intentionally left open while
+    // typing) are both exempt.
     if !app.choices.is_empty() {
         match key.code {
             KeyCode::Up => {
@@ -67,7 +78,19 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 app.choices_context = None;
                 return None;
             }
-            _ => { /* fall through to normal input editing */ }
+            _ => {
+                // Any other key means the user is editing/typing instead of
+                // navigating the picker. Dismiss a stale LLM-offered list
+                // (untagged + not slash-shaped) so the normal input-editing
+                // match below runs unobstructed and a subsequent Enter
+                // submits the line (#3325). Leave live slash completions
+                // and the tagged `/switch` picker alone — see the comment
+                // above `is_live_slash_completion`.
+                if app.choices_context.is_none() && !is_live_slash_completion(app) {
+                    app.choices.clear();
+                    app.choice_cursor = 0;
+                }
+            }
         }
     }
     // Ctrl combos.

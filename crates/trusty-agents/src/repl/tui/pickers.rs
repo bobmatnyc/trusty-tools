@@ -85,6 +85,36 @@ pub(crate) fn strip_numbered_marker(line: &str) -> Option<&str> {
     Some(&line[after_punct + n.len_utf8()..])
 }
 
+/// Whether `app.choices` currently holds a *live* slash-command completion
+/// list, as opposed to an untagged LLM-offered choice list.
+///
+/// Why (#3325): `app.choices` (untagged, i.e. `choices_context == None`) is
+/// populated by two different producers with very different lifecycles —
+/// `detect_choices` sets it ONCE per assistant turn and then leaves it
+/// alone, while `update_slash_completions` rebuilds it from `input_buf` on
+/// EVERY keystroke. `handle_key`'s choices branch used to let both kinds
+/// fall through untouched on a non-navigation key, which meant a stale
+/// LLM-offered list from a *previous* turn would still be sitting in
+/// `app.choices` the next time the user typed a new message — so the
+/// following Enter got swallowed as "confirm choice" instead of "submit
+/// this line". This predicate lets the caller dismiss only the stale kind:
+/// slash completions never go stale (they're rebuilt immediately after),
+/// so they're exempt. The tagged `/switch` picker
+/// (`choices_context == Some("switch")`) is a separate, deliberately
+/// persistent overlay and is never routed through this predicate — see the
+/// `choices_context.is_none()` guard at the call site in `keys.rs`.
+/// What: True only when there is no picker `context` tag AND every current
+/// entry is a `/`-prefixed command name (the shape `update_slash_completions`
+/// always produces).
+/// Test: `repl_app_choices_dismissed_on_typing_over_llm_list`,
+/// `repl_app_slash_completion_choices_survive_typing`,
+/// `slash_completions_does_not_stomp_context_picker`.
+pub(crate) fn is_live_slash_completion(app: &ReplApp) -> bool {
+    !app.choices.is_empty()
+        && app.choices_context.is_none()
+        && app.choices.iter().all(|c| c.starts_with('/'))
+}
+
 /// Render the inline multiple-choice picker (just below the input row).
 ///
 /// Why: A non-modal picker right beneath the input keeps the user's eyes near

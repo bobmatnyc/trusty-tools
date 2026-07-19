@@ -461,3 +461,193 @@ fn ctrl_e_noop_when_python_block_but_no_shell_block() {
     assert_eq!(a.input_buf, "");
     assert_eq!(a.cursor_pos, 0);
 }
+
+// ---------------------------------------------------------------------
+// #3325: REPL swallows a fully-typed message when a stale LLM-offered
+// choice list is still showing from the previous turn. Root cause:
+// `handle_key`'s inline-choice branch intercepted every Enter as "confirm
+// picker selection" while `app.choices` was non-empty, and `app.choices`
+// is only populated once per assistant turn (`push_assistant` ->
+// `detect_choices`) — it never clears itself just because the user typed
+// something new. The fix dismisses non-live pickers the moment the user
+// presses any key other than Up/Down/Enter/Esc.
+// ---------------------------------------------------------------------
+
+/// Why: This is the exact user-visible symptom from #3325 — type a brand
+/// new message after a numbered/bulleted assistant response and press
+/// Enter, and the whole line used to vanish (replaced by the first stale
+/// choice) instead of submitting.
+/// What: Seed `app.choices` the way `push_assistant` would after a
+/// numbered-list response, type a fresh message character-by-character
+/// (mirroring real keystroke delivery), then press Enter. Assert the
+/// typed message is returned as the submitted line and the picker state
+/// is cleared — not swallowed and replaced by "Apple".
+/// Test: `repl_app_choices_dismissed_on_typing_over_llm_list` (this test).
+#[test]
+fn repl_app_choices_dismissed_on_typing_over_llm_list() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    // Simulate the picker state left behind by a numbered-list assistant
+    // response (mirrors what `push_assistant` -> `detect_choices` sets).
+    a.choices = vec![
+        "Apple".to_string(),
+        "Banana".to_string(),
+        "Orange".to_string(),
+        "Other (type your own)".to_string(),
+    ];
+    a.choice_cursor = 0;
+    a.choices_context = None;
+
+    for ch in "totally different followup message".chars() {
+        let r = handle_key(&mut a, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        assert_eq!(r, None, "no key mid-message should submit");
+    }
+    // The stale picker must be gone the moment typing started.
+    assert!(
+        a.choices.is_empty(),
+        "typing over a stale LLM choice list must dismiss it"
+    );
+    let submitted = handle_key(&mut a, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        submitted.as_deref(),
+        Some("totally different followup message"),
+        "Enter must submit the freshly typed line, not a stale picker choice"
+    );
+}
+
+/// Why: Slash-command autocomplete also lives in `app.choices`, but unlike
+/// an LLM-offered list it is rebuilt from `input_buf` on every keystroke
+/// (`update_slash_completions`), so it must NOT be force-dismissed by the
+/// same-key fall-through path — that would make the completion list flicker
+/// away on every character instead of narrowing normally.
+/// What: Type `/mo` char-by-char; after each character, `app.choices`
+/// should still contain the live `/model` completion (never spuriously
+/// emptied by the choices dismissal added for #3325).
+/// Test: `repl_app_slash_completion_choices_survive_typing` (this test).
+#[test]
+fn repl_app_slash_completion_choices_survive_typing() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    for ch in "/mo".chars() {
+        handle_key(&mut a, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert_eq!(a.input_buf, "/mo");
+    assert!(
+        a.choices.iter().any(|c| c == "/model"),
+        "live slash completions must survive typing, got {:?}",
+        a.choices
+    );
+    assert!(a.choices_context.is_none());
+}
+
+/// No-op `ReplHandler` for driving `process_event` in tests without a real
+/// LLM backend. `handle_input` is never actually invoked by the assertions
+/// below (Enter's spawned dispatch task is fire-and-forget and the test
+/// checks state that `process_event` sets synchronously before spawning),
+/// but the trait bound requires a concrete impl.
+struct NoopReplHandler;
+
+#[async_trait::async_trait]
+impl ReplHandler for NoopReplHandler {
+    async fn handle_input(&self, _line: String, _tx: UnboundedSender<ReplEvent>) -> Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Why (#3325): The reported bug is a *race*, not just stale state —
+/// keystrokes get dropped/swallowed specifically when they arrive
+/// concurrently with model output landing mid-message. A test that only
+/// drives `handle_key` directly (as the two tests above do) never
+/// exercises the actual async entry point the event loop uses per-event
+/// (`process_event` in `events.rs`), so it can't catch a regression in
+/// that interleaving — e.g. a future change that drops keys queued while
+/// `process_event` holds the app lock to apply an `LlmResponse`. This
+/// test drives `process_event` directly (the same function
+/// `run_tui`'s `event_loop` calls for every `ReplEvent`), interleaving
+/// `Key` events with an `LlmResponse` event mid-message.
+/// What: Types "abc" via `process_event(ReplEvent::Key(..))`, then
+/// processes an `LlmResponse` carrying a numbered list — populating
+/// `app.choices` exactly like a real assistant turn arriving while the
+/// user keeps typing — then types "def" the rest of the message, then
+/// Enter. Asserts every character survived (`input_buf`/submitted line is
+/// exactly "abcdef", nothing dropped) and the concurrently-arrived
+/// picker didn't swallow the final Enter.
+/// Test: `repl_process_event_keys_survive_concurrent_llm_response` (this
+/// test).
+#[tokio::test]
+async fn repl_process_event_keys_survive_concurrent_llm_response() {
+    let app = Arc::new(Mutex::new(ReplApp::new("ctrl".into(), "u".into())));
+    let current_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let handler = Arc::new(NoopReplHandler);
+
+    async fn send_key(
+        app: &Arc<Mutex<ReplApp>>,
+        current_task: &Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        tx: &UnboundedSender<ReplEvent>,
+        handler: &Arc<NoopReplHandler>,
+        code: KeyCode,
+    ) {
+        process_event(
+            ReplEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            app,
+            current_task,
+            tx,
+            handler,
+        )
+        .await;
+    }
+
+    for ch in "abc".chars() {
+        send_key(&app, &current_task, &tx, &handler, KeyCode::Char(ch)).await;
+    }
+
+    // Model output for the prior turn lands mid-keystroke — mirrors
+    // `push_assistant`/`detect_choices` populating `app.choices` while the
+    // user is still typing their next message.
+    process_event(
+        ReplEvent::LlmResponse {
+            text: "Pick one:\n1. Apple\n2. Banana\n3. Orange".to_string(),
+            is_error: false,
+        },
+        &app,
+        &current_task,
+        &tx,
+        &handler,
+    )
+    .await;
+
+    for ch in "def".chars() {
+        send_key(&app, &current_task, &tx, &handler, KeyCode::Char(ch)).await;
+    }
+
+    {
+        let a = app.lock().await;
+        assert_eq!(
+            a.input_buf, "abcdef",
+            "keystrokes must survive an LlmResponse landing mid-message"
+        );
+        // The stale picker is dismissed the moment the user resumes typing
+        // (the first "d" keystroke after the LlmResponse) rather than
+        // lingering until Enter — see the `is_live_slash_completion` guard
+        // in `keys.rs`. Confirmed empty here as a sanity check on that
+        // dismiss-on-type behavior before asserting the Enter path below.
+        assert!(
+            a.choices.is_empty(),
+            "the stale picker should already be dismissed by the 'd' \
+             keystroke that followed the LlmResponse"
+        );
+    }
+
+    send_key(&app, &current_task, &tx, &handler, KeyCode::Enter).await;
+
+    let a = app.lock().await;
+    assert!(
+        a.choices.is_empty(),
+        "Enter after typing over a stale picker must dismiss it"
+    );
+    assert_eq!(
+        a.chat.last().map(|l| l.text.as_str()),
+        Some("abcdef"),
+        "the freshly typed line must be submitted verbatim, not swallowed by \
+         the concurrently-arrived choice list"
+    );
+}
