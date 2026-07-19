@@ -23,14 +23,16 @@ pub use pricing::{Pricing, pricing};
 use std::fmt;
 
 /// One of the inference providers epic #2400 targets (the original five plus the
-/// extension providers added in later waves — Together via #2488).
+/// extension providers added in later waves — Together via #2488, AtlasCloud
+/// via #2536, and Local via #3247).
 ///
 /// Why: a closed enum (rather than a bare string) lets the configurator and the
 /// registry share one exhaustively-matched identity, so adding a provider is a
 /// compile error until every match arm is handled.
 /// What: the target providers. `Bedrock` authenticates via the AWS
 /// credential chain (no API key), which is why [`Self::credential_name`] returns
-/// `None` for it.
+/// `None` for it. `Local` is the same "no key" shape — a local/OpenAI-compatible
+/// endpoint (Ollama by default) that runs unauthenticated on `localhost`.
 /// Test: `provider_id_round_trips`, `from_slug_prefix_matches`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderId {
@@ -48,6 +50,9 @@ pub enum ProviderId {
     Together,
     /// AtlasCloud (OpenAI-compatible inference; extension provider, #2536).
     AtlasCloud,
+    /// Local / OpenAI-compatible endpoint — Ollama by default, or any other
+    /// unauthenticated `/v1/chat/completions` server on `localhost` (#3247).
+    Local,
 }
 
 impl ProviderId {
@@ -68,6 +73,7 @@ impl ProviderId {
             Self::OpenAI => "openai",
             Self::Together => "together",
             Self::AtlasCloud => "atlascloud",
+            Self::Local => "local",
         }
     }
 
@@ -75,14 +81,16 @@ impl ProviderId {
     /// provider does not use an API key.
     ///
     /// Why: [`crate::inference::credentials::resolve_key_with`] keys off a
-    /// provider name; Bedrock has no key (AWS chain), so its resolution is
-    /// skipped entirely by the configurator.
-    /// What: same string as [`Self::as_str`] for the four keyed providers;
-    /// `None` for [`Self::Bedrock`].
-    /// Test: `credential_name_none_only_for_bedrock`.
+    /// provider name; Bedrock has no key (AWS chain) and Local has no key
+    /// (unauthenticated `localhost` endpoint), so their resolution is skipped
+    /// entirely by the configurator — both resolve immediately in stage 1 of
+    /// [`crate::inference::configurator::provider_for`] with no credential.
+    /// What: same string as [`Self::as_str`] for the keyed providers; `None`
+    /// for [`Self::Bedrock`] and [`Self::Local`].
+    /// Test: `credential_name_none_for_bedrock_and_local`.
     pub fn credential_name(self) -> Option<&'static str> {
         match self {
-            Self::Bedrock => None,
+            Self::Bedrock | Self::Local => None,
             other => Some(other.as_str()),
         }
     }
@@ -91,11 +99,16 @@ impl ProviderId {
     ///
     /// Why: stage 1 of the configurator's two-stage resolver keys off the slug
     /// prefix (`bedrock/`, `fireworks/`, `anthropic/`, `openai/`, `together/`,
-    /// `atlascloud/`, `openrouter/`); this is the single mapping it uses.
+    /// `atlascloud/`, `local/`, `ollama/`, `openrouter/`); this is the single
+    /// mapping it uses.
     /// What: matches the segment before the first `/` case-insensitively;
     /// returns `None` for a bare slug or an unrecognised prefix (the caller then
-    /// falls back to the OpenRouter default).
-    /// Test: `from_slug_prefix_matches`, `from_slug_prefix_unknown_is_none`.
+    /// falls back to the OpenRouter default). `ollama/` is accepted as an alias
+    /// for [`Self::Local`] — it matches the prefix `trusty-agents`' legacy
+    /// `OllamaAdapter` already routes on (see `crate::inference::providers::local`),
+    /// so a slug written either way resolves to the same provider here.
+    /// Test: `from_slug_prefix_matches`, `from_slug_prefix_unknown_is_none`,
+    /// `local_seeded_with_openai_compat_posture`.
     pub fn from_slug_prefix(slug: &str) -> Option<Self> {
         let prefix = slug.split('/').next()?;
         match prefix.to_ascii_lowercase().as_str() {
@@ -106,6 +119,7 @@ impl ProviderId {
             "openai" => Some(Self::OpenAI),
             "together" => Some(Self::Together),
             "atlascloud" => Some(Self::AtlasCloud),
+            "local" | "ollama" => Some(Self::Local),
             _ => None,
         }
     }
@@ -192,7 +206,7 @@ pub struct ProviderCapabilities {
 /// trusty-review's model notes (structured output).
 /// What: one entry per [`ProviderId`], indexed by [`capabilities`].
 /// Test: `all_providers_seeded`.
-const SEED: [ProviderCapabilities; 7] = [
+const SEED: [ProviderCapabilities; 8] = [
     ProviderCapabilities {
         id: ProviderId::OpenRouter,
         native_tool_calling: true,
@@ -301,6 +315,31 @@ const SEED: [ProviderCapabilities; 7] = [
         default_model: "openai/gpt-5.6-sol",
         credential_env: Some("ATLASCLOUD_API_KEY"),
     },
+    // Local / OpenAI-compatible (#3247) — a thin config over the shared
+    // OpenAI-compatible core pointed at `http://localhost:11434/v1` (Ollama's
+    // native OpenAI-compat shim) by default, overridable via `OLLAMA_HOST`
+    // (same env var `trusty-agents`' legacy `OllamaAdapter` already reads —
+    // see `crate::inference::providers::local`). No external credentials are
+    // needed (Bedrock precedent: `credential_env = None`); most local servers
+    // ignore the `Authorization` header entirely. Modeled conservatively —
+    // `native_tool_calling = true` / `OpenAiFunctions` because the endpoint
+    // IS OpenAI-compatible and accepts a `tools` array, but `structured_output`
+    // and `vision` stay `false` since most locally-served models don't
+    // reliably support either. `default_model` is a common current Ollama
+    // pull; callers running a different model override the slug per request.
+    ProviderCapabilities {
+        id: ProviderId::Local,
+        native_tool_calling: true,
+        tool_dialect: ToolDialect::OpenAiFunctions,
+        streaming: true,
+        prompt_caching: false,
+        structured_output: false,
+        vision: false,
+        detailed_usage_accounting: false,
+        max_context_window: 128_000,
+        default_model: "llama3.1",
+        credential_env: None,
+    },
 ];
 
 /// Look up the capability descriptor for a provider.
@@ -357,6 +396,7 @@ mod tests {
             ProviderId::OpenAI,
             ProviderId::Together,
             ProviderId::AtlasCloud,
+            ProviderId::Local,
         ] {
             assert_eq!(id.to_string(), id.as_str());
             assert_eq!(ProviderId::from_slug_prefix(&format!("{id}/x")), Some(id));
@@ -386,11 +426,13 @@ mod tests {
         assert_eq!(ProviderId::from_slug_prefix("cohere/command"), None);
     }
 
-    /// Why: only Bedrock uses a non-key credential chain.
+    /// Why: Bedrock (AWS chain) and Local (unauthenticated localhost) are the
+    /// only two providers with a non-key credential posture.
     /// Test: itself.
     #[test]
-    fn credential_name_none_only_for_bedrock() {
+    fn credential_name_none_for_bedrock_and_local() {
         assert_eq!(ProviderId::Bedrock.credential_name(), None);
+        assert_eq!(ProviderId::Local.credential_name(), None);
         assert_eq!(ProviderId::OpenRouter.credential_name(), Some("openrouter"));
         assert_eq!(ProviderId::Anthropic.credential_name(), Some("anthropic"));
     }
@@ -399,7 +441,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn all_providers_seeded() {
-        assert_eq!(all().len(), 7);
+        assert_eq!(all().len(), 8);
         for id in [
             ProviderId::OpenRouter,
             ProviderId::Fireworks,
@@ -408,11 +450,43 @@ mod tests {
             ProviderId::OpenAI,
             ProviderId::Together,
             ProviderId::AtlasCloud,
+            ProviderId::Local,
         ] {
             let caps = capabilities(id);
             assert_eq!(caps.id, id);
             assert!(caps.max_context_window >= 128_000);
         }
+    }
+
+    /// Why: Local (#3247) must resolve by id, by name, and by both accepted
+    /// slug-prefix spellings (`local/`, `ollama/`), carry a no-key credential
+    /// posture (Bedrock precedent), and expose an OpenAI-compat capability
+    /// shape suitable for the shared `OpenAiCompatAdapter` core.
+    /// Test: itself.
+    #[test]
+    fn local_seeded_with_openai_compat_posture() {
+        assert_eq!(
+            ProviderId::from_slug_prefix("local/llama3.1"),
+            Some(ProviderId::Local)
+        );
+        assert_eq!(
+            ProviderId::from_slug_prefix("ollama/qwen3:30b"),
+            Some(ProviderId::Local)
+        );
+        assert_eq!(
+            ProviderId::from_slug_prefix("OLLAMA/llama3.1"),
+            Some(ProviderId::Local)
+        );
+        let caps = capabilities(ProviderId::Local);
+        assert_eq!(caps.id, ProviderId::Local);
+        assert!(caps.native_tool_calling);
+        assert_eq!(caps.tool_dialect, ToolDialect::OpenAiFunctions);
+        assert_eq!(caps.credential_env, None);
+        assert_eq!(
+            capabilities_for("Local").map(|c| c.id),
+            Some(ProviderId::Local)
+        );
+        assert_eq!(ProviderId::Local.credential_name(), None);
     }
 
     /// Why: Together (#2488) must resolve by id, by name, and by slug prefix, and

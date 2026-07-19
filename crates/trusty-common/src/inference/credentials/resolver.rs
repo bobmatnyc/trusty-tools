@@ -57,6 +57,12 @@ pub fn env_var_for(provider: &str) -> Option<&'static str> {
         "slack-user" => Some("SLACK_USER_TOKEN"),
         // Non-inference token: the native Telegram MCP server (issue #2641).
         "telegram" => Some("TELEGRAM_BOT_TOKEN"),
+        // trusty-agents' ctrl/PM OAuth routing (issue #3248): the `claude`
+        // CLI subprocess token from `claude setup-token`. Registered here so
+        // `llm::credentials::pick_credentials` consults the same env >
+        // `.env.local` > store precedence as every other credential instead
+        // of a raw `std::env::var` read.
+        "claude-code" => Some("CLAUDE_CODE_OAUTH_TOKEN"),
         _ => None,
     }
 }
@@ -157,6 +163,9 @@ mod tests {
         assert_eq!(env_var_for("Slack-User"), Some("SLACK_USER_TOKEN"));
         // Non-inference token: the native Telegram MCP server (issue #2641).
         assert_eq!(env_var_for("telegram"), Some("TELEGRAM_BOT_TOKEN"));
+        // trusty-agents' ctrl/PM `claude` CLI OAuth token (issue #3248).
+        assert_eq!(env_var_for("claude-code"), Some("CLAUDE_CODE_OAUTH_TOKEN"));
+        assert_eq!(env_var_for("Claude-Code"), Some("CLAUDE_CODE_OAUTH_TOKEN"));
     }
 
     /// Why: an unmapped provider must not panic or synthesise a guess.

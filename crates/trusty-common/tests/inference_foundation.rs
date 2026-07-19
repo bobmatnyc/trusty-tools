@@ -50,6 +50,7 @@ fn registry_seeds_all_providers() {
         (ProviderId::OpenAI, "openai", true),
         (ProviderId::Together, "together", true),
         (ProviderId::AtlasCloud, "atlascloud", true),
+        (ProviderId::Local, "local", false), // no API-key env (unauthenticated localhost)
     ];
     for (id, name, has_key_env) in expected {
         let by_id = capabilities(id);

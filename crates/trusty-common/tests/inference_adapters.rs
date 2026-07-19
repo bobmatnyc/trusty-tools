@@ -604,10 +604,11 @@ async fn http_429_maps_to_retryable_api_error() {
 // ── Default factory registration ─────────────────────────────────────────────────
 
 /// Why: `register_default_factories` must wire the OpenAI-dialect providers
-/// (OpenRouter, Fireworks, OpenAI, Together) so a bare/OpenRouter slug builds a
-/// real adapter through the public entry point, and an explicit `together/` slug
-/// (with a resolvable key) builds a real Together adapter (Bedrock stays
-/// unregistered — a later wave).
+/// (OpenRouter, Fireworks, OpenAI, Together, AtlasCloud, Local) so a
+/// bare/OpenRouter slug builds a real adapter through the public entry point,
+/// an explicit `together/` slug (with a resolvable key) builds a real Together
+/// adapter, and a `local/`/`ollama/` slug builds a real Local adapter with NO
+/// stored credential required (Bedrock stays unregistered — a later wave).
 #[test]
 #[serial(dotenv_credential_env)]
 fn default_factories_register_openai_dialect() {
@@ -636,6 +637,16 @@ fn default_factories_register_openai_dialect() {
         .expect("build atlascloud");
     assert_eq!(atlascloud.name(), "atlascloud");
     assert_eq!(atlascloud.capabilities().id, ProviderId::AtlasCloud);
+
+    // Local (#3247) is registered by the default set and needs no stored
+    // credential at all — `local/`'s no-key resolution plus the factory's
+    // placeholder-key fallback build a working adapter with an empty store.
+    let local = cfg.build("local/llama3.1", &store).expect("build local");
+    assert_eq!(local.name(), "local");
+    assert_eq!(local.capabilities().id, ProviderId::Local);
+    // The `ollama/` alias resolves to the same provider/factory.
+    let ollama = cfg.build("ollama/qwen3:30b", &store).expect("build ollama");
+    assert_eq!(ollama.name(), "local");
 
     // Bedrock is intentionally not registered by the default set.
     let Err(err) = cfg.build("bedrock/us.anthropic.claude-sonnet-4-5", &store) else {

@@ -9,15 +9,17 @@
 //! `provider_for("openrouter" | "fireworks" | "openai", &store)` builds a REAL
 //! `Box<dyn InferenceAdapter>`.
 //! What: [`openai_compat::OpenAiCompatAdapter`] (the core) and the
-//! [`openrouter`]/[`fireworks`]/[`openai`]/[`together`] provider configs, the
-//! native [`anthropic`] adapter (its own Messages-API wire format, #2408), plus
-//! [`register_default_factories`]. Bedrock (#2407) is still out of scope here.
+//! [`openrouter`]/[`fireworks`]/[`openai`]/[`together`]/[`local`] provider
+//! configs, the native [`anthropic`] adapter (its own Messages-API wire format,
+//! #2408), plus [`register_default_factories`]. Bedrock (#2407) is still out
+//! of scope here.
 //! Test: each submodule's inline `tests` + the offline mock-server round-trip in
 //! `crates/trusty-common/tests/inference_adapters.rs`.
 
 pub mod anthropic;
 pub mod atlascloud;
 pub mod fireworks;
+pub mod local;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
@@ -35,9 +37,9 @@ use crate::inference::registry::ProviderId;
 /// configurator stays empty by default (no implicit adapters) — this is the
 /// explicit opt-in that turns resolution into live adapters.
 /// What: registers the OpenRouter, Fireworks, OpenAI, Together (#2488),
-/// AtlasCloud (#2536), and Anthropic-direct (#2408) production factories (each
-/// pointed at its real base URL) under their [`ProviderId`]. Bedrock is
-/// intentionally NOT registered here (later wave, #2407).
+/// AtlasCloud (#2536), Local (#3247), and Anthropic-direct (#2408) production
+/// factories (each pointed at its real base URL) under their [`ProviderId`].
+/// Bedrock is intentionally NOT registered here (later wave, #2407).
 /// Test: `crates/trusty-common/tests/inference_adapters.rs::default_factories_register_openai_dialect`
 /// and `default_factories_register_anthropic_direct`.
 pub fn register_default_factories(cfg: &mut Configurator) {
@@ -46,5 +48,6 @@ pub fn register_default_factories(cfg: &mut Configurator) {
     cfg.register(ProviderId::OpenAI, Box::new(openai::factory));
     cfg.register(ProviderId::Together, Box::new(together::factory));
     cfg.register(ProviderId::AtlasCloud, Box::new(atlascloud::factory));
+    cfg.register(ProviderId::Local, Box::new(local::factory));
     cfg.register(ProviderId::Anthropic, Box::new(anthropic::factory));
 }
