@@ -78,3 +78,5 @@ See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick referen
 See [`INDEX.md`](./INDEX.md) for the complete, machine-readable index of all ADRs
 (Accepted, Proposed, Rejected, and Superseded). Use it as a quick reference for
 consistency vetting when writing new ADRs.
+
+Note: ADR-0016 was added on main; its entry will be reflected in INDEX.md on next update.

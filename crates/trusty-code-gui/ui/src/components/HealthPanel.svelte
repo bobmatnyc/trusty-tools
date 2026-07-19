@@ -9,6 +9,13 @@
   // What: On mount (and every `pollMs`), fetches `${base}/health` and renders
   // connected/disconnected plus the raw JSON payload
   // (`{server, version, status}` — see `crates/trusty-code/src/serve/methods.rs`).
+  // The payload's `<pre>` block uses the themed `trusty-border` token at
+  // 20% opacity rather than the raw, non-themed Tailwind near-black it
+  // previously hardcoded at 30% opacity (issue #3133 theming audit) — that
+  // built-in shade never changes with `prefers-color-scheme`, so on a
+  // light theme the code block would have stayed a dark box regardless of
+  // the surrounding page; the themed border token tints appropriately in
+  // both schemes.
   // Test: With `tcode serve --http` running, the panel shows "Connected" and
   // the payload; with it stopped, "Disconnected" and the error message.
   import { onDestroy, onMount } from 'svelte';
@@ -68,7 +75,7 @@
   <p class="mt-1 text-xs text-trusty-text/60">{base}</p>
 
   {#if connected}
-    <pre class="mt-3 overflow-x-auto rounded bg-black/30 p-2 text-xs text-trusty-text">{JSON.stringify(
+    <pre class="mt-3 overflow-x-auto rounded bg-trusty-border/20 p-2 text-xs text-trusty-text">{JSON.stringify(
         payload,
         null,
         2,

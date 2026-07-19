@@ -46,13 +46,172 @@ impl AgentConfig {
     /// Test: `AgentConfig::by_name("pm")` loads without error when run from
     /// the project root.
     pub fn by_name(name: &str) -> Result<Self> {
-        // #482: Prefer the directory-package format (`<name>/agent.toml` +
-        // `persona.md`) when present; fall back to the flat `<name>.toml`.
-        let dir = agents_dir();
-        if let Some(cfg) = load_agent_package(&dir, name)? {
+        let (cfg, from_package) = Self::by_name_unresolved_src(name)?;
+        // #3055: resolve an `extends` chain at load time (DOC-41 §2.5). An
+        // agent with no `extends` is returned unchanged (its `extends` is
+        // already `None`); one that inherits is flattened base-first against
+        // sibling agents loaded by name.
+        if cfg.agent.extends.is_none() {
             return Ok(cfg);
         }
-        Self::load(&dir.join(format!("{name}.toml")))
+        let lookup = |n: &str| Self::by_name_unresolved(n).ok();
+        match crate::agents::extends::resolve(name, &lookup) {
+            Ok(resolved) => Ok(resolved.finalize_extends()),
+            Err(e) => Self::extends_shadow_fallback(name, from_package, e),
+        }
+    }
+
+    /// Load a single agent config by name WITHOUT resolving its `extends`
+    /// chain (#3055).
+    ///
+    /// Why: [`AgentConfig::resolve`](crate::agents::extends::resolve) walks the
+    /// chain recursively and must fetch each ancestor in its raw, still-
+    /// `extends`-bearing form; resolving inside the per-name loader would
+    /// double-resolve.
+    /// What: thin wrapper over [`Self::by_name_unresolved_src`] discarding the
+    /// source-provenance flag, for the recursive ancestor lookup where only the
+    /// config matters.
+    /// Test: covered by the `extends_*` by-name tests and the pre-existing
+    /// `by_name` tests.
+    fn by_name_unresolved(name: &str) -> Result<Self> {
+        Self::by_name_unresolved_src(name).map(|(cfg, _)| cfg)
+    }
+
+    /// Load a single agent by name (no `extends` resolution), reporting whether
+    /// it came from a directory package.
+    ///
+    /// Why: the flat `.md` personalization format (`<name>.md`) is the PRIMARY
+    /// user surface for `extends:` overlays (DOC-41 §2.5.1), yet the pre-#3055
+    /// per-name loader only tried `<name>/agent.toml` and `<name>.toml` — so a
+    /// user's `~/.trusty-agents/agents/my-assistant.md` was visible in the
+    /// registry roster but FILE-NOT-FOUND at dispatch (every runner loads via
+    /// `by_name`/`by_name_async`, not the informational registry). This adds the
+    /// missing flat-`.md` tier so the documented flow actually dispatches. The
+    /// `from_package` flag feeds [`Self::extends_shadow_fallback`], which must
+    /// not let an unresolvable directory package silently shadow a complete flat
+    /// `<name>.toml`.
+    /// What: tries, in order under `agents_dir()`: (1) the directory package
+    /// (`<name>/agent.toml` + `persona.md`), (2) flat `<name>.toml`, (3) flat
+    /// `<name>.md` via [`parse_md_agent`](crate::agents::registry::parse_md_agent),
+    /// (4) the synchronous claude-mpm `.md` fallback (kept in lock-step with the
+    /// async loader's tiers so ancestor resolution is symmetric — see the
+    /// async/sync drift note in `by_name_async_unresolved`). Returns
+    /// `(config, came_from_package)`.
+    /// Test: `by_name_flat_md_extends_dispatches`,
+    /// `by_name_package_extends_shadow_falls_back_to_flat` (tests.rs).
+    fn by_name_unresolved_src(name: &str) -> Result<(Self, bool)> {
+        // #482: Prefer the directory-package format when present.
+        let dir = agents_dir();
+        if let Some(cfg) = load_agent_package(&dir, name)? {
+            return Ok((cfg, true));
+        }
+        let toml_path = dir.join(format!("{name}.toml"));
+        if toml_path.exists() {
+            return Ok((Self::load(&toml_path)?, false));
+        }
+        // #3055: flat `.md` personalization overlay — the primary user surface.
+        let md_path = dir.join(format!("{name}.md"));
+        if md_path.exists() {
+            let cfg = crate::agents::registry::parse_md_agent(&md_path)
+                .with_context(|| format!("failed to load agent md {}", md_path.display()))?;
+            return Ok((cfg, false));
+        }
+        // claude-mpm compatibility tier (sync), symmetric with the async loader.
+        if let Some(cfg) = crate::agents::claude_mpm_loader::find_agent_sync(name) {
+            return Ok((cfg, false));
+        }
+        // Preserve the historical missing-`<name>.toml` error shape when nothing
+        // resolved.
+        Ok((Self::load(&toml_path)?, false))
+    }
+
+    /// Recover from a directory-package `extends` that could not be resolved by
+    /// falling back to a complete flat `<name>.toml` shadowing it (#3055).
+    ///
+    /// Why: `by_name_unresolved_src` prefers `<name>/agent.toml` over the flat
+    /// `<name>.toml`. If the package manifest declares an `extends` that fails
+    /// to resolve (target missing / cycle / depth), serving the unresolved,
+    /// permission-widened PARTIAL package over a complete flat config is a
+    /// silent correctness/security hazard (a `[tools]`-less `izzie/agent.toml`
+    /// shadowing a locked-down flat `izzie.toml`). Once the resolver works
+    /// end-to-end the normal path resolves the package and this fires only on
+    /// genuine failures.
+    /// What: when the offending config came from a package AND a flat
+    /// `<name>.toml` exists alongside, logs a `warn` naming both paths and loads
+    /// the flat file (resolving its OWN `extends` if any, forcing `name` to bind
+    /// to the flat file rather than the shadowing package). Otherwise the
+    /// original resolution error is returned with context.
+    /// Test: `by_name_package_extends_shadow_falls_back_to_flat`.
+    fn extends_shadow_fallback(
+        name: &str,
+        from_package: bool,
+        err: crate::agents::extends::AgentExtendsError,
+    ) -> Result<Self> {
+        let dir = agents_dir();
+        let flat = dir.join(format!("{name}.toml"));
+        if from_package && flat.exists() {
+            tracing::warn!(
+                agent = %name,
+                package = %dir.join(name).display(),
+                flat = %flat.display(),
+                error = %err,
+                "directory-package `extends` failed to resolve; falling back to the \
+                 complete flat <name>.toml (refusing to serve the unresolved partial package)"
+            );
+            return Self::by_name_flat_toml(name, &flat);
+        }
+        Err(anyhow::Error::new(err))
+            .with_context(|| format!("failed to resolve `extends` chain for agent '{name}'"))
+    }
+
+    /// Load ONLY the flat `<name>.toml`, resolving its own `extends` chain.
+    ///
+    /// Why: the shadow-fallback ([`Self::extends_shadow_fallback`]) must bind
+    /// `name` to the flat file, not the package that `by_name_unresolved_src`
+    /// would prefer — otherwise the resolver would re-load the broken package.
+    /// What: loads `flat` directly; if it declares no `extends`, returns it; if
+    /// it does, resolves via a lookup that forces `name` → the flat file and
+    /// routes ancestors through the normal per-name loader, then finalizes.
+    /// Test: `by_name_package_extends_shadow_falls_back_to_flat`.
+    fn by_name_flat_toml(name: &str, flat: &Path) -> Result<Self> {
+        let cfg = Self::load(flat)?;
+        if cfg.agent.extends.is_none() {
+            return Ok(cfg);
+        }
+        let lookup = |n: &str| {
+            if n.eq_ignore_ascii_case(name) {
+                Self::load(flat).ok()
+            } else {
+                Self::by_name_unresolved(n).ok()
+            }
+        };
+        let resolved = crate::agents::extends::resolve(name, &lookup).with_context(|| {
+            format!("failed to resolve flat `<name>.toml` extends for '{name}'")
+        })?;
+        Ok(resolved.finalize_extends())
+    }
+
+    /// Re-run model + adapter resolution after an `extends` merge (#3055).
+    ///
+    /// Why: `extends` resolution ([`crate::agents::extends`]) folds a base and
+    /// child at the struct level without touching model resolution. A `.md`
+    /// child that omitted `model` inherits the base's, and a child that
+    /// declared one carries it raw — either way the merged config must run
+    /// through `resolve_model` (for `TAGENT_MODEL_*` / default-env overrides
+    /// keyed on the FINAL agent name) and re-derive the provider adapter so it
+    /// matches a normally-loaded config.
+    /// What: resolves `agent.model` via [`resolve_model`] and rebuilds
+    /// `adapter` from the result. Idempotent for an already-resolved model.
+    /// Test: `extends_resolved_child_inherits_base_model` (registry tests).
+    pub(crate) fn finalize_extends(mut self) -> Self {
+        let (resolved, _src) = resolve_model(
+            &self.agent.name,
+            &self.agent.model,
+            self.llm.model_override.as_deref(),
+        );
+        self.agent.model = resolved;
+        self.adapter = Arc::from(adapter_for_model(&self.agent.model));
+        self
     }
 
     /// Built-in default `ctrl` agent config used when no `ctrl.toml` /
@@ -90,13 +249,52 @@ impl AgentConfig {
         // the blocking cost is negligible relative to the LLM dispatch that
         // follows.
         let dir = agents_dir();
-        if let Some(cfg) = load_agent_package(&dir, name)? {
+        let (cfg, from_package) = Self::by_name_async_unresolved(name, &dir).await?;
+        // #3055: resolve `extends` at load time (DOC-41 §2.5). Base lookups use
+        // the sync unresolved loader — which now carries the SAME tier set as
+        // the async loader (package → flat toml → flat md → claude-mpm), so a
+        // child extending a base only discoverable via the claude-mpm fallback
+        // no longer gets an asymmetric `ExtendsNotFound`. The reads are small
+        // config files, negligible next to the LLM dispatch that follows.
+        if cfg.agent.extends.is_none() {
             return Ok(cfg);
+        }
+        let lookup = |n: &str| Self::by_name_unresolved(n).ok();
+        match crate::agents::extends::resolve(name, &lookup) {
+            Ok(resolved) => Ok(resolved.finalize_extends()),
+            Err(e) => Self::extends_shadow_fallback(name, from_package, e),
+        }
+    }
+
+    /// Async single-agent load WITHOUT `extends` resolution (#3055 companion to
+    /// [`Self::by_name_unresolved_src`]).
+    ///
+    /// Why: `by_name_async` needs the raw, still-`extends`-bearing child before
+    /// it walks the chain.
+    /// What: mirrors [`Self::by_name_unresolved_src`]'s tier ORDER exactly so
+    /// sync and async resolve the same agents: directory package → flat
+    /// `<name>.toml` → flat `<name>.md` (#3055 personalization overlay) →
+    /// claude-mpm `.md` fallback. Returns `(config, came_from_package)`.
+    /// Test: `by_name_async_loads_plan_agent`,
+    /// `by_name_async_flat_md_extends_dispatches`.
+    async fn by_name_async_unresolved(name: &str, dir: &Path) -> Result<(Self, bool)> {
+        if let Some(cfg) = load_agent_package(dir, name)? {
+            return Ok((cfg, true));
         }
         let path = dir.join(format!("{name}.toml"));
         match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => Self::from_toml_str(&raw, &path),
+            Ok(raw) => Ok((Self::from_toml_str(&raw, &path)?, false)),
             Err(e) => {
+                // #3055: flat `.md` personalization overlay tier, BEFORE the
+                // claude-mpm fallback — matching `by_name_unresolved_src`.
+                let md_path = dir.join(format!("{name}.md"));
+                if md_path.exists() {
+                    let cfg =
+                        crate::agents::registry::parse_md_agent(&md_path).with_context(|| {
+                            format!("failed to load agent md {}", md_path.display())
+                        })?;
+                    return Ok((cfg, false));
+                }
                 // #128: Fallback to claude-mpm agent format (.md + YAML
                 // frontmatter) discovered under `.claude/agents/` (project)
                 // or `~/.claude/agents/` (user). Lets operators drop in
@@ -110,7 +308,7 @@ impl AgentConfig {
                         source = %agent.source_path.display(),
                         "loaded claude-mpm agent (fallback from missing TOML)"
                     );
-                    return Ok(agent.to_agent_config());
+                    return Ok((agent.to_agent_config(), false));
                 }
                 Err(anyhow::Error::new(e))
                     .with_context(|| format!("failed to read agent config {}", path.display()))

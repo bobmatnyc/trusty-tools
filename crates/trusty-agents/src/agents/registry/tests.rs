@@ -120,6 +120,31 @@ fn registry_loads_from_multiple_dirs_with_priority() {
 }
 
 #[test]
+fn registry_rejects_case_only_duplicate_names() {
+    // #3055 (code-critic PR #3106): the map is exact-case keyed but `extends`
+    // resolution lowercases names — two agents differing only by case would
+    // resolve ambiguously. The loader must reject the case-only duplicate.
+    let dir = TempDir::new().unwrap();
+    let mk = |fname: &str, agent: &str| {
+        let toml = format!(
+            "[agent]\nname = \"{agent}\"\nrole = \"engineer\"\nmodel = \"m\"\n\
+description = \"d\"\n\n[llm]\ntemperature = 0.0\nmax_tokens = 1024\n\n\
+[system_prompt]\ncontent = \"c\"\n"
+        );
+        fs::write(dir.path().join(fname), toml).unwrap();
+    };
+    // Distinct FILENAMES (so both exist even on a case-insensitive FS) but
+    // case-colliding agent NAMES.
+    mk("first.toml", "Foo");
+    mk("second.toml", "foo");
+
+    let reg = AgentRegistry::load(&[dir.path().to_path_buf()]);
+    // Exactly one survives — the case-only duplicate was rejected (without the
+    // guard both would insert under distinct exact-case keys → len 2).
+    assert_eq!(reg.len(), 1);
+}
+
+#[test]
 fn registry_best_match_prefers_specific_over_general() {
     let dir = TempDir::new().unwrap();
     write_agent(dir.path(), "engineer", "engineer", &[], &[], &["general"]);

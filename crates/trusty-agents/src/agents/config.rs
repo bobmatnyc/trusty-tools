@@ -354,6 +354,25 @@ pub struct AgentInfo {
     /// Test: Loaded via TOML round-trip in persona configs.
     #[serde(default)]
     pub prompt_label: Option<String>,
+
+    /// Name of a base agent this agent inherits from (`extends:`), DOC-41 §2.5
+    /// / epic #3052, issue #3055.
+    ///
+    /// Why: trusty-agents lets a user personalize a stock/bundled base agent
+    /// (name it, add tools, override tone) without forking it — they author a
+    /// child agent declaring `extends: <base>` and layer personal deltas on
+    /// top. Resolution mirrors trusty-mpm's proven `compose_agent`: single
+    /// parent, walked base-first at load time (`AgentRegistry::load` /
+    /// `AgentConfig::by_name`), never re-resolved per dispatch.
+    /// What: When `Some(base)`, the loader resolves `base` (case-insensitively)
+    /// and merges it under this agent per the §2.5 merge table — scalars
+    /// child-overrides, list fields union, prose base-first concatenation. The
+    /// field is consumed during resolution and cleared to `None` on the
+    /// flattened result so a resolved config is self-contained. `extends`
+    /// itself is never inherited through the chain.
+    /// Test: `agents::extends::tests` — see `extends_*` unit tests.
+    #[serde(default)]
+    pub extends: Option<String>,
 }
 
 /// Declarative capability tags for `AgentRegistry` matching (#167).

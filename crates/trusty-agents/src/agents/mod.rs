@@ -15,6 +15,7 @@ pub mod claude_code_runner;
 pub mod claude_mpm_loader;
 mod config;
 pub mod context_filter;
+pub mod extends;
 pub mod harness_protocol;
 pub mod in_process_runner;
 mod loader;

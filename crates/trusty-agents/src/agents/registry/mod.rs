@@ -15,6 +15,7 @@
 //! in `roster`.
 //! Test: See the unit tests in `tests`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
@@ -27,7 +28,7 @@ mod roster;
 #[cfg(test)]
 mod tests;
 
-use md_agent::parse_md_agent;
+pub(crate) use md_agent::parse_md_agent;
 pub use roster::{build_roster_section, inject_roster_into_prompt};
 
 /// Discovers and holds the project's agent configs.
@@ -38,6 +39,17 @@ pub struct AgentRegistry {
     /// but because shadowing skips already-inserted names, the first insert
     /// wins and later occurrences are dropped.
     agents: IndexMap<String, (AgentConfig, PathBuf)>,
+
+    /// Agents whose `extends` chain failed to resolve → the error message
+    /// (#3055 / code-critic PR #3106).
+    ///
+    /// Why: a failed resolution leaves the UNRESOLVED child servable via
+    /// `get`/`best_match`/`list`; surfacing the broken state in the roster (not
+    /// just a `tracing::warn`) lets operators see WHY an agent won't behave as
+    /// expected. Keyed by exact agent name.
+    /// What: populated by [`resolve_extends_in_map`]; read into
+    /// [`AgentSummary::extends_error`] by [`Self::list`].
+    extends_errors: std::collections::HashMap<String, String>,
 }
 
 /// Summary view of a discovered agent for the `agents list` subcommand.
@@ -53,6 +65,10 @@ pub struct AgentSummary {
     pub languages: Vec<String>,
     pub frameworks: Vec<String>,
     pub tags: Vec<String>,
+    /// `Some(message)` when this agent declared `extends:` but its chain could
+    /// not be resolved (missing base / cycle / depth); the agent is still
+    /// listed (unresolved) but rendered as broken. `None` for a clean agent.
+    pub extends_error: Option<String>,
 }
 
 impl AgentRegistry {
@@ -101,6 +117,23 @@ impl AgentRegistry {
                             );
                             continue;
                         }
+                        // #3055 (code-critic PR #3106): reject case-only
+                        // duplicates. The map is exact-case keyed but `extends`
+                        // resolution lowercases names — two agents differing only
+                        // by case would resolve ambiguously (last-wins in the
+                        // snapshot). Skip the newcomer with a clear error instead.
+                        if let Some(existing) =
+                            agents.keys().find(|k| k.eq_ignore_ascii_case(&name))
+                        {
+                            tracing::error!(
+                                agent = %name,
+                                conflicts_with = %existing,
+                                source = %path.display(),
+                                "case-only duplicate agent name; skipping (rename one — \
+                                 `extends` resolution is case-insensitive)"
+                            );
+                            continue;
+                        }
                         tracing::debug!(
                             agent = %name,
                             source = %path.display(),
@@ -119,7 +152,11 @@ impl AgentRegistry {
             }
         }
 
-        Self { agents }
+        let extends_errors = resolve_extends_in_map(&mut agents);
+        Self {
+            agents,
+            extends_errors,
+        }
     }
 
     /// Look up an agent by exact name.
@@ -311,10 +348,71 @@ impl AgentRegistry {
                     languages,
                     frameworks,
                     tags,
+                    extends_error: self.extends_errors.get(name).cloned(),
                 }
             })
             .collect()
     }
+}
+
+/// Flatten every discovered agent's `extends` chain in place (DOC-41 §2.5,
+/// issue #3055).
+///
+/// Why: `extends` resolution runs once, at load time — the natural
+/// instantiation point trusty-agents already has (no separate build/deploy
+/// pass like trusty-mpm). Doing it after the whole directory sweep means a
+/// child can inherit from ANY sibling in the map (a personal
+/// `~/.trusty-agents/agents/my-assistant.md` extending a bundled `assistant`),
+/// resolved base-first with cycle + depth safety.
+/// What: snapshots the raw (unresolved) configs into a case-folded index, then
+/// for each agent that declares `extends`, resolves + folds its chain via
+/// [`crate::agents::extends::resolve`] and re-runs model/adapter resolution on
+/// the result. A resolution failure (missing base, cycle, over-deep) logs a
+/// `warn`, records the error (surfaced in the roster via
+/// [`AgentSummary::extends_error`]), and leaves the unresolved agent in place —
+/// one bad `extends` never breaks startup, matching the loader's existing
+/// failure tolerance.
+/// Test: `registry_resolves_extends_chain`,
+/// `registry_extends_missing_base_warns_and_keeps_agent`,
+/// `registry_extends_error_surfaced_in_summary`.
+fn resolve_extends_in_map(
+    agents: &mut IndexMap<String, (AgentConfig, PathBuf)>,
+) -> HashMap<String, String> {
+    // Case-folded snapshot for the resolver's name lookup. Cloning is cheap
+    // relative to startup and keeps the resolver reading the pristine
+    // pre-resolution form of every base (its own `extends` still intact).
+    let raw: HashMap<String, AgentConfig> = agents
+        .iter()
+        .map(|(name, (cfg, _))| (name.to_lowercase(), cfg.clone()))
+        .collect();
+    let lookup = |n: &str| raw.get(&n.to_lowercase()).cloned();
+
+    let to_resolve: Vec<String> = agents
+        .iter()
+        .filter(|(_, (cfg, _))| cfg.agent.extends.is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut errors: HashMap<String, String> = HashMap::new();
+    for name in to_resolve {
+        match crate::agents::extends::resolve(&name, &lookup) {
+            Ok(resolved) => {
+                let resolved = resolved.finalize_extends();
+                if let Some(entry) = agents.get_mut(&name) {
+                    entry.0 = resolved;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %name,
+                    error = %e,
+                    "failed to resolve agent `extends` chain; using the unresolved agent"
+                );
+                errors.insert(name, e.to_string());
+            }
+        }
+    }
+    errors
 }
 
 /// Compute the agent search paths in priority order (highest first).
