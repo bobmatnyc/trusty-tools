@@ -1,5 +1,13 @@
 import { writable, derived } from 'svelte/store';
 import { apiBase } from '../lib/api-config';
+import { invoke, isDesktop } from '../lib/transport';
+import {
+  BASE_AGENT_ID,
+  buildRoster,
+  type CatalogAgent,
+  type OverlayAgent,
+  type RosterEntry,
+} from '../lib/roster';
 
 /**
  * Why: The sidebar needs a single source of truth for the list of chat
@@ -73,6 +81,106 @@ export const projects = writable<Project[]>([
 ]);
 
 export const activeProjectId = writable<string>('ctrl');
+
+/**
+ * Why (#3223 — Trusty Assistant agent roster, epic #3052; regression fix
+ * flagged by code-critic on PR #3279): the roster's "active agent" is a
+ * second, independent selection axis alongside `activeProjectId` — which
+ * conversation thread/working directory vs. which persona voice answers.
+ * `null` — NOT the base `assistant` id — is the default: `agent_for_chat`
+ * in `handlers.rs::submit_task` routes ANY non-`None` `agent` (including
+ * `"assistant"`) through `run_pm_task_with_persona`, which is a tools-OFF
+ * chat path (`persona.rs` — personas have no delegation-tool wiring yet).
+ * Defaulting this store to the base id would therefore silently strip
+ * delegation/tool capability from EVERY default GUI message, before the
+ * user ever touches the roster switcher. `null` instead falls through to
+ * `run_pm_task_with_session`, the existing tools-armed default path — the
+ * roster only takes over dispatch once the user actively picks an entry
+ * (including explicitly picking "Assistant", which is an intentional
+ * opt-in to the tools-off persona path, not the passive default).
+ * What: Holds the currently selected roster entry's `id`
+ * (`RosterEntry.id` — either the base `assistant`, a catalog agent name, or
+ * a user overlay's slug), or `null` when nothing has been explicitly
+ * selected yet. `InputArea.svelte` and `lib/transport.ts`'s browser
+ * fallback both OMIT the `agent` field from their submission payload when
+ * this is `null`, rather than forwarding it.
+ * Test: `AgentSwitcher.svelte` sets this on row click; `InputArea.svelte`
+ * reads it into the submission payload (only when non-null).
+ */
+export const activeAgentId = writable<string | null>(null);
+
+/** `GET /api/agents` catalog (`.trusty-agents/agents/*.toml`), #407. */
+export const catalogAgents = writable<CatalogAgent[]>([]);
+
+/**
+ * Why: There is no REST route for a user's `$HOME` personalization overlay
+ * tier (desktop-only filesystem access), so this is populated via the Tauri
+ * `list_personalization_overlays` command instead of a `fetch*` helper.
+ * Stays empty (not an error state) in browser/web mode.
+ */
+export const overlayAgents = writable<OverlayAgent[]>([]);
+
+/**
+ * Why: Both the roster switcher (#3223) and the agent editor (#3224) need
+ * the SAME merged, deduplicated view of "base + catalog + overlays" — a
+ * derived store recomputes it automatically whenever either source store
+ * updates, so callers never have to remember to re-merge by hand.
+ * What: `buildRoster($catalogAgents, $overlayAgents)` — see `lib/roster.ts`
+ * for the merge/dedup rules.
+ */
+export const agentRoster = derived(
+  [catalogAgents, overlayAgents],
+  ([$catalogAgents, $overlayAgents]) => buildRoster($catalogAgents, $overlayAgents),
+);
+
+/**
+ * Why: `GET /api/agents` is a plain REST endpoint (unlike the overlay tier),
+ * so it's fetched the same way `fetchProjects`/`fetchTmSessions` are —
+ * works in both Tauri and browser mode.
+ * What: Fetches the envelope and replaces `catalogAgents`. Swallows nothing:
+ * callers that want error feedback should catch around this call (mirrors
+ * `fetchProjects`).
+ * Test: Mount the roster switcher, observe a network call to
+ * `/api/agents` and the store populated.
+ */
+export async function fetchAgentCatalog(): Promise<void> {
+  const base = apiBase();
+  const headers: Record<string, string> = {};
+  const token = getCurrentApiToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const r = await fetch(`${base}/api/agents`, { headers });
+  if (!r.ok) {
+    throw new Error(`GET /api/agents failed: ${r.status}`);
+  }
+  const data = (await r.json()) as { agents?: CatalogAgent[] };
+  catalogAgents.set(data.agents ?? []);
+}
+
+/**
+ * Why: The overlay tier is direct `$HOME` filesystem access — only
+ * available in the Tauri desktop shell (see `isDesktop()` in
+ * `lib/transport.ts`), so this is a no-op in browser/web mode rather than an
+ * error. Called on the roster switcher's mount and again after any
+ * create/edit/delete in the agent editor so the roster reflects the change
+ * immediately.
+ * What: Invokes `list_personalization_overlays` and replaces
+ * `overlayAgents`. Failures are logged, not thrown — a broken overlay scan
+ * shouldn't block the rest of the roster from rendering.
+ * Test: Manual — in the Tauri app, create an overlay via the agent editor,
+ * confirm the switcher's roster includes it without a page reload.
+ */
+export async function refreshOverlayAgents(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    const list = await invoke<OverlayAgent[]>('list_personalization_overlays');
+    overlayAgents.set(list ?? []);
+  } catch (e) {
+    console.error('[app] refreshOverlayAgents failed:', e);
+  }
+}
+
+export type { RosterEntry };
+export { BASE_AGENT_ID };
 
 /**
  * Why: When `tagent --api --api-token …` runs, every `/api/*` call

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Send, Square } from 'lucide-svelte';
   import {
+    activeAgentId,
     activeMessages,
     activeProject,
     activeProjectId,
@@ -12,6 +13,7 @@
     updateMessageByTask,
     type Project,
   } from '../stores/app';
+  import { get } from 'svelte/store';
   import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
   import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
 
@@ -169,10 +171,22 @@
     unlistenReconcile = unlistenP;
 
     try {
-      const result = await invoke<string>('send_message', {
+      // #3223 (regression fix, code-critic on PR #3279): only forward
+      // `agent` when the user has explicitly picked a roster entry —
+      // `activeAgentId` defaults to `null` (see `stores/app.ts` doc
+      // comment) specifically so a default message OMITS this field and
+      // falls through to the tools-armed `run_pm_task_with_session` path in
+      // `handlers.rs`, rather than being forced onto the tools-off persona
+      // path by sending a non-empty `agent` value on every submission.
+      const invokeArgs: Record<string, unknown> = {
         content: payloadTask,
         projectPath: project.path ?? null,
-      });
+      };
+      const selectedAgent = get(activeAgentId);
+      if (selectedAgent) {
+        invokeArgs.agent = selectedAgent;
+      }
+      const result = await invoke<string>('send_message', invokeArgs);
       if (mySeq !== submissionSeq) return; // superseded by a retask
       // When `send_message` resolves (Tauri mode), the complete event should
       // already have updated the bubble. If not (browser fallback), we apply
