@@ -78,19 +78,19 @@ description = "Get detailed status for one session: uptime, token usage, current
 
 [[mcp.services.tools]]
 name = "session_send"
-description = "Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness."
+description = "Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness. Returns a confirmation with the target tmux session name."
 
 [[mcp.services.tools]]
 name = "project_list"
-description = "List all projects registered in the project registry."
+description = "List all projects registered in the project registry. Returns a JSON array of project objects, each with `name`, `repo_url`, `default_branch`, and optional `stack_hint`, `tags`, `description`, and `gh_user` (the project's preferred GitHub account login, #2081)."
 
 [[mcp.services.tools]]
 name = "agent_delegate"
-description = "Record and gate a delegation to a named agent: applies the circuit-breaker and depth limits. Tracking/gating only — does not spawn the agent."
+description = "Record and gate a delegation to a named agent: applies the circuit-breaker and depth limits and adds the delegation to the session's dashboard tree. This is a TRACKING/GATING companion, NOT an execution path — it does not spawn the agent. Execution happens via the native Agent/Task tool using the deployed agent name (from ~/.claude/agents/), e.g. Agent(subagent_type=\"rust-engineer\")."
 
 [[mcp.services.tools]]
 name = "console_metrics"
-description = "Return the standard trusty-console metrics report for trusty-mpm: health status plus the managed-session fleet snapshot."
+description = "Return the standard trusty-console metrics report for trusty-mpm: service id, display name, version, coarse health status, and a `metrics` payload carrying the managed-session fleet snapshot (counts by lifecycle state) and the supervisor auto-resume control state. Polled uniformly by trusty-console for the dashboard."
 
 # Granola — meeting notes, transcripts, and action items (#256).
 # Enabled by default; harmless when the binary is absent (the harness

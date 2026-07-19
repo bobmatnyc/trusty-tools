@@ -316,4 +316,33 @@ fn trusty_mpm_service_tool_names_match_expected_curated_list() {
          list; update EXPECTED_TRUSTY_MPM_TOOLS here AND cross-check against \
          crates/trusty-mpm/src/mcp/tools/mod.rs::TOOL_CATALOG"
     );
+
+    // Safety-relevant substring check: `mcp_service_tool_executors()` feeds
+    // this description to the LLM VERBATIM as the tool's function
+    // description (crates/trusty-agents/src/tools/mcp_service_tools.rs), so
+    // it is behavior-relevant, not decorative. `agent_delegate`'s verbatim
+    // source description (crates/trusty-mpm/src/mcp/tools/core.rs) carries a
+    // load-bearing correction: it clarifies the tool is TRACKING/GATING only
+    // and does NOT execute the agent — without it, the LLM could believe
+    // calling `agent_delegate` is sufficient to run the agent and skip the
+    // native Agent/Task tool call entirely. Guard against a future paraphrase
+    // silently dropping that guidance.
+    let agent_delegate_desc = svc
+        .tools
+        .iter()
+        .find(|t| t.name == "agent_delegate")
+        .expect("agent_delegate tool present")
+        .description
+        .as_str();
+    assert!(
+        agent_delegate_desc.contains("does not spawn"),
+        "agent_delegate description must retain 'does not spawn' \
+         (mcp_service_tool_executors() feeds this text to the LLM verbatim): {agent_delegate_desc}"
+    );
+    assert!(
+        agent_delegate_desc.contains("Agent/Task tool"),
+        "agent_delegate description must retain the pointer to the native \
+         Agent/Task tool (mcp_service_tool_executors() feeds this text to \
+         the LLM verbatim): {agent_delegate_desc}"
+    );
 }
