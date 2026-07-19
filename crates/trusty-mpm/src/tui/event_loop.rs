@@ -304,7 +304,8 @@ pub(super) async fn refresh_health_data(screen: &mut health::HealthScreen) {
 /// spawn routes through [`crate::core::spawn_disclaim::disclaimed_spawn_detached`]
 /// (issue #3126) so macOS TCC does not attribute the child `cargo build`'s
 /// file access back to the signed `trusty-mpm` daemon — this was the last
-/// undisclaimed `Command::new(..).spawn()` call site in the crate.
+/// undisclaimed spawn site in the TUI/session-launch call graph (two sites
+/// remain elsewhere in the crate, tracked as #2997 part 6, issue #3267).
 /// What: spawns the appropriate `cargo run` child detached from the TUI and
 /// records the outcome in `chat.last_action`. A spawn failure is recorded
 /// rather than panicking.

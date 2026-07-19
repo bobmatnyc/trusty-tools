@@ -154,8 +154,11 @@ pub fn disclaimed_status(
 /// launches a detached `cargo run -p trusty-search -- start` / `cargo run -p
 /// trusty-memory` child and never waits on it, so it fit none of the other
 /// three disclaim shapes (capture-to-completion, wait-for-status, or
-/// long-lived piped) — the last undisclaimed `Command::new(..).spawn()` call
-/// site in the crate (issue #2997 part 5, #3126).
+/// long-lived piped) — the last undisclaimed spawn site in the TUI/
+/// session-launch call graph (issue #2997 part 5, #3126). Two undisclaimed
+/// spawn sites remain elsewhere in the crate (`provisioner::clone_progress`,
+/// `formatters::info_box::probes::run_git_log`); tracked as #2997 part 6,
+/// issue #3267.
 /// What: on macOS, builds a `Command` for `program`/`args` with stdio left at
 /// the default (inherited from the caller, matching the pre-existing
 /// `.spawn()` call this replaces) and spawns it via `posix_spawnp` with the
