@@ -1,0 +1,33 @@
+# Root CLAUDE.md re-track guard for the trusty-tools workspace (issue #2299).
+#
+# Enforces that the repo-root CLAUDE.md stays untracked mechanically:
+#   - issue #2299 moved it to .trusty-mpm/INSTRUCTIONS.md to avoid duplicate
+#     context loading (~11k tokens/session) in Claude Code;
+#   - #2647 was a regression where it got re-tracked at the repo root;
+#   - this workflow fails the build if that ever happens again.
+#
+# Pure git-index check — no Rust toolchain or build needed, so this is fast
+# and runs as its own lightweight job (matches line-cap.yml's shape).
+name: CLAUDE.md guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches line-cap.yml).
+concurrency:
+  group: claude-md-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  claude-md-guard:
+    name: Root CLAUDE.md must stay untracked
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Guard against re-tracking root CLAUDE.md (#2299)
+        run: bash scripts/check_claude_md_not_tracked.sh

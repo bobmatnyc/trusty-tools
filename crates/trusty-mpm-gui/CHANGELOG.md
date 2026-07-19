@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Set an explicit Content-Security-Policy (`default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:7880; style-src 'self' 'unsafe-inline'`) in `tauri.conf.json`, replacing `"csp": null` (architecture-review tranche 0). Added a hand-authored `capabilities/default.json` (`core:default` only, scoped to the `main` window) so the app's ACL is explicit rather than implicit.
+
 ### Fixed
 
 - Stopped the recurring macOS "'trusty-mpm' would like to access data from other apps" TCC prompt caused by the GUI (closes #2951): renamed `productName`/window title from the bare `"trusty-mpm"` to `"Trusty MPM Dashboard"` so any future prompt is visibly the GUI, not the CLI/daemon; changed the bundle identifier from `com.trusty-mpm.gui` to `com.trusty.trusty-mpm.gui` and wired `bundle.macOS.signingIdentity` in `tauri.conf.json` so `cargo tauri build` produces a Developer-ID-signed `.app` with a stable designated requirement instead of a fresh ad-hoc identity per rebuild.
