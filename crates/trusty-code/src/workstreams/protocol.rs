@@ -45,7 +45,7 @@ use uuid::Uuid;
 
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 
-use super::activation::{self, ActivationError, SharedWorkstreamStore};
+use super::activation::{self, ActivationError, SharedWorkstreamStore, publish_state_inferred};
 use super::model::{Workstream, WorkstreamId, WorkstreamState};
 use super::store::StoreError;
 
@@ -300,9 +300,14 @@ async fn list(
 /// spec's §5.1 signature exactly — not the updated record, since a client
 /// that needs the post-close view already has `workstream.get`). Idempotent:
 /// closing an already-closed workstream succeeds again (see
-/// [`super::model::Workstream::mark_closed`]'s docs).
+/// [`super::model::Workstream::mark_closed`]'s docs). (Issue #3297)
+/// Unconditionally publishes `Event::WorkstreamStateInferred{state: "closed"}`
+/// via [`publish_state_inferred`] — even a repeat close re-asserts the same
+/// state to any freshly-subscribed `GET /workstreams/{id}/events` observer,
+/// and re-publishing an unchanged state is harmless.
 /// Test: `protocol_tests::close_succeeds_and_clears_active_pointer`,
-/// `protocol_tests::close_unknown_id_maps_to_not_found`.
+/// `protocol_tests::close_unknown_id_maps_to_not_found`,
+/// `protocol_tests::close_publishes_state_inferred`.
 async fn close(
     store: &SharedWorkstreamStore,
     params: Value,
@@ -312,6 +317,7 @@ async fn close(
     let id = parse_id(&p.id, "workstream.close")?;
     let mut store = store.lock().await;
     store.close(id).await.map_err(map_store_err)?;
+    publish_state_inferred(id, "closed", "closed");
     Ok(json!({}))
 }
 

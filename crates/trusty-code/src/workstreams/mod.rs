@@ -8,6 +8,7 @@
 //! - [`SPEC-WS-03~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-03~draft)
 //! - [`SPEC-WS-05~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-05~draft)
 //! - [`SPEC-WS-06~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-06~draft)
+//! - [`SPEC-WS-07~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-07~draft) AC-7
 //!
 //! Why: DOC-39 §4B introduced **Workstream** as a durable named grouping of
 //! sessions that must survive daemon restarts, but tcode's `SessionRegistry`
@@ -32,18 +33,25 @@
 //! daemon's [`crate::binding::ProjectBinding`] (see [`path`]); (issue #3294)
 //! [`activation`] — the activation-lock exclusivity layer above the store
 //! (`ActiveConflict`/force-switch semantics `WorkstreamStore::set_active`
-//! deliberately left out) — and [`protocol`], the full `workstream.*`
+//! deliberately left out) — [`protocol`], the full `workstream.*`
 //! JSON-RPC surface (`create`/`get`/`list`/`close` from #3295 plus
-//! `activate`/`deactivate` from #3294, built on [`activation`]).
+//! `activate`/`deactivate` from #3294, built on [`activation`]); and (issue
+//! #3297) [`sse`] — the `GET /workstreams/{id}/events` fan-out aggregation
+//! route, built directly on [`store::WorkstreamStore`] (bypassing the
+//! JSON-RPC router, mirroring `crate::serve::http::session_events_sse`'s
+//! per-session precedent).
 //!
 //! **Scope note (Phase 1A):** #3293 built ONLY the domain model and
 //! persistence layer (this module's `model`/`path`/`store` submodules);
 //! #3294 added the activation-lock RPC semantics (`activation`, plus
-//! `activate`/`deactivate` in [`protocol`]); #3295 (this ticket) added the
-//! rest of `protocol`'s surface (`create`/`get`/`list`/`close`) and the REST
-//! wrappers (`crate::serve::rest::workstreams`). The CLI (#3296) and the SSE
-//! aggregation route (#3297) remain out of scope and land in their own
-//! follow-up tickets against this foundation.
+//! `activate`/`deactivate` in [`protocol`]); #3295 added the rest of
+//! `protocol`'s surface (`create`/`get`/`list`/`close`) and the REST wrappers
+//! (`crate::serve::rest::workstreams`); #3297 (this ticket) adds [`sse`] —
+//! the `GET /workstreams/{id}/events` aggregation route — plus
+//! `activation`'s new role as the sole publisher of
+//! `crate::events::Event::WorkstreamActivationChanged`. The CLI (#3296) and
+//! the `trusty-agents-common` extraction of [`sse`]'s aggregation layer
+//! (Phase 1B, #3299) remain out of scope.
 //!
 //! Test: `cargo test -p trusty-code workstreams::` exercises every submodule
 //! in place; see each submodule's own `Test:` line for specifics.
@@ -52,9 +60,11 @@ pub mod activation;
 pub mod model;
 mod path;
 pub mod protocol;
+pub mod sse;
 pub mod store;
 
 pub use activation::{ActivateOutcome, ActivationError, SharedWorkstreamStore};
 pub use model::{Workstream, WorkstreamId, WorkstreamState};
 pub use path::{default_data_dir, store_path};
+pub use sse::WorkstreamEventEnvelope;
 pub use store::{ReconcileOutcome, StoreError, WorkstreamStore};

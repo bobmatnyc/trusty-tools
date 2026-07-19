@@ -415,6 +415,48 @@ async fn close_succeeds_and_clears_active_pointer() {
     assert_eq!(list_result["active_workstream_id"], Value::Null);
 }
 
+/// (issue #3297) `workstream.close` must publish
+/// `Event::WorkstreamStateInferred{state: "closed"}`.
+#[tokio::test]
+async fn close_publishes_state_inferred() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+    let ws_id: WorkstreamId = serde_json::from_value(id.clone()).unwrap();
+
+    let mut rx = crate::events::subscribe();
+    close(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("close");
+
+    // `crate::events::bus()` is a process-wide singleton shared by every
+    // concurrently-running test (issue #3297 CI: `cargo test` runs tests in
+    // parallel by default, so a raw `rx.recv().await` can observe another
+    // test's unrelated envelope first) — loop past anything that doesn't
+    // name THIS test's own workstream id, mirroring
+    // `workstreams::activation_tests::next_state_inferred_for`.
+    let target = ws_id.to_string();
+    let (state, _reason) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            if let crate::events::Event::WorkstreamStateInferred {
+                workstream_id,
+                state,
+                reason,
+            } = envelope.event
+                && workstream_id == target
+            {
+                return (state, reason);
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for WorkstreamStateInferred naming this workstream");
+    assert_eq!(state, "closed");
+}
+
 #[tokio::test]
 async fn close_unknown_id_maps_to_not_found() {
     let (store, _dir) = shared_store().await;

@@ -665,6 +665,81 @@ pub enum Event {
         compaction_rounds: usize,
     },
 
+    // -- Workstream lifecycle (DOC-48 §5.3/§6.3, issue #3297) --
+    /// The daemon-wide active workstream changed: `workstream.activate`
+    /// switched to a different workstream (or activated one from no prior
+    /// active workstream), or `workstream.deactivate` cleared the pointer
+    /// with no successor (`crate::workstreams::activation::{activate,
+    /// deactivate}` are the sole emitters — see their docs).
+    ///
+    /// Why: DOC-48 AC-3.3 requires every client observing a workstream to
+    /// learn when the active workstream changes, including a workstream that
+    /// was active learning it just got DEACTIVATED (so it can stop treating
+    /// itself as the ambient default target, §4.2) — not just clients of the
+    /// newly-active one. `crate::events::Event` was, until now, exhaustively
+    /// session-scoped (every variant but `Ping` carries a `session_id`); this
+    /// is a genuinely DAEMON-scoped signal with no owning session, so it
+    /// reuses the SAME global broadcast bus (the one mechanism already wired
+    /// to every live SSE subscriber) rather than standing up a second,
+    /// parallel channel purely to carry one event type — the aggregation
+    /// route (`crate::workstreams::sse::aggregate_live`) already subscribes
+    /// to this bus for its per-session fan-out, so no extra subscription is
+    /// needed to also observe this variant.
+    /// What: `new_active_id` is `Some(id)` for both a fresh activation (no
+    /// prior active workstream) and a force-switch; `None` exactly when
+    /// `workstream.deactivate` cleared the pointer with no successor — this
+    /// widens DOC-48 §5.3's literal `{new_active_id: UUID, prior_id?}` table
+    /// (which only anticipates a switch always landing on a new active
+    /// workstream) to also cover deactivation, a case the table's shape
+    /// otherwise cannot express. `prior_id` is the workstream that was active
+    /// immediately before this change, `None` when there wasn't one. Emitted
+    /// only when the persisted active pointer ACTUALLY changed — not on an
+    /// idempotent re-activation of the already-active workstream, nor on a
+    /// deactivate of a non-active workstream (both are true no-ops).
+    /// Not session-scoped: `Event::session_id()` returns `None` for this
+    /// variant, same as `Event::Ping`.
+    /// Test: `workstreams::activation_tests::activate_with_no_prior_active_publishes_activation_changed`,
+    /// `workstreams::activation_tests::activate_with_force_publishes_activation_changed_with_prior`,
+    /// `workstreams::activation_tests::activate_already_active_does_not_publish`,
+    /// `workstreams::activation_tests::deactivate_active_publishes_activation_changed`,
+    /// `workstreams::activation_tests::deactivate_non_active_does_not_publish`.
+    WorkstreamActivationChanged {
+        new_active_id: Option<String>,
+        prior_id: Option<String>,
+    },
+
+    /// A workstream's computed state (DOC-48 §2.2: `active | idle | closed`)
+    /// actually transitioned — fired by `workstream.activate`/`deactivate`
+    /// (`crate::workstreams::activation`) and `workstream.close`
+    /// (`crate::workstreams::protocol::close`) whenever they change it.
+    ///
+    /// Why: DOC-48 §5.3's event table lists this alongside
+    /// `WorkstreamActivationChanged` as part of the minimal Phase 1A set — a
+    /// client observing one workstream via `GET /workstreams/{id}/events`
+    /// needs to learn its OWN state changed (e.g. it was closed) even when no
+    /// bound session emitted anything, the same gap `WorkstreamActivationChanged`
+    /// fills for the daemon-wide active pointer.
+    /// What: `workstream_id` names which workstream transitioned; `state` is
+    /// its NEW state as a lowercase string (`"active"` | `"idle"` |
+    /// `"closed"`) — deliberately a plain string rather than
+    /// `crate::workstreams::WorkstreamState` so this module stays
+    /// domain-decoupled, matching `Event::IndexReadiness`/
+    /// `SessionStatusChanged`'s existing "state as a plain string"
+    /// convention. `reason` is a short human-readable cause (e.g.
+    /// `"activated"`, `"activated (force-switch)"`, `"deactivated"`,
+    /// `"closed"`).
+    /// Not session-scoped — grouped with `WorkstreamActivationChanged` and
+    /// `Ping` in `session_id()`.
+    /// Test: `workstreams::activation_tests::activate_with_no_prior_active_publishes_state_inferred`,
+    /// `workstreams::activation_tests::activate_with_force_publishes_state_inferred_for_both`,
+    /// `workstreams::activation_tests::deactivate_active_publishes_state_inferred_idle`,
+    /// `workstreams::protocol_tests::close_publishes_state_inferred`.
+    WorkstreamStateInferred {
+        workstream_id: String,
+        state: String,
+        reason: String,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -828,7 +903,9 @@ impl Event {
             | Event::RecapGenerated { session_id, .. }
             | Event::IndexReadiness { session_id, .. }
             | Event::ContextBudget { session_id, .. } => Some(session_id),
-            Event::Ping => None,
+            Event::WorkstreamActivationChanged { .. }
+            | Event::WorkstreamStateInferred { .. }
+            | Event::Ping => None,
         }
     }
 
@@ -879,6 +956,8 @@ impl Event {
             Event::RecapGenerated { .. } => "recap_generated",
             Event::IndexReadiness { .. } => "index_readiness",
             Event::ContextBudget { .. } => "context_budget",
+            Event::WorkstreamActivationChanged { .. } => "workstream_activation_changed",
+            Event::WorkstreamStateInferred { .. } => "workstream_state_inferred",
             Event::Ping => "ping",
         }
     }
