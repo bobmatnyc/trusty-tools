@@ -1112,25 +1112,250 @@ indicator (§4.5) need a per-agent story once fan-out is routine? **Owner: engin
 
 ---
 
-## 8. Visual system
+## 7A. Project-first entry flow {#SPEC-TCUI-10~draft}
 
-**Owned by the design handoff, not restated here.** See
-`docs/trusty-code/UI/Harness UI Rethink Proposal Explainer.pdf`:
+**ID:** SPEC-TCUI-10~draft
+**Status:** Draft
 
-- **§3 Visual system** — warm "engineering paper", not a dark IDE; ink-drawn borders.
-- **§4 Suggested tokens** — the `:root` custom properties (`--desk`, `--panel`,
-  `--chrome`, `--ink`, `--accent`, `--search`, `--done`, `--gap`, `--mono`, `--sans`).
-- **§5 Shell skeleton** — one flex column: header → service nav → body (rail + active
-  pane) → status line.
-- **§6 Key component CSS** — `.mon`, `.hit`, `.recall.injected`, `.svcols`, `.wsrail`.
+> **Epic #3174 feedback (Bob).** The create-session ceremony (screen 7a, the form) is the wrong entry point. Instead: **pick a project from recents/registered list → prompt box is live immediately → typing + Enter creates session and sends first task in one gesture**. Principle 4 (cold start is the empty state of the same shell) stands; the empty state is now "no project picked", not "create ceremony".
 
-**The role mapping is normative even though the palette is not.** Accent = selection /
-current / **inferred**; blue = search / in-progress; green = done / active / shipped;
-red = gaps / blocked / dirty. Colors are OKLCH-friendly and may be re-saturated per
-platform **without breaking the role mapping** (PDF §7). The `--mono` / `--sans` split
-is load-bearing: monospace for **all** system metadata (ids, paths, counts, status),
-sans for prose. That split is the main way the eye separates *content* from *telemetry*
-— and in a context-first harness, telemetry **is** the product's evidence.
+**Requirement — project selection drives immediate task creation:**
+
+1. **Project picker** — a curated list of recent/registered projects (from `trusty-mpm GET /projects/discover`), not raw filesystem browse. Selection is fast and repeatable.
+2. **Live prompt box on selection** — once a project is picked, a **single text input + Enter** is the entry point. No separate form step.
+3. **One-shot create+prompt** — typing the prompt text and pressing Enter calls `POST /tasks` with the prompt as the first `task_run`, binding the project per-call (§5.5 / §7). The session is created (or resumed into an existing workstream) as a side effect; the prompt is the primary action.
+
+**AC-21.1** The project picker shows recent projects (cached from prior selections) alongside registered projects from `trusty-mpm`.
+**AC-21.2** Selecting a project populates the session shell with that project's context (§7B); the prompt box becomes the only input.
+**AC-21.3** `POST /tasks` wired to accept per-call `project` binding (§5.5, issue #3178) so the prompt-box entry is possible at all.
+**AC-21.4** Session creation is now inferred from the first task, not a separate step (issue #3177).
+
+### 7A.1 Recents and project discovery
+
+Feeds the picker. Two sources:
+
+- **`trusty-mpm GET /projects/discover`** — registered projects (from `tm project register`)
+- **Recents cache** — operator's prior selections in this SPA, persisted in browser/app storage (client-side only; no backend)
+
+**AC-21.5** Recents are stored client-side and updated on every successful project binding.
+**AC-21.6** The picker sorts by recency, with a fallback to alphabetic for ties.
+
+---
+
+## 7B. Service hydration on project selection {#SPEC-TCUI-11~draft}
+
+**ID:** SPEC-TCUI-11~draft
+**Status:** Draft
+
+> **Gap.** §4.2 says binding occurs when work touches files. By that point the index may be cold, the palace nonexistent, or a daemon unreachable — and the operator has no warning until they ask a question. **Hydration on selection makes readiness visible before the first prompt.**
+
+**Requirement — project-scoped status aggregation:**
+
+The moment a project is picked, the shell fetches and renders the **full status** of that project's services (search, memory, analyze):
+
+- **Search:** index exists? readiness lanes (semantic/text/graph), doc count, last-indexed-at.
+- **Memory:** palace exists? word count, summary stats.
+- **Analyze:** daemon reachable? health status.
+- **Git (if bound repo):** branch, dirty/clean, ahead/behind (§7D).
+
+All via a **single daemon aggregation call** that fans out to each service.
+
+**AC-22.1** `POST /rpc` method `project.status{path}` returns aggregated health for all services bound to that project root.
+**AC-22.2** The call resolves daemon addresses via `trusty_common::daemon_addr::resolve_daemon_base_url` — no hardcoded ports.
+**AC-22.3** Response shape (not yet specified in this addendum; see issue #3181):
+```rust
+project.status { path } -> {
+  project: { name, root_path, git_repo?: bool },
+  search: { ready: bool, lanes: [{lane, state, doc_count}] },
+  memory: { palace_id?: string, word_count: u32 },
+  analyze: { reachable: bool },
+  git?: { branch, dirty: bool, ahead: u32, behind: u32 }  // if git repo
+}
+```
+
+**AC-22.4** A degraded service (search index cold, palace missing, daemon unreachable) renders as a **designed state in the status chrome** — not an error and not hidden. Status bar shows a visual indicator per service.
+
+---
+
+## 7C. Project context panel {#SPEC-TCUI-12~draft}
+
+**ID:** SPEC-TCUI-12~draft
+**Status:** Draft
+
+> **Gap.** The workstream is context-first (principle 1), but the operator sees only the prompt and thread. **Project context** — what can be indexed, what instructions the harness reads, what stack is detected — must be discoverable in the shell chrome without leaving the thread.
+
+**Requirement — a read-only project-info panel:**
+
+1. **Inferred stack** — language/toolchain detected via trusty-mpm's marker-table logic (reuse `project_lang::LANGUAGE_ENGINEERS` + `stack_profile.rs`, issue #3182).
+2. **Instruction summaries** — short prose summary of `CLAUDE.md` and `AGENTS.md` (if present), with an **edit link** (§7C.1).
+3. **Service status** — read from §7B aggregation.
+
+**AC-23.1** Stack is rendered as a set of tags (e.g. `Rust`, `Tokio`, `PostgreSQL`).
+**AC-23.2** Instruction summaries are **daemon-generated** — one-off LLM summarize call (reuse `DispatchingLlmClient`, issue #3184), not client-side markdown parsing.
+**AC-23.3** Summary length is capped at ~200 chars; a "show full" link opens the instruction file for editing.
+**AC-23.4** Summaries are cached server-side (per project + file mtime) to avoid re-summarizing on every project pick.
+
+### 7C.1 Instruction file editing — daemon-served route {#SPEC-TCUI-15~draft}
+
+**ID:** SPEC-TCUI-15~draft
+**Status:** Draft
+**Owner directive (Bob).** Binding architectural constraint. Distinct from the deferred IDE (§1.3 non-goal 1).
+
+> **The "edit link" cannot use:** (1) an external editor (no `open -a VSCode`; breaks §2.1 C-1); (2) Tauri-native fs (barred by §2.1 C-4); (3) a general fs-write API (barred by §2.1 C-2 — daemon is the sole source).
+
+**Requirement — dedicated read+write instruction-file route:**
+
+A **single, path-guarded REST/RPC surface** locked to **two filenames only** (`CLAUDE.md` and `AGENTS.md`, once #3183 lands) within the bound project root:
+
+```rust
+// READ
+project.read_instruction { filename: "CLAUDE.md" | "AGENTS.md" }
+  -> { content: String, mtime: u64 }
+
+// WRITE
+project.write_instruction { filename, content: String }
+  -> { content: String, mtime: u64 }  // re-read after write
+```
+
+**Field notes (normative):**
+
+- **Filename allowlist only** — no path parameters. `CLAUDE.md` resolves from root or `.claude/` (precedence per `project_context/mod.rs`); `AGENTS.md` same.
+- **No traversal.** A rejected request that attempts `../../../etc/passwd` fails with a guard error, never a generic fs error (AC-24.3).
+- **No arbitrary fs access.** This is NOT a general file-serve route; it MUST NOT be extended to read/write arbitrary project files.
+- **Parity across targets** (§2.1 C-3) — the route exists on the daemon so both web and Tauri get the same behavior.
+
+**AC-24.1** The route is available over both REST and JSON-RPC, wired into `POST /rpc` alongside the other project.* methods (§5.8, §5.0).
+**AC-24.2** Write succeeds with a `conflict` error (HTTP 409 / JSON-RPC error code) if the file has been edited externally since the last read (compare mtime).
+**AC-24.3** Path traversal attempts (detected by canonicalization or naive `..` checks) fail with **`guard: PathTraversalAttempted`** error code, distinct from a genuine not-found or permission error.
+**AC-24.4** The GUI opens an **in-app editor** (not an external app) backed by this route — the UI is a thin client over the daemon (§2.1 C-2).
+
+---
+
+## 7D. Git status — branch, dirty, ahead/behind {#SPEC-TCUI-13~draft}
+
+**ID:** SPEC-TCUI-13~draft
+**Status:** Draft
+
+> **Gap.** §4.2 binds git repos; §4.9 defers workflow lanes (the full PR/branch/deploy pipeline is Phase 2+). But operators need **immediate visibility** into whether the working tree is clean and where they stand relative to the remote — a simple, high-signal three-tuple that does not require the full subsystem.
+
+**Requirement — lightweight git status:**
+
+```rust
+project.git_status { path } -> {
+  branch: String,          // current branch name
+  is_dirty: bool,          // git status --porcelain empty?
+  ahead: u32,              // rev-list --left-right --count … | head -1
+  behind: u32              // rev-list --left-right --count … | tail -1
+}
+```
+
+**Per-field semantics:**
+
+- **`branch`** — symbolic-ref HEAD, or detached commit hash if applicable.
+- **`is_dirty`** — true if `git status --porcelain` is non-empty (working-tree modifications, staged, or untracked).
+- **`ahead` / `behind`** — relative to tracking remote (if set); both 0 if no remote. Computed via `git rev-list --left-right --count HEAD...@{u}`.
+
+**AC-25.1** The route errors (JSON-RPC / REST) if the path is not a git repo or git is unreachable.
+**AC-25.2** Status renders in the project-context panel (§7C) and, if live-polling (§7D.1), updates while the session runs.
+**AC-25.3** Distinct from §4.9's workflow lanes (PRs, branches, deploy stage); git_status is Phase 1, workflow is Phase 2+.
+
+### 7D.1 Optional: live polling {#SPEC-TCUI-14~draft}
+
+**ID:** SPEC-TCUI-14~draft
+**Status:** Draft
+
+> **Not normative for Phase 1, but worth spelling out.** If the harness is modifying files and the operator is watching the project context, they will want to see the dirty/ahead-behind state update in real time without re-fetching the whole project.status aggregate.
+
+A lightweight **poll on interval** (5–10s) of `project.git_status` while the workstream is active. If this lands, the UI is responsible for debouncing the requests (no more than one per 5 seconds).
+
+**AC-25.4** Live polling of `project.git_status` is optional; poll interval is a client-side preference (default 10s if implemented).
+
+---
+
+## 7E. Project creation {#SPEC-TCUI-16~draft}
+
+**ID:** SPEC-TCUI-16~draft
+**Status:** Draft
+
+> **Gap.** The picker (§7A) offers registered projects, but operators also need to create new ones on the fly — "pick a directory, optionally init git, register it, and start coding". **Not clone-from-URL** (that is §5.1 #11, deferred to Phase 2+); just a **local directory + git init + recents cache update**.
+
+**Requirement — create-dir + registration flow:**
+
+1. **Browse and create** — the project picker includes a "New Project" entry (or button) that opens a **directory picker** (same daemon-served `project.list_dir` surface used by the 7a binding picker, §5.8) and allows the operator to **select or create a directory**.
+2. **Optional git init** — prompt to `git init` if creating a new dir or if selected dir is not already a repo.
+3. **Register + bind** — call `project.create_dir` to persist the binding (and optionally register it in trusty-mpm if that API exists); add to recents cache.
+
+```rust
+project.create_dir {
+  path: String,       // absolute path to create or bind
+  git_init?: bool,    // true => `git init` if directory is new or non-git
+} -> { path: String, git: bool }
+```
+
+**AC-26.1** Creating a project calls `project.create_dir` which MUST handle **mkdir with traversal safety** — no `../`, no symlink escapes.
+**AC-26.2** Git init is optional; a plain directory project is valid (§4.2 Bound · non-git).
+**AC-26.3** On success, the new project is added to the recents cache and immediately selectable.
+**AC-26.4** GUI affords "New Project" as a prominent entry in the project picker or as a separate button.
+
+---
+
+## 8. Visual system — Foundry design system {#SPEC-TCUI-17~draft}
+
+**ID:** SPEC-TCUI-17~draft
+**Status:** Draft
+
+**Normative: Foundry (v1)** replaces the missing design handoff PDF references. See
+[`docs/design/UI/design-system/`](../../design/UI/design-system/) (PR #3170, branch
+`docs-foundry-design-system`):
+
+- **Philosophy:** robot-themed, rust-colored. Machines talk mono; humans talk sans. Flat,
+  honest, clean line borders (no drop shadows on resting surfaces).
+- **Tokens:** `docs/design/UI/design-system/tokens.css` — single source of truth for
+  colors, typography, spacing, radii. Both **light** (`:root`) and **dark** ("Night Shift",
+  `[data-theme="dark"]` or `.dark` class) palettes ship in the same file.
+- **Role mapping** (normative; palette is not):
+  - **Rust (#B7410E light, #D97742 dark)** — primary action, highlighted datum, active nav (one per region, never body text or large backgrounds).
+  - **Green (#3F6F2A)** — done, active, shipped.
+  - **Blue (#3D6B8A)** — info, in-progress.
+  - **Red (#C2331F)** — gaps, blocked, dirty (used in AC-5.7 context-budget overflow, AC-9.2 missing stages).
+  - **Amber (via `--accent-soft`, `--surface-hover`)** — inferred state (AC-5.2 model-authored goals).
+- **Typography:**
+  - **Chakra Petch** — display/headings; hero numbers.
+  - **IBM Plex Sans** — body prose; UI labels.
+  - **IBM Plex Mono** — all system metadata (ids, paths, counts, status, table headers). This split is **load-bearing**: it separates *content* from *telemetry* visually — and in a context-first harness, telemetry **is** the product's evidence.
+- **Shell skeleton** (unchanged from PDF) — one flex column: header → service nav → body (rail + active pane) → status line. **§8.1 nesting invariant (AC-18.1) remains binding.**
+
+### 8.1 Dark theme ("Night Shift") and OS integration
+
+**Requirement — automatic theme activation:**
+
+The shell MUST follow the operator's OS setting (light/dark mode preference). On startup,
+read `window.matchMedia('(prefers-color-scheme: dark)')` and set `<html data-theme="dark">`
+or remove it accordingly. When the OS setting changes (via Settings or during session), the
+shell MUST update in real-time (listen to the `matchmedia` event).
+
+**AC-27.1** Dark theme activates via `[data-theme="dark"]` on the root `<html>` element;
+light is the default.
+**AC-27.2** On init, the shell reads OS preference via `window.matchMedia('(prefers-color-scheme: dark)')`.
+**AC-27.3** The shell listens to OS theme changes and updates the `data-theme` attribute in real-time (no page reload).
+**AC-27.4** The operator MAY override the OS setting with a manual toggle (stored in
+browser/app settings); the override persists across sessions.
+**AC-27.5** All components reference tokens only — hardcoded hex colors are a spec
+violation and must fail review.
+
+### 8.2 Component state quick-reference (Foundry §1 guardrails)
+
+Foundry defines component states that normalize across the SPA. Normative constraints:
+
+- **Buttons:** PRIMARY (solid rust) · SECONDARY (card bg) · TERTIARY (raised bg) · DANGER (soft-rust bg) · GHOST (transparent) · DISABLED (raised bg + muted text).
+- **Badges:** rectangular stamps, 4px radius, mono uppercase 10px, one status color per region.
+- **Tables:** no zebra stripes; row hover uses `--trusty-surface-hover`.
+- **Toasts:** dark chassis panels, bottom-right stack, 3px status left edge (color for success/warning/danger), mono title + sans body. Success auto-dismisses at 5s; errors persist.
+- **Modals:** card with raised header strip, Chakra Petch title, actions right-aligned in footer.
+- **Empty states:** muted idle-robot mark, one mono label, one line of sans guidance, one primary action.
+
+**AC-27.6** New components added to the shell MUST follow Foundry precedent or extend
+Foundry's open rules (the "extend without breaking" guardrails in `docs/design/UI/design-system/README.md`).
 
 ### 8.1 The nesting note — keep it, and assert it
 
@@ -1148,17 +1373,20 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 | ID | Item | Depends on |
 |---|---|---|
-| **F1** | Add the DOC-39 catalog row to `docs/specs/README.md` and refresh its stale "next free `DOC-N`" note to **DOC-40**. | this spec |
+| **F1** | Add the DOC-39 catalog row to `docs/specs/README.md` and refresh its stale "next free `DOC-N`" note. **Update catalog status** after addendum merge: spec now spans `SPEC-TCUI-01~draft` … `-17~draft`; next free is **DOC-42** (per 2026-07-16 scan). | this spec |
 | **F2** | Commit the missing interactive wireframe doc (§7 Q1); re-check §4.6/§4.6.1 against it. | design |
 | **F3** | File the Phase-1 issues (§6.2) under the UI epic, sequenced with §5.2 first. | this spec |
 | **F4** | Resolve ~~Q2~~/Q3/Q4 (~~platform~~, auth, IDE scope) before Phase 2 planning. **Q2 is RESOLVED** (§7); Q3/Q4 remain. | Bob |
 | **F6** | File the `project.list_dir` Phase-1 issue (§5.8), paired with projectless (§6.2.1) — 7a needs both to be a screen. | this spec |
 | **F7** | Q6's client-side-cost option is now a §2.1 violation; scope the streaming cost **event** instead. | engineering |
-| **F5** | Note for DOC-38 §10 F3 (DOC-28 renumber): DOC-39 is now **claimed by this spec**; that follow-up must re-scan and take **DOC-40**. | DOC-38 |
+| **F5** | Note for DOC-38 §10 F3 (DOC-28 renumber): DOC-39 is now **claimed by this spec**; that follow-up must re-scan and take **DOC-42**. | DOC-38 |
+| **F8** | File epic #3174 sub-issues (issues #3177–#3188) under the UI epic; sequence them per the dependency map in the epic description. Per-issue specs (especially #3181 and #3188) will refine the `project.status` shape and `project.{read,write}_instruction` guards. | epic #3174 |
+| **F9** | Merge `docs-foundry-design-system` branch (PR #3170) into main; verify the `docs/design/UI/design-system/` path exists and both token files are present. Update any UI crates referencing `tokens.css` to use the new Foundry version. | PR #3170 |
 
 ## Changelog
 
-- **2026-07-16** — Initial draft (DOC-39, `SPEC-TCUI-01~draft` … `SPEC-TCUI-08~draft`).
+- **2026-07-19** — **DOC-39 addendum pass** (epic #3174, PR #3170 Foundry design system). Adds **§7A–§7E** (`SPEC-TCUI-10~draft` … `-16~draft`) covering the **project-first session flow** (pick project → live prompt → one-shot create+prompt; issue #3177–#3178), **service hydration on selection** (search + memory + analyze status aggregation; issue #3181), **project-context panel** with instruction summaries and edit affordance (issues #3183–#3184), **git status** (branch, dirty, ahead/behind; issue #3185), and **project creation** (mkdir + git init; issue #3186). Amends **§8 Visual system** to make **Foundry design system (v1)** (`docs/design/UI/design-system/`) the **normative visual reference**, replacing the missing handoff PDF citations; documents token sourcing, dark theme ("Night Shift") OS integration (§8.1, AC-27), and Foundry component guardrails (§8.2). Adds **§7C.1** (`SPEC-TCUI-15~draft`) specifying the **daemon-served instruction-file edit route** (read + write CLAUDE.md / AGENTS.md, path-guarded, issue #3188) with AC-24 guards against traversal and arbitrary fs access. Adds optional §7D.1 for live git-status polling. Updates Follow-ups to reflect addendum dependencies and Foundry merge (F8–F9). Documents that `SPEC-TCUI-10~draft` … `-17~draft` (or `-16~draft` depending on AC audit) are the new spec IDs claimed by this addendum.
+- **2026-07-16** — Initial draft (DOC-39, `SPEC-TCUI-01~draft` … `SPEC-TCUI-09~draft`).
 - **2026-07-16** — **Daemon-is-everything amendment** (owner directive, Bob). Adds §2.1
   `SPEC-TCUI-09~draft` — *"The UI communicates with the daemon; the daemon provides all
   functionality"* — as a foundational **architectural** constraint (C-1 thin client, C-2
