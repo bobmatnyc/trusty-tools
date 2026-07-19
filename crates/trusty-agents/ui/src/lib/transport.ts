@@ -100,6 +100,19 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       if (typeof agent === 'string' && agent.trim()) {
         body.agent = agent;
       }
+      // #3245: mirror the Tauri `send_message` command's `model_id`/
+      // `provider_id` forwarding (see `task_commands::send_message` on the
+      // Rust side) so the browser fallback path behaves identically —
+      // `InputArea.svelte` passes `modelId`/`providerId` only when the
+      // model picker has an active, selectable entry.
+      const modelId = args?.modelId;
+      if (typeof modelId === 'string' && modelId.trim()) {
+        body.model_id = modelId;
+      }
+      const providerId = args?.providerId;
+      if (typeof providerId === 'string' && providerId.trim()) {
+        body.provider_id = providerId;
+      }
       const submit = await fetch(`${base}/api/task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },

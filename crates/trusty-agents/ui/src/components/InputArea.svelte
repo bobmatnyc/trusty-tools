@@ -3,6 +3,7 @@
   import {
     activeAgentId,
     activeMessages,
+    activeModelEntry,
     activeProject,
     activeProjectId,
     activeTaskId,
@@ -16,6 +17,7 @@
   import { get } from 'svelte/store';
   import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
   import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
+  import { resolveOverride } from '../lib/models';
 
   let input = '';
   let textareaEl: HTMLTextAreaElement;
@@ -185,6 +187,17 @@
       const selectedAgent = get(activeAgentId);
       if (selectedAgent) {
         invokeArgs.agent = selectedAgent;
+      }
+      // #3245: forward the model/provider picker's selection, when any.
+      // `resolveOverride` returns `{ modelId: null, providerId: null }` for
+      // both the "Default" row and a `null` store (nothing selected yet),
+      // so a session that never touches the picker omits both keys here —
+      // identical wire shape to every pre-#3245 submission.
+      const selectedModel = get(activeModelEntry);
+      if (selectedModel) {
+        const { modelId, providerId } = resolveOverride(selectedModel);
+        if (modelId) invokeArgs.modelId = modelId;
+        if (providerId) invokeArgs.providerId = providerId;
       }
       const result = await invoke<string>('send_message', invokeArgs);
       if (mySeq !== submissionSeq) return; // superseded by a retask

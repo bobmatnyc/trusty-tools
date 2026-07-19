@@ -8,6 +8,7 @@ import {
   type OverlayAgent,
   type RosterEntry,
 } from '../lib/roster';
+import type { ModelsCatalogResponse, PickerEntry } from '../lib/models';
 
 /**
  * Why: The sidebar needs a single source of truth for the list of chat
@@ -181,6 +182,51 @@ export async function refreshOverlayAgents(): Promise<void> {
 
 export type { RosterEntry };
 export { BASE_AGENT_ID };
+
+/**
+ * Why (#3245 — model/provider picker, epic #3052; depends on #3243's
+ * `GET /api/models` catalog): mirrors `activeAgentId`'s "second, independent
+ * selection axis" pattern — which model/provider answers, alongside which
+ * project (`activeProjectId`) and which persona (`activeAgentId`). `null`
+ * is the default so a session that never touches the picker sends neither
+ * `model_id` nor `provider_id` in `POST /api/task`, preserving the
+ * pre-#3245 default (the agent config's own model, normal env-credential
+ * resolution) byte-for-byte.
+ * What: Holds the `PickerEntry` (see `lib/models.ts`) the user last
+ * selected in `ModelSwitcher.svelte`, or `null`. `InputArea.svelte` maps it
+ * through `resolveOverride()` into the submission payload.
+ * Test: `ModelSwitcher.svelte` sets this on row click; `InputArea.svelte`
+ * reads it into the submission payload (only when non-null and selectable).
+ */
+export const activeModelEntry = writable<PickerEntry | null>(null);
+
+/** `GET /api/models` catalog (#3243), populated on `ModelSwitcher` mount. */
+export const modelCatalog = writable<ModelsCatalogResponse | null>(null);
+
+/**
+ * Why: Same shape as `fetchAgentCatalog` — a plain REST fetch populating a
+ * store, callable from `ModelSwitcher`'s `onMount` and any manual refresh.
+ * What: Fetches `GET /api/models` and replaces `modelCatalog`. Throws on a
+ * non-2xx response or network failure; callers (mirroring `fetchAgentCatalog`
+ * call sites) catch around it so an unreachable API doesn't crash the input
+ * area — the picker just falls back to showing only "Default".
+ * Test: Mount the model switcher, observe a network call to `/api/models`
+ * and the store populated.
+ */
+export async function fetchModelCatalog(): Promise<void> {
+  const base = apiBase();
+  const headers: Record<string, string> = {};
+  const token = getCurrentApiToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const r = await fetch(`${base}/api/models`, { headers });
+  if (!r.ok) {
+    throw new Error(`GET /api/models failed: ${r.status}`);
+  }
+  const data = (await r.json()) as ModelsCatalogResponse;
+  modelCatalog.set(data);
+}
+
+export type { ModelsCatalogResponse, PickerEntry };
 
 /**
  * Why: When `tagent --api --api-token …` runs, every `/api/*` call
