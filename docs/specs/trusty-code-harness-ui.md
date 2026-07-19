@@ -400,7 +400,7 @@ per-agent, not global, and MUST be readable from the roster (§5.4).
 `overhead_cap_tokens = context_window * 40/100`).
 
 > **The ratio is computed and then discarded.** `cadence::maybe_cadence_compress`
-> returns `CadenceOutcome { compaction_fired, compaction_rounds, within_budget }` (`cadence.rs:218`) whose own
+> returns `CadenceOutcome { fired, rounds, within_budget }` (`cadence.rs:218`) whose own
 > doc comment says it exists **"for observability/tests"** — and observability never
 > consumes it. `AgentLoop::maybe_cadence_compress` (`agent_loop/mod.rs:739`) calls it at
 > **`mod.rs:747` and drops the return value on the floor**; the turn-boundary call site
@@ -411,7 +411,7 @@ per-agent, not global, and MUST be readable from the roster (§5.4).
 `CadenceOutcome`, not an estimate recomputed in the client.
 **AC-5.7** `within_budget == false` (the documented floor: the active zone alone exceeds
 the cap after full compaction) MUST be visible — red `--gap` per the token map.
-**AC-5.8** A compaction firing (`compaction_fired == true`) MUST be observable in the thread (§4.7).
+**AC-5.8** A compaction firing (`fired == true`) MUST be observable in the thread (§4.7).
 **AC-5.9 — cadence is PM-only today.** `AgentLoopConfig.cadence` defaults `None`; only
 `task/executor.rs:327` sets `Some`. The indicator MUST render "not applicable" for
 non-PM agents rather than implying an unmanaged context.
