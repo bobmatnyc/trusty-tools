@@ -280,10 +280,14 @@ versions by version number.
 1. Bump the crate version in `crates/<name>/Cargo.toml`.
    - Shortcut: `scripts/bump-version.sh <crate-dir> <major|minor|patch>` reads the
      current version, computes the next semver, edits the package version in
-     place, stages the unreleased `CHANGELOG.md` section (via
-     `scripts/generate-changelog.sh`), and **prints** the exact `git tag` /
-     `git push` commands for you to run. It never tags or pushes — the human
-     stays in the loop per the manual-tag convention. It honours the
+     place, syncs the root `Cargo.lock` (`cargo update -p <package-name>
+     --precise <next-version>`, resolving `<package-name>` from the crate's
+     `[package] name` field so it works even when that differs from the
+     crates/ directory name, e.g. `tga`) so the release PR is `--locked`-clean
+     on the first CI run (issue #3199), stages the unreleased `CHANGELOG.md`
+     section (via `scripts/generate-changelog.sh`), and **prints** the exact
+     `git tag` / `git push` commands for you to run. It never tags or pushes —
+     the human stays in the loop per the manual-tag convention. It honours the
      `trusty-git-analytics` tag-prefix gotcha automatically (tags are
      `trusty-git-analytics-v*`, not `tga-v*`).
 2. Update any dependent crates that pin that version.

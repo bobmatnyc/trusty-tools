@@ -11,11 +11,15 @@
 # What: Given a crate directory under crates/ and a bump level
 # (major|minor|patch), reads the package `version = "X.Y.Z"` from
 # crates/<crate-dir>/Cargo.toml, computes the next semver, edits that line in
-# place, then calls scripts/generate-changelog.sh <crate-dir> <tag-prefix> to
-# prepend the unreleased CHANGELOG section. For every current crate the tag
-# prefix equals the crate-dir name (tag_prefix_for() is the single, easy-to-
-# extend place that derives it). Finally it prints — but does NOT execute — the
-# `git tag` and `git push` commands.
+# place, runs `cargo update -p <package-name> --precise <next>` so
+# Cargo.lock's entry for that package matches the bumped manifest (issue
+# #3199 — every release PR previously failed CI's `--locked` build until a
+# human pushed a manual lock-sync follow-up commit), then calls
+# scripts/generate-changelog.sh <crate-dir> <tag-prefix> to prepend the
+# unreleased CHANGELOG section. For every current crate the tag prefix equals
+# the crate-dir name (tag_prefix_for() is the single, easy-to-extend place
+# that derives it). Finally it prints — but does NOT execute — the `git tag`
+# and `git push` commands.
 #
 # Test: `bash -n scripts/bump-version.sh` for syntax and `shellcheck
 # scripts/bump-version.sh` for lint. Functionally, the pure version-bump logic
@@ -53,8 +57,9 @@ usage() {
   echo "  <major|minor|patch>    semver component to increment" >&2
   echo "" >&2
   echo "Reads the package version from crates/<crate-dir>/Cargo.toml, bumps it," >&2
-  echo "stages the unreleased CHANGELOG section, and PRINTS the tag/push commands" >&2
-  echo "for you to run (it never tags or pushes itself)." >&2
+  echo "syncs Cargo.lock (cargo update -p <package> --precise <next>), stages the" >&2
+  echo "unreleased CHANGELOG section, and PRINTS the tag/push commands for you to" >&2
+  echo "run (it never tags or pushes itself)." >&2
   exit 2
 }
 
@@ -73,6 +78,26 @@ read_package_version() {
     return 1
   fi
   echo "${version}"
+}
+
+# Why: `cargo update -p <name>` needs the crate's cargo PACKAGE name, which can
+# differ from its crates/ directory name (e.g. crates/trusty-git-analytics has
+# package name "tga" — see tag_prefix_for() above). By Cargo convention the
+# [package] table is always the first table in a manifest, so the FIRST
+# `name = "..."` line is the package name — the same first-occurrence anchor
+# read_package_version() relies on for the version line just below it.
+# What: prints the crate's cargo package name from crates/<crate-dir>/Cargo.toml,
+# or fails.
+read_package_name() {
+  local manifest="$1"
+  local name
+  name="$(grep -m1 -E '^name[[:space:]]*=[[:space:]]*"[^"]+"' "${manifest}" \
+    | sed -E 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+  if [[ -z "${name}" ]]; then
+    echo "ERROR: could not find a package name (name = \"...\") in ${manifest}" >&2
+    return 1
+  fi
+  echo "${name}"
 }
 
 # Why: centralise the semver arithmetic so it is unit-testable in isolation.
@@ -199,6 +224,34 @@ main() {
   fi
   echo "Bumped crates/${crate_dir}/Cargo.toml: ${current} -> ${next} (${level})" >&2
 
+  # Sync Cargo.lock to the bumped manifest (issue #3199): CI's --locked builds
+  # reject a Cargo.lock whose entry for this package still pins the OLD
+  # version, and until this step existed a human had to notice the failure and
+  # push a manual `cargo update -p <crate> --precise <version>` follow-up
+  # commit on every release PR. Resolve the cargo PACKAGE name (not the
+  # crates/ directory name — they differ for trusty-git-analytics/"tga") and
+  # run the equivalent update here so the release PR is --locked-clean on the
+  # first push.
+  local pkg_name
+  pkg_name="$(read_package_name "${manifest}")"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "ERROR: cargo not found on PATH — cannot sync Cargo.lock for package" >&2
+    echo "       '${pkg_name}' (crates/${crate_dir}). crates/${crate_dir}/Cargo.toml" >&2
+    echo "       has ALREADY been bumped to ${next}; install/enable cargo, then run" >&2
+    echo "       this from ${WORKSPACE_ROOT} before committing:" >&2
+    echo "         cargo update -p ${pkg_name} --precise ${next}" >&2
+    echo "       Skipping this will fail CI's --locked build." >&2
+    exit 1
+  fi
+  echo "Syncing Cargo.lock: cargo update -p ${pkg_name} --precise ${next} ..." >&2
+  if ! (cd "${WORKSPACE_ROOT}" && cargo update -p "${pkg_name}" --precise "${next}"); then
+    echo "ERROR: cargo update -p ${pkg_name} --precise ${next} failed. Note:" >&2
+    echo "       crates/${crate_dir}/Cargo.toml has ALREADY been bumped to ${next} —" >&2
+    echo "       resolve the Cargo.lock issue manually before committing, or run" >&2
+    echo "       \`git checkout crates/${crate_dir}/Cargo.toml\` to start over." >&2
+    exit 1
+  fi
+
   # Stage the unreleased CHANGELOG section for this crate's tag series.
   echo "Staging unreleased CHANGELOG section via generate-changelog.sh ..." >&2
   "${changelog_script}" "${crate_dir}" "${prefix}"
@@ -228,7 +281,7 @@ main() {
   echo "" >&2
   echo "Next steps (review, then run these yourself):" >&2
   echo "" >&2
-  echo "  git add crates/${crate_dir}/Cargo.toml crates/${crate_dir}/CHANGELOG.md  # add Cargo.lock too if cargo regenerated it" >&2
+  echo "  git add crates/${crate_dir}/Cargo.toml crates/${crate_dir}/CHANGELOG.md Cargo.lock" >&2
   echo "  git commit -m \"chore(release): ${crate_dir} ${next}\"" >&2
   echo "  git tag ${tag}" >&2
   echo "  git push origin ${tag}" >&2
