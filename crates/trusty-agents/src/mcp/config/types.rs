@@ -7,6 +7,8 @@
 //! `McpTool`, plus the `serde` default helpers they share.
 //! Test: Defaults + round-trips exercised in `config::tests`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Default agent roles that receive MCP tool descriptions in their prompt.
@@ -152,6 +154,11 @@ pub struct McpService {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables overlaid on the spawned server's process
+    /// environment (e.g. API keys). Empty by default — most services need
+    /// nothing beyond the inherited environment.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
     /// For HTTP-transport services, the endpoint URL. Stdio services leave
     /// this `None` and use `command` + `args` instead.
     #[serde(default)]
@@ -162,6 +169,13 @@ pub struct McpService {
     pub enabled: bool,
     #[serde(default)]
     pub tools: Vec<McpTool>,
+    /// When `true`, ignore `tools` (the static list above) entirely and
+    /// live-discover the server's tools via `tools/list` at registry-build
+    /// time instead (#3238). Requires `transport = "stdio"` and a non-empty
+    /// `command` — non-stdio or command-less services with `discover = true`
+    /// are skipped with a warning, same as the static path.
+    #[serde(default)]
+    pub discover: bool,
 }
 
 /// A single tool advertised by an MCP service.

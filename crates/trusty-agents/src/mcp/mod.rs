@@ -14,7 +14,10 @@
 //! Test: `mcp::config::tests::*` cover load/create/render.
 
 pub mod config;
+pub mod mcp_json;
 
 pub use config::GlobalConfig;
 #[allow(unused_imports)]
 pub use config::{LocalInferenceConfig, McpSection, McpService, McpTool};
+#[allow(unused_imports)]
+pub use mcp_json::{McpJsonServer, discover_mcp_json_paths, parse_mcp_json_servers};
