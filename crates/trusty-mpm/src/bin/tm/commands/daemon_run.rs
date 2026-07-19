@@ -1,29 +1,43 @@
 //! Daemon HTTP-server entry point and its private helpers.
 //!
-//! Why: `run_daemon` and its three private helpers (`wait_for_shutdown_signal`,
-//! `spawn_telegram_bot`, `get_tailscale_ip`) are a coherent "boot and serve"
-//! group; extracting them keeps `daemon.rs` under the 500-line cap while
-//! co-locating the helpers that are only meaningful together.
+//! Why: `run_daemon` and its private helpers (`wait_for_shutdown_signal`,
+//! `spawn_telegram_bot`, `tailscale_deprecated_error`) are a coherent "boot
+//! and serve" group; extracting them keeps `daemon.rs` under the 500-line cap
+//! while co-locating the helpers that are only meaningful together.
 //! What: `run_daemon` (the `daemon` subcommand handler) plus private helpers.
-//! Test: `cli_parses_daemon_*` parse tests; the bind/serve path is exercised
-//! by the daemon e2e suite.
+//! Test: `cli_parses_daemon_*` parse tests; `run_daemon_rejects_tailscale_flag`
+//! covers the deprecation error; the bind/serve path is exercised by the
+//! daemon e2e suite.
 
 use std::net::SocketAddr;
 
 /// `daemon` subcommand — run the HTTP daemon (or MCP server) with auto port
-/// selection, lock-file service discovery, and optional Tailscale exposure.
+/// selection and lock-file service discovery.
 ///
 /// Why: the daemon must start even when the configured port is busy (auto
-/// fallback to an ephemeral port), publish its real address so clients can
-/// find it (lock file), and optionally be reachable over Tailscale.
-/// What: in MCP mode delegates straight to `run_mcp`; otherwise binds `addr`
-/// (falling back to `127.0.0.1:0` on `AddrInUse`), optionally binds a second
-/// Tailscale listener, writes the lock file, registers a Ctrl-C handler that
-/// removes the lock, then serves the API on the primary listener.
-/// Test: `cli_parses_daemon_*` cover flag parsing; the bind/serve path is
+/// fallback to an ephemeral port) and publish its real address so clients can
+/// find it (lock file). Per ADR-0011's loopback-only doctrine (issue #3330,
+/// part of epic #3328), the daemon itself never exposes a non-loopback
+/// listener — `trusty-console` is the sole HTTP surface reachable off-host,
+/// via its own `--tailscale`/Funnel modes.
+/// What: rejects `--tailscale` up front with an actionable error (see
+/// [`tailscale_deprecated_error`]); in MCP mode delegates straight to
+/// `run_mcp`; otherwise binds `addr` (falling back to `127.0.0.1:0` on
+/// `AddrInUse`), writes the lock file, registers a Ctrl-C handler that
+/// removes the lock, then serves the API on the primary (loopback) listener.
+/// Test: `cli_parses_daemon_*` cover flag parsing; `run_daemon_rejects_
+/// tailscale_flag` covers the deprecation error; the bind/serve path is
 /// exercised by the daemon e2e suite.
 pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> anyhow::Result<()> {
     use std::io::ErrorKind;
+
+    // ADR-0011 loopback-only doctrine (#3330): the secondary Tailscale
+    // listener has been removed. Fail loudly and immediately rather than
+    // silently ignoring the flag — old invocations (scripts, launchd plists,
+    // muscle memory) need a clear signal, not a quietly-degraded daemon.
+    if tailscale {
+        return Err(tailscale_deprecated_error());
+    }
 
     // Anchor cwd to a stable directory so that git subprocesses spawned later
     // never fail with "fatal: Unable to read current working directory" when the
@@ -86,40 +100,9 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
     let base_url = format!("http://{actual_addr}");
     tracing::info!("daemon listening on {base_url}");
 
-    // Optional Tailscale second listener.
-    let tailscale_url = if tailscale {
-        match get_tailscale_ip() {
-            Some(ts_ip) => {
-                let ts_addr = format!("{ts_ip}:{}", actual_addr.port());
-                match tokio::net::TcpListener::bind(&ts_addr).await {
-                    Ok(ts_listener) => {
-                        let ts_url = format!("http://{ts_addr}");
-                        tracing::info!("Tailscale listener on {ts_url}");
-                        // Spawn a second server sharing daemon state.
-                        trusty_mpm::daemon::spawn_secondary_listener(
-                            trusty_mpm::daemon::DaemonState::shared(),
-                            ts_listener,
-                        );
-                        Some(ts_url)
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to bind Tailscale address {ts_addr}: {e}");
-                        None
-                    }
-                }
-            }
-            None => {
-                tracing::warn!("--tailscale requested but no Tailscale IP found");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     // Write lock file so clients can discover us (backward-compat for existing
     // clients that parse the TOML lock directly, e.g. the old MpmConnector).
-    trusty_mpm::daemon::lock::write_lock(&base_url, tailscale_url.as_deref());
+    trusty_mpm::daemon::lock::write_lock(&base_url);
     // Also write the standard trusty-common http_addr file so the console's
     // reverse proxy can discover the daemon address via the shared
     // `read_daemon_addr` helper (#1849 Phase 1).
@@ -271,30 +254,44 @@ fn spawn_telegram_bot(base_url: &str) -> Option<tokio_util::sync::CancellationTo
     }
 }
 
-/// Detect the Tailscale IPv4 address by running `tailscale ip -4`.
+/// Build the hard-deprecation error returned when `tm daemon --tailscale` is
+/// invoked.
 ///
-/// Why: Tailscale's IP changes per device; we can't hardcode it. The CLI
-/// is the most reliable cross-platform way to query it without adding a
-/// Tailscale SDK dependency.
-/// What: Spawns `tailscale ip -4`, trims the output, returns it if it
-/// looks like an IP address. Returns `None` on any error or if Tailscale
-/// is not installed.
-/// Test: Hard to test without Tailscale installed; the unit test below
-/// checks the happy-path string parsing.
-fn get_tailscale_ip() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["ip", "-4"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let ip = String::from_utf8(output.stdout).ok()?;
-    let ip = ip.trim().to_string();
-    // Basic sanity check: must look like an IPv4 or Tailscale CGNAT address.
-    if ip.contains('.') && !ip.is_empty() {
-        Some(ip)
-    } else {
-        None
+/// Why: issue #3330 (part of epic #3328) removed the daemon's secondary
+/// Tailscale listener under ADR-0011's loopback-only doctrine — non-loopback
+/// ingress is exclusively `trusty-console`'s job. Old invocations (scripts,
+/// launchd plists, muscle memory) must fail loudly with a pointer to the
+/// replacement, not silently degrade to a loopback-only daemon that looks
+/// like it started fine.
+/// What: returns an `anyhow::Error` with the actionable message; kept as a
+/// separate function so the message text has exactly one source of truth for
+/// both the runtime call site and its test.
+/// Test: `run_daemon_rejects_tailscale_flag` below.
+fn tailscale_deprecated_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "tm daemon --tailscale has been removed: the daemon binds loopback \
+         only now (ADR-0011 loopback-only doctrine, issue #3330). Use \
+         `trusty-console --tailscale` (or its Funnel mode) for non-loopback \
+         ingress instead."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `run_daemon` must refuse `--tailscale` before doing anything else —
+    /// no bind, no chdir, no lock file — so the deprecation error is fast
+    /// and side-effect free to test.
+    #[tokio::test]
+    async fn run_daemon_rejects_tailscale_flag() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let err = run_daemon(addr, true, false)
+            .await
+            .expect_err("--tailscale must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("trusty-console"), "message was: {msg}");
+        assert!(msg.contains("ADR-0011"), "message was: {msg}");
+        assert!(msg.contains("#3330"), "message was: {msg}");
     }
 }

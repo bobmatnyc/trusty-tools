@@ -84,9 +84,10 @@ the live daemon and a second `trusty-mpmd` start is refused.
    `TRUSTY_MPM_ADDR` override). On `AddrInUse` it falls back to an ephemeral port
    (`127.0.0.1:0`). The health-probe guard above prevents the ephemeral fallback from
    silently spawning a traffic-splitting second daemon.
-4. After bind, `lock::write_lock(base_url, tailscale_url)` writes
-   `~/.trusty-mpm/daemon.lock` (TOML: `pid`, `addr`, optional `tailscale_addr`,
-   `started_at`) — `daemon/lock.rs:18-35`.
+4. After bind, `lock::write_lock(base_url)` writes `~/.trusty-mpm/daemon.lock`
+   (TOML: `pid`, `addr`, `started_at`) — `daemon/lock.rs:18-35`. (Historical
+   note: prior to ADR-0011's loopback-only doctrine, issue #3330, this also
+   took an optional `tailscale_url` for a now-removed secondary listener.)
 5. A shutdown task traps SIGINT **and** SIGTERM and calls `lock::remove_lock()` so a
    `tm restart` (pkill → SIGTERM) never leaks a stale lock (`tm.rs:3209-3218`).
 

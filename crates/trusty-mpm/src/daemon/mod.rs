@@ -149,8 +149,10 @@ pub async fn serve_http(
         info!("inproject-hygiene disabled via TRUSTY_MPM_INPROJECT_HYGIENE");
     }
 
-    // #3304: the primary listener is loopback; guard router-wide trusting only
-    // loopback. The secondary (Tailscale) listener trusts its own bind addr.
+    // #3304 + ADR-0011 loopback-only doctrine (#3330): the daemon binds
+    // loopback ONLY — there is no secondary (Tailscale) listener anymore, so
+    // the router-wide guard always trusts just the loopback default.
+    // Non-loopback ingress is exclusively trusty-console's job.
     let app = api::origin_guard::guard_router(
         api::router(Arc::clone(&state)),
         trusty_common::server::SelfOrigins::default(),
@@ -275,43 +277,6 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
         }
     }
     info!("graceful shutdown: reaped {reaped} legacy session(s)");
-}
-
-/// Spawn a background axum server for a secondary listener (e.g. Tailscale).
-///
-/// Why: the CLI binds an extra listener for Tailscale external access but does
-/// not depend on `axum`; the daemon owns the router and the `axum::serve`
-/// call, so the secondary server is spawned here on shared `DaemonState`.
-/// What: builds a router over `state` and spawns an `axum::serve` task on
-/// `listener`, logging if the server exits with an error.
-/// Test: covered indirectly — the primary listener path is exercised by the
-/// e2e suite and the secondary path reuses the same `api::router`.
-pub fn spawn_secondary_listener(state: Arc<DaemonState>, listener: tokio::net::TcpListener) {
-    // #3304: the secondary listener is the non-loopback (e.g. Tailscale) bind.
-    // Trust its own resolved address as a self-origin so the browser `/web`
-    // surface served from that address can POST to itself through the
-    // router-wide write guard, while genuinely cross-origin pages are still
-    // rejected (#3269). `from_bind_addrs` drops loopback, so a loopback
-    // secondary bind degrades to the loopback-only default.
-    let self_origins = match listener.local_addr() {
-        Ok(addr) => trusty_common::server::SelfOrigins::from_bind_addrs(&[addr]),
-        Err(_) => trusty_common::server::SelfOrigins::default(),
-    };
-    let app = api::origin_guard::guard_router(api::router(state), self_origins);
-    tokio::spawn(async move {
-        // Match the primary listener: expose ConnectInfo so the loopback-only
-        // `POST /rpc` gate (#1221) works on this listener too. The Tailscale
-        // listener is non-loopback, so `/rpc` here will correctly 403 — the
-        // bridge only ever talks to the loopback listener.
-        if let Err(e) = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        {
-            tracing::warn!("secondary listener failed: {e}");
-        }
-    });
 }
 
 /// Spawn the idle auto-stop background loop if `idle_auto_stop.enabled = true`.

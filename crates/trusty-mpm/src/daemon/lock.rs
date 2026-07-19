@@ -13,20 +13,19 @@ use crate::core::lock_file_path;
 
 /// Write the daemon lock file with the actual bound address and current PID.
 ///
-/// Why: Must be called after `TcpListener::local_addr()` is known.
+/// Why: Must be called after `TcpListener::local_addr()` is known. As of
+/// ADR-0011's loopback-only doctrine (issue #3330) the daemon never binds a
+/// second (Tailscale) listener, so the lock file no longer carries an
+/// optional `tailscale_addr` field.
 /// What: Creates parent dirs if needed, writes TOML, logs on error.
-pub fn write_lock(addr: &str, tailscale_addr: Option<&str>) {
+pub fn write_lock(addr: &str) {
     let path = lock_file_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let pid = std::process::id();
-    let ts_line = tailscale_addr
-        .map(|a| format!("\ntailscale_addr = \"{a}\""))
-        .unwrap_or_default();
     let started_at = chrono::Utc::now().to_rfc3339();
-    let content =
-        format!("pid = {pid}\naddr = \"{addr}\"{ts_line}\nstarted_at = \"{started_at}\"\n");
+    let content = format!("pid = {pid}\naddr = \"{addr}\"\nstarted_at = \"{started_at}\"\n");
     if let Err(e) = std::fs::write(&path, content) {
         tracing::warn!("failed to write daemon lock file {}: {e}", path.display());
     } else {
@@ -55,7 +54,7 @@ mod tests {
     #[test]
     fn write_and_remove_round_trip() {
         // Just verify the functions don't panic on a writable path.
-        write_lock("http://127.0.0.1:7880", None);
+        write_lock("http://127.0.0.1:7880");
         remove_lock();
     }
 }
