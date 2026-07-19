@@ -21,8 +21,10 @@
   import { recaps } from '../stores/recap';
   import { activeProjectId } from '../stores/app';
   import { workflowState, type AgentActivityStatus } from '../stores/workflow';
+  import { isDesktop } from '../lib/transport';
 
   let collapsed = false;
+  const desktop = isDesktop();
 
   $: currentRecap = $recaps.get($activeProjectId) ?? null;
   $: agents = $workflowState.agents;
@@ -60,11 +62,25 @@
   <div class="flex flex-col gap-5 px-4 py-4 text-xs font-mono">
     <!-- AGENTS ACTIVE -->
     <section>
-      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foundry-light-primary dark:text-[#e9b98a]">
+      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foundry-light-primary dark:text-foundry-sidebar-accent">
         Agents Active
       </h3>
       {#if agents.length === 0}
-        <p class="text-foundry-light-muted dark:text-foundry-text/40">No agents active.</p>
+        {#if desktop}
+          <!-- Why (#3257 code-critic HIGH / #3258): desktop mode never
+               receives agent_spawned/agent_message/agent_done/agent_failed
+               SSE events (App.svelte's SSE bridge is browser-only), and
+               today's terminal PmResponse carries no per-agent summary
+               either — see PmResponseLike.agents_active doc comment in
+               stores/workflow.ts. `agents.length === 0` in desktop mode is
+               therefore NOT "no agents ran"; it's "we have no way to know."
+               Saying "No agents active." would be actively misleading. -->
+          <p class="text-foundry-light-muted dark:text-foundry-text/40">
+            Live agent status unavailable in desktop mode (see #3258).
+          </p>
+        {:else}
+          <p class="text-foundry-light-muted dark:text-foundry-text/40">No agents active.</p>
+        {/if}
       {:else}
         <ul class="flex flex-col gap-2">
           {#each agents as a (a.agent)}
@@ -80,7 +96,7 @@
 
     <!-- FILES TOUCHED -->
     <section>
-      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foundry-light-primary dark:text-[#e9b98a]">
+      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foundry-light-primary dark:text-foundry-sidebar-accent">
         Files Touched
       </h3>
       {#if filesTouched.length === 0}
@@ -96,7 +112,7 @@
 
     <!-- TOKENS -->
     <section>
-      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foundry-light-primary dark:text-[#e9b98a]">
+      <h3 class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-foundry-light-primary dark:text-foundry-sidebar-accent">
         Tokens
       </h3>
       {#if tokens}

@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import type { AppEvent } from '../lib/transport';
 
 /**
@@ -143,14 +143,37 @@ function upsertAgent(
  * event types are ignored (no default branch needed since files_modified /
  * metadata / phase elapsed+cost+note are not carried on the wire by these
  * events — see `applyTaskResult` for the full-fidelity backfill).
+ *
+ * #3257 code-critic MEDIUM: events are filtered to the session this store is
+ * currently tracking before the switch runs. The broadcast SSE stream is
+ * process-wide (`events::bus()`), not per-subscriber-filtered by session
+ * unless the client opted into `?session_id=`, so a stale event from a
+ * previous/foreign task racing in after a reset (or arriving out of order)
+ * must not mutate the active task's checklist. `session_started` always
+ * resets+adopts regardless of the current id (it's the definitive "new task"
+ * signal). When `workflowState.taskId` is still `null` (bootstrap — no
+ * `session_started` seen yet, e.g. a `phase_started` arriving first) the
+ * event's session is adopted rather than discarded, so the store isn't stuck
+ * waiting for an event type that may never come.
  * Test: Manual — see module doc comment.
  */
 export function handleWorkflowEvent(ev: AppEvent): void {
+  if (ev.type === 'session_started') {
+    resetWorkflow();
+    workflowState.update((s) => ({ ...s, taskId: ev.session_id ?? null, status: 'running' }));
+    return;
+  }
+
+  if (ev.session_id) {
+    const current = get(workflowState);
+    if (current.taskId === null) {
+      workflowState.update((s) => (s.taskId === null ? { ...s, taskId: ev.session_id ?? null } : s));
+    } else if (ev.session_id !== current.taskId) {
+      return; // stale/foreign session — ignore
+    }
+  }
+
   switch (ev.type) {
-    case 'session_started':
-      resetWorkflow();
-      workflowState.update((s) => ({ ...s, taskId: ev.session_id ?? null, status: 'running' }));
-      break;
     case 'session_done': {
       const wireStatus = (ev.status as string) ?? 'success';
       const status: WorkflowRunStatus =
@@ -217,6 +240,21 @@ export interface PmResponseLike {
     total_cost_usd?: number;
     model?: string | null;
   };
+  /**
+   * Why (#3257 code-critic HIGH / #3258): today's `PmResponse` (see
+   * `crates/trusty-agents/src/api/types.rs`) carries no per-agent summary —
+   * `AgentSpawned`/`AgentMessage`/`AgentDone`/`AgentFailed` only exist as
+   * live SSE events (`events.rs`), which Tauri desktop mode never receives
+   * (`App.svelte`'s SSE bridge is browser-only). So in desktop mode
+   * `workflowState.agents` stays empty for the entire task, not just until
+   * completion — `RecapPanel` renders an explicit "unavailable in desktop
+   * mode" state rather than a misleading "No agents active." in that case
+   * (see #3258, tracked as a follow-up to forward live agent events through
+   * the Tauri bridge). This field does not exist on the wire yet; it's
+   * declared here so that if/when the backend adds one, `applyTaskResult`
+   * picks it up with zero changes to this store or its consumers.
+   */
+  agents_active?: Array<{ agent: string; status: string; last_activity?: string | null }>;
 }
 
 export function applyTaskResult(resp: unknown): void {
@@ -258,6 +296,17 @@ export function applyTaskResult(resp: unknown): void {
 
     if (Array.isArray(r.files_modified)) {
       next.filesTouched = r.files_modified;
+    }
+
+    // See `PmResponseLike.agents_active` doc comment — no-op today (the
+    // field doesn't exist on the wire), forward-compatible if it's added.
+    if (Array.isArray(r.agents_active) && r.agents_active.length > 0) {
+      next.agents = r.agents_active.map((a) => ({
+        agent: a.agent,
+        status: a.status === 'working' ? 'working' : a.status === 'failed' ? 'failed' : 'idle',
+        lastActivity: a.last_activity ?? undefined,
+        updatedAt: Date.now(),
+      }));
     }
 
     if (r.metadata) {

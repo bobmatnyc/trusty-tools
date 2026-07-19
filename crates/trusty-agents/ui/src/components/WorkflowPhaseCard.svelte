@@ -36,7 +36,7 @@
 
 {#if phases.length > 0}
   <div class="rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface overflow-hidden font-mono text-xs">
-    <div class="flex items-center justify-between px-3.5 py-2 bg-foundry-light-border/40 dark:bg-foundry-border/40 text-foundry-light-text dark:text-[#e9b98a] font-semibold uppercase tracking-wide">
+    <div class="flex items-center justify-between px-3.5 py-2 bg-foundry-light-border/40 dark:bg-foundry-border/40 text-foundry-light-text dark:text-foundry-sidebar-accent font-semibold uppercase tracking-wide">
       <span>Workflow</span>
       <span class="text-foundry-amber">Phase {Math.min(doneCount + 1, phases.length)}/{phases.length}</span>
     </div>

@@ -3,6 +3,7 @@
   import { taskHistory } from '../stores/app';
   import type { TaskHistoryEntry } from '../stores/app';
   import { invoke, listenEvent, type UnlistenFn } from '../lib/transport';
+  import type { PmResponseLike } from '../stores/workflow';
 
   let unlistenComplete: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
@@ -17,12 +18,11 @@
    * interface) keeps this a self-contained, additive read of data that was
    * already on the wire, with no risk to other TaskHistoryEntry consumers.
    * What: Same shape as `TaskHistoryEntry` plus the optional raw
-   * `phases_completed` list (name/status only — elapsed/cost aren't needed
-   * for a stamp label).
+   * `phases_completed` list, reusing `PmResponseLike`'s field (#3217's
+   * `stores/workflow.ts`) instead of a second, drifting inline duplicate of
+   * that shape — `phaseStamp` below only reads `.name`/`.status` off it.
    */
-  interface TaskHistoryEntryWithPhases extends TaskHistoryEntry {
-    phases_completed?: Array<{ name: string; status: string }>;
-  }
+  type TaskHistoryEntryWithPhases = TaskHistoryEntry & Pick<PmResponseLike, 'phases_completed'>;
 
   /**
    * Why: The mockup's task-history stamps read as present-continuous verbs

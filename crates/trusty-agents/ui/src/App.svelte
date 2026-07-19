@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import Sidebar from './components/Sidebar.svelte';
   import ChatView from './components/ChatView.svelte';
   import InputArea from './components/InputArea.svelte';
@@ -13,7 +14,7 @@
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
   // comment for the full rationale. Additive to the flattened webBus path
   // below, never a replacement.
-  import { handleWorkflowEvent, applyTaskResult } from './stores/workflow';
+  import { handleWorkflowEvent, applyTaskResult, resetWorkflow, workflowState } from './stores/workflow';
   // Why: Importing the theme store has the side-effect of running applyTheme()
   // for the persisted theme, ensuring the `dark` class on <html> tracks the
   // user's preference for the lifetime of the app (the inline <head> script
@@ -204,6 +205,39 @@
    * "Recent tasks" updates without a page refresh and ChatView shows live
    * progress text.
    */
+  /**
+   * Why (#3257 code-critic HIGH): `workflowState.resetWorkflow()` previously
+   * only fired on the SSE `session_started` event — but Tauri desktop mode
+   * never opens the SSE stream (`startEventStream()` below no-ops when
+   * `isDesktop()`; "Tauri has its own listen() bridge already"), so
+   * `handleWorkflowEvent` never runs there. Without this, a new desktop task
+   * would keep showing the PREVIOUS task's phase checklist / agents / files
+   * until the new task's own `task-complete` finally overwrote them —
+   * actively misleading mid-run. `task-progress` is emitted in BOTH modes
+   * (browser fallback's own polling loop and the Tauri `send_message`
+   * command) and its very first firing for a task always carries that
+   * task's id, so it's the earliest per-task signal available without
+   * touching `InputArea.svelte` or `src-tauri/**`.
+   * What: Resets + adopts a new task id the moment it's first seen. No-op
+   * when the id matches what's already tracked (the common case — most
+   * `task-progress` ticks repeat the same id) so this never clobbers
+   * in-flight browser/SSE phase data for the task already running; in
+   * browser mode `session_started` still performs its own reset as before
+   * (this only changes behavior for desktop, where it was previously a
+   * no-op because nothing ever called `resetWorkflow()`).
+   * Test: Manual — start a desktop task, let it reach IMPLEMENT, submit a
+   * second task before the first's `task-complete` arrives, confirm the
+   * phase card clears instead of showing the first task's stale phases.
+   */
+  function maybeAdoptNewTask(taskId: string | null | undefined) {
+    if (!taskId) return;
+    const current = get(workflowState);
+    if (current.taskId !== taskId) {
+      resetWorkflow();
+      workflowState.update((s) => ({ ...s, taskId, status: 'running' }));
+    }
+  }
+
   function bridgeEventToWebBus(ev: AppEvent) {
     // #3217: feed the structured workflow store first — additive, never
     // short-circuits the flattened-text switch below.
@@ -377,9 +411,18 @@
     listenEvent('task-complete', applyTaskResult).then((fn) => {
       unlistenWorkflowComplete = fn;
     });
+    // #3257 code-critic HIGH: the earliest per-task signal available in
+    // both transport modes — see `maybeAdoptNewTask` doc comment above.
+    let unlistenWorkflowProgress: (() => void) | null = null;
+    listenEvent<{ task_id?: string }>('task-progress', (p) => {
+      maybeAdoptNewTask(p?.task_id);
+    }).then((fn) => {
+      unlistenWorkflowProgress = fn;
+    });
     return () => {
       window.removeEventListener('beforeunload', onUnload);
       unlistenWorkflowComplete?.();
+      unlistenWorkflowProgress?.();
       stopEventStream();
     };
   });
