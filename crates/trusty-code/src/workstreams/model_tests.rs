@@ -106,6 +106,19 @@ fn touch_updates_timestamp() {
 }
 
 #[test]
+fn mark_closed_sets_flag_and_touches() {
+    let mut ws = Workstream::new("G");
+    let before = ws.updated_at;
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    ws.mark_closed();
+
+    assert!(ws.is_closed());
+    assert_eq!(ws.state(None), WorkstreamState::Closed);
+    assert!(ws.updated_at > before);
+}
+
+#[test]
 fn state_display_matches_wire_string() {
     assert_eq!(WorkstreamState::Active.to_string(), "active");
     assert_eq!(WorkstreamState::Idle.to_string(), "idle");

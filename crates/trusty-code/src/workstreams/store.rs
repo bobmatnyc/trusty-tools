@@ -328,6 +328,47 @@ impl WorkstreamStore {
         self.save().await
     }
 
+    /// Irreversibly close a workstream, auto-deactivating it if it is the
+    /// active one (DOC-48 §4.4, [`SPEC-WS-04~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-04~draft)).
+    ///
+    /// Why: the persistence primitive `workstream.close` (#3295) calls. §4.4
+    /// is explicit that "if the closed workstream is the active one, it is
+    /// automatically deactivated (sets `active_workstream_id` to `null`)" —
+    /// closing must never leave a dangling active pointer referencing a
+    /// closed workstream, which would otherwise let a closed workstream keep
+    /// reporting `Active` state forever (model precedence: the pointer beats
+    /// the closed flag, see [`Workstream::state`]'s docs).
+    /// What: reloads first, marks the record closed via
+    /// [`Workstream::mark_closed`] (idempotent — closing twice is not an
+    /// error), clears `active_workstream_id` if it pointed at `id`, persists,
+    /// and returns the updated record. `NotFound` if `id` does not exist.
+    /// Test: `store_tests::close_marks_closed_and_persists`,
+    /// `store_tests::close_active_workstream_clears_active_pointer`,
+    /// `store_tests::close_missing_id_returns_not_found`,
+    /// `store_tests::close_is_idempotent`.
+    pub async fn close(&mut self, id: WorkstreamId) -> Result<Workstream, StoreError> {
+        self.reload_if_changed().await?;
+        {
+            let ws = self
+                .data
+                .workstreams
+                .iter_mut()
+                .find(|w| w.id == id)
+                .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+            ws.mark_closed();
+        }
+        if self.data.active_workstream_id == Some(id) {
+            self.data.active_workstream_id = None;
+        }
+        self.save().await?;
+        self.data
+            .workstreams
+            .iter()
+            .find(|w| w.id == id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))
+    }
+
     /// Boot-time reconciliation (DOC-48 §3.3, AC-1.4, AC-6.1, AC-6.2).
     ///
     /// Why: a daemon restart must never silently change which workstream is

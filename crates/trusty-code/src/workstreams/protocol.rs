@@ -1,54 +1,99 @@
-//! `workstream.activate` / `workstream.deactivate` JSON-RPC method handlers
-//! (DOC-48 §5.1/§6, issue #3294).
+//! `workstream.*` JSON-RPC method handlers (issues #3294, #3295, epic #3292).
 //!
 //! # Spec References
 //!
 //! - [`SPEC-WS-05~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-05~draft)
 //! - [`SPEC-WS-06~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-06~draft)
+//! - [`SPEC-WS-07~draft`](docs/specs/DOC-48-tcode-workstreams.md#SPEC-WS-07~draft)
 //!
 //! Why: mirrors `crate::session::protocol`'s role for `session.*` — the RPC
 //! surface the daemon exposes over `POST /rpc` (and, via
-//! `crate::serve::rest::workstreams`, the REST twin), thin handlers that
-//! parse `params` and delegate to [`super::activation`]'s business logic, so
-//! the activation-lock rules live in exactly one place regardless of which
-//! transport a caller uses.
+//! `crate::serve::rest::workstreams`, the REST twin). #3293 (merged) built
+//! the domain model and the flat-JSON [`super::store::WorkstreamStore`], but
+//! left it unreachable from any transport. This file is where BOTH
+//! concurrent follow-up tickets against that foundation land: #3294's
+//! activation-lock exclusivity model (`activate`/`deactivate`, built on
+//! [`super::activation`]) and #3295's CRUD/inspection surface
+//! (`create`/`get`/`list`/`close`, built directly on the store) — six thin
+//! handlers, one shared [`SharedWorkstreamStore`], one `register` call.
 //!
-//! **Scope note (issue #3294):** this file registers ONLY `activate` and
-//! `deactivate` — `workstream.create`/`get`/`list`/`close` are issue #3295's
-//! surface (a sibling ticket landing concurrently; see that ticket for the
-//! rest of `workstream.*`). Both tickets' `register` functions are additive
-//! (`Router::register` on a distinct method name each), so whichever merges
-//! first, the other rebases cleanly onto the same `router.register(...)`
-//! call in `crate::serve::build_router` rather than colliding.
+//! **Scope note:** `activate`/`deactivate`'s business logic (conflict
+//! detection, force-switch) lives entirely in [`super::activation`] — this
+//! file only parses `params` and maps [`ActivationError`] onto the JSON-RPC
+//! taxonomy. `create`/`get`/`list`/`close` have no activation-lock rules to
+//! apply, so they call [`super::store::WorkstreamStore`] directly. The CLI
+//! (#3296) and the SSE aggregation route (#3297) remain out of scope.
 //!
-//! What: [`register`] wires both methods onto a [`Router`], sharing one
-//! [`SharedWorkstreamStore`](super::activation::SharedWorkstreamStore).
-//! [`activate`] maps [`ActivationError::NotFound`] to `-32002 not_found`,
-//! [`ActivationError::ActiveConflict`] to the new `-32008 active_conflict`
-//! (`RpcError::active_conflict`, carrying `active_id`), and
-//! [`ActivationError::Store`] to `-32603 internal_error`. [`deactivate`]
-//! never fails on a valid UUID — see [`super::activation::deactivate`]'s
-//! idempotent-no-op contract.
+//! What: [`register`] wires `workstream.create`, `workstream.get`,
+//! `workstream.list`, `workstream.close`, `workstream.activate`,
+//! `workstream.deactivate` onto a [`crate::jsonrpc::Router`], all sharing one
+//! [`SharedWorkstreamStore`]. Every verb that takes a wire `id` parses it via
+//! [`parse_id`] (a manual `Uuid::parse_str` + `-32602 Invalid params` on
+//! failure) rather than deserializing straight into a [`WorkstreamId`] —
+//! chosen as the ONE id-parsing style for this file since #3294 landed it
+//! first. [`WorkstreamView`] is the wire-shape adapter `get`/`list` share:
+//! the domain [`Workstream`] has no `state` FIELD (§2.2 — it is computed,
+//! never stored), so every read path builds this view by pairing a record
+//! with the store's current `active_workstream_id` pointer via
+//! [`Workstream::state`], exactly once, right before serializing.
 //! Test: `protocol_tests`.
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 
 use super::activation::{self, ActivationError, SharedWorkstreamStore};
-use super::model::WorkstreamId;
+use super::model::{Workstream, WorkstreamId, WorkstreamState};
+use super::store::StoreError;
 
-/// Register `workstream.activate`/`workstream.deactivate` onto `router`, both
-/// sharing `store`.
+/// Register every `workstream.*` method onto `router`, all sharing `store`.
 ///
-/// Why: the one place that lists this ticket's slice of the `workstream.*`
-/// surface — mirrors `crate::session::protocol::register`'s role.
+/// Why: the one place that lists the full `workstream.*` surface — mirrors
+/// `crate::session::protocol::register`'s role for `session.*`.
 /// What: clones `store` once per method (cheap — `Arc`) into a small adapter
 /// closure that forwards to the corresponding free function below.
-/// Test: `protocol_tests::register_wires_activate_and_deactivate`.
+/// Test: `protocol_tests::register_wires_activate_and_deactivate`,
+/// `protocol_tests::register_wires_create_get_list_close`.
 pub fn register(router: &mut Router, store: SharedWorkstreamStore) {
+    let s = store.clone();
+    router.register(
+        "workstream.create",
+        move |params: Value, ctx: ConnectionContext| {
+            let s = s.clone();
+            async move { create(&s, params, ctx).await }
+        },
+    );
+
+    let s = store.clone();
+    router.register(
+        "workstream.get",
+        move |params: Value, ctx: ConnectionContext| {
+            let s = s.clone();
+            async move { get(&s, params, ctx).await }
+        },
+    );
+
+    let s = store.clone();
+    router.register(
+        "workstream.list",
+        move |params: Value, ctx: ConnectionContext| {
+            let s = s.clone();
+            async move { list(&s, params, ctx).await }
+        },
+    );
+
+    let s = store.clone();
+    router.register(
+        "workstream.close",
+        move |params: Value, ctx: ConnectionContext| {
+            let s = s.clone();
+            async move { close(&s, params, ctx).await }
+        },
+    );
+
     let s = store.clone();
     router.register(
         "workstream.activate",
@@ -68,6 +113,92 @@ pub fn register(router: &mut Router, store: SharedWorkstreamStore) {
     );
 }
 
+/// The wire shape for a workstream record — the domain [`Workstream`] plus
+/// its computed [`WorkstreamState`] (§2.2: never a stored field), assembled
+/// fresh for every response.
+#[derive(Debug, serde::Serialize)]
+struct WorkstreamView {
+    id: WorkstreamId,
+    name: String,
+    state: WorkstreamState,
+    session_ids: Vec<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    metadata: serde_json::Map<String, Value>,
+}
+
+impl WorkstreamView {
+    /// Pair a stored record with the pointer that governs its state.
+    fn new(ws: Workstream, active_workstream_id: Option<WorkstreamId>) -> Self {
+        let state = ws.state(active_workstream_id);
+        Self {
+            id: ws.id,
+            name: ws.name,
+            state,
+            session_ids: ws.session_ids,
+            created_at: ws.created_at,
+            updated_at: ws.updated_at,
+            metadata: ws.metadata,
+        }
+    }
+}
+
+/// Deserialise `params` into `T`, mapping a failure onto `-32602 Invalid
+/// params` with the method name for context (mirrors
+/// `crate::session::protocol::parse`).
+fn parse<T: DeserializeOwned>(params: Value, method: &str) -> Result<T, RpcError> {
+    serde_json::from_value(params).map_err(|e| RpcError::invalid_params(format!("{method}: {e}")))
+}
+
+/// Parse a wire `id` string into a [`WorkstreamId`], mapping a malformed
+/// UUID onto `-32602 Invalid params` rather than a panic (issue #3294's
+/// id-parsing style, applied uniformly to every verb in this file — see
+/// module docs).
+fn parse_id(raw: &str, method: &str) -> Result<WorkstreamId, RpcError> {
+    Uuid::parse_str(raw)
+        .map(WorkstreamId::from)
+        .map_err(|e| RpcError::invalid_params(format!("{method}: invalid workstream id: {e}")))
+}
+
+/// Map a [`StoreError`] onto the JSON-RPC error taxonomy (vision spec §13.2)
+/// for the `create`/`get`/`list`/`close` verbs (the `activate`/`deactivate`
+/// verbs instead map [`ActivationError`], which wraps `StoreError` alongside
+/// its own `NotFound`/`ActiveConflict` variants).
+///
+/// Why: the one place `NotFound` becomes the spec's general `-32002
+/// not_found` (workstreams have no session-specific error code) and every
+/// other variant (I/O, serialization) becomes `-32603 internal` — a
+/// caller-triggerable "id doesn't exist" must never be indistinguishable
+/// from a daemon-side storage fault.
+/// Test: `protocol_tests::get_unknown_id_maps_to_not_found`.
+fn map_store_err(err: StoreError) -> RpcError {
+    match err {
+        StoreError::NotFound(id) => RpcError::not_found(format!("workstream not found: {id}")),
+        StoreError::Io(_) | StoreError::Serialize(_) => RpcError::internal(err.to_string()),
+    }
+}
+
+/// `params` shape for `workstream.create`.
+#[derive(Deserialize)]
+struct CreateParams {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `params` shape shared by every verb that only needs a workstream id
+/// (`get`, `close`, `deactivate`).
+#[derive(Deserialize)]
+struct WorkstreamIdParams {
+    id: String,
+}
+
+/// `params` shape for `workstream.list`.
+#[derive(Deserialize, Default)]
+struct ListParams {
+    #[serde(default)]
+    include_closed: bool,
+}
+
 /// `params` shape for `workstream.activate` (DOC-48 §5.1).
 #[derive(Deserialize)]
 struct ActivateParams {
@@ -76,18 +207,112 @@ struct ActivateParams {
     force: bool,
 }
 
-/// `params` shape shared by `workstream.deactivate` (a bare workstream id).
-#[derive(Deserialize)]
-struct WorkstreamIdParams {
-    id: String,
+/// `workstream.create{name?} -> {id: UUID}` (DOC-48 §5.1, AC-2.1).
+///
+/// Why: mints a brand-new daemon-owned workstream. No `project_id`
+/// parameter — the daemon's own `ProjectBinding` is implicit (§2.3): the
+/// store this handler shares is already scoped to it via the file the daemon
+/// booted with.
+/// What: `name` defaults to an empty string when omitted (§5.1: "Name is
+/// initially empty"). Returns `{"id": <new id>}`.
+/// Test: `protocol_tests::create_returns_new_id`,
+/// `protocol_tests::create_without_name_defaults_to_empty`.
+async fn create(
+    store: &SharedWorkstreamStore,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: CreateParams = parse(params, "workstream.create")?;
+    let mut store = store.lock().await;
+    let id = store
+        .create(p.name.unwrap_or_default())
+        .await
+        .map_err(map_store_err)?;
+    Ok(json!({ "id": id }))
 }
 
-/// Parse a wire `id` string into a [`WorkstreamId`], mapping a malformed
-/// UUID onto `-32602 Invalid params` rather than a panic.
-fn parse_id(raw: &str, method: &str) -> Result<WorkstreamId, RpcError> {
-    Uuid::parse_str(raw)
-        .map(WorkstreamId::from)
-        .map_err(|e| RpcError::invalid_params(format!("{method}: invalid workstream id: {e}")))
+/// `workstream.get{id} -> Workstream` (DOC-48 §5.1, AC-2.1).
+///
+/// Why: point lookup for one workstream's current (inferred) state.
+/// What: `-32002 not_found` if `id` is unknown; otherwise the full
+/// [`WorkstreamView`] — id, name, computed `state`, `session_ids`,
+/// timestamps, `metadata`.
+/// Test: `protocol_tests::get_returns_workstream_with_state`,
+/// `protocol_tests::get_unknown_id_maps_to_not_found`.
+async fn get(
+    store: &SharedWorkstreamStore,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: WorkstreamIdParams = parse(params, "workstream.get")?;
+    let id = parse_id(&p.id, "workstream.get")?;
+    let mut store = store.lock().await;
+    let ws = store.get(id).await.map_err(map_store_err)?;
+    let active_id = store.active_workstream_id().await.map_err(map_store_err)?;
+    Ok(json!(WorkstreamView::new(ws, active_id)))
+}
+
+/// `workstream.list{include_closed?} -> {active_workstream_id, workstreams: [Workstream]}`
+/// (DOC-48 §5.1, AC-2.1, AC-2.3).
+///
+/// Why: enumerates every workstream in the daemon's project, so a client can
+/// build a switcher without a `get` per id.
+/// What: default `include_closed = false` filters out records whose
+/// [`Workstream::is_closed`] flag is set (§4.4: "optionally listable ...
+/// for audit/historical query"); `true` includes them. Every returned record
+/// is paired with the SAME `active_workstream_id` snapshot (read once, not
+/// per record) so the response is internally consistent even if a concurrent
+/// writer changes the pointer mid-list. `active_workstream_id` is always
+/// present at the top level (`null` if none active, AC-2.3).
+/// Test: `protocol_tests::list_returns_active_workstream_id_and_records`,
+/// `protocol_tests::list_default_excludes_closed`,
+/// `protocol_tests::list_include_closed_true_includes_closed`.
+async fn list(
+    store: &SharedWorkstreamStore,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: ListParams = if params.is_null() {
+        ListParams::default()
+    } else {
+        parse(params, "workstream.list")?
+    };
+    let mut store = store.lock().await;
+    let all = store.list().await.map_err(map_store_err)?;
+    let active_id = store.active_workstream_id().await.map_err(map_store_err)?;
+    let views: Vec<WorkstreamView> = all
+        .into_iter()
+        .filter(|ws| p.include_closed || !ws.is_closed())
+        .map(|ws| WorkstreamView::new(ws, active_id))
+        .collect();
+    Ok(json!({
+        "active_workstream_id": active_id,
+        "workstreams": views,
+    }))
+}
+
+/// `workstream.close{id} -> {}` (DOC-48 §4.4/§5.1, AC-2.1).
+///
+/// Why: irreversibly closes a workstream — rejects future session bindings
+/// (enforced at the session-binding call site, #3298 scope, not here) and,
+/// per §4.4, auto-deactivates it if it is currently the active one.
+/// What: `-32002 not_found` if `id` is unknown; otherwise `{}` (matching the
+/// spec's §5.1 signature exactly — not the updated record, since a client
+/// that needs the post-close view already has `workstream.get`). Idempotent:
+/// closing an already-closed workstream succeeds again (see
+/// [`super::model::Workstream::mark_closed`]'s docs).
+/// Test: `protocol_tests::close_succeeds_and_clears_active_pointer`,
+/// `protocol_tests::close_unknown_id_maps_to_not_found`.
+async fn close(
+    store: &SharedWorkstreamStore,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: WorkstreamIdParams = parse(params, "workstream.close")?;
+    let id = parse_id(&p.id, "workstream.close")?;
+    let mut store = store.lock().await;
+    store.close(id).await.map_err(map_store_err)?;
+    Ok(json!({}))
 }
 
 /// `workstream.activate(id, force?) -> {active_id, prior_id?}` (DOC-48
@@ -95,7 +320,10 @@ fn parse_id(raw: &str, method: &str) -> Result<WorkstreamId, RpcError> {
 ///
 /// Why: the RPC entry point for the activation-lock exclusivity model.
 /// What: parses `params`, delegates to [`activation::activate`], and maps
-/// its typed error onto the JSON-RPC error taxonomy — see the module docs.
+/// its typed error onto the JSON-RPC error taxonomy — [`ActivationError::NotFound`]
+/// to `-32002 not_found`, [`ActivationError::ActiveConflict`] to `-32008
+/// active_conflict` (`RpcError::active_conflict`, carrying `active_id`), and
+/// [`ActivationError::Store`] to `-32603 internal_error`.
 /// Test: `protocol_tests::activate_succeeds_with_no_prior_active`,
 /// `protocol_tests::activate_without_force_maps_to_active_conflict`,
 /// `protocol_tests::activate_with_force_switches`,
@@ -106,8 +334,7 @@ async fn activate(
     params: Value,
     _ctx: ConnectionContext,
 ) -> Result<Value, RpcError> {
-    let p: ActivateParams = serde_json::from_value(params)
-        .map_err(|e| RpcError::invalid_params(format!("workstream.activate: {e}")))?;
+    let p: ActivateParams = parse(params, "workstream.activate")?;
     let id = parse_id(&p.id, "workstream.activate")?;
 
     match activation::activate(store, id, p.force).await {
@@ -138,8 +365,7 @@ async fn deactivate(
     params: Value,
     _ctx: ConnectionContext,
 ) -> Result<Value, RpcError> {
-    let p: WorkstreamIdParams = serde_json::from_value(params)
-        .map_err(|e| RpcError::invalid_params(format!("workstream.deactivate: {e}")))?;
+    let p: WorkstreamIdParams = parse(params, "workstream.deactivate")?;
     let id = parse_id(&p.id, "workstream.deactivate")?;
 
     activation::deactivate(store, id)

@@ -1,5 +1,4 @@
-//! Tests for `workstream.activate`/`workstream.deactivate` RPC handlers
-//! (DOC-48 §5.1/§6, issue #3294).
+//! Tests for `workstream.*` RPC handlers (DOC-48 §5.1/§6, issues #3294/#3295).
 
 use super::*;
 use serde_json::json;
@@ -24,7 +23,10 @@ async fn shared_store() -> (SharedWorkstreamStore, TempDir) {
     (std::sync::Arc::new(tokio::sync::Mutex::new(store)), dir)
 }
 
-async fn create(store: &SharedWorkstreamStore, name: &str) -> WorkstreamId {
+/// Seed a workstream directly via the store (bypassing the
+/// `workstream.create` RPC handler, which some tests below exercise
+/// directly under its own name — named distinctly so the two never collide).
+async fn seed_workstream(store: &SharedWorkstreamStore, name: &str) -> WorkstreamId {
     store.lock().await.create(name).await.expect("create")
 }
 
@@ -37,12 +39,13 @@ fn req(method: &str, params: serde_json::Value) -> Request {
     }
 }
 
-/// Both methods must be reachable through a `Router` built by `register`
-/// (proves the wiring, not just the free functions).
+/// `workstream.activate`/`workstream.deactivate` must be reachable through a
+/// `Router` built by `register` (proves the wiring, not just the free
+/// functions).
 #[tokio::test]
 async fn register_wires_activate_and_deactivate() {
     let (store, _dir) = shared_store().await;
-    let id = create(&store, "t").await;
+    let id = seed_workstream(&store, "t").await;
     let mut router = Router::new();
     register(&mut router, store);
 
@@ -71,18 +74,44 @@ async fn register_wires_activate_and_deactivate() {
     );
 }
 
+/// `workstream.create`/`get`/`list`/`close` must be reachable through a
+/// `Router` built by `register` (proves the wiring, not just the free
+/// functions) — the #3295 counterpart to
+/// `register_wires_activate_and_deactivate` above.
+#[tokio::test]
+async fn register_wires_create_get_list_close() {
+    let (store, _dir) = shared_store().await;
+    let mut router = Router::new();
+    register(&mut router, store);
+
+    let resp = router
+        .dispatch(req("workstream.create", json!({"name": "A"})), &test_ctx())
+        .await;
+    assert!(resp.error.is_none(), "create failed: {:?}", resp.error);
+    let id = resp.result.unwrap()["id"].clone();
+
+    for (method, params) in [
+        ("workstream.get", json!({"id": id})),
+        ("workstream.list", json!({})),
+        ("workstream.close", json!({"id": id})),
+    ] {
+        let resp = router.dispatch(req(method, params), &test_ctx()).await;
+        assert!(resp.error.is_none(), "{method} failed: {:?}", resp.error);
+    }
+}
+
 /// Activating with no prior active workstream must return `active_id` and a
 /// null `prior_id`.
 #[tokio::test]
 async fn activate_succeeds_with_no_prior_active() {
     let (store, _dir) = shared_store().await;
-    let id = create(&store, "t").await;
+    let id = seed_workstream(&store, "t").await;
 
     let result = activate(&store, json!({"id": id.to_string()}), test_ctx())
         .await
         .expect("activate must succeed");
     assert_eq!(result["active_id"], json!(id));
-    assert_eq!(result["prior_id"], serde_json::Value::Null);
+    assert_eq!(result["prior_id"], Value::Null);
 }
 
 /// Re-activating the already-active workstream (force omitted, defaults to
@@ -90,7 +119,7 @@ async fn activate_succeeds_with_no_prior_active() {
 #[tokio::test]
 async fn activate_already_active_is_idempotent() {
     let (store, _dir) = shared_store().await;
-    let id = create(&store, "t").await;
+    let id = seed_workstream(&store, "t").await;
     activate(&store, json!({"id": id.to_string()}), test_ctx())
         .await
         .expect("first activate");
@@ -99,7 +128,7 @@ async fn activate_already_active_is_idempotent() {
         .await
         .expect("re-activate must succeed");
     assert_eq!(result["active_id"], json!(id));
-    assert_eq!(result["prior_id"], serde_json::Value::Null);
+    assert_eq!(result["prior_id"], Value::Null);
 }
 
 /// Activating a different workstream without `force` while one is active
@@ -107,8 +136,8 @@ async fn activate_already_active_is_idempotent() {
 #[tokio::test]
 async fn activate_without_force_maps_to_active_conflict() {
     let (store, _dir) = shared_store().await;
-    let a = create(&store, "a").await;
-    let b = create(&store, "b").await;
+    let a = seed_workstream(&store, "a").await;
+    let b = seed_workstream(&store, "b").await;
     activate(&store, json!({"id": a.to_string()}), test_ctx())
         .await
         .expect("activate a");
@@ -124,8 +153,8 @@ async fn activate_without_force_maps_to_active_conflict() {
 #[tokio::test]
 async fn activate_with_force_switches() {
     let (store, _dir) = shared_store().await;
-    let a = create(&store, "a").await;
-    let b = create(&store, "b").await;
+    let a = seed_workstream(&store, "a").await;
+    let b = seed_workstream(&store, "b").await;
     activate(&store, json!({"id": a.to_string()}), test_ctx())
         .await
         .expect("activate a");
@@ -171,7 +200,7 @@ async fn activate_malformed_id_maps_to_invalid_params() {
 #[tokio::test]
 async fn deactivate_active_clears_pointer() {
     let (store, _dir) = shared_store().await;
-    let id = create(&store, "t").await;
+    let id = seed_workstream(&store, "t").await;
     activate(&store, json!({"id": id.to_string()}), test_ctx())
         .await
         .expect("activate");
@@ -191,8 +220,8 @@ async fn deactivate_active_clears_pointer() {
 #[tokio::test]
 async fn deactivate_idle_is_idempotent_noop() {
     let (store, _dir) = shared_store().await;
-    let a = create(&store, "a").await;
-    let b = create(&store, "b").await;
+    let a = seed_workstream(&store, "a").await;
+    let b = seed_workstream(&store, "b").await;
     activate(&store, json!({"id": a.to_string()}), test_ctx())
         .await
         .expect("activate a");
@@ -218,7 +247,7 @@ async fn activation_persists_across_store_reload_through_rpc() {
         .await
         .expect("load fresh store");
     let shared: SharedWorkstreamStore = std::sync::Arc::new(tokio::sync::Mutex::new(store));
-    let id = create(&shared, "t").await;
+    let id = seed_workstream(&shared, "t").await;
     activate(&shared, json!({"id": id.to_string()}), test_ctx())
         .await
         .expect("activate");
@@ -229,4 +258,172 @@ async fn activation_persists_across_store_reload_through_rpc() {
         Some(id),
         "active pointer must persist across a fresh load"
     );
+}
+
+#[tokio::test]
+async fn create_returns_new_id() {
+    let (store, _dir) = shared_store().await;
+    let result = create(&store, json!({"name": "Token rotation"}), test_ctx())
+        .await
+        .expect("create");
+    assert!(result["id"].is_string());
+}
+
+#[tokio::test]
+async fn create_without_name_defaults_to_empty() {
+    let (store, _dir) = shared_store().await;
+    let result = create(&store, json!({}), test_ctx()).await.expect("create");
+    let id = result["id"].clone();
+    let ws = get(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("get");
+    assert_eq!(ws["name"], "");
+}
+
+#[tokio::test]
+async fn get_returns_workstream_with_state() {
+    let (store, _dir) = shared_store().await;
+    let created = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create");
+    let id = created["id"].clone();
+
+    let ws = get(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("get");
+    assert_eq!(ws["name"], "A");
+    assert_eq!(ws["state"], "idle");
+    assert!(ws["session_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn get_unknown_id_maps_to_not_found() {
+    let (store, _dir) = shared_store().await;
+    let err = get(
+        &store,
+        json!({"id": WorkstreamId::new().to_string()}),
+        test_ctx(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32002);
+}
+
+#[tokio::test]
+async fn get_invalid_params_maps_to_invalid_params() {
+    let (store, _dir) = shared_store().await;
+    let err = get(&store, json!({"id": "not-a-uuid"}), test_ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn list_returns_active_workstream_id_and_records() {
+    let (store, _dir) = shared_store().await;
+    let a = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create A")["id"]
+        .clone();
+    create(&store, json!({"name": "B"}), test_ctx())
+        .await
+        .expect("create B");
+
+    let a_id: WorkstreamId = serde_json::from_value(a.clone()).unwrap();
+    store
+        .lock()
+        .await
+        .set_active(Some(a_id))
+        .await
+        .expect("activate A");
+
+    let result = list(&store, json!({}), test_ctx()).await.expect("list");
+    assert_eq!(result["active_workstream_id"], a);
+    let workstreams = result["workstreams"].as_array().unwrap();
+    assert_eq!(workstreams.len(), 2);
+    let a_view = workstreams.iter().find(|w| w["id"] == a).unwrap();
+    assert_eq!(a_view["state"], "active");
+}
+
+#[tokio::test]
+async fn list_missing_params_defaults_to_include_closed_false() {
+    let (store, _dir) = shared_store().await;
+    let result = list(&store, Value::Null, test_ctx()).await.expect("list");
+    assert!(result["workstreams"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn list_default_excludes_closed() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+    close(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("close");
+
+    let result = list(&store, json!({}), test_ctx()).await.expect("list");
+    assert!(
+        result["workstreams"].as_array().unwrap().is_empty(),
+        "closed workstream must be excluded by default"
+    );
+}
+
+#[tokio::test]
+async fn list_include_closed_true_includes_closed() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+    close(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("close");
+
+    let result = list(&store, json!({"include_closed": true}), test_ctx())
+        .await
+        .expect("list");
+    let workstreams = result["workstreams"].as_array().unwrap();
+    assert_eq!(workstreams.len(), 1);
+    assert_eq!(workstreams[0]["state"], "closed");
+}
+
+#[tokio::test]
+async fn close_succeeds_and_clears_active_pointer() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+    let ws_id: WorkstreamId = serde_json::from_value(id.clone()).unwrap();
+    store
+        .lock()
+        .await
+        .set_active(Some(ws_id))
+        .await
+        .expect("activate");
+
+    let result = close(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("close");
+    assert_eq!(result, json!({}));
+
+    let list_result = list(&store, json!({"include_closed": true}), test_ctx())
+        .await
+        .expect("list");
+    assert_eq!(list_result["active_workstream_id"], Value::Null);
+}
+
+#[tokio::test]
+async fn close_unknown_id_maps_to_not_found() {
+    let (store, _dir) = shared_store().await;
+    let err = close(
+        &store,
+        json!({"id": WorkstreamId::new().to_string()}),
+        test_ctx(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32002);
 }
