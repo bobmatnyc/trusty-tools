@@ -35,7 +35,11 @@ For **cross-release performance tracking**, see GitHub issue
 [#129](https://github.com/bobmatnyc/trusty-tools/issues/129): it accumulates
 benchmark deltas across all measured versions.
 
-## Specs and Spec-Linked Documentation (SLD)
+## First-Class Documentation Artifacts: Specs, Requirements, and ADRs
+
+The repository recognizes three **co-equal, cross-linked documentation artifact classes**:
+
+### Specifications (Specs)
 
 Workspace-wide engineering **specs** live under [`docs/specs/`](../specs/README.md)
 (a separate, catalog-indexed namespace from the per-crate docs above). All new
@@ -44,3 +48,18 @@ the repository's policy for declaring machine-and-human-readable links from sour
 artifacts (code, config, Markdown) to the spec sections that govern them. The
 `sld-lint` gate (`scripts/check_sld.sh`) enforces it; see the
 [specs README "Policy" note](../specs/README.md#policy).
+
+### Architecture Decision Records (ADRs)
+
+Workspace-wide architectural decisions live under [`docs/adr/`](../adr/README.md).
+ADRs capture *why* a choice was made among alternatives, including consequences and
+trade-offs. See **[DOC-46 — ADR Standard](../specs/DOC-46-adr-standard.md)** for the
+formal specification, including the consistency-vetting protocol that ensures new ADRs
+do not silently contradict accepted decisions. The `check_adr.sh` gate (proposed in
+DOC-46 §6) will enforce numbering, status validity, and bidirectional supersedes links.
+
+### Requirements (Reqs)
+
+(Future: DOC-43) Requirements that codify "what must be true" (as opposed to Specs
+"how it works" and ADRs "why we chose this"). To be integrated once DOC-43 is
+formalized.

@@ -31,7 +31,7 @@ Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a s
 | `test-quality-inspector` | agent-reference | no | Test quality inspection framework for reviewing test coverage, identifying gaps, and ensuring comprehensive validation |
 | `testing-anti-patterns` | agent-reference | no | Never test mock behavior. Never add test-only methods to production classes. Understand dependencies before mocking. Language-agnostic principles with TypeScript/Jest and Python/pytest examples. |
 | `tm` | pm-reference | yes | trusty-mpm orchestration model overview — agents, skills, delegation |
-| `tm-adr` | pm-optional | yes | Architecture Decision Records (ADRs) — opt-in convention for documenting significant, hard-to-reverse architectural decisions using the Nygard template |
+| `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
 | `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
