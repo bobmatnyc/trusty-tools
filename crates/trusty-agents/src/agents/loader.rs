@@ -31,9 +31,8 @@ use crate::llm::adapter::adapter_for_model;
 /// re-implemented per call site.
 /// What: Rejects names containing `/` or `\` (covers `..` traversal, absolute
 /// paths, and nested joins) or that are exactly `.`/`..`. A valid name must be
-/// a single path segment.
-/// Test: `by_name_rejects_parent_dir_traversal`, `by_name_rejects_nested_path`,
-/// `by_name_in_rejects_parent_dir_traversal` (tests/loading.rs).
+/// a single path segment. Validation is called by every by-name resolution
+/// tier, ensuring all extends-chain resolution is protected.
 fn validate_agent_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
         anyhow::bail!(
