@@ -9,9 +9,12 @@
 //! one full-router test proving the route is actually wired into
 //! `build_router`.
 //! What: Persistence + round-trip, unknown-agent 404, empty-body 400,
-//! unknown-provider 400, the claude-code/non-Anthropic runner conflict (both
-//! the rejection and the accepted Anthropic case), provider-only defaulting,
-//! and preservation of unrelated TOML content (comments + untouched keys).
+//! unknown-provider 400, the claude-code/non-Anthropic runner conflict via
+//! an explicit prefixed model (rejection) and an explicit `provider_id`
+//! (acceptance), the same conflict via a *bare* unprefixed model_id (the
+//! fail-shut/no-fail-open case, #3287 review), provider-only defaulting,
+//! malformed on-disk TOML (500, not a panic), and preservation of unrelated
+//! TOML content (comments + untouched keys).
 //! Test: This module IS the test.
 
 use axum::Router;
@@ -43,6 +46,10 @@ runner = "claude-code"
 model = "claude-sonnet-4-6"
 description = "PM persona"
 "#;
+
+/// Deliberately unparseable TOML (unterminated `[agent` table header) — the
+/// #3246 write path must surface this as a clean `500`, not a panic.
+const MALFORMED_TOML_FIXTURE: &str = "[agent\nname = \"broken\n";
 
 fn write_fixture(dir: &std::path::Path, name: &str, contents: &str) {
     std::fs::write(dir.join(format!("{name}.toml")), contents).unwrap();
@@ -179,6 +186,85 @@ async fn patch_agent_claude_code_rejects_non_anthropic_model() {
     );
     let on_disk = std::fs::read_to_string(tmp.path().join("pm.toml")).unwrap();
     assert_eq!(on_disk, CLAUDE_CODE_FIXTURE, "rejected write must not land");
+}
+
+/// Why: #3287 review (HIGH) — a *bare*, unprefixed `model_id` (no
+/// `provider/` prefix, no explicit `provider_id`) previously resolved to
+/// `None` and the runner-conflict check silently skipped it (fail-open),
+/// so e.g. `{"model_id":"gpt-4o-mini"}` against a claude-code agent would
+/// return `200 OK` and persist a model the claude-code runner can never
+/// dispatch. The fix makes an unresolved provider for a claude-code agent
+/// just as rejected as an explicitly wrong one (fail-shut).
+/// What: PATCHes a bare, non-Anthropic-looking model_id with no provider_id
+/// against the claude-code fixture; asserts `400` and that the file on disk
+/// is byte-identical to the original fixture (no partial/silent write).
+#[tokio::test]
+async fn patch_agent_claude_code_rejects_bare_non_anthropic_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture(tmp.path(), "pm", CLAUDE_CODE_FIXTURE);
+
+    let resp = patch_agent_at(
+        tmp.path(),
+        "pm",
+        PatchAgentRequest {
+            model_id: Some("gpt-4o-mini".to_string()),
+            provider_id: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a bare, unresolvable model_id must be rejected, not silently accepted"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("claude-code"),
+        "error should explain the claude-code constraint: {body}"
+    );
+    let on_disk = std::fs::read_to_string(tmp.path().join("pm.toml")).unwrap();
+    assert_eq!(
+        on_disk, CLAUDE_CODE_FIXTURE,
+        "rejected write must not land on disk"
+    );
+}
+
+/// Why: `raw.parse::<DocumentMut>()` on an already-corrupt on-disk file must
+/// surface as a clean `500`, not a panic that takes the whole server down.
+/// What: Writes deliberately unparseable TOML, PATCHes it, asserts `500`.
+#[tokio::test]
+async fn patch_agent_malformed_toml_returns_500() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture(tmp.path(), "broken", MALFORMED_TOML_FIXTURE);
+
+    let resp = patch_agent_at(
+        tmp.path(),
+        "broken",
+        PatchAgentRequest {
+            model_id: Some("gpt-4o-mini".to_string()),
+            provider_id: None,
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not valid TOML")
+    );
+    let on_disk = std::fs::read_to_string(tmp.path().join("broken.toml")).unwrap();
+    assert_eq!(on_disk, MALFORMED_TOML_FIXTURE, "must not touch the file");
 }
 
 /// Why: Same claude-code agent, but an explicit `provider_id: "anthropic"`

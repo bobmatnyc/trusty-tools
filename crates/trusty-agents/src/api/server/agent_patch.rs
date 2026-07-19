@@ -17,16 +17,27 @@
 //! What: [`patch_agent_route`] extracts `:name` and a [`PatchAgentRequest`]
 //! body, then delegates to [`patch_agent_at`] (the testable core) which:
 //! validates the request isn't empty, resolves `provider_id` against
-//! [`trusty_common::inference::registry`], rejects a model/provider that
-//! conflicts with the agent's existing `runner` (the concrete case the issue
-//! calls out: `runner = "claude-code"` requires an Anthropic-resolving
-//! model), edits the `[agent]` table in place, writes the file back, and
-//! returns the updated agent via [`super::projects::parse_agent_toml`] — the
-//! same shape `GET /api/agents` returns, so a client can round-trip through
-//! either route.
+//! [`trusty_common::inference::registry`] (falling back to whatever
+//! `provider_id` is already on disk when the request doesn't supply one),
+//! and rejects a model/provider that conflicts with the agent's existing
+//! `runner`. For `runner = "claude-code"` this is a closed-world (fail-shut,
+//! not fail-open) check: the local `claude` CLI only ever talks to
+//! Anthropic, so the resolved provider must be [`ProviderId::Anthropic`] —
+//! anything else, OR a provider that can't be resolved at all (a bare
+//! `model_id` with no recognised `provider/` prefix and no `provider_id`
+//! anywhere), is rejected with `400`. A bare non-Anthropic model_id with no
+//! prefix would otherwise slip past a naive prefix-only check (see #3287
+//! review) and persist a model the claude-code runner can never actually
+//! dispatch. On success the handler edits the `[agent]` table in place,
+//! writes the file back, and returns the updated agent via
+//! [`super::projects::parse_agent_toml`] — the same shape `GET /api/agents`
+//! returns, so a client can round-trip through either route.
 //! Test: `super::tests::agent_patch` — persists + round-trips a model
 //! change, rejects an unknown agent (404), an empty body (400), an unknown
-//! `provider_id` (400), and a claude-code/non-Anthropic conflict (400).
+//! `provider_id` (400), a claude-code/non-Anthropic conflict via an explicit
+//! prefix (400), the same conflict via a *bare* unprefixed model_id (400,
+//! the fail-shut case), the accepted Anthropic case, and malformed on-disk
+//! TOML (500).
 
 use std::path::Path;
 
@@ -149,14 +160,33 @@ pub(super) async fn patch_agent_at(dir: &Path, name: &str, req: PatchAgentReques
         }
     };
 
-    // Resolve + validate provider_id, if given, against the registry (I1/#3243).
-    let provider_cap = match req.provider_id.as_deref() {
+    // Resolve + validate an explicitly-requested provider_id against the
+    // registry (I1/#3243) — an unknown value here is always a hard error,
+    // it's the caller's own input.
+    let requested_provider_cap = match req.provider_id.as_deref() {
         Some(pid) => match registry::capabilities_for(pid) {
             Some(cap) => Some(cap),
             None => return bad_request(format!("unknown provider_id '{pid}'")),
         },
         None => None,
     };
+
+    // Fall back to whatever `provider_id` is already persisted on disk when
+    // the request doesn't supply one — e.g. a follow-up patch that only
+    // changes `model_id` shouldn't have to repeat a `provider_id` a prior
+    // patch already established. A disk value that no longer resolves
+    // (should not happen since writes always validate first, but is not a
+    // caller input) is silently ignored rather than erroring the request.
+    let existing_provider_id_str = doc
+        .get("agent")
+        .and_then(|a| a.get("provider_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let provider_cap = requested_provider_cap.or_else(|| {
+        existing_provider_id_str
+            .as_deref()
+            .and_then(registry::capabilities_for)
+    });
 
     // The model string to persist: explicit model_id wins; a provider_id
     // given alone falls back to that provider's default model so "just pick
@@ -167,11 +197,11 @@ pub(super) async fn patch_agent_at(dir: &Path, name: &str, req: PatchAgentReques
         .or_else(|| provider_cap.map(|cap| cap.default_model.to_string()));
 
     // Resolve the provider implied by the write, for the runner-constraint
-    // check below: explicit provider_id first, else whatever the model's
-    // slug prefix implies (`openai/…`, `bedrock/…`, …); a bare slug with no
-    // recognised prefix and no explicit provider_id can't be resolved here,
-    // so the conflict check is skipped for it (fail-open — no known
-    // conflict, not "assume compatible").
+    // check below: explicit-or-existing provider_id first, else whatever the
+    // model's slug prefix implies (`openai/…`, `bedrock/…`, …). A bare slug
+    // with no recognised prefix and no provider_id anywhere resolves to
+    // `None` here — see the runner check below for why that is NOT treated
+    // as "no conflict" for claude-code agents.
     let resolved_provider: Option<ProviderId> = provider_cap.map(|cap| cap.id).or_else(|| {
         model_to_write
             .as_deref()
@@ -185,18 +215,33 @@ pub(super) async fn patch_agent_at(dir: &Path, name: &str, req: PatchAgentReques
         .unwrap_or("subprocess")
         .to_string();
 
-    // The one concrete rejection rule the issue calls out: the `claude-code`
-    // runner spawns the local `claude` CLI, which only ever talks to
-    // Anthropic — an OpenAI/Bedrock/Fireworks/etc. model would silently fail
-    // at dispatch time, so reject it here instead.
-    if current_runner == "claude-code"
-        && let Some(pid) = resolved_provider
-        && pid != ProviderId::Anthropic
-    {
-        return bad_request(format!(
-            "runner 'claude-code' only supports Anthropic models; resolved provider '{}' is incompatible",
-            pid.as_str()
-        ));
+    // The `claude-code` runner spawns the local `claude` CLI, which only
+    // ever talks to Anthropic. This check is deliberately fail-shut, not
+    // fail-open: an unresolved provider (a bare model_id with no recognised
+    // prefix and no provider_id anywhere) is just as unacceptable as an
+    // explicitly non-Anthropic one, because a bare "gpt-4o-mini"-style
+    // model_id would otherwise silently persist and break at dispatch time.
+    // A claude-code agent can only ever end up with an
+    // Anthropic-*resolvable* model — ambiguous is rejected exactly like
+    // wrong.
+    if current_runner == "claude-code" {
+        match resolved_provider {
+            Some(ProviderId::Anthropic) => {}
+            Some(pid) => {
+                return bad_request(format!(
+                    "runner 'claude-code' only supports Anthropic models; resolved provider '{}' is incompatible",
+                    pid.as_str()
+                ));
+            }
+            None => {
+                return bad_request(
+                    "runner 'claude-code' requires an unambiguous Anthropic-resolvable model: \
+                     pass an explicit provider_id (\"anthropic\") or a prefixed model_id \
+                     (e.g. \"anthropic/claude-...\") — a bare, unprefixed model_id cannot be \
+                     validated and is rejected rather than silently accepted",
+                );
+            }
+        }
     }
 
     let Some(agent_table) = doc
