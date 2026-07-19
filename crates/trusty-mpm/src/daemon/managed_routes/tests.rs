@@ -10,10 +10,34 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
-use super::{checked_summaries, reconcile_live_state, record_to_json, record_to_summary};
+use super::summary::{reconcile_against_tmux, reconcile_live_state};
+use super::{checked_summaries, record_to_json, record_to_summary};
 use crate::session_manager::{
-    InjectionStatus, ManagedSessionId, ManagedSessionState, SessionRecord,
+    InjectionStatus, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
+    SessionRecord,
 };
+
+/// A tmux driver whose `list_sessions` FAILS — used to prove the list handler's
+/// reconciliation fails CLOSED (keeps persisted state) rather than treating a
+/// probe error as "zero live sessions".
+struct EnumErrTmux;
+impl ManagedTmuxDriver for EnumErrTmux {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Err(ManagedError::TmuxUnavailable("enumeration failed".into()))
+    }
+}
 
 /// Build a minimal [`SessionRecord`] suitable for serialization tests.
 fn make_record(source_id: Option<&str>) -> SessionRecord {
@@ -69,6 +93,30 @@ fn reconcile_live_state_flips_stopped_to_active_when_alive() {
     reconcile_live_state(&mut summaries2, &records, &HashSet::new(), &HashSet::new());
     assert_eq!(summaries2[0].state, "stopped", "no tmux → stopped");
     assert!(!summaries2[0].attached);
+}
+
+/// `reconcile_against_tmux` FAILS CLOSED on a tmux enumeration error: an Active
+/// record must keep its `active` state, NOT be reconciled to `stopped` (which
+/// would offer a fleet-wide destructive restart on a transient tmux hiccup).
+#[test]
+fn reconcile_against_tmux_fails_closed_on_enumeration_error() {
+    let mut rec = make_record(None);
+    rec.state = ManagedSessionState::Active;
+    rec.tmux_name = "tm-live-1".into();
+    let records = vec![rec];
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    assert_eq!(summaries[0].state, "active");
+
+    // The driver's enumeration errors — reconciliation must be SKIPPED entirely.
+    reconcile_against_tmux(&EnumErrTmux, &mut summaries, &records);
+    assert_eq!(
+        summaries[0].state, "active",
+        "a tmux enumeration error must NOT flip a live record to stopped"
+    );
+    assert!(
+        !summaries[0].attached,
+        "attached stays at its default on a probe error"
+    );
 }
 
 /// Terminal/non-transient states are NEVER flipped by the liveness probe — a

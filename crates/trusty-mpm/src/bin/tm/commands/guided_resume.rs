@@ -58,10 +58,29 @@ pub(crate) fn needs_restart(state: &str) -> bool {
 /// Stopped) then restarts it via the normal resume path — the operator does
 /// nothing (#2001). Previously this was operator-driven (`tm session stop` then
 /// `tm` again); that manual step is now automated.
-/// What: returns `true` when `!needs_restart(state)` AND `!tmux_live`.
-/// Test: `guided_resume_is_zombie_*` in `tests_behavior_c_tests.rs`.
+/// What: returns `true` when `!needs_restart(state)` AND `!tmux_live` AND the
+/// state is NOT terminal — a `decommissioned`/`deleted` tombstone is gone for
+/// good and must never be treated as a resurrectable zombie (code-critic
+/// CRITICAL: `is_zombie("deleted", false)` used to return `true`, which routed
+/// a deleted record through `ReconcileThenRestart` and resurrected it).
+/// Test: `guided_resume_is_zombie_*`, `is_zombie_false_for_terminal_states` in
+/// `tests_behavior_c_tests.rs`.
 pub(crate) fn is_zombie(state: &str, tmux_live: bool) -> bool {
-    !tmux_live && !needs_restart(state)
+    !tmux_live && !needs_restart(state) && !is_terminal_state(state)
+}
+
+/// Whether a wire state token is a TERMINAL tombstone (`decommissioned`/`deleted`).
+///
+/// Why: the resume decision (`plan_resume`) must refuse a terminal record
+/// outright — never attach into it, never reconcile-restart it. Driving this
+/// off [`ManagedSessionState::is_terminal`] (the enum, the single source of
+/// truth) rather than a hardcoded token list means a new terminal variant can
+/// never silently slip past the resume guard.
+/// What: `true` iff `state` parses to a terminal [`ManagedSessionState`].
+/// Test: `plan_resume_refuses_terminal_states` in `tests_behavior_c_tests.rs`.
+fn is_terminal_state(state: &str) -> bool {
+    trusty_mpm::session_manager::ManagedSessionState::from_wire(state)
+        .is_some_and(|s| s.is_terminal())
 }
 
 /// The action a guided resume must take, derived purely from state + tmux liveness.
@@ -93,6 +112,10 @@ pub(crate) enum ResumeAction {
     Restart,
     /// Zombie — auto-stop to reset the record to Stopped, then restart + attach.
     ReconcileThenRestart,
+    /// TERMINAL tombstone (`decommissioned`/`deleted`) — REFUSE: never attach,
+    /// never restart. Resuming a terminal record would resurrect it
+    /// (code-critic CRITICAL); the operator must spawn a fresh session instead.
+    Terminal,
 }
 
 /// Decide, purely from `state` and `tmux_live`, how a guided resume should proceed.
@@ -101,12 +124,19 @@ pub(crate) enum ResumeAction {
 /// reconcile, the plain restart, and the happy-path attach can never diverge
 /// from what [`is_zombie`]/[`needs_restart`] classify. Pure so it is exhaustively
 /// unit-tested.
-/// What: zombie (checked first, since a zombie's state also fails
+/// What: TERMINAL (`decommissioned`/`deleted`, checked FIRST) → `Terminal`
+/// (refuse); zombie (checked next, since a zombie's state also fails
 /// `needs_restart`) → `ReconcileThenRestart`; Stopped/Errored → `Restart`;
-/// everything else (active/provisioning with a live tmux) → `Attach`.
-/// Test: `guided_resume_plan_*` in `tests_behavior_c_tests.rs`.
+/// everything else (active/provisioning with a live tmux) → `Attach`. The
+/// terminal check is first so neither the zombie path (would resurrect via
+/// reconcile-restart) nor the Attach path (would attach into a deleted session)
+/// can ever be reached for a tombstone (code-critic CRITICAL).
+/// Test: `guided_resume_plan_*`, `plan_resume_refuses_terminal_states` in
+/// `tests_behavior_c_tests.rs`.
 pub(crate) fn plan_resume(state: &str, tmux_live: bool) -> ResumeAction {
-    if is_zombie(state, tmux_live) {
+    if is_terminal_state(state) {
+        ResumeAction::Terminal
+    } else if is_zombie(state, tmux_live) {
         ResumeAction::ReconcileThenRestart
     } else if needs_restart(state) {
         ResumeAction::Restart
@@ -201,6 +231,18 @@ pub(crate) async fn resume_session(
 ) -> anyhow::Result<AttachOutcome> {
     let tmux_live = tmux_has_session(&session.name);
     let action = plan_resume(&session.state, tmux_live);
+
+    // Terminal-state refusal (code-critic CRITICAL): a decommissioned/deleted
+    // tombstone must never be attached to or restarted — doing either would
+    // resurrect it. Refuse BEFORE any daemon round-trip or tmux attach.
+    if action == ResumeAction::Terminal {
+        eprintln!(
+            "tm: '{}' is {} — a terminal (decommissioned/deleted) session cannot be \
+             resumed; spawn a fresh session instead.",
+            session.name, session.state
+        );
+        return Ok(AttachOutcome::Skipped);
+    }
 
     // Zombie auto-reconcile (#2001): the daemon still marks the session
     // active/provisioning but its tmux pane is gone (e.g. after a reboot). The

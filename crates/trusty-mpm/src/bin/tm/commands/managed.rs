@@ -48,16 +48,21 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 
 /// Return true when a session state should be shown in the default picker/list view.
 ///
-/// Why: decommissioned tombstones accumulate without bound (#1809); operators
-/// don't want 230+ dead records cluttering the picker and `tm session ls`. This
-/// predicate is the single source of truth for which states are "live" so the
-/// picker and the `sessions list` table use identical logic.
-/// What: returns `false` for `"decommissioned"` (the sole dead/tombstone state);
-/// returns `true` for every other state (active, provisioning, stopped, errored).
-/// Test: `picker_filter_excludes_decommissioned_keeps_active` in
-/// `tests_behavior_c_tests.rs`.
+/// Why: TERMINAL tombstones (`decommissioned` AND `deleted`, #2012) accumulate
+/// without bound (#1809) and — critically — must NEVER be offered as a resume
+/// target: a deleted row surfaced in the picker would flow through the
+/// zombie-reconcile path and RESURRECT the deleted session. Driving the
+/// decision off [`ManagedSessionState::is_terminal`] (the single source of
+/// truth on the enum) rather than a hardcoded `== "decommissioned"` string
+/// guarantees a new terminal variant can never silently slip past this filter.
+/// What: returns `false` for any terminal state; `true` for every live state
+/// (active, provisioning, stopped, errored) and for any unrecognised token
+/// (fail-open for DISPLAY only — the daemon owns real lifecycle gating).
+/// Test: `picker_filter_excludes_decommissioned_keeps_active`,
+/// `is_live_session_state_excludes_deleted` in `tests_behavior_c_tests.rs`.
 pub(crate) fn is_live_session_state(state: &str) -> bool {
-    state != "decommissioned"
+    !trusty_mpm::session_manager::ManagedSessionState::from_wire(state)
+        .is_some_and(|s| s.is_terminal())
 }
 
 /// Filter a session list to only live sessions for display in the picker (#1809).

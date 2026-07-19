@@ -20,6 +20,38 @@ use super::manager::ManagedError;
 use super::record::{ManagedSessionId, ManagedSessionState};
 use super::tests::{make_manager, seed_record};
 
+/// `stop` REFUSES a terminal (Deleted/Decommissioned) record — the daemon-side
+/// backstop against resurrection (code-critic CRITICAL).
+///
+/// Why: the zombie-reconcile resume path does `runtime-stop` then `resume`; if
+/// `stop` flipped a `Deleted` tombstone to `Stopped`, the follow-up `resume`
+/// would bring a DELETED session back to life. This pins that `stop` rejects a
+/// terminal record with `InvalidState` and leaves its state unchanged.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn stop_refuses_terminal_record() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    for terminal in [
+        ManagedSessionState::Deleted,
+        ManagedSessionState::Decommissioned,
+    ] {
+        let id = ManagedSessionId::new();
+        seed_record(&mgr, &dir, id, terminal.clone(), false).await;
+
+        let err = mgr
+            .stop(&id)
+            .await
+            .expect_err("a terminal record must not be stoppable (resurrection guard)");
+        assert!(
+            matches!(err, ManagedError::InvalidState(_, _)),
+            "expected InvalidState for {terminal:?}, got {err:?}"
+        );
+        // State is unchanged — the tombstone was not flipped to Stopped.
+        assert_eq!(mgr.get(&id).await.expect("record present").state, terminal);
+    }
+}
+
 /// `delete_record` marks a non-running record `--deleted--`, keeping it in the
 /// store (#2012, soft-delete marker).
 ///

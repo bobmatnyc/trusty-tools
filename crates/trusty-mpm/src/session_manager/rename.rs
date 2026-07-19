@@ -18,7 +18,7 @@
 use chrono::Utc;
 
 use super::manager::{ManagedError, SessionManager};
-use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::record::{ManagedSessionId, SessionRecord};
 
 /// Validate a proposed session name, returning the trimmed value or a message.
 ///
@@ -67,17 +67,22 @@ impl SessionManager {
     /// the SAME name is a no-op that returns the record unchanged. A terminal
     /// record (`Decommissioned`/`Deleted`) is refused with `InvalidState`.
     /// Refuses — with [`ManagedError::NameCollision`] — a name already taken by
-    /// ANOTHER managed record or by a live tmux session. Otherwise, when a live
-    /// tmux session backs the record it is renamed via
+    /// another NON-terminal managed record or by a live tmux session (a terminal
+    /// tombstone's name is reusable). Otherwise, when a live tmux session backs
+    /// the record it is renamed via
     /// [`ManagedTmuxDriver::rename_session`](super::driver::ManagedTmuxDriver::rename_session)
-    /// FIRST (so a tmux failure aborts before the store is touched — no drift),
-    /// then the record's `tmux_name` is updated, `last_activity_at` is stamped,
-    /// and the record is persisted. Returns the updated [`SessionRecord`].
+    /// FIRST (re-verifying `tmux_name` immediately beforehand to catch a
+    /// concurrent rename), then the record's `tmux_name` is updated,
+    /// `last_activity_at` is stamped, and the record is persisted. If the store
+    /// write fails AFTER the tmux rename, the tmux rename is rolled back so the
+    /// live session and the record never desync; a failed rollback surfaces an
+    /// explicit manual-recovery error. Returns the updated [`SessionRecord`].
     /// Test: `rename_updates_name_and_persists`,
     /// `rename_same_name_is_noop`, `rename_rejects_collision_with_record`,
     /// `rename_rejects_collision_with_live_tmux`,
     /// `rename_rejects_invalid_name`, `rename_rejects_terminal_record`,
-    /// `rename_renames_live_tmux_session` in `super::rename_tests`.
+    /// `rename_renames_live_tmux_session`,
+    /// `rename_reuses_name_freed_by_a_deleted_record` in `super::rename_tests`.
     pub async fn rename(
         &self,
         id: &ManagedSessionId,
@@ -91,25 +96,25 @@ impl SessionManager {
             // Renaming to the current name is a no-op — nothing to persist.
             return Ok(record);
         }
-        if matches!(
-            record.state,
-            ManagedSessionState::Decommissioned | ManagedSessionState::Deleted
-        ) {
+        if record.state.is_terminal() {
             return Err(ManagedError::InvalidState(
                 id.to_string(),
                 format!(
-                    "session is {} — a terminal record cannot be renamed",
+                    "session is {} — a terminal (decommissioned/deleted) record cannot be renamed",
                     record.state
                 ),
             ));
         }
 
-        // Collision guard: no OTHER managed record may already carry the name…
+        // Collision guard: no OTHER *live* managed record may already carry the
+        // name. A TERMINAL tombstone's `tmux_name` does NOT block reuse (it is
+        // gone for good) — so a name freed by delete/decommission is
+        // immediately reusable; only `prune` still holds the on-disk record.
         if self
             .list()
             .await
             .into_iter()
-            .any(|r| r.id != *id && r.tmux_name == new_name)
+            .any(|r| r.id != *id && r.tmux_name == new_name && !r.state.is_terminal())
         {
             return Err(ManagedError::NameCollision(new_name));
         }
@@ -118,18 +123,52 @@ impl SessionManager {
             return Err(ManagedError::NameCollision(new_name));
         }
 
+        let old_name = record.tmux_name.clone();
+        let tmux_live = self.tmux.session_exists(&old_name);
+
         // Rename the live tmux session FIRST when one backs the record: a tmux
-        // failure aborts here, before the store is mutated, so the record's name
-        // can never drift from the live session. A stopped session has no live
-        // tmux to rename — only the record changes.
-        if self.tmux.session_exists(&record.tmux_name) {
-            self.tmux.rename_session(&record.tmux_name, &new_name)?;
+        // failure aborts here, before the store is mutated. A stopped session
+        // has no live tmux to rename — only the record changes.
+        //
+        // Concurrency (get→check→act is not atomic): another rename could have
+        // changed this record's `tmux_name` between our read and now. Re-verify
+        // right before the destructive tmux rename and abort on mismatch, so we
+        // never rename a tmux session that no longer belongs to this record.
+        if tmux_live {
+            let current = self.get(id).await?;
+            if current.tmux_name != old_name {
+                return Err(ManagedError::InvalidState(
+                    id.to_string(),
+                    format!(
+                        "session was renamed concurrently (now '{}', expected '{old_name}') — \
+                         retry the rename",
+                        current.tmux_name
+                    ),
+                ));
+            }
+            self.tmux.rename_session(&old_name, &new_name)?;
         }
 
         let mut updated = record;
-        updated.tmux_name = new_name;
+        updated.tmux_name = new_name.clone();
         updated.last_activity_at = Some(Utc::now());
-        self.store.write().await.upsert(updated.clone()).await?;
+        if let Err(e) = self.store.write().await.upsert(updated.clone()).await {
+            // Compensation: the tmux session was already renamed but the store
+            // write failed, so the live tmux name and the (unchanged) record
+            // would desync. Roll the tmux rename back; if THAT also fails, surface
+            // an explicit manual-recovery error rather than leaving a silent split.
+            if tmux_live && let Err(rollback) = self.tmux.rename_session(&new_name, &old_name) {
+                return Err(ManagedError::InvalidState(
+                    id.to_string(),
+                    format!(
+                        "rename half-applied: tmux is now '{new_name}' but the store still \
+                         records '{old_name}', and the rollback failed ({rollback}) — manually \
+                         run `tmux rename-session -t {new_name} {old_name}` (store error: {e})"
+                    ),
+                ));
+            }
+            return Err(e.into());
+        }
         Ok(updated)
     }
 }

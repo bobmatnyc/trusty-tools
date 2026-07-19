@@ -151,6 +151,26 @@ async fn rename_rejects_terminal_record() {
     );
 }
 
+/// A name held only by a TERMINAL (Deleted) tombstone is reusable — the
+/// tombstone's `tmux_name` must NOT block a live session from taking it (MEDIUM).
+#[tokio::test]
+async fn rename_reuses_name_freed_by_a_deleted_record() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    // A live session we will rename, and a Deleted tombstone whose name we reuse.
+    let live = ManagedSessionId::new();
+    let gone = ManagedSessionId::new();
+    seed_record(&mgr, &dir, live, ManagedSessionState::Stopped, false).await;
+    seed_record(&mgr, &dir, gone, ManagedSessionState::Deleted, false).await;
+    let freed = mgr.get(&gone).await.expect("get gone").tmux_name;
+
+    let updated = mgr
+        .rename(&live, &freed)
+        .await
+        .expect("a deleted tombstone's name must be reusable");
+    assert_eq!(updated.tmux_name, freed);
+}
+
 /// `rename` renames the LIVE tmux session when one backs the record.
 #[tokio::test]
 async fn rename_renames_live_tmux_session() {

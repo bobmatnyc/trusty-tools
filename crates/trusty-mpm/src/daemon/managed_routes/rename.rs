@@ -1,4 +1,4 @@
-//! POST /api/v1/sessions/managed/{id}/rename — rename a managed session.
+//! PATCH /api/v1/sessions/managed/{id} — rename a managed session.
 //!
 //! Why: `tm sessions rename` needs a daemon endpoint because the daemon owns
 //! the [`crate::session_manager::SessionManager`] (the store + the live tmux
@@ -26,7 +26,7 @@ use super::{parse_id, record_to_summary};
 use crate::daemon::state::DaemonState;
 use crate::session_manager::ManagedError;
 
-/// Request body for POST /api/v1/sessions/managed/{id}/rename.
+/// Request body for PATCH /api/v1/sessions/managed/{id}.
 ///
 /// Why: rename takes exactly one caller input — the new name; a small typed
 /// body keeps it explicit and validated (the manager rejects a bad name).
@@ -38,7 +38,7 @@ pub struct RenameRequest {
     pub name: String,
 }
 
-/// POST /api/v1/sessions/managed/{id}/rename — rename a managed session.
+/// PATCH /api/v1/sessions/managed/{id} — rename a managed session.
 ///
 /// Why: keeps the tmux entity's name in sync with the record's `tmux_name` so
 /// operators can give a session a meaningful name and have `tmux attach`/`ls`

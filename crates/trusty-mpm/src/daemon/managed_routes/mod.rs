@@ -76,7 +76,7 @@ pub use resume_error::ResumeManagedError;
 pub use session_summary::SessionSummary;
 pub use summary::record_to_json;
 use summary::{
-    attach_cmd_for, checked_summaries, parse_id, reconcile_live_state, record_to_summary,
+    attach_cmd_for, checked_summaries, parse_id, reconcile_against_tmux, record_to_summary,
     record_to_summary_checked,
 };
 
@@ -582,17 +582,8 @@ pub async fn list_managed_sessions(
     // Reconcile the displayed state against LIVE tmux so a running/attached
     // session never reads as `(stopped)` (and never gets offered a destructive
     // `restart`) just because its persisted state went stale after a daemon
-    // restart. The tmux probes are cheap single calls (one `list-sessions`
-    // each) reused across every record.
-    let live: std::collections::HashSet<String> = mgr
-        .tmux
-        .list_sessions()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let attached: std::collections::HashSet<String> =
-        mgr.tmux.attached_session_names().into_iter().collect();
-    reconcile_live_state(&mut sessions, &records, &live, &attached);
+    // restart. Fail-closed on a tmux probe error (see `reconcile_against_tmux`).
+    reconcile_against_tmux(mgr.tmux.as_ref(), &mut sessions, &records);
     Json(ListSessionsResponse { sessions })
 }
 
@@ -615,7 +606,19 @@ pub async fn get_managed_session(
     };
     let mgr = state.session_manager().await;
     match mgr.get(&id).await {
-        Ok(record) => Json(record_to_summary_checked(&record).await).into_response(),
+        Ok(record) => {
+            // Reconcile against live tmux like the list handler — this is the
+            // record `tm session resume <id>` reads, and its resume decision keys
+            // off `state`; serving a stale `stopped` for a live session would let
+            // resume destructively recreate the pane (code-critic HIGH).
+            let mut summary = record_to_summary_checked(&record).await;
+            reconcile_against_tmux(
+                mgr.tmux.as_ref(),
+                std::slice::from_mut(&mut summary),
+                std::slice::from_ref(&record),
+            );
+            Json(summary).into_response()
+        }
         Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
     }
 }
