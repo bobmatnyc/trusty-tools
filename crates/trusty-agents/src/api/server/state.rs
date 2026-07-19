@@ -384,9 +384,23 @@ pub(super) enum CancelOutcome {
 /// Why: Shared by `upsert` (always overwrites) and `finalize_task` (which
 /// adds a cancellation guard before calling this). Keeping the
 /// insert/track/trim logic in one place avoids the two call sites drifting.
+/// A naive index-0 FIFO eviction would silently orphan a genuinely
+/// `Running` task once `MAX_RETAINED` unrelated tasks churn through the
+/// store: its `responses`/`order` row disappears while its `AbortHandle`
+/// stays in `handles` forever, and `try_cancel` (which looks the id up in
+/// `responses` first) then 404s a task that is very much still alive
+/// (issue #3063 code review).
 /// What: Inserts, appends to `order` iff the key was previously absent,
-/// then evicts the oldest entries past `MAX_RETAINED`.
-/// Test: `app_state_trims_to_max_retained` (via `upsert`).
+/// then evicts entries past `MAX_RETAINED` — walking forward from the
+/// oldest to find the first entry whose status isn't `Running` and
+/// evicting that one instead of blindly evicting index 0, removing its
+/// `handles` entry too so the maps stay in lockstep. If every retained row
+/// happens to be `Running`, eviction is skipped entirely for this call
+/// (never kill a live task to make room) — in practice this only lets the
+/// store grow transiently, since concurrently `Running` tasks are rare.
+/// Test: `app_state_trims_to_max_retained` (via `upsert`, all-terminal
+/// case); `cancel_survives_fifo_eviction_pressure` (a `Running` task
+/// planted before `MAX_RETAINED` terminal tasks must still be reachable).
 fn insert_and_trim(
     store: &mut TaskStore,
     id: String,
@@ -398,8 +412,24 @@ fn insert_and_trim(
         store.order.push(id);
     }
     while store.order.len() > MAX_RETAINED {
-        let old = store.order.remove(0);
+        let mut evict_idx = None;
+        for (i, oid) in store.order.iter().enumerate() {
+            let is_running = matches!(
+                store.responses.get(oid),
+                Some(r) if r.status == PmStatus::Running
+            );
+            if !is_running {
+                evict_idx = Some(i);
+                break;
+            }
+        }
+        let Some(idx) = evict_idx else {
+            // Every retained row is Running — don't evict a live task.
+            break;
+        };
+        let old = store.order.remove(idx);
         store.responses.remove(&old);
+        store.handles.remove(&old);
     }
     store.responses.clone()
 }

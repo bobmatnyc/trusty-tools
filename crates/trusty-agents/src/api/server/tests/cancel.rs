@@ -10,7 +10,8 @@
 //! (`register_handle` -> `try_cancel`/`clear_tasks` -> `.abort()`) production
 //! code uses.
 //! What: `cancel_running_task_marks_cancelled`, `cancel_unknown_id_404`,
-//! `cancel_already_done_409`, `clear_context_now_aborts_running_task`.
+//! `cancel_already_done_409`, `clear_context_now_aborts_running_task`,
+//! `cancel_survives_fifo_eviction_pressure`.
 //! Test: This module IS the test.
 
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::api::server::routes::build_router;
-use crate::api::server::state::AppState;
+use crate::api::server::state::{AppState, MAX_RETAINED};
 use crate::api::types::{PmResponse, PmStatus};
 
 fn router(state: AppState) -> Router {
@@ -150,5 +151,58 @@ async fn clear_context_now_aborts_running_task() {
     assert!(
         !completed.load(Ordering::SeqCst),
         "clear-context must actually abort the in-flight future, not just drop its record"
+    );
+}
+
+/// Regression test for the FIFO-eviction bug found in code review (#3063):
+/// `insert_and_trim` used to evict strictly by insertion order (index 0),
+/// so a long-running task submitted first and left running while
+/// `MAX_RETAINED` unrelated tasks completed would get silently evicted from
+/// `responses`/`order` — orphaning its `AbortHandle` in `handles` forever
+/// and making `DELETE /api/task/:id` 404 a task that was genuinely still
+/// running. `insert_and_trim` now walks forward past `Running` rows to
+/// evict the next-oldest terminal one instead.
+#[tokio::test]
+async fn cancel_survives_fifo_eviction_pressure() {
+    let state = AppState::default();
+    let completed = spawn_fake_running_task(&state, "long-runner").await;
+
+    // Push MAX_RETAINED more terminal tasks after it. Under naive index-0
+    // FIFO this alone would already have evicted "long-runner" (the oldest
+    // entry) before we ever get a chance to cancel it.
+    for i in 0..MAX_RETAINED {
+        let id = format!("filler-{i}");
+        let mut r = PmResponse::running(&id);
+        r.status = PmStatus::Success;
+        state.upsert(id, r).await;
+    }
+
+    let stored = state.get("long-runner").await;
+    assert!(
+        stored.is_some(),
+        "a Running task must survive FIFO eviction pressure from unrelated task churn"
+    );
+    assert_eq!(stored.unwrap().status, PmStatus::Running);
+
+    let app = router(state.clone());
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/api/task/long-runner")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a still-running task must remain cancellable after eviction pressure, not 404"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["status"], "cancelled");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "the surviving task's AbortHandle must still be live and effective"
     );
 }
