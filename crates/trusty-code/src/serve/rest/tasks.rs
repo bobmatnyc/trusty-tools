@@ -62,7 +62,11 @@ pub fn routes(router: Arc<Router>) -> AxumRouter {
 /// Request body for `POST /tasks`, shaped like `task::protocol`'s private
 /// `TaskRunRequestParams` — forwarded verbatim into the RPC `params` `Value`,
 /// so `task.run`'s own validation (empty `task_description`, unknown
-/// `session_id`, …) applies identically either way.
+/// `session_id`, invalid `project`, …) applies identically either way.
+/// `project` stays a `String` here (mirroring `sessions_write::CreateBody`'s
+/// identical choice) — it is forwarded verbatim into the RPC `params`
+/// `Value`, and `task.run`'s own `PathBuf` deserialization +
+/// `ProjectBinding::resolve` apply identically either way (#3178).
 #[derive(Deserialize)]
 struct RunTaskBody {
     task_description: String,
@@ -78,6 +82,8 @@ struct RunTaskBody {
     mode: Option<String>,
     #[serde(default)]
     deadline_secs: Option<u64>,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 /// Like [`super::respond`] but reports `202 Accepted` on success instead of
@@ -115,14 +121,19 @@ async fn respond_accepted(
 /// session per `crate::task::protocol::task_run`'s docs.
 /// What: `202 Accepted` with `{session_id, status, mode, binding}` on
 /// success (see [`respond_accepted`] for the status-code rationale); `400`
-/// for an empty `task_description` (`-32003 invalid_argument`) or a
-/// syntactically malformed body (rejected by axum's `Json` extractor before
-/// this handler runs); `404` for an unknown `session_id` (`-32007
-/// session_not_found`).
+/// for an empty `task_description` or an invalid `project` (both `-32003
+/// invalid_argument`, #3178) or a syntactically malformed body (rejected by
+/// axum's `Json` extractor before this handler runs); `404` for an unknown
+/// `session_id` (`-32007 session_not_found`). `project` is forwarded
+/// verbatim to `task.run` — no independent resolution happens in this REST
+/// layer (see the module docs' "duplicating it here would fork the two
+/// surfaces" rationale).
 /// Test: `tests::run_task_returns_202_with_running_session`,
 /// `tests::run_task_empty_task_description_returns_400`,
 /// `tests::run_task_unknown_session_id_returns_404`,
-/// `tests::run_task_malformed_body_returns_400`.
+/// `tests::run_task_malformed_body_returns_400`,
+/// `tests::run_task_with_project_binds_a_real_directory`,
+/// `tests::run_task_invalid_project_returns_400`.
 async fn run_task(
     State(state): State<TasksState>,
     Json(body): Json<RunTaskBody>,
@@ -138,6 +149,7 @@ async fn run_task(
             "session_id": body.session_id,
             "mode": body.mode,
             "deadline_secs": body.deadline_secs,
+            "project": body.project,
         }),
     )
     .await
@@ -260,5 +272,88 @@ mod tests {
 
         let resp = post(&app, "/tasks", "{not valid json").await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A `project` in the body must bind a real directory, overriding the
+    /// daemon's boot-time binding for this call, and the response must
+    /// reflect it (#3178) — the REST-level half of the `task.run` RPC
+    /// coverage in `task::protocol::tests::task_run_with_project_overrides_boot_binding`.
+    #[tokio::test]
+    async fn run_task_with_project_binds_a_real_directory() {
+        let _guard = crate::task::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(
+                crate::task::mock_llm::MOCK_LLM_ENV,
+                crate::task::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        let (app, _sessions, _boot_project) = app_and_registry();
+        let call_project = tempfile::tempdir().expect("call project tempdir");
+
+        let body = json!({
+            "task_description": "say hi",
+            "project": call_project.path().to_string_lossy(),
+        })
+        .to_string();
+        let resp = post(&app, "/tasks", &body).await;
+        unsafe {
+            std::env::remove_var(crate::task::mock_llm::MOCK_LLM_ENV);
+        }
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = body_json(resp).await;
+        assert_eq!(
+            v["binding"]["state"], "directory",
+            "the per-call project must bind: {v}"
+        );
+    }
+
+    /// A `project` naming a nonexistent path must map to `400` (`-32003
+    /// invalid_argument`), matching `task.run`'s RPC-level error mapping.
+    #[tokio::test]
+    async fn run_task_invalid_project_returns_400() {
+        let (app, _sessions, _project) = app_and_registry();
+
+        let resp = post(
+            &app,
+            "/tasks",
+            r#"{"task_description": "say hi", "project": "/no/such/path/anywhere"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["code"], -32003);
+    }
+
+    /// A `session_id` reusing an existing session, paired with a `project`
+    /// naming a DIFFERENT root than that session's own persisted binding,
+    /// must be rejected with `400`/`-32003 invalid_argument` (#3178,
+    /// code-critic HIGH finding, PR #3189) — the REST-level half of
+    /// `task::protocol::tests::task_run_session_id_with_mismatched_project_is_rejected`.
+    #[tokio::test]
+    async fn run_task_session_id_with_mismatched_project_returns_400() {
+        let (app, sessions, _boot_project) = app_and_registry();
+        let session_project = tempfile::tempdir().expect("session project tempdir");
+        let other_project = tempfile::tempdir().expect("other project tempdir");
+        let session_binding = ProjectBinding::resolve(Some(session_project.path().to_path_buf()))
+            .expect("tempdir must bind");
+        let existing = sessions.create("say hi".to_string(), None, session_binding);
+
+        let body = json!({
+            "task_description": "say hi",
+            "session_id": existing.id,
+            "project": other_project.path().to_string_lossy(),
+        })
+        .to_string();
+        let resp = post(&app, "/tasks", &body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["code"], -32003);
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not match session"),
+            "error message must name the mismatch: {v}"
+        );
     }
 }

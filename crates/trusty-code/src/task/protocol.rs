@@ -94,34 +94,76 @@ struct TaskRunRequestParams {
     /// (`TCODE_RUN_DEADLINE_SECONDS`) and default (1800s) tiers.
     #[serde(default)]
     deadline_secs: Option<u64>,
+    /// #3178: per-call project override (DOC-39 §5.5, AC-16.2 convergence).
+    /// `None` preserves today's back-compat behaviour — the process-boot-time
+    /// `binding` `register` closed over. `Some(path)` is resolved through the
+    /// SAME [`ProjectBinding::resolve`] `session.create`'s `CreateParams.project`
+    /// uses (see `crate::session::protocol::create`'s docs), so a nonexistent
+    /// or non-directory path maps to `-32003 invalid_argument` identically on
+    /// both surfaces — this is the keystone convergence the issue names:
+    /// `task.run` and `session.create` can no longer disagree about what a
+    /// project is or how one is resolved.
+    ///
+    /// **Invariant when paired with `session_id` (reusing an existing
+    /// session):** a session's persisted `Session.binding` is authoritative —
+    /// `SessionRegistry` has no binding-update path (it is set once, in
+    /// `SessionRegistry::create`). `project` may only RESTATE that same root;
+    /// naming a DIFFERENT root is rejected with `-32003 invalid_argument`
+    /// rather than silently executing the run against a project
+    /// `session.status`/`session.list` would never agree it is bound to. See
+    /// [`task_run`]'s docs.
+    #[serde(default)]
+    project: Option<PathBuf>,
 }
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
-/// session_id?, mode?, deadline_secs?) -> { session_id, status, mode }`.
+/// session_id?, mode?, deadline_secs?, project?) -> { session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
 /// What: validates `task_description` is non-empty
-/// (`-32003 invalid_argument`); resolves the target session — an existing
-/// one by `session_id` (propagating `session_not_found` if it doesn't
-/// exist) or a freshly `session.create`d one; resolves the effective
-/// `HarnessMode` via `crate::mode::resolve_mode` (#2059's three-tier
-/// precedence) and persists it onto the session (`SessionRegistry::set_mode`)
-/// so it is queryable afterward via `session.status`/`session.list`
-/// (`Session.mode`) and `session.get_transcript` (`TranscriptRecord.mode`);
-/// builds the shared LLM client (real or the #2056 offline mock, per
-/// `TCODE_MOCK_LLM`); and calls `spawn_task_run`, which reserves the
-/// execution slot synchronously (rejecting a second overlapping run) before
-/// handing off to the background task. Returns immediately — the caller
-/// `session.attach`es to observe progress, per the ticket's "must not block
-/// the request thread on the whole LLM run" requirement. The response's own
-/// `mode` field is the SAME resolved value, surfaced immediately rather than
-/// requiring a follow-up `session.status` call.
+/// (`-32003 invalid_argument`); resolves the EFFECTIVE binding for this call —
+/// `project: Some(path)` resolves via [`ProjectBinding::resolve`] (mapping a
+/// `BindingError` onto `-32003 invalid_argument`, exactly like
+/// `session.create`); `project: None` keeps the process-boot-time `binding`
+/// `register` closed over, so an existing caller that never sends `project`
+/// observes no change (#3178 back-compat). Then resolves the target session —
+/// an existing one by `session_id` (propagating `session_not_found` if it
+/// doesn't exist) or a freshly `session.create`d one bound to the effective
+/// binding; resolves the effective `HarnessMode` via `crate::mode::resolve_mode`
+/// (#2059's three-tier precedence, rooted at the effective binding) and
+/// persists it onto the session (`SessionRegistry::set_mode`) so it is
+/// queryable afterward via `session.status`/`session.list` (`Session.mode`)
+/// and `session.get_transcript` (`TranscriptRecord.mode`); builds the shared
+/// LLM client (real or the #2056 offline mock, per `TCODE_MOCK_LLM`); and
+/// calls `spawn_task_run`, which reserves the execution slot synchronously
+/// (rejecting a second overlapping run) before handing off to the background
+/// task. Returns immediately — the caller `session.attach`es to observe
+/// progress, per the ticket's "must not block the request thread on the whole
+/// LLM run" requirement. The response's own `mode`/`binding` fields are the
+/// SAME resolved values, surfaced immediately rather than requiring a
+/// follow-up `session.status` call.
+///
+/// **Invariant: a reused session's persisted binding is authoritative.** When
+/// `session_id` is supplied, `project` may only RESTATE that session's own
+/// `Session.binding` root (or be omitted); a `project` naming a DIFFERENT
+/// root is rejected as `-32003 invalid_argument` rather than silently
+/// executing the run against a project the session itself was never bound to
+/// (`SessionRegistry` has no binding-update path — `create` sets it once).
+/// Accepting the mismatch would let `session.status`/`session.list` report
+/// the ORIGINAL binding forever while the run actually executed against a
+/// different one — a silent audit/state divergence this validation exists to
+/// prevent (code-critic HIGH finding, PR #3189).
 /// Test: `task::protocol::tests::task_run_rejects_empty_task_description`,
 /// `task::protocol::tests::task_run_creates_session_when_none_given`,
 /// `task::protocol::tests::task_run_sessionful_reuses_existing_session`,
 /// `task::protocol::tests::task_run_unknown_session_id_errors`,
-/// `task::protocol::tests::task_run_resolves_and_reports_mode`.
+/// `task::protocol::tests::task_run_resolves_and_reports_mode`,
+/// `task::protocol::tests::task_run_without_project_keeps_boot_binding`,
+/// `task::protocol::tests::task_run_with_project_overrides_boot_binding`,
+/// `task::protocol::tests::task_run_rejects_invalid_project`,
+/// `task::protocol::tests::task_run_session_id_with_matching_project_succeeds`,
+/// `task::protocol::tests::task_run_session_id_with_mismatched_project_is_rejected`.
 async fn task_run(
     registry: Arc<SessionRegistry>,
     params: Value,
@@ -135,11 +177,38 @@ async fn task_run(
             "task_description must not be empty",
         ));
     }
+    // #3178: a per-call `project` overrides the boot-time binding for this
+    // call only, resolved through the exact same helper `session.create` uses
+    // — never a second, divergent implementation of "what is a project".
+    let project_given = p.project.is_some();
+    let binding = match p.project {
+        Some(project) => ProjectBinding::resolve(Some(project))
+            .map_err(|e| RpcError::invalid_argument(format!("task.run: {e}")))?,
+        None => binding,
+    };
     let agent_name = p.agent_name.unwrap_or_else(|| "pm".to_string());
 
     let session_id = match &p.session_id {
         Some(id) => {
-            registry.status(id)?; // propagate session_not_found verbatim
+            let existing = registry.status(id)?; // propagate session_not_found verbatim
+            // HIGH finding (code-critic, PR #3189): a session's persisted
+            // binding is authoritative once created — reject a per-call
+            // `project` that would silently redirect the run to a DIFFERENT
+            // root than `session.status`/`session.list` will keep reporting.
+            if project_given && existing.binding.root() != binding.root() {
+                return Err(RpcError::invalid_argument(format!(
+                    "task.run: project `{}` does not match session `{id}`'s existing binding \
+                     `{}` — a session's persisted binding is authoritative; project may only \
+                     restate it, not change it",
+                    binding
+                        .label()
+                        .unwrap_or_else(|| "<projectless>".to_string()),
+                    existing
+                        .binding
+                        .label()
+                        .unwrap_or_else(|| "<projectless>".to_string()),
+                )));
+            }
             id.clone()
         }
         None => {
@@ -177,383 +246,5 @@ async fn task_run(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::jsonrpc::Request;
-    use tokio::sync::mpsc;
-
-    fn test_ctx() -> ConnectionContext {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        ConnectionContext::new(tx)
-    }
-
-    fn agents_dir() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("agents tempdir");
-        std::fs::write(
-            tmp.path().join("pm.md"),
-            "---\nname: pm\nmodel: openai/gpt-4o-mini\n---\n\nYou are the PM.\n",
-        )
-        .expect("write pm.md");
-        std::fs::write(
-            tmp.path().join("python-engineer.md"),
-            "---\nname: python-engineer\nmodel: deepseek/deepseek-chat\n---\n\nengineer\n",
-        )
-        .expect("write python-engineer.md");
-        tmp
-    }
-
-    /// `register` must wire `task.run` so the router recognises it.
-    #[tokio::test]
-    async fn register_wires_task_run() {
-        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation; serialized by `ENV_LOCK` above.
-        unsafe {
-            std::env::set_var(
-                super::super::mock_llm::MOCK_LLM_ENV,
-                super::super::mock_llm::MOCK_LLM_ECHO,
-            );
-        }
-        let registry = Arc::new(SessionRegistry::new());
-        let agents = agents_dir();
-        let project = tempfile::tempdir().expect("project tempdir");
-        let mut router = Router::new();
-        register(
-            &mut router,
-            registry,
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        );
-
-        let req = Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(1)),
-            method: "task.run".to_string(),
-            params: Some(json!({"task_description": "say hi"})),
-        };
-        let resp = router.dispatch(req, &test_ctx()).await;
-        unsafe {
-            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
-        }
-        assert!(
-            resp.error.is_none(),
-            "task.run should succeed, got {:?}",
-            resp.error
-        );
-        assert_eq!(resp.result.unwrap()["status"], "running");
-    }
-
-    /// `task.run` must be callable with NO project bound at all (AC-16.1) —
-    /// the change that makes the shell's entry screen (7a) implementable. This
-    /// call was impossible before: `register` took a required `PathBuf`.
-    #[tokio::test]
-    async fn register_wires_task_run_projectless() {
-        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation; serialized by the lock above.
-        unsafe {
-            std::env::set_var(
-                super::super::mock_llm::MOCK_LLM_ENV,
-                super::super::mock_llm::MOCK_LLM_ECHO,
-            );
-        }
-        let registry = Arc::new(SessionRegistry::new());
-        let agents = agents_dir();
-        let mut router = Router::new();
-        register(
-            &mut router,
-            registry,
-            ProjectBinding::None,
-            agents.path().to_path_buf(),
-        );
-
-        let req = Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(1)),
-            method: "task.run".to_string(),
-            params: Some(json!({"task_description": "just chat"})),
-        };
-        let resp = router.dispatch(req, &test_ctx()).await;
-        unsafe {
-            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
-        }
-        assert!(
-            resp.error.is_none(),
-            "projectless task.run must succeed, got {:?}",
-            resp.error
-        );
-        let result = resp.result.expect("a result");
-        assert_eq!(result["status"], "running");
-        assert_eq!(
-            result["binding"]["state"], "projectless",
-            "task.run must report the projectless binding back to the caller: {result}"
-        );
-    }
-
-    /// An empty `task_description` must map to `-32003 invalid_argument`.
-    #[tokio::test]
-    async fn task_run_rejects_empty_task_description() {
-        let registry = Arc::new(SessionRegistry::new());
-        let agents = agents_dir();
-        let project = tempfile::tempdir().expect("project tempdir");
-        let err = task_run(
-            registry,
-            json!({"task_description": "   "}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, -32003);
-    }
-
-    /// Omitting `session_id` must mint a fresh session.
-    #[tokio::test]
-    async fn task_run_creates_session_when_none_given() {
-        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var(
-                super::super::mock_llm::MOCK_LLM_ENV,
-                super::super::mock_llm::MOCK_LLM_ECHO,
-            );
-        }
-        let registry = Arc::new(SessionRegistry::new());
-        let agents = agents_dir();
-        let project = tempfile::tempdir().expect("project tempdir");
-
-        let result = task_run(
-            Arc::clone(&registry),
-            json!({"task_description": "say hi"}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await;
-        unsafe {
-            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
-        }
-        let value = result.expect("task.run should succeed");
-        let session_id = value["session_id"].as_str().expect("session_id string");
-        assert!(
-            registry.status(session_id).is_ok(),
-            "a new session must have been created"
-        );
-    }
-
-    /// `task.run` must resolve `HarnessMode` per §5.9's three-tier
-    /// precedence and report it BOTH in its own immediate response AND on
-    /// the session (queryable via `session.status`/`get_transcript`
-    /// afterward) — #2059.
-    ///
-    /// Why: this is the integration point proving the wiring
-    /// `crate::mode::resolve_mode`'s own unit tests cannot: that
-    /// `task::protocol::task_run` actually reads the `mode` request param,
-    /// the project's `.claude/settings.json`, and `TRUSTY_CODE_MODE`, in
-    /// that precedence, and persists the result via
-    /// `SessionRegistry::set_mode` before spawning the run.
-    /// What: covers default (nothing set), settings.json alone,
-    /// task-param-over-settings.json, and env-var-over-everything.
-    /// Test: this test.
-    #[tokio::test]
-    async fn task_run_resolves_and_reports_mode() {
-        let _mock_guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
-        let _mode_guard = crate::mode::MODE_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation; serialized by both locks above.
-        unsafe {
-            std::env::set_var(
-                super::super::mock_llm::MOCK_LLM_ENV,
-                super::super::mock_llm::MOCK_LLM_ECHO,
-            );
-            std::env::remove_var(crate::mode::MODE_ENV_VAR);
-        }
-        let agents = agents_dir();
-
-        // 1. Nothing set anywhere -> default (daily-driver).
-        let project = tempfile::tempdir().expect("project tempdir");
-        let registry = Arc::new(SessionRegistry::new());
-        let value = task_run(
-            Arc::clone(&registry),
-            json!({"task_description": "say hi"}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .expect("task.run should succeed");
-        assert_eq!(value["mode"], "daily-driver");
-        let session_id = value["session_id"].as_str().unwrap().to_string();
-        assert_eq!(
-            registry.status(&session_id).unwrap().mode,
-            Some(crate::mode::HarnessMode::DailyDriver)
-        );
-
-        // 2. `.claude/settings.json` alone sets parity.
-        let project2 = tempfile::tempdir().expect("project tempdir");
-        std::fs::create_dir_all(project2.path().join(".claude")).expect("mkdir");
-        std::fs::write(
-            project2.path().join(".claude").join("settings.json"),
-            r#"{"code_harness": {"mode": "parity"}}"#,
-        )
-        .expect("write settings.json");
-        let registry2 = Arc::new(SessionRegistry::new());
-        let value2 = task_run(
-            Arc::clone(&registry2),
-            json!({"task_description": "say hi"}),
-            ProjectBinding::resolve(Some(project2.path().to_path_buf()))
-                .expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .expect("task.run should succeed");
-        assert_eq!(value2["mode"], "parity");
-
-        // 3. A `mode` request param overrides settings.json (still parity
-        //    from settings.json here, but requesting daily-driver must win).
-        let registry3 = Arc::new(SessionRegistry::new());
-        let value3 = task_run(
-            Arc::clone(&registry3),
-            json!({"task_description": "say hi", "mode": "daily-driver"}),
-            ProjectBinding::resolve(Some(project2.path().to_path_buf()))
-                .expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .expect("task.run should succeed");
-        assert_eq!(
-            value3["mode"], "daily-driver",
-            "task.run's mode param must override settings.json"
-        );
-
-        // 4. TRUSTY_CODE_MODE overrides EVERYTHING, including a task param.
-        unsafe {
-            std::env::set_var(crate::mode::MODE_ENV_VAR, "parity");
-        }
-        let registry4 = Arc::new(SessionRegistry::new());
-        let value4 = task_run(
-            Arc::clone(&registry4),
-            json!({"task_description": "say hi", "mode": "daily-driver"}),
-            ProjectBinding::resolve(Some(project2.path().to_path_buf()))
-                .expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .expect("task.run should succeed");
-        assert_eq!(
-            value4["mode"], "parity",
-            "TRUSTY_CODE_MODE must win over a task.run mode param"
-        );
-
-        unsafe {
-            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
-            std::env::remove_var(crate::mode::MODE_ENV_VAR);
-        }
-    }
-
-    /// A `session_id` that does not exist must propagate `session_not_found`.
-    #[tokio::test]
-    async fn task_run_unknown_session_id_errors() {
-        let registry = Arc::new(SessionRegistry::new());
-        let agents = agents_dir();
-        let project = tempfile::tempdir().expect("project tempdir");
-
-        let err = task_run(
-            registry,
-            json!({"task_description": "say hi", "session_id": "does-not-exist"}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// A `session_id` for an existing session must reuse it, not mint a new
-    /// one.
-    #[tokio::test]
-    async fn task_run_sessionful_reuses_existing_session() {
-        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var(
-                super::super::mock_llm::MOCK_LLM_ENV,
-                super::super::mock_llm::MOCK_LLM_ECHO,
-            );
-        }
-        let registry = Arc::new(SessionRegistry::new());
-        let existing = registry.create(
-            "say hi".to_string(),
-            None,
-            crate::binding::ProjectBinding::None,
-        );
-        let agents = agents_dir();
-        let project = tempfile::tempdir().expect("project tempdir");
-
-        let result = task_run(
-            Arc::clone(&registry),
-            json!({"task_description": "say hi", "session_id": existing.id}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await;
-        unsafe {
-            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
-        }
-        let value = result.expect("task.run should succeed");
-        assert_eq!(value["session_id"], existing.id);
-    }
-
-    /// A second `task.run` at the JSON-RPC entry point, issued AFTER the
-    /// first run against the same `session_id` has fully `Finished`, must be
-    /// ACCEPTED (#2344 resumption) rather than erroring — the acceptance
-    /// criterion "two sequential task.run calls on one session" exercised at
-    /// the actual RPC surface, not just `spawn_task_run` directly
-    /// (`task::executor::tests::spawn_task_run_second_call_after_finish_appends_to_cumulative_transcript`
-    /// covers the transcript-accumulation half; this test covers that
-    /// `task_run` itself — including its `registry.status(id)` existing-
-    /// session lookup — does not reject the resumed call).
-    #[tokio::test]
-    async fn task_run_second_call_after_finish_continues_the_session() {
-        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var(
-                super::super::mock_llm::MOCK_LLM_ENV,
-                super::super::mock_llm::MOCK_LLM_ECHO,
-            );
-        }
-        let registry = Arc::new(SessionRegistry::new());
-        let agents = agents_dir();
-        let project = tempfile::tempdir().expect("project tempdir");
-
-        let first = task_run(
-            Arc::clone(&registry),
-            json!({"task_description": "say hi"}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await
-        .expect("first task.run should succeed");
-        let session_id = first["session_id"].as_str().unwrap().to_string();
-
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-        loop {
-            let status = registry.status(&session_id).expect("session must exist");
-            if status.status.is_terminal() {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "first run did not reach a terminal state within 5s"
-            );
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-        }
-
-        let second = task_run(
-            Arc::clone(&registry),
-            json!({"task_description": "say hi again", "session_id": session_id}),
-            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
-            agents.path().to_path_buf(),
-        )
-        .await;
-        unsafe {
-            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
-        }
-        let value = second.expect("a second task.run on a Finished session must be accepted");
-        assert_eq!(value["session_id"], session_id);
-        assert_eq!(value["status"], "running");
-    }
-}
+#[path = "protocol_tests.rs"]
+mod tests;
