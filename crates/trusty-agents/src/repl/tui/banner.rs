@@ -1,8 +1,59 @@
 //! Part of the `tui` module (split from the original monolithic `tui.rs`
 //! to satisfy the 500-line file cap — see #357). Cross-submodule items and
 //! external imports resolve through the flat re-exports in `mod.rs`.
+//!
+//! The startup splash art is standardized on the same trusty branding `tm`
+//! renders (issue #3326): both binaries read the art text and per-glyph
+//! color rule from `trusty_common::banner`, so a future art update lands in
+//! both places at once instead of drifting apart the way this REPL's
+//! previous bespoke robot glyphs did.
 
 use super::*;
+use trusty_common::banner::{TRUSTY_SPLASH_ART, shade_bucket};
+
+/// Widest line (in chars) of the shared trusty splash art.
+///
+/// Why: the left column must reserve enough width for the shared art (issue
+/// #3326) so its glyphs never clip; measuring it from the art text itself
+/// means the layout math can never silently desync from a future art edit.
+/// What: the max `chars().count()` across every line of `TRUSTY_SPLASH_ART`.
+/// Test: `splash_art_width_is_positive`.
+fn splash_art_width() -> usize {
+    TRUSTY_SPLASH_ART
+        .lines()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Render the shared trusty splash art as ratatui spans, one row per art
+/// line, coloring each non-space glyph via the shared `shade_bucket` palette.
+///
+/// Why: standardizes the REPL's startup splash on the same trusty branding
+/// `tm` renders (issue #3326), reusing `tm`'s art + color-bucket rule via
+/// `trusty_common::banner` instead of a second, drifted copy.
+/// What: splits `TRUSTY_SPLASH_ART` into lines and maps each non-space char
+/// to a `Span` styled with `Color::Rgb` from `shade_bucket`; spaces render
+/// as unstyled `Span::raw(" ")` (transparent, matching `tm`'s renderer).
+/// Test: `splash_art_rows_row_count_matches_source`,
+/// `splash_art_rows_glyph_row_is_nonempty`.
+fn splash_art_rows() -> Vec<Vec<Span<'static>>> {
+    TRUSTY_SPLASH_ART
+        .lines()
+        .map(|row| {
+            row.chars()
+                .map(|c| {
+                    if c == ' ' {
+                        Span::raw(" ")
+                    } else {
+                        let (r, g, b) = shade_bucket(c);
+                        Span::styled(c.to_string(), Style::default().fg(Color::Rgb(r, g, b)))
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
 
 /// Produce the welcome banner as a `Vec<Line<'static>>` so it can be prepended
 /// to the chat scroll buffer instead of occupying its own layout chunk.
@@ -12,28 +63,27 @@ use super::*;
 /// terminal command history. This eliminates the abrupt "banner disappears
 /// when first message is sent" UX from the previous design.
 /// What: Returns the same content `draw_banner()` rendered as widgets, but as
-/// raw `Line`s. Layout: left ASCII-art column, vertical `│` divider, right
-/// info column. Column widths are computed from `width` (25% / 1 / rest).
+/// raw `Line`s. Layout: left column (shared trusty splash art, issue #3326),
+/// vertical `│` divider, right info column. Column widths are computed from
+/// `width`, with the left column widened enough to fit the art unclipped.
 /// Test: Visual via `scripts/tmux-repl-test.sh`; mechanical via the
 /// `banner_lines_*` unit tests.
 pub(crate) fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     let version = env!("CARGO_PKG_VERSION");
 
     let total_w = width.max(40);
-    let left_w = (total_w / 4).max(18);
+    let left_w = (total_w / 4).max(splash_art_width() + 2);
     let div_w = 1usize;
     let right_w = total_w.saturating_sub(left_w + div_w + 2 /* margins */);
 
-    // Left column rows (centered ASCII art + identity).
-    let left_rows: Vec<(String, Option<Color>)> = vec![
-        (String::new(), None),
-        (String::new(), None),
-        ("▐▛███▜▌ ▐▛███▜▌".to_string(), Some(Color::Cyan)),
-        ("▝▜█████▛▘▝▜█████▛▘".to_string(), Some(Color::Cyan)),
-        ("▘▘ ▝▝    ▘▘ ▝▝".to_string(), Some(Color::Cyan)),
-        (String::new(), None),
-        (format!("{} · {}", app.user_label, app.project_name), None),
-    ];
+    // Left column rows: the shared trusty splash art (per-glyph shaded),
+    // a blank separator, then the tagent identity line.
+    let mut left_rows: Vec<Vec<Span<'static>>> = splash_art_rows();
+    left_rows.push(Vec::new());
+    left_rows.push(vec![Span::raw(format!(
+        "{} · {}",
+        app.user_label, app.project_name
+    ))]);
 
     // Right column rows: app title + recent activity + commands.
     let mut right_rows: Vec<(String, Style)> = Vec::new();
@@ -97,41 +147,35 @@ pub(crate) fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
 
     // Body rows.
     for i in 0..row_count {
-        let (left_raw, left_color) = left_rows
-            .get(i)
-            .cloned()
-            .unwrap_or_else(|| (String::new(), None));
+        let left_spans = left_rows.get(i).cloned().unwrap_or_default();
         let (right_raw, right_style) = right_rows
             .get(i)
             .cloned()
             .unwrap_or_else(|| (String::new(), Style::default()));
 
-        // Center left text within left_w.
-        let left_chars = left_raw.chars().count();
+        // Center the left row within left_w by padding with blank spans on
+        // either side, preserving each glyph's own color.
+        let left_chars: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
         let pad_total = left_w.saturating_sub(left_chars);
         let pad_left = pad_total / 2;
         let pad_right = pad_total - pad_left;
-        let left_padded = format!(
-            "{}{}{}",
-            " ".repeat(pad_left),
-            left_raw,
-            " ".repeat(pad_right)
-        );
-        let left_style = match left_color {
-            Some(c) => Style::default().fg(c),
-            None => Style::default(),
-        };
+
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(left_spans.len() + 4);
+        if pad_left > 0 {
+            spans.push(Span::raw(" ".repeat(pad_left)));
+        }
+        spans.extend(left_spans);
+        if pad_right > 0 {
+            spans.push(Span::raw(" ".repeat(pad_right)));
+        }
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(" ", Style::default()));
 
         // Truncate right to right_w.
         let right_truncated: String = right_raw.chars().take(right_w).collect();
+        spans.push(Span::styled(right_truncated, right_style));
 
-        let spans = vec![
-            Span::styled(left_padded, left_style),
-            Span::styled(" ", Style::default()),
-            Span::styled("│", Style::default().fg(Color::DarkGray)),
-            Span::styled(" ", Style::default()),
-            Span::styled(right_truncated, right_style),
-        ];
         out.push(Line::from(spans));
     }
 
@@ -153,6 +197,11 @@ pub(crate) fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+/// Widget-mode counterpart to `banner_lines` — renders the same shared
+/// trusty splash art (issue #3326) as a bordered `Block` + `Paragraph`
+/// layout instead of scrollback `Line`s. Currently unused (see the module
+/// doc comment: the ratatui port moved the banner into chat scrollback) but
+/// kept in sync so a future revival doesn't resurrect the old, drifted art.
 #[allow(dead_code)]
 pub(crate) fn draw_banner(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
     // Use the compile-time crate version so the banner always matches the
@@ -183,25 +232,14 @@ pub(crate) fn draw_banner(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
 
     f.render_widget(block, area);
 
-    // Left panel.
-    let left_lines = vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "▐▛███▜▌ ▐▛███▜▌",
-            Style::default().fg(Color::Cyan),
-        )),
-        Line::from(Span::styled(
-            "▝▜█████▛▘▝▜█████▛▘",
-            Style::default().fg(Color::Cyan),
-        )),
-        Line::from(Span::styled(
-            "▘▘ ▝▝    ▘▘ ▝▝",
-            Style::default().fg(Color::Cyan),
-        )),
-        Line::from(""),
-        Line::from(format!("{} · {}", app.user_label, app.project_name)),
-    ];
+    // Left panel: shared trusty splash art (issue #3326), then identity line.
+    let mut left_lines: Vec<Line<'static>> = vec![Line::from("")];
+    left_lines.extend(splash_art_rows().into_iter().map(Line::from));
+    left_lines.push(Line::from(""));
+    left_lines.push(Line::from(format!(
+        "{} · {}",
+        app.user_label, app.project_name
+    )));
     let left = Paragraph::new(left_lines).alignment(ratatui::layout::Alignment::Center);
     f.render_widget(left, cols[0]);
 
@@ -244,4 +282,66 @@ pub(crate) fn draw_banner(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
     right_lines.push(Line::from("   /status     - show agent status"));
     let right = Paragraph::new(right_lines).wrap(Wrap { trim: false });
     f.render_widget(right, cols[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The shared splash art always has some display width to lay out
+    /// around — this is a sanity check on the art file itself, not the
+    /// layout math.
+    #[test]
+    fn splash_art_width_is_positive() {
+        assert!(splash_art_width() > 0);
+    }
+
+    /// `splash_art_rows` must produce exactly one row per line of the
+    /// shared art text, so the left column's row count matches what
+    /// `TRUSTY_SPLASH_ART` actually contains.
+    #[test]
+    fn splash_art_rows_row_count_matches_source() {
+        let rows = splash_art_rows();
+        assert_eq!(rows.len(), TRUSTY_SPLASH_ART.lines().count());
+    }
+
+    /// At least one art row must carry a colored (non-space) glyph span —
+    /// otherwise the "art" would render as an invisible blank block.
+    #[test]
+    fn splash_art_rows_glyph_row_is_nonempty() {
+        let rows = splash_art_rows();
+        assert!(
+            rows.iter().any(|row| !row.is_empty()),
+            "splash art must contain at least one non-space glyph row"
+        );
+    }
+
+    /// `banner_lines` must still open and close with the tmux e2e test's
+    /// literal frame markers after the left-column art swap (issue #3326).
+    #[test]
+    fn banner_lines_top_and_bottom_rules_present() {
+        let app = ReplApp::new("demo-project".to_string(), "bob".to_string());
+        let lines = banner_lines(&app, 120);
+        let top = line_text(lines.first().expect("banner must have a top rule"));
+        let bottom = line_text(lines.last().expect("banner must have a bottom rule"));
+        assert!(top.starts_with("╭─── trusty-agents ctrl"));
+        assert!(bottom.starts_with('╰'));
+    }
+
+    /// The left column must be widened enough to fit the shared splash art
+    /// unclipped even on a narrow-ish terminal — this is the layout change
+    /// this issue required (the previous 18-col floor was too narrow for
+    /// the wider shared art).
+    #[test]
+    fn banner_lines_reserves_left_width_for_art() {
+        let app = ReplApp::new("demo-project".to_string(), "bob".to_string());
+        // Row count must be at least the art's own row count (plus the
+        // blank separator + identity row), regardless of terminal width.
+        let lines = banner_lines(&app, 60);
+        assert!(lines.len() > TRUSTY_SPLASH_ART.lines().count());
+    }
 }

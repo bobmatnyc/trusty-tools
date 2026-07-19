@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- `tm`'s launch/connect splash art now sources from the shared `trusty_common::banner::TRUSTY_SPLASH_ART` / `shade_bucket` instead of a locally embedded `image.txt` + `shade_bucket` copy, so it can never silently drift from `trusty-agents`' REPL splash again (issue [#3326](https://github.com/bobmatnyc/trusty-tools/issues/3326)). Byte-identical art and rendering — `tm`'s own banner is unchanged; all 41 existing banner unit tests pass unmodified.
+
 ### Security
 
 - **Daemon write guard extended from single-handler to router-wide**
