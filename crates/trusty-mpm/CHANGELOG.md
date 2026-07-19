@@ -10,7 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Daemon write guard extended from single-handler to router-wide**
-  ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)): previously
+  ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304), PR [#3317](https://github.com/bobmatnyc/trusty-tools/pull/3317)): previously
   only `coordinator_chat` (`POST /api/v1/sessions/chat`) was origin-checked;
   every other destructive route (`POST /sessions` spawn, `DELETE /sessions/{id}`,
   `POST /api/v1/control/sessions/{id}/stop`, managed-session mutation,
@@ -23,8 +23,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- `tm sessions rename <id-or-name> <new-name>` (and in-session `tm sessions rename <new-name>` via `$TM_MANAGED_SESSION_ID`) renames a managed session, updating the record's `tmux_name` and the live tmux session, with collision + invalid-name guards
-- `tm sessions delete` now marks a session `--deleted--` (a new persisted `Deleted` state shown in the master list) instead of silently dropping the record; `tm sessions prune --state deleted` compacts the tombstones
+- WorkstreamConnector trait + tm/tcode backends (twin Phase 1, DOC-44) ([#3194](https://github.com/bobmatnyc/trusty-tools/pull/3194)) ([`6890b62`](https://github.com/bobmatnyc/trusty-tools/commit/6890b624f0e772827e6f1e50f2d885f36276c3db))
+- `tm sessions rename <id-or-name> <new-name>` (and in-session `tm sessions rename <new-name>` via `$TM_MANAGED_SESSION_ID`) renames a managed session, updating the record's `tmux_name` and the live tmux session, with collision + invalid-name guards ([#3302](https://github.com/bobmatnyc/trusty-tools/pull/3302))
+- `tm sessions delete` now marks a session `--deleted--` (a new persisted `Deleted` state shown in the master list) instead of silently dropping the record; `tm sessions prune --state deleted` compacts the tombstones ([#3302](https://github.com/bobmatnyc/trusty-tools/pull/3302))
 - per-project gh account pinning via GH_TOKEN spawn-env injection (closes #3025) ([#3040](https://github.com/bobmatnyc/trusty-tools/pull/3040)) ([`53d0a54`](https://github.com/bobmatnyc/trusty-tools/commit/53d0a5433c9e42b2c49f11f943de8cfc2c7f4696))
 - bridge custom remote+local MCP servers into fleet sessions at project/user scope ([#3033](https://github.com/bobmatnyc/trusty-tools/pull/3033)) ([`07cb73f`](https://github.com/bobmatnyc/trusty-tools/commit/07cb73f6bc236f753bb8e920ebab20b5cd9658c5))
 - per-session asset staleness + tm sessions sync-assets ([#2980](https://github.com/bobmatnyc/trusty-tools/pull/2980)) ([`c8d137a`](https://github.com/bobmatnyc/trusty-tools/commit/c8d137a632275e85709e745176a39253e62d6e3b))
@@ -32,24 +33,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- disclaim TCC responsibility on the TUI health screen's `[S]`-key `cargo run` spawn — the last undisclaimed spawn site in the TUI/session-launch call graph from the #2997 sweep; two remaining sites elsewhere in the crate tracked as #2997 part 6 (closes #3126)
+- disclaim the tmux-pane `claude` off the shared tmux server (via an `internal-spawn-disclaimed` launch shim) so TCC attributes its data-access prompts to Claude Code itself, not tmux; adds a `tcc_taint` doctor check surfacing the disclaim state (refs #2997) ([#3314](https://github.com/bobmatnyc/trusty-tools/pull/3314)) ([`7849296`](https://github.com/bobmatnyc/trusty-tools/commit/7849296bb1e26d4ba8a594289c0316b8c6700e83))
+- disclaim TCC responsibility on the TUI health screen's `[S]`-key `cargo run` spawn — the last undisclaimed spawn site in the TUI/session-launch call graph from the #2997 sweep; two remaining sites elsewhere in the crate tracked as #2997 part 6 (closes #3126) ([#3261](https://github.com/bobmatnyc/trusty-tools/pull/3261)) ([`6dc1ef7`](https://github.com/bobmatnyc/trusty-tools/commit/6dc1ef753a2f5655d262850e981ea58797bd35ee))
 - `tm ls` / the session picker no longer report running/attached sessions as `(stopped)`: the list handler now reconciles each session's displayed state against live tmux (`active`/`attached` when the tmux session exists, `stopped` only when it is truly gone) so the offered action (connect vs restart) matches reality
-- disclaim the tmux-pane `claude` off the shared tmux server (via an `internal-spawn-disclaimed` launch shim) so TCC attributes its data-access prompts to Claude Code itself, not tmux; adds a `tcc_taint` doctor check surfacing the disclaim state (refs #2997)
 - disclaim TCC responsibility on session-launch spawns so Claude Code isn't attributed to trusty-mpm (closes #2997) ([#3037](https://github.com/bobmatnyc/trusty-tools/pull/3037)) ([`d481a0c`](https://github.com/bobmatnyc/trusty-tools/commit/d481a0cd7e264b20109e1c92122ba972db828222))
 - teach user-scope MCP registration via tm mcp add in tm-cli-operations (closes #3020) ([#3021](https://github.com/bobmatnyc/trusty-tools/pull/3021)) ([`f6223aa`](https://github.com/bobmatnyc/trusty-tools/commit/f6223aacc1c030055440cea93c5ae52c1c4d231f))
 - write_project_hooks uses write_json_atomic for torn-write parity (closes #2972) ([#3018](https://github.com/bobmatnyc/trusty-tools/pull/3018)) ([`32e805d`](https://github.com/bobmatnyc/trusty-tools/commit/32e805d609e15bbcc02ab4212f606e0e34b20293))
 - tm doctor output_style content-drift + orphan detection ([#2976](https://github.com/bobmatnyc/trusty-tools/pull/2976)) ([`05a4a05`](https://github.com/bobmatnyc/trusty-tools/commit/05a4a059b1cd4d00f052e5a504141b8f2b621b84))
 - explicit --url errors on unreachable daemon instead of silent fallback ([#2971](https://github.com/bobmatnyc/trusty-tools/pull/2971)) ([`c228ad9`](https://github.com/bobmatnyc/trusty-tools/commit/c228ad9a31093f79c27866d7ae15f0cb253e710f))
 - entry-level hook matching for mixed groups + lifecycle triad in project-tier settings ([#2969](https://github.com/bobmatnyc/trusty-tools/pull/2969)) ([`de11649`](https://github.com/bobmatnyc/trusty-tools/commit/de11649700a79028771092cc22ea6343e4a8da84))
+- repair 10 dangling doc-comment pointers (unblock main) ([#3282](https://github.com/bobmatnyc/trusty-tools/pull/3282)) ([`f906005`](https://github.com/bobmatnyc/trusty-tools/commit/f906005cf9972fcdd150865219042096b03b8950))
 
 ### Changed
 
-- extract gh_account enforcement into `gh_account_enforce.rs` and split `claude_code.rs` command-builder tests into sibling `claude_code_tests.rs`, bringing both production files back under the 500-SLOC cap (closes #3070)
+- extract gh_account enforcement into `gh_account_enforce.rs` and split `claude_code.rs` command-builder tests into sibling `claude_code_tests.rs`, bringing both production files back under the 500-SLOC cap (closes #3070) ([#3281](https://github.com/bobmatnyc/trusty-tools/pull/3281)) ([`83d3ed3`](https://github.com/bobmatnyc/trusty-tools/commit/83d3ed3e2aef4d528af67a0b123f5d985f660072))
 - tm-adr skill v2.0.0 — formalize ADRs as first-class documentation artifact (opt-in → mandatory) ([#3172](https://github.com/bobmatnyc/trusty-tools/pull/3172))
 - single shared tmux library; route trusty-mpm + trusty-agents through it ([#3017](https://github.com/bobmatnyc/trusty-tools/pull/3017)) ([`383b9f4`](https://github.com/bobmatnyc/trusty-tools/commit/383b9f475e781ef6049900f1630875e8ebf68264))
 
 ### Documentation
 
+- proportional documentation policy — lighter touch for self-evident code ([#3271](https://github.com/bobmatnyc/trusty-tools/pull/3271)) ([`5bc8aba`](https://github.com/bobmatnyc/trusty-tools/commit/5bc8abab497b1993a72d731d361316c086cabc73))
+- DOC-46 — formalize ADRs as first-class artifact with consistency-vetting protocol ([#3172](https://github.com/bobmatnyc/trusty-tools/pull/3172)) ([`b775ede`](https://github.com/bobmatnyc/trusty-tools/commit/b775edebcd2a1ee7a11396ebc392d69b8ab9defc))
 - in-flight issue/PR progress updates as standard PM workflow convention: bug diagnoses at triage time, progress comments at meaningful state changes, PR body freshness, and completion evidence (closes #3149) ([#3151](https://github.com/bobmatnyc/trusty-tools/pull/3151))
 - long-wait protocol — disarm monitors on goal completion ([#2960](https://github.com/bobmatnyc/trusty-tools/pull/2960)) ([`e193414`](https://github.com/bobmatnyc/trusty-tools/commit/e1934140d38d6d9b847fef07676f29277683b220))
 
