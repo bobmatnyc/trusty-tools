@@ -6,6 +6,7 @@
 // tokio multi-threaded test runtime keeps the lock from causing deadlock.
 #![allow(clippy::await_holding_lock)]
 
+mod agent_patch;
 mod cancel;
 mod ctrl_sessions;
 mod listing;

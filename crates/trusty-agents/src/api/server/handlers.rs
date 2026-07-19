@@ -87,6 +87,19 @@ pub(super) fn projects_config_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".trusty-agents/projects")
 }
 
+/// Directory under `.trusty-agents/` holding per-agent TOML manifests.
+///
+/// Why: `GET /api/agents` (`projects::list_agents_route`) and
+/// `PATCH /api/agents/:name` (#3246, `agent_patch::patch_agent_route`) must
+/// agree on where agent manifests live on disk. Centralizing the literal
+/// here (mirroring [`projects_config_dir`]) keeps the two routes from
+/// drifting on a hand-typed path.
+/// What: Returns `.trusty-agents/agents`, relative to the process cwd.
+/// Test: Indirectly via `list_agents_*` and `patch_agent_*` route tests.
+pub(super) fn agents_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(".trusty-agents/agents")
+}
+
 /// `GET /api/health` — liveness + version probe.
 pub(super) async fn health() -> Json<HealthBody> {
     Json(HealthBody {
