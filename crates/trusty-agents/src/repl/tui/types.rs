@@ -257,6 +257,24 @@ pub struct ReplApp {
     /// input buffer (legacy free-type behavior).
     /// Test: `inline_choices_switch_context_dispatches_submit`.
     pub choices_context: Option<String>,
+    /// Whether Up/Down has already navigated the *current* `choices` list.
+    ///
+    /// Why (#3346): `handle_key` reinterprets a first Up/Down over a stale,
+    /// untagged `detect_choices` list (`choices_context.is_none()`, not a
+    /// live slash completion) as shell-style history recall instead of
+    /// picker navigation when the input buffer is empty — see
+    /// `should_navigate_picker` in `keys.rs`. Once the user has genuinely
+    /// navigated such a list, every further Up/Down must keep navigating
+    /// regardless of the buffer; this flag is that "already navigating"
+    /// carve-out. It does NOT gate `/switch` or live slash-completion
+    /// pickers — those are always actively driven by arrow keys and always
+    /// navigate regardless of this flag (see `should_navigate_picker`).
+    /// What: Reset to `false` every time `choices` is freshly populated or
+    /// cleared (mirrors the `choice_cursor = 0` reset sites). Set to `true`
+    /// by `handle_key` the moment Up/Down actually moves `choice_cursor`.
+    /// Test: `repl_app_first_up_over_stale_untagged_picker_recalls_history`,
+    /// `repl_app_first_down_over_stale_untagged_picker_recalls_history`.
+    pub choices_navigated: bool,
     /// Synthetic submission queued by `handle_key` (e.g. when Enter on a
     /// `choices_context = "switch"` list selects a persona). Drained by
     /// the event loop after `handle_key` returns and translated into a
