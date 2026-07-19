@@ -19,8 +19,38 @@
 //! Test: `origin_guard_tests` covers no-Origin → allowed, loopback/same-origin →
 //! allowed, and cross-origin → rejected.
 
+use axum::Router;
 use axum::http::HeaderMap;
 use axum::http::header::{HOST, ORIGIN};
+
+/// Apply the shared router-wide same-origin write guard to the daemon router
+/// (#3304).
+///
+/// Why: before #3304 only the `coordinator_chat` handler was origin-checked (via
+/// [`origin_allowed`], above); every OTHER destructive route (`POST /sessions`,
+/// `DELETE /sessions/{id}`, `POST /api/v1/control/sessions/{id}/stop`,
+/// managed-session mutation, `/claude-config/apply`, `/pair/*`) was exposed to
+/// cross-origin CSRF. Layering the shared `trusty_common` guard router-wide (a
+/// plain `.layer()` AFTER `with_state`, applied at the serve site in
+/// `daemon::mod` so it wraps every route incl. merged sub-routers — the #3268
+/// lesson) covers them all. `coordinator_chat` KEEPS its own finer-grained
+/// [`origin_allowed`] check and `/rpc` KEEPS its loopback `ConnectInfo` gate —
+/// belt and braces. Only the guard is layered (NOT `with_standard_middleware`)
+/// so the daemon's existing no-CORS posture is unchanged.
+/// What: wraps `router` with `guard_write_origin` carrying `self_origins`. The
+/// primary (loopback) listener passes `SelfOrigins::default()`; the secondary
+/// Tailscale listener passes its resolved bind address so its `/web` surface can
+/// POST to itself (#3269). Method-gated + fail-open-on-missing-Origin, so GET
+/// reads, SSE streams, the `serve --stdio` bridge, `curl`, and the TUI/Telegram
+/// adapters are unaffected.
+/// Test: `origin_guard_router_tests` (cross-origin `POST /sessions` → 403;
+/// loopback/missing-Origin → allowed; GET read unaffected).
+pub fn guard_router(router: Router, self_origins: trusty_common::server::SelfOrigins) -> Router {
+    router.layer(axum::middleware::from_fn_with_state(
+        self_origins,
+        trusty_common::server::guard_write_origin,
+    ))
+}
 
 /// Decide whether a request to the action-capable chat endpoint is allowed by the
 /// CSRF/origin guard.
@@ -239,3 +269,6 @@ mod origin_guard_tests {
         )));
     }
 }
+
+#[cfg(test)]
+mod origin_guard_router_tests;

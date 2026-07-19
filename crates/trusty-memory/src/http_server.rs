@@ -267,7 +267,16 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     // the router below.
     let bm25_supervisor = state.bm25_supervisor.clone();
 
-    let app = crate::web::router()
+    // #3304: trust the resolved bind address as a self-origin (non-loopback
+    // binds only; `from_bind_addrs` drops loopback) for the router-wide write
+    // guard, so a non-loopback bind still serves its own write UI. `/sse` is a
+    // GET (safe method) so it is unaffected by the guard whether or not it sits
+    // outside the guarded layer.
+    let self_origins = match local {
+        Some(a) => trusty_common::server::SelfOrigins::from_bind_addrs(&[a]),
+        None => trusty_common::server::SelfOrigins::default(),
+    };
+    let app = crate::web::router_with_self_origins(self_origins)
         .route("/sse", get(sse_handler))
         .with_state(state);
 

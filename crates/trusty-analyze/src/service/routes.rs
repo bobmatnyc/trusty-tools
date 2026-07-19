@@ -46,6 +46,30 @@ use super::ui;
 /// the returned router; the middleware composition is smoke-tested
 /// transitively (any layering regression breaks the suite).
 pub fn build_router(state: AnalyzerAppState) -> Router {
+    // #3304: loopback-only default. `serve` calls
+    // `build_router_with_self_origins` with the resolved bind address; every
+    // test keeps this entry point.
+    build_router_with_self_origins(state, trusty_common::server::SelfOrigins::default())
+}
+
+/// Build the router, additionally trusting the given bind-derived, non-loopback
+/// self-origins for the router-wide same-origin write guard (#3304).
+///
+/// Why: the analyzer exposes destructive write routes (`POST /indexes/{id}/scip`,
+/// `POST /review`, `POST /analyze/deep`, `POST /facts`, `DELETE /facts/{id}`,
+/// GitHub webhook) behind the permissive-CORS shared stack; without a
+/// same-origin guard a page the operator visits could drive them cross-origin
+/// (CSRF). This is the guarded entry point; `build_router` delegates here with a
+/// loopback-only allowlist so existing callers/tests are unchanged. `serve`
+/// passes its resolved bind address so a non-loopback bind trusts itself (#3269).
+/// What: identical router to `build_router`, except the final middleware is
+/// `with_guarded_middleware` (guard + standard stack).
+/// Test: `service::tests_review` guard tests (cross-origin `POST /review` →
+/// 403; loopback/missing-Origin → allowed; GET read unaffected).
+pub fn build_router_with_self_origins(
+    state: AnalyzerAppState,
+    self_origins: trusty_common::server::SelfOrigins,
+) -> Router {
     let router = Router::new()
         .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/health", get(health))
@@ -98,7 +122,9 @@ pub fn build_router(state: AnalyzerAppState) -> Router {
         .route("/ui/", get(ui::ui_index_handler))
         .route("/ui/{*path}", get(ui::ui_asset_handler))
         .with_state(Arc::new(state));
-    trusty_common::server::with_standard_middleware(router)
+    // #3304: router-wide same-origin write guard, applied AFTER all route
+    // registration so every destructive route is covered.
+    trusty_common::server::with_guarded_middleware(router, self_origins)
 }
 
 /// Bind to `start_port` (or auto-pick a free port walking forward) and run
@@ -119,7 +145,10 @@ pub async fn serve(state: AnalyzerAppState, start_port: u16) -> Result<()> {
     let actual = listener.local_addr()?;
     trusty_common::write_daemon_addr("trusty-analyze", &actual.to_string())?;
     tracing::info!("trusty-analyze listening on http://{actual}");
-    let app = build_router(state);
+    // #3304: trust the resolved bind address as a self-origin (non-loopback
+    // binds only; `from_bind_addrs` drops loopback) for the write guard.
+    let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[actual]);
+    let app = build_router_with_self_origins(state, self_origins);
     // Why (issue #534): without `with_graceful_shutdown`, SIGTERM from
     // `launchctl bootout` kills the process before any cleanup code in the
     // caller (PID file removal, supervisor shutdown) can run, and in-flight

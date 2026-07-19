@@ -48,6 +48,7 @@ mod chat_tests;
 mod dream_sse_tests;
 mod health_tests;
 mod kg_tests;
+mod origin_guard_tests;
 mod palace_crud_tests;
 mod palace_tests;
 mod prompt_tests;

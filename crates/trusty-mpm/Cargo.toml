@@ -187,6 +187,11 @@ trusty-common = { workspace = true, features = [
     # (`search_index::register_project_index` → `trusty_common::search_index`).
     # Promoted out of trusty-mpm so trusty-code can reuse the ONE implementation.
     "search-index",
+    # #3304: the shared router-wide same-origin write guard
+    # (`trusty_common::server::guard_write_origin` / `SelfOrigins`) applied to the
+    # daemon router in `daemon/api.rs`. Already enabled as a dev-dependency below;
+    # promoted to the main dep so the guard compiles into the production daemon.
+    "axum-server",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by

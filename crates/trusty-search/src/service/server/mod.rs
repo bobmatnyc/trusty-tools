@@ -42,6 +42,8 @@ mod tests_2336;
 #[cfg(test)]
 mod tests_2984;
 #[cfg(test)]
+mod tests_3304;
+#[cfg(test)]
 mod tests_829;
 #[cfg(test)]
 mod tests_chunks;
@@ -141,6 +143,32 @@ use self::health::upgrade_handler;
 ///
 /// Test: each handler test builds the router via this function using `oneshot`.
 pub fn build_router(state: SearchAppState) -> Router {
+    // #3304: loopback-only default. The daemon startup path
+    // (`service::daemon`) calls `build_router_with_self_origins` with the
+    // actually-resolved bind address so a non-loopback (Tailscale) bind still
+    // trusts its own served origin; every existing test keeps this entry point.
+    build_router_with_self_origins(state, trusty_common::server::SelfOrigins::default())
+}
+
+/// Build the router, additionally trusting the given bind-derived, non-loopback
+/// self-origins for the router-wide same-origin write guard (#3304).
+///
+/// Why: the daemon serves destructive write routes (`POST /admin/stop`,
+/// `DELETE /indexes/{id}`, `POST /indexes`, `POST /upgrade`, reindex) behind the
+/// permissive-CORS shared stack; without a same-origin guard any page the
+/// operator visits could drive them cross-origin (CSRF). This is the guarded
+/// entry point; `build_router` delegates here with an empty (loopback-only)
+/// allowlist so existing callers/tests are unchanged. The daemon startup path
+/// passes its resolved bind address so a non-loopback bind trusts itself (#3269).
+/// What: identical router to `build_router`, except the final middleware is
+/// `with_guarded_middleware` (guard + standard stack) instead of
+/// `with_standard_middleware`.
+/// Test: `admin_stop_rejects_cross_origin_write` / `_allows_loopback_write` /
+/// `_allows_missing_origin` / `read_route_allows_cross_origin` in `tests_2984`.
+pub fn build_router_with_self_origins(
+    state: SearchAppState,
+    self_origins: trusty_common::server::SelfOrigins,
+) -> Router {
     use crate::service::query_timeout::{apply_query_timeout, QueryTimeoutConfig};
     use crate::service::ui::{
         chat_handler, list_chat_providers, ui_asset_handler, ui_index_handler,
@@ -254,5 +282,7 @@ pub fn build_router(state: SearchAppState) -> Router {
         crate::service::metrics::request_metrics_middleware,
     ));
 
-    trusty_common::server::with_standard_middleware(router)
+    // #3304: router-wide same-origin write guard, applied AFTER all route
+    // registration so every destructive route (incl. any merged in) is covered.
+    trusty_common::server::with_guarded_middleware(router, self_origins)
 }
