@@ -68,26 +68,110 @@ fn tmux_pane_pid(session_name: &str) -> Option<u32> {
     text.trim().parse::<u32>().ok()
 }
 
-/// Find a direct child of `shell_pid` whose command name contains `claude`.
+/// Find the `claude` process under `shell_pid`, one hop through the #2997
+/// disclaim wrapper if present.
 ///
-/// Why: after `send-keys "claude"`, the `claude` process is a child of the
-/// pane's shell; matching by command name avoids picking up unrelated children.
-/// What: runs `pgrep -P <shell_pid>` and returns the first child whose process
-/// name (`/proc/<pid>/comm` on Linux, `ps -p <pid> -o comm=` on macOS) contains
-/// `claude`.
-/// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
+/// Why: after `send-keys "claude"`, `claude` is normally a DIRECT child of the
+/// pane's shell. But on macOS (issue #2997) the pane routes `claude` through
+/// the `internal-spawn-disclaimed` shim so it can be `posix_spawn`ed with TCC
+/// responsibility disclaimed — which makes `claude` a GRANDCHILD (`shell →
+/// tm internal-spawn-disclaimed → claude`), not a direct child. A direct-child
+/// `pgrep -P` would then deterministically miss it, breaking every downstream
+/// consumer of the resolved PID (runtime-ready gate, `--task` injection,
+/// graceful-stop SIGTERM, daemon PID capture). So after the direct-child scan
+/// fails, walk exactly one hop through any child that is our wrapper (matched
+/// by the unique [`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`]
+/// token — deterministic, not a fragile name heuristic).
+/// What: `pgrep -P <shell_pid>`; return the first direct child whose process
+/// name contains `claude`; else, for each direct child that
+/// [`is_disclaim_wrapper`] identifies, scan ITS children for `claude` and
+/// return the first found. On non-macOS (and with the disclaim disabled) no
+/// wrapper is ever present, so this reduces to the original direct-child scan.
+/// Test: `find_claude_pid_returns_none_for_nonexistent_session`;
+/// `claude_pid_resolves_through_disclaim_wrapper` (`#[ignore]`, real tmux).
 fn claude_child_of(shell_pid: u32) -> Option<u32> {
-    let output = Command::new("pgrep")
-        .args(["-P", &shell_pid.to_string()])
+    let children = child_pids_of(shell_pid);
+    // Direct child (the pre-#2997 / non-macOS / disclaim-disabled shape).
+    if let Some(pid) = children
+        .iter()
+        .copied()
+        .find(|&pid| process_name_contains_claude(pid))
+    {
+        return Some(pid);
+    }
+    // #2997: walk one hop through the disclaim wrapper to reach the grandchild.
+    children
+        .into_iter()
+        .filter(|&child| is_disclaim_wrapper(child))
+        .find_map(|wrapper| {
+            child_pids_of(wrapper)
+                .into_iter()
+                .find(|&pid| process_name_contains_claude(pid))
+        })
+}
+
+/// Return the PIDs of the direct children of `pid` via `pgrep -P`.
+///
+/// Why: both the direct-child `claude` scan and the one-hop-through-the-wrapper
+/// scan in [`claude_child_of`] need a process's child list; factoring it keeps
+/// the two-level walk readable.
+/// What: runs `pgrep -P <pid>` and parses one PID per line; an unavailable
+/// `pgrep`, a non-zero exit (no children), or unparsable output all yield an
+/// empty vector.
+/// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
+fn child_pids_of(pid: u32) -> Vec<u32> {
+    let Ok(output) = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// Whether `pid` is the #2997 disclaim-exec shim (`tm/trusty-mpm
+/// internal-spawn-disclaimed …`).
+///
+/// Why: [`claude_child_of`] must know which of the pane shell's children is the
+/// wrapper to walk one hop through it. Keying on the unique subcommand token
+/// (rather than the process name `tm`, which could match an unrelated `tm`
+/// child) makes the match deterministic and self-documenting.
+/// What: reads the process's full argv ([`process_args`]) and tests for the
+/// [`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`] token.
+/// Test: `claude_pid_resolves_through_disclaim_wrapper` (`#[ignore]`).
+fn is_disclaim_wrapper(pid: u32) -> bool {
+    process_args(pid)
+        .is_some_and(|args| args.contains(crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND))
+}
+
+/// Read process `pid`'s full command line (argv joined by spaces).
+///
+/// Why: [`is_disclaim_wrapper`] needs the argv, not just the short `comm`
+/// name, to see the `internal-spawn-disclaimed` subcommand token.
+/// What: reads `/proc/<pid>/cmdline` (NUL-separated → spaces) on Linux, else
+/// `ps -p <pid> -o args=` (the macOS path). `None` on any lookup failure.
+/// Test: exercised via `claude_pid_resolves_through_disclaim_wrapper`.
+fn process_args(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            return Some(cmdline.replace('\0', " "));
+        }
+    }
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .find(|&pid| process_name_contains_claude(pid))
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Check whether process `pid`'s command name contains `claude`.
@@ -199,5 +283,127 @@ mod tests {
     fn process_name_is_claude_for_dead_pid_is_false() {
         // A non-existent PID can never be a live `claude` process.
         assert!(!process_name_is_claude(u32::MAX));
+    }
+
+    /// Cheap, always-run sanity check for the process-tree helpers the #2997
+    /// one-hop walk is built from ([`child_pids_of`], [`is_disclaim_wrapper`],
+    /// [`process_args`]) against a REAL spawned child — no tmux needed.
+    ///
+    /// Why: the ignored live test below needs a real tmux + macOS; this guards
+    /// the helpers in ordinary CI so a regression in the child-listing / argv
+    /// read is caught without the heavier harness.
+    #[test]
+    fn tree_helpers_see_a_real_child_and_reject_a_non_wrapper() {
+        use std::process::Stdio;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let cpid = child.id();
+
+        // child_pids_of lists the freshly spawned direct child.
+        assert!(
+            child_pids_of(std::process::id()).contains(&cpid),
+            "child_pids_of must include the spawned sleep pid {cpid}"
+        );
+        // A plain `sleep` carries no disclaim token → not the wrapper.
+        assert!(
+            !is_disclaim_wrapper(cpid),
+            "a bare sleep is not the wrapper"
+        );
+        // Its argv is readable and mentions the program.
+        assert!(
+            process_args(cpid).unwrap_or_default().contains("sleep"),
+            "process_args must read the child's argv"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Live end-to-end proof that PID discovery walks one hop through the
+    /// #2997 disclaim wrapper (the class the pure string tests cannot catch).
+    ///
+    /// Reconstructs the exact wrapped pane topology in a real tmux session:
+    /// `pane sh → <sh whose argv carries the internal-spawn-disclaimed token>
+    /// → <a process `ps` reports as `claude`>`. The middle `sh` SPAWNS
+    /// (backgrounds) the fake claude and `wait`s — mirroring the real shim's
+    /// posix_spawn+reap, so the fake claude is a GRANDCHILD of the pane's
+    /// process exactly as the real one is; `find_claude_pid_in_tmux` must
+    /// resolve that grandchild through the wrapper.
+    ///
+    /// The session is created with the command inline (not `send-keys`, which
+    /// races zsh's line-editor startup) on the DEFAULT tmux socket (so the
+    /// production `find_claude_pid_in_tmux`, which shells out to a bare `tmux`,
+    /// can see it); cleanup kills only this session, never the server. The fake
+    /// `claude` is a SYMLINK to `/bin/sleep` — a copy would be SIGKILLed by
+    /// macOS AMFI as an unsigned clone of a SIP binary, whereas the symlink
+    /// execs the real signed `sleep` while `ps -o comm=` still reports the
+    /// `claude` path.
+    ///
+    /// macOS-gated + `#[ignore]`: the disclaim wrapper only ever exists on
+    /// macOS, and the symlink-`comm` trick is macOS-specific. Run with
+    /// `cargo test -p trusty-mpm -- --include-ignored`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn claude_pid_resolves_through_disclaim_wrapper() {
+        if Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // A process `ps -o comm=` reports as `claude`: a symlink to /bin/sleep.
+        std::os::unix::fs::symlink("/bin/sleep", dir.join("claude")).unwrap();
+        // wrap.sh carries the token in ITS argv and SPAWNS claude (bg + wait,
+        // not exec) → claude is a grandchild.
+        let wrap = dir.join("wrap.sh");
+        std::fs::write(
+            &wrap,
+            format!("#!/bin/sh\n\"{}/claude\" 60 &\nwait\n", dir.display()),
+        )
+        .unwrap();
+        // drv.sh is the pane's process; it SPAWNS wrap.sh (bg + wait) so wrap
+        // sits one level below the pane process, forcing the one-hop walk.
+        let drv = dir.join("drv.sh");
+        std::fs::write(
+            &drv,
+            format!(
+                "#!/bin/sh\nsh \"{}\" {} &\nwait\n",
+                wrap.display(),
+                crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND
+            ),
+        )
+        .unwrap();
+
+        let session = format!("tmpm-disclaim-pid-{}", std::process::id());
+        let tmux = |args: &[&str]| Command::new("tmux").args(args).status();
+        let _ = tmux(&["kill-session", "-t", &session]);
+        tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            &format!("sh {}", drv.display()),
+        ])
+        .unwrap();
+
+        let pid = find_claude_pid_in_tmux(&session, 25, Duration::from_millis(200));
+        // Verify the resolved pid IS the claude grandchild WHILE the session is
+        // still alive — kill-session below tears down the whole tree, so this
+        // check must precede cleanup.
+        let named_claude = pid.map(process_name_is_claude);
+        let _ = tmux(&["kill-session", "-t", &session]);
+
+        let pid = pid.expect("claude pid must resolve through the disclaim wrapper");
+        assert_eq!(
+            named_claude,
+            Some(true),
+            "resolved pid {pid} must be the fake claude grandchild reached via the wrapper hop"
+        );
     }
 }

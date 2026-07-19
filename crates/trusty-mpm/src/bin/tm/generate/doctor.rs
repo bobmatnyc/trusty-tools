@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// `doctor_checks_match_run_doctor_names`, which fails the test suite the
 /// moment `run_doctor`'s actual check set diverges from this list.
 /// Test: `doctor_checks_match_run_doctor_names`.
-pub(crate) const DOCTOR_CHECKS: [(&str, &str); 18] = [
+pub(crate) const DOCTOR_CHECKS: [(&str, &str); 19] = [
     (
         "instructions",
         "Framework instructions deployed and non-empty for the target project.",
@@ -102,6 +102,10 @@ pub(crate) const DOCTOR_CHECKS: [(&str, &str); 18] = [
     (
         "hooks_foreign_conflict",
         "Informational: warns when a project's `.claude/settings*.json` carries foreign (claude-mpm) hook entries that would fire inside a tm session — never auto-removed (issue #2940).",
+    ),
+    (
+        "tcc_taint",
+        "macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997).",
     ),
 ];
 

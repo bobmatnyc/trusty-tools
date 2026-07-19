@@ -870,7 +870,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                 tmux_name,
                 &spawn_command(
                     cwd,
-                    &claude_bin,
+                    // #2997: route the pane's `claude` through the disclaim-exec
+                    // wrapper so tccd attributes its RemovableVolumes/App-Data
+                    // access to Claude Code itself, not the shared tmux server
+                    // that forks this pane's shell. No-op off macOS / under
+                    // TM_DISABLE_SPAWN_DISCLAIM (`claude_bin` stays unwrapped for
+                    // the debug log above).
+                    &crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin),
                     config_dir.as_deref(),
                     session_id,
                     prompt_file.as_deref(),
@@ -1002,7 +1008,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         );
         let cmd = resume_command(
             cwd,
-            &claude_bin,
+            // #2997: same disclaim-exec wrapper as `spawn` — every resumed /
+            // guided-resume / crash-recovery pane must disclaim `claude` off the
+            // shared tmux server too, else exactly those sessions keep
+            // re-prompting.
+            &crate::core::spawn_disclaim::disclaim_pane_command(&claude_bin),
             config_dir.as_deref(),
             effective_id,
             prior,

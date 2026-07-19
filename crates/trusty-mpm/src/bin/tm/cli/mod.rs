@@ -176,6 +176,35 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+    /// [INTERNAL] Spawn a program with macOS TCC responsibility disclaimed
+    /// (issue #2997) — not for direct use.
+    ///
+    /// Why: trusty-mpm's managed sessions launch `claude` by typing a shell
+    /// command into a tmux pane, and the pane's shell is forked by the ONE
+    /// long-lived, shared tmux server. A `posix_spawn` disclaim attribute set
+    /// by the daemon can't reach that `claude`, so tccd walks its responsibility
+    /// chain up to the shared tmux server and blames it for the pane's
+    /// RemovableVolumes/App-Data access (issue #2997). This hidden subcommand is
+    /// the tm-owned process the pane routes `claude` through: it re-`posix_spawn`s
+    /// `claude` WITH the disclaim attribute set (reusing the #3037
+    /// `disclaimed_status` seam), making `claude` its OWN responsible process so
+    /// the tccd walk stops at Claude Code's stable code identity instead of the
+    /// tmux server. Hidden because it is an internal launch shim
+    /// ([`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`]), never a
+    /// user-facing verb.
+    /// What: spawns `argv[0]` with `argv[1..]` via
+    /// [`trusty_mpm::core::spawn_disclaim::disclaimed_status`] (inherited stdio),
+    /// waits, and exits with the child's status code. On non-macOS the disclaim
+    /// is a no-op pass-through to a plain `Command::status()`.
+    /// Test: `cli_parses_internal_spawn_disclaimed` (in `tests.rs`) covers the
+    /// trailing-argv parse; the spawn behaviour is covered by
+    /// `crate::core::spawn_disclaim`'s `disclaimed_status_*` tests.
+    #[command(name = "internal-spawn-disclaimed", hide = true)]
+    InternalSpawnDisclaimed {
+        /// The program to launch, followed by its arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        argv: Vec<String>,
+    },
     /// Manage the project registry (registry B) and its Deliverable/Milestone
     /// ledger.
     ///

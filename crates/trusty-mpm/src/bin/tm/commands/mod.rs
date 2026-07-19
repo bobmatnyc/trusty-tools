@@ -54,6 +54,7 @@ pub(crate) mod session;
 pub(crate) mod session_picker;
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
+pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 pub(crate) mod statusline;
 pub(crate) mod supervisor;

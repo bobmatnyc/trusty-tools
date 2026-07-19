@@ -72,6 +72,18 @@ fn cli_parses_status() {
 }
 
 #[test]
+fn cli_parses_internal_spawn_disclaimed() {
+    // #2997: the hidden pane shim collects `<program> <args...>` as a trailing
+    // var-arg, including hyphen-led flags — exactly the pane-command shape.
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "internal-spawn-disclaimed", "claude", "-p"]).unwrap();
+    let Some(Command::InternalSpawnDisclaimed { argv }) = cli.command else {
+        panic!("expected internal-spawn-disclaimed");
+    };
+    assert_eq!(argv, ["claude", "-p"]);
+}
+
+#[test]
 fn cli_parses_mcp_add() {
     // stdio (default transport): `tm mcp add echo -- echo hi`
     let cli =

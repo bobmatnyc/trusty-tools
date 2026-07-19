@@ -193,13 +193,17 @@ async fn start_session_in_place(
             .map(|output| output.status);
     match new_session {
         Ok(status) if status.success() => {
+            // #2997: disclaim the pane's `claude` off the shared tmux server
+            // (same wrapper the daemon + `tm launch`/`connect` paths use).
+            // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
+            let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&format!(
+                "claude {}",
+                trusty_mpm::core::model_inject::PERMISSION_MODE_FLAG
+            ));
             let send = trusty_mpm::core::tmux::send_line(
                 None,
                 &trusty_mpm::core::tmux::TmuxTarget::session(&body.name),
-                &format!(
-                    "claude {}",
-                    trusty_mpm::core::model_inject::PERMISSION_MODE_FLAG
-                ),
+                &claude_cmd,
             )
             .map(|output| output.status);
             match send {

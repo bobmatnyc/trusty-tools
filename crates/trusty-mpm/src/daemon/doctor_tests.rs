@@ -112,7 +112,7 @@ async fn agents_check_ok_when_managed_workspace_roster_populated() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_eighteen_checks() {
+async fn run_doctor_produces_nineteen_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -120,11 +120,12 @@ async fn run_doctor_produces_eighteen_checks() {
     // into `agent_skills` + `agent_skills_prose_hints` (fourteen → fifteen);
     // issue #2940 adds `hooks_contamination` + `hooks_foreign_conflict`
     // (fifteen → seventeen); issue #2333 adds `output_style_staleness`
-    // (seventeen → eighteen).
+    // (seventeen → eighteen); issue #2997 adds `tcc_taint` (eighteen →
+    // nineteen).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[]).await;
-    assert_eq!(report.checks.len(), 18);
+    assert_eq!(report.checks.len(), 19);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -146,7 +147,8 @@ async fn run_doctor_produces_eighteen_checks() {
             "gh_account",
             "oauth_token",
             "hooks_contamination",
-            "hooks_foreign_conflict"
+            "hooks_foreign_conflict",
+            "tcc_taint"
         ]
     );
 }
