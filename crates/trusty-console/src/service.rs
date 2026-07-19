@@ -297,6 +297,13 @@ mod tests {
                 7890,
                 "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
             ),
+            (
+                // #3331: trusty-agents joined the proxied-sibling set; its API
+                // server default port must not collide with the console's.
+                "trusty-agents",
+                8080,
+                "trusty-agents/src/runtime/mode_dispatch.rs (--port default 8080)",
+            ),
         ];
         for (binary, port, source) in known_siblings {
             assert_ne!(

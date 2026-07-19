@@ -213,7 +213,13 @@ pub(super) async fn dispatch_cli_mode(
             .clone()
             .or_else(|| crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN").ok())
             .filter(|s| !s.is_empty());
+        // #3329: default to loopback; `--bind` is the explicit non-loopback
+        // opt-in (which serve_with_config gates on a token being present).
+        let bind = cli
+            .bind
+            .unwrap_or_else(|| std::net::Ipv4Addr::LOCALHOST.into());
         return crate::api::server::serve_with_config(crate::api::server::ApiConfig {
+            bind,
             port,
             token,
         })

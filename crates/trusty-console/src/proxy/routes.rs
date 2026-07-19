@@ -59,6 +59,12 @@ fn full_id(service_key: &str) -> Option<&'static str> {
         // forward requests to the live trusty-mpm HTTP daemon via its base URL
         // resolved from the standard http_addr discovery file.
         "mpm" => Some("trusty-mpm"),
+        // #3331: agents added so the trusty-agents API surface is reachable via
+        // `/api/agents/*`. Under the loopback-only doctrine (#3328) the agents
+        // daemon binds 127.0.0.1 by default, so this console proxy is the
+        // intended remote path to it — resolved from the same `http_addr`
+        // discovery file the other entries use (see `detect::AgentsConnector`).
+        "agents" => Some("trusty-agents"),
         _ => None,
     }
 }
@@ -531,6 +537,8 @@ mod tests {
         assert_eq!(full_id("review"), Some("trusty-review"));
         // #1849 Phase 1: mpm must be in the allowlist.
         assert_eq!(full_id("mpm"), Some("trusty-mpm"));
+        // #3331: agents must be in the allowlist so `/api/agents/*` proxies.
+        assert_eq!(full_id("agents"), Some("trusty-agents"));
         assert_eq!(full_id("unknown"), None);
     }
 

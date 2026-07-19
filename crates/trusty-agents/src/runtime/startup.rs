@@ -272,7 +272,27 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                     crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN").ok()
                 })
                 .filter(|s| !s.is_empty());
-            api::server::serve_with_config(api::server::ApiConfig { port, token }).await?;
+            // #3329: `--bind <addr>` / `--bind=<addr>`; default loopback. A
+            // non-loopback bind without a token is refused inside
+            // serve_with_config (loopback-only doctrine).
+            let mut bind: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+            let mut iter = raw_args.iter();
+            while let Some(a) = iter.next() {
+                if a == "--bind"
+                    && let Some(v) = iter.next()
+                    && let Ok(ip) = v.parse::<std::net::IpAddr>()
+                {
+                    bind = ip;
+                    break;
+                }
+                if let Some(rest) = a.strip_prefix("--bind=")
+                    && let Ok(ip) = rest.parse::<std::net::IpAddr>()
+                {
+                    bind = ip;
+                    break;
+                }
+            }
+            api::server::serve_with_config(api::server::ApiConfig { bind, port, token }).await?;
             return Ok(false);
         }
     }

@@ -205,16 +205,11 @@ mod tests {
     use std::fs;
     use std::net::TcpListener;
     use tempfile::TempDir;
+    // #3331: use the shared `detect::ENV_LOCK` so these env-mutating tests
+    // serialise against the sibling agents-connector tests, which also point
+    // `resolve_data_dir` at a tempdir via the same process-global env var.
+    use super::super::ENV_LOCK;
     use trusty_common::DATA_DIR_OVERRIDE_ENV;
-
-    /// Mutex serialising tests that mutate `TRUSTY_DATA_DIR_OVERRIDE`.
-    ///
-    /// Why: concurrent tests that set the same env var race with each other
-    /// and with trusty-common's own test suite when run in the same binary.
-    /// Sharing one lock prevents spurious env-var clobber failures.
-    /// What: a `std::sync::Mutex<()>` locked by every env-mutating test.
-    /// Test: used by the tests in this module; not itself a test.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Why: the TCP probe needs a bare host:port; the parser must strip the TOML
     /// quoting and the `http://` scheme.

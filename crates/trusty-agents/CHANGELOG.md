@@ -7,6 +7,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **Loopback-only doctrine (#3329):** the HTTP API server (`--api`/`--serve`)
+  now binds `127.0.0.1` by default instead of `0.0.0.0`. A non-loopback bind is
+  an explicit opt-in via the new `--bind <addr>` flag, and the server **refuses
+  to start** on a non-loopback interface unless an API token is set
+  (`--api-token` / `TAGENT_API_TOKEN`) — the error points operators at the
+  trusty-console proxy (`/api/agents/*`) as the intended remote path. The API
+  can spawn arbitrary subprocesses, so an unauthenticated LAN-reachable bind was
+  a real exposure. Additionally adopts the shared same-origin write guard
+  (`trusty_common::server::with_guarded_middleware`, mirroring #3317) router-wide
+  so cross-origin browser writes (CSRF) to `POST /api/task`, the `/api/tm/*`,
+  `/api/ctrl/*`, and `POST /rpc` surfaces are rejected with 403; GET reads, the
+  `/api/events` SSE stream, and same-origin/loopback writes are unaffected. The
+  agents-ui webview keeps working: in Tauri desktop mode writes travel over
+  Tauri IPC (never HTTP), and in browser mode the SPA is served same-origin
+  loopback. Replaces the crate-local CORS/compression/trace stack with the
+  shared standard middleware so trusty-agents no longer drifts from the sibling
+  trusty-* daemons.
+
+### Added
+
+- The API server now writes the standard `http_addr` discovery file on bind
+  (and removes it on graceful shutdown), so the trusty-console reverse proxy can
+  resolve the agents surface at `/api/agents/*` (#3331).
+
 ### Fixed
 
 - Committed `ui/pnpm-lock.yaml` (architecture-review tranche 0): the file was gitignored with a comment claiming the repo-wide detect-secrets pre-commit hook flags npm integrity hashes, but the root `.pre-commit-config.yaml` already excludes `.*pnpm-lock\.yaml` (only the crate-scoped `crates/trusty-agents/.pre-commit-config.yaml`, which governs Python tooling and is unrelated to the JS UI, was missing that exclusion) and no CI workflow runs detect-secrets at all. Every other Tauri UI in the workspace (`trusty-mpm-gui`, `trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-code-gui`, `trusty-console`) already commits its own subdir-scoped `pnpm-lock.yaml`; `trusty-agents/ui` was the only outlier. Removed the stale `.gitignore` entry and regenerated the lockfile with `pnpm install --lockfile-only`.
