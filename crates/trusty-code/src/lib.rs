@@ -260,6 +260,21 @@ pub mod project_context;
 /// Test: `binding::tests::*`.
 pub mod binding;
 
+/// Workstream domain model + flat JSON persistence + boot reconciliation
+/// (DOC-48 Phase 1A, issue #3293).
+///
+/// Why: DOC-39 §4B's Workstream domain object had no daemon-owned identity —
+/// a restart silently discarded the in-memory `SessionRegistry`'s workstream
+/// grouping. This module gives it one: a serializable domain object plus a
+/// single flat, atomically-written JSON store per project.
+/// What: `WorkstreamId`, `WorkstreamState` (computed, never persisted),
+/// `Workstream` (the domain record); `WorkstreamStore` (load/save/create/get/
+/// list, the `set_active` persistence primitive, and boot reconciliation).
+/// Activation-lock RPC semantics, the RPC/REST/CLI surface, and SSE
+/// aggregation are out of scope here (#3294–#3297).
+/// Test: `cargo test -p trusty-code workstreams::`.
+pub mod workstreams;
+
 // ── Phase 4 orchestration layer (per #1028) ──
 
 /// Multi-turn agent loop driving an LLM through tool calls to completion.

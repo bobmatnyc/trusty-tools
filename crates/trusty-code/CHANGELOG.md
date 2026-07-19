@@ -10,6 +10,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workstream domain model + flat JSON storage + boot reconciliation
+  (issue #3293, DOC-48 §2/§3, Phase 1A foundation for epic #3292).** New
+  `workstreams` module: `Workstream`/`WorkstreamId`/`WorkstreamState` (state
+  is computed, never persisted — active iff its id equals the store's
+  `active_workstream_id` pointer) and `WorkstreamStore`, an atomic
+  temp+rename flat-JSON store at `~/.trusty-code/workstreams-{slug}-{hash}.json`
+  keyed off the daemon's `ProjectBinding`. `reconcile_on_boot` restores the
+  persisted active pointer on restart and is strictly non-destructive — no
+  workstream record is ever deleted, and a pointer whose target vanished is
+  simply cleared. Activation-lock RPC semantics, the RPC/REST surface, the
+  CLI, and SSE aggregation are follow-up tickets (#3294–#3297) building on
+  this foundation.
 - **Per-call project binding on `task.run` (issue #3178, DOC-39 §5.5 /
   AC-16.2).** `task.run` (and `POST /tasks`) now accept an optional `project`
   path, resolved through the exact same `ProjectBinding::resolve` helper
