@@ -210,6 +210,13 @@ pub fn router_with_self_origins(
         // tool surface without learning the REST routes. The REST
         // routes above remain for backwards compatibility.
         .route("/rpc", post(rpc::rpc_handler))
+        // #3304: `/sse` (a GET event stream) is registered HERE, inside the
+        // router, so it sits UNDER the guard/standard-middleware layer applied
+        // below — not chained on by `run_http_on` AFTER the layer (where axum's
+        // `layer` contract would leave it middleware-less). It is a safe GET so
+        // the guard never blocks it; placing it here keeps "router-wide after
+        // all registration" literally true and avoids the layering footgun.
+        .route("/sse", get(crate::http_server::sse_handler))
         .fallback(static_assets::static_handler);
 
     // #3304: router-wide same-origin write guard, applied AFTER all route

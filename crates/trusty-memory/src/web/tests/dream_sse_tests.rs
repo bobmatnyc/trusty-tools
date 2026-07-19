@@ -58,11 +58,12 @@ async fn sse_broadcast_emits_palace_created() {
 /// Test: `cargo test -p trusty-memory-mcp sse_endpoint_emits_connected_frame`.
 #[tokio::test]
 async fn sse_endpoint_emits_connected_frame() {
-    use axum::routing::get;
+    // #3304: `/sse` is now registered inside `router()` (before the guard
+    // layer), so the test no longer adds it — doing so would panic on a
+    // duplicate route. This also exercises the real wired shape: `/sse` under
+    // the standard middleware + write guard (it is a safe GET, so unblocked).
     let state = test_state();
-    let app = router()
-        .route("/sse", get(crate::sse_handler))
-        .with_state(state);
+    let app = router().with_state(state);
     let resp = app
         .oneshot(Request::builder().uri("/sse").body(Body::empty()).unwrap())
         .await
