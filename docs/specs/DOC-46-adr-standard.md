@@ -98,12 +98,14 @@ Every ADR must carry:
 
 Vetted against prior ADRs on 2026-07-19:
 
-- **ADR-0005 (Unified harness event bus):** Consistent. This ADR refines event-bus boundary per ADR-0005; no conflict.
-- **ADR-0008 (Project-identity convention):** Extends. We adopt ADR-0008's full-path slug; this ADR adds git-root marker-file identity (see ADR-0012).
-- **ADR-0003 (MSRV & edition policy):** Supersedes. This ADR replaces ADR-0003's MSRV 1.88 floor with 1.91 (driven by aws-smithy dependencies).
-- **ADR-0011 (tctl headless control plane):** Conflict(resolved). ADR-0011 restricted tctl to headless bootstrap; this ADR introduces interactive installer mode. **Resolution:** Amended ADR-0011 status to "Amended by ADR-NNNN".
+- **ADR-0097 (Hypothetical: Use X for event bus):** Consistent. This ADR refines event-bus boundary per ADR-0097; no conflict.
+- **ADR-0098 (Hypothetical: Project-identity scheme):** Extends. We adopt ADR-0098's full-path slug; this ADR adds git-root marker-file identity.
+- **ADR-0099 (Hypothetical: MSRV floor policy):** Supersedes. This ADR replaces ADR-0099's 1.88 floor with 1.91 (driven by dependency constraints).
+- **ADR-0100 (Hypothetical: Daemon lifecycle model):** Conflict(resolved). ADR-0100 restricted daemon to headless mode; this ADR introduces interactive mode. **Resolution:** Amended ADR-0100 status to "Amended by ADR-NNNN".
 
 No prior decisions contradict this choice. Summary: Consistent with existing decisions; no silent contradictions.
+
+*(Example uses fictional ADR numbers 0097–0100 to illustrate verdict codes and consequences; these are not real decisions.)*
 ```
 
 **Verdict codes:**
