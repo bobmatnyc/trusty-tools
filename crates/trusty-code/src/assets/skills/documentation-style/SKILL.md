@@ -31,17 +31,21 @@ Why/What/Test triple (or your project's equivalent) stands on its own.
 
 | Axis | Answers | Mandatory? |
 |---|---|---|
-| **Why** | What problem does this solve? What's the motivation? | Yes, on every public item |
-| **What** | What does it mechanically do? | Yes, on every public item |
-| **Test** | Where is this proven? (backtick-quoted test name(s)) | Yes, where the project enforces it |
+| **Why** | What problem does this solve? What's the motivation? | Yes for non-obvious code; lighter touch OK for trivial items |
+| **What** | What does it mechanically do? | Yes for non-obvious code; lighter touch OK for trivial items |
+| **Test** | Where is this proven? (backtick-quoted test name(s)) | Optional when adjacent test module names are self-evident; mandatory for safety/error contracts |
 | **Spec References** | Which spec section governs this, if any? | **Opt-in** — only when a real spec governs it |
 
-**Why**/**What**/**Test** are unchanged by anything below — they stay exactly
-what your project's convention already defines. **Spec References** is a
-fourth, *additive* axis: a separate block within the same doc comment,
-introduced by its own marker, never a replacement for the other three.
+**Proportionality principle:** Documentation effort scales with how surprising the
+code is. For self-evident items (obvious one-liners, trivial getters, thin facades),
+a single-line summary suffices; for API entry points and design-heavy code, the
+full Why/What/Test pattern is mandatory. **Why**/**What**/**Test** stay exactly what
+your project's convention defines when invoked — the proportionality amendment only
+gates *when* each axis is required. **Spec References** is a fourth, *additive*
+axis: a separate block within the same doc comment, introduced by its own marker,
+never a replacement for the other three.
 
-A fully-compliant Rust doc comment, all four axes present:
+**Full pattern** (API entry point with governing spec, all axes):
 
 ```rust
 /// Why: <motivation>
@@ -53,11 +57,24 @@ A fully-compliant Rust doc comment, all four axes present:
 pub fn my_function() { … }
 ```
 
+**Lighter touch** (trivial item, one-line summary sufficient):
+
+```rust
+/// Returns the caller's working directory.
+pub fn cwd(&self) -> &Path { … }
+```
+
 **Never fabricate a spec link.** Add `# Spec References` (inline) or
 `spec_refs:` (Markdown frontmatter) only when a spec genuinely governs the
 item. An item with no governing spec simply omits the block — that is the
 correct, complete state, not an oversight to "fix" by inventing a link to
 satisfy a checklist.
+
+**When to use the full pattern:** API entry points, design decisions, error
+contracts, safety/TCC behavior, cross-crate surfaces.
+**When a one-liner suffices:** Trivial getters, obvious constructors, thin
+re-exports, one-line helpers. If a competent reader's first guess is right,
+one line is enough.
 
 ## Per-Type Guides
 
@@ -106,12 +123,13 @@ economy argument is about redundancy, not about omitting the mandatory axes.
 ## Quick Checklist
 
 ```
-□ Public APIs carry Why/What/Test (or the project's equivalent triple)
+□ Non-obvious public APIs carry full Why/What/Test; trivial items get one-line summaries
 □ Spec References added only where a spec genuinely governs the item
-□ Parameters, returns, and errors documented
-□ Usage example provided where non-obvious
+□ Parameters, returns, and errors documented (where non-obvious)
+□ Usage example provided where the contract or behavior isn't self-evident
 □ File-level doc states why the file exists, not just what's in it
-□ No comment restates what the next line or the signature already shows
+□ No comment restates what the signature or a one-line summary already shows
+□ Defensive-reasoning paragraphs replaced with links to issues or ADRs
 □ Docs updated in the same change as the code they describe
 ```
 
