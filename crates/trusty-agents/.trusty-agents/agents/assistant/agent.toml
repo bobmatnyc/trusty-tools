@@ -1,0 +1,135 @@
+# Base `assistant` agent (#3054, epic #3052).
+#
+# This is the reusable, UN-personalized productivity assistant template. It
+# carries a functional role, the curated Google Workspace tool surface, and
+# generic helpful/productivity instructions (in persona.md) — but deliberately
+# NO persona identity: no display_name, no personal name, no user-identity
+# binding, and no user-specific skills. A concrete persona (e.g. "Izzie") is
+# supplied by a USER via an `extends = "assistant"` personalization overlay
+# (Eve §2.5.1). See `../izzie/` for the reference overlay example.
+#
+# NOTE: the `extends`-based overlay resolver is NOT implemented yet (#3055);
+# this base is fully self-contained and loads standalone today.
+
+[agent]
+name = "assistant"
+role = "assistant"
+runner = "claude-code"
+model = "claude-sonnet-4-6"
+description = "General-purpose productivity assistant (base template; personalize via `extends`)"
+# Intentionally NO display_name / prompt_label: the base is nameless. A persona
+# identity (name + prompt label) is contributed by the personalization overlay.
+
+[llm]
+# Conversational productivity assistant — warm, short replies by default.
+temperature = 0.7
+max_tokens = 1024
+use_anthropic_direct = false
+# Conversational mode: block markdown headers and divider rules from appearing
+# mid-response so replies stay in plain prose.
+stop_sequences = ["\n##", "\n* * *"]
+# Note: "\n---\n" intentionally excluded — some models use HR dividers naturally
+# in conversational output; including it caused mid-sentence truncation.
+
+[tools]
+# Curated productivity tool surface. Every entry here is generic — a capability
+# any user of the assistant benefits from — so it belongs on the base. Personal,
+# user-specific tools (if any) are added by the overlay, not here.
+allow = [
+  # management
+  "mcp_list", "mcp_enable", "mcp_disable",
+  # git
+  "git_log", "git_status",
+  # meeting notes
+  "granola_*",
+  # web search
+  "web_search",
+  # gworkspace — Gmail
+  "compose_email",
+  "download_gmail_attachment",
+  "format_email_content",
+  "get_gmail_message_content",
+  "list_message_attachments",
+  "manage_gmail_filters",
+  "manage_gmail_labels",
+  "manage_gmail_settings",
+  "modify_gmail_messages",
+  "search_gmail_messages",
+  # gworkspace — Calendar
+  "manage_calendars",
+  "manage_events",
+  "query_free_busy",
+  # gworkspace — Drive
+  "get_drive_file_content",
+  "list_drive_contents",
+  "list_shared_drives",
+  "manage_drive_file",
+  "manage_file_permissions",
+  "search_drive_files",
+  "sync_drive",
+  # gworkspace — Docs
+  "append_to_document",
+  "apply_table_style",
+  "convert_document",
+  "create_document",
+  "create_document_from_template",
+  "create_document_tab",
+  "create_list_in_document",
+  "delete_range_in_document",
+  "find_tables_in_document",
+  "format_document_range",
+  "format_paragraph_in_document",
+  "get_document",
+  "get_document_named_styles",
+  "get_document_structure",
+  "insert_image_in_document",
+  "insert_table_in_document",
+  "insert_text_in_document",
+  "manage_document_comments",
+  "manage_document_header_footer",
+  "manage_document_tabs",
+  "manage_table_structure",
+  "move_paragraph_in_document",
+  "publish_markdown_to_doc",
+  "render_mermaid_to_doc",
+  "replace_text_in_document",
+  "set_document_style",
+  "update_document_named_styles",
+  # gworkspace — Sheets
+  "format_sheet",
+  "get_spreadsheet",
+  "manage_spreadsheet",
+  "modify_sheet_values",
+  "set_table_column_widths",
+  # gworkspace — Slides
+  "add_slide_content",
+  "format_slide",
+  "get_slides",
+  "manage_slides",
+  # gworkspace — Tasks
+  "manage_task_lists",
+  "manage_tasks",
+  # gworkspace — misc
+  "create_chart",
+  "list_accounts",
+]
+# OpenRPC (https://spec.open-rpc.org/) over stdio scopes (#455, #454). The base
+# assistant remembers facts across sessions (memory.write), recalls them
+# (memory.read), and reads notes/snippets via search (search.read). Google
+# access defaults to READ-ONLY (`google.read`) on the base template per §5.5 —
+# a generic, un-personalized assistant should not mutate a user's mailbox /
+# calendar / drive by default. A personalization overlay opts into write
+# (`google.*`) explicitly (see `../izzie/agent.toml`).
+scopes = ["memory.read", "memory.write", "search.read", "google.read"]
+
+[system_prompt]
+# Generic productivity skills only — resolved by name from the skill registry.
+# User-specific skills (weather for a home city, a personal transit line, a
+# particular writing voice) belong on the personalization overlay, NOT here.
+# #482: the system prompt body lives in persona.md (MD-package format).
+skills = [
+    "gworkspace-gmail",
+    "gworkspace-calendar",
+    "gworkspace-drive",
+    "trusty-memory-openrpc",
+]

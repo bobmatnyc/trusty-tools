@@ -1,3 +1,14 @@
+# Izzie — standalone working persona (pre-#3055).
+#
+# This flat manifest is the fully self-contained Izzie that the REPL / Telegram
+# persona-dispatch paths load today (they read `<name>.toml` directly). It is
+# INTENTIONALLY kept whole until the `extends` overlay resolver (#3055) lands
+# and persona dispatch migrates to the directory-package loader — at which point
+# this file is superseded by the base `assistant/` + the `izzie/` overlay
+# (which together carry this same content split into template + personalization,
+# per #3054 / epic #3052). Do not add new Izzie behavior here; add it to
+# `izzie/` (personal deltas) or `assistant/` (generic) instead.
+
 [agent]
 name = "izzie"
 role = "assistant"

@@ -1,33 +1,56 @@
+# Izzie — personalization overlay over the base `assistant` agent (#3054).
+#
+# This is the REFERENCE EXAMPLE of the Eve §2.5.1 `extends` pattern: Izzie is
+# not a base agent, she is one user's (Masa's) personalization of the nameless
+# base `assistant`. The intent is that everything generic — the curated Google
+# Workspace tool surface, the productivity scopes, the generic gworkspace/memory
+# skills, and the base "helpful assistant" instructions — is INHERITED from
+# `assistant`, leaving only the personal deltas here (display name, warm/witty
+# Masa-bound persona, and the user-specific skills).
+#
+# ⚠️ TEMPORARY REDUNDANCY (until #3055): the `extends` resolver is NOT
+# implemented yet, so an overlay carrying ONLY deltas would resolve — via
+# `AgentConfig::by_name("izzie")` (this directory package shadows the flat
+# `../izzie.toml`) — to an Izzie with NO `[tools]` restriction (absent = all
+# tools UNRESTRICTED) and no inherited guardrails. That is a live safety
+# regression the moment this merges, independent of #3055. To keep the overlay
+# SAFE STANDALONE, the `[tools]` block and the safety-critical guardrail
+# sections in persona.md are duplicated verbatim from the base for now. Once
+# #3055 lands the inheritance resolver, DELETE this redundant `[tools]` block
+# (and the redundant persona guardrails) so the overlay is deltas-only again.
+
+# Inherit the base productivity assistant (resolved by #3055).
+extends = "assistant"
+
 [agent]
 name = "izzie"
 role = "assistant"
 runner = "claude-code"
 model = "claude-sonnet-4-6"
-description = "Izzie — personal assistant"
+description = "Izzie — personal assistant (personalization overlay over `assistant`)"
+# Persona identity supplied by the overlay (the base is nameless).
 display_name = "Izzie"
 prompt_label = "Izzie"
 
 [llm]
+# Izzie's tone: warm, short conversational replies. Overrides the base `[llm]`
+# under #3055; kept here so the overlay is also valid standalone.
 temperature = 0.7
-# Conversational assistant — short replies by default.
 max_tokens = 1024
-use_anthropic_direct = false
-# Conversational mode (#feature-A): block markdown headers and divider rules
-# from appearing mid-response so replies stay in plain prose.
+# Conversational mode: block markdown headers and divider rules mid-response.
 stop_sequences = ["\n##", "\n* * *"]
-# Note: "\n---\n" intentionally excluded — qwen3 uses HR dividers naturally in
-# conversational output; including it caused mid-sentence truncation (#eval-qwen3)
 
 [tools]
-# Curated tool surface mirrored from personal-assistant.toml — Izzie is the
-# friendly day-to-day voice and benefits from the same MCP / git / granola
-# read access that lets her answer schedule and lookup questions.
+# ⚠️ TEMPORARY REDUNDANCY (until #3055) — see the header note. This is the SAME
+# curated allowlist as `../assistant/agent.toml`, duplicated so the overlay is
+# safe standalone (absent `allow` = UNRESTRICTED, which we must not ship). Once
+# the `extends` resolver lands, delete this block and inherit from the base.
 allow = [
   # management
   "mcp_list", "mcp_enable", "mcp_disable",
   # git
   "git_log", "git_status",
-  # granola
+  # meeting notes
   "granola_*",
   # web search
   "web_search",
@@ -100,22 +123,21 @@ allow = [
   "create_chart",
   "list_accounts",
 ]
-# OpenRPC (https://spec.open-rpc.org/) over stdio scopes (#455, #454). Izzie is the
-# persistent personal-assistant face; she remembers facts about Masa (memory.write)
-# and recalls them (memory.read), benefits from search.read to surface notes/snippets,
-# and uses google.* for Gmail/Calendar/Drive when the gworkspace endpoint is enabled.
+# Izzie opts INTO Google write (`google.*`) — a personalization decision on top
+# of the base template's read-only `google.read` default (§5.5). The rest of the
+# scope list matches the base and is redundant until #3055 (see header note).
 scopes = ["memory.read", "memory.write", "search.read", "google.*"]
 
 [system_prompt]
-# Skills are resolved by name from the global skill registry. Each
-# of these has a corresponding `.trusty-agents/skills/<name>.md` file.
-# #482: The system prompt body now lives in persona.md (MD-package format).
+# Personal skills only — these are Masa-specific and MERGE with the base's
+# generic gworkspace/memory skills under #3055. Each resolves to a
+# `.trusty-agents/skills/<name>.md` file.
+#   izzie-weather      — weather for the home city (Open-Meteo + NWS)
+#   izzie-metro-north  — real-time MTA Metro North schedules and alerts
+#   cto-bob-voice      — Masa's Slack writing style for drafting on his behalf
+# #482: the system prompt body (personal deltas) lives in persona.md.
 skills = [
     "izzie-weather",
     "izzie-metro-north",
     "cto-bob-voice",
-    "gworkspace-gmail",
-    "gworkspace-calendar",
-    "gworkspace-drive",
-    "trusty-memory-openrpc",
 ]
