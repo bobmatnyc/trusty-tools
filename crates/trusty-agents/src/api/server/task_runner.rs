@@ -71,8 +71,17 @@ pub(super) async fn run_task(id: &str, req: TaskRequest, state: AppState) -> Res
     // #149: Pipe stderr so we can sniff `__OMPM_PROGRESS__` lines and stream
     // them into the stored PmResponse. Other stderr lines pass through to our
     // own stderr (the original `inherit()` behavior, but with a parse layer).
+    //
+    // #3063: `kill_on_drop(true)` is what makes `DELETE /api/task/:id` (and
+    // `POST /api/clear-context`) actually kill this subprocess rather than
+    // merely abandoning the awaiting future. When the enclosing `tokio::spawn`
+    // task in `handlers::submit_task` is aborted, this async fn's frame —
+    // including the local `child` below — is dropped at whatever `.await`
+    // point it's suspended at; `Child::drop` then calls `start_kill()`,
+    // sending the OS process a kill signal instead of leaving it orphaned.
     cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
 
     tracing::info!(task_id = %id, "spawning workflow subprocess");
     let mut child = cmd.spawn()?;

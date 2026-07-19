@@ -20,6 +20,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
+use super::cancel::cancel_task;
 use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
@@ -75,12 +76,19 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
     // Tailscale / LAN from the operator's other devices and from the Tauri
     // webview, and we don't know those origins ahead of time. We tighten the
     // method/header allowlists to the minimum the API actually uses so a
-    // hostile LAN page can't, e.g., issue DELETE/PUT preflight or smuggle
-    // exotic headers. Bearer-token auth (when configured) remains the real
-    // gate on `POST /api/task` — CORS is defence-in-depth, not the lock.
+    // hostile LAN page can't smuggle exotic headers. Bearer-token auth (when
+    // configured) remains the real gate on `POST /api/task` — CORS is
+    // defence-in-depth, not the lock.
+    //
+    // #3063: DELETE was missing from this list even though `/api/ctrl/sessions/:id`,
+    // `/api/tm/sessions/:name`, and `/api/tm/sessions/:name/favorite` already
+    // route DELETE — a pre-existing gap that silently blocked browser access
+    // to all of them (curl/oneshot tests never hit it since CORS preflight is
+    // browser-enforced). Adding the new `DELETE /api/task/:id` cancellation
+    // route in the same PR made fixing it the smallest correct move.
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     let auth_required = token.is_some();
@@ -88,7 +96,9 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
 
     let mut router = Router::new()
         .route("/api/task", post(submit_task))
-        .route("/api/task/{id}", get(get_task))
+        // #3063: DELETE aborts an in-flight task (cancellation/retask
+        // primitive — see `cancel::cancel_task` for the full contract).
+        .route("/api/task/{id}", get(get_task).delete(cancel_task))
         .route("/api/tasks", get(list_tasks))
         .route("/api/clear-context", post(clear_context))
         .route("/api/health", get(health))
