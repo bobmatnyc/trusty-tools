@@ -182,6 +182,76 @@ max_tokens = 4096
     assert_eq!(cfg.system_prompt.content, expected);
 }
 
+/// #3303 code-critic HIGH-2: `by_name`/`by_name_in` must reject a `name`
+/// that path-traverses outside the search dir before it ever reaches
+/// `load_agent_package`/the flat-file joins — a name like `"../victim"`
+/// previously escaped the intended agents dir entirely via `dir.join(name)`.
+///
+/// Why: builds a `victim/agent.toml` package as a SIBLING of (not inside)
+/// the dir passed to `by_name_in`, so a successful `Ok` would prove the
+/// traversal actually reached outside content — the guard must make this an
+/// `Err` instead.
+/// What: `AgentConfig::by_name_in(&[agents_dir], "../victim")` must return
+/// `Err`. No env mutation needed — `by_name_in` takes its search dirs
+/// explicitly, so this doesn't need `ENV_LOCK`.
+/// Test: Self-explanatory.
+#[test]
+fn by_name_in_rejects_parent_dir_traversal() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let agents = root.path().join("agents");
+    std::fs::create_dir_all(&agents).expect("create agents dir");
+    let victim = root.path().join("victim");
+    std::fs::create_dir(&victim).expect("create victim dir");
+    std::fs::write(
+        victim.join("agent.toml"),
+        r#"
+[agent]
+name = "victim"
+role = "assistant"
+model = "anthropic/claude-haiku-4-5"
+
+[llm]
+temperature = 0.5
+max_tokens = 1024
+"#,
+    )
+    .expect("write agent.toml");
+    std::fs::write(victim.join("persona.md"), "secret persona").expect("write persona.md");
+
+    let result = AgentConfig::by_name_in(&[agents], "../victim");
+    assert!(
+        result.is_err(),
+        "path traversal via '../victim' must be rejected, got: {result:?}"
+    );
+}
+
+/// #3303 code-critic HIGH-2 companion: a name containing an embedded `/`
+/// (not just `..`) must also be rejected — `dir.join("a/b")` is a valid
+/// nested-path join regardless of whether either segment is `..`.
+/// Test: Self-explanatory.
+#[test]
+fn by_name_in_rejects_nested_path_segment() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let result = AgentConfig::by_name_in(&[tmp.path().to_path_buf()], "a/b");
+    assert!(
+        result.is_err(),
+        "nested path segment 'a/b' must be rejected, got: {result:?}"
+    );
+}
+
+/// #3303: `by_name` (the default-dirs wrapper) must apply the same guard as
+/// `by_name_in` — the validation must fire before any dir is even consulted,
+/// so this needs no `TAGENT_CONFIG_DIR` setup / `ENV_LOCK`.
+/// Test: Self-explanatory.
+#[test]
+fn by_name_rejects_parent_dir_traversal() {
+    let result = AgentConfig::by_name("../../etc");
+    assert!(
+        result.is_err(),
+        "by_name must reject path traversal, got: {result:?}"
+    );
+}
+
 #[test]
 fn agent_config_path_honors_env_var() {
     // MIN-7 (#104): With TAGENT_CONFIG_DIR set, resolution must use it

@@ -18,6 +18,31 @@ use super::config::AgentConfig;
 use super::model::{CTRL_DEFAULT_TOML, resolve_model};
 use crate::llm::adapter::adapter_for_model;
 
+/// Reject an agent `name` that could path-traverse outside the agents
+/// directory (#3303 code-critic HIGH finding).
+///
+/// Why: every by-name resolution tier (`load_agent_package`, the flat
+/// `<name>.toml` join, the flat `<name>.md` join) builds a path via
+/// `dir.join(name)`/`dir.join(format!("{name}.toml"))` with NO sanitization.
+/// A name like `"../../etc"` or `"a/b"` escapes `dir` entirely, and since
+/// `extends = "..."` chains feed attacker-influenced names back through this
+/// same resolver, the check must sit at the single choke point every tier
+/// (including recursive ancestor lookups) passes through — not be
+/// re-implemented per call site.
+/// What: Rejects names containing `/` or `\` (covers `..` traversal, absolute
+/// paths, and nested joins) or that are exactly `.`/`..`. A valid name must be
+/// a single path segment.
+/// Test: `by_name_rejects_parent_dir_traversal`, `by_name_rejects_nested_path`,
+/// `by_name_in_rejects_parent_dir_traversal` (tests/loading.rs).
+fn validate_agent_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        anyhow::bail!(
+            "invalid agent name '{name}': must be a single path segment (no '/', '\\', '.', or '..')"
+        );
+    }
+    Ok(())
+}
+
 impl AgentConfig {
     /// Load an AgentConfig from a TOML file path.
     ///
@@ -46,7 +71,30 @@ impl AgentConfig {
     /// Test: `AgentConfig::by_name("pm")` loads without error when run from
     /// the project root.
     pub fn by_name(name: &str) -> Result<Self> {
-        let (cfg, from_package) = Self::by_name_unresolved_src(name)?;
+        Self::by_name_in(&agents_dir_candidates(), name)
+    }
+
+    /// Resolve an agent config by short name, searching `dirs` in priority
+    /// order instead of the default `agents_dir_candidates()` (#3303).
+    ///
+    /// Why: `by_name`'s default dirs are `TAGENT_CONFIG_DIR` (or CWD-relative
+    /// `.trusty-agents/agents`) plus the `$HOME` fallback tier — both derived
+    /// from process-global state that ignores any caller-specific directory
+    /// resolution. The REPL resolves its own `agents_dir` robustly (walking up
+    /// from `current_exe`/`detect_self_project` — see `repl/mod.rs`), so a
+    /// standalone launch (CWD outside the project) previously listed agents
+    /// from the REPL's resolved dir via `list_assistant_agents_into` but then
+    /// failed to ACTIVATE them because `by_name` searched a different,
+    /// CWD-derived dir set — the exact "list finds it, activate can't" bug
+    /// this fixes. `by_name` itself becomes a thin wrapper over this with the
+    /// default dirs.
+    /// What: Same package → flat `.toml` → flat `.md` → `extends` resolution
+    /// as `by_name`, but every dir lookup (including recursive `extends`
+    /// ancestor lookups and the shadow-fallback) is scoped to `dirs`.
+    /// Test: `handle_agent_command_resolves_directory_package_fixture`,
+    /// `handle_agent_command_activates_bundled_assistant_package` (repl/tests.rs).
+    pub fn by_name_in(dirs: &[PathBuf], name: &str) -> Result<Self> {
+        let (cfg, from_package) = Self::by_name_unresolved_src_in(dirs, name)?;
         // #3055: resolve an `extends` chain at load time (DOC-41 §2.5). An
         // agent with no `extends` is returned unchanged (its `extends` is
         // already `None`); one that inherits is flattened base-first against
@@ -54,10 +102,10 @@ impl AgentConfig {
         if cfg.agent.extends.is_none() {
             return Ok(cfg);
         }
-        let lookup = |n: &str| Self::by_name_unresolved(n).ok();
+        let lookup = |n: &str| Self::by_name_unresolved_in(dirs, n).ok();
         match crate::agents::extends::resolve(name, &lookup) {
             Ok(resolved) => Ok(resolved.finalize_extends()),
-            Err(e) => Self::extends_shadow_fallback(name, from_package, e),
+            Err(e) => Self::extends_shadow_fallback_in(dirs, name, from_package, e),
         }
     }
 
@@ -68,13 +116,13 @@ impl AgentConfig {
     /// chain recursively and must fetch each ancestor in its raw, still-
     /// `extends`-bearing form; resolving inside the per-name loader would
     /// double-resolve.
-    /// What: thin wrapper over [`Self::by_name_unresolved_src`] discarding the
+    /// What: thin wrapper over [`Self::by_name_unresolved_src_in`] discarding the
     /// source-provenance flag, for the recursive ancestor lookup where only the
     /// config matters.
     /// Test: covered by the `extends_*` by-name tests and the pre-existing
     /// `by_name` tests.
-    fn by_name_unresolved(name: &str) -> Result<Self> {
-        Self::by_name_unresolved_src(name).map(|(cfg, _)| cfg)
+    fn by_name_unresolved_in(dirs: &[PathBuf], name: &str) -> Result<Self> {
+        Self::by_name_unresolved_src_in(dirs, name).map(|(cfg, _)| cfg)
     }
 
     /// Load a single agent by name (no `extends` resolution), reporting whether
@@ -96,7 +144,7 @@ impl AgentConfig {
     /// directory from [`agents_dir_candidates`] — primary (`TAGENT_CONFIG_DIR` /
     /// project-local) first, `$HOME/.trusty-agents/agents` as a fallback tier —
     /// so the documented flow actually dispatches regardless of CWD. The
-    /// `from_package` flag feeds [`Self::extends_shadow_fallback`], which must
+    /// `from_package` flag feeds [`Self::extends_shadow_fallback_in`], which must
     /// not let an unresolvable directory package silently shadow a complete flat
     /// `<name>.toml` — and, since the package itself may have resolved from ANY
     /// candidate directory (not just the primary one), the shadow rescue must
@@ -113,9 +161,13 @@ impl AgentConfig {
     /// Test: `by_name_flat_md_extends_dispatches`,
     /// `by_name_package_extends_shadow_falls_back_to_flat`,
     /// `by_name_finds_flat_md_in_home_tier_when_project_dir_misses` (tests.rs).
-    fn by_name_unresolved_src(name: &str) -> Result<(Self, bool)> {
-        let dirs = agents_dir_candidates();
-        for dir in &dirs {
+    fn by_name_unresolved_src_in(dirs: &[PathBuf], name: &str) -> Result<(Self, bool)> {
+        // #3303: single choke point for the path-traversal guard — every
+        // caller (direct `by_name`/`by_name_in`, and recursive `extends`
+        // ancestor lookups via the `lookup` closures above) funnels through
+        // here before any `dir.join(name)` happens.
+        validate_agent_name(name)?;
+        for dir in dirs {
             // #482: Prefer the directory-package format when present.
             if let Some(cfg) = load_agent_package(dir, name)? {
                 return Ok((cfg, true));
@@ -138,21 +190,24 @@ impl AgentConfig {
         }
         // Preserve the historical missing-`<name>.toml` error shape when nothing
         // resolved — report against the primary (highest-priority) directory.
-        let toml_path = dirs[0].join(format!("{name}.toml"));
+        // `dirs.first()` guards against a caller passing an empty slice to
+        // `by_name_in` rather than indexing-panicking (#3303).
+        let primary = dirs.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+        let toml_path = primary.join(format!("{name}.toml"));
         Ok((Self::load(&toml_path)?, false))
     }
 
     /// Recover from a directory-package `extends` that could not be resolved by
     /// falling back to a complete flat `<name>.toml` shadowing it (#3055).
     ///
-    /// Why: `by_name_unresolved_src` prefers `<name>/agent.toml` over the flat
+    /// Why: `by_name_unresolved_src_in` prefers `<name>/agent.toml` over the flat
     /// `<name>.toml`. If the package manifest declares an `extends` that fails
     /// to resolve (target missing / cycle / depth), serving the unresolved,
     /// permission-widened PARTIAL package over a complete flat config is a
     /// silent correctness/security hazard (a `[tools]`-less `izzie/agent.toml`
     /// shadowing a locked-down flat `izzie.toml`). Once the resolver works
     /// end-to-end the normal path resolves the package and this fires only on
-    /// genuine failures. #3198 code-critic fix: `by_name_unresolved_src` (and
+    /// genuine failures. #3198 code-critic fix: `by_name_unresolved_src_in` (and
     /// its async twin) now resolve the offending package from ANY candidate
     /// directory in [`agents_dir_candidates`] — e.g. the `$HOME` fallback tier
     /// — not just the primary one. A single-tier `agents_dir()` lookup here
@@ -167,13 +222,14 @@ impl AgentConfig {
     /// the original resolution error is returned with context.
     /// Test: `by_name_package_extends_shadow_falls_back_to_flat`,
     /// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`.
-    fn extends_shadow_fallback(
+    fn extends_shadow_fallback_in(
+        dirs: &[PathBuf],
         name: &str,
         from_package: bool,
         err: crate::agents::extends::AgentExtendsError,
     ) -> Result<Self> {
         if from_package {
-            for dir in agents_dir_candidates() {
+            for dir in dirs {
                 let flat = dir.join(format!("{name}.toml"));
                 if flat.exists() {
                     tracing::warn!(
@@ -184,7 +240,7 @@ impl AgentConfig {
                         "directory-package `extends` failed to resolve; falling back to the \
                          complete flat <name>.toml (refusing to serve the unresolved partial package)"
                     );
-                    return Self::by_name_flat_toml(name, &flat);
+                    return Self::by_name_flat_toml_in(dirs, name, &flat);
                 }
             }
         }
@@ -194,14 +250,14 @@ impl AgentConfig {
 
     /// Load ONLY the flat `<name>.toml`, resolving its own `extends` chain.
     ///
-    /// Why: the shadow-fallback ([`Self::extends_shadow_fallback`]) must bind
-    /// `name` to the flat file, not the package that `by_name_unresolved_src`
+    /// Why: the shadow-fallback ([`Self::extends_shadow_fallback_in`]) must bind
+    /// `name` to the flat file, not the package that `by_name_unresolved_src_in`
     /// would prefer — otherwise the resolver would re-load the broken package.
     /// What: loads `flat` directly; if it declares no `extends`, returns it; if
     /// it does, resolves via a lookup that forces `name` → the flat file and
-    /// routes ancestors through the normal per-name loader, then finalizes.
+    /// routes ancestors through `dirs`, then finalizes.
     /// Test: `by_name_package_extends_shadow_falls_back_to_flat`.
-    fn by_name_flat_toml(name: &str, flat: &Path) -> Result<Self> {
+    fn by_name_flat_toml_in(dirs: &[PathBuf], name: &str, flat: &Path) -> Result<Self> {
         let cfg = Self::load(flat)?;
         if cfg.agent.extends.is_none() {
             return Ok(cfg);
@@ -210,7 +266,7 @@ impl AgentConfig {
             if n.eq_ignore_ascii_case(name) {
                 Self::load(flat).ok()
             } else {
-                Self::by_name_unresolved(n).ok()
+                Self::by_name_unresolved_in(dirs, n).ok()
             }
         };
         let resolved = crate::agents::extends::resolve(name, &lookup).with_context(|| {
@@ -278,7 +334,7 @@ impl AgentConfig {
         // follows.
         // #3061: iterate every candidate directory (primary, then the
         // `$HOME/.trusty-agents/agents` fallback tier) — mirrors the sync
-        // `by_name_unresolved_src` fix.
+        // `by_name_unresolved_src_in` fix.
         let dirs = agents_dir_candidates();
         let (cfg, from_package) = Self::by_name_async_unresolved(name, &dirs).await?;
         // #3055: resolve `extends` at load time (DOC-41 §2.5). Base lookups use
@@ -290,19 +346,19 @@ impl AgentConfig {
         if cfg.agent.extends.is_none() {
             return Ok(cfg);
         }
-        let lookup = |n: &str| Self::by_name_unresolved(n).ok();
+        let lookup = |n: &str| Self::by_name_unresolved_in(&dirs, n).ok();
         match crate::agents::extends::resolve(name, &lookup) {
             Ok(resolved) => Ok(resolved.finalize_extends()),
-            Err(e) => Self::extends_shadow_fallback(name, from_package, e),
+            Err(e) => Self::extends_shadow_fallback_in(&dirs, name, from_package, e),
         }
     }
 
     /// Async single-agent load WITHOUT `extends` resolution (#3055 companion to
-    /// [`Self::by_name_unresolved_src`]).
+    /// [`Self::by_name_unresolved_src_in`]).
     ///
     /// Why: `by_name_async` needs the raw, still-`extends`-bearing child before
     /// it walks the chain.
-    /// What: mirrors [`Self::by_name_unresolved_src`]'s tier ORDER exactly so
+    /// What: mirrors [`Self::by_name_unresolved_src_in`]'s tier ORDER exactly so
     /// sync and async resolve the same agents: for each candidate directory
     /// (primary, then `$HOME/.trusty-agents/agents`, #3061) — directory package
     /// → flat `<name>.toml` → flat `<name>.md` (#3055 personalization overlay)
@@ -311,6 +367,9 @@ impl AgentConfig {
     /// Test: `by_name_async_loads_plan_agent`,
     /// `by_name_async_flat_md_extends_dispatches`.
     async fn by_name_async_unresolved(name: &str, dirs: &[PathBuf]) -> Result<(Self, bool)> {
+        // #3303: same path-traversal guard as the sync loader — reject a name
+        // that could escape `dir` before any `dir.join(name)` join happens.
+        validate_agent_name(name)?;
         for dir in dirs {
             if let Some(cfg) = load_agent_package(dir, name)? {
                 return Ok((cfg, true));
@@ -320,7 +379,7 @@ impl AgentConfig {
                 Ok(raw) => return Ok((Self::from_toml_str(&raw, &path)?, false)),
                 Err(_e) => {
                     // #3055: flat `.md` personalization overlay tier, BEFORE the
-                    // claude-mpm fallback — matching `by_name_unresolved_src`.
+                    // claude-mpm fallback — matching `by_name_unresolved_src_in`.
                     let md_path = dir.join(format!("{name}.md"));
                     if md_path.exists() {
                         let cfg = crate::agents::registry::parse_md_agent(&md_path).with_context(
