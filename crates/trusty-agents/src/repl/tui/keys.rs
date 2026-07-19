@@ -4,6 +4,55 @@
 
 use super::*;
 
+/// How long a never-navigated picker stays "fresh" (i.e. still navigable by
+/// a first Up/Down) before `should_navigate_picker` starts treating it as
+/// stale and reinterprets Up/Down as history recall instead (#3346).
+///
+/// Why: Long enough that a normal human glance-and-arrow-key reaction to a
+/// picker that just appeared (e.g. `/switch`'s persona list, or a
+/// `detect_choices` suggestion list right after an assistant reply) is never
+/// mistaken for staleness — see `inline_choices_switch_context_dispatches_submit`,
+/// which requires the very first Down after `/switch` to navigate. Short
+/// enough that a picker genuinely left sitting (the user moved on to reading
+/// the response, thinking, or simply paused) reads as stale well before the
+/// user could plausibly still be orienting to a list that "just" appeared.
+const PICKER_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether an Up/Down keypress should navigate `app.choices` right now,
+/// rather than being reinterpreted as shell-style history recall (#3346).
+///
+/// Why: `handle_key` used to let Up/Down always navigate `app.choices`
+/// whenever it was non-empty, even before the input-editing match arms ever
+/// saw the key. That's correct while the picker is genuinely being used, but
+/// wrong for the residual case #3325 left open: a picker (a `detect_choices`
+/// LLM list or a `/switch` list — anything that isn't a live slash-command
+/// completion) that has sat untouched past `PICKER_STALE_AFTER` reads as the
+/// user reaching for history, not browsing suggestions they've shown no
+/// interest in since it appeared. A picker that was *just* populated must
+/// still navigate on its first press (that's normal use — see
+/// `PICKER_STALE_AFTER`'s doc), and once the picker HAS been navigated, or
+/// the input buffer is non-empty (typing already dismisses a stale picker
+/// per #3325, so this only matters for the still-live slash-completion
+/// case), continuing to navigate is unambiguous regardless of elapsed time.
+/// What: True when `app.choices` is a live slash-command completion list
+/// (see `is_live_slash_completion`), OR `app.choices_navigated` is already
+/// `true`, OR `app.input_buf` is non-empty, OR the picker hasn't been open
+/// longer than `PICKER_STALE_AFTER` (including when `choices_opened_at` is
+/// `None` — no timestamp recorded means "assume fresh", the safe default).
+/// False only for a never-navigated, non-live, genuinely stale picker with
+/// an empty buffer — the #3346 history-recall case.
+/// Test: `repl_app_first_up_over_stale_picker_recalls_history`,
+/// `repl_app_first_down_over_stale_picker_recalls_history`,
+/// `repl_app_fresh_picker_navigates_on_first_press`,
+/// `repl_app_stale_picker_navigates_after_first_press`,
+/// `repl_app_live_slash_picker_up_down_still_navigates`.
+fn should_navigate_picker(app: &ReplApp) -> bool {
+    let is_stale = app
+        .choices_opened_at
+        .is_some_and(|t| t.elapsed() >= PICKER_STALE_AFTER);
+    is_live_slash_completion(app) || app.choices_navigated || !app.input_buf.is_empty() || !is_stale
+}
+
 /// Handle one key press. Returns `Some(line)` if the user submitted.
 pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     // Picker modal: when an overlay is open, capture all keys here so
@@ -30,14 +79,27 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     if !app.choices.is_empty() {
         match key.code {
             KeyCode::Up => {
-                app.choice_cursor = app.choice_cursor.saturating_sub(1);
-                return None;
+                if should_navigate_picker(app) {
+                    app.choice_cursor = app.choice_cursor.saturating_sub(1);
+                    app.choices_navigated = true;
+                    return None;
+                }
+                // Stale picker, never navigated, empty input buffer: this is
+                // shell-style history recall, not picker navigation (#3346).
+                // Dismiss and fall through to the normal Up-arrow handling
+                // below instead of returning early.
+                app.dismiss_choices();
             }
             KeyCode::Down => {
-                if app.choice_cursor + 1 < app.choices.len() {
-                    app.choice_cursor += 1;
+                if should_navigate_picker(app) {
+                    if app.choice_cursor + 1 < app.choices.len() {
+                        app.choice_cursor += 1;
+                    }
+                    app.choices_navigated = true;
+                    return None;
                 }
-                return None;
+                // Same disambiguation as Up above, mirrored for `history_next`.
+                app.dismiss_choices();
             }
             KeyCode::Enter => {
                 let idx = app.choice_cursor;
@@ -50,15 +112,12 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                         .unwrap_or(false);
                 if is_other {
                     // Free-type path: leave input empty for the user.
-                    app.choices.clear();
-                    app.choice_cursor = 0;
-                    app.choices_context = None;
+                    app.dismiss_choices();
                     return None;
                 }
                 let pick = app.choices[idx].clone();
-                let ctx = app.choices_context.take();
-                app.choices.clear();
-                app.choice_cursor = 0;
+                let ctx = app.choices_context.clone();
+                app.dismiss_choices();
                 match ctx.as_deref() {
                     Some("switch") => {
                         // Direct dispatch — synthesize `/switch <name>`
@@ -74,9 +133,7 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 return None;
             }
             KeyCode::Esc => {
-                app.choices.clear();
-                app.choice_cursor = 0;
-                app.choices_context = None;
+                app.dismiss_choices();
                 return None;
             }
             _ => {
@@ -92,9 +149,7 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 // `update_slash_completions` produces, so it never
                 // shadows the tagged `/switch` picker.
                 if !is_live_slash_completion(app) {
-                    app.choices.clear();
-                    app.choice_cursor = 0;
-                    app.choices_context = None;
+                    app.dismiss_choices();
                 }
             }
         }
@@ -170,8 +225,7 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 let selected = app.choices[app.choice_cursor].clone();
                 app.input_buf = format!("{selected} ");
                 app.cursor_pos = app.input_buf.len();
-                app.choices.clear();
-                app.choice_cursor = 0;
+                app.dismiss_choices();
             }
             None
         }

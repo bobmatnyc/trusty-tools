@@ -257,6 +257,43 @@ pub struct ReplApp {
     /// input buffer (legacy free-type behavior).
     /// Test: `inline_choices_switch_context_dispatches_submit`.
     pub choices_context: Option<String>,
+    /// Whether Up/Down has already navigated the *current* `choices` list.
+    ///
+    /// Why (#3346): Once the user has genuinely navigated a picker, every
+    /// further Up/Down must keep navigating regardless of how long it's been
+    /// showing or whether the input buffer is empty — this is the
+    /// "already navigating" carve-out that keeps a slow, deliberate arrow-key
+    /// browse from suddenly flipping into history recall mid-session. See
+    /// `choices_opened_at` for the complementary freshness signal used
+    /// before any navigation has happened.
+    /// What: Reset to `false` every time `choices` is freshly populated or
+    /// cleared (mirrors the `choice_cursor = 0` reset sites). Set to `true`
+    /// by `handle_key` the moment Up/Down actually moves `choice_cursor`.
+    /// Test: `repl_app_stale_picker_navigates_after_first_press`.
+    pub choices_navigated: bool,
+    /// When the current `choices` list was populated. `None` when the
+    /// producer didn't record a timestamp (kept navigable by default).
+    ///
+    /// Why (#3346): #3325 dismissed a stale picker on any key except
+    /// Up/Down/Enter/Esc, leaving a residual gap — a picker's first Up/Down
+    /// still always navigated, even when the picker had been sitting idle
+    /// long enough that the user almost certainly meant shell-style history
+    /// recall instead. `choice_cursor` / `choices_navigated` alone can't
+    /// distinguish "just opened, about to navigate" (e.g. `/switch`'s list
+    /// immediately after the command runs — `inline_choices_switch_context_dispatches_submit`
+    /// requires the very first Down to navigate it) from "opened a while
+    /// ago and left untouched" — both look identical as a raw Up/Down
+    /// keypress. Elapsed time since population is the only signal that
+    /// actually separates them.
+    /// What: Set to `Some(Instant::now())` wherever `choices` is freshly
+    /// populated (`push_assistant` -> `detect_choices`, and the `/switch`
+    /// `SetChoices` handler); cleared back to `None` by `dismiss_choices`.
+    /// `handle_key` treats the picker as stale once elapsed time exceeds
+    /// `PICKER_STALE_AFTER` AND `choices_navigated` is still `false` AND the
+    /// input buffer is empty — see `should_navigate_picker`.
+    /// Test: `repl_app_first_up_over_stale_picker_recalls_history`,
+    /// `repl_app_first_down_over_stale_picker_recalls_history`.
+    pub choices_opened_at: Option<std::time::Instant>,
     /// Synthetic submission queued by `handle_key` (e.g. when Enter on a
     /// `choices_context = "switch"` list selects a persona). Drained by
     /// the event loop after `handle_key` returns and translated into a
