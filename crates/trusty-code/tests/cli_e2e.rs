@@ -34,7 +34,21 @@
 //! inspection test (attach to a session a DIFFERENT process created) isn't
 //! possible yet: M1 sessions are in-memory, one per ephemeral spawned
 //! daemon, and this ticket's required path is spawn-stdio, not a shared
-//! long-lived daemon.
+//! daemon.
+//!
+//! `workstream_list_on_fresh_project_reports_no_workstreams` through
+//! `workstream_close_hides_from_default_list_but_include_closed_shows_it`
+//! (#3296, DOC-48 §5.4) prove the `tcode workstream`/`tcode ws` family end
+//! to end. UNLIKE sessions, workstreams are persisted to a flat file keyed
+//! on `--project` (`crate::workstreams::path`), so — unlike every
+//! session/attach/cancel/transcript case above — these tests spawn the CLI
+//! TWICE against the same `--project` and prove the SECOND invocation's
+//! ephemeral daemon sees what the FIRST one persisted (create, then a
+//! separate list; close, then a separate list). Each test pins `HOME` to
+//! its own tempdir (`crate::workstreams::path::default_data_dir` resolves
+//! `~/.trusty-code`) so the store file never touches the real developer's
+//! home directory — the same sandboxing `support::home_with_user_level_agents`
+//! already uses for agent resolution.
 //!
 //! Test: this file IS the test; see `support` for the shared
 //! `project_with_agents` fixture.
@@ -336,5 +350,236 @@ fn version_flag_reports_build_provenance() {
     assert!(
         stdout.trim() != format!("tcode {}", env!("CARGO_PKG_VERSION")),
         "--version regressed to a bare semver with no provenance: {stdout}"
+    );
+}
+
+/// `tcode workstream create --name <NAME> --project <project_arg>`, run
+/// against `home`, returning the newly-minted id parsed out of its
+/// `created workstream <id>` confirmation line.
+///
+/// Why: every workstream e2e test below needs at least one persisted
+/// workstream to act on; factored out so each test's setup is one line
+/// instead of a repeated Command/parse block.
+fn create_workstream(home: &std::path::Path, project_arg: &str, name: &str) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args([
+            "workstream",
+            "create",
+            "--name",
+            name,
+            "--project",
+            project_arg,
+        ])
+        .env("HOME", home)
+        .output()
+        .expect("spawn tcode workstream create");
+    assert!(
+        output.status.success(),
+        "workstream create must exit 0: {output:?}"
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .strip_prefix("created workstream ")
+        .expect("expected the `created workstream <id>` confirmation shape")
+        .to_string()
+}
+
+/// `tcode workstream list` on a project with no prior workstreams must
+/// report none and exit 0 (DOC-48 AC-5.1).
+#[test]
+fn workstream_list_on_fresh_project_reports_no_workstreams() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args([
+            "workstream",
+            "list",
+            "--project",
+            &project.path().display().to_string(),
+        ])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream list");
+
+    assert!(output.status.success(), "must exit 0: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no workstreams"),
+        "expected an empty-list message: {stdout}"
+    );
+}
+
+/// `tcode workstream create` persists to a flat file keyed on `--project`
+/// (DOC-48 §3.1) — a SEPARATE `tcode ws list` invocation against the SAME
+/// project must see what a prior, already-exited invocation created. This
+/// also proves the `ws` alias (DOC-48 AC-5.3).
+#[test]
+fn workstream_create_persists_and_ws_alias_lists_it() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_arg = project.path().display().to_string();
+
+    create_workstream(home.path(), &project_arg, "Token rotation hardening");
+
+    let list_output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args(["ws", "list", "--project", &project_arg])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode ws list");
+    assert!(
+        list_output.status.success(),
+        "ws list must exit 0: {list_output:?}"
+    );
+    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(
+        list_stdout.contains("Token rotation hardening"),
+        "a SEPARATE invocation against the same --project must see the persisted workstream: {list_stdout}"
+    );
+    assert!(
+        list_stdout.contains("idle"),
+        "a freshly-created workstream must show idle: {list_stdout}"
+    );
+}
+
+/// `tcode workstream get <unknown-uuid>` must surface `not_found` cleanly
+/// and exit nonzero.
+#[test]
+fn workstream_get_unknown_id_errors_cleanly() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args([
+            "workstream",
+            "get",
+            "00000000-0000-0000-0000-000000000000",
+            "--project",
+            &project.path().display().to_string(),
+        ])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream get");
+
+    assert!(!output.status.success(), "must exit nonzero on not_found");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("-32002"),
+        "expected a clear not_found error on stderr: {stderr}"
+    );
+}
+
+/// `tcode workstream activate` without `--force` while a DIFFERENT
+/// workstream is active must name the active workstream and suggest
+/// `--force`, exiting nonzero (DOC-48 §5.2/§6.1's `ActiveConflict`
+/// scenario, the ONE piece of business logic this CLI ticket's scope
+/// explicitly calls out).
+#[test]
+fn workstream_activate_conflict_names_active_and_suggests_force() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_arg = project.path().display().to_string();
+
+    let id_a = create_workstream(home.path(), &project_arg, "A");
+    let id_b = create_workstream(home.path(), &project_arg, "B");
+
+    let activate_a = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args(["workstream", "activate", &id_a, "--project", &project_arg])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream activate a");
+    assert!(
+        activate_a.status.success(),
+        "activating a with no prior active must succeed: {activate_a:?}"
+    );
+
+    let activate_b = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args(["workstream", "activate", &id_b, "--project", &project_arg])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream activate b");
+    assert!(
+        !activate_b.status.success(),
+        "activating b without --force while a is active must fail"
+    );
+    let stderr = String::from_utf8_lossy(&activate_b.stderr);
+    assert!(
+        stderr.contains(&id_a),
+        "must name the currently-active workstream: {stderr}"
+    );
+    assert!(stderr.contains("--force"), "must suggest --force: {stderr}");
+}
+
+/// `tcode workstream deactivate` with no active workstream is a documented
+/// no-op (DOC-48 §4.3) — must print a clear message and exit 0, never an
+/// error.
+#[test]
+fn workstream_deactivate_with_none_active_is_a_clean_noop() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args([
+            "workstream",
+            "deactivate",
+            "--project",
+            &project.path().display().to_string(),
+        ])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream deactivate");
+
+    assert!(output.status.success(), "must exit 0: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no workstream is active"),
+        "expected a clear no-op message: {stdout}"
+    );
+}
+
+/// `tcode workstream close` then `tcode workstream list` (default) must hide
+/// the closed workstream; `--include-closed` must still show it (DOC-48
+/// §4.4).
+#[test]
+fn workstream_close_hides_from_default_list_but_include_closed_shows_it() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_arg = project.path().display().to_string();
+
+    let id = create_workstream(home.path(), &project_arg, "Old spike");
+
+    let close_output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args(["workstream", "close", &id, "--project", &project_arg])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream close");
+    assert!(
+        close_output.status.success(),
+        "close must exit 0: {close_output:?}"
+    );
+
+    let default_list = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args(["workstream", "list", "--project", &project_arg])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream list");
+    let default_stdout = String::from_utf8_lossy(&default_list.stdout);
+    assert!(
+        !default_stdout.contains("Old spike"),
+        "closed workstream must be hidden from the default list: {default_stdout}"
+    );
+
+    let include_closed_list = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args([
+            "workstream",
+            "list",
+            "--include-closed",
+            "--project",
+            &project_arg,
+        ])
+        .env("HOME", home.path())
+        .output()
+        .expect("spawn tcode workstream list --include-closed");
+    let include_closed_stdout = String::from_utf8_lossy(&include_closed_list.stdout);
+    assert!(
+        include_closed_stdout.contains("Old spike") && include_closed_stdout.contains("closed"),
+        "include-closed list must show the closed workstream: {include_closed_stdout}"
     );
 }

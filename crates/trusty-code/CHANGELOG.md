@@ -10,6 +10,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`tcode workstream` / `tcode ws` CLI family (issue #3296, DOC-48 §5.4,
+  epic #3292).** `list [--include-closed]` (tmux-`list-sessions`-style
+  table: id prefix, state, session count, humanized age, name — `*` marks
+  the active row), `get <id>` (raw JSON), `create [--name NAME]`,
+  `activate <id> [--force]`, `deactivate` (no-arg; resolves and clears
+  whichever workstream is active, or reports a clean no-op), and
+  `close <id>`, all thin JSON-RPC clients over the daemon's `workstream.*`
+  surface (#3294/#3295). `ws` is a clap alias for the whole family.
+  `activate` without `--force` while a different workstream is active
+  surfaces the `-32008 active_conflict` error as a clear message naming the
+  active workstream and suggesting `--force`, instead of the raw RPC error
+  text. ID arguments require the full UUID — the RPC layer has no
+  prefix-matching support, so none is built client-side. Auto-streaming
+  from the newly-active workstream on `activate` is deferred until the
+  workstream-level SSE aggregation route (issue #3297) lands.
 - **Workstream activation lock: `workstream.activate`/`workstream.deactivate`
   RPC + REST, `ActiveConflict` (issue #3294, DOC-48 §5/§6, epic #3292).**
   Daemon-enforced singleton active-workstream invariant on top of #3293's
