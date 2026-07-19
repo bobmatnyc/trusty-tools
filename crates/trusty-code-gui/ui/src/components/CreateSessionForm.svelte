@@ -1,12 +1,18 @@
 <script lang="ts">
   // Why: DOC-39's biggest gap called out for this slice — the GUI could only
-  // observe and cancel a session, never create one. This is the create-
-  // session flow: the 7a folder picker (§4.2.1) plus the minimal task-input
-  // form needed to call `POST /sessions` (`session.create`, REST Slice 3,
-  // `crate::serve::rest::sessions_write`). Two daemon routes cover the whole
-  // slice — no Tauri command, no native dialog (barred by §2.1 C-4, see
-  // `lib/create-session.ts`'s module doc), identical behavior in web and
-  // Tauri per C-3.
+  // observe and cancel a session, never create one. This is the create+
+  // prompt flow: the 7a folder picker (§4.2.1) plus the minimal task-input
+  // form needed to call `POST /tasks` (`task.run`, #2983 Slice 4,
+  // `crate::serve::rest::tasks`) — the one-shot "mint-or-reuse a session AND
+  // start executing" entry point DOC-39 §7A/AC-21 names. This form used to
+  // call `POST /sessions` (`session.create`), which only ever minted an inert
+  // session record with no agent loop behind it (issue #3177) — every
+  // GUI-created session sat doing nothing. `POST /tasks` fixes that: typing a
+  // task and hitting submit now actually runs it, with the per-call `project`
+  // binding (PR #3189) carried the same way `POST /sessions` already
+  // forwarded it. Two daemon routes cover the whole slice — no Tauri command,
+  // no native dialog (barred by §2.1 C-4, see `lib/create-session.ts`'s
+  // module doc), identical behavior in web and Tauri per C-3.
   //
   // **Picker interaction model.** Mirrors 7a's own shape: browsing a
   // directory lists its CHILDREN as the selectable candidates (each row a
@@ -31,7 +37,7 @@
   // re-fetches `GET /fs?path=..` whenever `browsePath` changes (aborting the
   // previous in-flight listing fetch — a fast double-click through several
   // directories must not let a stale response win the race), the other only
-  // aborts `submitController` on unmount (`POST /sessions` is user-triggered,
+  // aborts `submitController` on unmount (`POST /tasks` is user-triggered,
   // not polled, so it needs no interval). The prior listing stays on screen
   // while a new one loads (`listingPhase === 'loading'` renders a small
   // inline cue rather than blanking the rows) to avoid picker flicker while
@@ -39,13 +45,18 @@
   // already in flight — `lib/create-session.ts`), and the button's `disabled`
   // binding is the only double-submit guard needed since there is no
   // separate confirm step for creation (unlike `SessionMonitor`'s cancel).
-  // A successful `201` clears `task`/`selectedProject` and shows the new
+  // A successful `202` clears `task`/`selectedProject` and shows the new
   // session's id when the body carries one (a generic "session created"
-  // otherwise — the 201 status, not the body, is authoritative). Both
+  // otherwise — the 202 status, not the body, is authoritative). Both
   // response bodies pass runtime shape guards (`isDirListing` /
-  // `extractSessionId`) before touching reactive state, so a shape-invalid
-  // 200/201 degrades to an inline message instead of throwing out of this
-  // unconditionally-mounted component and crashing the shell.
+  // `extractTaskSessionId`'s internal `isTaskRunResponse` check) before
+  // touching reactive state, so a shape-invalid
+  // 200/202 degrades to an inline message instead of throwing out of this
+  // unconditionally-mounted component and crashing the shell. A `400`
+  // (empty task, invalid `project`, or a `project` mismatching an existing
+  // session's own binding — #3178/PR #3189) surfaces via the daemon's
+  // `error.message` unchanged, the same generic 4xx/5xx path this form
+  // already had.
   // The session itself becomes visible through the existing
   // `GET /sessions` pollers (`StatusBar`/`SessionMonitor`'s `pickActiveSession`)
   // on their next tick — this component does not need its own poll.
@@ -63,10 +74,10 @@
   import { apiBase } from '../lib/api-config';
   import {
     bindingLabel,
-    buildCreateBody,
+    buildRunTaskBody,
     canSubmitCreate,
     describeFsError,
-    extractSessionId,
+    extractTaskSessionId,
     isDirListing,
     type DirEntryInfo,
     type DirListing,
@@ -194,8 +205,8 @@
       const base = await apiBase();
       if (controller.signal.aborted) return;
 
-      const body = buildCreateBody(task, selectedProject);
-      const res = await fetch(`${base}/sessions`, {
+      const body = buildRunTaskBody(task, selectedProject);
+      const res = await fetch(`${base}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -203,7 +214,10 @@
       });
       if (controller.signal.aborted) return;
 
-      if (res.status !== 201) {
+      if (res.status !== 202) {
+        // Covers the daemon's existing 4xx/5xx envelope, including the
+        // per-call project mismatch 400 (#3178, PR #3189) — its message is
+        // already caller-actionable, so it needs no special-casing here.
         const errBody = (await res.json().catch(() => null)) as {
           error?: { message?: string };
         } | null;
@@ -211,12 +225,12 @@
         return;
       }
 
-      // The 201 status is authoritative — the session exists even if the
+      // The 202 status is authoritative — task.run was accepted even if the
       // body is missing/malformed (same guard rationale as `isDirListing`),
       // so a bad body degrades the message to a generic one, never an error.
       const created: unknown = await res.json().catch(() => null);
       if (controller.signal.aborted) return;
-      const id = extractSessionId(created);
+      const id = extractTaskSessionId(created);
       successMessage = id ? `session created — ${id.slice(0, 8)}` : 'session created';
       task = '';
       selectedProject = null;
@@ -361,7 +375,7 @@
 
     <p
       class="mt-2 text-[11px] text-trusty-text-muted"
-      title="session.get_agents (GET /sessions/{'{'}id{'}'}/agents) requires an existing session — there is no pre-session roster route, so this form omits `agent` and the daemon applies its own default (DOC-39 §5.4)."
+      title="session.get_agents (GET /sessions/{'{'}id{'}'}/agents) requires an existing session — there is no pre-session roster route, so this form omits `agent_name` and the daemon applies its own default (DOC-39 §5.4)."
     >
       agent: daemon default — no pre-session roster endpoint exists yet
     </p>

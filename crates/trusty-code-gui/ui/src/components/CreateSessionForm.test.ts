@@ -1,12 +1,14 @@
 // Why: `CreateSessionForm.svelte` is this slice's main deliverable — the
-// create-session flow that closes the "observe-and-cancel only" gap. Its
+// create+prompt flow that closes the "observe-and-cancel only" gap (and, as
+// of issue #3177, the "GUI-created sessions are inert" gap — the form now
+// calls `POST /tasks`/`task.run`, not the dead-end `POST /sessions`). Its
 // pure logic is covered by `lib/create-session.test.ts`; this file covers
 // what only mounting the real component can: the submit button's
 // disabled/enabled states, the no-double-submit guard under a real in-flight
 // `fetch`, and that picking a listed folder updates the "selected:" line
 // before submit.
 // What: Mounts the real component with `fetch` stubbed to answer
-// `GET /fs` and `POST /sessions`. Mirrors `SessionMonitor.test.ts`'s
+// `GET /fs` and `POST /tasks`. Mirrors `SessionMonitor.test.ts`'s
 // stub-fetch-by-URL-suffix mounting pattern.
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -126,7 +128,7 @@ describe('CreateSessionForm submit gating', () => {
         if (url.includes('/fs')) {
           return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
         }
-        if (url.endsWith('/sessions') && init?.method === 'POST') {
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
           return createPromise;
         }
         throw new Error(`unexpected fetch: ${url}`);
@@ -151,8 +153,8 @@ describe('CreateSessionForm submit gating', () => {
 
     resolveCreate!({
       ok: true,
-      status: 201,
-      json: async () => ({ id: 'sess-abc12345', status: 'running' }),
+      status: 202,
+      json: async () => ({ session_id: 'sess-abc12345', status: 'running' }),
     } as Response);
 
     await waitFor(() => target.textContent?.includes('session created') ?? false);
@@ -168,7 +170,7 @@ describe('CreateSessionForm submit gating', () => {
         if (url.includes('/fs')) {
           return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
         }
-        if (url.endsWith('/sessions') && init?.method === 'POST') {
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
           return {
             ok: false,
             status: 400,
@@ -193,6 +195,87 @@ describe('CreateSessionForm submit gating', () => {
     expect(submitButton().disabled).toBe(false); // re-enabled after failure
   });
 
+  it('surfaces the per-call project-mismatch 400 from the daemon verbatim (#3178, PR #3189)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
+          return {
+            ok: false,
+            status: 400,
+            json: async () => ({
+              error: {
+                code: -32003,
+                message: "task.run: project `/tmp/other` does not match session `sess-1`'s existing binding",
+              },
+            }),
+          } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('does not match session') ?? false);
+
+    expect(taskField().value).toBe('ship the feature'); // not cleared on error
+    expect(submitButton().disabled).toBe(false); // re-enabled after failure
+  });
+
+  it('forwards the selected project path in the POST /tasks body', async () => {
+    let capturedBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
+          capturedBody = JSON.parse(init.body as string);
+          return {
+            ok: true,
+            status: 202,
+            json: async () => ({ session_id: 'sess-abc12345', status: 'running' }),
+          } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    const useButtons = Array.from(target.querySelectorAll('button')).filter(
+      (b) => b.textContent === 'use',
+    );
+    (useButtons[0] as HTMLButtonElement).click();
+    await waitFor(() => target.textContent?.includes('git repo — acme-api') ?? false);
+
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('session created') ?? false);
+
+    expect(capturedBody).toEqual({
+      task_description: 'ship the feature',
+      project: '/home/bob/acme-api',
+    });
+  });
+
   it('degrades to the error UI when GET /fs returns 200 with a shape-invalid body (PR #3103 HIGH finding)', async () => {
     vi.stubGlobal(
       'fetch',
@@ -215,7 +298,7 @@ describe('CreateSessionForm submit gating', () => {
     expect(submitButton().disabled).toBe(true); // no task entered yet
   });
 
-  it('shows a generic success message when a 201 body lacks a valid id (PR #3103 MEDIUM finding)', async () => {
+  it('shows a generic success message when a 202 body lacks a valid session_id (PR #3103 MEDIUM finding)', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -223,9 +306,9 @@ describe('CreateSessionForm submit gating', () => {
         if (url.includes('/fs')) {
           return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
         }
-        if (url.endsWith('/sessions') && init?.method === 'POST') {
-          // 201 (session WAS created) but the body carries no `id`.
-          return { ok: true, status: 201, json: async () => ({ status: 'running' }) } as Response;
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
+          // 202 (task.run was accepted) but the body carries no `session_id`.
+          return { ok: true, status: 202, json: async () => ({ status: 'running' }) } as Response;
         }
         throw new Error(`unexpected fetch: ${url}`);
       }),
@@ -243,7 +326,7 @@ describe('CreateSessionForm submit gating', () => {
 
     expect(target.textContent).toContain('session created');
     expect(target.textContent).not.toContain('session created —'); // no id prefix
-    expect(taskField().value).toBe(''); // 201 is authoritative — form still clears
+    expect(taskField().value).toBe(''); // 202 is authoritative — form still clears
   });
 
   it('issue #3132: Enter (no Shift) submits the task field, and a rapid second Enter while in flight causes no second POST', async () => {
@@ -260,7 +343,7 @@ describe('CreateSessionForm submit gating', () => {
         if (url.includes('/fs')) {
           return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
         }
-        if (url.endsWith('/sessions') && init?.method === 'POST') {
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
           postCount += 1;
           return createPromise;
         }
@@ -300,8 +383,8 @@ describe('CreateSessionForm submit gating', () => {
 
     resolveCreate!({
       ok: true,
-      status: 201,
-      json: async () => ({ id: 'sess-abc12345', status: 'running' }),
+      status: 202,
+      json: async () => ({ session_id: 'sess-abc12345', status: 'running' }),
     } as Response);
 
     await waitFor(() => target.textContent?.includes('session created') ?? false);
@@ -317,9 +400,9 @@ describe('CreateSessionForm submit gating', () => {
         if (url.includes('/fs')) {
           return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
         }
-        if (url.endsWith('/sessions') && init?.method === 'POST') {
+        if (url.endsWith('/tasks') && init?.method === 'POST') {
           postCount += 1;
-          return { ok: true, status: 201, json: async () => ({ id: 'sess-abc' }) } as Response;
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc' }) } as Response;
         }
         throw new Error(`unexpected fetch: ${url}`);
       }),
