@@ -20,7 +20,11 @@
   // comes along for free, feeding DOC-39 §4.2's binding-state label).
   // Leaving the selection cleared (or clicking `clear`) submits projectless
   // (`project` omitted from the body) — AC-2.1 mandates this MUST be
-  // supported, not treated as an error state.
+  // supported, not treated as an error state. The row's `use` button sits
+  // directly adjacent to the directory name (issue #3134, Bob's smoke-test
+  // feedback: the prior `flex-1`/`justify-between` layout stretched the
+  // name button to fill the row and stranded `use` at the far right, wide
+  // gap included) — see the row markup's inline comment.
   //
   // What: Two independent `$effect`s, same `AbortController`-per-lifetime
   // shape `SessionMonitor.svelte`/`StatusBar.svelte` already establish: one
@@ -45,9 +49,17 @@
   // The session itself becomes visible through the existing
   // `GET /sessions` pollers (`StatusBar`/`SessionMonitor`'s `pickActiveSession`)
   // on their next tick — this component does not need its own poll.
+  // Enter-to-submit (issue #3132, Bob's smoke-test feedback: the form had
+  // no keyboard submit path — click was the only way in) is handled by
+  // `handleTaskKeydown` on the task `<textarea>`: plain `Enter` submits,
+  // `Shift+Enter` inserts a newline (the textarea's own default behavior,
+  // untouched) — see that function's own doc comment for the full
+  // rationale and why no separate double-submit guard was needed.
+  //
   // Test: `create-session.test.ts` covers the pure gating/body-construction
   // logic; `CreateSessionForm.test.ts` covers the form's disabled/enabled
-  // submit states, the no-double-submit guard, and picker navigation.
+  // submit states, the no-double-submit guard (click AND rapid Enter),
+  // Enter-vs-Shift+Enter keyboard behavior, and picker navigation.
   import { apiBase } from '../lib/api-config';
   import {
     bindingLabel,
@@ -139,6 +151,35 @@
 
   function clearSelection() {
     selectedProject = null;
+  }
+
+  /**
+   * Task-field `keydown` handler — issue #3132.
+   *
+   * Why: the form had no keyboard submit path at all — clicking "create
+   * session" was the only way in, which Bob's smoke test flagged as wrong
+   * UX (`docs/specs/trusty-code-harness-ui.md` has no submit-key
+   * convention to defer to, so this follows the universal textarea
+   * pattern: Enter submits, Shift+Enter inserts a newline). A plain
+   * `<textarea>`'s native behavior is to insert a newline on every Enter
+   * (never auto-submit, unlike a single-line `<input>` in a `<form>`), so
+   * Shift+Enter needs no handling at all here — only the plain-Enter case
+   * needs to be intercepted and redirected to `submit()`.
+   * What: `Enter` without `Shift` (and not mid-IME-composition) calls
+   * `preventDefault()` — so no newline is inserted — then defers to the
+   * existing `submit()`, which already re-checks `canSubmitCreate` at its
+   * top; this handler adds no separate guard, so the no-double-submit
+   * semantics are identical to the button's `disabled` binding. `Shift+Enter`
+   * (or any other key) falls through untouched, letting the textarea's
+   * default newline-insertion behavior apply.
+   * Test: `CreateSessionForm.test.ts` — Enter submits, Shift+Enter does not
+   * (and is never prevented), and a second rapid Enter while the first
+   * submit is in flight produces no second `POST`.
+   */
+  function handleTaskKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    void submit();
   }
 
   async function submit() {
@@ -235,10 +276,23 @@
 
       <ul class="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
         {#each dirEntries as entry (entry.path)}
-          <li class="flex items-center justify-between gap-2 rounded px-1.5 py-1 hover:bg-trusty-border/10">
+          <!-- issue #3134: the "use" (picker) button sits DIRECTLY adjacent
+               to the directory name it acts on. The prior markup put
+               `flex-1` on the name button and `justify-between` on the
+               row, which stretched the name button to fill the row and
+               shoved "use" to the row's far right — for a short name that
+               left a wide, disorienting gap between the name and the
+               control that binds it. `min-w-0 max-w-[65%]` still bounds
+               the name button's width so `truncate` keeps working on long
+               names, but without `flex-1`/`justify-between` the row's
+               default `flex items-center` packs both buttons together at
+               the left, so "use" always immediately follows the name
+               (any leftover row width is simply unused space at the end,
+               not a gap in the middle). -->
+          <li class="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-trusty-border/10">
             <button
               type="button"
-              class="flex flex-1 items-center gap-1.5 truncate text-left"
+              class="flex min-w-0 max-w-[65%] items-center gap-1.5 truncate text-left"
               onclick={() => openEntry(entry)}
             >
               <span class="truncate">{entry.name}</span>
@@ -282,8 +336,9 @@
     <textarea
       id="new-session-task"
       bind:value={task}
+      onkeydown={handleTaskKeydown}
       rows="3"
-      placeholder="Describe what this session should do…"
+      placeholder="Describe what this session should do… (Enter to submit, Shift+Enter for a new line)"
       class="mt-1 w-full rounded border border-trusty-border bg-trusty-surface/40 p-2 text-xs text-trusty-text"
     ></textarea>
   </div>
