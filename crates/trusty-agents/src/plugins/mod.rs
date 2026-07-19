@@ -14,11 +14,9 @@
 pub mod manager;
 pub mod python_tool;
 pub mod stdio_mcp;
-pub mod trusty_memory;
 pub mod trusty_search;
 
 pub use manager::{PluginManager, PluginState, PluginStatus, init_global, plugin_manager};
 pub use python_tool::{PythonPluginConfig, PythonToolPlugin};
 pub use stdio_mcp::{McpTool, ServerInfo, StdioMcpClient};
-pub use trusty_memory::TrustyMemoryPlugin;
 pub use trusty_search::TrustySearchPlugin;
