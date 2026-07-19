@@ -691,6 +691,7 @@ Full-length reference materials for less-frequent lookups:
 - **IDE setup (detailed):** [docs/reference/ide-setup.md](docs/reference/ide-setup.md)
 - **Running MCP servers (examples & wiring):** [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md)
 - **Spec-Linked Documentation (SLD) policy:** [DOC-38](docs/specs/spec-linked-documentation.md) — the standard for declaring source↔spec references; enforced by `scripts/check_sld.sh`.
+- **HTTP trust-boundary threat model:** [docs/reference/threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy compliance inventory for the loopback-only doctrine ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
 
 ## Domain Consolidation Audit
 
