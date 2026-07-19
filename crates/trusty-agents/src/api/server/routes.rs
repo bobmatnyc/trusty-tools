@@ -1,23 +1,25 @@
-//! Router assembly + server bootstrap (#151, #181).
+//! Router assembly + server bootstrap (#151, #181, #3329).
 //!
-//! Why: One place to wire every route to its handler, attach CORS /
-//! compression / tracing / optional bearer-auth layers, and bind the listener.
-//! Keeping route registration separate from the handlers themselves makes the
-//! API surface auditable at a glance.
-//! What: `build_router*` construct the axum `Router`; `serve*` bind
-//! `0.0.0.0:<port>`, print startup URLs, and run until killed.
-//! Test: `super::tests` build routers via `build_router` / `build_router_with_config`.
+//! Why: One place to wire every route to its handler, attach the shared
+//! same-origin write guard + standard middleware stack, the optional
+//! bearer-auth layer, and bind the listener. Keeping route registration
+//! separate from the handlers themselves makes the API surface auditable at a
+//! glance.
+//! What: `build_router*` construct the axum `Router` (router-wide guard applied
+//! AFTER all route registration, #3329); `serve*` default to a loopback bind
+//! (`127.0.0.1:<port>`), refuse an unauthenticated non-loopback bind, write the
+//! `http_addr` discovery file so the console proxy can reach this surface, print
+//! startup URLs, and run until killed.
+//! Test: `super::tests` build routers via `build_router` / `build_router_with_config`;
+//! `super::tests::guard` covers the router-wide write guard and the
+//! non-loopback-without-token startup refusal.
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
-    http::{Method, header},
-    middleware,
+    Json, Router, middleware,
     routing::{get, post},
 };
-use tower_http::compression::CompressionLayer;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
+use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_patch::patch_agent_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
@@ -42,22 +44,15 @@ use super::ui::{serve_asset, serve_index};
 
 /// Build the axum router.
 ///
-/// Why: A permissive CORS layer lets the dual-mode UI (`pnpm dev` browser
-/// build) talk to the API directly without a Vite proxy when desired, and
-/// also unblocks `curl`/Postman from any origin during local development.
-/// In production-style deploys the server is fronted by a same-origin
-/// reverse proxy (or the Tauri webview) so the wide-open policy is
-/// acceptable for our local-dev threat model. Tighten if/when we expose the
-/// API publicly.
-/// What: Builds the route table with a permissive `CorsLayer` and no auth.
-/// Test: `curl -i -H 'Origin: http://localhost:5173' http://localhost:7654/api/health`
-/// returns `access-control-allow-origin: *`.
+/// Why: Kept `pub` for unit tests and future callers that want an
+/// unauthenticated, loopback-only router without going through `ApiConfig`.
+/// What: Delegates to `build_router_with_config` (no token, loopback-only
+/// self-origins).
+/// Test: `super::tests` build routers via this entry point.
 //
-// Used by unit tests (see `test_router` below) and kept `pub` for future
-// callers that want an unauthenticated router without going through
-// `ApiConfig`. Note: `#[allow(dead_code)]` is required because this is a
-// `bin` crate — `pub` only suppresses dead-code warnings for library crates
-// exposing items as public API, not for binaries with no external consumers.
+// Note: `#[allow(dead_code)]` is required because this is a `bin` crate —
+// `pub` only suppresses dead-code warnings for library crates exposing items
+// as public API, not for binaries with no external consumers.
 #[allow(dead_code)]
 pub fn build_router(state: AppState) -> Router {
     build_router_with_config(state, None)
@@ -65,41 +60,45 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Build the axum router, optionally with bearer-token auth. (#181)
 ///
-/// Why: Splitting this from `build_router` keeps the call-sites that don't
-/// care about auth (most tests) ergonomic while letting `serve()` thread an
-/// `ApiConfig` through. The auth layer is only attached when `token` is
-/// `Some` so the unauthenticated path remains identical to before.
-/// What: Builds the same routes as `build_router`, adds `/api/config` for UI
-/// bootstrap, and conditionally wraps `/api/*` with `auth_middleware`.
-/// Test: `auth_middleware_*` tests cover both with-token and without-token
-/// branches via `oneshot` requests.
+/// Why: The default entry point for tests and same-machine dev — trusts only
+/// loopback for the router-wide write guard. `serve_with_config` uses
+/// [`build_router_with_origins`] with the resolved (possibly non-loopback)
+/// bind address.
+/// What: Delegates to [`build_router_with_origins`] with a default
+/// (loopback-only) `SelfOrigins`.
+/// Test: `auth_middleware_*` and `super::tests::guard` cover both branches.
 pub fn build_router_with_config(state: AppState, token: Option<String>) -> Router {
-    // CORS: keep `allow_origin(Any)` because the server is reachable over
-    // Tailscale / LAN from the operator's other devices and from the Tauri
-    // webview, and we don't know those origins ahead of time. We tighten the
-    // method/header allowlists to the minimum the API actually uses so a
-    // hostile LAN page can't smuggle exotic headers. Bearer-token auth (when
-    // configured) remains the real gate on `POST /api/task` — CORS is
-    // defence-in-depth, not the lock.
-    //
-    // #3063: DELETE was missing from this list even though `/api/ctrl/sessions/:id`,
-    // `/api/tm/sessions/:name`, and `/api/tm/sessions/:name/favorite` already
-    // route DELETE — a pre-existing gap that silently blocked browser access
-    // to all of them (curl/oneshot tests never hit it since CORS preflight is
-    // browser-enforced). Adding the new `DELETE /api/task/:id` cancellation
-    // route in the same PR made fixing it the smallest correct move.
-    // #3246: PATCH added for `/api/agents/:name`.
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::DELETE,
-            Method::PATCH,
-            Method::OPTIONS,
-        ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+    build_router_with_origins(state, token, SelfOrigins::default())
+}
 
+/// Build the axum router with bearer-token auth AND the router-wide
+/// same-origin write guard bound to `self_origins`. (#181, #3329)
+///
+/// Why: The trusty-agents API exposes DESTRUCTIVE write routes (`POST
+/// /api/task` spawns arbitrary subprocesses, `DELETE /api/task/{id}` and the
+/// `/api/tm/*`, `/api/ctrl/*`, `POST /rpc` surfaces mutate live sessions)
+/// behind permissive CORS. Without a same-origin guard, any page the operator
+/// visits could drive those endpoints cross-origin (CSRF). This adopts the
+/// shared guard (`trusty_common::server::with_guarded_middleware`,
+/// mirroring #3317) router-wide so every route — including any merged in
+/// later — is covered (the #3268 lesson). The guard is method-gated
+/// (POST/PUT/PATCH/DELETE only), so `GET` reads and the `/api/events` SSE
+/// stream pass through untouched, and it fails open on a missing `Origin`
+/// header so server-side callers (the console reverse proxy, `curl`, the Tauri
+/// IPC path) keep working. `self_origins` additionally trusts the daemon's own
+/// resolved non-loopback bind address so a token-guarded remote bind still
+/// serves its own write UI (#3269).
+/// What: Registers the same routes as before, conditionally wraps `/api/*`
+/// with `auth_middleware` when a token is set (innermost), then applies
+/// `with_guarded_middleware` (guard + standard CORS/trace/gzip stack)
+/// router-wide.
+/// Test: `super::tests::guard` — cross-origin write → 403; loopback (browser
+/// same-origin) write → allowed; GET reads unaffected.
+pub fn build_router_with_origins(
+    state: AppState,
+    token: Option<String>,
+    self_origins: SelfOrigins,
+) -> Router {
     let auth_required = token.is_some();
     let config_route = get(move || async move { Json(ApiClientConfig { auth_required }) });
 
@@ -190,17 +189,20 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
         router = router.layer(middleware::from_fn_with_state(auth_state, auth_middleware));
     }
 
-    router
-        .layer(cors)
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
+    // #3329: router-wide same-origin write guard + the shared standard
+    // middleware stack (permissive CORS, tracing, gzip), applied AFTER all
+    // route registration so every destructive route is covered (#3268 lesson).
+    // Replaces the crate-local CORS/compression/trace layers so trusty-agents
+    // no longer drifts from the sibling trusty-* daemons' middleware.
+    with_guarded_middleware(router, self_origins)
 }
 
-/// Serve the HTTP API and embedded web UI on `0.0.0.0:<port>` until killed.
+/// Serve the HTTP API and embedded web UI on `127.0.0.1:<port>` until killed.
 ///
 /// Why: Single-binary deployment — one process handles both API requests and
 /// serves the web frontend so users don't need a separate static-file server.
-/// What: Delegates to `serve_with_config` with an unauthenticated config.
+/// What: Delegates to `serve_with_config` with an unauthenticated,
+/// loopback-only config (#3329).
 /// Test: `cargo run -- --serve --port 7654 &` followed by
 /// `curl -s http://localhost:7654/ | grep -c 'app'` should return > 0.
 //
@@ -214,19 +216,37 @@ pub async fn serve(port: u16) -> Result<()> {
     serve_with_config(ApiConfig::unauthenticated(port)).await
 }
 
-/// Serve the HTTP API and embedded web UI, honoring `ApiConfig`. (#181)
+/// Serve the HTTP API and embedded web UI, honoring `ApiConfig`. (#181, #3329)
 ///
-/// Why: Bound on `0.0.0.0`, the server is reachable from any host on the
-/// LAN. We surface the LAN IP at startup so the operator can copy/paste the
-/// URL to other devices, and we loudly warn if no auth token is configured
-/// because the API can spawn arbitrary subprocesses.
-/// What: Resolves the LAN IP via the standard "connect a UDP socket to
-/// 8.8.8.8 and ask the kernel for the local addr" trick (no packet is
-/// actually sent — UDP is connectionless), prints localhost + LAN URLs,
-/// optionally warns on missing token, then serves until killed.
-/// Test: Manual — run `--api --port 7654` with and without `--api-token`
-/// and confirm the warning + LAN URL print as documented.
+/// Why: Loopback-only doctrine (#3329) — the API can spawn arbitrary
+/// subprocesses and mutate live sessions, so it binds `127.0.0.1` by default
+/// and REFUSES to start on a non-loopback interface without a token. For
+/// remote access the intended path is the trusty-console reverse proxy
+/// (`/api/agents/*`), not exposing this port directly. We also write the
+/// standard `http_addr` discovery file after bind so the console proxy can
+/// resolve this surface, and remove it on shutdown.
+/// What: Rejects a non-loopback `cfg.bind` when `cfg.token` is `None` with an
+/// actionable error; binds `cfg.bind:cfg.port`; builds the router trusting the
+/// resolved bind address as a self-origin for the write guard; writes/removes
+/// the `http_addr` discovery file; prints startup URLs (LAN URL only for a
+/// non-loopback bind); serves until killed.
+/// Test: `super::tests::guard::non_loopback_without_token_refuses_start`;
+/// manual — run `--api --port 7654` and confirm the discovery file appears.
 pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
+    // #3329: loopback-only doctrine. An unauthenticated non-loopback bind would
+    // expose an arbitrary-subprocess-spawning API to the whole LAN — refuse it
+    // with an actionable error rather than binding silently.
+    if !cfg.bind.is_loopback() && cfg.token.is_none() {
+        anyhow::bail!(
+            "refusing to start the trusty-agents API on non-loopback bind {bind} without an API \
+             token: this API can spawn arbitrary subprocesses. Set --api-token <TOKEN> (or the \
+             TAGENT_API_TOKEN env var), or bind loopback (omit --bind for the 127.0.0.1 default). \
+             For remote access, front this surface with the trusty-console proxy (reachable as \
+             /api/agents/*) instead of exposing this port directly.",
+            bind = cfg.bind
+        );
+    }
+
     // #364: Don't block server startup on docs indexing. For projects with
     // many docs files, `DocsIndex::build` can take 5–15s, which pushes us
     // past the Tauri sidecar's 20s health-check budget and the user sees
@@ -267,24 +287,56 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     });
     // #212: Load persisted task snapshot so restarts don't lose history.
     let state = AppState::with_persistence(None).await;
-    let app = build_router_with_config(state, cfg.token.clone());
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cfg.port));
+    let addr = std::net::SocketAddr::from((cfg.bind, cfg.port));
     tracing::info!(%addr, "trusty-agents api server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    // Resolve the actual bound address (port may have been requested as 0) and
+    // trust it as a self-origin for the router-wide write guard so a
+    // token-guarded non-loopback bind still serves its own write UI (#3269);
+    // loopback binds are always trusted by the guard, so `from_bind_addrs`
+    // drops them.
+    let resolved = listener.local_addr().unwrap_or(addr);
+    let self_origins = SelfOrigins::from_bind_addrs(&[resolved]);
+    let app = build_router_with_origins(state, cfg.token.clone(), self_origins);
+
+    // #3331: publish the bound address via the standard `http_addr` discovery
+    // file so the trusty-console reverse proxy (and the connector poller) can
+    // resolve `/api/agents/*` to this daemon — the same mechanism the sibling
+    // daemons use. Best-effort: a missing $HOME / read-only fs is non-fatal.
+    if let Err(e) = trusty_common::write_daemon_addr("trusty-agents", &resolved.to_string()) {
+        tracing::warn!(?e, "could not write trusty-agents http_addr discovery file");
+    }
 
     let port = cfg.port;
     println!("[trusty-agents] API:    http://localhost:{port}/api");
     println!("[trusty-agents] Web UI: http://localhost:{port}/");
-    if let Some(lan_ip) = detect_lan_ip() {
+    // Only advertise a LAN URL when the operator explicitly opted into a
+    // non-loopback bind; the loopback default is not reachable off-host.
+    if !cfg.bind.is_loopback()
+        && let Some(lan_ip) = detect_lan_ip()
+    {
         println!("[trusty-agents] Web UI (LAN): http://{lan_ip}:{port}/");
     }
     if cfg.token.is_none() {
-        eprintln!("\u{26A0}  No API token set — server is unauthenticated");
+        eprintln!("\u{26A0}  No API token set — server is unauthenticated (loopback-only)");
     } else {
         eprintln!("[trusty-agents] API token authentication: enabled");
     }
 
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(trusty_common::shutdown_signal())
+        .await;
+
+    // Remove the discovery file so stale clients fail fast instead of proxying
+    // to a dead port.
+    if let Err(e) = trusty_common::remove_daemon_addr("trusty-agents") {
+        tracing::warn!(
+            ?e,
+            "could not remove trusty-agents http_addr discovery file"
+        );
+    }
+    serve_result?;
     Ok(())
 }
 
