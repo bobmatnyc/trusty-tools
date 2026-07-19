@@ -100,6 +100,8 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         "dash",
         // #2405: universal inference-provider credential CLI (`config keys …`).
         "config",
+        // #3062: resume a checkpointed workflow run (`resume <run-id>`).
+        "resume",
     ];
     if args.len() > 1 {
         let candidate = &args[1];
@@ -186,6 +188,13 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
     // #449: `trusty-agents eval run --suite <path>` — run a behavior eval suite.
     if args.len() > 1 && args[1] == "eval" {
         registry_cmds::run_eval_subcommand(&args[2..]).await?;
+        return Ok(false);
+    }
+
+    // #3062: `trusty-agents resume [--list] [--json] <run-id>` — continue a
+    // checkpointed workflow run from its first incomplete phase.
+    if args.len() > 1 && args[1] == "resume" {
+        super::workflow_mode::run_resume_subcommand(&args[2..]).await?;
         return Ok(false);
     }
 
