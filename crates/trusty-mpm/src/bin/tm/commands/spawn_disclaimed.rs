@@ -10,9 +10,16 @@
 //! What: [`run`] spawns the given program+args via the shared #3037
 //! [`trusty_mpm::core::spawn_disclaim::disclaimed_status`] seam (inherited
 //! stdio so `claude` stays interactive in the pane), waits, and exits with the
-//! child's code. Non-macOS is a plain pass-through spawn (no TCC there).
-//! Test: `run_rejects_empty_argv`; the disclaim/spawn behaviour itself is
-//! covered by `trusty_mpm::core::spawn_disclaim`'s `disclaimed_status_*` tests.
+//! child's code. On macOS it first sets SIGINT/SIGQUIT to SIG_IGN so a pane
+//! Ctrl-C reaches only `claude` (which the disclaimed spawn resets to SIG_DFL)
+//! and the shim survives to reap and propagate the child's real exit status —
+//! the standard wrapper convention. Non-macOS is a plain pass-through spawn (no
+//! TCC there, and the shim is never emitted into a pane off macOS).
+//! Test: `run_rejects_empty_argv`; the disclaim/spawn behaviour is covered by
+//! `trusty_mpm::core::spawn_disclaim`'s `disclaimed_status_*` tests, and the
+//! wrapped-pane PID discovery + signal topology by
+//! `core::process::claude_pid_resolves_through_disclaim_wrapper` (`#[ignore]`)
+//! plus the manual macOS pre-merge checks noted on the PR.
 
 use anyhow::Context as _;
 
@@ -36,6 +43,24 @@ pub(crate) fn run(argv: Vec<String>) -> anyhow::Result<()> {
         .next()
         .context("internal-spawn-disclaimed requires a program to launch")?;
     let rest: Vec<String> = it.collect();
+
+    // #2997 review: ignore SIGINT/SIGQUIT in the shim so a pane Ctrl-C (or
+    // Ctrl-\) reaches only `claude` — which the disclaimed spawn resets to
+    // SIG_DFL so it installs its own handlers (see
+    // `spawn_disclaim::macos::status`) — and the shim SURVIVES to reap the
+    // child and propagate its real exit status. Without this the shim and
+    // `claude` share the foreground process group, so the signal would kill
+    // the shim (default disposition) out from under `claude`, orphaning it.
+    // The standard wrapper convention (à la `nohup`/`system(3)`). macOS-only
+    // to match where the child-side SIG_DFL reset actually happens (the shim
+    // is only ever emitted into a pane on macOS).
+    #[cfg(target_os = "macos")]
+    // SAFETY: setting SIG_IGN for two async-signal-safe signals before any
+    // child exists; no handler state is shared.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+    }
 
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&rest);

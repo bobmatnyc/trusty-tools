@@ -19,7 +19,10 @@
 //! current process environment with `cmd.get_envs()`'s overrides/removals
 //! layered on top (matching what `Command` itself would hand the child), sets
 //! the disclaim attribute when the private SPI resolves (via
-//! [`super::resolve_disclaim_fn`]), and spawns via `posix_spawnp`. No
+//! [`super::resolve_disclaim_fn`]), resets SIGINT/SIGQUIT to SIG_DFL in the
+//! child via `POSIX_SPAWN_SETSIGDEF` (so an interactive child installs its own
+//! handlers even when the caller — the #2997 disclaim-exec shim — ignored
+//! them), and spawns via `posix_spawnp`. No
 //! stdin/stdout/stderr file actions are added, so the child inherits the
 //! caller's fds directly (`Stdio::inherit()` semantics — this fn assumes
 //! `cmd` was built that way; it does not read back `cmd`'s stdio config,
@@ -142,6 +145,28 @@ fn spawn_pid_inherit_disclaimed(cmd: &Command) -> io::Result<libc::pid_t> {
                 // child is not disclaimed (today's behaviour), so we
                 // ignore it.
                 let _ = disclaim(&mut attr, 1);
+            }
+
+            // #2997 review: reset SIGINT/SIGQUIT to SIG_DFL in the child so an
+            // interactive child (`claude`) installs its OWN handlers even when
+            // the CALLER has set those signals to SIG_IGN — the disclaim-exec
+            // shim (`spawn_disclaimed.rs`) does exactly that (à la nohup) so a
+            // pane Ctrl-C reaches only `claude`, never killing the shim out
+            // from under it. A child started with SIGINT already SIG_IGN (as it
+            // would be by plain inheritance) commonly declines to install its
+            // own handler, silently swallowing Ctrl-C; POSIX_SPAWN_SETSIGDEF
+            // prevents that. Harmless for callers that do NOT ignore the signals
+            // (the child inherits SIG_DFL regardless). getflags-then-OR so we
+            // never clobber the disclaim SPI's own flag bit.
+            let mut sigdefault: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut sigdefault);
+            libc::sigaddset(&mut sigdefault, libc::SIGINT);
+            libc::sigaddset(&mut sigdefault, libc::SIGQUIT);
+            if libc::posix_spawnattr_setsigdefault(&mut attr, &sigdefault) == 0 {
+                let mut flags: libc::c_short = 0;
+                libc::posix_spawnattr_getflags(&attr, &mut flags);
+                flags |= libc::POSIX_SPAWN_SETSIGDEF as libc::c_short;
+                let _ = libc::posix_spawnattr_setflags(&mut attr, flags);
             }
 
             let mut pid: libc::pid_t = 0;
