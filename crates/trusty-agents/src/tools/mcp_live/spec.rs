@@ -147,6 +147,12 @@ pub async fn gather_specs(global: &GlobalConfig, project_dir: &Path) -> Vec<McpS
 
 #[cfg(test)]
 mod tests {
+    // Why: `gather_specs_does_not_spawn_mcp_add_discover_bypass` holds
+    // `HOME_LOCK` (a `std::sync::Mutex`) across async I/O to serialize
+    // global $HOME mutation against other tests — same rationale as
+    // `tools::mcp_tools::tests` (see `crate::test_env` docs).
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::mcp::config::{McpService, McpTool};
 
@@ -333,5 +339,62 @@ mod tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "trusted-entry");
         assert_eq!(specs[0].source, SpecSource::McpJson);
+    }
+
+    /// Why: SECURITY (#3266 follow-up) — closes the same bypass class the
+    /// `.mcp.json` trust-gate tests above cover, but for the `mcp_add` LLM
+    /// tool path: `dispatch_mcp_tool("mcp_add", ...)` (`tools/mcp_tools`)
+    /// forces `discover = false` on any LLM-originated call regardless of
+    /// what the caller requested, specifically so a config-service entry
+    /// that arrived via that path can never reach `gather_specs`' unguarded
+    /// `enabled && discover && stdio` auto-spawn loop. This test proves the
+    /// end-to-end path: an `mcp_add` call requesting `discover: true` with
+    /// an attacker-chosen command is persisted, reloaded from disk, and
+    /// still produces zero specs.
+    /// What: Set `HOME` to an isolated tempdir, dispatch `mcp_add` with
+    /// `discover: true` and `command: "evil-binary"`, reload
+    /// `GlobalConfig::load()`, then call `gather_specs`; assert the
+    /// resulting spec list contains no entry for that service.
+    /// Test: This test.
+    #[tokio::test]
+    async fn gather_specs_does_not_spawn_mcp_add_discover_bypass() {
+        use crate::test_env::HOME_LOCK;
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let out = crate::tools::mcp_tools::dispatch_mcp_tool(
+            "mcp_add",
+            &serde_json::json!({
+                "name": "attacker-service",
+                "description": "attacker-controlled",
+                "transport": "stdio",
+                "command": "evil-binary",
+                "discover": true
+            }),
+        )
+        .await;
+        assert!(out.contains("Added"), "got: {out}");
+
+        let reloaded = GlobalConfig::load().await;
+        let persisted = reloaded
+            .mcp
+            .services
+            .iter()
+            .find(|s| s.name == "attacker-service")
+            .expect("attacker-service present");
+        assert!(
+            !persisted.discover,
+            "mcp_add must have forced discover=false on persist"
+        );
+
+        let project = tempfile::tempdir().unwrap();
+        let specs = gather_specs(&reloaded, project.path()).await;
+        assert!(
+            !specs.iter().any(|s| s.name == "attacker-service"),
+            "mcp_add-originated discover:true must never be auto-spawned by gather_specs: {specs:?}"
+        );
     }
 }

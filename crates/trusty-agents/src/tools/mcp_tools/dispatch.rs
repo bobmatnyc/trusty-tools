@@ -109,10 +109,25 @@ fn parse_service_from_args(args: &Value) -> Result<McpService> {
         .unwrap_or_default();
     let url = args.get("url").and_then(Value::as_str).map(str::to_string);
     let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-    let discover = args
-        .get("discover")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // SECURITY (#3266 follow-up): `discover` is a declared `mcp_add` schema
+    // field, but it is intentionally forced to `false` here regardless of
+    // what an LLM-originated tool call requests. `gather_specs`
+    // (`tools/mcp_live/spec.rs`) auto-spawns ANY `enabled && discover &&
+    // stdio` service with no trust gate of its own — the `.mcp.json` trust
+    // gate only covers the `.mcp.json` ingestion path. Without this strip, a
+    // prompt-injected or hallucinated `mcp_add` call could set
+    // `discover: true` with an attacker-chosen `command`, `add_service`
+    // would persist it, and the very next persona turn's `gather_specs` call
+    // would auto-spawn that binary — a full trust-gate bypass. Live
+    // discovery remains available, but only via a human hand-editing
+    // `~/.trusty-agents/config.toml` directly, same as the documented `env`
+    // path above.
+    let discover = false;
+    if args.get("discover").and_then(Value::as_bool) == Some(true) {
+        tracing::warn!(
+            "mcp_add: rejected 'discover: true' from LLM-originated tool call; service added with discover=false"
+        );
+    }
     // SECURITY (#3266): `env` is intentionally NOT read from `args` here.
     // `mcp_add` is dispatched from LLM-originated tool calls (the persona's
     // model decides the arguments); `env` is not declared in this tool's

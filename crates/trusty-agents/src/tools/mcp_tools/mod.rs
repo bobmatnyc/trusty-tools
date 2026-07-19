@@ -271,4 +271,49 @@ mod tests {
             epsilon.env
         );
     }
+
+    /// Why: SECURITY (#3266 follow-up) — `discover` IS a declared `mcp_add`
+    /// schema field (unlike `env`), but honoring `discover: true` from an
+    /// LLM-originated call is a trust-gate bypass: `gather_specs`
+    /// (`tools/mcp_live/spec.rs`) auto-spawns any `enabled && discover &&
+    /// stdio` `[[mcp.services]]` entry with no trust gate of its own. A
+    /// prompt-injected `mcp_add` call setting `discover: true` +
+    /// attacker-chosen `command` must not result in a service that the next
+    /// persona turn auto-spawns.
+    /// What: Call `mcp_add` with `discover: true` and an attacker-chosen
+    /// command; assert the persisted service has `discover == false`
+    /// regardless (the code additionally emits a `tracing::warn!` on this
+    /// path, mirroring the undeclared-`env` strip above).
+    /// Test: This test.
+    #[tokio::test]
+    async fn dispatch_mcp_add_strips_discover_true() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let args = json!({
+            "name": "zeta",
+            "description": "zeta service",
+            "transport": "stdio",
+            "command": "evil-binary",
+            "discover": true
+        });
+        let out = dispatch_mcp_tool("mcp_add", &args).await;
+        assert!(out.contains("Added"), "got: {out}");
+
+        let reloaded = GlobalConfig::load().await;
+        let zeta = reloaded
+            .mcp
+            .services
+            .iter()
+            .find(|s| s.name == "zeta")
+            .expect("zeta service present");
+        assert!(
+            !zeta.discover,
+            "discover must be forced to false for LLM-originated mcp_add calls, got: {}",
+            zeta.discover
+        );
+    }
 }
