@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #f5efe7; font-family: 'IBM Plex Sans', sans-serif; color: #2b1c12; }
+  a { color: #b7410e; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  /* Idle: slow blink every 4s */
+  @keyframes foundry-blink { 0%, 94%, 100% { transform: scaleY(1); } 96%, 98% { transform: scaleY(0.12); } }
+  /* Active: antenna emits expanding rings */
+  @keyframes foundry-ping { 0% { transform: translateX(-50%) scale(0.3); opacity: 0.9; } 100% { transform: translateX(-50%) scale(2.6); opacity: 0; } }
+  /* Working: quicker double-blink */
+  @keyframes foundry-blink-busy { 0%, 86%, 100% { transform: scaleY(1); } 88%, 90% { transform: scaleY(0.12); } 92% { transform: scaleY(1); } 94%, 96% { transform: scaleY(0.12); } }
+  @keyframes foundry-tilt { 0%, 100% { transform: rotate(0deg); } 40% { transform: rotate(-4deg); } 60% { transform: rotate(4deg); } }
+</style>
+</helmet>
+<div style="max-width:1060px; margin:0 auto; padding:56px 40px 96px;">
+  <div style="border-bottom:3px solid #b7410e; padding-bottom:20px; margin-bottom:36px;">
+    <div style="font:700 28px 'Chakra Petch',sans-serif; letter-spacing:0.02em;">ROBOT ACTIVITY STATES</div>
+    <div style="font:500 11px 'IBM Plex Mono',monospace; letter-spacing:0.16em; color:#8a7460; margin-top:6px;">FOUNDRY MOTION SPEC · EVENT-DRIVEN MARK ANIMATION</div>
+  </div>
+  <p style="margin:0 0 28px; color:#6e5843; font-size:14px; max-width:680px;">The mark is the activity indicator. Idle units blink slowly (every 4s). When events stream through, the antenna emits expanding rings — one ring per event burst. Working units double-blink. Motion is subtle, loopable, and never blocks reading.</p>
+  <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:36px;">
+    <div style="background:#fffdf9; border:1.5px solid #d8c9b4; border-radius:6px; padding:32px; display:flex; flex-direction:column; align-items:center; gap:18px;">
+      <div style="width:64px; height:64px; background:#b7410e; border-radius:10px; position:relative;">
+        <div style="position:absolute; left:50%; top:-9px; width:3px; height:10px; background:#e9b98a; transform:translateX(-50%);"></div>
+        <div style="position:absolute; left:50%; top:-16px; width:8px; height:8px; border-radius:50%; background:#e9b98a; transform:translateX(-50%);"></div>
+        <div style="position:absolute; left:14px; top:20px; width:12px; height:12px; background:#f5efe7; animation:foundry-blink 4s infinite; transform-origin:center;"></div>
+        <div style="position:absolute; right:14px; top:20px; width:12px; height:12px; background:#f5efe7; animation:foundry-blink 4s infinite; transform-origin:center;"></div>
+        <div style="position:absolute; left:19px; bottom:14px; right:19px; height:5px; background:#f5efe7;"></div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font:600 11px 'IBM Plex Mono',monospace; letter-spacing:0.14em; color:#2b1c12;">IDLE</div>
+        <div style="font-size:12px; color:#8a7460; margin-top:4px;">slow blink · 4s cycle · nothing else moves</div>
+      </div>
+    </div>
+    <div style="background:#fffdf9; border:1.5px solid #d8c9b4; border-radius:6px; padding:32px; display:flex; flex-direction:column; align-items:center; gap:18px;">
+      <div style="width:64px; height:64px; background:#b7410e; border-radius:10px; position:relative;">
+        <div style="position:absolute; left:50%; top:-16px; width:8px; height:8px; border-radius:50%; border:2px solid #b7410e; transform:translateX(-50%); animation:foundry-ping 1.4s ease-out infinite;"></div>
+        <div style="position:absolute; left:50%; top:-16px; width:8px; height:8px; border-radius:50%; border:2px solid #d97742; transform:translateX(-50%); animation:foundry-ping 1.4s ease-out 0.7s infinite;"></div>
+        <div style="position:absolute; left:50%; top:-9px; width:3px; height:10px; background:#e9b98a; transform:translateX(-50%);"></div>
+        <div style="position:absolute; left:50%; top:-16px; width:8px; height:8px; border-radius:50%; background:#e9b98a; transform:translateX(-50%);"></div>
+        <div style="position:absolute; left:14px; top:20px; width:12px; height:12px; background:#f5efe7; animation:foundry-blink 4s infinite; transform-origin:center;"></div>
+        <div style="position:absolute; right:14px; top:20px; width:12px; height:12px; background:#f5efe7; animation:foundry-blink 4s infinite; transform-origin:center;"></div>
+        <div style="position:absolute; left:19px; bottom:14px; right:19px; height:5px; background:#f5efe7;"></div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font:600 11px 'IBM Plex Mono',monospace; letter-spacing:0.14em; color:#2b1c12;">RECEIVING</div>
+        <div style="font-size:12px; color:#8a7460; margin-top:4px;">antenna rings expand · one per event burst</div>
+      </div>
+    </div>
+    <div style="background:#fffdf9; border:1.5px solid #d8c9b4; border-radius:6px; padding:32px; display:flex; flex-direction:column; align-items:center; gap:18px;">
+      <div style="width:64px; height:64px; background:#b7410e; border-radius:10px; position:relative; animation:foundry-tilt 2.8s ease-in-out infinite;">
+        <div style="position:absolute; left:50%; top:-9px; width:3px; height:10px; background:#e9b98a; transform:translateX(-50%);"></div>
+        <div style="position:absolute; left:50%; top:-16px; width:8px; height:8px; border-radius:50%; background:#e9b98a; transform:translateX(-50%);"></div>
+        <div style="position:absolute; left:14px; top:20px; width:12px; height:12px; background:#f5efe7; animation:foundry-blink-busy 2.2s infinite; transform-origin:center;"></div>
+        <div style="position:absolute; right:14px; top:20px; width:12px; height:12px; background:#f5efe7; animation:foundry-blink-busy 2.2s infinite; transform-origin:center;"></div>
+        <div style="position:absolute; left:19px; bottom:14px; right:19px; height:5px; background:#f5efe7;"></div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font:600 11px 'IBM Plex Mono',monospace; letter-spacing:0.14em; color:#2b1c12;">WORKING</div>
+        <div style="font-size:12px; color:#8a7460; margin-top:4px;">double-blink + gentle head tilt · long-running job</div>
+      </div>
+    </div>
+  </div>
+  <div style="background:#fffdf9; border:1.5px solid #d8c9b4; border-radius:6px; padding:24px;">
+    <div style="font:600 10px 'IBM Plex Mono',monospace; letter-spacing:0.14em; color:#8a7460; margin-bottom:12px;">MOTION GUARDRAILS</div>
+    <div style="font-size:13px; color:#6e5843; line-height:1.7;">
+      Rings: 1.4s ease-out, max 2 concurrent, rust stroke fading to 0 — trigger per SSE event, throttle to ≤2/s. Blink: scaleY on the eyes only, never opacity. Working tilt stays within ±4°. Respect <span style="font:500 12px 'IBM Plex Mono',monospace;">prefers-reduced-motion</span>: rings become a static halo, blinks stop. Keyframes ship in <a href="tokens.css">tokens.css</a>'s companion <span style="font:500 12px 'IBM Plex Mono',monospace;">foundry.css</span>.
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
