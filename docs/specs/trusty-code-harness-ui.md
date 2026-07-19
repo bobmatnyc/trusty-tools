@@ -670,12 +670,12 @@ API is an unbuilt feature, not a UI problem.
 | Route | Purpose |
 |---|---|
 | `POST /rpc` | All JSON-RPC (`session.*`, `task.*`) |
+| `POST /tasks` | Direct task creation (REST interface for `task.run`, #2983 Slice 4) |
+| `POST /sessions` | Direct session creation (REST interface for `session.create`, #2983 Slice 4) |
 | `GET /health` | Health |
 | `GET /sessions/{id}/events` | SSE — replays the ring buffer, then streams |
 
-**There is no REST resource surface.** The event taxonomy is `crate::events::Event`
-(`events.rs:75`, ~30 variants). Every UI need below routes through either a new
-JSON-RPC method or a new/extended `Event` variant.
+**REST surface:** Per #2983 Slice 4, direct `POST /tasks` and `POST /sessions` endpoints exist alongside `/rpc`; they provide REST alternatives to the JSON-RPC methods. The event taxonomy is `crate::events::Event` (`events.rs:75`, ~30 variants). Every UI need below routes through either a new JSON-RPC method, a new/extended `Event` variant, or a new REST endpoint where it makes sense for the UI surface (e.g., one-shot task creation, §7A.1).
 
 ### 5.1 Summary — UI need → API delta
 
@@ -1139,6 +1139,7 @@ Feeds the picker. Two sources:
 
 **AC-21.5** Recents are stored client-side and updated on every successful project binding.
 **AC-21.6** The picker sorts by recency, with a fallback to alphabetic for ties.
+**AC-21.7** When `task.run` receives both a `session_id` and a per-call `project` binding that resolves to a **different root** than that session's persisted binding, the call is rejected with `invalid_argument` (JSON-RPC error -32003 / HTTP 400). A session's persisted binding is authoritative; per-call project may only restate it for an existing session, never contradict it.
 
 ---
 
@@ -1162,7 +1163,7 @@ All via a **single daemon aggregation call** that fans out to each service.
 
 **AC-22.1** `POST /rpc` method `project.status{path}` returns aggregated health for all services bound to that project root.
 **AC-22.2** The call resolves daemon addresses via `trusty_common::daemon_addr::resolve_daemon_base_url` — no hardcoded ports.
-**AC-22.3** Response shape (not yet specified in this addendum; see issue #3181):
+**AC-22.3** Response shape (illustrative sketch; final binding shape lands with issue #3181):
 ```rust
 project.status { path } -> {
   project: { name, root_path, git_repo?: bool },
@@ -1172,6 +1173,7 @@ project.status { path } -> {
   git?: { branch, dirty: bool, ahead: u32, behind: u32 }  // if git repo
 }
 ```
+This struct is an illustrative sketch only — the actual response shape, field names, and error semantics are determined in issue #3181 and are not binding by this spec section.
 
 **AC-22.4** A degraded service (search index cold, palace missing, daemon unreachable) renders as a **designed state in the status chrome** — not an error and not hidden. Status bar shows a visual indicator per service.
 
@@ -1226,7 +1228,7 @@ project.write_instruction { filename, content: String }
 
 **AC-24.1** The route is available over both REST and JSON-RPC, wired into `POST /rpc` alongside the other project.* methods (§5.8, §5.0).
 **AC-24.2** Write succeeds with a `conflict` error (HTTP 409 / JSON-RPC error code) if the file has been edited externally since the last read (compare mtime).
-**AC-24.3** Path traversal attempts (detected by canonicalization or naive `..` checks) fail with **`guard: PathTraversalAttempted`** error code, distinct from a genuine not-found or permission error.
+**AC-24.3** Path traversal attempts are rejected with **`guard: PathTraversalAttempted`** error code, distinct from a genuine not-found or permission error. This covers both naive `..` attempts and symlink escapes: resolve the canonical target via `fs::canonicalize` and REJECT if the canonical path falls outside the canonicalized project root. Both CLAUDE.md and AGENTS.md MUST be tested for symlink targets pointing elsewhere.
 **AC-24.4** The GUI opens an **in-app editor** (not an external app) backed by this route — the UI is a thin client over the daemon (§2.1 C-2).
 
 ---
@@ -1292,7 +1294,7 @@ project.create_dir {
 } -> { path: String, git: bool }
 ```
 
-**AC-26.1** Creating a project calls `project.create_dir` which MUST handle **mkdir with traversal safety** — no `../`, no symlink escapes.
+**AC-26.1** Creating a project calls `project.create_dir` which MUST handle **mkdir with traversal safety**. For a not-yet-existing absolute path, canonicalize the parent directory and verify no symlink escapes; reject if the parent cannot be canonicalized (permission denied, nonexistent ancestor). For an already-existing path, canonicalize it and reject if it falls outside an expected containment boundary or contains symlink escapes. Reject all attempts containing `..` components with the same `guard: PathTraversalAttempted` error code as §7C.1.
 **AC-26.2** Git init is optional; a plain directory project is valid (§4.2 Bound · non-git).
 **AC-26.3** On success, the new project is added to the recents cache and immediately selectable.
 **AC-26.4** GUI affords "New Project" as a prominent entry in the project picker or as a separate button.
@@ -1325,7 +1327,7 @@ project.create_dir {
   - **IBM Plex Mono** — all system metadata (ids, paths, counts, status, table headers). This split is **load-bearing**: it separates *content* from *telemetry* visually — and in a context-first harness, telemetry **is** the product's evidence.
 - **Shell skeleton** (unchanged from PDF) — one flex column: header → service nav → body (rail + active pane) → status line. **§8.1 nesting invariant (AC-18.1) remains binding.**
 
-### 8.1 Dark theme ("Night Shift") and OS integration
+### 8.2 Dark theme ("Night Shift") and OS integration
 
 **Requirement — automatic theme activation:**
 
@@ -1343,7 +1345,7 @@ browser/app settings); the override persists across sessions.
 **AC-27.5** All components reference tokens only — hardcoded hex colors are a spec
 violation and must fail review.
 
-### 8.2 Component state quick-reference (Foundry §1 guardrails)
+### 8.3 Component state quick-reference (Foundry §1 guardrails)
 
 Foundry defines component states that normalize across the SPA. Normative constraints:
 
@@ -1373,19 +1375,19 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 | ID | Item | Depends on |
 |---|---|---|
-| **F1** | Add the DOC-39 catalog row to `docs/specs/README.md` and refresh its stale "next free `DOC-N`" note. **Update catalog status** after addendum merge: spec now spans `SPEC-TCUI-01~draft` … `-17~draft`; next free is **DOC-42** (per 2026-07-16 scan). | this spec |
+| **F1** | Add the DOC-39 catalog row to `docs/specs/README.md` and update its status to `SPEC-TCUI-01~draft` … `-17~draft`. Refresh the "next free `DOC-N`" note — re-scan `docs/specs/` to verify the current claim: DOC-46 is claimed (ADR standard); DOC-42 is claimed (Agent-Bundled Skills); verify DOC-43/44/45 and use the actual next free. | this spec |
 | **F2** | Commit the missing interactive wireframe doc (§7 Q1); re-check §4.6/§4.6.1 against it. | design |
 | **F3** | File the Phase-1 issues (§6.2) under the UI epic, sequenced with §5.2 first. | this spec |
 | **F4** | Resolve ~~Q2~~/Q3/Q4 (~~platform~~, auth, IDE scope) before Phase 2 planning. **Q2 is RESOLVED** (§7); Q3/Q4 remain. | Bob |
 | **F6** | File the `project.list_dir` Phase-1 issue (§5.8), paired with projectless (§6.2.1) — 7a needs both to be a screen. | this spec |
 | **F7** | Q6's client-side-cost option is now a §2.1 violation; scope the streaming cost **event** instead. | engineering |
-| **F5** | Note for DOC-38 §10 F3 (DOC-28 renumber): DOC-39 is now **claimed by this spec**; that follow-up must re-scan and take **DOC-42**. | DOC-38 |
+| **F5** | Note for DOC-38 §10 F3 (DOC-28 renumber): DOC-39 is now claimed by this spec; that follow-up must re-scan (DOC-42 is claimed by Agent-Bundled Skills, DOC-46 by ADR standard) and take the next free number. | DOC-38 |
 | **F8** | File epic #3174 sub-issues (issues #3177–#3188) under the UI epic; sequence them per the dependency map in the epic description. Per-issue specs (especially #3181 and #3188) will refine the `project.status` shape and `project.{read,write}_instruction` guards. | epic #3174 |
 | **F9** | Merge `docs-foundry-design-system` branch (PR #3170) into main; verify the `docs/design/UI/design-system/` path exists and both token files are present. Update any UI crates referencing `tokens.css` to use the new Foundry version. | PR #3170 |
 
 ## Changelog
 
-- **2026-07-19** — **DOC-39 addendum pass** (epic #3174, PR #3170 Foundry design system). Adds **§7A–§7E** (`SPEC-TCUI-10~draft` … `-16~draft`) covering the **project-first session flow** (pick project → live prompt → one-shot create+prompt; issue #3177–#3178), **service hydration on selection** (search + memory + analyze status aggregation; issue #3181), **project-context panel** with instruction summaries and edit affordance (issues #3183–#3184), **git status** (branch, dirty, ahead/behind; issue #3185), and **project creation** (mkdir + git init; issue #3186). Amends **§8 Visual system** to make **Foundry design system (v1)** (`docs/design/UI/design-system/`) the **normative visual reference**, replacing the missing handoff PDF citations; documents token sourcing, dark theme ("Night Shift") OS integration (§8.1, AC-27), and Foundry component guardrails (§8.2). Adds **§7C.1** (`SPEC-TCUI-15~draft`) specifying the **daemon-served instruction-file edit route** (read + write CLAUDE.md / AGENTS.md, path-guarded, issue #3188) with AC-24 guards against traversal and arbitrary fs access. Adds optional §7D.1 for live git-status polling. Updates Follow-ups to reflect addendum dependencies and Foundry merge (F8–F9). Documents that `SPEC-TCUI-10~draft` … `-17~draft` (or `-16~draft` depending on AC audit) are the new spec IDs claimed by this addendum.
+- **2026-07-19** — **DOC-39 addendum pass** (epic #3174, PR #3170 Foundry design system). Adds **§7A–§7E** (`SPEC-TCUI-10~draft` … `-16~draft`) covering the **project-first session flow** (pick project → live prompt → one-shot create+prompt; issue #3177–#3178), **service hydration on selection** (search + memory + analyze status aggregation; issue #3181), **project-context panel** with instruction summaries and edit affordance (issues #3183–#3184), **git status** (branch, dirty, ahead/behind; issue #3185), and **project creation** (mkdir + git init; issue #3186). Amends **§8 Visual system** to make **Foundry design system (v1)** (`docs/design/UI/design-system/`) the **normative visual reference**, replacing the missing handoff PDF citations; documents token sourcing, dark theme ("Night Shift") OS integration (§8.2, AC-27), and Foundry component guardrails (§8.3); retains **§8.1 nesting invariant** (AC-18.1) unchanged. Adds **§7C.1** (`SPEC-TCUI-15~draft`) specifying the **daemon-served instruction-file edit route** (read + write CLAUDE.md / AGENTS.md, path-guarded, issue #3188) with AC-24 guards against traversal and symlink escapes. Adds optional §7D.1 for live git-status polling. Amends §5.0 to clarify that POST /tasks and POST /sessions REST endpoints exist (#2983 Slice 4). Updates Follow-ups to reflect addendum dependencies and Foundry merge (F8–F9). Spec IDs: `SPEC-TCUI-10~draft` … `-17~draft`.
 - **2026-07-16** — Initial draft (DOC-39, `SPEC-TCUI-01~draft` … `SPEC-TCUI-09~draft`).
 - **2026-07-16** — **Daemon-is-everything amendment** (owner directive, Bob). Adds §2.1
   `SPEC-TCUI-09~draft` — *"The UI communicates with the daemon; the daemon provides all
