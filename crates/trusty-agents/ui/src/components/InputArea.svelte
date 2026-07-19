@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Send, Square } from 'lucide-svelte';
   import {
+    activeAgentId,
     activeMessages,
     activeProject,
     activeProjectId,
@@ -12,6 +13,7 @@
     updateMessageByTask,
     type Project,
   } from '../stores/app';
+  import { get } from 'svelte/store';
   import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
   import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
 
@@ -169,9 +171,14 @@
     unlistenReconcile = unlistenP;
 
     try {
+      // #3223: thread the roster's active agent selection into the
+      // submission — see `stores/app.ts::activeAgentId` doc comment for why
+      // this always has a value (defaults to the base `assistant` id rather
+      // than "no override").
       const result = await invoke<string>('send_message', {
         content: payloadTask,
         projectPath: project.path ?? null,
+        agent: get(activeAgentId),
       });
       if (mySeq !== submissionSeq) return; // superseded by a retask
       // When `send_message` resolves (Tauri mode), the complete event should

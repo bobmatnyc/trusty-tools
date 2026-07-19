@@ -81,10 +81,14 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       return r.json();
     }
     case 'send_message': {
+      // #3223: forward the roster's active agent selection so the browser
+      // fallback path behaves identically to the Tauri `send_message`
+      // command (see `task_commands::send_message` on the Rust side).
       const body = {
         task: args?.content ?? '',
         workflow: args?.workflow ?? 'prescriptive',
         project_path: args?.projectPath ?? args?.project_path ?? null,
+        agent: args?.agent ?? null,
       };
       const submit = await fetch(`${base}/api/task`, {
         method: 'POST',

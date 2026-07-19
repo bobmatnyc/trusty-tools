@@ -429,7 +429,7 @@
 </script>
 
 <div class="flex flex-col h-screen w-full relative bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text overflow-hidden">
-  <Header />
+  <Header {activeView} {apiReady} on:switch-view={(e) => switchView(e.detail.view)} />
   <div class="flex flex-1 min-h-0 w-full overflow-hidden">
   {#if $apiAuthRequired && !apiReady}
     <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
@@ -495,35 +495,11 @@
   {:else}
     <Sidebar {apiReady} {apiError} />
     <main class="flex flex-1 flex-col bg-foundry-light-bg dark:bg-foundry-bg">
-      <nav class="flex items-center gap-1 border-b border-foundry-light-border dark:border-foundry-border px-4 py-1">
-        <button
-          type="button"
-          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'chat'
-            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => switchView('chat')}
-        >
-          Chat
-        </button>
-        <button
-          type="button"
-          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'projects'
-            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => switchView('projects')}
-        >
-          Projects
-        </button>
-        <button
-          type="button"
-          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'personality'
-            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => switchView('personality')}
-        >
-          Personality
-        </button>
-      </nav>
+      <!-- #3220: the Chat/Projects/Personality tab nav that used to live
+           here has been consolidated into <Header/>, which now owns tab
+           rendering and dispatches `switch-view` back up to `switchView()`
+           above (still the single gate on the Personality unsaved-changes
+           guard). -->
       {#if activeView === 'chat'}
         <!-- #3219: RecapPanel is now a persistent right rail (own scroll,
              AGENTS ACTIVE / FILES TOUCHED / TOKENS + folded recap summary),
@@ -544,12 +520,4 @@
     </main>
   {/if}
   </div>
-  <span
-    class="absolute top-14 right-3 z-30 text-[10px] px-2 py-0.5 rounded-full {desktop
-      ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
-      : 'bg-foundry-amber/20 text-foundry-amber'}"
-    title={desktop ? 'Running inside Tauri (IPC)' : 'Running in browser (HTTP /api)'}
-  >
-    {desktop ? '⊞ Desktop' : '⟳ Web'}
-  </span>
 </div>

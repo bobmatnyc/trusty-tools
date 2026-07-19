@@ -39,7 +39,13 @@ pub struct TaskRequest {
     #[serde(default)]
     pub task_file: Option<String>,
     /// #151 phase-4: when set, dispatch to a single sub-agent instead of a
-    /// full workflow (via `trusty-agents --direct <agent>`).
+    /// full workflow (via `trusty-agents --direct <agent>`) for
+    /// `IntentClass::Implementation`. #3223 (Trusty Assistant agent roster,
+    /// epic #3052) additionally threads this into the in-process
+    /// Conversational/Research path (see [`agent_override`] and
+    /// `submit_task`), so the same field selects the active persona for
+    /// both dispatch shapes — the GUI's roster never needs to know which
+    /// path a given message will take.
     #[serde(default)]
     pub agent: Option<String>,
     /// Tauri GUI: when set, run the spawned `trusty-agents` subprocess with this
@@ -87,6 +93,26 @@ pub(super) async fn health() -> Json<HealthBody> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// Extract a non-empty agent override from a task request (#3223).
+///
+/// Why: The GUI's agent roster passes `agent: Some("cto-assistant")` (or
+/// omits it / sends blank for the default) on every `POST /api/task`. Empty
+/// string and pure-whitespace are normalized to `None` so a client that
+/// sends `agent: ""` (e.g. a stale/cleared roster selection) falls through
+/// to the existing default dispatch instead of erroring on an empty persona
+/// name deep inside `run_pm_task_with_persona`.
+/// What: Trims `req.agent` and returns `None` when absent or blank,
+/// otherwise the trimmed owned string.
+/// Test: `agent_override_normalizes_blank_to_none`,
+/// `agent_override_passes_through_trimmed_name`.
+fn agent_override(req: &TaskRequest) -> Option<String> {
+    req.agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// `POST /api/task` — kick off a workflow/agent/conversational run.
@@ -151,11 +177,31 @@ pub(super) async fn submit_task(
         classify_intent(&req.task)
     };
 
+    // #3223 (Trusty Assistant agent roster, epic #3052): CTRL management
+    // commands ("add project …", "list projects", …) must always run
+    // through the full CTRL session (`run_pm_task_with_session`) regardless
+    // of the roster's active agent — that's the only dispatch path wired to
+    // CTRL's project-management tools (AddProjectTool, RemoveProjectTool,
+    // ListProjectsTool, SetActiveProjectTool, StopTaskTool). The roster's
+    // agent override only applies to ordinary conversational/research turns.
+    let agent_for_chat = if is_ctrl_command {
+        None
+    } else {
+        agent_override(&req)
+    };
+
     match intent {
         IntentClass::Conversational | IntentClass::Research => {
-            // Both run in-process via run_pm_task_with_session. The function
-            // re-classifies internally: Conversational hits the no-tools fast
-            // path; Research falls through to the tool-armed PM loop.
+            // Both run in-process. With no roster agent selected, this goes
+            // through run_pm_task_with_session (which re-classifies
+            // internally: Conversational hits the no-tools fast path,
+            // Research falls through to the tool-armed PM loop). With a
+            // roster agent selected (#3223), it instead goes through
+            // run_pm_task_with_persona — the same persona-chat path the REPL
+            // `/agent` command and the Slack/Telegram bridges use — so
+            // chatting with a named agent (bundled `.toml`/directory-package
+            // or a user's `~/.trusty-agents/agents/<slug>.md` personalization
+            // overlay, #3224) resolves identically everywhere.
             let state_bg = state.clone();
             let id_bg = id.clone();
             let task_text = req.task.clone();
@@ -164,6 +210,7 @@ pub(super) async fn submit_task(
                 .clone()
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let agent_bg = agent_for_chat.clone();
             let intent_label = match intent {
                 IntentClass::Conversational => "conversational",
                 IntentClass::Research => "research",
@@ -171,12 +218,24 @@ pub(super) async fn submit_task(
             };
 
             let join = tokio::spawn(async move {
-                let result = crate::ctrl::run_pm_task_with_session(
-                    &project_path,
-                    &task_text,
-                    Some(id_bg.clone()),
-                )
-                .await;
+                let result = if let Some(agent_name) = agent_bg {
+                    crate::ctrl::run_pm_task_with_persona(
+                        &project_path,
+                        &agent_name,
+                        &task_text,
+                        &[],
+                        Some(id_bg.clone()),
+                        crate::ctrl::SessionOverrides::default(),
+                    )
+                    .await
+                } else {
+                    crate::ctrl::run_pm_task_with_session(
+                        &project_path,
+                        &task_text,
+                        Some(id_bg.clone()),
+                    )
+                    .await
+                };
 
                 let resp = match result {
                     Ok(content) => {
@@ -358,4 +417,39 @@ pub(super) async fn docs_search(
         "results": hits,
         "status": "ok",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_request(agent: Option<&str>) -> TaskRequest {
+        TaskRequest {
+            task: "hi".to_string(),
+            workflow: None,
+            out_dir: None,
+            task_file: None,
+            agent: agent.map(str::to_string),
+            project_path: None,
+        }
+    }
+
+    #[test]
+    fn agent_override_normalizes_blank_to_none() {
+        assert_eq!(agent_override(&base_request(None)), None);
+        assert_eq!(agent_override(&base_request(Some(""))), None);
+        assert_eq!(agent_override(&base_request(Some("   "))), None);
+    }
+
+    #[test]
+    fn agent_override_passes_through_trimmed_name() {
+        assert_eq!(
+            agent_override(&base_request(Some("  cto-assistant  "))).as_deref(),
+            Some("cto-assistant")
+        );
+        assert_eq!(
+            agent_override(&base_request(Some("assistant"))).as_deref(),
+            Some("assistant")
+        );
+    }
 }
