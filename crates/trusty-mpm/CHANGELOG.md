@@ -26,6 +26,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- extract gh_account enforcement into `gh_account_enforce.rs` and split `claude_code.rs` command-builder tests into sibling `claude_code_tests.rs`, bringing both production files back under the 500-SLOC cap (closes #3070)
 - tm-adr skill v2.0.0 — formalize ADRs as first-class documentation artifact (opt-in → mandatory) ([#3172](https://github.com/bobmatnyc/trusty-tools/pull/3172))
 - single shared tmux library; route trusty-mpm + trusty-agents through it ([#3017](https://github.com/bobmatnyc/trusty-tools/pull/3017)) ([`383b9f4`](https://github.com/bobmatnyc/trusty-tools/commit/383b9f475e781ef6049900f1630875e8ebf68264))
 
