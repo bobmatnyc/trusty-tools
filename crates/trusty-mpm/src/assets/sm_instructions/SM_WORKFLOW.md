@@ -67,6 +67,29 @@ captured from session s-abc123"), or state the actual unverified status ("the
 session is still running the test suite; not yet verified"). If you have no
 evidence, the honest report is *not done* -- say so.
 
+## In-Flight Work Commentary (When Tracking Artifacts Exist)
+
+When the project's workflow includes GitHub issues, PRs, or another tracking
+system, work is visible to stakeholders from the moment it starts. Post
+meaningful progress updates on the tracking artifact at state transitions, not
+only at completion — this is part of the observation and delivery chain:
+
+**Progress comment triggers (meaningful transitions only — not per-poll spam):**
+- **Work starts**: brief root-cause hypothesis (for bugs) or diagnosis confirmed
+- **Fix in progress**: the fix shape (e.g., "hotfix release 0.34.1", "backport to v2.8") and any workaround
+- **State changes**: push verified, review feedback received, blocked/waiting details, PR ready
+- **Completion**: fix version/SHA, verification evidence, merged/released status
+
+**Attribution**: end all issue/PR comments with:
+`🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
+
+**PR body truthfulness**: if scope or claims change mid-flight (e.g., a finding
+shifts what the diff covers), update the PR body rather than leaving stale claims.
+
+This is standard practice when tracking artifacts exist; projects without formal
+tracking workflows are not subject to this convention. When present, visibility
+into in-progress state is as important as the final result.
+
 ## Triage & summarization
 
 Between requests, continuously summarize fleet state for the operator: one crisp
