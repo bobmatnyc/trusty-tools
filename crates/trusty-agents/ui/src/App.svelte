@@ -6,6 +6,7 @@
   import ProjectsView from './components/ProjectsView.svelte';
   import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
+  import PersonalityPanel from './components/PersonalityPanel.svelte';
   import { invoke, isDesktop, connectEventSource, emitWebEvent, type AppEvent } from './lib/transport';
   import { apiAuthRequired, getCurrentApiToken, setApiToken, addMessage } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
@@ -19,8 +20,37 @@
   let apiError = '';
   // Why: Top-level view selector. Chat is the default; Projects shows the
   // /api/projects panel. Kept as a simple tab toggle to avoid pulling in a
-  // router for two views. (#341)
-  let activeView: 'chat' | 'projects' = 'chat';
+  // router for two views. (#341) 'personality' (#3061) shows the
+  // personalization-overlay editor.
+  let activeView: 'chat' | 'projects' | 'personality' = 'chat';
+  // Why (#3198 code-critic HIGH): the {#if}/{:else if} tab router below
+  // unmounts PersonalityPanel on navigation away from it, which would
+  // silently discard an unsaved edit buffer. Bound from PersonalityPanel's
+  // exported `unsavedChanges` prop so `switchView` can guard the transition
+  // BEFORE it happens (confirm() runs while the component is still mounted).
+  let personalityUnsaved = false;
+
+  /**
+   * Why: Centralizes tab navigation so the one place that can discard
+   * PersonalityPanel's unsaved buffer (by unmounting it) is also the one
+   * place that asks first. Simplest correct guard: a native `confirm()`
+   * when leaving 'personality' with unsaved changes.
+   * What: No-ops (asks for confirmation) when navigating AWAY from
+   * 'personality' while `personalityUnsaved` is true; otherwise switches
+   * `activeView` immediately.
+   * Test: Manual — type in the Personality editor without saving, click
+   * another tab, confirm a browser confirm() dialog blocks the switch;
+   * Cancel keeps the tab and the buffer; OK switches and discards.
+   */
+  function switchView(view: 'chat' | 'projects' | 'personality') {
+    if (activeView === 'personality' && view !== 'personality' && personalityUnsaved) {
+      const discard = confirm(
+        'You have unsaved changes in Personality. Discard them and switch tabs?',
+      );
+      if (!discard) return;
+    }
+    activeView = view;
+  }
   let tokenInput = '';
   let tokenError = '';
   let probingToken = false;
@@ -410,7 +440,7 @@
           class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'chat'
             ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
             : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => (activeView = 'chat')}
+          on:click={() => switchView('chat')}
         >
           Chat
         </button>
@@ -419,17 +449,28 @@
           class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'projects'
             ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
             : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-          on:click={() => (activeView = 'projects')}
+          on:click={() => switchView('projects')}
         >
           Projects
+        </button>
+        <button
+          type="button"
+          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'personality'
+            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
+            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
+          on:click={() => switchView('personality')}
+        >
+          Personality
         </button>
       </nav>
       {#if activeView === 'chat'}
         <ChatView />
         <RecapPanel />
         <InputArea />
+      {:else if activeView === 'projects'}
+        <ProjectsView on:navigate={(e) => switchView(e.detail.view)} />
       {:else}
-        <ProjectsView on:navigate={(e) => (activeView = e.detail.view)} />
+        <PersonalityPanel bind:unsavedChanges={personalityUnsaved} />
       {/if}
     </main>
   {/if}
