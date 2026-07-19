@@ -64,6 +64,7 @@ normative grammar — this note does not restate it.
 | DOC-41 | `SPEC-AGENTFW-01~draft` … `-06~draft` | [Eve-Style Agent Framework for trusty-agents](./trusty-agents-eve-style-agents-spec.md) | trusty-agents — agent definition / runtime / tool-calling / memory |
 | DOC-46 | `SPEC-ADR-01~draft` | [Architecture Decision Records (ADR) as First-Class Documentation Artifact](./DOC-46-adr-standard.md) | documentation standard — architecture governance / consistency vetting (cross-crate) |
 | DOC-47 | `SPEC-EVTING-01~draft` … `-04~draft` | [External Event Ingestion — Webhooks & Connector Push](./DOC-47-external-event-ingestion.md) | trusty-agents-common — event seam; trusty-mpm — webhook ingress + goal store; trusty-console — Tailscale Funnel binding |
+| DOC-48 | `SPEC-WS-01~draft` … `-09~draft` | [tcode Workstreams: Durable Named Work Aggregation](./DOC-48-tcode-workstreams.md) | trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -77,24 +78,21 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-42`** (re-scan of the whole `docs/` tree, 2026-07-16): the
-> highest claimed number is now **DOC-41** ([Eve-Style Agent Framework](./trusty-agents-eve-style-agents-spec.md),
-> the entry above), which claimed the next free number after **DOC-40**
-> ([Durable Background Agents](./durable-background-agents.md)) merged and was cataloged, per the
+> **Next free `DOC-N` = `DOC-49`** (re-scan of the whole `docs/` tree, 2026-07-19): the
+> highest cataloged number is now **DOC-48** ([tcode Workstreams](./DOC-48-tcode-workstreams.md),
+> the entry above), which claimed the next free number after **DOC-47**
+> ([External Event Ingestion](./DOC-47-external-event-ingestion.md)) per the
 > scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
-> note is a *hint, not authority*; the scan is authoritative). **DOC-38 §10 F3** (the DOC-28
-> renumber follow-up) has previously named DOC-39, then DOC-40, as its target — both are now
-> stale and F3 must re-scan and take **DOC-42**. DOC-34 is assigned
-> ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
-> #1999 — still a catalog gap), DOC-35/36/38/39/41 are cataloged, and **DOC-37** is
+> note is a *hint, not authority*; the scan is authoritative). DOC-44/45 are claimed by the
+> unmerged `spec-twin-lead-architecture` branch ([DOC-44 Engineering Lead Twin Orchestration](https://github.com/bobmatnyc/trusty-tools/tree/spec-twin-lead-architecture));
+> DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
+> #1999 — still a catalog gap), DOC-35/36/38/39/40/41/46/47/48 are cataloged, and **DOC-37** is
 > self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
 > (`SPEC-SEARCHREPO-01~draft`…, uncataloged). What was open PR #2792 (Eve-style agent framework
 > for trusty-agents) previously also self-labeled `DOC-37` for this unrelated spec — that
-> collision is now resolved: PR #2792 renumbered to **DOC-41** (this entry) per the
+> collision is now resolved: PR #2792 renumbered to **DOC-41** per the
 > scan-before-claim check, and `DOC-37` remains solely claimed by
-> `trusty-search-managed-repo-awareness.md`. Open PR #2863 (SLD policy adoption) also edits
-> this document (a `## Policy` section above the catalog) but does not claim a `DOC-N`.
-> The DOC-N assignment rule (scan-before-claim)
+> `trusty-search-managed-repo-awareness.md`. The DOC-N assignment rule (scan-before-claim)
 > and collision handling are now normative in [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft)
 > (note: `{#SPEC-…}` cross-links are best-effort on github.com — GitHub does not
 > honor explicit heading IDs, DOC-38 §4.3 — so this link lands on the file; scan
