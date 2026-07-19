@@ -108,7 +108,7 @@ mod tests {
         assert!(out.contains("beta"));
 
         // Verify it persists by reloading. Note: #245 — load() now returns
-        // documented defaults (native gworkspace-mcp, granola-notes,
+        // documented defaults (native trusty-mpm, granola-notes,
         // duetto-memory) when the file doesn't exist, so mcp_add against a
         // missing file persists those defaults plus the new "beta" service.
         let reloaded = GlobalConfig::load().await;

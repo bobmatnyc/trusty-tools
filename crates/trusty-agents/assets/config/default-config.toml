@@ -9,101 +9,88 @@ inject_for_roles = ["ctrl", "pm", "research", "observe"]
 # (kuzu-memory, mcp-vector-search) are handled by the harness directly and
 # do not appear here.
 
-# gworkspace-mcp — the NATIVE in-workspace stdio MCP server built from crate
-# `trusty-gworkspace` (bin `trusty-gworkspace-mcp`,
-# src/bin/trusty-gworkspace-mcp.rs). Per ADR-0014 (native Rust MCP, PR #2624)
-# this repoints off the retired external Python upstream: the native binary is
-# a pure stdio server that takes NO subcommand, so `args = []` (the old
-# external upstream required `["mcp"]`).
+# gworkspace-mcp — REMOVED (#3204). This used to be a static `[[mcp.services]]`
+# stdio entry (command = "trusty-gworkspace-mcp") carrying a hand-written tool
+# list (`gmail_search`, `calendar_list`, `docs_read`, `sheets_read`,
+# `tasks_list`, ...) that had drifted from the real binary's tool surface —
+# the actual `trusty-gworkspace-mcp` tools are named `compose_email`,
+# `search_gmail_messages`, `manage_calendars`, `get_document`, etc. (see the
+# `assistant`/`cto-assistant` agent.toml `[tools].allow` lists, and
+# `crates/trusty-gworkspace/src/tools.rs`). That mismatch was not cosmetic:
+# `mcp_service_tool_executors()` (crates/trusty-agents/src/tools/
+# mcp_service_tools.rs) spawns the service's `command` and calls
+# `tools/call` using EXACTLY the names listed under `[[mcp.services.tools]]`,
+# so every one of those stale names would have failed against the live server
+# with a "method not found"-style error.
 #
-# Issue #2644: the native binary was renamed from `gworkspace-mcp` to
-# `trusty-gworkspace-mcp` to disambiguate it from the legacy pipx-installed
-# Python package, which previously shared the same name on $PATH. The service
-# `name` below stays `gworkspace-mcp` (registry identifier only); `command`
-# now targets the renamed binary.
+# The LIVE, self-discovering path for gworkspace is the OpenRPC
+# `[[tool_registry.endpoints]]` entry named "gworkspace" below (search this
+# file for `name = "gworkspace"`), which calls `rpc.discover` against the
+# running `trusty-gworkspace-mcp` binary and always reflects its real tool
+# surface — no static list to drift. Do not re-add a `[[mcp.services]]`
+# block for gworkspace; extend the OpenRPC endpoint's `scopes` instead.
+#
+# slack-user-proxy retired per ADR-0014 (native Rust MCP, PR #2624): it was a
+# disabled external (Python) stdio stub with no native in-workspace successor,
+# so it is dropped rather than repointed.
+
+# trusty-mpm — the native session-orchestration + project-registry MCP server
+# (crate `trusty-mpm`, bin `trusty-mpm`). `serve --stdio` is a thin bridge:
+# it ensures the trusty-mpm daemon is running, then forwards JSON-RPC framing
+# to the daemon's loopback `POST /rpc` (crates/trusty-mpm/src/mcp/mod.rs,
+# crates/trusty-mpm/src/daemon/mcp_backend.rs). The repo-root `.mcp.json`
+# already wires this exact command for Claude Code itself (`.mcp.json:9-15`);
+# this block gives trusty-agents personas the identical MCP surface.
+#
+# Issue #3203: curated, safe subset of the full 31-tool catalog
+# (crates/trusty-mpm/src/mcp/tools/{core,session,console,project,proxy}.rs —
+# see `TOOL_CATALOG` in `tools/mod.rs` for the authoritative name list).
+# INCLUDED — read-only or clearly non-destructive: `session_list`,
+# `session_status`, `session_send` (drives an existing pane; does not
+# create/destroy sessions), `project_list`, `agent_delegate` (tracking/gating
+# only — its own description states it "does not spawn" anything), and
+# `console_metrics`. EXCLUDED: `session_new` / `session_stop` /
+# `session_resume` / `session_decommission*` / `session_delete` /
+# `session_prune` (real tmux-session lifecycle mutation — too consequential
+# for a static default allowlist), `config_read` / `config_write` /
+# `auto_resume_set` / `project_register` (mutate on-disk daemon config or the
+# project registry), `memory_protect` / `hook_event` / `circuit_breaker_status`
+# (internal daemon-instrumentation/ops surface, not agent-facing), the
+# bug-reporting trio `list_recent_errors` / `preview_bug_report` /
+# `report_bug` (`report_bug` files public GitHub issues and needs an
+# explicit human-gated flow, not a default tool), and the `session_proxy_*`
+# quartet (channel-proxy focus state — out of scope for this MVP wiring).
 [[mcp.services]]
-name = "gworkspace-mcp"
-description = "Google Workspace (native trusty-gworkspace) — Gmail, Calendar, Drive, Docs, Sheets, Tasks"
-command = "trusty-gworkspace-mcp"
-args = []
+name = "trusty-mpm"
+description = "trusty-mpm session orchestration + project registry (native MCP)"
+command = "trusty-mpm"
+args = ["serve", "--stdio"]
 transport = "stdio"
 enabled = true
 
 [[mcp.services.tools]]
-name = "gmail_search"
-description = "Search Gmail messages by query"
+name = "session_list"
+description = "List all Claude Code sessions the trusty-mpm daemon is managing, with status, working directory, and active delegation count."
 
 [[mcp.services.tools]]
-name = "gmail_send"
-description = "Send an email via Gmail"
+name = "session_status"
+description = "Get detailed status for one session: uptime, token usage, current agent, memory pressure, and last activity."
 
 [[mcp.services.tools]]
-name = "gmail_read"
-description = "Read a Gmail message by ID"
+name = "session_send"
+description = "Send a line of text into a managed session's tmux pane (followed by Enter), e.g. to answer a prompt or drive the harness. Returns a confirmation with the target tmux session name."
 
 [[mcp.services.tools]]
-name = "gmail_list"
-description = "List Gmail messages with optional filters"
+name = "project_list"
+description = "List all projects registered in the project registry. Returns a JSON array of project objects, each with `name`, `repo_url`, `default_branch`, and optional `stack_hint`, `tags`, `description`, and `gh_user` (the project's preferred GitHub account login, #2081)."
 
 [[mcp.services.tools]]
-name = "calendar_list"
-description = "List Google Calendar events"
+name = "agent_delegate"
+description = "Record and gate a delegation to a named agent: applies the circuit-breaker and depth limits and adds the delegation to the session's dashboard tree. This is a TRACKING/GATING companion, NOT an execution path — it does not spawn the agent. Execution happens via the native Agent/Task tool using the deployed agent name (from ~/.claude/agents/), e.g. Agent(subagent_type=\"rust-engineer\")."
 
 [[mcp.services.tools]]
-name = "calendar_create"
-description = "Create a Google Calendar event"
-
-[[mcp.services.tools]]
-name = "calendar_update"
-description = "Update an existing calendar event"
-
-[[mcp.services.tools]]
-name = "drive_search"
-description = "Search Google Drive files"
-
-[[mcp.services.tools]]
-name = "drive_read"
-description = "Read a Google Drive file"
-
-[[mcp.services.tools]]
-name = "drive_create"
-description = "Create a file in Google Drive"
-
-[[mcp.services.tools]]
-name = "docs_read"
-description = "Read a Google Doc"
-
-[[mcp.services.tools]]
-name = "docs_create"
-description = "Create a new Google Doc"
-
-[[mcp.services.tools]]
-name = "docs_update"
-description = "Update content in a Google Doc"
-
-[[mcp.services.tools]]
-name = "sheets_read"
-description = "Read data from Google Sheets"
-
-[[mcp.services.tools]]
-name = "sheets_update"
-description = "Write data to Google Sheets"
-
-[[mcp.services.tools]]
-name = "tasks_list"
-description = "List Google Tasks"
-
-[[mcp.services.tools]]
-name = "tasks_create"
-description = "Create a Google Task"
-
-[[mcp.services.tools]]
-name = "tasks_complete"
-description = "Mark a Google Task as complete"
-
-# slack-user-proxy retired per ADR-0014 (native Rust MCP, PR #2624): it was a
-# disabled external (Python) stdio stub with no native in-workspace successor,
-# so it is dropped rather than repointed.
+name = "console_metrics"
+description = "Return the standard trusty-console metrics report for trusty-mpm: service id, display name, version, coarse health status, and a `metrics` payload carrying the managed-session fleet snapshot (counts by lifecycle state) and the supervisor auto-resume control state. Polled uniformly by trusty-console for the dashboard."
 
 # Granola — meeting notes, transcripts, and action items (#256).
 # Enabled by default; harmless when the binary is absent (the harness

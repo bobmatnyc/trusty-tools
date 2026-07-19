@@ -44,6 +44,13 @@ allow = [
   "granola_*",
   # web search
   "web_search",
+  # trusty-mpm (#3203) — read-only subset only, per the base's read-only
+  # posture (see the `scopes` note below); session_send/agent_delegate are
+  # left to cto-assistant's broader, write-capable allowlist.
+  "session_list",
+  "session_status",
+  "project_list",
+  "console_metrics",
   # gworkspace — Gmail
   "compose_email",
   "download_gmail_attachment",
