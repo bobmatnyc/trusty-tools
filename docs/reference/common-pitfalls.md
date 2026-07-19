@@ -28,8 +28,21 @@ Otherwise every library consumer pulls in the full axum + tower stack.
 `trusty-embedderd`, or `trusty-bm25-daemon` can silently break dependents. Always run `cargo check` (workspace-wide) and
 `cargo test -p <consumer>` for every crate that imports the edited library.
 
-🟡 **Forgetting the Why/What/Test doc pattern on new public items** — clippy
-does not enforce this. Review public APIs manually before committing.
+🟡 **Skipping proportional documentation on new public items** — clippy does
+not enforce this. Scale documentation to how surprising the code is: the full
+Why/What/Test pattern is mandatory for API entry points, design-heavy code,
+error contracts, safety/TCC behavior, and cross-crate surfaces; a one-line summary
+suffices for trivial items (simple getters, obvious one-liners). Avoid
+defensive-reasoning paragraphs in doc comments — link to issues or ADRs instead
+(`// See issue #1234 for the full context`). Review public APIs manually before
+committing.
+
+🟡 **Changing a function/class for a ticket without an inline pointer** —
+when a modification is driven by a ticket, leave a concise reference at the
+change site (`// #1234: <one-line reason>` or `// See #1234`). Same pointer
+convention as the rule above, applied to change attribution instead of
+design rationale: a one-line reference, never a narrative — the ticket
+carries the full context.
 
 🟡 **Building the Svelte UI manually before `cargo build`** — `trusty-search`
 uses `build.rs` to invoke pnpm if `ui-dist/` is stale. If pnpm is not

@@ -17,10 +17,10 @@ the result is computed.
 
 ## Required Elements
 
-- **Why/What/Test** where the project mandates it: `Why` states the
-  motivation, `What` states the mechanical behavior, `Test` names the actual
-  test(s) proving it — as backtick-quoted names a mechanical checker can
-  verify still exist (see "The `Test:` Pointer", below).
+**For non-obvious or API-heavy callables:**
+- **Why/What/Test**: `Why` states the motivation, `What` states the mechanical
+  behavior, `Test` names the actual test(s) proving it — as backtick-quoted
+  names a mechanical checker can verify still exist (see "The `Test:` Pointer", below).
 - A one-line summary in third-person-singular-present ("Returns…", "Computes
   …") — the rustdoc convention, portable to any docstring style.
 - Full sentences, not fragments.
@@ -28,6 +28,10 @@ the result is computed.
   self-evident from the signature.
 - `# Errors` / `# Panics` sections (or your language's equivalent) whenever
   the function can fail or panic.
+
+**For trivial callables (getters, obvious one-liners):**
+- A single-line summary is sufficient. One-line `Test:` pointers may be omitted
+  when an adjacent test module's names are self-evident.
 
 ## The Reconciled Four-Axis Example
 
@@ -102,3 +106,13 @@ manual search.
   signature is `fn discount(price: f64, pct: f64) -> f64`, the doc doesn't
   need "price is a float" — it needs the units, the valid range, and what
   happens at the boundary.
+- **Defensive-reasoning paragraphs in the doc comment.** Inline issue
+  history, design-decision backstory, and architectural rationale belong in
+  linked ADRs or issues (`// See issue #1234 for the full context`), not
+  in the doc comment itself. The doc comment should state the **what** and
+  **why** for the current behavior; deep history stays one hop away.
+- **A ticket-driven change with no inline pointer.** When you modify a
+  callable *because of* a ticket, add a concise pointer at the change site —
+  `// #1234: <one-line reason>` or `// See #1234`. Same pointer convention as
+  the bullet above, applied to change attribution: a reference, not a
+  narrative. The ticket carries the context; the comment is only the address.
