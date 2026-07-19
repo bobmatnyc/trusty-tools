@@ -16,6 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- disclaim TCC responsibility on the TUI health screen's `[S]`-key `cargo run` spawn — the last undisclaimed spawn site in the TUI/session-launch call graph from the #2997 sweep; two remaining sites elsewhere in the crate tracked as #2997 part 6 (closes #3126)
 - disclaim TCC responsibility on session-launch spawns so Claude Code isn't attributed to trusty-mpm (closes #2997) ([#3037](https://github.com/bobmatnyc/trusty-tools/pull/3037)) ([`d481a0c`](https://github.com/bobmatnyc/trusty-tools/commit/d481a0cd7e264b20109e1c92122ba972db828222))
 - teach user-scope MCP registration via tm mcp add in tm-cli-operations (closes #3020) ([#3021](https://github.com/bobmatnyc/trusty-tools/pull/3021)) ([`f6223aa`](https://github.com/bobmatnyc/trusty-tools/commit/f6223aacc1c030055440cea93c5ae52c1c4d231f))
 - write_project_hooks uses write_json_atomic for torn-write parity (closes #2972) ([#3018](https://github.com/bobmatnyc/trusty-tools/pull/3018)) ([`32e805d`](https://github.com/bobmatnyc/trusty-tools/commit/32e805d609e15bbcc02ab4212f606e0e34b20293))

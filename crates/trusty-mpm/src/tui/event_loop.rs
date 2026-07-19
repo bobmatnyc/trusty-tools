@@ -300,12 +300,18 @@ pub(super) async fn refresh_health_data(screen: &mut health::HealthScreen) {
 /// Spawn the focused daemon's start command as a detached child process.
 ///
 /// Why: the `[S]` key starts a stopped daemon; the ticket specifies launching
-/// `cargo run -p trusty-search -- start` / `cargo run -p trusty-memory`.
+/// `cargo run -p trusty-search -- start` / `cargo run -p trusty-memory`. The
+/// spawn routes through [`crate::core::spawn_disclaim::disclaimed_spawn_detached`]
+/// (issue #3126) so macOS TCC does not attribute the child `cargo build`'s
+/// file access back to the signed `trusty-mpm` daemon — this was the last
+/// undisclaimed spawn site in the TUI/session-launch call graph (two sites
+/// remain elsewhere in the crate, tracked as #2997 part 6, issue #3267).
 /// What: spawns the appropriate `cargo run` child detached from the TUI and
 /// records the outcome in `chat.last_action`. A spawn failure is recorded
 /// rather than panicking.
 /// Test: `health_start` is side-effecting (spawns a process); the action-string
-/// recording is exercised manually.
+/// recording is exercised manually. The disclaim itself is covered by
+/// `disclaimed_spawn_detached_*` in `crate::core::spawn_disclaim`.
 pub(super) fn health_start(chat: &mut DashboardState, hp: &HealthScreen) {
     let (label, args): (&str, &[&str]) = match hp.focus {
         Daemon::Search => (
@@ -314,8 +320,8 @@ pub(super) fn health_start(chat: &mut DashboardState, hp: &HealthScreen) {
         ),
         Daemon::Memory => ("trusty-memory", &["run", "-p", "trusty-memory"]),
     };
-    match std::process::Command::new("cargo").args(args).spawn() {
-        Ok(_) => {
+    match crate::core::spawn_disclaim::disclaimed_spawn_detached("cargo", args) {
+        Ok(()) => {
             tracing::info!("health screen: spawned {label}");
             chat.last_action = Some(format!("starting {label}…"));
         }
