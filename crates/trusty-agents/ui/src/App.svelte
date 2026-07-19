@@ -7,9 +7,13 @@
   import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
   import PersonalityPanel from './components/PersonalityPanel.svelte';
-  import { invoke, isDesktop, connectEventSource, emitWebEvent, type AppEvent } from './lib/transport';
+  import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
   import { apiAuthRequired, getCurrentApiToken, setApiToken, addMessage } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
+  // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
+  // comment for the full rationale. Additive to the flattened webBus path
+  // below, never a replacement.
+  import { handleWorkflowEvent, applyTaskResult } from './stores/workflow';
   // Why: Importing the theme store has the side-effect of running applyTheme()
   // for the persisted theme, ensuring the `dark` class on <html> tracks the
   // user's preference for the lifetime of the app (the inline <head> script
@@ -201,6 +205,9 @@
    * progress text.
    */
   function bridgeEventToWebBus(ev: AppEvent) {
+    // #3217: feed the structured workflow store first — additive, never
+    // short-circuits the flattened-text switch below.
+    handleWorkflowEvent(ev);
     switch (ev.type) {
       case 'session_started':
         emitWebEvent('task-progress', {
@@ -360,8 +367,19 @@
     bootstrap();
     const onUnload = () => stopEventStream();
     window.addEventListener('beforeunload', onUnload);
+    // #3217: `task-complete`'s payload is the full `PmResponse` in Tauri
+    // desktop mode (phases_completed/files_modified/metadata included) and
+    // a narrower {id,status,narrative} shape from the browser fallback;
+    // `applyTaskResult` merges whichever fields are present. This is the
+    // only source of per-phase elapsed/cost/note and the files/tokens
+    // sections in either transport mode.
+    let unlistenWorkflowComplete: (() => void) | null = null;
+    listenEvent('task-complete', applyTaskResult).then((fn) => {
+      unlistenWorkflowComplete = fn;
+    });
     return () => {
       window.removeEventListener('beforeunload', onUnload);
+      unlistenWorkflowComplete?.();
       stopEventStream();
     };
   });
@@ -464,9 +482,17 @@
         </button>
       </nav>
       {#if activeView === 'chat'}
-        <ChatView />
-        <RecapPanel />
-        <InputArea />
+        <!-- #3219: RecapPanel is now a persistent right rail (own scroll,
+             AGENTS ACTIVE / FILES TOUCHED / TOKENS + folded recap summary),
+             so it sits beside the chat+input column rather than stacked
+             between them. -->
+        <div class="flex flex-1 min-h-0">
+          <div class="flex flex-1 flex-col min-w-0">
+            <ChatView />
+            <InputArea />
+          </div>
+          <RecapPanel />
+        </div>
       {:else if activeView === 'projects'}
         <ProjectsView on:navigate={(e) => switchView(e.detail.view)} />
       {:else}
