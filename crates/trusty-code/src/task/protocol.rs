@@ -94,34 +94,54 @@ struct TaskRunRequestParams {
     /// (`TCODE_RUN_DEADLINE_SECONDS`) and default (1800s) tiers.
     #[serde(default)]
     deadline_secs: Option<u64>,
+    /// #3178: per-call project override (DOC-39 §5.5, AC-16.2 convergence).
+    /// `None` preserves today's back-compat behaviour — the process-boot-time
+    /// `binding` `register` closed over. `Some(path)` is resolved through the
+    /// SAME [`ProjectBinding::resolve`] `session.create`'s `CreateParams.project`
+    /// uses (see `crate::session::protocol::create`'s docs), so a nonexistent
+    /// or non-directory path maps to `-32003 invalid_argument` identically on
+    /// both surfaces — this is the keystone convergence the issue names:
+    /// `task.run` and `session.create` can no longer disagree about what a
+    /// project is or how one is resolved.
+    #[serde(default)]
+    project: Option<PathBuf>,
 }
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
-/// session_id?, mode?, deadline_secs?) -> { session_id, status, mode }`.
+/// session_id?, mode?, deadline_secs?, project?) -> { session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
 /// What: validates `task_description` is non-empty
-/// (`-32003 invalid_argument`); resolves the target session — an existing
-/// one by `session_id` (propagating `session_not_found` if it doesn't
-/// exist) or a freshly `session.create`d one; resolves the effective
-/// `HarnessMode` via `crate::mode::resolve_mode` (#2059's three-tier
-/// precedence) and persists it onto the session (`SessionRegistry::set_mode`)
-/// so it is queryable afterward via `session.status`/`session.list`
-/// (`Session.mode`) and `session.get_transcript` (`TranscriptRecord.mode`);
-/// builds the shared LLM client (real or the #2056 offline mock, per
-/// `TCODE_MOCK_LLM`); and calls `spawn_task_run`, which reserves the
-/// execution slot synchronously (rejecting a second overlapping run) before
-/// handing off to the background task. Returns immediately — the caller
-/// `session.attach`es to observe progress, per the ticket's "must not block
-/// the request thread on the whole LLM run" requirement. The response's own
-/// `mode` field is the SAME resolved value, surfaced immediately rather than
-/// requiring a follow-up `session.status` call.
+/// (`-32003 invalid_argument`); resolves the EFFECTIVE binding for this call —
+/// `project: Some(path)` resolves via [`ProjectBinding::resolve`] (mapping a
+/// `BindingError` onto `-32003 invalid_argument`, exactly like
+/// `session.create`); `project: None` keeps the process-boot-time `binding`
+/// `register` closed over, so an existing caller that never sends `project`
+/// observes no change (#3178 back-compat). Then resolves the target session —
+/// an existing one by `session_id` (propagating `session_not_found` if it
+/// doesn't exist) or a freshly `session.create`d one bound to the effective
+/// binding; resolves the effective `HarnessMode` via `crate::mode::resolve_mode`
+/// (#2059's three-tier precedence, rooted at the effective binding) and
+/// persists it onto the session (`SessionRegistry::set_mode`) so it is
+/// queryable afterward via `session.status`/`session.list` (`Session.mode`)
+/// and `session.get_transcript` (`TranscriptRecord.mode`); builds the shared
+/// LLM client (real or the #2056 offline mock, per `TCODE_MOCK_LLM`); and
+/// calls `spawn_task_run`, which reserves the execution slot synchronously
+/// (rejecting a second overlapping run) before handing off to the background
+/// task. Returns immediately — the caller `session.attach`es to observe
+/// progress, per the ticket's "must not block the request thread on the whole
+/// LLM run" requirement. The response's own `mode`/`binding` fields are the
+/// SAME resolved values, surfaced immediately rather than requiring a
+/// follow-up `session.status` call.
 /// Test: `task::protocol::tests::task_run_rejects_empty_task_description`,
 /// `task::protocol::tests::task_run_creates_session_when_none_given`,
 /// `task::protocol::tests::task_run_sessionful_reuses_existing_session`,
 /// `task::protocol::tests::task_run_unknown_session_id_errors`,
-/// `task::protocol::tests::task_run_resolves_and_reports_mode`.
+/// `task::protocol::tests::task_run_resolves_and_reports_mode`,
+/// `task::protocol::tests::task_run_without_project_keeps_boot_binding`,
+/// `task::protocol::tests::task_run_with_project_overrides_boot_binding`,
+/// `task::protocol::tests::task_run_rejects_invalid_project`.
 async fn task_run(
     registry: Arc<SessionRegistry>,
     params: Value,
@@ -135,6 +155,14 @@ async fn task_run(
             "task_description must not be empty",
         ));
     }
+    // #3178: a per-call `project` overrides the boot-time binding for this
+    // call only, resolved through the exact same helper `session.create` uses
+    // — never a second, divergent implementation of "what is a project".
+    let binding = match p.project {
+        Some(project) => ProjectBinding::resolve(Some(project))
+            .map_err(|e| RpcError::invalid_argument(format!("task.run: {e}")))?,
+        None => binding,
+    };
     let agent_name = p.agent_name.unwrap_or_else(|| "pm".to_string());
 
     let session_id = match &p.session_id {
@@ -461,6 +489,93 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, -32007);
+    }
+
+    /// Omitting `project` must keep today's process-boot-time binding
+    /// unchanged (#3178 back-compat) — the daemon's `binding` param, not
+    /// `ProjectBinding::None`.
+    #[tokio::test]
+    async fn task_run_without_project_keeps_boot_binding() {
+        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(
+                super::super::mock_llm::MOCK_LLM_ENV,
+                super::super::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        let registry = Arc::new(SessionRegistry::new());
+        let agents = agents_dir();
+        let boot_project = tempfile::tempdir().expect("project tempdir");
+        let boot_binding = ProjectBinding::resolve(Some(boot_project.path().to_path_buf()))
+            .expect("tempdir must bind");
+
+        let value = task_run(
+            registry,
+            json!({"task_description": "say hi"}),
+            boot_binding.clone(),
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("task.run should succeed");
+        unsafe {
+            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+        }
+        assert_eq!(value["binding"], boot_binding.to_json());
+    }
+
+    /// A per-call `project` must override the boot-time binding for this
+    /// call, resolved through the same `ProjectBinding::resolve` helper
+    /// `session.create` uses (#3178, DOC-39 §5.5/AC-16.2).
+    #[tokio::test]
+    async fn task_run_with_project_overrides_boot_binding() {
+        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(
+                super::super::mock_llm::MOCK_LLM_ENV,
+                super::super::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        let registry = Arc::new(SessionRegistry::new());
+        let agents = agents_dir();
+        let call_project = tempfile::tempdir().expect("project tempdir");
+
+        let value = task_run(
+            registry,
+            json!({
+                "task_description": "say hi",
+                "project": call_project.path().to_string_lossy(),
+            }),
+            ProjectBinding::None,
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("task.run should succeed");
+        unsafe {
+            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+        }
+        assert_eq!(
+            value["binding"]["state"], "directory",
+            "the per-call project must bind, not stay projectless: {value}"
+        );
+    }
+
+    /// A `project` naming a nonexistent path must map to `-32003
+    /// invalid_argument`, matching `session.create`'s error mapping for the
+    /// same failure mode.
+    #[tokio::test]
+    async fn task_run_rejects_invalid_project() {
+        let registry = Arc::new(SessionRegistry::new());
+        let agents = agents_dir();
+
+        let err = task_run(
+            registry,
+            json!({"task_description": "say hi", "project": "/no/such/path/anywhere"}),
+            ProjectBinding::None,
+            agents.path().to_path_buf(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, -32003);
     }
 
     /// A `session_id` for an existing session must reuse it, not mint a new

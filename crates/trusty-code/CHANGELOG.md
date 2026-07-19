@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Per-call project binding on `task.run` (issue #3178, DOC-39 §5.5 /
+  AC-16.2).** `task.run` (and `POST /tasks`) now accept an optional `project`
+  path, resolved through the exact same `ProjectBinding::resolve` helper
+  `session.create` uses — an invalid path (missing, not a directory) maps to
+  `-32003 invalid_argument`/`400` identically on both surfaces. Omitting
+  `project` keeps today's process-boot-time binding unchanged (back-compat).
+  This converges the two project-binding entry points epic #3174 needs for
+  the project-first "pick a project and just start prompting" flow.
 - **REST-pollable search/recall audit trail (issue #3072).** New
   `session.get_search_audit` RPC method and `GET /sessions/{id}/search-audit`
   REST route return a session's retained, capped (200 records) history of
