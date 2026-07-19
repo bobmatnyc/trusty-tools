@@ -15,7 +15,9 @@
 //!
 //! What: thin clap CLI. `serve` (#2053) delegates to
 //! `trusty_code::serve::{run_stdio, run_http}` for its two transports.
-//! `run-workflow` remains a stub.
+//! `run-workflow` remains a stub. `workstream` (`ws` alias, #3296, DOC-48
+//! §5.4) is the same thin-client shape over `workstream.*` — see
+//! [`WorkstreamCommand`] and `crate::cli::workstream`.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
 //! crate version. The thin-client subcommands are covered end-to-end by
@@ -228,6 +230,93 @@ enum Command {
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
     Config(trusty_common::inference::config::ConfigCommand),
+
+    /// Manage workstreams — durable named groupings of sessions bound to the
+    /// daemon's project (#3296, DOC-48 §5.4). `tcode ws` is a short alias
+    /// for this whole family (DOC-48 AC-5.3).
+    #[command(alias = "ws")]
+    Workstream {
+        #[command(subcommand)]
+        action: WorkstreamCommand,
+    },
+}
+
+/// `tcode workstream <action>` / `tcode ws <action>` subcommands (#3296,
+/// DOC-48 §5.4).
+///
+/// Every variant carries its own `--project` (defaulting to `.`), matching
+/// [`SessionCommand`]/[`Command::Attach`]/[`Command::Cancel`]/
+/// [`Command::Transcript`]'s existing per-leaf convention rather than
+/// hoisting it onto the parent [`Command::Workstream`] variant (clap
+/// subcommand args aren't inherited from an enclosing variant without a
+/// shared flattened struct, which would be a bigger change than this
+/// ticket's scope).
+#[derive(Subcommand)]
+enum WorkstreamCommand {
+    /// List workstreams in the daemon's project (tm-ls-style table; DOC-48
+    /// AC-5.1).
+    List {
+        /// Include closed workstreams (default: false, DOC-48 §4.4).
+        #[arg(long)]
+        include_closed: bool,
+
+        /// Path to the project root the daemon should be rooted at.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Show one workstream's full record as JSON.
+    Get {
+        /// The workstream id — a FULL UUID only (prefix-matching is a
+        /// documented future nicety; see `crate::cli::workstream`'s module
+        /// docs for why it isn't implemented client-side today).
+        id: String,
+
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Create a new workstream.
+    Create {
+        /// Human-readable name (defaults to empty/untitled if omitted).
+        #[arg(long)]
+        name: Option<String>,
+
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Activate a workstream, making it the daemon's one active workstream
+    /// (DOC-48 §6.1, AC-5.2).
+    Activate {
+        /// The workstream id to activate (full UUID only).
+        id: String,
+
+        /// Force-switch even if a DIFFERENT workstream is currently active
+        /// (deactivates the prior one; DOC-48 §6.1). Without this flag,
+        /// activating while another workstream is active fails with a clear
+        /// message naming the active workstream.
+        #[arg(long)]
+        force: bool,
+
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Deactivate the currently active workstream, if any (no-op otherwise).
+    Deactivate {
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Irreversibly close a workstream (DOC-48 §4.4).
+    Close {
+        /// The workstream id to close (full UUID only).
+        id: String,
+
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
 }
 
 /// `tcode session <action>` subcommands (#2060).
@@ -364,6 +453,48 @@ async fn main() -> Result<()> {
         }
 
         Command::Config(cmd) => cmd.run().await,
+
+        Command::Workstream { action } => match action {
+            WorkstreamCommand::List {
+                include_closed,
+                project,
+            } => {
+                let project = canonicalize_project_or_exit(&project, "workstream list");
+                run_thin_client(
+                    cli::workstream::list(&project, include_closed),
+                    "workstream list",
+                )
+                .await
+            }
+            WorkstreamCommand::Get { id, project } => {
+                let project = canonicalize_project_or_exit(&project, "workstream get");
+                run_thin_client(cli::workstream::get(&project, &id), "workstream get").await
+            }
+            WorkstreamCommand::Create { name, project } => {
+                let project = canonicalize_project_or_exit(&project, "workstream create");
+                run_thin_client(cli::workstream::create(&project, name), "workstream create").await
+            }
+            WorkstreamCommand::Activate { id, force, project } => {
+                let project = canonicalize_project_or_exit(&project, "workstream activate");
+                run_thin_client(
+                    cli::workstream::activate(&project, &id, force),
+                    "workstream activate",
+                )
+                .await
+            }
+            WorkstreamCommand::Deactivate { project } => {
+                let project = canonicalize_project_or_exit(&project, "workstream deactivate");
+                run_thin_client(
+                    cli::workstream::deactivate(&project),
+                    "workstream deactivate",
+                )
+                .await
+            }
+            WorkstreamCommand::Close { id, project } => {
+                let project = canonicalize_project_or_exit(&project, "workstream close");
+                run_thin_client(cli::workstream::close(&project, &id), "workstream close").await
+            }
+        },
     }
 }
 

@@ -14,7 +14,9 @@
 //! re-spawn itself as `tcode serve --stdio`), [`session::list`]/
 //! [`session::status`], [`run_task::run`] (create + `task.run` + attach +
 //! stream — the M1 cut-line "replay via thin CLI" verb), [`attach::run`],
-//! [`cancel::run`], [`transcript::run`].
+//! [`cancel::run`], [`transcript::run`], and (#3296)
+//! [`workstream::list`]/[`workstream::get`]/[`workstream::create`]/
+//! [`workstream::activate`]/[`workstream::deactivate`]/[`workstream::close`].
 //! Test: each submodule's own doc comments note its coverage; the full
 //! spawn+wire behaviour is covered end-to-end by `tests/cli_e2e.rs` against
 //! the real `tcode` binary — these handlers are too thin to usefully unit
@@ -27,3 +29,4 @@ pub mod run_task;
 pub mod session;
 pub mod tcode_exe;
 pub mod transcript;
+pub mod workstream;
