@@ -750,10 +750,19 @@ impl SessionRegistry {
     /// (Issue #3298) Also records+publishes `Event::SessionActivityUpdate` —
     /// the natural "a turn just happened" hook DOC-48 §5.3's event table asks
     /// for, so a workstream observer can see which bound sessions are
-    /// recently active without polling. Published unconditionally (whether
-    /// or not `id` is workstream-bound — see the event's own docs); a no-op
-    /// alongside the rest of this method if `id` is already gone.
-    /// Test: `registry_tests::set_run_outcome_publishes_activity_update`.
+    /// recently active without polling. Published ONLY when `id` is
+    /// workstream-bound (`Session.workstream_id.is_some()`): the event
+    /// exists for workstream observers (§5.3 lists it in the WORKSTREAM
+    /// event set), an unbound session has no such observer, and — decisive
+    /// — the M1 cutline e2e contract (`tests/m1_cutline_e2e.rs`) freezes the
+    /// exact event-kind sequence a plain, workstream-less session emits;
+    /// firing this unconditionally inserted a new kind into that baseline
+    /// and broke both transports' frozen sequences (CI failure on PR #3354).
+    /// A no-op alongside the rest of this method if `id` is already gone.
+    /// Test: `registry_tests::set_run_outcome_publishes_activity_update_when_workstream_bound`,
+    /// `registry_tests::set_run_outcome_stays_silent_for_unbound_session`;
+    /// the frozen unbound-session baseline itself in
+    /// `m1_cutline_e2e::m1_cutline_full_scenario_over_stdio`/`_http`.
     pub fn set_run_outcome(
         &self,
         id: &str,
@@ -761,7 +770,7 @@ impl SessionRegistry {
         usage: TokenUsage,
         cost_usd: Option<f64>,
     ) {
-        let has_running_task = {
+        let activity = {
             let mut sessions = self.lock();
             let Some(entry) = sessions.get_mut(id) else {
                 return;
@@ -773,9 +782,10 @@ impl SessionRegistry {
                 (Some(a), None) | (None, Some(a)) => Some(a),
                 (None, None) => None,
             };
-            entry.execution.is_some()
+            let bound = entry.session.workstream_id.is_some();
+            bound.then_some(entry.execution.is_some())
         };
-        self.publish_activity_update(id, has_running_task);
+        self.publish_activity_update(id, activity);
     }
 
     /// Retrieve this session's persistent PM conversation `Transcript`,

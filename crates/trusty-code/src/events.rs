@@ -712,13 +712,15 @@ pub enum Event {
     /// Why: DOC-48 §5.3's event table lists this alongside `SessionAdded` so
     /// a workstream observer can track which of its bound sessions are
     /// live/recently-active without polling `session.status` per id. Emitted
-    /// unconditionally (workstream-bound or not — `SessionRegistry` has no
-    /// cheap way to know at this call site, and a client observing a
-    /// PROJECTLESS session's own `GET /sessions/{id}/events` stream benefits
-    /// from it identically); the workstream-level aggregation route only
-    /// ever forwards it for sessions that ARE bound (dynamic membership
-    /// check, same as `SessionAdded` above), so an unbound session's copy is
-    /// simply never surfaced there.
+    /// ONLY for workstream-BOUND sessions (`Session.workstream_id` set):
+    /// this is a workstream-taxonomy event (§5.3 defines it in that set),
+    /// an unbound session has no workstream observer to serve — and the M1
+    /// cutline e2e contract (`tests/m1_cutline_e2e.rs`) freezes the exact
+    /// event-kind sequence a plain, workstream-less session emits, so
+    /// firing this unconditionally would (and, in PR #3354's first cut,
+    /// did) break that frozen baseline for every existing client on both
+    /// transports. See `SessionRegistry::set_run_outcome`'s docs for the
+    /// gate.
     /// What: `last_turn_at` is the UTC instant this update was recorded;
     /// `has_running_task` mirrors `SessionRegistry::is_executing` at that
     /// same instant (`true` while `set_run_outcome`'s caller — `run_task`'s
@@ -728,7 +730,8 @@ pub enum Event {
     /// `set_run_outcome` returns — carried anyway so a future caller with a
     /// genuinely mid-run activity signal has a field to set it on without a
     /// schema change).
-    /// Test: `session::registry_tests::set_run_outcome_publishes_activity_update`.
+    /// Test: `session::registry_tests::set_run_outcome_publishes_activity_update_when_workstream_bound`,
+    /// `session::registry_tests::set_run_outcome_stays_silent_for_unbound_session`.
     SessionActivityUpdate {
         session_id: String,
         last_turn_at: DateTime<Utc>,

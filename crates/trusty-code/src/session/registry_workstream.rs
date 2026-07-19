@@ -65,17 +65,25 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// Record+publish `Event::SessionActivityUpdate` for `id`.
+    /// Record+publish `Event::SessionActivityUpdate` for `id` — a no-op for
+    /// an UNBOUND session.
     ///
     /// Why: `Self::set_run_outcome`'s sole activity-signal hook (module
     /// docs) — split out here purely so that method's own diff stays small
     /// enough for `registry.rs`'s 500-SLOC cap; behaviourally this is still
     /// just `Self::record` with the event's shape.
-    /// What: `last_turn_at` is stamped `Utc::now()` at call time;
-    /// `has_running_task` is passed in by the caller (which already holds
-    /// the lock needed to read `entry.execution.is_some()`, so this helper
-    /// does not re-lock).
-    pub(super) fn publish_activity_update(&self, id: &str, has_running_task: bool) {
+    /// What: `activity` is `None` when the session is not workstream-bound
+    /// — publish NOTHING, keeping an unbound session's event stream
+    /// byte-identical to the pre-#3298 baseline the M1 cutline e2e contract
+    /// freezes (see `set_run_outcome`'s docs for the full rationale) — and
+    /// `Some(has_running_task)` when it is. `last_turn_at` is stamped
+    /// `Utc::now()` at call time; the caller computes `activity` while
+    /// already holding the lock (reading `Session.workstream_id` and
+    /// `entry.execution`), so this helper does not re-lock.
+    pub(super) fn publish_activity_update(&self, id: &str, activity: Option<bool>) {
+        let Some(has_running_task) = activity else {
+            return;
+        };
         self.record(
             id,
             Event::SessionActivityUpdate {
