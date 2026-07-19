@@ -151,6 +151,14 @@ is complete. Defensive-reasoning paragraphs and issue-history anecdotes belong i
 linked ADRs or issues, not inline comments — use `// See <issue-or-adr>` instead.
 This keeps the entry point dense and lets detail stay one hop away.
 
+🟡 **Ticket-attributed inline comments** — when you modify a function, class,
+or module *because of* a ticket, add a concise inline pointer at the change
+site: `// #1234: <one-line reason>`, or `// See #1234` when the ticket title
+already says it all. This is the same pointer convention as the judgment rule
+above, applied to change attribution instead of design rationale: the ticket
+reference is the pointer, never a narrative — one line, not a changelog
+embedded in comments. The full reasoning stays in the ticket.
+
 🔴 **No `unwrap()` in library code** — use `?` with `anyhow::Result` for
 application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that

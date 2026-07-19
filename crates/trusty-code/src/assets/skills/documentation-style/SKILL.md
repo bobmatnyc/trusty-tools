@@ -76,6 +76,14 @@ contracts, safety/TCC behavior, cross-crate surfaces.
 re-exports, one-line helpers. If a competent reader's first guess is right,
 one line is enough.
 
+**Ticket-attributed changes:** When you modify a function, class, or module
+*because of* a ticket, add a concise inline pointer at the change site —
+`// #1234: <one-line reason>`, or `// See #1234` when the ticket title says
+it all. This uses the same pointer convention described above for
+defensive-reasoning paragraphs: the ticket reference is the pointer, never a
+narrative. Full context stays in the ticket, not a changelog embedded in
+comments.
+
 ## Per-Type Guides
 
 Each artifact type gets a focused reference under `references/` — read the one
@@ -130,6 +138,7 @@ economy argument is about redundancy, not about omitting the mandatory axes.
 □ File-level doc states why the file exists, not just what's in it
 □ No comment restates what the signature or a one-line summary already shows
 □ Defensive-reasoning paragraphs replaced with links to issues or ADRs
+□ Ticket-driven changes carry an inline pointer at the change site (`// #1234: …`)
 □ Docs updated in the same change as the code they describe
 ```
 

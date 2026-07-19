@@ -37,6 +37,7 @@ Always read full ticket + comments before writing code.
 - No `unwrap()` in library code
 - `thiserror` for crates, `anyhow` for binaries
 - Why/What/Test doc pattern proportional to code surprisingness: full pattern for API entry points, design-heavy code, error contracts, safety/TCC behavior, cross-crate surfaces; one-line summaries for trivial items
+- Changing a function/class because of this ticket: add an inline pointer at the change site (`// #1234: <one-line reason>`)
 
 ### Phase 3: Test
 - `cargo test --workspace` — all green

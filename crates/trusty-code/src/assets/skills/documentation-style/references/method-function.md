@@ -111,3 +111,8 @@ manual search.
   linked ADRs or issues (`// See issue #1234 for the full context`), not
   in the doc comment itself. The doc comment should state the **what** and
   **why** for the current behavior; deep history stays one hop away.
+- **A ticket-driven change with no inline pointer.** When you modify a
+  callable *because of* a ticket, add a concise pointer at the change site —
+  `// #1234: <one-line reason>` or `// See #1234`. Same pointer convention as
+  the bullet above, applied to change attribution: a reference, not a
+  narrative. The ticket carries the context; the comment is only the address.

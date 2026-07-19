@@ -37,6 +37,13 @@ defensive-reasoning paragraphs in doc comments — link to issues or ADRs instea
 (`// See issue #1234 for the full context`). Review public APIs manually before
 committing.
 
+🟡 **Changing a function/class for a ticket without an inline pointer** —
+when a modification is driven by a ticket, leave a concise reference at the
+change site (`// #1234: <one-line reason>` or `// See #1234`). Same pointer
+convention as the rule above, applied to change attribution instead of
+design rationale: a one-line reference, never a narrative — the ticket
+carries the full context.
+
 🟡 **Building the Svelte UI manually before `cargo build`** — `trusty-search`
 uses `build.rs` to invoke pnpm if `ui-dist/` is stale. If pnpm is not
 installed, the build script fails loudly. Install pnpm or set
