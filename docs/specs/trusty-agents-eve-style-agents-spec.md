@@ -621,6 +621,51 @@ The key difference from mpm/tcode: trusty-agents' agents are predominantly *pers
 specialist catalog. `extends` is a user-facing feature for customization, not a
 platform-internal template hierarchy.
 
+### 2.5.2 Naming: base agents are nameless (Bob decision, 2026-07-18)
+
+`AgentInfo` (§2.1, `config.rs:287-357`) carries two distinct name concepts,
+easy to conflate and worth separating explicitly:
+
+1. **The manifest slug/key — `name:`.** The functional identifier used by
+   both loaders (§2.1: `AgentRegistry::load`'s directory-scan key,
+   `AgentConfig::by_name`'s lookup key), by delegation (`subagents.allowed`,
+   §2.3.2/§5), and as the TOML/directory filename. Required on every agent,
+   base or personalized — this is not what the decision below changes.
+2. **The persona/display name — `display_name`/`prompt_label`**
+   (`AgentInfo.display_name`, `config.rs:345`; `AgentInfo.prompt_label`,
+   `config.rs:356`). What the agent calls itself and how the REPL `/agent`
+   switch announces/prompts it (e.g. `Switched to: Izzie`, `izzie>`). Both
+   fields already fall back to `name` when absent (per their existing doc
+   comments at `config.rs:350` and `config.rs:365`) — the fallback mechanism
+   is unchanged; this decision constrains manifest *content*, not code.
+
+**The rule:** a base/archetype agent — any package meant to be `extends`-ed
+(§2.5.1) rather than personalized, e.g. a base `assistant` — ships with
+`display_name`/`prompt_label` **absent**. It has a manifest slug
+(`name: assistant`) and nothing more: functionally addressable, but with no
+persona. The persona name is supplied **only** in a user's personalization
+overlay — an `extends`-ing agent in the user's own
+`~/.trusty-agents/agents/` (§2.5.1) sets `display_name`/`prompt_label` (and
+the accompanying custom instructions/persona prose) as part of that overlay,
+never in the base package it extends.
+
+**Izzie is the reference overlay example, not a base agent.** The existing
+`crates/trusty-agents/.trusty-agents/agents/izzie/` package
+(`agent.toml`'s `display_name = "Izzie"` / `prompt_label = "Izzie"`, plus the
+~109 lines of first-person persona prose in `persona.md`) is, under this
+rule, personalization content layered over a base assistant — not itself the
+shipped base. Migrating Izzie's manifest/prose into an `extends`-based
+overlay (mirroring §2.5.1's `my-researcher` worked example) is tracked
+separately (issue #3087); this spec fixes only the rule the migration must
+satisfy.
+
+**Conformance:** a base agent invoked directly, with no personalization
+overlay applied, refers to itself by role/slug — "the assistant" — not a
+persona name, because `display_name` is absent and the existing fallback
+(above) resolves the display to `name`. A personalization overlay that sets
+`display_name: Izzie` via `extends: assistant` is the only path by which an
+agent instance acquires a persona name.
+
 ### 2.6 No-code enforcement (NEW)
 
 The mechanical guarantee behind §2.0's principle, in two layers:
@@ -1914,6 +1959,14 @@ not a speculative extension.
   `user_authority` to stay consistent with this addition; §9 gained a
   matching non-goal bullet and §10 gained item 12 plus a partial-resolution
   note on item 1, both scoped to the `user.*` namespace only.
+- **2026-07-18 (v3.2)** — Bob's naming decision: base/archetype agents ship
+  without a persona/display name (§2.5.2, NEW). Distinguishes the manifest
+  slug (`name:`, functional id, required on every agent) from the
+  persona/display name (`display_name`/`prompt_label`, optional, existing
+  fields at `config.rs:345`/`:356`, set only in a user's `extends`
+  personalization overlay per §2.5.1). Izzie reclassified as the reference
+  personalization-overlay example rather than a base agent; migrating her
+  manifest/prose into that shape is tracked in issue #3087.
 
 [gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
