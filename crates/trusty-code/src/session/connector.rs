@@ -176,7 +176,7 @@ impl WorkstreamConnector for TcodeConnector {
     /// `session.create`'s `agent` param. A `400` (empty task, or `project`
     /// naming no real directory — see `session::protocol::create`'s AC-16.2
     /// docs) maps to [`ConnectorError::InvalidRequest`].
-    /// Test: `connector_e2e::create_session_binds_project_and_appears_in_list`,
+    /// Test: `connector_e2e::create_session_full_lifecycle`,
     /// `connector_e2e::create_session_wrong_backend_params_is_invalid_request`.
     async fn create_session(&self, req: CreateSessionReq) -> Result<SessionInfo, ConnectorError> {
         let CreateSessionReq {
@@ -294,8 +294,8 @@ impl WorkstreamConnector for TcodeConnector {
     /// [`ConnectorError::NotFound`]). On success, wraps
     /// `result.{session_id,stream_url,events}` in
     /// [`AttachHandle::EventStream`].
-    /// Test: `connector_e2e::attach_returns_event_stream_for_known_session`,
-    /// `connector_e2e::attach_unknown_id_is_not_found`.
+    /// Test: `connector_e2e::create_session_full_lifecycle` (covers the
+    /// `EventStream` shape on success), `connector_e2e::attach_unknown_id_is_not_found`.
     async fn attach(&self, session_id: &str) -> Result<AttachHandle, ConnectorError> {
         let rpc_req = json!({
             "jsonrpc": "2.0",

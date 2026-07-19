@@ -156,7 +156,9 @@ impl TrustyMemoryClient {
     /// request (idempotent in effect — trusty-memory's `create_palace`
     /// overwrites `palace.json` rather than erroring when the directory
     /// already exists) and caches the id on success.
-    /// Test: `insert_creates_palace_once_then_reuses` (mock-server test).
+    /// Test: `insert_get_delete_round_trip_against_mock_daemon` (mock-server
+    /// test — `insert` calls this on every write, so the round trip exercises
+    /// palace auto-creation as a side effect).
     async fn ensure_palace(&self, segment: Segment) -> Result<()> {
         let palace_id = Self::palace_id_for(segment);
         {
@@ -205,7 +207,8 @@ impl TrustyMemoryClient {
     /// 404 (unknown palace) is treated as "no matches" rather than an error
     /// so callers see a clean `None`/empty result instead of a spurious
     /// failure on a not-yet-created palace.
-    /// Test: `get_returns_none_when_absent`, `delete_is_noop_when_absent`.
+    /// Test: `get_and_delete_are_clean_when_absent`, plus
+    /// `insert_upserts_existing_id` for the upsert-cleanup lookup path.
     async fn find_by_tag(&self, palace_id: &str, tag: &str) -> Result<Vec<DrawerRow>> {
         let url = format!(
             "{}/api/v1/palaces/{palace_id}/drawers",
@@ -261,6 +264,15 @@ struct CreatePalaceReq {
 struct CreateDrawerReq {
     content: String,
     tags: Vec<String>,
+    /// Bypasses trusty-memory's signal/noise QUALITY gate (issue #3225 —
+    /// `CreateDrawerBody::force` in `trusty-memory`'s service types).
+    /// `content` here is a JSON-serialized payload (see `insert`'s doc
+    /// comment), which the gate's `non_alphabetic_ratio` heuristic rejects
+    /// by design (it looks like raw code, not prose) — `force: true` is
+    /// required for every write this client makes. The daemon's secret
+    /// gate (`check_secret`) is NOT bypassed by this flag; it runs
+    /// unconditionally regardless of `force`.
+    force: bool,
 }
 
 /// Minimal shape we read back from `GET .../drawers` — trusty-memory's
@@ -277,6 +289,34 @@ struct DrawerRow {
 
 #[async_trait]
 impl MemoryStore for TrustyMemoryClient {
+    /// Upsert: drawers are keyed by server-generated UUID, not our string
+    /// id, so a naive `insert` for an id that already exists would create a
+    /// duplicate drawer rather than overwrite the first (unlike the
+    /// redb-keyed local store). This creates the NEW drawer first and only
+    /// deletes the old one (best-effort) after the create succeeds — never
+    /// the reverse — so a failed create can never destroy the prior record;
+    /// worst case on a create failure is the stale drawer survives untouched
+    /// and `insert` returns `Err`, which is the correct "nothing changed"
+    /// outcome for the caller to retry.
+    ///
+    /// Known limitation (single-writer assumption): the find-old →
+    /// create-new → delete-old sequence is not atomic. Two concurrent
+    /// `insert` calls for the SAME `(segment, id)` can both pass the
+    /// find-old lookup before either creates, race to create their own new
+    /// drawer, and then race to delete what they each believe is "the old
+    /// one" — leaving two drawers tagged with the same `ns_id` (a duplicate,
+    /// not data loss) until the next `insert`/`delete` for that id cleans
+    /// one up via `find_by_tag`'s `limit=1` lookup. This mirrors the
+    /// workstream's documented model elsewhere in this crate (e.g.
+    /// `TrustyBackedMemoryStore`'s in-memory sidecar) of assuming a single
+    /// writer per `(segment, id)` rather than providing cross-request
+    /// locking; a proper fix would need a server-side compare-and-swap
+    /// primitive trusty-memory's drawer API does not have.
+    /// Test: `insert_upserts_existing_id`, `insert_get_delete_round_trip_against_mock_daemon`
+    /// and `insert_sends_force_true_for_realistic_low_prose_payload` cover
+    /// the upsert-overwrite, create-succeeds, and force-transmission paths
+    /// respectively. The concurrent-race window itself is documented, not
+    /// mechanically tested — see the limitation above.
     async fn insert(
         &self,
         segment: Segment,
@@ -294,19 +334,11 @@ impl MemoryStore for TrustyMemoryClient {
         let palace_id = Self::palace_id_for(segment);
         let ns_id = Self::ns_id(segment, id);
 
-        // Upsert: drawers are keyed by server-generated UUID, not our string
-        // id, so a second `insert` for the same id would otherwise create a
-        // duplicate drawer instead of overwriting the first (unlike the
-        // redb-keyed local store). Best-effort delete any existing match
-        // before creating the new one.
-        if let Some(existing) = self
+        let existing = self
             .find_by_tag(&palace_id, &ns_id)
             .await?
             .into_iter()
-            .next()
-        {
-            self.delete_by_uuid(&palace_id, existing.id).await?;
-        }
+            .next();
 
         let url = format!(
             "{}/api/v1/palaces/{palace_id}/drawers",
@@ -314,11 +346,17 @@ impl MemoryStore for TrustyMemoryClient {
         );
         // Serialize the full payload (rather than a text summary) as
         // `content` so `get` can losslessly round-trip it — trusty-memory's
-        // `CreateDrawerBody` carries no separate metadata field.
+        // `CreateDrawerBody` carries no separate metadata field. That makes
+        // `content` JSON-shaped, which trusty-memory's signal/noise QUALITY
+        // gate (`non_alphabetic_ratio`) rejects by design for structured
+        // payloads — `force: true` is required on every write this client
+        // makes (see `CreateDrawerReq::force`'s doc comment; the daemon's
+        // secret gate still runs regardless of `force`).
         let content = serde_json::to_string(&payload).context("serialize payload as content")?;
         let body = CreateDrawerReq {
             content,
             tags: vec![ns_id],
+            force: true,
         };
 
         let resp = self
@@ -329,8 +367,24 @@ impl MemoryStore for TrustyMemoryClient {
             .await
             .with_context(|| format!("POST {url}"))?;
         if !resp.status().is_success() {
+            // Create failed — the prior drawer (if any) was never touched,
+            // so there is nothing to roll back here.
             return Err(anyhow!("trusty insert failed: HTTP {}", resp.status()));
         }
+
+        // Create succeeded — now it's safe to best-effort clean up the old
+        // drawer. A failure here leaves a harmless stale duplicate (caught
+        // by `find_by_tag`'s next lookup) rather than data loss, so errors
+        // are logged, not propagated.
+        if let Some(existing) = existing
+            && let Err(e) = self.delete_by_uuid(&palace_id, existing.id).await
+        {
+            tracing::warn!(
+                %palace_id, drawer_id = %existing.id,
+                "trusty insert: best-effort cleanup of superseded drawer failed: {e:#}"
+            );
+        }
+
         Ok(())
     }
 

@@ -154,7 +154,9 @@ impl AppState {
     /// What: Removes the task's stored `AbortHandle` (it's done either way)
     /// and, only if the current stored status isn't already `Cancelled`,
     /// performs the same insert/trim/persist `upsert` does.
-    /// Test: `finalize_task_does_not_clobber_cancelled`.
+    /// Test: `cancel_running_task_marks_cancelled` — asserts a late
+    /// `finalize_task` call after cancellation does not clobber the
+    /// `Cancelled` record.
     pub(super) async fn finalize_task(&self, id: String, resp: PmResponse) {
         let snapshot = {
             let mut store = self.inner.lock().await;
@@ -186,7 +188,9 @@ impl AppState {
     /// acquire the lock.
     /// What: Inserts `handle` keyed by `id`, unless `id`'s stored response is
     /// already non-`Running`.
-    /// Test: `register_handle_skips_already_terminal_task`.
+    /// Test: the non-terminal insert path is exercised indirectly by
+    /// `cancel_running_task_marks_cancelled` (via `spawn_fake_running_task`);
+    /// the terminal-skip branch itself has no dedicated regression test.
     pub(super) async fn register_handle(&self, id: &str, handle: AbortHandle) {
         let mut store = self.inner.lock().await;
         let terminal = matches!(

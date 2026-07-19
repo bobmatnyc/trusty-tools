@@ -113,6 +113,27 @@ pub struct CreatePalaceBody {
 }
 
 /// `POST /api/v1/palaces/{id}/drawers` body — service-facing version.
+///
+/// Why: `content` normally goes through `PalaceHandle::remember`'s signal/
+/// noise quality gate (noise patterns, short-content, non-alphabetic ratio —
+/// see `trusty_common::memory_core::filter`), which is correct for
+/// human/LLM-authored prose but rejects legitimate structured payloads (a
+/// caller storing `{"score":0.42,"tier":3}`-shaped content is mostly
+/// punctuation/digits, so `non_alphabetic_ratio` trips the gate). Issue
+/// #3225 (trusty-agents `TrustyMemoryClient` writing JSON-serialized
+/// payloads as `content` to preserve losslessness) needed a bypass that
+/// mirrors the QUALITY-gate-only `force` semantics `RememberOptions`
+/// already exposes internally — MCP/CLI callers never had a way to reach
+/// it over HTTP.
+/// What: `force` mirrors `RememberOptions::force` (issue #61/#2520):
+/// `Some(true)` skips the noise/short-content/non-alphabetic QUALITY gates
+/// only — the secret-detection gate (`check_secret`) still runs
+/// unconditionally, so this can never be used to smuggle credential-shaped
+/// content past screening. Defaults to `false` (`None`/absent), preserving
+/// the existing gate for ordinary prose callers (the admin UI, MCP
+/// `memory_remember`, `memory_note`).
+/// Test: `create_drawer_rejects_json_content_without_force`,
+/// `create_drawer_force_bypasses_quality_gate_for_json_content`.
 #[derive(Deserialize, Clone, Debug)]
 pub struct CreateDrawerBody {
     pub content: String,
@@ -122,6 +143,8 @@ pub struct CreateDrawerBody {
     pub tags: Vec<String>,
     #[serde(default)]
     pub importance: Option<f32>,
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 /// `GET /api/v1/palaces/{id}/drawers` query — service-facing version.

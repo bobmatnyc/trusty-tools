@@ -112,6 +112,10 @@ struct MockDrawer {
     id: Uuid,
     content: String,
     tags: Vec<String>,
+    /// Captured `force` flag from the create request — lets tests assert the
+    /// client actually sent `force: true` (issue #3225 finding 2: the real
+    /// daemon's quality gate rejects JSON-shaped `content` without it).
+    force: bool,
 }
 
 #[derive(Default)]
@@ -132,6 +136,8 @@ struct MockCreateDrawerBody {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    force: bool,
 }
 
 async fn mock_create_drawer(
@@ -144,6 +150,7 @@ async fn mock_create_drawer(
         id,
         content: body.content,
         tags: body.tags,
+        force: body.force,
     });
     Json(json!({"id": id}))
 }
@@ -282,6 +289,45 @@ async fn insert_upserts_existing_id() {
 
     let got = client.get(Segment::Brief, "rec-1").await.unwrap();
     assert_eq!(got, Some(json!({"v": 2})));
+}
+
+/// Why: issue #3225 finding 2 — the REAL trusty-memory daemon runs a
+/// signal/noise quality gate on `content` that rejects JSON-shaped payloads
+/// by design (`non_alphabetic_ratio` — see
+/// `crates/trusty-memory/src/service/core.rs`'s `create_drawer` doc comment
+/// and its `create_drawer_rejects_json_content_without_force` /
+/// `create_drawer_force_bypasses_quality_gate_for_json_content` daemon-side
+/// tests). `insert_get_delete_round_trip_against_mock_daemon` above passed
+/// even before `force` existed only because its payload happened to embed
+/// an English sentence (`"the quokka is a marsupial"`), which would NOT
+/// reproduce a rejection against the real daemon. This test uses a
+/// realistic low-prose payload — the shape `TrustyMemoryClient` actually
+/// needs to support (scores, ids, small structured records) — and proves
+/// the client always sets `force: true` on the wire, not just that the
+/// (gate-less) mock round-trips successfully.
+/// What: inserts `{"score":0.42,"id":"a1b2","tier":3}`, then inspects the
+/// mock server's captured request directly and asserts `force == true`.
+/// Test: this test.
+#[tokio::test]
+async fn insert_sends_force_true_for_realistic_low_prose_payload() {
+    let (addr, state) = spawn_mock_server().await;
+    let client = TrustyMemoryClient::new(format!("http://{addr}"));
+
+    let payload = json!({"score": 0.42, "id": "a1b2", "tier": 3});
+    client
+        .insert(Segment::Brief, "rec-1", &[0.0], payload.clone())
+        .await
+        .expect("insert should succeed even for a low-prose JSON payload");
+
+    let drawers = state.drawers.lock().unwrap();
+    assert_eq!(drawers.len(), 1, "expected exactly one drawer");
+    assert!(
+        drawers[0].force,
+        "TrustyMemoryClient::insert must set force:true so the real daemon's \
+         quality gate does not reject JSON-shaped content"
+    );
+    let got: Value = serde_json::from_str(&drawers[0].content).unwrap();
+    assert_eq!(got, payload);
 }
 
 /// Why: `get`/`delete` must behave correctly when nothing matches the
