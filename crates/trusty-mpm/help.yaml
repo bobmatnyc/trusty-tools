@@ -85,7 +85,7 @@ commands:
         default: 127.0.0.1:7880
         description: Address the daemon HTTP API binds to
       - name: tailscale
-        description: Also expose the daemon on the Tailscale interface
+        description: DEPRECATED — daemon binds loopback only (ADR-0011, #3330); use trusty-console --tailscale instead
       - name: mcp
         description: Run as an MCP server over stdio instead of HTTP daemon
   launch:

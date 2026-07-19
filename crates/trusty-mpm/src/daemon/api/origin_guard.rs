@@ -38,11 +38,11 @@ use axum::http::header::{HOST, ORIGIN};
 /// belt and braces. Only the guard is layered (NOT `with_standard_middleware`)
 /// so the daemon's existing no-CORS posture is unchanged.
 /// What: wraps `router` with `guard_write_origin` carrying `self_origins`. The
-/// primary (loopback) listener passes `SelfOrigins::default()`; the secondary
-/// Tailscale listener passes its resolved bind address so its `/web` surface can
-/// POST to itself (#3269). Method-gated + fail-open-on-missing-Origin, so GET
-/// reads, SSE streams, the `serve --stdio` bridge, `curl`, and the TUI/Telegram
-/// adapters are unaffected.
+/// daemon binds loopback only (ADR-0011 loopback-only doctrine, #3330) — there
+/// is no secondary listener, so only `SelfOrigins::default()` is ever passed;
+/// non-loopback ingress is exclusively `trusty-console`'s job. Method-gated +
+/// fail-open-on-missing-Origin, so GET reads, SSE streams, the `serve --stdio`
+/// bridge, `curl`, and the TUI/Telegram adapters are unaffected.
 /// Test: `origin_guard_router_tests` (cross-origin `POST /sessions` → 403;
 /// loopback/missing-Origin → allowed; GET read unaffected).
 pub fn guard_router(router: Router, self_origins: trusty_common::server::SelfOrigins) -> Router {
