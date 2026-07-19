@@ -234,25 +234,32 @@ fn default_config_includes_local_inference_section() {
 #[test]
 fn default_config_is_valid_toml() {
     let cfg = GlobalConfig::from_toml_str(DEFAULT_CONFIG_TOML).expect("default parses");
-    // ADR-0014: 3 services after slack-user-proxy retire.
+    // ADR-0014 + #3203/#3204: 3 services after slack-user-proxy retire and
+    // the gworkspace-mcp → trusty-mpm swap (gworkspace-mcp's static tool list
+    // had drifted from the real binary; trusty-mpm's is fresh, see #3203).
     assert_eq!(cfg.mcp.services.len(), 3);
-    let gw = cfg
+    let tm = cfg
         .mcp
         .services
         .iter()
-        .find(|s| s.name == "gworkspace-mcp")
-        .expect("gworkspace-mcp present");
-    assert!(gw.enabled);
-    // Native gworkspace-mcp takes no subcommand (external upstream used ["mcp"]).
-    assert!(gw.args.is_empty(), "native gworkspace-mcp takes no args");
-    assert!(gw.tools.iter().any(|t| t.name == "gmail_search"));
-    assert!(gw.tools.iter().any(|t| t.name == "calendar_list"));
+        .find(|s| s.name == "trusty-mpm")
+        .expect("trusty-mpm present");
+    assert!(tm.enabled);
+    assert_eq!(tm.command, "trusty-mpm");
+    assert_eq!(tm.args, vec!["serve".to_string(), "--stdio".to_string()]);
+    assert!(tm.tools.iter().any(|t| t.name == "session_list"));
+    assert!(tm.tools.iter().any(|t| t.name == "agent_delegate"));
     assert!(
         !cfg.mcp
             .services
             .iter()
             .any(|s| s.name == "slack-user-proxy"),
         "slack-user-proxy retired per ADR-0014"
+    );
+    assert!(
+        !cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"),
+        "gworkspace-mcp mcp.services entry removed (#3204); live path is the \
+         OpenRPC tool_registry.endpoints \"gworkspace\" entry"
     );
     // Native local integrations stay out of the registry.
     assert!(!cfg.mcp.services.iter().any(|s| s.name == "kuzu-memory"));
@@ -261,5 +268,52 @@ fn default_config_is_valid_toml() {
             .services
             .iter()
             .any(|s| s.name == "mcp-vector-search")
+    );
+}
+
+/// Drift guard (#3203): freeze the curated `trusty-mpm` static tool list as a
+/// checked-in expected set so a silent typo, addition, or removal in
+/// `default-config.toml` fails CI.
+///
+/// Why: the ideal guard would assert directly against
+/// `trusty_mpm::mcp::tools::TOOL_CATALOG`, but `trusty-agents` does not
+/// currently depend on `trusty-mpm` (and `trusty-mpm` does not depend on
+/// `trusty-agents` either — no cycle risk); adding it as a dev-dependency
+/// purely for this one assertion would pull `trusty-mpm`'s full
+/// daemon/tui/telegram/slack dependency graph into every `cargo test -p
+/// trusty-agents` run, which is disproportionate for an Effort:S ticket. This
+/// checked-in-list approach is the cheaper option named in #3203 — it still
+/// catches accidental drift in this file, just not a rename inside
+/// `trusty-mpm` itself (a human cross-checks that case against
+/// `crates/trusty-mpm/src/mcp/tools/mod.rs::TOOL_CATALOG` when touching
+/// either side).
+/// What: parses `DEFAULT_CONFIG_TOML`, finds the `trusty-mpm` service, and
+/// asserts its tool names equal `EXPECTED_TRUSTY_MPM_TOOLS` verbatim
+/// (order-sensitive, matching the file).
+/// Test: this test.
+#[test]
+fn trusty_mpm_service_tool_names_match_expected_curated_list() {
+    const EXPECTED_TRUSTY_MPM_TOOLS: [&str; 6] = [
+        "session_list",
+        "session_status",
+        "session_send",
+        "project_list",
+        "agent_delegate",
+        "console_metrics",
+    ];
+    let cfg = GlobalConfig::from_toml_str(DEFAULT_CONFIG_TOML).expect("default parses");
+    let svc = cfg
+        .mcp
+        .services
+        .iter()
+        .find(|s| s.name == "trusty-mpm")
+        .expect("trusty-mpm service present in defaults (#3203)");
+    let names: Vec<&str> = svc.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        EXPECTED_TRUSTY_MPM_TOOLS.to_vec(),
+        "trusty-mpm mcp.services.tools drifted from the checked-in expected \
+         list; update EXPECTED_TRUSTY_MPM_TOOLS here AND cross-check against \
+         crates/trusty-mpm/src/mcp/tools/mod.rs::TOOL_CATALOG"
     );
 }
