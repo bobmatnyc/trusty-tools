@@ -29,6 +29,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Documentation
 
+- in-flight issue/PR progress updates as standard PM workflow convention: bug diagnoses at triage time, progress comments at meaningful state changes, PR body freshness, and completion evidence (closes #3149) ([#3151](https://github.com/bobmatnyc/trusty-tools/pull/3151))
 - long-wait protocol — disarm monitors on goal completion ([#2960](https://github.com/bobmatnyc/trusty-tools/pull/2960)) ([`e193414`](https://github.com/bobmatnyc/trusty-tools/commit/e1934140d38d6d9b847fef07676f29277683b220))
 
 ---

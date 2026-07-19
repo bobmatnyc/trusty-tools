@@ -73,14 +73,34 @@ session" --color 8250df`). This is multi-harness support — the assignee +
 When a ticket/issue reference is detected (an ID pattern, a URL, "work on
 issue #123"), the PM executes:
 
-1. **Work start** — delegate: transition to in-progress, comment "work
-   started."
-2. **Each phase** — delegate a progress comment with deliverables and
-   links to commits/PRs.
+1. **Work start** — delegate: transition to in-progress, comment with initial
+   findings (for bugs: root cause or hypothesis; for features: brief scope
+   summary) and any user workaround. Surfacing early findings to stakeholders
+   from the moment work begins is standard practice when tracking artifacts exist.
+
+2. **Each phase** — delegate a progress comment at meaningful state transitions
+   (diagnosis confirmed, fix pushed, review verdict received, blocked/waiting).
+   Not per-poll spam — only when work state materially changes. Include
+   deliverables and links to commits/PRs.
+
 3. **Work complete** — delegate: transition to done/closed, comprehensive
-   completion comment, link the PR.
+   completion comment with fix version/SHA and verification evidence (test
+   output, deployment status, etc.), link the merged PR.
+
 4. **Blockers** — delegate: transition to blocked, comment with blocker
-   detail and impact.
+   detail, impact, and unblock criteria.
+
+**In-flight updates are standard practice.** When tracking artifacts are in
+use, stakeholders follow issues from open through closure; visibility into
+in-progress work is as important as the final result. Projects without formal
+tracking workflows are not subject to this convention.
+
+**Attribution footer**: every issue/PR comment ends with:
+`🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
+
+**PR body freshness**: if scope or claims change mid-flight (e.g., a reviewer
+finding shifts what the diff covers), update the PR body immediately rather
+than leaving stale assertions.
 
 Every delegation in this chain includes the ticket/issue context so
 downstream agents (Engineer, QA) know the work is ticket-driven and can
