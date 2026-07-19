@@ -342,7 +342,7 @@
   <div class="flex flex-1 min-h-0 w-full overflow-hidden">
   {#if $apiAuthRequired && !apiReady}
     <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
-      <div class="w-full max-w-md rounded-lg border border-foundry-primary/30 bg-foundry-light-surface dark:bg-foundry-surface p-6 shadow-lg">
+      <div class="w-full max-w-md rounded-lg border border-foundry-light-primary/30 dark:border-foundry-primary/30 bg-foundry-light-surface dark:bg-foundry-surface p-6 shadow-lg">
         <h1 class="mb-2 text-lg font-semibold text-foundry-light-text dark:text-foundry-text">API token required</h1>
         <p class="mb-4 text-sm text-foundry-light-muted dark:text-foundry-text/70">
           The tagent API server was started with <code class="font-mono bg-foundry-light-border/50 dark:bg-black/40 rounded px-1 py-0.5 text-xs">--api-token</code>. Paste the token to
@@ -354,7 +354,7 @@
             bind:value={tokenInput}
             placeholder="API token"
             autocomplete="off"
-            class="rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text px-3 py-2 text-sm shadow-sm focus:border-foundry-primary focus:outline-none"
+            class="rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text px-3 py-2 text-sm shadow-sm focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
             disabled={probingToken}
           />
           {#if tokenError}
@@ -362,7 +362,7 @@
           {/if}
           <button
             type="submit"
-            class="inline-flex items-center justify-center rounded-md bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:bg-foundry-light-surface dark:disabled:bg-foundry-surface disabled:text-foundry-light-muted dark:disabled:text-foundry-text/40"
+            class="inline-flex items-center justify-center rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:bg-foundry-light-surface dark:disabled:bg-foundry-surface disabled:text-foundry-light-muted dark:disabled:text-foundry-text/40"
             disabled={probingToken || !tokenInput.trim()}
           >
             {probingToken ? 'Verifying…' : 'Continue'}
@@ -382,7 +382,7 @@
         </p>
         <button
           type="button"
-          class="mt-4 inline-flex items-center justify-center rounded-md bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-primary/80"
+          class="mt-4 inline-flex items-center justify-center rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80"
           on:click={() => window.location.reload()}
         >
           Reload
@@ -393,7 +393,7 @@
     <!-- Full-screen loading state: spinning indicator with status text, never blank -->
     <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
       <div class="flex flex-col items-center gap-4 text-foundry-light-text dark:text-foundry-text">
-        <svg class="h-8 w-8 animate-spin text-foundry-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <svg class="h-8 w-8 animate-spin text-foundry-light-primary dark:text-foundry-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
         </svg>
@@ -408,8 +408,8 @@
         <button
           type="button"
           class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'chat'
-            ? 'bg-foundry-primary/20 text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary/10'}"
+            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
+            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
           on:click={() => (activeView = 'chat')}
         >
           Chat
@@ -417,8 +417,8 @@
         <button
           type="button"
           class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'projects'
-            ? 'bg-foundry-primary/20 text-foundry-primary'
-            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary/10'}"
+            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
+            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
           on:click={() => (activeView = 'projects')}
         >
           Projects
@@ -436,7 +436,7 @@
   </div>
   <span
     class="absolute top-14 right-3 z-30 text-[10px] px-2 py-0.5 rounded-full {desktop
-      ? 'bg-foundry-primary/20 text-foundry-primary'
+      ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
       : 'bg-foundry-amber/20 text-foundry-amber'}"
     title={desktop ? 'Running inside Tauri (IPC)' : 'Running in browser (HTTP /api)'}
   >

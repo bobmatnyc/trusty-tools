@@ -125,13 +125,13 @@
         bind:value={input}
         placeholder={`Message ${$activeProject.name}…`}
         rows="2"
-        class="flex-1 resize-none rounded-lg border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-surface dark:bg-foundry-surface text-foundry-light-text dark:text-foundry-text px-3 py-2 text-sm shadow-sm focus:border-foundry-primary focus:outline-none placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40"
+        class="flex-1 resize-none rounded-lg border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-surface dark:bg-foundry-surface text-foundry-light-text dark:text-foundry-text px-3 py-2 text-sm shadow-sm focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40"
         on:keydown={handleKeydown}
         disabled={$isRunning}
       ></textarea>
       <button
         type="button"
-        class="inline-flex items-center gap-1 rounded-lg bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:bg-foundry-light-surface dark:disabled:bg-foundry-surface disabled:text-foundry-light-muted dark:disabled:text-foundry-text/40"
+        class="inline-flex items-center gap-1 rounded-lg bg-foundry-light-primary dark:bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:bg-foundry-light-surface dark:disabled:bg-foundry-surface disabled:text-foundry-light-muted dark:disabled:text-foundry-text/40"
         on:click={handleSubmit}
         {disabled}
       >

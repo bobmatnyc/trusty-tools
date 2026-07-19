@@ -63,8 +63,8 @@
       <button
         type="button"
         class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors {project.id === $activeProjectId
-          ? 'bg-foundry-primary/20 text-foundry-light-text dark:text-foundry-text border-l-2 border-foundry-primary'
-          : 'text-foundry-light-text/80 dark:text-foundry-text/80 hover:bg-foundry-primary/10'}"
+          ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-text dark:text-foundry-text border-l-2 border-foundry-light-primary dark:border-foundry-primary'
+          : 'text-foundry-light-text/80 dark:text-foundry-text/80 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
         on:click={() => selectProject(project.id)}
       >
         <span

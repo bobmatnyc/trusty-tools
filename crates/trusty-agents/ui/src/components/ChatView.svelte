@@ -153,13 +153,13 @@
         </div>
       {:else if msg.role === 'pm'}
         <div class="flex justify-start">
-          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-primary bg-foundry-primary/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
-            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-primary/80">
+          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-light-primary dark:border-foundry-primary bg-foundry-light-primary/10 dark:bg-foundry-primary/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
+            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-light-primary/80 dark:text-foundry-primary/80">
               <ActionIcon name="pm" size={14} />
               <span>pm</span>
             </div>
             <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
-            <p class="mt-1 text-[10px] text-foundry-primary/80">{fmtTime(msg.timestamp)}</p>
+            <p class="mt-1 text-[10px] text-foundry-light-primary/80 dark:text-foundry-primary/80">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
       {:else}

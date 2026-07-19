@@ -364,8 +364,8 @@
         <button
           type="button"
           class="rounded px-2 py-0.5 text-xs transition-colors {sortMode === 'last_connected'
-            ? 'bg-foundry-primary text-white'
-            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-primary/10'}"
+            ? 'bg-foundry-light-primary dark:bg-foundry-primary text-white'
+            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
           on:click={() => (sortMode = 'last_connected')}
         >
           Last Connected
@@ -373,8 +373,8 @@
         <button
           type="button"
           class="rounded px-2 py-0.5 text-xs transition-colors {sortMode === 'name'
-            ? 'bg-foundry-primary text-white'
-            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-primary/10'}"
+            ? 'bg-foundry-light-primary dark:bg-foundry-primary text-white'
+            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
           on:click={() => (sortMode = 'name')}
         >
           Name
@@ -382,8 +382,8 @@
         <button
           type="button"
           class="rounded px-2 py-0.5 text-xs transition-colors {sortMode === 'active_first'
-            ? 'bg-foundry-primary text-white'
-            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-primary/10'}"
+            ? 'bg-foundry-light-primary dark:bg-foundry-primary text-white'
+            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
           on:click={() => (sortMode = 'active_first')}
         >
           Active First
@@ -393,7 +393,7 @@
         type="search"
         placeholder="Filter…"
         bind:value={filter}
-        class="rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40 focus:border-foundry-primary focus:outline-none"
+        class="rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40 focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
       />
       <label class="flex items-center gap-1 text-xs text-foundry-light-muted dark:text-foundry-text/70">
         <input type="checkbox" checked={showAll} on:change={toggleShowAll} class="h-3 w-3" />
@@ -403,7 +403,7 @@
         type="button"
         on:click={refresh}
         disabled={loading}
-        class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-primary/10 disabled:opacity-50"
+        class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 disabled:opacity-50"
         title="Refresh"
       >
         <RefreshCw class="h-3 w-3 {loading ? 'animate-spin' : ''}" />
@@ -412,7 +412,7 @@
       <button
         type="button"
         on:click={() => { showAddForm = !showAddForm; addError = ''; }}
-        class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-primary/10"
+        class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10"
         title="Add project by path"
       >
         <Plus class="h-3 w-3" />
@@ -434,7 +434,7 @@
         bind:value={newPath}
         placeholder="/absolute/path/to/project  or  ~/relative/path"
         title="Enter an absolute or relative filesystem path"
-        class="flex-1 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40 focus:border-foundry-primary focus:outline-none"
+        class="flex-1 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40 focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
         on:keydown={(e) => e.key === 'Enter' && submitAddProject()}
         disabled={addLoading}
       />
@@ -442,14 +442,14 @@
         type="button"
         on:click={submitAddProject}
         disabled={addLoading || !newPath.trim()}
-        class="inline-flex items-center gap-1 rounded-md bg-foundry-primary px-3 py-1 text-xs font-medium text-white hover:bg-foundry-primary/80 disabled:opacity-50"
+        class="inline-flex items-center gap-1 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1 text-xs font-medium text-white hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:opacity-50"
       >
         {addLoading ? 'Adding…' : 'Add'}
       </button>
       <button
         type="button"
         on:click={() => { showAddForm = false; newPath = ''; addError = ''; }}
-        class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary/10"
+        class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10"
         aria-label="Cancel"
       >
         <X class="h-3 w-3" />
@@ -508,7 +508,7 @@
           >
             <button
               type="button"
-              class="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-foundry-primary/5 transition-colors"
+              class="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-foundry-light-primary/5 dark:hover:bg-foundry-primary/5 transition-colors"
               on:click={() => toggleExpand(project.id)}
               aria-expanded={isOpen}
             >
@@ -519,13 +519,13 @@
                       ? 'rotate-90'
                       : ''}"
                   />
-                  <Folder class="h-4 w-4 shrink-0 text-foundry-primary" />
+                  <Folder class="h-4 w-4 shrink-0 text-foundry-light-primary dark:text-foundry-primary" />
                   <span class="font-semibold text-foundry-light-text dark:text-foundry-text truncate">
                     {project.name}
                   </span>
                   {#if project.framework}
                     <span
-                      class="rounded-full bg-foundry-primary/15 px-2 py-0.5 text-xs text-foundry-primary"
+                      class="rounded-full bg-foundry-light-primary/15 dark:bg-foundry-primary/15 px-2 py-0.5 text-xs text-foundry-light-primary dark:text-foundry-primary"
                     >
                       {project.framework}
                     </span>
@@ -599,7 +599,7 @@
                       target="_blank"
                       rel="noopener noreferrer"
                       on:click|stopPropagation
-                      class="inline-flex items-center gap-1 text-foundry-primary hover:underline"
+                      class="inline-flex items-center gap-1 text-foundry-light-primary dark:text-foundry-primary hover:underline"
                     >
                       <Github class="h-3 w-3" />
                       {ghLink.replace('https://github.com/', '')}
@@ -623,7 +623,7 @@
                   <ul class="flex flex-col gap-1">
                     {#each project.sessions as session (session.name)}
                       <li
-                        class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-foundry-primary/5 transition-colors"
+                        class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-foundry-light-primary/5 dark:hover:bg-foundry-primary/5 transition-colors"
                       >
                         <span
                           class="inline-block h-2 w-2 rounded-full shrink-0 {statusDotClasses(
@@ -651,7 +651,7 @@
                         <button
                           type="button"
                           on:click={() => openAttachModal(session.name)}
-                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary hover:text-white hover:border-foundry-primary transition-colors"
+                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary dark:hover:bg-foundry-primary hover:text-white hover:border-foundry-light-primary dark:hover:border-foundry-primary transition-colors"
                           title="Attach to session"
                           aria-label="Attach to session {session.name}"
                         >
@@ -690,7 +690,7 @@
                         <button
                           type="button"
                           on:click={() => connectToProject(project)}
-                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary hover:text-white hover:border-foundry-primary transition-colors"
+                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary dark:hover:bg-foundry-primary hover:text-white hover:border-foundry-light-primary dark:hover:border-foundry-primary transition-colors"
                           title="Connect to chat"
                           aria-label="Connect to chat {session.name}"
                         >
@@ -708,7 +708,7 @@
                 <button
                   type="button"
                   on:click={() => newSession(project)}
-                  class="mt-2 inline-flex items-center gap-1 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/60 hover:border-foundry-primary hover:text-foundry-primary transition-colors"
+                  class="mt-2 inline-flex items-center gap-1 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/60 hover:border-foundry-light-primary dark:hover:border-foundry-primary hover:text-foundry-light-primary dark:hover:text-foundry-primary transition-colors"
                 >
                   <Plus class="h-3 w-3" />
                   New Session
@@ -768,7 +768,7 @@
           <button
             type="button"
             on:click={copyAttachCommand}
-            class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-primary/10"
+            class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10"
           >
             <Copy class="h-3 w-3" />
             {attachCopied ? 'Copied!' : 'Copy command'}
@@ -776,7 +776,7 @@
           <button
             type="button"
             on:click={closeAttachModal}
-            class="rounded-md bg-foundry-primary px-3 py-1.5 text-xs text-white hover:bg-foundry-primary/90"
+            class="rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs text-white hover:bg-foundry-light-primary/90 dark:hover:bg-foundry-primary/90"
           >
             Close
           </button>

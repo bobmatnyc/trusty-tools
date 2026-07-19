@@ -67,7 +67,7 @@
 
   <ul class="flex flex-col gap-1">
     {#each $taskHistory.filter(t => (t.task?.trim() || t.narrative?.trim()) || t.status !== 'running') as entry (entry.id)}
-      <li class="flex flex-col rounded-md px-2 py-1 hover:bg-foundry-primary/10">
+      <li class="flex flex-col rounded-md px-2 py-1 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10">
         <span class="truncate text-xs font-medium text-foundry-light-text dark:text-foundry-text" title={entry.task}>
           {shortTask(entry.task)}
         </span>

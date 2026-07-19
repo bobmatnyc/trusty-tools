@@ -21,7 +21,11 @@ export default {
           text: '#f0e7d8',
           muted: '#a58a6b',
           border: '#46311f',
-          primary: '#b7410e',
+          // Accent brightens one step on dark to hold contrast on oxide
+          // paper (tokens.css: --trusty-accent dark = #D97742). Unlike the
+          // other bare keys this is genuinely the DARK-theme accent value —
+          // see 'light-primary' below for the light-theme counterpart.
+          primary: '#d97742',
           teal: '#7ba7c4',
           amber: '#d9a83a',
           // Light theme values (used via `dark:` prefix inversion, same
@@ -31,12 +35,15 @@ export default {
           'light-text': '#2b1c12',
           'light-muted': '#6e5843',
           'light-border': '#d8c9b4',
+          'light-primary': '#b7410e',
         },
       },
       fontFamily: {
-        // Loaded via the Google Fonts link in index.html (Foundry README
-        // install step). Fallback chains keep text rendering immediately
-        // with system fonts before the webfont arrives.
+        // Self-hosted from public/fonts/ via @font-face rules in index.html
+        // (Foundry README install step) — no external CDN dependency so the
+        // desktop app renders correctly fully offline. Fallback chains keep
+        // text rendering immediately with system fonts before the woff2
+        // loads.
         sans: ['"IBM Plex Sans"', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'system-ui', 'sans-serif'],
         display: ['"Chakra Petch"', '"IBM Plex Sans"', 'system-ui', 'sans-serif'],
         mono: ['"IBM Plex Mono"', '"SF Mono"', 'Monaco', '"Cascadia Code"', 'Consolas', 'ui-monospace', 'monospace'],

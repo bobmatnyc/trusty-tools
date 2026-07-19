@@ -28,7 +28,7 @@
       type="button"
       class="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
              {$theme === opt.value
-               ? 'bg-foundry-primary text-white'
+               ? 'bg-foundry-light-primary dark:bg-foundry-primary text-white'
                : 'text-foundry-light-muted dark:text-foundry-muted hover:text-foundry-light-text dark:hover:text-foundry-text'}"
       on:click={() => setTheme(opt.value)}
       title={opt.label}
