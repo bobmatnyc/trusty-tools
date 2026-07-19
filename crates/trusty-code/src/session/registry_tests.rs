@@ -1030,6 +1030,29 @@ async fn set_run_outcome_stores_transcript_and_usage() {
     registry.set_run_outcome("nope", turns, crate::perf::TokenUsage::default(), None);
 }
 
+/// (Issue #3298) `set_run_outcome` must record+publish
+/// `Event::SessionActivityUpdate` on the session's own ring buffer/live bus.
+#[tokio::test]
+async fn set_run_outcome_publishes_activity_update() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    registry.set_run_outcome(
+        &session.id,
+        vec![],
+        crate::perf::TokenUsage::default(),
+        None,
+    );
+
+    let events = registry.replay(&session.id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, Event::SessionActivityUpdate { has_running_task, .. } if !has_running_task)),
+        "expected a SessionActivityUpdate event: {events:?}"
+    );
+}
+
 /// `set_run_outcome` must ACCUMULATE across two calls (#2344): the second
 /// run's turns are appended (not replacing the first run's), and usage/cost
 /// are added onto the running total — `session.get_transcript` must reflect

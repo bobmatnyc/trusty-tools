@@ -665,6 +665,76 @@ pub enum Event {
         compaction_rounds: usize,
     },
 
+    // -- Session<->workstream binding (DOC-48 §4/§5.3, issue #3298) --
+    /// A session was just bound to a workstream — either the ambient default
+    /// target (§4.2: `session.create`/`task.run` called with no explicit
+    /// `workstream_id` while a workstream is active) or an explicit
+    /// `workstream_id` param (§4.1). `session::protocol::create` and
+    /// `task::protocol::task_run` are the sole emitters, each exactly once
+    /// per newly-minted session that resolves a binding — a session's
+    /// binding is immutable thereafter (§4.1), so this can never fire twice
+    /// for the same `session_id`.
+    ///
+    /// Why: DOC-48 §5.3's event table lists `SessionAdded` as part of the
+    /// minimal Phase 1A/1B set so a client observing
+    /// `GET /workstreams/{id}/events` learns a new session joined the
+    /// workstream. Session-scoped (unlike `WorkstreamActivationChanged`/
+    /// `WorkstreamStateInferred` above) — published via
+    /// `SessionRegistry::record`, so it flows through the SAME per-session
+    /// ring buffer and live bus every other session event does. This is
+    /// exactly why `crate::workstreams::sse::aggregate_live`'s dynamic
+    /// per-event membership re-check (module docs) needs no change to pick
+    /// it up: by the time this event is recorded, the binding write into
+    /// [`crate::workstreams::store::WorkstreamStore`] has already completed,
+    /// so the session is already a member of `workstream_id`'s `session_ids`
+    /// when the aggregation route re-checks membership for this event.
+    /// What: `workstream_id` and `session_id` are both carried (unlike
+    /// §5.3's literal `{session_id, binding_time}` table, widened per this
+    /// ticket's scope note so a client subscribed to one workstream's
+    /// aggregate stream — which tags every forwarded event with its source
+    /// `session_id` already — can also learn WHICH workstream without a
+    /// second round trip); `binding_time` is the UTC instant the binding was
+    /// persisted.
+    /// Test: `session::protocol::workstream_binding_tests::create_binds_ambient_active_workstream`,
+    /// `session::protocol::workstream_binding_tests::create_binds_explicit_workstream_overriding_ambient`,
+    /// `task::protocol::tests::task_run_binds_ambient_active_workstream_and_publishes_session_added`.
+    SessionAdded {
+        session_id: String,
+        workstream_id: String,
+        binding_time: DateTime<Utc>,
+    },
+
+    /// A bound session's activity signal changed — currently fired whenever
+    /// `SessionRegistry::set_run_outcome` records a completed run's turns
+    /// (the natural "a turn just happened" hook; #2056's `task::executor`
+    /// calls it once per finished execution).
+    ///
+    /// Why: DOC-48 §5.3's event table lists this alongside `SessionAdded` so
+    /// a workstream observer can track which of its bound sessions are
+    /// live/recently-active without polling `session.status` per id. Emitted
+    /// unconditionally (workstream-bound or not — `SessionRegistry` has no
+    /// cheap way to know at this call site, and a client observing a
+    /// PROJECTLESS session's own `GET /sessions/{id}/events` stream benefits
+    /// from it identically); the workstream-level aggregation route only
+    /// ever forwards it for sessions that ARE bound (dynamic membership
+    /// check, same as `SessionAdded` above), so an unbound session's copy is
+    /// simply never surfaced there.
+    /// What: `last_turn_at` is the UTC instant this update was recorded;
+    /// `has_running_task` mirrors `SessionRegistry::is_executing` at that
+    /// same instant (`true` while `set_run_outcome`'s caller — `run_task`'s
+    /// executor — still holds the execution slot when this fires; #2056's
+    /// call order means this is realistically always `false` in practice
+    /// today, since the executor clears its execution slot only AFTER
+    /// `set_run_outcome` returns — carried anyway so a future caller with a
+    /// genuinely mid-run activity signal has a field to set it on without a
+    /// schema change).
+    /// Test: `session::registry_tests::set_run_outcome_publishes_activity_update`.
+    SessionActivityUpdate {
+        session_id: String,
+        last_turn_at: DateTime<Utc>,
+        has_running_task: bool,
+    },
+
     // -- Workstream lifecycle (DOC-48 §5.3/§6.3, issue #3297) --
     /// The daemon-wide active workstream changed: `workstream.activate`
     /// switched to a different workstream (or activated one from no prior
@@ -902,7 +972,9 @@ impl Event {
             | Event::ReportGenerated { session_id, .. }
             | Event::RecapGenerated { session_id, .. }
             | Event::IndexReadiness { session_id, .. }
-            | Event::ContextBudget { session_id, .. } => Some(session_id),
+            | Event::ContextBudget { session_id, .. }
+            | Event::SessionAdded { session_id, .. }
+            | Event::SessionActivityUpdate { session_id, .. } => Some(session_id),
             Event::WorkstreamActivationChanged { .. }
             | Event::WorkstreamStateInferred { .. }
             | Event::Ping => None,
@@ -956,6 +1028,8 @@ impl Event {
             Event::RecapGenerated { .. } => "recap_generated",
             Event::IndexReadiness { .. } => "index_readiness",
             Event::ContextBudget { .. } => "context_budget",
+            Event::SessionAdded { .. } => "session_added",
+            Event::SessionActivityUpdate { .. } => "session_activity_update",
             Event::WorkstreamActivationChanged { .. } => "workstream_activation_changed",
             Event::WorkstreamStateInferred { .. } => "workstream_state_inferred",
             Event::Ping => "ping",

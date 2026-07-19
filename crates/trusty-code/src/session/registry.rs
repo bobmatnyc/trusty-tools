@@ -315,6 +315,7 @@ impl SessionRegistry {
             status: SessionStatus::Created,
             created_at: Utc::now(),
             mode: None,
+            workstream_id: None,
         };
         {
             let mut sessions = self.lock();
@@ -745,6 +746,14 @@ impl SessionRegistry {
     /// sum, either `Some` alone passes through, `None`+`None` stays `None`).
     /// Test: `registry_tests::set_run_outcome_stores_transcript_and_usage`,
     /// `registry_tests::set_run_outcome_accumulates_across_two_calls`.
+    ///
+    /// (Issue #3298) Also records+publishes `Event::SessionActivityUpdate` —
+    /// the natural "a turn just happened" hook DOC-48 §5.3's event table asks
+    /// for, so a workstream observer can see which bound sessions are
+    /// recently active without polling. Published unconditionally (whether
+    /// or not `id` is workstream-bound — see the event's own docs); a no-op
+    /// alongside the rest of this method if `id` is already gone.
+    /// Test: `registry_tests::set_run_outcome_publishes_activity_update`.
     pub fn set_run_outcome(
         &self,
         id: &str,
@@ -752,8 +761,11 @@ impl SessionRegistry {
         usage: TokenUsage,
         cost_usd: Option<f64>,
     ) {
-        let mut sessions = self.lock();
-        if let Some(entry) = sessions.get_mut(id) {
+        let has_running_task = {
+            let mut sessions = self.lock();
+            let Some(entry) = sessions.get_mut(id) else {
+                return;
+            };
             entry.transcript.extend(transcript);
             entry.usage.add(&usage);
             entry.cost_usd = match (entry.cost_usd, cost_usd) {
@@ -761,7 +773,9 @@ impl SessionRegistry {
                 (Some(a), None) | (None, Some(a)) => Some(a),
                 (None, None) => None,
             };
-        }
+            entry.execution.is_some()
+        };
+        self.publish_activity_update(id, has_running_task);
     }
 
     /// Retrieve this session's persistent PM conversation `Transcript`,
@@ -1070,6 +1084,11 @@ mod goal_ops;
 /// own file for the same 500-SLOC-cap reason as `events` above.
 #[path = "registry_agents.rs"]
 mod agents;
+
+/// `SessionRegistry::bind_workstream` (DOC-48 §4.1, issue #3298), split out
+/// into its own file for the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_workstream.rs"]
+mod workstream_binding;
 
 /// `session.get_search_audit`'s retained search/recall audit trail (issue
 /// #3072), split out into its own file for the same 500-SLOC-cap reason as

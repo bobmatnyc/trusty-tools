@@ -369,3 +369,100 @@ async fn store_reload_noop_when_unchanged() {
     let ws = store.get(id).await.expect("get");
     assert_eq!(ws.id, id);
 }
+
+// -- Session binding (DOC-48 §4.1/§2, issue #3298) --
+
+#[tokio::test]
+async fn bind_session_appends_and_persists() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+
+    store.bind_session(id, "s-1").await.expect("bind");
+    let ws = store.get(id).await.expect("get");
+    assert_eq!(ws.session_ids, vec!["s-1".to_string()]);
+
+    // Persisted, not just in-memory.
+    let mut reloaded = WorkstreamStore::load(store_file(&dir))
+        .await
+        .expect("reload");
+    let ws = reloaded.get(id).await.expect("get after reload");
+    assert_eq!(ws.session_ids, vec!["s-1".to_string()]);
+}
+
+#[tokio::test]
+async fn bind_session_is_idempotent_for_same_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+
+    store.bind_session(id, "s-1").await.expect("first bind");
+    store
+        .bind_session(id, "s-1")
+        .await
+        .expect("re-binding to the SAME workstream must not error");
+    let ws = store.get(id).await.expect("get");
+    assert_eq!(
+        ws.session_ids,
+        vec!["s-1".to_string()],
+        "must not double-append on the idempotent path"
+    );
+}
+
+#[tokio::test]
+async fn bind_session_rejects_double_binding_to_different_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let a = store.create("A").await.expect("create a");
+    let b = store.create("B").await.expect("create b");
+
+    store.bind_session(a, "s-1").await.expect("bind to a");
+    assert!(matches!(
+        store.bind_session(b, "s-1").await,
+        Err(BindError::AlreadyBound(id)) if id == "s-1"
+    ));
+}
+
+#[tokio::test]
+async fn bind_session_rejects_unknown_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let missing = WorkstreamId::new();
+
+    assert!(matches!(
+        store.bind_session(missing, "s-1").await,
+        Err(BindError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn bind_session_rejects_closed_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+    store.close(id).await.expect("close");
+
+    assert!(matches!(
+        store.bind_session(id, "s-1").await,
+        Err(BindError::Closed(_))
+    ));
+}
+
+#[tokio::test]
+async fn find_binding_returns_owning_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+    store.bind_session(id, "s-1").await.expect("bind");
+
+    assert_eq!(store.find_binding("s-1").await.expect("find"), Some(id));
+}
+
+#[tokio::test]
+async fn find_binding_returns_none_for_unbound_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    store.create("A").await.expect("create");
+
+    assert_eq!(store.find_binding("s-nope").await.expect("find"), None);
+}

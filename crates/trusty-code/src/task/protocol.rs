@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 use crate::session::SessionRegistry;
+use crate::workstreams::SharedWorkstreamStore;
 
 use super::executor::{TaskRunParams, spawn_task_run};
 use super::mock_llm::build_llm_client;
@@ -48,17 +49,25 @@ use super::mock_llm::build_llm_client;
 /// [`ProjectBinding`], whose `None` variant is that state.
 /// Test: `task::protocol::tests::register_wires_task_run`,
 /// `task::protocol::tests::register_wires_task_run_projectless`.
+/// (Issue #3298) `workstreams` is the daemon's shared workstream store —
+/// `task.run` resolves and persists a freshly-minted session's binding
+/// (explicit `workstream_id` param, or DOC-48 §4.2's ambient
+/// active-workstream default) through it, or enforces §4.1's immutability
+/// rule against an EXISTING session's persisted binding — see
+/// [`task_run`]'s docs.
 pub fn register(
     router: &mut Router,
     registry: Arc<SessionRegistry>,
     binding: ProjectBinding,
     agents_dir: PathBuf,
+    workstreams: SharedWorkstreamStore,
 ) {
     router.register("task.run", move |params: Value, _ctx: ConnectionContext| {
         let registry = Arc::clone(&registry);
         let binding = binding.clone();
         let agents_dir = agents_dir.clone();
-        async move { task_run(registry, params, binding, agents_dir).await }
+        let workstreams = workstreams.clone();
+        async move { task_run(registry, params, binding, agents_dir, workstreams).await }
     });
 }
 
@@ -114,13 +123,39 @@ struct TaskRunRequestParams {
     /// [`task_run`]'s docs.
     #[serde(default)]
     project: Option<PathBuf>,
+    /// (Issue #3298, DOC-48 §4.1/§4.2) Explicit workstream to bind a
+    /// FRESHLY-MINTED session to (`session_id` absent), or to RESTATE an
+    /// existing reused session's own persisted binding — see
+    /// [`task_run`]'s docs on the immutability check this triggers on the
+    /// `session_id`-present path. `None` on the mint path falls back to
+    /// §4.2's ambient active-workstream default; `None` on the reuse path
+    /// never re-applies ambient targeting (a session's binding, once set, is
+    /// immutable — see `crate::workstreams::protocol::check_workstream_immutable`'s
+    /// docs).
+    #[serde(default)]
+    workstream_id: Option<String>,
 }
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
-/// session_id?, mode?, deadline_secs?, project?) -> { session_id, status, mode }`.
+/// session_id?, mode?, deadline_secs?, project?, workstream_id?) -> {
+/// session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
+///
+/// **(Issue #3298, DOC-48 §4.1/§4.2) Workstream binding**, mirroring the
+/// `project`/binding reconciliation immediately below: on the mint path
+/// (`session_id` absent), resolves the EFFECTIVE workstream target —
+/// `workstream_id` explicit param wins, else the daemon's active workstream
+/// is the ambient default (§4.2), else the session stays projectless — and
+/// persists it via `crate::workstreams::protocol::resolve_and_bind_session`
+/// before this session is used further. On the reuse path (`session_id`
+/// present), the session's own persisted `workstream_id` is authoritative;
+/// `crate::workstreams::protocol::check_workstream_immutable` rejects a
+/// `workstream_id` param that would silently redirect a session
+/// `session.status`/`session.list` already reports as bound to a different
+/// (or no) workstream — same rule, same rationale as the `project` mismatch
+/// guard.
 /// What: validates `task_description` is non-empty
 /// (`-32003 invalid_argument`); resolves the EFFECTIVE binding for this call —
 /// `project: Some(path)` resolves via [`ProjectBinding::resolve`] (mapping a
@@ -169,6 +204,7 @@ async fn task_run(
     params: Value,
     binding: ProjectBinding,
     agents_dir: PathBuf,
+    workstreams: SharedWorkstreamStore,
 ) -> Result<Value, RpcError> {
     let p: TaskRunRequestParams = serde_json::from_value(params)
         .map_err(|e| RpcError::invalid_params(format!("task.run: {e}")))?;
@@ -209,6 +245,17 @@ async fn task_run(
                         .unwrap_or_else(|| "<projectless>".to_string()),
                 )));
             }
+            // (Issue #3298, DOC-48 §4.1 AC-1.3) A REUSED session's own
+            // persisted `workstream_id` is likewise authoritative — the
+            // exact same rule as the `project` check just above, applied to
+            // the sibling binding. `None` here never rejects: ambient
+            // default-targeting (§4.2) applies only at a session's FIRST
+            // binding, never re-applied on reuse.
+            crate::workstreams::protocol::check_workstream_immutable(
+                existing.workstream_id,
+                p.workstream_id.as_deref(),
+                "task.run",
+            )?;
             id.clone()
         }
         None => {
@@ -217,6 +264,16 @@ async fn task_run(
                 Some(agent_name.clone()),
                 binding.clone(),
             );
+            if let Some(ws_id) = crate::workstreams::protocol::resolve_and_bind_session(
+                &workstreams,
+                p.workstream_id.as_deref(),
+                &session.id,
+                "task.run",
+            )
+            .await?
+            {
+                registry.bind_workstream(&session.id, ws_id)?;
+            }
             session.id
         }
     };

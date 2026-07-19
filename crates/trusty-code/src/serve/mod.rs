@@ -166,9 +166,15 @@ async fn build_router_at(
 
     let mut router = Router::new();
     methods::register(&mut router);
-    crate::session::protocol::register(&mut router, sessions.clone());
+    crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::fs_browse::protocol::register(&mut router);
-    crate::task::protocol::register(&mut router, sessions.clone(), binding, agents_dir);
+    crate::task::protocol::register(
+        &mut router,
+        sessions.clone(),
+        binding,
+        agents_dir,
+        workstreams.clone(),
+    );
     crate::workstreams::protocol::register(&mut router, workstreams.clone());
     Ok((router, sessions, workstreams))
 }

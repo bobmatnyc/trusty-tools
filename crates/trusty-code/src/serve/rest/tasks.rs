@@ -84,6 +84,11 @@ struct RunTaskBody {
     deadline_secs: Option<u64>,
     #[serde(default)]
     project: Option<String>,
+    /// (Issue #3298) Forwarded verbatim to `task.run`'s own `workstream_id`
+    /// param — see `task::protocol`'s docs for the mint-vs-reuse resolution
+    /// rules.
+    #[serde(default)]
+    workstream_id: Option<String>,
 }
 
 /// Like [`super::respond`] but reports `202 Accepted` on success instead of
@@ -150,6 +155,7 @@ async fn run_task(
             "mode": body.mode,
             "deadline_secs": body.deadline_secs,
             "project": body.project,
+            "workstream_id": body.workstream_id,
         }),
     )
     .await
@@ -169,7 +175,7 @@ mod tests {
     /// Build a router wired with a real `task.run` (mock LLM, so no real
     /// subprocess/network call happens), then this module's route group over
     /// it — mirrors `sessions::tests::app_and_registry`.
-    fn app_and_registry() -> (AxumRouter, StdArc<SessionRegistry>, tempfile::TempDir) {
+    async fn app_and_registry() -> (AxumRouter, StdArc<SessionRegistry>, tempfile::TempDir) {
         let sessions = StdArc::new(SessionRegistry::new());
         let agents = tempfile::tempdir().expect("agents tempdir");
         std::fs::write(
@@ -178,13 +184,15 @@ mod tests {
         )
         .expect("write pm.md");
         let project = tempfile::tempdir().expect("project tempdir");
+        let workstreams = crate::workstreams::test_shared_store().await;
         let mut router = Router::new();
-        crate::session::protocol::register(&mut router, sessions.clone());
+        crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
         crate::task::protocol::register(
             &mut router,
             sessions.clone(),
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             agents.path().to_path_buf(),
+            workstreams,
         );
         let app = routes(StdArc::new(router));
         (app, sessions, project)
@@ -221,7 +229,7 @@ mod tests {
                 crate::task::mock_llm::MOCK_LLM_ECHO,
             );
         }
-        let (app, _sessions, _project) = app_and_registry();
+        let (app, _sessions, _project) = app_and_registry().await;
 
         let resp = post(&app, "/tasks", r#"{"task_description": "say hi"}"#).await;
         unsafe {
@@ -236,7 +244,7 @@ mod tests {
     /// invalid_argument`).
     #[tokio::test]
     async fn run_task_empty_task_description_returns_400() {
-        let (app, _sessions, _project) = app_and_registry();
+        let (app, _sessions, _project) = app_and_registry().await;
 
         let resp = post(&app, "/tasks", r#"{"task_description": "   "}"#).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -249,7 +257,7 @@ mod tests {
     /// above.
     #[tokio::test]
     async fn run_task_unknown_session_id_returns_404() {
-        let (app, _sessions, _project) = app_and_registry();
+        let (app, _sessions, _project) = app_and_registry().await;
 
         let resp = post(
             &app,
@@ -268,7 +276,7 @@ mod tests {
     /// identical case for `POST /sessions`.
     #[tokio::test]
     async fn run_task_malformed_body_returns_400() {
-        let (app, _sessions, _project) = app_and_registry();
+        let (app, _sessions, _project) = app_and_registry().await;
 
         let resp = post(&app, "/tasks", "{not valid json").await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -287,7 +295,7 @@ mod tests {
                 crate::task::mock_llm::MOCK_LLM_ECHO,
             );
         }
-        let (app, _sessions, _boot_project) = app_and_registry();
+        let (app, _sessions, _boot_project) = app_and_registry().await;
         let call_project = tempfile::tempdir().expect("call project tempdir");
 
         let body = json!({
@@ -311,7 +319,7 @@ mod tests {
     /// invalid_argument`), matching `task.run`'s RPC-level error mapping.
     #[tokio::test]
     async fn run_task_invalid_project_returns_400() {
-        let (app, _sessions, _project) = app_and_registry();
+        let (app, _sessions, _project) = app_and_registry().await;
 
         let resp = post(
             &app,
@@ -331,7 +339,7 @@ mod tests {
     /// `task::protocol::tests::task_run_session_id_with_mismatched_project_is_rejected`.
     #[tokio::test]
     async fn run_task_session_id_with_mismatched_project_returns_400() {
-        let (app, sessions, _boot_project) = app_and_registry();
+        let (app, sessions, _boot_project) = app_and_registry().await;
         let session_project = tempfile::tempdir().expect("session project tempdir");
         let other_project = tempfile::tempdir().expect("other project tempdir");
         let session_binding = ProjectBinding::resolve(Some(session_project.path().to_path_buf()))

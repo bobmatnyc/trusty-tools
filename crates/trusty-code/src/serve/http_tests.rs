@@ -21,10 +21,11 @@ use trusty_common::mcp::error_codes;
 
 async fn router_and_sessions() -> (Arc<Router>, Arc<SessionRegistry>, SharedWorkstreamStore) {
     let sessions = Arc::new(SessionRegistry::new());
+    let workstreams = test_workstreams_store().await;
     let mut router = Router::new();
     crate::serve::methods::register(&mut router);
-    crate::session::protocol::register(&mut router, sessions.clone());
-    (Arc::new(router), sessions, test_workstreams_store().await)
+    crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
+    (Arc::new(router), sessions, workstreams)
 }
 
 /// A fresh, tempdir-backed `SharedWorkstreamStore` with no workstreams
@@ -250,17 +251,19 @@ async fn http_rest_post_tasks_route_is_merged_in() {
     )
     .expect("write pm.md");
     let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = test_workstreams_store().await;
     let mut router = Router::new();
     crate::serve::methods::register(&mut router);
-    crate::session::protocol::register(&mut router, sessions.clone());
+    crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::task::protocol::register(
         &mut router,
         sessions.clone(),
         crate::binding::ProjectBinding::resolve(Some(project.path().to_path_buf()))
             .expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        workstreams.clone(),
     );
-    let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
+    let app = build_axum_router(Arc::new(router), sessions, workstreams);
 
     let resp = app
         .oneshot(
@@ -298,7 +301,11 @@ async fn http_rest_get_fs_route_is_merged_in() {
     let sessions = Arc::new(SessionRegistry::new());
     let mut router = Router::new();
     crate::serve::methods::register(&mut router);
-    crate::session::protocol::register(&mut router, sessions.clone());
+    crate::session::protocol::register(
+        &mut router,
+        sessions.clone(),
+        test_workstreams_store().await,
+    );
     crate::fs_browse::protocol::register(&mut router);
     let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -425,7 +432,7 @@ async fn http_rest_get_workstreams_route_is_merged_in() {
     let workstreams = Arc::new(tokio::sync::Mutex::new(store));
     let mut router = Router::new();
     crate::serve::methods::register(&mut router);
-    crate::session::protocol::register(&mut router, sessions.clone());
+    crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::workstreams::protocol::register(&mut router, workstreams.clone());
     let id = workstreams.lock().await.create("t").await.expect("create");
     let app = build_axum_router(Arc::new(router), sessions, workstreams);

@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
+use crate::workstreams::SharedWorkstreamStore;
 
 use super::registry::SessionRegistry;
 
@@ -50,13 +51,24 @@ use super::registry::SessionRegistry;
 /// What: clones `registry` once per method (cheap — `Arc`) into a small
 /// adapter closure that forwards to the corresponding free function below.
 /// Test: `protocol::tests::register_wires_every_session_method`.
-pub fn register(router: &mut Router, registry: Arc<SessionRegistry>) {
+///
+/// (Issue #3298) `workstreams` is the daemon's shared workstream store —
+/// `session.create` resolves and persists the session's binding (explicit
+/// `workstream_id` param, or DOC-48 §4.2's ambient active-workstream
+/// default) through it before returning.
+pub fn register(
+    router: &mut Router,
+    registry: Arc<SessionRegistry>,
+    workstreams: SharedWorkstreamStore,
+) {
     let r = registry.clone();
+    let ws = workstreams.clone();
     router.register(
         "session.create",
         move |params: Value, ctx: ConnectionContext| {
             let r = r.clone();
-            async move { create(&r, params, ctx).await }
+            let ws = ws.clone();
+            async move { create(&r, &ws, params, ctx).await }
         },
     );
 
@@ -205,6 +217,12 @@ struct CreateParams {
     agent: Option<String>,
     #[serde(default)]
     project: Option<PathBuf>,
+    /// (Issue #3298, DOC-48 §4.1) Explicit workstream to bind this NEW
+    /// session to. `None` falls back to §4.2's ambient active-workstream
+    /// default (or stays projectless if nothing is active) — see
+    /// [`create`]'s docs.
+    #[serde(default)]
+    workstream_id: Option<String>,
 }
 
 /// `params` shape for `session.send`.
@@ -248,8 +266,25 @@ fn parse<T: DeserializeOwned>(params: Value, method: &str) -> Result<T, RpcError
 /// `protocol::tests::create_without_project_is_projectless`,
 /// `protocol::tests::create_binds_a_real_directory`,
 /// `protocol::tests::create_rejects_a_label_that_is_not_a_directory`.
+///
+/// **(Issue #3298, DOC-48 §4.1/§4.2) Workstream binding.** Resolves the
+/// EFFECTIVE workstream target via
+/// `crate::workstreams::protocol::resolve_and_bind_session` — an explicit
+/// `workstream_id` param wins; otherwise the daemon's active workstream is
+/// the ambient default (§4.2); if neither applies the session stays
+/// projectless (valid). Resolution/binding happens AFTER the session is
+/// minted (the store needs the fresh id to bind), but BEFORE the response is
+/// returned, so a caller never observes an unbound `Session` that is about
+/// to be bound moments later. A malformed/unknown/closed `workstream_id`
+/// fails the whole call — see that function's docs for the exact error
+/// mapping.
+/// Test: `binding_tests::create_binds_ambient_active_workstream`,
+/// `binding_tests::create_binds_explicit_workstream_overriding_ambient`,
+/// `binding_tests::create_stays_projectless_without_explicit_or_active`,
+/// `binding_tests::create_rejects_closed_explicit_workstream`.
 async fn create(
     registry: &SessionRegistry,
+    workstreams: &SharedWorkstreamStore,
     params: Value,
     _ctx: ConnectionContext,
 ) -> Result<Value, RpcError> {
@@ -260,7 +295,14 @@ async fn create(
     let binding = ProjectBinding::resolve(p.project)
         .map_err(|e| RpcError::invalid_argument(format!("session.create: {e}")))?;
     let session = registry.create(p.task, p.agent, binding);
-    Ok(json!(session))
+    protocol_workstream::bind_and_snapshot(
+        registry,
+        workstreams,
+        &session.id,
+        p.workstream_id.as_deref(),
+        "session.create",
+    )
+    .await
 }
 
 /// `session.list() -> [Session]` (vision spec Axiom 4).
@@ -423,6 +465,12 @@ async fn get_transcript(
 #[path = "protocol_goals.rs"]
 mod protocol_goals;
 
+/// `session.create`'s workstream-binding step (DOC-48 §4.1/§4.2, issue
+/// #3298), split out for the same 500-SLOC-cap reason as `protocol_goals`
+/// above.
+#[path = "protocol_workstream.rs"]
+mod protocol_workstream;
+
 /// `session.get_readiness` (DOC-39 §5.6 Slice D), split into its own file for
 /// the same 500-SLOC-cap reason as `protocol_goals` above.
 #[path = "protocol_readiness.rs"]
@@ -443,300 +491,26 @@ mod protocol_budget;
 #[path = "protocol_search_audit.rs"]
 mod protocol_search_audit;
 
+/// `protocol::tests` (parameter validation, error mapping), split into its
+/// own file for the same reason `sessions_write_tests.rs`/`registry_tests.rs`
+/// are split — a `_tests.rs`-suffixed sibling file falls under the crate's
+/// 1500-SLOC test cap rather than counting against this production file's
+/// 500-SLOC budget.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::mpsc;
-    use trusty_common::mcp::Request;
+#[path = "protocol_tests.rs"]
+mod tests;
 
-    fn test_ctx() -> ConnectionContext {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        ConnectionContext::new(tx)
-    }
-
-    /// Every `session.*` method must be reachable through a `Router` built
-    /// by `register` (proves the wiring, not just the free functions).
-    #[tokio::test]
-    async fn register_wires_every_session_method() {
-        let registry = Arc::new(SessionRegistry::new());
-        let mut router = Router::new();
-        register(&mut router, registry.clone());
-
-        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-
-        let cases: &[(&str, Value)] = &[
-            ("session.list", json!({})),
-            ("session.status", json!({"session_id": session.id})),
-            (
-                "session.send",
-                json!({"session_id": session.id, "input": "hi"}),
-            ),
-            ("session.attach", json!({"session_id": session.id})),
-            ("session.detach", json!({"session_id": session.id})),
-            ("session.get_transcript", json!({"session_id": session.id})),
-            ("session.get_goals", json!({"session_id": session.id})),
-            ("session.get_readiness", json!({"session_id": session.id})),
-            ("session.get_agents", json!({"session_id": session.id})),
-            (
-                "session.get_context_budget",
-                json!({"session_id": session.id}),
-            ),
-            (
-                "session.get_search_audit",
-                json!({"session_id": session.id}),
-            ),
-        ];
-        for (method, params) in cases {
-            let req = Request {
-                jsonrpc: Some("2.0".to_string()),
-                id: Some(json!(1)),
-                method: method.to_string(),
-                params: Some(params.clone()),
-            };
-            let resp = router.dispatch(req, &test_ctx()).await;
-            assert!(
-                resp.error.is_none(),
-                "{method} should succeed, got {:?}",
-                resp.error
-            );
-        }
-
-        // `session.cancel` last since it terminates the session.
-        let req = Request {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(1)),
-            method: "session.cancel".to_string(),
-            params: Some(json!({"session_id": session.id})),
-        };
-        let resp = router.dispatch(req, &test_ctx()).await;
-        assert!(
-            resp.error.is_none(),
-            "session.cancel should succeed, got {:?}",
-            resp.error
-        );
-    }
-
-    /// `session.set_goal`/`session.clear_goal` must be reachable through the
-    /// `Router` (proving the wiring) even though a freshly-created session
-    /// with no `task.run` yet has no transcript to write into — the
-    /// documented #2350 "no transcript yet" error IS the proof the request
-    /// was routed to the real handler rather than `-32601 method not found`.
-    #[tokio::test]
-    async fn register_wires_set_goal_and_clear_goal() {
-        let registry = Arc::new(SessionRegistry::new());
-        let mut router = Router::new();
-        register(&mut router, registry.clone());
-        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-
-        for method in ["session.set_goal", "session.clear_goal"] {
-            let req = Request {
-                jsonrpc: Some("2.0".to_string()),
-                id: Some(json!(1)),
-                method: method.to_string(),
-                params: Some(json!({"session_id": session.id, "slot": 1, "text": "x"})),
-            };
-            let resp = router.dispatch(req, &test_ctx()).await;
-            let error = resp
-                .error
-                .unwrap_or_else(|| panic!("{method} must error (no transcript yet)"));
-            assert_eq!(error.code, -32003, "{method} wrong error code");
-        }
-    }
-
-    /// An empty `task` must map to `-32003 invalid_argument`, not silently
-    /// create a blank session.
-    #[tokio::test]
-    async fn create_rejects_empty_task() {
-        let registry = SessionRegistry::new();
-        let err = create(&registry, json!({"task": "   "}), test_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, -32003);
-    }
-
-    /// A well-formed `session.create` call must return a running session.
-    #[tokio::test]
-    async fn create_returns_running_session() {
-        let registry = SessionRegistry::new();
-        let result = create(&registry, json!({"task": "do it"}), test_ctx())
-            .await
-            .unwrap();
-        assert_eq!(result["status"], "running");
-        assert_eq!(result["task"], "do it");
-    }
-
-    /// `session.list` must wrap its result under a `"sessions"` key.
-    #[tokio::test]
-    async fn list_returns_sessions_key() {
-        let registry = SessionRegistry::new();
-        registry.create("a".to_string(), None, crate::binding::ProjectBinding::None);
-        let result = list(&registry, Value::Null, test_ctx()).await.unwrap();
-        assert_eq!(result["sessions"].as_array().unwrap().len(), 1);
-    }
-
-    /// `session.status` on an unknown id must map to `session_not_found`.
-    #[tokio::test]
-    async fn status_unknown_session_maps_to_session_not_found() {
-        let registry = SessionRegistry::new();
-        let err = status(&registry, json!({"session_id": "nope"}), test_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// `session.get_transcript` on an unknown id must map to
-    /// `session_not_found` (#2058).
-    #[tokio::test]
-    async fn get_transcript_unknown_session_maps_to_session_not_found() {
-        let registry = SessionRegistry::new();
-        let err = get_transcript(&registry, json!({"session_id": "nope"}), test_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// `session.get_transcript` on a session that has never run a task
-    /// returns an empty transcript, not an error (#2058).
-    #[tokio::test]
-    async fn get_transcript_on_never_run_session_is_empty() {
-        let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-        let result = get_transcript(&registry, json!({"session_id": session.id}), test_ctx())
-            .await
-            .unwrap();
-        assert_eq!(result["session_id"], session.id);
-        assert_eq!(result["turns"].as_array().unwrap().len(), 0);
-        assert_eq!(result["cost_usd"], Value::Null);
-    }
-
-    /// `session.send` on an unknown id must map to `session_not_found`.
-    #[tokio::test]
-    async fn send_unknown_session_maps_to_session_not_found() {
-        let registry = SessionRegistry::new();
-        let err = send(
-            &registry,
-            json!({"session_id": "nope", "input": "hi"}),
-            test_ctx(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// `session.attach` on an unknown id must map to `session_not_found`.
-    #[tokio::test]
-    async fn attach_unknown_session_maps_to_session_not_found() {
-        let registry = SessionRegistry::new();
-        let err = attach(&registry, json!({"session_id": "nope"}), test_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// `session.detach` on an unknown id must map to `session_not_found`.
-    #[tokio::test]
-    async fn detach_unknown_session_maps_to_session_not_found() {
-        let registry = SessionRegistry::new();
-        let err = detach(&registry, json!({"session_id": "nope"}), test_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// `session.cancel` on an unknown id must map to `session_not_found`.
-    #[tokio::test]
-    async fn cancel_unknown_session_maps_to_session_not_found() {
-        let registry = SessionRegistry::new();
-        let err = cancel(&registry, json!({"session_id": "nope"}), test_ctx())
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, -32007);
-    }
-
-    /// `session.cancel` on a session with an in-flight execution must request
-    /// cooperative cancellation (set the flag) rather than immediately
-    /// transitioning to `cancelled` — the executor lands that transition once
-    /// it actually observes the flag.
-    #[tokio::test]
-    async fn cancel_executing_session_requests_cooperative_cancel() {
-        let registry = SessionRegistry::new();
-        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-        let flag = registry.begin_execution(&session.id).unwrap();
-
-        let result = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result["status"], "running",
-            "status must NOT be transitioned immediately for an executing session"
-        );
-        assert!(
-            flag.load(std::sync::atomic::Ordering::Relaxed),
-            "the shared cancel flag must have been set"
-        );
-    }
-}
-
+/// `protocol::binding_tests` (project-binding validation, AC-2.1/AC-16.2),
+/// split out for the same reason as `tests` above.
 #[cfg(test)]
-mod binding_tests {
-    use super::*;
-    use tokio::sync::mpsc;
+#[path = "protocol_binding_tests.rs"]
+mod binding_tests;
 
-    fn ctx() -> ConnectionContext {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        ConnectionContext::new(tx)
-    }
-
-    /// Omitting `project` is VALID and means projectless — a supported state,
-    /// never an error (AC-2.1). This is the entry state screen 7a renders.
-    #[tokio::test]
-    async fn create_without_project_is_projectless() {
-        let registry = SessionRegistry::new();
-        let value = create(&registry, json!({"task": "just chat"}), ctx())
-            .await
-            .expect("omitting project must be valid");
-
-        assert_eq!(value["binding"]["state"], "projectless");
-        assert!(value["binding"]["root"].is_null());
-        assert!(
-            value["project"].is_null(),
-            "projectless must derive no label"
-        );
-    }
-
-    /// A real directory binds, and the derived label matches the binding — the
-    /// reconciliation in one assertion (AC-16.2).
-    #[tokio::test]
-    async fn create_binds_a_real_directory() {
-        let registry = SessionRegistry::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let value = create(
-            &registry,
-            json!({"task": "t", "project": dir.path().to_string_lossy()}),
-            ctx(),
-        )
-        .await
-        .expect("a real directory must bind");
-
-        // A non-git tempdir binds as `directory` — NOT projectless (#2728).
-        assert_eq!(value["binding"]["state"], "directory");
-        assert_eq!(
-            value["project"], value["binding"]["root"],
-            "the label must be derived from the binding root, not independent of it"
-        );
-    }
-
-    /// The old free-form label is now rejected: `"my-app"` names no directory,
-    /// so it can bind nothing and index nothing. Erroring is the point — see
-    /// `create`'s docs. This is the deliberate breaking change.
-    #[tokio::test]
-    async fn create_rejects_a_label_that_is_not_a_directory() {
-        let registry = SessionRegistry::new();
-        let err = create(&registry, json!({"task": "t", "project": "my-app"}), ctx())
-            .await
-            .expect_err("a decorative label must no longer be silently accepted");
-
-        assert_eq!(err.code, -32003, "expected invalid_argument, got {err:?}");
-    }
-}
+/// `session.create`'s workstream-binding tests (issue #3298), split into its
+/// own file for the same reason `sessions_write_tests.rs`/`registry_tests.rs`
+/// are split — a `_tests.rs`-suffixed sibling file falls under the crate's
+/// 1500-SLOC test cap rather than counting against this production file's
+/// 500-SLOC budget.
+#[cfg(test)]
+#[path = "protocol_workstream_binding_tests.rs"]
+mod workstream_binding_tests;

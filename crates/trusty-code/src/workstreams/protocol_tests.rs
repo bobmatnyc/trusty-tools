@@ -509,3 +509,102 @@ async fn rename_invalid_params_maps_to_invalid_params() {
         .unwrap_err();
     assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
 }
+
+// -- resolve_and_bind_session / check_workstream_immutable (issue #3298) --
+
+#[tokio::test]
+async fn resolve_and_bind_session_explicit_wins_over_active() {
+    let (store, _dir) = shared_store().await;
+    let active = seed_workstream(&store, "active").await;
+    let explicit = seed_workstream(&store, "explicit").await;
+    activation::activate(&store, active, false)
+        .await
+        .expect("activate");
+
+    let bound = resolve_and_bind_session(&store, Some(&explicit.to_string()), "s-1", "test")
+        .await
+        .expect("resolve");
+    assert_eq!(bound, Some(explicit));
+    let ws = store.lock().await.get(explicit).await.expect("get");
+    assert_eq!(ws.session_ids, vec!["s-1".to_string()]);
+}
+
+#[tokio::test]
+async fn resolve_and_bind_session_falls_back_to_active() {
+    let (store, _dir) = shared_store().await;
+    let active = seed_workstream(&store, "active").await;
+    activation::activate(&store, active, false)
+        .await
+        .expect("activate");
+
+    let bound = resolve_and_bind_session(&store, None, "s-1", "test")
+        .await
+        .expect("resolve");
+    assert_eq!(bound, Some(active));
+}
+
+#[tokio::test]
+async fn resolve_and_bind_session_none_when_nothing_active() {
+    let (store, _dir) = shared_store().await;
+    let bound = resolve_and_bind_session(&store, None, "s-1", "test")
+        .await
+        .expect("resolve");
+    assert_eq!(
+        bound, None,
+        "no explicit param and nothing active must stay projectless"
+    );
+}
+
+#[tokio::test]
+async fn resolve_and_bind_session_rejects_closed_explicit_target() {
+    let (store, _dir) = shared_store().await;
+    let id = seed_workstream(&store, "closed").await;
+    store.lock().await.close(id).await.expect("close");
+
+    let err = resolve_and_bind_session(&store, Some(&id.to_string()), "s-1", "test")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, -32003);
+}
+
+#[tokio::test]
+async fn resolve_and_bind_session_rejects_unknown_explicit_id() {
+    let (store, _dir) = shared_store().await;
+    let err = resolve_and_bind_session(
+        &store,
+        Some(&WorkstreamId::new().to_string()),
+        "s-1",
+        "test",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32002);
+}
+
+#[test]
+fn check_workstream_immutable_allows_none() {
+    let existing = Some(WorkstreamId::new());
+    assert!(check_workstream_immutable(existing, None, "test").is_ok());
+}
+
+#[test]
+fn check_workstream_immutable_allows_restating_same_id() {
+    let id = WorkstreamId::new();
+    assert!(check_workstream_immutable(Some(id), Some(&id.to_string()), "test").is_ok());
+}
+
+#[test]
+fn check_workstream_immutable_rejects_mismatch() {
+    let existing = WorkstreamId::new();
+    let requested = WorkstreamId::new();
+    let err = check_workstream_immutable(Some(existing), Some(&requested.to_string()), "test")
+        .unwrap_err();
+    assert_eq!(err.code, -32003);
+}
+
+#[test]
+fn check_workstream_immutable_rejects_binding_an_unbound_session() {
+    let requested = WorkstreamId::new();
+    let err = check_workstream_immutable(None, Some(&requested.to_string()), "test").unwrap_err();
+    assert_eq!(err.code, -32003);
+}

@@ -153,6 +153,107 @@ impl WorkstreamView {
     }
 }
 
+/// Resolve the EFFECTIVE workstream target for a freshly-minted session and
+/// persist the binding (DOC-48 §4.1/§4.2, issue #3298).
+///
+/// Why: `session::protocol::create` and `task::protocol::task_run` (minting
+/// a NEW session) both need this exact resolution — an explicit
+/// `workstream_id` param (§4.1) takes precedence; otherwise the daemon's
+/// currently active workstream is the ambient default target (§4.2); if
+/// neither applies, the session stays projectless (valid, never an error).
+/// Centralising it here (rather than duplicating in both `protocol` modules)
+/// is the same "one place, both callers" precedent
+/// `crate::binding::ProjectBinding::resolve` already set for project
+/// binding.
+/// What: `explicit` is the caller's raw wire `workstream_id` string, if any.
+/// `Ok(None)` — no explicit param and no active workstream. `Ok(Some(id))` —
+/// after `WorkstreamStore::bind_session` has persisted the append.
+/// `Err(-32602 invalid_params)` — `explicit` is not a valid UUID.
+/// `Err(-32002 not_found)` — `explicit` names no workstream.
+/// `Err(-32003 invalid_argument)` — the target (explicit OR ambient) is
+/// closed (§4.1: "new sessions may not bind to it"). `StoreError::AlreadyBound`
+/// maps to `-32603 internal` — unreachable in practice, since `session_id`
+/// here is always a just-minted, globally-unique id that cannot already
+/// appear in any workstream's `session_ids`.
+/// Test: `protocol_tests::resolve_and_bind_session_explicit_wins_over_active`,
+/// `protocol_tests::resolve_and_bind_session_falls_back_to_active`,
+/// `protocol_tests::resolve_and_bind_session_none_when_nothing_active`,
+/// `protocol_tests::resolve_and_bind_session_rejects_closed_explicit_target`,
+/// `protocol_tests::resolve_and_bind_session_rejects_unknown_explicit_id`.
+pub async fn resolve_and_bind_session(
+    store: &SharedWorkstreamStore,
+    explicit: Option<&str>,
+    session_id: &str,
+    method: &str,
+) -> Result<Option<WorkstreamId>, RpcError> {
+    let mut store = store.lock().await;
+    let target = match explicit {
+        Some(raw) => Some(parse_id(raw, method)?),
+        None => store.active_workstream_id().await.map_err(map_store_err)?,
+    };
+    let Some(id) = target else {
+        return Ok(None);
+    };
+    store
+        .bind_session(id, session_id)
+        .await
+        .map_err(|e| match e {
+            super::store::BindError::NotFound(id) => {
+                RpcError::not_found(format!("workstream not found: {id}"))
+            }
+            super::store::BindError::Closed(id) => RpcError::invalid_argument(format!(
+                "workstream {id} is closed; new sessions may not bind to it"
+            )),
+            super::store::BindError::AlreadyBound(sid) => RpcError::internal(format!(
+                "unexpected: freshly-minted session `{sid}` already bound to a workstream"
+            )),
+            super::store::BindError::Store(e) => map_store_err(e),
+        })?;
+    Ok(Some(id))
+}
+
+/// Enforce DOC-48 §4.1's binding immutability on a REUSED session (AC-1.3,
+/// issue #3298): "if a session with an existing workstream binding receives
+/// a task with a different workstream, the task is rejected."
+///
+/// Why: `task::protocol::task_run`'s `session_id` ("sessionful") path is the
+/// one call site that can present a session already carrying a persisted
+/// `workstream_id` alongside a fresh, possibly-conflicting `workstream_id`
+/// param — mirrors the existing `project` mismatch guard right next to it
+/// (`task::protocol::task_run`'s own docs) at the exact same layer.
+/// What: `explicit: None` never rejects — ambient default-targeting (§4.2)
+/// applies only to a session's FIRST binding at creation, never re-applied
+/// on reuse. `explicit: Some(raw)` — parses `raw`; `Ok(())` if it restates
+/// `existing` exactly (including `existing: None` restated by... it cannot
+/// restate `None`, so any `Some` explicit id against an unbound session is
+/// ALSO a mismatch, per the same authoritative-binding rule
+/// `task::protocol::task_run`'s `project` check already applies); otherwise
+/// `Err(-32003 invalid_argument)` naming both ids.
+/// Test: `protocol_tests::check_workstream_immutable_allows_none`,
+/// `protocol_tests::check_workstream_immutable_allows_restating_same_id`,
+/// `protocol_tests::check_workstream_immutable_rejects_mismatch`,
+/// `protocol_tests::check_workstream_immutable_rejects_binding_an_unbound_session`.
+pub fn check_workstream_immutable(
+    existing: Option<WorkstreamId>,
+    explicit: Option<&str>,
+    method: &str,
+) -> Result<(), RpcError> {
+    let Some(raw) = explicit else {
+        return Ok(());
+    };
+    let requested = parse_id(raw, method)?;
+    if existing == Some(requested) {
+        return Ok(());
+    }
+    Err(RpcError::invalid_argument(format!(
+        "{method}: workstream `{requested}` does not match this session's existing binding \
+         `{}` — a session's workstream binding is immutable once set (DOC-48 §4.1)",
+        existing
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "<unbound>".to_string()),
+    )))
+}
+
 /// Deserialise `params` into `T`, mapping a failure onto `-32602 Invalid
 /// params` with the method name for context (mirrors
 /// `crate::session::protocol::parse`).
