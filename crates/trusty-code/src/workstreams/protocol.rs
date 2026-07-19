@@ -153,6 +153,144 @@ impl WorkstreamView {
     }
 }
 
+/// Resolve + VALIDATE the EFFECTIVE workstream target, then mint a session
+/// and persist its binding — all under one store lock (DOC-48 §4.1/§4.2,
+/// issue #3298; validate-before-mint ordering per PR #3354 code-critic
+/// HIGH findings 1 & 2).
+///
+/// Why: `session::protocol::create` and `task::protocol::task_run` (minting
+/// a NEW session) both need this exact resolution — an explicit
+/// `workstream_id` param (§4.1) takes precedence; otherwise the daemon's
+/// currently active workstream is the ambient default target (§4.2); if
+/// neither applies, the session stays projectless (valid, never an error).
+/// Centralising it here (rather than duplicating in both `protocol` modules)
+/// is the same "one place, both callers" precedent
+/// `crate::binding::ProjectBinding::resolve` already set for project
+/// binding.
+///
+/// **Why the `mint` closure (atomicity):** `SessionRegistry` has no
+/// delete/rollback — a session, once minted, exists for the daemon
+/// lifetime. The first cut of this function took an ALREADY-minted
+/// `session_id` and could then fail (closed/unknown/malformed target),
+/// leaving an orphaned, caller-invisible session in the registry on every
+/// rejected bind — a retry-amplified memory-growth vector (code-critic
+/// HIGH, PR #3354). Now every caller-triggerable failure mode (malformed
+/// id, unknown id, closed workstream) is validated BEFORE `mint()` runs, so
+/// a rejected bind mints nothing. Holding the ONE store lock across
+/// resolve -> validate -> mint -> bind keeps the sequence TOCTOU-free: no
+/// concurrent `workstream.close`/`deactivate` can invalidate the target
+/// between its validation and the bind.
+/// What: `explicit` is the caller's raw wire `workstream_id` string, if
+/// any; `mint` mints the session (infallible — `SessionRegistry::create`
+/// never fails) and returns its id, called EXACTLY ONCE, and only after
+/// validation passes. Returns `(session_id, bound_workstream)` —
+/// `(id, None)` when no explicit param was given and no workstream is
+/// active (projectless mint); `(id, Some(ws))` after
+/// `WorkstreamStore::bind_session` persisted the append.
+/// `Err(-32602 invalid_params)` — `explicit` is not a valid UUID.
+/// `Err(-32002 not_found)` — `explicit` names no workstream.
+/// `Err(-32003 invalid_argument)` — the target (explicit OR ambient) is
+/// closed (§4.1: "new sessions may not bind to it"). All three fire before
+/// `mint`. The residual post-mint failure surface is `bind_session`'s
+/// save-to-disk I/O error (`-32603 internal`) — a daemon-side storage
+/// fault, not caller-triggerable; `BindError::NotFound`/`Closed`/
+/// `AlreadyBound` are unreachable post-validation under the held lock and
+/// map to `-32603 internal` defensively.
+/// Test: `protocol_tests::resolve_validate_bind_explicit_wins_over_active`,
+/// `protocol_tests::resolve_validate_bind_falls_back_to_active`,
+/// `protocol_tests::resolve_validate_bind_none_when_nothing_active`,
+/// `protocol_tests::resolve_validate_bind_rejects_closed_target_without_minting`,
+/// `protocol_tests::resolve_validate_bind_rejects_unknown_id_without_minting`,
+/// `protocol_tests::resolve_validate_bind_rejects_malformed_id_without_minting`;
+/// the end-to-end no-phantom-session regression at both RPC surfaces in
+/// `session::protocol::workstream_binding_tests::create_rejected_bind_leaves_no_phantom_session`
+/// and `task::protocol::tests::task_run_rejected_bind_leaves_no_phantom_session`.
+pub async fn resolve_validate_bind<F>(
+    store: &SharedWorkstreamStore,
+    explicit: Option<&str>,
+    method: &str,
+    mint: F,
+) -> Result<(String, Option<WorkstreamId>), RpcError>
+where
+    F: FnOnce() -> String,
+{
+    let mut store = store.lock().await;
+    let target = match explicit {
+        Some(raw) => Some(parse_id(raw, method)?),
+        None => store.active_workstream_id().await.map_err(map_store_err)?,
+    };
+    // Validate the target BEFORE minting — every caller-triggerable
+    // rejection must happen while nothing has been created yet.
+    if let Some(id) = target {
+        let ws = store.get(id).await.map_err(map_store_err)?;
+        if ws.is_closed() {
+            return Err(RpcError::invalid_argument(format!(
+                "workstream {id} is closed; new sessions may not bind to it"
+            )));
+        }
+    }
+    let session_id = mint();
+    if let Some(id) = target {
+        store
+            .bind_session(id, &session_id)
+            .await
+            .map_err(|e| match e {
+                // Post-validation, under the same lock, only a storage I/O
+                // fault can land here; the caller-shaped variants are
+                // defensively mapped to internal rather than silently
+                // reusing their pre-mint codes (which would misreport an
+                // impossible state as a caller error).
+                super::store::BindError::Store(e) => map_store_err(e),
+                other => RpcError::internal(format!(
+                    "unexpected post-validation bind failure for session `{session_id}`: {other}"
+                )),
+            })?;
+    }
+    Ok((session_id, target))
+}
+
+/// Enforce DOC-48 §4.1's binding immutability on a REUSED session (AC-1.3,
+/// issue #3298): "if a session with an existing workstream binding receives
+/// a task with a different workstream, the task is rejected."
+///
+/// Why: `task::protocol::task_run`'s `session_id` ("sessionful") path is the
+/// one call site that can present a session already carrying a persisted
+/// `workstream_id` alongside a fresh, possibly-conflicting `workstream_id`
+/// param — mirrors the existing `project` mismatch guard right next to it
+/// (`task::protocol::task_run`'s own docs) at the exact same layer.
+/// What: `explicit: None` never rejects — ambient default-targeting (§4.2)
+/// applies only to a session's FIRST binding at creation, never re-applied
+/// on reuse. `explicit: Some(raw)` — parses `raw`; `Ok(())` if it restates
+/// `existing` exactly (including `existing: None` restated by... it cannot
+/// restate `None`, so any `Some` explicit id against an unbound session is
+/// ALSO a mismatch, per the same authoritative-binding rule
+/// `task::protocol::task_run`'s `project` check already applies); otherwise
+/// `Err(-32003 invalid_argument)` naming both ids.
+/// Test: `protocol_tests::check_workstream_immutable_allows_none`,
+/// `protocol_tests::check_workstream_immutable_allows_restating_same_id`,
+/// `protocol_tests::check_workstream_immutable_rejects_mismatch`,
+/// `protocol_tests::check_workstream_immutable_rejects_binding_an_unbound_session`.
+pub fn check_workstream_immutable(
+    existing: Option<WorkstreamId>,
+    explicit: Option<&str>,
+    method: &str,
+) -> Result<(), RpcError> {
+    let Some(raw) = explicit else {
+        return Ok(());
+    };
+    let requested = parse_id(raw, method)?;
+    if existing == Some(requested) {
+        return Ok(());
+    }
+    Err(RpcError::invalid_argument(format!(
+        "{method}: workstream `{requested}` does not match this session's existing binding \
+         `{}` — a session's workstream binding is immutable once set (DOC-48 §4.1)",
+        existing
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "<unbound>".to_string()),
+    )))
+}
+
 /// Deserialise `params` into `T`, mapping a failure onto `-32602 Invalid
 /// params` with the method name for context (mirrors
 /// `crate::session::protocol::parse`).

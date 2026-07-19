@@ -67,4 +67,29 @@ pub use activation::{ActivateOutcome, ActivationError, SharedWorkstreamStore};
 pub use model::{Workstream, WorkstreamId, WorkstreamState};
 pub use path::{default_data_dir, store_path};
 pub use sse::WorkstreamEventEnvelope;
-pub use store::{ReconcileOutcome, StoreError, WorkstreamStore};
+pub use store::{BindError, ReconcileOutcome, StoreError, WorkstreamStore};
+
+/// Test-only helper: a fresh, in-memory-backed [`SharedWorkstreamStore`]
+/// rooted at a throwaway tempdir (issue #3298).
+///
+/// Why: `session::protocol::register`/`task::protocol::register` both now
+/// require a `SharedWorkstreamStore` — every test call site across the
+/// crate that wires either `register` but does not itself care about
+/// workstream binding needs a cheap, disposable store rather than resolving
+/// the real `~/.trusty-code` directory. One helper here (rather than each
+/// call site re-deriving its own) keeps that boilerplate in exactly one
+/// place.
+/// What: loads a fresh [`WorkstreamStore`] at a tempdir path and wraps it in
+/// the same `Arc<tokio::sync::Mutex<_>>` shape production code uses. The
+/// `TempDir` guard is intentionally dropped here — `WorkstreamStore::save`
+/// re-creates its parent directory on every write (see that method's docs),
+/// so a test that never asserts on persisted file contents (the common case)
+/// is unaffected by the directory's removal.
+#[cfg(test)]
+pub(crate) async fn test_shared_store() -> SharedWorkstreamStore {
+    let dir = tempfile::tempdir().expect("tempdir for test workstream store");
+    let store = WorkstreamStore::load(dir.path().join("workstreams-test.json"))
+        .await
+        .expect("load fresh workstream store");
+    std::sync::Arc::new(tokio::sync::Mutex::new(store))
+}

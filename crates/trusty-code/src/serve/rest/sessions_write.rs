@@ -96,6 +96,11 @@ struct CreateBody {
     agent: Option<String>,
     #[serde(default)]
     project: Option<String>,
+    /// (Issue #3298) Forwarded verbatim to `session.create`'s own
+    /// `workstream_id` param — see `session::protocol::create`'s docs for
+    /// the explicit-vs-ambient resolution rules.
+    #[serde(default)]
+    workstream_id: Option<String>,
 }
 
 /// Request body for `POST /sessions/{id}/messages` — `session_id` comes
@@ -165,7 +170,12 @@ async fn create_session(
     respond_created(
         &state.router,
         "session.create",
-        json!({"task": body.task, "agent": body.agent, "project": body.project}),
+        json!({
+            "task": body.task,
+            "agent": body.agent,
+            "project": body.project,
+            "workstream_id": body.workstream_id,
+        }),
     )
     .await
 }

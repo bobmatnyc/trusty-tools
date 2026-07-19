@@ -359,6 +359,47 @@ async fn rename_closed_workstream_succeeds() {
     assert!(renamed.is_closed(), "rename must not clear the closed flag");
 }
 
+/// (#3298 x #3300 intersection) Renaming a workstream with BOUND sessions —
+/// including the active one — must disturb neither its `session_ids` nor
+/// the active pointer: rename touches only `name`/`updated_at`, and this
+/// pins that orthogonality now that both features exist. Also proves a
+/// session can still bind AFTER a rename (the record's identity is its id,
+/// not its label).
+#[tokio::test]
+async fn rename_preserves_session_bindings_and_active_pointer() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("original").await.expect("create");
+    store.set_active(Some(id)).await.expect("activate");
+    store.bind_session(id, "s-1").await.expect("bind s-1");
+    store.bind_session(id, "s-2").await.expect("bind s-2");
+
+    let renamed = store.rename(id, "renamed").await.expect("rename");
+    assert_eq!(renamed.name, "renamed");
+    assert_eq!(
+        renamed.session_ids,
+        vec!["s-1".to_string(), "s-2".to_string()],
+        "rename must not disturb existing session bindings"
+    );
+    assert_eq!(
+        store.active_workstream_id().await.expect("active"),
+        Some(id),
+        "rename must not disturb the active pointer"
+    );
+
+    // Binding still works after the rename, and persists across reload.
+    store.bind_session(id, "s-3").await.expect("bind s-3");
+    let mut reloaded = WorkstreamStore::load(store_file(&dir))
+        .await
+        .expect("reload");
+    let ws = reloaded.get(id).await.expect("get after reload");
+    assert_eq!(ws.name, "renamed");
+    assert_eq!(
+        ws.session_ids,
+        vec!["s-1".to_string(), "s-2".to_string(), "s-3".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn store_reload_noop_when_unchanged() {
     let dir = TempDir::new().expect("tempdir");
@@ -368,4 +409,82 @@ async fn store_reload_noop_when_unchanged() {
     store.reload_if_changed().await.expect("reload no-op");
     let ws = store.get(id).await.expect("get");
     assert_eq!(ws.id, id);
+}
+
+// -- Session binding (DOC-48 §4.1/§2, issue #3298) --
+
+#[tokio::test]
+async fn bind_session_appends_and_persists() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+
+    store.bind_session(id, "s-1").await.expect("bind");
+    let ws = store.get(id).await.expect("get");
+    assert_eq!(ws.session_ids, vec!["s-1".to_string()]);
+
+    // Persisted, not just in-memory.
+    let mut reloaded = WorkstreamStore::load(store_file(&dir))
+        .await
+        .expect("reload");
+    let ws = reloaded.get(id).await.expect("get after reload");
+    assert_eq!(ws.session_ids, vec!["s-1".to_string()]);
+}
+
+#[tokio::test]
+async fn bind_session_is_idempotent_for_same_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+
+    store.bind_session(id, "s-1").await.expect("first bind");
+    store
+        .bind_session(id, "s-1")
+        .await
+        .expect("re-binding to the SAME workstream must not error");
+    let ws = store.get(id).await.expect("get");
+    assert_eq!(
+        ws.session_ids,
+        vec!["s-1".to_string()],
+        "must not double-append on the idempotent path"
+    );
+}
+
+#[tokio::test]
+async fn bind_session_rejects_double_binding_to_different_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let a = store.create("A").await.expect("create a");
+    let b = store.create("B").await.expect("create b");
+
+    store.bind_session(a, "s-1").await.expect("bind to a");
+    assert!(matches!(
+        store.bind_session(b, "s-1").await,
+        Err(BindError::AlreadyBound(id)) if id == "s-1"
+    ));
+}
+
+#[tokio::test]
+async fn bind_session_rejects_unknown_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let missing = WorkstreamId::new();
+
+    assert!(matches!(
+        store.bind_session(missing, "s-1").await,
+        Err(BindError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn bind_session_rejects_closed_workstream() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("A").await.expect("create");
+    store.close(id).await.expect("close");
+
+    assert!(matches!(
+        store.bind_session(id, "s-1").await,
+        Err(BindError::Closed(_))
+    ));
 }
