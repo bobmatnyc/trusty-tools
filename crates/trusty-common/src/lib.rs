@@ -27,6 +27,17 @@
 //! **This escape hatch is intended for testing only.** Do not set it in
 //! production deployments; rely on the OS-standard data directory instead.
 
+/// Shared trusty splash art + per-glyph shading (issue #3326).
+///
+/// Why: `tm`'s launch banner and `trusty-agents`' REPL startup splash must
+/// present the same trusty branding; centralising the art text and its
+/// color-bucket rule here stops the two binaries from drifting apart again.
+/// What: [`banner::TRUSTY_SPLASH_ART`] (embedded ASCII/block-art text) and
+/// [`banner::shade_bucket`] (glyph → RGB triple). Zero extra dependencies —
+/// pure `&str` + `match`.
+/// Test: `cargo test -p trusty-common -- banner::tests`.
+pub mod banner;
+
 pub mod chat;
 pub mod claude_config;
 

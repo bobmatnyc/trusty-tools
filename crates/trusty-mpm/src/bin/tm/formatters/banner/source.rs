@@ -18,9 +18,12 @@
 /// Embedded compile-time default banner art.
 ///
 /// Why: a fresh install must always render something without touching disk.
-/// What: the block-robot design baked in at compile time via `include_str!`.
+/// What: the block-robot design shared with `trusty-agents`' REPL splash
+/// (issue #3326) — sourced from `trusty_common::banner::TRUSTY_SPLASH_ART`
+/// (the single source of truth) instead of a locally embedded copy, so the
+/// two binaries can never drift apart again.
 /// Test: `banner_source_embedded_fallback_is_nonempty`.
-pub(crate) const DEFAULT_BANNER_ART: &str = include_str!("image.txt");
+pub(crate) const DEFAULT_BANNER_ART: &str = trusty_common::banner::TRUSTY_SPLASH_ART;
 
 /// Resolve the home-directory banner file path.
 ///
