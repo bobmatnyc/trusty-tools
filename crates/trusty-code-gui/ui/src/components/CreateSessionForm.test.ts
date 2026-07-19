@@ -246,6 +246,160 @@ describe('CreateSessionForm submit gating', () => {
     expect(taskField().value).toBe(''); // 201 is authoritative — form still clears
   });
 
+  it('issue #3132: Enter (no Shift) submits the task field, and a rapid second Enter while in flight causes no second POST', async () => {
+    let postCount = 0;
+    let resolveCreate: ((value: Response) => void) | null = null;
+    const createPromise = new Promise<Response>((resolve) => {
+      resolveCreate = resolve;
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          postCount += 1;
+          return createPromise;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    const firstEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    taskField().dispatchEvent(firstEnter);
+
+    // Intercepted to submit rather than insert a newline.
+    expect(firstEnter.defaultPrevented).toBe(true);
+    await waitFor(() => postCount === 1 && submitButton().disabled);
+
+    // A rapid second Enter while the first submit is still in flight must
+    // be a no-op — `submit()`'s own `canSubmitCreate` guard (submitPhase
+    // already 'submitting') rejects it before a second fetch is ever made,
+    // same guard the button's `disabled` binding relies on.
+    const secondEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    taskField().dispatchEvent(secondEnter);
+    expect(postCount).toBe(1);
+
+    resolveCreate!({
+      ok: true,
+      status: 201,
+      json: async () => ({ id: 'sess-abc12345', status: 'running' }),
+    } as Response);
+
+    await waitFor(() => target.textContent?.includes('session created') ?? false);
+    expect(postCount).toBe(1);
+  });
+
+  it('issue #3132: Shift+Enter does not submit, letting the textarea insert a newline', async () => {
+    let postCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          postCount += 1;
+          return { ok: true, status: 201, json: async () => ({ id: 'sess-abc' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    taskField().value = 'line one';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    const shiftEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    taskField().dispatchEvent(shiftEnter);
+
+    // Never prevented — the textarea's default newline-insertion behavior
+    // must be left alone for Shift+Enter.
+    expect(shiftEnter.defaultPrevented).toBe(false);
+    expect(postCount).toBe(0);
+    expect(submitButton().disabled).toBe(false); // form untouched, still submittable by other means
+  });
+
+  it('issue #3132: a non-Enter key never triggers submit or preventDefault', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    const aKey = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true });
+    taskField().dispatchEvent(aKey);
+    expect(aKey.defaultPrevented).toBe(false);
+  });
+
+  it('issue #3134: the picker "use" button is immediately adjacent to the directory-name button, not pushed to the far right', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/fs')) {
+          return { ok: true, status: 200, json: async () => HOME_LISTING } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(CreateSessionForm, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+
+    const nameButton = Array.from(target.querySelectorAll('li button')).find((b) =>
+      b.textContent?.includes('acme-api'),
+    ) as HTMLButtonElement;
+    expect(nameButton).toBeTruthy();
+
+    // Structural adjacency: the "use" button must be the name button's very
+    // next element sibling within the row, with nothing spacing them apart.
+    const nextSibling = nameButton.nextElementSibling as HTMLButtonElement | null;
+    expect(nextSibling?.textContent?.trim()).toBe('use');
+
+    // The layout classes that caused the far-right separation (stretching
+    // the name button to fill the row, then justifying the row's content
+    // apart) must be gone — regression guard for issue #3134.
+    expect(nameButton.className).not.toMatch(/\bflex-1\b/);
+    const row = nameButton.closest('li');
+    expect(row?.className).not.toMatch(/justify-between/);
+  });
+
   it('renders daemon-unreachable when the initial GET /fs fails', async () => {
     vi.stubGlobal(
       'fetch',

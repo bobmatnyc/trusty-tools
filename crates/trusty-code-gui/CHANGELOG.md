@@ -10,6 +10,62 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- GUI smoke-test UX feedback (Bob, 2026-07-18): three fixes to
+  `CreateSessionForm.svelte`/`HealthPanel.svelte` and the global theme.
+  - **#3132 Enter-to-submit.** The task `<textarea>` had no keyboard submit
+    path — click was the only way in. `docs/specs/trusty-code-harness-ui.md`
+    specifies no submit-key convention, so this follows the universal
+    textarea pattern: `Enter` (without `Shift`, not mid-IME-composition)
+    calls `preventDefault()` and submits; `Shift+Enter` is left untouched,
+    falling through to the textarea's own newline-insertion default. The
+    existing `canSubmitCreate` no-double-submit guard is unchanged — the new
+    `handleTaskKeydown` handler defers to the same `submit()` the button
+    already called, adding no separate gate. Covered by three new
+    `CreateSessionForm.test.ts` cases: Enter submits (and a rapid second
+    Enter while the first is in flight produces no second `POST`),
+    Shift+Enter never calls `preventDefault()` or submits, and a non-Enter
+    key is a no-op.
+  - **#3133 light + dark themes following system appearance.** Every
+    `trusty-*`/`status-*` Tailwind color token (`tailwind.config.js`) now
+    resolves to `rgb(var(--color-*) / <alpha-value>)` instead of a
+    hardcoded hex literal; the actual light (default) and
+    `@media (prefers-color-scheme: dark)` (override) values live in
+    `src/app.css`. No manual toggle — theming purely follows the OS
+    setting, live, including inside the Tauri webview (WebKit re-evaluates
+    the media query on the native "Appearance changed" notification with no
+    reload needed). The previous `darkMode: 'class'` config was dead
+    weight — nothing in this codebase ever added a `.dark` class to
+    `<html>`, so its `html:not(.dark)` override in `app.css` silently won
+    every render regardless of the OS setting. The CSS-variable values are
+    space-separated RGB triples (`"15 23 42"`, not `"#0f172a"`) — required
+    by the `rgb(var(...) / <alpha-value>)` format, the only way Tailwind
+    can still generate the `bg-status-ok/15`/`text-trusty-text/60`-style
+    opacity modifiers used throughout every component; a bare `var(--x)`
+    reference (this PR's first cut) compiles the base utility fine but
+    silently produces NO rule at all for any opacity-modified one. The
+    theming audit also caught one real hardcoded color outside the token
+    system: `HealthPanel.svelte`'s JSON payload `<pre>` block used the
+    Tailwind built-in near-black shade (which never changes with
+    `prefers-color-scheme`) instead of a themed token — swapped for the
+    `trusty-border` token at reduced opacity. New `lib/theme.test.ts`
+    covers the token format, both themes' CSS-variable values (and that
+    dark genuinely differs from light), a real `postcss`/`tailwindcss`
+    compile check proving opacity-modified utilities produce a rule (the
+    actual regression a bare `var()` causes), and a component-hygiene scan
+    for `<style>` blocks, hardcoded inline-style colors, and raw
+    (non-themed) Tailwind palette utilities.
+  - **#3134 picker placement.** The directory listing's `use` button sat at
+    the row's far right (`flex-1` on the name button + `justify-between` on
+    the row stretched the name button to fill the available width), leaving
+    a wide, disorienting gap between a short directory name and the control
+    that binds it. The name button is now width-bounded
+    (`min-w-0 max-w-[65%]`, `truncate` still applies) rather than
+    flex-stretched, so with `justify-between` removed the row's default
+    left-packed flex layout puts `use` immediately after the name. Covered
+    by a new `CreateSessionForm.test.ts` structural assertion: the `use`
+    button must be the name button's next DOM sibling, and neither the name
+    button nor the row may carry the `flex-1`/`justify-between` classes that
+    caused the separation.
 - Create-session flow response-shape hardening (PR #3103 review findings):
   `GET /fs` 200 bodies and `POST /sessions` 201 bodies are now validated at
   runtime (`lib/create-session.ts::isDirListing` / `extractSessionId`)
