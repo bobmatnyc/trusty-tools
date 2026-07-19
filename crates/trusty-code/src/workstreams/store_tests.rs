@@ -359,6 +359,47 @@ async fn rename_closed_workstream_succeeds() {
     assert!(renamed.is_closed(), "rename must not clear the closed flag");
 }
 
+/// (#3298 x #3300 intersection) Renaming a workstream with BOUND sessions —
+/// including the active one — must disturb neither its `session_ids` nor
+/// the active pointer: rename touches only `name`/`updated_at`, and this
+/// pins that orthogonality now that both features exist. Also proves a
+/// session can still bind AFTER a rename (the record's identity is its id,
+/// not its label).
+#[tokio::test]
+async fn rename_preserves_session_bindings_and_active_pointer() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = WorkstreamStore::load(store_file(&dir)).await.expect("load");
+    let id = store.create("original").await.expect("create");
+    store.set_active(Some(id)).await.expect("activate");
+    store.bind_session(id, "s-1").await.expect("bind s-1");
+    store.bind_session(id, "s-2").await.expect("bind s-2");
+
+    let renamed = store.rename(id, "renamed").await.expect("rename");
+    assert_eq!(renamed.name, "renamed");
+    assert_eq!(
+        renamed.session_ids,
+        vec!["s-1".to_string(), "s-2".to_string()],
+        "rename must not disturb existing session bindings"
+    );
+    assert_eq!(
+        store.active_workstream_id().await.expect("active"),
+        Some(id),
+        "rename must not disturb the active pointer"
+    );
+
+    // Binding still works after the rename, and persists across reload.
+    store.bind_session(id, "s-3").await.expect("bind s-3");
+    let mut reloaded = WorkstreamStore::load(store_file(&dir))
+        .await
+        .expect("reload");
+    let ws = reloaded.get(id).await.expect("get after reload");
+    assert_eq!(ws.name, "renamed");
+    assert_eq!(
+        ws.session_ids,
+        vec!["s-1".to_string(), "s-2".to_string(), "s-3".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn store_reload_noop_when_unchanged() {
     let dir = TempDir::new().expect("tempdir");
