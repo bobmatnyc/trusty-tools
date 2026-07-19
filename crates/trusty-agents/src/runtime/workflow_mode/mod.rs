@@ -107,14 +107,19 @@ use workflow::WorkflowEngine;
 
 // Module layout (see #366 split): the `run_workflow` orchestration body lives
 // here; the self-contained helpers (runner selection, init-context build,
-// modified-file scan, build-counter read) live in `helpers.rs`.
+// modified-file scan, build-counter read) live in `helpers.rs`. `resume.rs`
+// (#3062) is the `tagent resume <run-id>` CLI surface — a sibling entry
+// point sharing the same helpers rather than a mode of `run_workflow`.
 mod helpers;
+mod resume;
 
 use helpers::{
     build_init_context, build_runner_for_workflow, check_workflow_project_dirs,
     collect_modified_files, load_skill_registry, load_tag_skill_registry, load_user_memory_suffix,
     read_current_build_number, refresh_global_skills_cache, resolve_out_dir,
 };
+
+pub(super) use resume::run_resume_subcommand;
 
 // Re-export the task-text readers so sibling runtime modules can keep calling
 // `workflow_mode::read_task_text` / `read_task_text_with_inline`.

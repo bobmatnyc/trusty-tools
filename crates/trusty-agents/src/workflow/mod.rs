@@ -24,7 +24,7 @@ pub use config::{
 };
 #[allow(unused_imports)]
 pub use context::{WorkflowContext, WorkflowContextBuilder};
-pub use engine::WorkflowEngine;
+pub use engine::{ResumeOutcome, WorkflowEngine};
 #[allow(unused_imports)]
 pub use error::WorkflowError;
 #[allow(unused_imports)]

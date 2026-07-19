@@ -165,6 +165,21 @@ pub enum Event {
         persona: String,
     },
 
+    // -- Checkpoint durability (#3062, SPEC-AGENTFW-02 §3.4) --
+    /// Emitted once at the start of `tagent resume <run-id>`, before any
+    /// phase from the resume point re-executes.
+    ///
+    /// Why: Lets the UI / stderr stream distinguish "a fresh run started"
+    /// from "an existing run picked back up mid-pipeline" without parsing
+    /// the checkpoint journal itself.
+    /// What: `resumed_at_phase` is the name of the first phase that will
+    /// re-execute (the phase immediately after the last `PhaseComplete`, or
+    /// the in-flight phase for `Failed`/`Retrying`/`PhaseRunning`).
+    RunResumed {
+        session_id: String,
+        resumed_at_phase: String,
+    },
+
     // -- LLM call lifecycle (#199) --
     /// Emitted just before any LLM chat-completion HTTP call leaves the
     /// process. Pairs with `LlmResponded` so consumers can compute latency
@@ -259,6 +274,7 @@ impl Event {
             | Event::PhaseDone { session_id, .. }
             | Event::PhaseSkipped { session_id, .. }
             | Event::PersonaDetected { session_id, .. }
+            | Event::RunResumed { session_id, .. }
             | Event::LlmRequested { session_id, .. }
             | Event::LlmResponded { session_id, .. }
             | Event::AgentStarted { session_id, .. }

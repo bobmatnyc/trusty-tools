@@ -20,6 +20,7 @@ use tracing::info;
 use crate::workflow::autopush;
 use crate::workflow::config::WorkflowDef;
 use crate::workflow::context::WorkflowContext;
+use crate::workflow::engine::checkpoint;
 use crate::workflow::error::WorkflowError;
 
 use super::WorkflowEngine;
@@ -44,6 +45,9 @@ pub(super) struct FinalizeState {
     pub total_cost_usd: f64,
     pub files_generated: usize,
     pub qa_summary: String,
+    /// #3062: run id used to locate `.trusty-agents/state/runs/<run_id>/` for
+    /// checkpoint deletion on full success (`RunState::Done`).
+    pub run_id: String,
 }
 
 impl WorkflowEngine {
@@ -73,6 +77,7 @@ impl WorkflowEngine {
             total_cost_usd,
             files_generated,
             qa_summary,
+            run_id,
         } = state;
 
         // Only write the workflow report when all phases succeeded — a partial
@@ -180,6 +185,12 @@ impl WorkflowEngine {
         if let Some(err) = first_error {
             return Err(err);
         }
+
+        // #3062 (SPEC-AGENTFW-02 §3.3 "Deletion"): a full-success run reaches
+        // `RunState::Done` here — its checkpoint journal has no further
+        // durability value, so remove `.trusty-agents/state/runs/<run_id>/`
+        // entirely. Best-effort/non-fatal, matching every other finalize hook.
+        checkpoint::delete_run_dir(&crate::usage::project_dir(), &run_id);
 
         Ok((ctx, perf_record))
     }

@@ -8,6 +8,7 @@
 //! Test: Behavior is covered by each sub-module's own `#[cfg(test)]` block and
 //! the integration tests in `executor`.
 
+pub mod checkpoint;
 mod executor;
 mod helpers;
 mod qa;
@@ -16,4 +17,4 @@ mod skills;
 mod state;
 mod step_dispatch;
 
-pub use executor::{DiscoveredSkill, WorkflowEngine};
+pub use executor::{DiscoveredSkill, ResumeOutcome, WorkflowEngine};

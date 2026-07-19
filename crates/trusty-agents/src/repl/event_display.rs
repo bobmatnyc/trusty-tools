@@ -76,6 +76,14 @@ pub fn format_event(event: &Event) -> Option<String> {
         Event::PersonaDetected { persona, .. } => {
             Some(dim.paint(format!("  ◆ persona: {persona}")).to_string())
         }
+        // #3062: surface a resumed checkpointed run distinctly from a fresh
+        // start so the REPL stream reads "picked back up", not "started over".
+        Event::RunResumed {
+            resumed_at_phase, ..
+        } => Some(
+            teal.paint(format!("  ↻ resumed at phase: {resumed_at_phase}"))
+                .to_string(),
+        ),
         Event::Ping => None,
         // #199: LLM lifecycle + agent fine-grained events emit on the bus but
         // are suppressed from the REPL stream by default to reduce noise.

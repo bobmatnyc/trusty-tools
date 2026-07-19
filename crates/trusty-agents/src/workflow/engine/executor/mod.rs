@@ -32,13 +32,17 @@ use super::skills::skill_summary_for;
 
 mod dispatch;
 mod finalize;
+mod phase_loop;
 mod post_phase;
 mod prompt;
+mod resume;
 mod run;
 mod setup;
 
 #[cfg(test)]
 mod tests;
+
+pub use resume::ResumeOutcome;
 
 /// Workflow execution engine.
 pub struct WorkflowEngine {
