@@ -86,29 +86,36 @@ pub(crate) fn strip_numbered_marker(line: &str) -> Option<&str> {
 }
 
 /// Whether `app.choices` currently holds a *live* slash-command completion
-/// list, as opposed to an untagged LLM-offered choice list.
+/// list, as opposed to a stale LLM-offered or `/switch` choice list.
 ///
-/// Why (#3325): `app.choices` (untagged, i.e. `choices_context == None`) is
-/// populated by two different producers with very different lifecycles —
-/// `detect_choices` sets it ONCE per assistant turn and then leaves it
-/// alone, while `update_slash_completions` rebuilds it from `input_buf` on
-/// EVERY keystroke. `handle_key`'s choices branch used to let both kinds
-/// fall through untouched on a non-navigation key, which meant a stale
-/// LLM-offered list from a *previous* turn would still be sitting in
+/// Why (#3325): `app.choices` is populated by three different producers with
+/// very different lifecycles — `detect_choices` sets it ONCE per assistant
+/// turn (untagged, `choices_context == None`) and then leaves it alone,
+/// `bridge.rs`'s `/switch` handler sets it ONCE per invocation (tagged,
+/// `choices_context == Some("switch")`), while `update_slash_completions`
+/// rebuilds the untagged list from `input_buf` on EVERY keystroke.
+/// `handle_key`'s choices branch used to let all three kinds fall through
+/// untouched on a non-navigation key, which meant a stale LLM-offered *or*
+/// `/switch` list from a *previous* action would still be sitting in
 /// `app.choices` the next time the user typed a new message — so the
-/// following Enter got swallowed as "confirm choice" instead of "submit
-/// this line". This predicate lets the caller dismiss only the stale kind:
-/// slash completions never go stale (they're rebuilt immediately after),
-/// so they're exempt. The tagged `/switch` picker
-/// (`choices_context == Some("switch")`) is a separate, deliberately
-/// persistent overlay and is never routed through this predicate — see the
-/// `choices_context.is_none()` guard at the call site in `keys.rs`.
+/// following Enter got swallowed as "confirm choice" (or silently fired an
+/// unintended `/switch <persona>`) instead of "submit this line". This
+/// predicate lets the caller dismiss only the stale kinds: slash
+/// completions never go stale (they're rebuilt immediately after), so
+/// they're exempt regardless of how many other producers exist.
 /// What: True only when there is no picker `context` tag AND every current
 /// entry is a `/`-prefixed command name (the shape `update_slash_completions`
-/// always produces).
+/// always produces). Depends on the invariant that no other producer's
+/// items are ALL `/`-prefixed — in particular, `push_assistant` always
+/// appends a non-`/`-prefixed `"Other (type your own)"` sentinel to every
+/// `detect_choices` result (see `app.rs`), so an untagged LLM list can never
+/// be misclassified as a live slash completion. `is_live_slash_completion_sentinel_pins_non_slash_shape`
+/// pins that invariant.
 /// Test: `repl_app_choices_dismissed_on_typing_over_llm_list`,
 /// `repl_app_slash_completion_choices_survive_typing`,
-/// `slash_completions_does_not_stomp_context_picker`.
+/// `repl_app_switch_picker_dismissed_on_typing_over_it`,
+/// `slash_completions_does_not_stomp_context_picker`,
+/// `is_live_slash_completion_sentinel_pins_non_slash_shape`.
 pub(crate) fn is_live_slash_completion(app: &ReplApp) -> bool {
     !app.choices.is_empty()
         && app.choices_context.is_none()
