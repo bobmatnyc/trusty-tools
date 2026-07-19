@@ -137,6 +137,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `prune` — Prune managed sessions by state + compact tombstones (#1508)
   - `prune-idle` — Reclaim idle managed sessions: stop idle, decommission done (#1313)
   - `prune-worktrees` — Remove orphaned per-session git worktree directories (#1840)
+  - `rename` — Rename a managed session — from the list OR from within a session
   - `resume` — Resume a stopped/paused session (managed or project session)
   - `run` — Send a command to a session's tmux pane
   - `runtime-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
@@ -168,6 +169,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `prune` — Prune managed sessions by state + compact tombstones (#1508)
   - `prune-idle` — Reclaim idle managed sessions: stop idle, decommission done (#1313)
   - `prune-worktrees` — Remove orphaned per-session git worktree directories (#1840)
+  - `rename` — Rename a managed session — from the list OR from within a session
   - `resume` — Resume a stopped/paused session (managed or project session)
   - `run` — Send a command to a session's tmux pane
   - `runtime-stop` — [DEPRECATED] Stop a managed session's runtime — use `stop` instead
