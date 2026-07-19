@@ -70,7 +70,7 @@ item. An item with no governing spec simply omits the block — that is the
 correct, complete state, not an oversight to "fix" by inventing a link to
 satisfy a checklist.
 
-**When to use the full pattern:** API entry points, design decisions, error
+**When to use the full pattern:** API entry points, design-heavy code, error
 contracts, safety/TCC behavior, cross-crate surfaces.
 **When a one-liner suffices:** Trivial getters, obvious constructors, thin
 re-exports, one-line helpers. If a competent reader's first guess is right,
