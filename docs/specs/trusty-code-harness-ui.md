@@ -400,7 +400,7 @@ per-agent, not global, and MUST be readable from the roster (§5.4).
 `overhead_cap_tokens = context_window * 40/100`).
 
 > **The ratio is computed and then discarded.** `cadence::maybe_cadence_compress`
-> returns `CadenceOutcome { fired, rounds, within_budget }` (`cadence.rs:218`) whose own
+> returns `CadenceOutcome { compaction_fired, compaction_rounds, within_budget }` (`cadence.rs:218`) whose own
 > doc comment says it exists **"for observability/tests"** — and observability never
 > consumes it. `AgentLoop::maybe_cadence_compress` (`agent_loop/mod.rs:739`) calls it at
 > **`mod.rs:747` and drops the return value on the floor**; the turn-boundary call site
@@ -411,7 +411,7 @@ per-agent, not global, and MUST be readable from the roster (§5.4).
 `CadenceOutcome`, not an estimate recomputed in the client.
 **AC-5.7** `within_budget == false` (the documented floor: the active zone alone exceeds
 the cap after full compaction) MUST be visible — red `--gap` per the token map.
-**AC-5.8** A compaction firing (`fired == true`) MUST be observable in the thread (§4.7).
+**AC-5.8** A compaction firing (`compaction_fired == true`) MUST be observable in the thread (§4.7).
 **AC-5.9 — cadence is PM-only today.** `AgentLoopConfig.cadence` defaults `None`; only
 `task/executor.rs:327` sets `Some`. The indicator MUST render "not applicable" for
 non-PM agents rather than implying an unmanaged context.
@@ -685,7 +685,7 @@ API is an unbuilt feature, not a UI problem.
 | 2 | Search audit trail (10d, 8a/8b) | `Event::SearchPerformed{lane,query,hit_count,latency_ms,agent_id}` | **MISSING** | New structured event |
 | 3 | Memory recall w/ score + injected (8a/8b, 10c) | `Event::MemoryRecalled{query,results:[{score,injected}],agent_id}` | **MISSING** | New structured event |
 | 4 | Index readiness (status bar, 7a) | `IndexReadiness` as event + RPC | **MISSING** (stderr-only) | Surface computed value |
-| 5 | Working-context budget (status bar) | `Event::ContextBudget{working_pct,overhead_pct,within_budget,fired}` | **MISSING** (discarded) | Stop dropping `CadenceOutcome` |
+| 5 | Working-context budget (status bar) | `Event::ContextBudget{working_context_pct,overhead_pct,within_budget,compaction_fired}` | **MISSING** (discarded) | Stop dropping `CadenceOutcome` |
 | 6 | Goal slots (§4.5) | `session.get_goals` / `set_goal` / `clear_goal` | **EXISTS** | **none — UI wiring only** |
 | 7 | Projectless + binding (7a, §4.2) | `task.run` `project` → optional; unify with `session.create` | **PARTIAL** | Type change + reconciliation |
 | 8 | Agent roster (10b, 11a) | `session.get_agents` snapshot + `model` field | **EXISTS** | `session.get_agents` ships, backed by an always-retained per-session map (not a ring-buffer fold) so it cannot lose a still-running agent to eviction (closes #2962); `model` field remains deferred — see §5.4 |
@@ -848,7 +848,7 @@ ships (#2728/#2747, `run_task/mod.rs:100-107`).
 ```rust
 session.get_readiness() -> { lanes: [{ lane, state, doc_count, last_indexed_at }] }
 Event::IndexReadinessChanged { lanes: [...] }
-Event::ContextBudget { working_pct, overhead_pct, within_budget, fired, rounds }
+Event::ContextBudget { working_context_pct, overhead_pct, within_budget, compaction_fired, compaction_rounds }
 ```
 
 **AC-17.1** Readiness is served from the **same** `IndexReadiness` value
