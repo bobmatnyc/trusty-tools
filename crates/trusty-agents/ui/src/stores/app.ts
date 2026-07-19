@@ -83,21 +83,31 @@ export const projects = writable<Project[]>([
 export const activeProjectId = writable<string>('ctrl');
 
 /**
- * Why (#3223 — Trusty Assistant agent roster, epic #3052): the roster's
- * "active agent" is a second, independent selection axis alongside
- * `activeProjectId` — which conversation thread/working directory vs. which
- * persona voice answers. Defaulting to the base `assistant` id (rather than
- * `null`/"no override") means the default chat experience literally is
- * "chat with the assistant", matching the MVP's core promise, without
- * InputArea needing a separate "no agent selected" branch.
+ * Why (#3223 — Trusty Assistant agent roster, epic #3052; regression fix
+ * flagged by code-critic on PR #3279): the roster's "active agent" is a
+ * second, independent selection axis alongside `activeProjectId` — which
+ * conversation thread/working directory vs. which persona voice answers.
+ * `null` — NOT the base `assistant` id — is the default: `agent_for_chat`
+ * in `handlers.rs::submit_task` routes ANY non-`None` `agent` (including
+ * `"assistant"`) through `run_pm_task_with_persona`, which is a tools-OFF
+ * chat path (`persona.rs` — personas have no delegation-tool wiring yet).
+ * Defaulting this store to the base id would therefore silently strip
+ * delegation/tool capability from EVERY default GUI message, before the
+ * user ever touches the roster switcher. `null` instead falls through to
+ * `run_pm_task_with_session`, the existing tools-armed default path — the
+ * roster only takes over dispatch once the user actively picks an entry
+ * (including explicitly picking "Assistant", which is an intentional
+ * opt-in to the tools-off persona path, not the passive default).
  * What: Holds the currently selected roster entry's `id`
  * (`RosterEntry.id` — either the base `assistant`, a catalog agent name, or
- * a user overlay's slug). Threaded into `send_message`/`POST /api/task` as
- * the `agent` field by `InputArea.svelte`.
+ * a user overlay's slug), or `null` when nothing has been explicitly
+ * selected yet. `InputArea.svelte` and `lib/transport.ts`'s browser
+ * fallback both OMIT the `agent` field from their submission payload when
+ * this is `null`, rather than forwarding it.
  * Test: `AgentSwitcher.svelte` sets this on row click; `InputArea.svelte`
- * reads it into the submission payload.
+ * reads it into the submission payload (only when non-null).
  */
-export const activeAgentId = writable<string>(BASE_AGENT_ID);
+export const activeAgentId = writable<string | null>(null);
 
 /** `GET /api/agents` catalog (`.trusty-agents/agents/*.toml`), #407. */
 export const catalogAgents = writable<CatalogAgent[]>([]);

@@ -97,22 +97,58 @@ pub(super) async fn health() -> Json<HealthBody> {
 
 /// Extract a non-empty agent override from a task request (#3223).
 ///
-/// Why: The GUI's agent roster passes `agent: Some("cto-assistant")` (or
-/// omits it / sends blank for the default) on every `POST /api/task`. Empty
-/// string and pure-whitespace are normalized to `None` so a client that
-/// sends `agent: ""` (e.g. a stale/cleared roster selection) falls through
-/// to the existing default dispatch instead of erroring on an empty persona
-/// name deep inside `run_pm_task_with_persona`.
+/// Why: The GUI's agent roster only sends a non-`None` `agent` (e.g.
+/// `Some("cto-assistant")`) when the user has EXPLICITLY picked a roster
+/// entry — the roster's `activeAgentId` store defaults to `null`
+/// specifically so the default, no-selection GUI message omits this field
+/// entirely (regression fixed post-PR #3279: an earlier version of the
+/// frontend defaulted `activeAgentId` to the base `assistant` id and
+/// forwarded it unconditionally, which forced EVERY default chat message
+/// through the tools-off `run_pm_task_with_persona` path below — see
+/// `submit_task`'s `agent_for_chat` — silently losing delegation/tool
+/// capability for ordinary chat). This function's blank/whitespace
+/// normalization is a defensive second layer (e.g. a stale/cleared roster
+/// selection serialized as `agent: ""`), not the primary guard — the
+/// primary guard is the frontend not sending the field at all by default.
 /// What: Trims `req.agent` and returns `None` when absent or blank,
 /// otherwise the trimmed owned string.
 /// Test: `agent_override_normalizes_blank_to_none`,
-/// `agent_override_passes_through_trimmed_name`.
+/// `agent_override_passes_through_trimmed_name`,
+/// `submit_task_without_agent_uses_session_path`,
+/// `submit_task_with_agent_uses_persona_path`.
 fn agent_override(req: &TaskRequest) -> Option<String> {
     req.agent
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Resolve which Conversational/Research dispatch path a request should
+/// take (#3223; extracted as a pure function during the PR #3279
+/// code-critic regression fix).
+///
+/// Why: The choice between the tools-armed `run_pm_task_with_session` path
+/// and the tools-off `run_pm_task_with_persona` path (see `submit_task`'s
+/// match arm below) is the single most consequential decision in this
+/// file — get it wrong and ordinary GUI chat silently loses delegation/tool
+/// capability (see `agent_override`'s doc comment for the regression this
+/// guards against). Pulling it out of `submit_task`'s body into its own
+/// pure function lets that decision be pinned by a fast unit test that
+/// needs no HTTP router, background task, or LLM/agent-loading machinery.
+/// What: Returns `None` (→ session path) when `is_ctrl_command` is `true`
+/// OR `agent_override(req)` is `None` (no roster selection, or a
+/// blank/whitespace one); otherwise the trimmed agent name (→ persona
+/// path).
+/// Test: `submit_task_without_agent_uses_session_path`,
+/// `submit_task_with_agent_uses_persona_path`,
+/// `submit_task_ctrl_command_ignores_agent_override`.
+fn resolve_agent_for_chat(req: &TaskRequest, is_ctrl_command: bool) -> Option<String> {
+    if is_ctrl_command {
+        None
+    } else {
+        agent_override(req)
+    }
 }
 
 /// `POST /api/task` — kick off a workflow/agent/conversational run.
@@ -184,11 +220,7 @@ pub(super) async fn submit_task(
     // CTRL's project-management tools (AddProjectTool, RemoveProjectTool,
     // ListProjectsTool, SetActiveProjectTool, StopTaskTool). The roster's
     // agent override only applies to ordinary conversational/research turns.
-    let agent_for_chat = if is_ctrl_command {
-        None
-    } else {
-        agent_override(&req)
-    };
+    let agent_for_chat = resolve_agent_for_chat(&req, is_ctrl_command);
 
     match intent {
         IntentClass::Conversational | IntentClass::Research => {
@@ -450,6 +482,44 @@ mod tests {
         assert_eq!(
             agent_override(&base_request(Some("assistant"))).as_deref(),
             Some("assistant")
+        );
+    }
+
+    /// Regression pin (code-critic BLOCK on PR #3279): a default GUI
+    /// message — no `agent` field on the wire, because the frontend's
+    /// `activeAgentId` now defaults to `null` rather than the base
+    /// `assistant` id — must resolve to `None`, which routes `submit_task`
+    /// through `run_pm_task_with_session` (tools-armed), NOT
+    /// `run_pm_task_with_persona` (tools-off). Before the fix,
+    /// `activeAgentId` defaulted to `"assistant"` and was forwarded
+    /// unconditionally, so EVERY default chat message silently lost
+    /// delegation/tool capability.
+    #[test]
+    fn submit_task_without_agent_uses_session_path() {
+        assert_eq!(resolve_agent_for_chat(&base_request(None), false), None);
+    }
+
+    /// An explicitly-selected roster entry (any non-blank `agent`,
+    /// including the base `"assistant"` — picking it is an intentional
+    /// opt-in, not the passive default) resolves to `Some`, which routes
+    /// `submit_task` through `run_pm_task_with_persona`.
+    #[test]
+    fn submit_task_with_agent_uses_persona_path() {
+        assert_eq!(
+            resolve_agent_for_chat(&base_request(Some("cto-assistant")), false).as_deref(),
+            Some("cto-assistant")
+        );
+    }
+
+    /// CTRL management commands ("add project …", "list projects", …) must
+    /// always use the tools-armed session path — that's the only path
+    /// wired to CTRL's project-management tools — regardless of whatever
+    /// the roster's active agent happens to be.
+    #[test]
+    fn submit_task_ctrl_command_ignores_agent_override() {
+        assert_eq!(
+            resolve_agent_for_chat(&base_request(Some("cto-assistant")), true),
+            None
         );
     }
 }

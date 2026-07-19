@@ -81,15 +81,25 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       return r.json();
     }
     case 'send_message': {
-      // #3223: forward the roster's active agent selection so the browser
-      // fallback path behaves identically to the Tauri `send_message`
-      // command (see `task_commands::send_message` on the Rust side).
-      const body = {
+      // #3223 (regression fix, code-critic on PR #3279): forward the
+      // roster's active agent selection so the browser fallback path
+      // behaves identically to the Tauri `send_message` command (see
+      // `task_commands::send_message` on the Rust side) — but ONLY when
+      // `InputArea.svelte` actually passed one (`activeAgentId` is `null`
+      // by default). Mirrors `task_commands::send_message`'s own
+      // `.filter(|s| !s.is_empty())` gate: omitting the key entirely (not
+      // sending `agent: null`) keeps this path's payload shape identical to
+      // the Tauri path's, and defends against a falsy-but-non-null value
+      // ever reaching here.
+      const body: Record<string, unknown> = {
         task: args?.content ?? '',
         workflow: args?.workflow ?? 'prescriptive',
         project_path: args?.projectPath ?? args?.project_path ?? null,
-        agent: args?.agent ?? null,
       };
+      const agent = args?.agent;
+      if (typeof agent === 'string' && agent.trim()) {
+        body.agent = agent;
+      }
       const submit = await fetch(`${base}/api/task`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
