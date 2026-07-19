@@ -457,6 +457,14 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                // This app currently has exactly one window ("main", per
+                // tauri.conf.json). Guard on the label explicitly so a
+                // future secondary window (settings/about/etc.) does not
+                // silently inherit hide-on-close — only "main" participates
+                // in persistent/tray mode.
+                if window.label() != "main" {
+                    return;
+                }
                 // Persistent/tray mode (#3059): closing the window must NOT
                 // kill the sidecar or the app — hide it instead. The tray
                 // "Show" item / tray-icon click brings it back without
@@ -470,14 +478,20 @@ fn main() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        if let RunEvent::ExitRequested { .. } = event {
+        if let RunEvent::ExitRequested { api, .. } = event {
             // Real quit path: Cmd+Q or the app-menu Quit item (the tray
             // "Quit" item already reaped the sidecar itself before calling
             // `exit`, so this is a no-op in that case thanks to `take()`).
             // We must not block this callback on the async mutex — the
-            // process exit proceeds immediately after it returns — so we
-            // try a non-blocking lock first and fall back to a best-effort
-            // fire-and-forget kill if it's momentarily contended.
+            // runtime checks for a pending `prevent_exit()` via a
+            // synchronous `try_recv()` immediately after this closure
+            // returns, so a bare fire-and-forget spawn here can lose the
+            // race and let the process exit before `kill_sidecar` runs.
+            // Try a non-blocking lock first (the common case); if it's
+            // contended, call `prevent_exit()` synchronously *before*
+            // returning, finish the kill asynchronously, then trigger the
+            // real exit ourselves once it's done — mirroring the tray
+            // "Quit" pattern above.
             if let Some(state) = app_handle.try_state::<SharedApi>() {
                 match state.child.try_lock() {
                     Ok(mut guard) => {
@@ -486,9 +500,12 @@ fn main() {
                         }
                     }
                     Err(_) => {
+                        api.prevent_exit();
                         let state = state.inner().clone();
+                        let handle = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             kill_sidecar(&state).await;
+                            handle.exit(0);
                         });
                     }
                 }
