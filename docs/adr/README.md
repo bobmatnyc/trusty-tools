@@ -1,25 +1,35 @@
 # Architecture Decision Records (ADRs)
 
 This directory holds the **workspace-wide** Architecture Decision Records for
-trusty-tools.
+trusty-tools — a **first-class documentation artifact, peer to Specs (DOC-38)
+and Requirements (DOC-43)**.
+
+See **[DOC-31](../specs/DOC-31-adr-standard.md)** for the formal ADR standard,
+including the consistency-vetting protocol and governance rules.
 
 ## What is an ADR?
 
-An ADR captures a single architecturally-significant decision: the context that
-forced the decision, the decision itself, and its consequences. ADRs are
-immutable once accepted — a decision is changed by writing a *new* ADR that
-supersedes the old one, never by editing history. We use the
+An ADR captures *why* a single architecturally-significant decision was made:
+the context that forced the decision, the decision itself, and its consequences.
+ADRs are immutable once accepted — a decision is changed by writing a *new* ADR
+that supersedes the old one, never by editing history. We use the
 [Nygard format](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions)
-(Title, Status, Context, Decision, Consequences).
+(Title, Status, Context, Decision, Consequences) plus a **"Related Decisions"**
+section documenting consistency vetting (see DOC-31 §3).
 
 ## When to write one (the bar)
 
 Write an ADR when a decision is **architecturally significant *and* costly to
 reverse**. Examples: choosing an IPC protocol, a credential-routing model, an
-MSRV/edition policy, where documentation lives. Do **not** write an ADR for
-routine implementation choices, reversible refactors, or anything a code review
-comment would cover. If in doubt, ask: *would a future maintainer be confused
-about why we did this, and would undoing it be expensive?* If yes, write one.
+MSRV/edition policy, where documentation lives, defining service boundaries
+between crates. Do **not** write an ADR for routine implementation choices,
+reversible refactors, bug fixes, or anything a code review comment would cover.
+If in doubt, ask: *would a future maintainer be confused about why we did this,
+and would undoing it be expensive?* If yes, write one.
+
+**ADRs are not optional** for architectural decisions — they are mandatory. The
+decision itself is required; recording it formally is also required. This ensures
+consistency vetting happens before decisions land.
 
 ## Hybrid scope rule
 
@@ -39,37 +49,34 @@ maintain **independent** numbering sequences. Never renumber an existing ADR.
 ## Status lifecycle
 
 ```
-Proposed ──► Accepted ──► Superseded (by ADR-NNNN)
+Proposed ──► Accepted ──► Superseded by NNNN
        └────► Rejected
+
+       ┌────────────────┐
+       │ Amended by NNN │
+       └────────────────┘
+       (refined, not replaced, by later ADR)
 ```
 
-- **Proposed** — drafted, under discussion.
-- **Accepted** — agreed and in force.
+- **Proposed** — drafted, under discussion. Consistency vetting is optional while Proposed, but required before acceptance.
+- **Accepted** — agreed and in force. All Accepted ADRs form the current decision set.
 - **Rejected** — considered but not adopted (kept for the record).
-- **Superseded** — replaced by a later ADR; note which one in the Status line.
+- **Superseded by NNNN** — replaced by a later ADR; links to the new ADR. Old decision no longer in force.
+- **Amended by NNNN** — refined (not replaced) by a later ADR. Prior decision still in force, but qualified by the amendment.
 
 ## Writing a new ADR
 
 1. Copy [`template.md`](./template.md) to the next free `NNNN-kebab-title.md`.
 2. Fill in Title, Status, Context, Decision, Consequences.
-3. Open it as **Proposed**; flip to **Accepted** when the decision is agreed.
+3. **Critical: Add a "Related Decisions" section** (see DOC-31 §3) — sweep `docs/adr/INDEX.md` and prior decisions; record verdict codes (Consistent, Extends, Supersedes, Conflict) for each relevant prior ADR. **Do not accept an ADR with an empty "Related Decisions" section.**
+4. Open it as **Proposed**; flip to **Accepted** when the decision is agreed and consistency vetting is complete.
+
+See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick reference for vetting.
 
 ## Index
 
-| ADR | Title | Status |
-|---|---|---|
-| [0001](./0001-docs-live-top-level.md) | Design/research/ADR docs live in top-level `docs/` | Accepted |
-| [0002](./0002-single-install-convention.md) | Single-install convention for main crates | Accepted |
-| [0003](./0003-msrv-and-edition-policy.md) | MSRV 1.88 and per-crate Rust edition policy | Accepted |
-| [0004](./0004-three-harnesses-shared-event-driven-common.md) | Three distinct harnesses on a shared event-driven trusty-common foundation | Proposed |
-| [0005](./0005-harness-event-bus.md) | Shared HarnessEvent envelope + process-global event bus in trusty-agents-common | Accepted |
-| [0006](./0006-trusty-controller-naming.md) | Name the stack control plane `trusty-controller` (binary `tctl`) | Accepted |
-| [0007](./0007-tool-contract-versioning-and-verb-model.md) | Monotonic-integer `contract_version` + 3-layer extensible verb model | Accepted |
-| [0008](./0008-project-identity-convention.md) | Project-identity convention: full-path slug of the nearest git root | Accepted |
-| [0009](./0009-external-extractor-kg-ingest-contract.md) | External-extractor KG ingest contract: durable contributed overlay in trusty-search | Accepted |
-| [0010](./0010-kg-edge-kind-extensibility.md) | KG edge-kind extensibility: first-class data-flow variants + Custom escape hatch | Proposed |
-| [0011](./0011-tctl-owns-service-lifecycle.md) | `tctl` headless control plane (owns boot/lifecycle); `trusty-console` is the single HTTP surface | Accepted |
-| [0012](./0012-per-instance-guid-and-marker-file-identity.md) | Per-instance GUID and marker-file identity | Accepted |
-| [0013](./0013-rename-trusty-controller-to-trusty-installer.md) | Rename `trusty-controller` → `trusty-installer`; add `tctl` transitional alias; build out interactive installer | Accepted |
+See [`INDEX.md`](./INDEX.md) for the complete, machine-readable index of all ADRs
+(Accepted, Proposed, Rejected, and Superseded). Use it as a quick reference for
+consistency vetting when writing new ADRs.
 | [0014](./0014-native-mcp-support.md) | Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more) | Accepted |
 | [0015](./0015-three-product-agent-composition-model.md) | Unified agent composition: shared `.md`+YAML+`extends` format across trusty-agents, trusty-mpm, trusty-code | Proposed |
