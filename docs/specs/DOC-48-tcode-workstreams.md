@@ -168,8 +168,8 @@ This matches the **dual precedent** of:
 When the daemon boots or when `workstream.list` is called:
 1. Load the persisted `active_workstream_id` from storage.
 2. For each workstream:
-   - If its ID equals `active_workstream_id`, and at least one session is live (in the registry), state is `active`.
-   - Otherwise, if any session is live, state is `active` only if this is the daemon's "current working" workstream (see below). If no session is live, state is `idle`.
+   - If its ID equals `active_workstream_id`, state is `active` (regardless of session liveness; the activation pointer determines this).
+   - Otherwise, state is `idle` (unless marked closed).
    - If the workstream is marked as closed (a metadata flag; see future Phase C), state is `closed`.
 
 **Active workstream restoration on boot:**
@@ -294,15 +294,25 @@ All endpoints return JSON. Errors are HTTP 4xx/5xx with a JSON error body (match
 **Error codes:**
 - `ActiveConflict{active_id}` (HTTP 409): returned by `activate{force: false}` when another workstream is active. Includes the ID of the currently-active workstream so the client can decide whether to retry with `force: true`.
 
-### 5.3 Server-Sent Events (SSE) — multi-client observation
+### 5.3 Server-Sent Events (SSE) — multi-client observation and workstream-level aggregation
 
-Clients (CLI, GUI, or agent) can observe the active workstream via the daemon's **multi-subscriber SSE endpoint** (not workstream-specific; the daemon's global event stream):
+Clients (CLI, GUI, or agent) observe a workstream via a **workstream-level SSE endpoint** that aggregates events from all sessions bound to that workstream:
 
 ```
-GET /api/v1/sessions/{active_workstream_id}/events
+GET /api/v1/workstreams/{id}/events
 ```
 
-This is the **same endpoint as session events** (see DOC-39 §5.0). When the active workstream changes, all connected clients automatically start receiving events from the new active workstream (the endpoint path changes). Multiple clients may observe the same active workstream simultaneously (like `tmux attach-session` — any number of terminal clients can attach to one session).
+**Workstream event aggregation (key architecture):** The workstream-level endpoint is NOT a direct session-registry lookup. Instead, the daemon **fan-outs over the workstream's bound `session_ids`** internally:
+
+1. On subscription to `/api/v1/workstreams/{id}/events`, the daemon identifies all sessions in `workstreams[id].session_ids`.
+2. The daemon internally subscribes to the event streams for each session (via the per-session SSE subscriber registry, which IS session-keyed per AC-7.3).
+3. Events from each session are tagged with `{session_id, event_type, payload}` and forwarded to the workstream-level subscriber.
+4. When sessions are added to the workstream (§4.1), new sessions are dynamically added to the fan-out.
+5. When the workstream is deactivated (§4.2), clients reconnect to the new active workstream's `/api/v1/workstreams/{new_id}/events` endpoint.
+
+**Multi-client observation:** Multiple clients (CLI, GUI, agent) may observe the same workstream's events simultaneously (like `tmux attach-session` — any number of terminal clients can attach to one session). No per-client exclusive leases; the fan-out is daemon-managed.
+
+**Harness-agnostic shared transport:** This aggregation layer (workstream event fan-out + per-session event tagging) is part of the **shared multi-client attach transport component** (§5.3.1/AC-7). It must be extracted to `trusty-agents-common` in Phase 1B so `trusty-agents` background sessions can reuse it for epic #3052 (iOS thin client over VPN).
 
 **Event types (extensible; Phase 1A minimal set):**
 
@@ -320,12 +330,13 @@ This is the **same endpoint as session events** (see DOC-39 §5.0). When the act
 **Phase 1A scope:** tcode may implement this as a tcode-private component initially. **Phase 1B scope (explicit AC below):** the interface must be designed against a session-id abstraction (a trait, not concrete `trusty_code::Session` types) so `trusty-agents` and future consumers can adopt it without rework. The extraction to `trusty-agents-common` is a mandatory follow-up (Phase 1B+), not deferred to Phase C.
 
 **Harness-agnostic interface requirements:**
-- **Session ID abstraction:** The SSE endpoint accepts a generic `session_id` (UUID or string), not tcode-specific types. Subscribers fanout by session ID.
+- **Session ID abstraction:** The per-session SSE endpoint accepts a generic `session_id` (UUID or string), not tcode-specific types. Subscribers fanout by session ID.
 - **Event envelope:** Events are transported as a generic envelope: `{session_id, event_type, payload}`, allowing any harness to layer domain-specific events.
 - **Reconnect/replay:** SSE ring-buffer replays N turns on reconnect (consistent with tcode session events §5.0); the mechanism is harness-agnostic.
-- **Multi-subscriber registry:** A daemon-global subscriber registry (not per-workstream) tracks active SSE connections by session ID, enabling fan-out and activation-change notifications.
+- **Multi-subscriber registry (session-scoped):** A daemon-global subscriber registry (not per-workstream, but per-session) tracks active SSE connections by session ID, enabling fan-out and activation-change notifications (AC-7.3).
+- **Logical-unit aggregation layer (workstream-level):** On top of the per-session registry, a workstream-level event aggregation layer fan-outs over `session_ids` and tags events per session. This allows a workstream to be observed as a single logical unit (§5.3) while maintaining session-scoped subscriber tracking underneath. The aggregation layer is also part of this harness-agnostic interface and must be extracted to `trusty-agents-common` (e.g., for epic #3052 where a background agent may manage multiple sub-sessions).
 
-The trait/interface **must live in `trusty-agents-common`** (alongside the workstream ledger, DOC-44); both tcode and tagents implement and consume it. Cross-ref DOC-44 and epic #3052 for adoption.
+The trait/interface + aggregation layer **must live in `trusty-agents-common`** (alongside the workstream ledger, DOC-44); both tcode and tagents implement and consume it. Cross-ref DOC-44 and epic #3052 for adoption.
 
 ### 5.4 CLI surface — `tcode workstream` family
 
@@ -641,16 +652,20 @@ curl -X POST http://localhost:7881/rpc \
 
 ## 13. Implementation checklist (for code reviewer)
 
-- [ ] Workstream storage directory and JSON schema implemented.
-- [ ] Boot reconciliation clears stale leases, loads all records, doesn't delete any.
-- [ ] `workstream.create`, `workstream.get`, `workstream.list`, `workstream.attach`, `workstream.detach`, `workstream.heartbeat`, `workstream.close` exist in the RPC router.
-- [ ] REST endpoints wrap the RPC methods.
-- [ ] CLI commands exist and work with the RPC surface.
-- [ ] State inference (idle/active/closed) works based on session activity and TTL.
-- [ ] Lease exclusivity is enforced: only one live lease per workstream, `attach{force: true}` evicts.
-- [ ] SSE events stream properly (`SessionAdded`, `StateInferred`, `LeaseRevoked`).
-- [ ] Session-to-workstream binding is optional at `session.create` and immutable thereafter.
-- [ ] Project binding is enforced: sessions in a workstream all bind to the same project.
+**Rev 2 contract:**
+- [ ] Workstream storage: single flat `workstreams-{project_slug}-{hash}.json` file (atomic temp+rename), with `version`, `active_workstream_id`, and `workstreams[]` array.
+- [ ] Boot reconciliation: loads all records, restores `active_workstream_id`, clears no stale data (persistence is deterministic, no TTL-based expiry).
+- [ ] RPC methods implemented: `workstream.create`, `workstream.get`, `workstream.list`, `workstream.activate`, `workstream.deactivate`, `workstream.close` (NO attach/detach/heartbeat).
+- [ ] REST endpoints wrap the RPC methods (POST /workstreams, GET /workstreams/{id}, POST /workstreams/{id}/activate, etc.).
+- [ ] **NEW route**: `GET /api/v1/workstreams/{id}/events` — workstream-level SSE endpoint that fan-outs over bound session_ids with event tagging `{session_id, event_type, payload}`.
+- [ ] CLI commands: `tcode workstream list/get/create/activate/deactivate/close` (NO attach/detach; ws short alias works).
+- [ ] State inference: workstream state is `active` IFF its id == `active_workstream_id` (not computed from session activity). Otherwise `idle` or `closed`.
+- [ ] Activation-lock exclusivity: `activate{force: false}` returns `ActiveConflict{active_id}` if another workstream is active. `activate{force: true}` deactivates prior and activates new.
+- [ ] SSE events: `SessionAdded`, `SessionActivityUpdate`, `WorkstreamStateInferred`, `WorkstreamActivationChanged` (NO LeaseRevoked).
+- [ ] Session binding: optional at `session.create(workstream_id?)` and immutable thereafter.
+- [ ] Project scoping: all workstreams in daemon are project-scoped (daemon-local via ProjectBinding; no cross-project sessions).
+- [ ] AC-7: harness-agnostic transport interface is designed (generic session-id abstraction, event envelope, aggregation layer for multi-session logical units).
 - [ ] All ACs in §7 pass.
 - [ ] All curl examples in §12 succeed.
+- [ ] **Grep check:** No mentions of `lease`, `heartbeat`, `TTL`, `.attach`, `.detach` except DOC-40 cross-references (verify each hit is intentional).
 
