@@ -95,6 +95,7 @@ impl ClaudeMpmAgent {
                 capabilities: None,
                 display_name: None,
                 prompt_label: None,
+                extends: None,
             },
             llm: LlmParams {
                 temperature: 0.3,
@@ -264,6 +265,69 @@ async fn load_from_dir(out: &mut HashMap<String, ClaudeMpmAgent>, dir: &Path) {
 pub async fn find_agent(name: &str, project_dir: &Path) -> Option<ClaudeMpmAgent> {
     let mut agents = discover_agents(project_dir).await.ok()?;
     agents.remove(name)
+}
+
+/// Synchronous single-agent lookup mirroring [`find_agent`] (#3055).
+///
+/// Why: the sync per-name loader (`AgentConfig::by_name_unresolved_src`) and the
+/// `extends` ancestor lookup must reach the SAME claude-mpm agents the async
+/// `by_name_async` loader can, or a child extending a claude-mpm-only base gets
+/// an asymmetric `ExtendsNotFound` (code-critic drift finding, PR #3106). The
+/// reads are a handful of small `.md` files, so doing them synchronously here
+/// costs nothing meaningful next to the LLM dispatch that follows.
+/// What: scans `~/.claude/agents` then `<cwd>/.claude/agents` (project overrides
+/// user, matching [`discover_agents`]) with `std::fs`, returns the matching
+/// agent already projected into an [`AgentConfig`], or `None`.
+/// Test: exercised via the loader's `by_name` symmetry tests.
+pub fn find_agent_sync(name: &str) -> Option<AgentConfig> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut agents: HashMap<String, ClaudeMpmAgent> = HashMap::new();
+    let home = dirs::home_dir().unwrap_or_default();
+    load_from_dir_sync(&mut agents, &home.join(".claude").join("agents"));
+    load_from_dir_sync(&mut agents, &project_dir.join(".claude").join("agents"));
+    let agent = agents.remove(name)?;
+    tracing::info!(
+        agent = %name,
+        source = %agent.source_path.display(),
+        "loaded claude-mpm agent (sync fallback)"
+    );
+    Some(agent.to_agent_config())
+}
+
+/// Synchronous counterpart to [`load_from_dir`] used by [`find_agent_sync`].
+///
+/// Why: keeps the sync fallback's discovery semantics identical to the async
+/// path (same directories, same override order, same silent-skip tolerance).
+/// What: reads every `.md` in `dir`, parses it, and inserts (later writes win).
+/// Missing/unreadable dirs and files are skipped.
+/// Test: exercised via `find_agent_sync`.
+fn load_from_dir_sync(out: &mut HashMap<String, ClaudeMpmAgent>, dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(dir = %dir.display(), error = %e, "claude-mpm: read_dir failed (sync)");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "claude-mpm: read failed (sync)");
+                continue;
+            }
+        };
+        if let Some(agent) = parse_agent_file(&path, &content) {
+            out.insert(agent.name.clone(), agent);
+        }
+    }
 }
 
 #[cfg(test)]

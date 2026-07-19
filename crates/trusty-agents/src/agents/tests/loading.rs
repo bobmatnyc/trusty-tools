@@ -525,3 +525,201 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
         "overlay persona must carry the anti-hallucination guardrail standalone"
     );
 }
+
+// --- #3055 `extends` end-to-end loader tests -----------------------------
+//
+// These exercise the REAL dispatch loaders (`AgentConfig::by_name` /
+// `by_name_async`) — not the informational `AgentRegistry` — over on-disk
+// `extends` chains, closing the code-critic CRITICAL (flat `.md` overlays were
+// unreachable at dispatch) and HIGH (by_name/by_name_async had zero extends
+// coverage) findings on PR #3106.
+
+/// A base agent flat TOML with an Anthropic model + given prose.
+fn write_flat_toml_base(dir: &Path, name: &str, body: &str) {
+    let toml = format!(
+        r#"
+[agent]
+name = "{name}"
+role = "researcher"
+model = "anthropic/claude-sonnet-4-6"
+description = "the base {name}"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "{body}"
+"#
+    );
+    std::fs::write(dir.join(format!("{name}.toml")), toml).expect("write base toml");
+}
+
+#[test]
+fn extends_resolved_child_inherits_base_model() {
+    // A flat `.md` child that OMITS `model` and `extends` a flat-TOML base must
+    // dispatch-load via `by_name` with the base's model AND a matching adapter.
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    write_flat_toml_base(dir, "researcher", "BASE INSTRUCTIONS");
+    // Child overlay: no model, adds a tool, appends prose.
+    let child = "---\nname: my-researcher\nrole: agent\nextends: researcher\n\
+tools:\n  allowed: [my_tool]\n---\n\nMY OVERRIDES\n";
+    std::fs::write(dir.join("my-researcher.md"), child).expect("write child md");
+
+    clear_model_env("my-researcher");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", dir);
+    }
+    let cfg = AgentConfig::by_name("my-researcher").expect("resolves + dispatch-loads");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    assert_eq!(cfg.agent.name, "my-researcher");
+    // Model inherited from the base and resolved; adapter matches it.
+    assert_eq!(cfg.agent.model, "anthropic/claude-sonnet-4-6");
+    use crate::llm::adapter::Provider;
+    assert_eq!(cfg.adapter.provider(), Provider::Anthropic);
+}
+
+#[test]
+fn by_name_flat_md_extends_dispatches() {
+    // The flat `.md` personalization overlay (the primary #3055 surface) must be
+    // reachable from `by_name` with prose concatenated base-first and tools
+    // unioned.
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    write_flat_toml_base(dir, "researcher", "BASE INSTRUCTIONS");
+    let child = "---\nname: my-researcher\nrole: agent\nextends: researcher\n\
+tools:\n  allowed: [my_tool]\n---\n\nMY OVERRIDES\n";
+    std::fs::write(dir.join("my-researcher.md"), child).expect("write child md");
+
+    clear_model_env("my-researcher");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", dir);
+    }
+    let cfg = AgentConfig::by_name("my-researcher").expect("flat-md extends dispatches");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    assert_eq!(
+        cfg.system_prompt.content,
+        "BASE INSTRUCTIONS\n\nMY OVERRIDES"
+    );
+    assert_eq!(
+        cfg.tools.allowed.as_deref(),
+        Some(&["my_tool".to_string()][..])
+    );
+    assert!(cfg.agent.extends.is_none());
+}
+
+#[tokio::test]
+async fn by_name_async_flat_md_extends_dispatches() {
+    // Same flat-`.md` extends chain must ALSO dispatch via the async loader —
+    // proving the sync/async tier symmetry (no asymmetric ExtendsNotFound).
+    let _guard = ENV_LOCK.lock().await;
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    write_flat_toml_base(dir, "researcher", "BASE INSTRUCTIONS");
+    let child = "---\nname: my-researcher\nrole: agent\nextends: researcher\n---\n\nMY OVERRIDES\n";
+    std::fs::write(dir.join("my-researcher.md"), child).expect("write child md");
+
+    clear_model_env("my-researcher");
+    // SAFETY: guarded by ENV_LOCK across the await below.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", dir);
+    }
+    let cfg = AgentConfig::by_name_async("my-researcher")
+        .await
+        .expect("flat-md extends dispatches async");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    assert_eq!(cfg.agent.name, "my-researcher");
+    assert_eq!(cfg.agent.model, "anthropic/claude-sonnet-4-6");
+    assert_eq!(
+        cfg.system_prompt.content,
+        "BASE INSTRUCTIONS\n\nMY OVERRIDES"
+    );
+}
+
+#[test]
+fn by_name_package_extends_shadow_falls_back_to_flat() {
+    // A directory package whose `extends` cannot be resolved must NOT shadow a
+    // complete flat `<name>.toml` — the flat file wins (with a warn).
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+
+    // Package `izzie/agent.toml` with an UNRESOLVABLE extends and NO [tools].
+    let pkg = dir.join("izzie");
+    std::fs::create_dir(&pkg).expect("mk pkg");
+    std::fs::write(
+        pkg.join("agent.toml"),
+        r#"
+[agent]
+name = "izzie"
+role = "assistant"
+model = "anthropic/claude-sonnet-4-6"
+description = "partial package"
+extends = "ghost-base"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+"#,
+    )
+    .expect("write pkg agent.toml");
+    std::fs::write(pkg.join("persona.md"), "PARTIAL PACKAGE").expect("write persona");
+
+    // Complete flat `izzie.toml` alongside it (locked-down tools, no extends).
+    std::fs::write(
+        dir.join("izzie.toml"),
+        r#"
+[agent]
+name = "izzie"
+role = "assistant"
+model = "anthropic/claude-sonnet-4-6"
+description = "complete flat"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "COMPLETE FLAT"
+
+[tools]
+allowed = ["locked_tool"]
+"#,
+    )
+    .expect("write flat toml");
+
+    clear_model_env("izzie");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", dir);
+    }
+    let cfg = AgentConfig::by_name("izzie").expect("falls back to flat toml");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    // Flat file won — NOT the tools-less partial package.
+    assert_eq!(cfg.system_prompt.content, "COMPLETE FLAT");
+    assert_eq!(
+        cfg.tools.allowed.as_deref(),
+        Some(&["locked_tool".to_string()][..])
+    );
+}

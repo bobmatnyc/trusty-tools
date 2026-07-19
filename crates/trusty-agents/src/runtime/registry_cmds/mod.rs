@@ -150,6 +150,11 @@ pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
                 if !s.tags.is_empty() {
                     parts.push(format!("tags: {}", s.tags.join(",")));
                 }
+                // #3055: flag an unresolved `extends` chain so a broken overlay
+                // is visible in `tagent agents list`, not just the roster.
+                if let Some(err) = &s.extends_error {
+                    parts.push(format!("!! unresolved extends: {err}"));
+                }
                 println!(
                     "  {name:<width$}  [{src}]  {caps}",
                     name = s.name,

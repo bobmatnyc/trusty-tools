@@ -67,6 +67,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
             capabilities: None,
             display_name: None,
             prompt_label: None,
+            extends: None,
         },
         llm: LlmParams {
             temperature: 0.0,
