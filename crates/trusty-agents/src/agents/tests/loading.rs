@@ -723,3 +723,84 @@ allowed = ["locked_tool"]
         Some(&["locked_tool".to_string()][..])
     );
 }
+
+/// #3061: `agents_dir()` resolves a SINGLE directory (`TAGENT_CONFIG_DIR` or
+/// the CWD-relative project-local `.trusty-agents/agents`) with no `$HOME`
+/// awareness at all — unlike the registry roster
+/// (`agent_search_paths`/`registry::mod.rs`), which DOES search
+/// `~/.trusty-agents/agents`. So a personalization overlay dropped in
+/// `~/.trusty-agents/agents/` showed up in listings but was FILE-NOT-FOUND at
+/// dispatch. This proves `agents_dir_candidates()`'s `$HOME` fallback tier
+/// fixes it: the primary (project-local) directory here genuinely lacks the
+/// agent (unique per-process name), so resolution can only succeed by falling
+/// through to the `$HOME` tier.
+#[test]
+fn by_name_finds_flat_md_in_home_tier_when_project_dir_misses() {
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let home_agents = tmp.path().join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
+    let unique_name = format!("home-tier-agent-{}", std::process::id());
+    std::fs::write(
+        home_agents.join(format!("{unique_name}.md")),
+        format!("---\nname: {unique_name}\nrole: agent\n---\nHOME TIER PROSE"),
+    )
+    .expect("write home overlay");
+
+    clear_model_env(&unique_name);
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        // Force the project-local primary tier (which lacks this name).
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+        std::env::set_var("HOME", tmp.path());
+    }
+    let result = AgentConfig::by_name(&unique_name);
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        match &prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    let cfg = result.expect("by_name must find the overlay via the $HOME fallback tier");
+    assert_eq!(cfg.system_prompt.content, "HOME TIER PROSE");
+}
+
+/// Async counterpart of `by_name_finds_flat_md_in_home_tier_when_project_dir_misses`
+/// — proves `by_name_async`'s tier set is symmetric with the sync loader after
+/// the #3061 fix (both call `agents_dir_candidates()`, not a bare
+/// `agents_dir()`).
+#[tokio::test]
+async fn by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses() {
+    let _guard = ENV_LOCK.lock().await;
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let home_agents = tmp.path().join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&home_agents).expect("mkdir home agents");
+    let unique_name = format!("home-tier-agent-async-{}", std::process::id());
+    std::fs::write(
+        home_agents.join(format!("{unique_name}.md")),
+        format!("---\nname: {unique_name}\nrole: agent\n---\nHOME TIER ASYNC PROSE"),
+    )
+    .expect("write home overlay");
+
+    clear_model_env(&unique_name);
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: guarded by ENV_LOCK across the await below.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+        std::env::set_var("HOME", tmp.path());
+    }
+    let result = AgentConfig::by_name_async(&unique_name).await;
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        match &prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    let cfg = result.expect("by_name_async must find the overlay via the $HOME fallback tier");
+    assert_eq!(cfg.system_prompt.content, "HOME TIER ASYNC PROSE");
+}

@@ -6,6 +6,7 @@
   import ProjectsView from './components/ProjectsView.svelte';
   import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
+  import PersonalityPanel from './components/PersonalityPanel.svelte';
   import { invoke, isDesktop, connectEventSource, emitWebEvent, type AppEvent } from './lib/transport';
   import { apiAuthRequired, getCurrentApiToken, setApiToken, addMessage } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
@@ -19,8 +20,9 @@
   let apiError = '';
   // Why: Top-level view selector. Chat is the default; Projects shows the
   // /api/projects panel. Kept as a simple tab toggle to avoid pulling in a
-  // router for two views. (#341)
-  let activeView: 'chat' | 'projects' = 'chat';
+  // router for two views. (#341) 'personality' (#3061) shows the
+  // personalization-overlay editor.
+  let activeView: 'chat' | 'projects' | 'personality' = 'chat';
   let tokenInput = '';
   let tokenError = '';
   let probingToken = false;
@@ -423,13 +425,24 @@
         >
           Projects
         </button>
+        <button
+          type="button"
+          class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'personality'
+            ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
+            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
+          on:click={() => (activeView = 'personality')}
+        >
+          Personality
+        </button>
       </nav>
       {#if activeView === 'chat'}
         <ChatView />
         <RecapPanel />
         <InputArea />
-      {:else}
+      {:else if activeView === 'projects'}
         <ProjectsView on:navigate={(e) => (activeView = e.detail.view)} />
+      {:else}
+        <PersonalityPanel />
       {/if}
     </main>
   {/if}
