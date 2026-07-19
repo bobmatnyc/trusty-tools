@@ -129,10 +129,14 @@ lru = "0.16"
 # other through it.
 #
 # Why: The `trusty-agents` crate must NOT depend on `publish = false`
-#      agent crates (e.g. `cto-assistant`). Private launchers like
-#      `trusty-agents-local` depend on both `trusty-agents` and the agent crate, and
-#      wire them at startup via `trusty_agents::install_plugins(...)` before
-#      calling `trusty_agents::run()`.
+#      agent crates (e.g. `cto-assistant`). A private launcher can depend on
+#      both `trusty-agents` and such an agent crate, wiring them at startup
+#      via `trusty_agents::install_plugins(...)` before calling
+#      `trusty_agents::run()`. As of architecture-review tranche 0 (item 4),
+#      `trusty-agents-local` no longer does this for `cto-assistant` — that
+#      Cargo edge was cut deliberately, ahead of cto-assistant's planned
+#      migration directly into `trusty-agents`. This `install_plugins`
+#      mechanism remains available for any future private launcher.
 trusty-agents-common = { path = "../trusty-agents-common", version = "0.2.0" }
 
 # [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
