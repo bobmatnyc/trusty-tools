@@ -69,7 +69,8 @@ pub struct ModelsCatalogResponse {
 
 /// Whether the *current legacy chat dispatch* can reach `id` today.
 ///
-/// Why: The unified registry (#2400) already knows about seven providers, but
+/// Why: The unified registry (#2400) already knows about eight providers
+/// (seven keyed/AWS-chain providers plus Local, #3247), but
 /// `crate::llm::adapter::adapter_for_model` — the code path actual chat turns
 /// run through — only resolves OpenRouter (the default fallback), Anthropic
 /// (direct, when `ANTHROPIC_API_KEY` is set), and Bedrock (`bedrock/` prefix)
@@ -78,8 +79,13 @@ pub struct ModelsCatalogResponse {
 /// endpoint, which then receives each provider's bare (un-prefixed) model-id
 /// slug. OpenRouter doesn't recognize those bare slugs as its own routes, so
 /// the call fails: the gap is a model-ID / endpoint mismatch, not a missing
-/// branch. Surfacing this distinction keeps the picker honest instead of
-/// implying every registry entry is immediately usable.
+/// branch. The registry's `local` entry has a DIFFERENT gap: its `local/`
+/// slug prefix isn't recognized by `adapter_for_model` at all (only the
+/// separate `ollama/` prefix is, via `OllamaAdapter` — see the synthetic
+/// `local` object's own `reachable_today`, always `true`, below), so it falls
+/// all the way to `GenericAdapter` instead. Surfacing this distinction keeps
+/// the picker honest instead of implying every registry entry is immediately
+/// usable.
 /// What: `true` for OpenRouter, Bedrock, Anthropic; `false` for the
 /// providers whose legacy dispatch falls through to OpenRouter with an
 /// unresolvable model-id slug. Flip an entry to `true` here once its legacy

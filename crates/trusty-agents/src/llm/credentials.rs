@@ -1,4 +1,4 @@
-//! Credential routing for the controller's own LLM calls (#250).
+//! Credential routing for the controller's own LLM calls (#250, #3248).
 //!
 //! Why: The PM/ctrl orchestrator was hard-requiring `OPENROUTER_API_KEY` even
 //! when the user has equally-valid alternative credentials configured
@@ -7,15 +7,29 @@
 //! both the client constructor and the chat dispatcher agree on which backend
 //! is active.
 //!
-//! What: `pick_credentials()` inspects the env in priority order
-//! (CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > OPENROUTER_API_KEY) and
+//! Credential detection consults the SAME shared resolver
+//! (`trusty_common::inference::credentials::resolve_key`) that
+//! `trusty-channels` (Slack/Telegram) and this crate's own `GET /api/models`
+//! catalog already use, rather than a raw `std::env::var` read (#3248). That
+//! resolver checks process env, then `.env.local`, then the secure
+//! keyring/file `KeyStore` `tagent config keys set` writes to — so a
+//! credential configured ONLY via the store (never exported to the shell) is
+//! no longer silently invisible to `pick_credentials()`. The three provider
+//! names (`openrouter`, `anthropic`, `claude-code`) map to the exact same env
+//! var names this module always used
+//! (`trusty_common::inference::credentials::env_var_for`), so the env-tier
+//! behaviour is unchanged — only the store fallback is new.
+//!
+//! What: `pick_credentials()` resolves the same three credentials in priority
+//! order (CLAUDE_CODE_OAUTH_TOKEN > ANTHROPIC_API_KEY > OPENROUTER_API_KEY) and
 //! returns a `LlmCredentials` enum describing the routing mode plus a friendly
 //! display label for startup logging.
 //!
 //! Test: `pick_picks_claude_code_when_oauth_set`,
 //! `pick_picks_anthropic_when_only_anthropic_set`,
 //! `pick_picks_openrouter_when_only_openrouter_set`,
-//! `pick_returns_none_when_nothing_set`.
+//! `pick_returns_none_when_nothing_set`,
+//! `pick_consults_store_when_env_absent`.
 
 /// Resolved LLM backend for the ctrl/PM in-process LLM calls.
 ///
@@ -63,16 +77,19 @@ impl LlmCredentials {
 /// `ANTHROPIC_API_KEY` is preferred over OpenRouter when both are set
 /// (lower-latency direct API). `OPENROUTER_API_KEY` is the deployment / CI
 /// fallback.
-/// What: Reads three env vars. Returns `ClaudeCode` only when
-/// `runner == Some(RunnerKind::ClaudeCode)` AND `CLAUDE_CODE_OAUTH_TOKEN`
-/// is set. Otherwise prefers `AnthropicDirect` then `OpenRouter`. Returns
+/// What: Resolves three credentials via
+/// [`trusty_common::inference::credentials::resolve_key`] (env >
+/// `.env.local` > secure store — #3248). Returns `ClaudeCode` only when
+/// `runner == Some(RunnerKind::ClaudeCode)` AND the `claude-code` credential
+/// resolves. Otherwise prefers `AnthropicDirect` then `OpenRouter`. Returns
 /// `None` when nothing applicable is configured.
 /// Test: See module-level tests, including
-/// `pick_skips_claude_code_when_runner_not_claude_code`.
+/// `pick_skips_claude_code_when_runner_not_claude_code`,
+/// `pick_consults_store_when_env_absent`.
 pub fn pick_credentials(runner: Option<crate::agents::RunnerKind>) -> Option<LlmCredentials> {
-    let openrouter = env_set("OPENROUTER_API_KEY");
-    let anthropic = env_set("ANTHROPIC_API_KEY");
-    let claude_code = env_set("CLAUDE_CODE_OAUTH_TOKEN");
+    let openrouter = resolve_key_set("openrouter");
+    let anthropic = resolve_key_set("anthropic");
+    let claude_code = resolve_key_set("claude-code");
     let runner_is_claude_code = matches!(runner, Some(crate::agents::RunnerKind::ClaudeCode));
     tracing::debug!(
         openrouter_set = openrouter,
@@ -93,18 +110,33 @@ pub fn pick_credentials(runner: Option<crate::agents::RunnerKind>) -> Option<Llm
 }
 
 /// Multi-line user-facing error listing every supported credential option.
+///
+/// Why: since #3248 each option resolves via env, `.env.local`, OR the
+/// secure `tagent config keys set` store — the message names all three tiers
+/// so a user who already ran `config keys set` isn't told to re-export an env
+/// var they don't need.
 pub fn missing_credentials_error() -> String {
-    "no LLM credentials configured. Set one of:\n\
-     - OPENROUTER_API_KEY in .env.local (OpenRouter routing)\n\
-     - ANTHROPIC_API_KEY in .env.local (direct api.anthropic.com)\n\
-     - CLAUDE_CODE_OAUTH_TOKEN in env (via `claude setup-token`)"
+    "no LLM credentials configured. Set one of (env var, .env.local, or \
+     `tagent config keys set <provider>`):\n\
+     - OPENROUTER_API_KEY / `openrouter` (OpenRouter routing)\n\
+     - ANTHROPIC_API_KEY / `anthropic` (direct api.anthropic.com)\n\
+     - CLAUDE_CODE_OAUTH_TOKEN / `claude-code` (via `claude setup-token`)"
         .to_string()
 }
 
-fn env_set(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+/// Whether `provider`'s credential resolves via the shared 3-tier resolver,
+/// without ever exposing the resolved value.
+///
+/// Why: the single call-through point for `pick_credentials()`'s three
+/// probes, so all three consult the same env > `.env.local` > secure-store
+/// precedence as every other unified-inference consumer (#3248) instead of a
+/// raw `std::env::var` read that only ever saw the env tier.
+/// What: delegates to
+/// [`trusty_common::inference::credentials::resolve_key`] and keeps only the
+/// `is_some()` boolean.
+/// Test: `pick_consults_store_when_env_absent`.
+fn resolve_key_set(provider: &str) -> bool {
+    trusty_common::inference::credentials::resolve_key(provider).is_some()
 }
 
 /// Qualify a bare Claude / Anthropic model id with the `anthropic/` provider
@@ -159,6 +191,17 @@ mod tests {
         }
     }
 
+    /// Why: since #3248, `pick_credentials()` also consults the shared secure
+    /// store, not just process env — a dev machine with real credentials
+    /// stashed via `tagent config keys set` (openrouter/anthropic) would make
+    /// a hard-coded `is_none()` flaky. Mirrors the same self-consistency
+    /// pattern `crate::api::server::models`'s `zero_credentials_configured_is_stable`
+    /// test uses for the identical risk: assert `pick_credentials` agrees with
+    /// what `resolve_key` reports right now (with `runner = None`, the
+    /// claude-code branch never fires regardless of store contents, since it
+    /// additionally requires `runner_is_claude_code`), rather than a fixed
+    /// absence.
+    /// Test: itself.
     #[test]
     #[serial]
     fn pick_returns_none_when_nothing_set() {
@@ -166,7 +209,58 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         clear_all();
-        assert!(pick_credentials(None).is_none());
+        let expect_some = trusty_common::inference::credentials::resolve_key("openrouter")
+            .is_some()
+            || trusty_common::inference::credentials::resolve_key("anthropic").is_some();
+        assert_eq!(pick_credentials(None).is_some(), expect_some);
+    }
+
+    /// Why: the entire point of #3248 — a credential configured ONLY in the
+    /// secure store (never exported to the process env) must still be
+    /// detected. Sandboxes both `$HOME` (so the store resolves against a
+    /// tempdir, never the real one) and the credential env vars, holding both
+    /// crate-wide locks for the full body per `test_env`'s documented
+    /// convention for tests that mutate `$HOME`.
+    /// What: writes `openrouter` directly to a `FileKeyStore` rooted at the
+    /// sandboxed `$HOME`, clears every credential env var, and asserts
+    /// `pick_credentials(None)` now resolves `OpenRouter` — which would have
+    /// been silently `None` before the #3248 fix (raw `std::env::var` only).
+    /// Test: itself.
+    #[test]
+    #[serial]
+    fn pick_consults_store_when_env_absent() {
+        let _env_guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_all();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: HOME_LOCK held for the entire test body.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+        trusty_common::inference::credentials::KeyStore::set(
+            &store,
+            "openrouter",
+            "sk-or-from-store", // pragma: allowlist secret
+        )
+        .expect("seed store");
+
+        assert_eq!(pick_credentials(None), Some(LlmCredentials::OpenRouter));
+
+        // SAFETY: HOME_LOCK still held.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 
     #[test]

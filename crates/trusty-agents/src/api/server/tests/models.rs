@@ -90,8 +90,10 @@ async fn models_response_has_expected_shape() {
 /// pins the documented set so an accidental edit to `models::reachable_today`
 /// is caught here rather than silently shipping a wrong claim to the UI.
 /// What: OpenRouter/Bedrock/Anthropic are `true`; Fireworks/OpenAI/Together/
-/// AtlasCloud are `false`. Ollama's `local.reachable_today` is always `true`
-/// (it has its own legacy `ollama/`-prefix branch, independent of #2410).
+/// AtlasCloud/registry-`local` are `false`. Ollama's synthetic `local.reachable_today`
+/// (a DIFFERENT field — the top-level `local` object, not the `providers`
+/// array's `local` entry) is always `true` (it has its own legacy
+/// `ollama/`-prefix branch, independent of #2410).
 #[tokio::test]
 async fn reachable_today_matches_documented_set() {
     let body = get_models_body(router()).await;
@@ -113,6 +115,10 @@ async fn reachable_today_matches_documented_set() {
     assert!(!reachable_today("openai"));
     assert!(!reachable_today("together"));
     assert!(!reachable_today("atlascloud"));
+    // The registry's `local` provider (#3247) isn't wired into the legacy
+    // dispatch under its OWN name — only the synthetic `local.provider_id ==
+    // "ollama"` entry below is (via the `ollama/` prefix).
+    assert!(!reachable_today("local"));
 
     assert_eq!(body["local"]["reachable_today"], true);
 }
@@ -196,7 +202,8 @@ async fn credential_values_never_serialized() {
 /// fabricate the boolean) and is fully deterministic regardless of what's in
 /// the store.
 /// What: Clears every credential env var, then asserts each provider's
-/// `credential_configured` equals `id == "bedrock" || resolve_key(id).is_some()`.
+/// `credential_configured` equals
+/// `id == "bedrock" || id == "local" || resolve_key(id).is_some()`.
 #[tokio::test]
 async fn zero_credentials_configured_is_stable() {
     let _env_guard = crate::test_env::ENV_LOCK
@@ -217,7 +224,11 @@ async fn zero_credentials_configured_is_stable() {
     let body = get_models_body(router()).await;
     for entry in body["providers"].as_array().unwrap() {
         let id = entry["provider_id"].as_str().unwrap();
-        let expected = id == "bedrock" // AWS chain: always "configured".
+        // Bedrock (AWS chain) and Local (unauthenticated localhost, #3247)
+        // both have `credential_name() == None` — the handler's
+        // `credential_configured` reports `true` unconditionally for either.
+        let expected = id == "bedrock"
+            || id == "local"
             || trusty_common::inference::credentials::resolve_key(id).is_some();
         assert_eq!(
             entry["credential_configured"], expected,

@@ -9,6 +9,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- register a `local`/OpenAI-compatible inference provider (Ollama by default, `http://localhost:11434/v1`) in the unified inference registry — no external credentials required (`credential_env: None`, Bedrock precedent); base URL overridable via `OLLAMA_HOST`, optional bearer credential via `TRUSTY_LOCAL_API_KEY`; slug prefixes `local/` and `ollama/` both resolve to it (closes [#3247](https://github.com/bobmatnyc/trusty-tools/issues/3247))
+- add a `claude-code` → `CLAUDE_CODE_OAUTH_TOKEN` mapping to `inference::credentials::env_var_for`, so trusty-agents' `claude` CLI OAuth routing can resolve through the shared 3-tier credential resolver (part of [#3248](https://github.com/bobmatnyc/trusty-tools/issues/3248))
 - surface index readiness + working-context budget as events (UI Phase-1) ([#2861](https://github.com/bobmatnyc/trusty-tools/pull/2861)) ([`c5d75fc`](https://github.com/bobmatnyc/trusty-tools/commit/c5d75fc86259ac370a07504efd34671c70db9de7))
 - adopt DOC-38 policy + sld-lint gate (closes #2853, #2854) ([#2863](https://github.com/bobmatnyc/trusty-tools/pull/2863)) ([`580c9a7`](https://github.com/bobmatnyc/trusty-tools/commit/580c9a7d08e873d9706c6b05cfe83eafb2befbfa))
 

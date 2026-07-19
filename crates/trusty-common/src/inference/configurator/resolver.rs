@@ -8,11 +8,14 @@
 //! What: [`provider_for`] implements that two-stage ladder against the #2401
 //! credential resolver (env > `.env.local` > secure store), returning a
 //! [`ResolvedProvider`] carrying the provider id, the model slug, and the
-//! resolved key (wrapped in a redacting [`SecretString`]). Bedrock resolves with
-//! no key (AWS credential chain).
+//! resolved key (wrapped in a redacting [`SecretString`]). Bedrock (AWS
+//! credential chain) and Local (unauthenticated `localhost` endpoint, #3247)
+//! both resolve with no key — [`ProviderId::credential_name`] returning `None`
+//! is what routes either one through this no-key branch.
 //! Test: inline `tests` — `explicit_prefix_with_key_wins`,
 //! `explicit_prefix_missing_key_falls_back_to_openrouter`, `bare_slug_uses_openrouter`,
-//! `bedrock_resolves_without_key`, `no_credential_anywhere_errors`.
+//! `bedrock_resolves_without_key`, `local_resolves_without_key`,
+//! `no_credential_anywhere_errors`.
 
 use crate::inference::credentials::{KeyStore, resolve_key_with};
 use crate::inference::error::InferenceError;
@@ -215,6 +218,22 @@ mod tests {
         let r = provider_for("bedrock/us.anthropic.claude-sonnet-4-5", &store).expect("resolves");
         assert_eq!(r.provider(), ProviderId::Bedrock);
         assert!(r.key().is_none());
+    }
+
+    /// Why: Local (#3247) resolves with no key (unauthenticated `localhost`
+    /// endpoint) regardless of store contents, exactly like Bedrock.
+    /// Test: itself.
+    #[test]
+    #[serial(dotenv_credential_env)]
+    fn local_resolves_without_key() {
+        let store = store_with(&[]);
+        let r = provider_for("local/llama3.1", &store).expect("resolves");
+        assert_eq!(r.provider(), ProviderId::Local);
+        assert!(r.key().is_none());
+        // The `ollama/` alias resolves identically.
+        let r2 = provider_for("ollama/qwen3:30b", &store).expect("resolves");
+        assert_eq!(r2.provider(), ProviderId::Local);
+        assert!(r2.key().is_none());
     }
 
     /// Why: with no credential anywhere (and no Bedrock prefix), resolution must
