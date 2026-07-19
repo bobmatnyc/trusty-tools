@@ -161,9 +161,14 @@ fn parse_origin_authority(origin: &str) -> Option<(&str, Option<&str>)> {
         let port = remainder.strip_prefix(':');
         Some((host, port))
     } else {
-        // host[:port] — split at the last `:` so IPv6-without-brackets (which
-        // should not appear in a well-formed Origin) does not falsely match;
-        // a bare host has no `:` at all.
+        // host[:port] — split at the FIRST `:` (`split_once`). For a
+        // well-formed, non-bracketed authority (IPv4 dotted-quad or hostname
+        // plus an optional `:port`) there is at most one `:`, so first and
+        // last coincide; a bare host has no `:` at all. A raw (unbracketed)
+        // IPv6 literal — which should never appear in a well-formed
+        // `Origin` — would produce a garbage `host` here, but that only
+        // degrades to a safe rejection in `origin_is_loopback` /
+        // `origin_matches_self`, never a false accept.
         match authority.split_once(':') {
             Some((h, p)) => Some((h, Some(p))),
             None => Some((authority, None)),

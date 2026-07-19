@@ -254,9 +254,9 @@ crates/trusty-common/src/update/mod.rs	check_throttled_uses_cache
 crates/trusty-console/src/bind.rs	test_port_from_addr
 crates/trusty-console/src/mcp_handle/mod.rs	call_tool_raw_absent_binary_returns_error
 crates/trusty-console/src/mcp_handle/mod.rs	mcp_handle_degraded_when_console_metrics_missing
-crates/trusty-console/src/server.rs	test_analyze_visualize_handler_absent_binary_returns_503
-crates/trusty-console/src/server.rs	test_analyze_visualize_handler_no_index_returns_400
-crates/trusty-console/src/server.rs	test_services_route_daemon_version_overlay
+crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_absent_binary_returns_503
+crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_no_index_returns_400
+crates/trusty-console/src/server/mod.rs	test_services_route_daemon_version_overlay
 crates/trusty-cto-db/src/lib.rs	open_readonly_rejects_writes
 crates/trusty-embedderd/src/lib.rs	try_parse_from
 crates/trusty-embedderd/src/stdio_server.rs	stdio_eof_terminates_cleanly
