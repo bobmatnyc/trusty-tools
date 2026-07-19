@@ -4,53 +4,51 @@
 
 use super::*;
 
-/// How long a never-navigated picker stays "fresh" (i.e. still navigable by
-/// a first Up/Down) before `should_navigate_picker` starts treating it as
-/// stale and reinterprets Up/Down as history recall instead (#3346).
-///
-/// Why: Long enough that a normal human glance-and-arrow-key reaction to a
-/// picker that just appeared (e.g. `/switch`'s persona list, or a
-/// `detect_choices` suggestion list right after an assistant reply) is never
-/// mistaken for staleness — see `inline_choices_switch_context_dispatches_submit`,
-/// which requires the very first Down after `/switch` to navigate. Short
-/// enough that a picker genuinely left sitting (the user moved on to reading
-/// the response, thinking, or simply paused) reads as stale well before the
-/// user could plausibly still be orienting to a list that "just" appeared.
-const PICKER_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// Whether an Up/Down keypress should navigate `app.choices` right now,
 /// rather than being reinterpreted as shell-style history recall (#3346).
 ///
 /// Why: `handle_key` used to let Up/Down always navigate `app.choices`
 /// whenever it was non-empty, even before the input-editing match arms ever
-/// saw the key. That's correct while the picker is genuinely being used, but
-/// wrong for the residual case #3325 left open: a picker (a `detect_choices`
-/// LLM list or a `/switch` list — anything that isn't a live slash-command
-/// completion) that has sat untouched past `PICKER_STALE_AFTER` reads as the
-/// user reaching for history, not browsing suggestions they've shown no
-/// interest in since it appeared. A picker that was *just* populated must
-/// still navigate on its first press (that's normal use — see
-/// `PICKER_STALE_AFTER`'s doc), and once the picker HAS been navigated, or
-/// the input buffer is non-empty (typing already dismisses a stale picker
-/// per #3325, so this only matters for the still-live slash-completion
-/// case), continuing to navigate is unambiguous regardless of elapsed time.
-/// What: True when `app.choices` is a live slash-command completion list
-/// (see `is_live_slash_completion`), OR `app.choices_navigated` is already
-/// `true`, OR `app.input_buf` is non-empty, OR the picker hasn't been open
-/// longer than `PICKER_STALE_AFTER` (including when `choices_opened_at` is
-/// `None` — no timestamp recorded means "assume fresh", the safe default).
-/// False only for a never-navigated, non-live, genuinely stale picker with
-/// an empty buffer — the #3346 history-recall case.
-/// Test: `repl_app_first_up_over_stale_picker_recalls_history`,
-/// `repl_app_first_down_over_stale_picker_recalls_history`,
-/// `repl_app_fresh_picker_navigates_on_first_press`,
-/// `repl_app_stale_picker_navigates_after_first_press`,
-/// `repl_app_live_slash_picker_up_down_still_navigates`.
+/// saw the key. That's still correct for two picker kinds the user is
+/// *actively driving with arrow keys on purpose* — a live slash-command
+/// completion list (rebuilt from `input_buf` on every keystroke) and the
+/// tagged `/switch` persona picker (`choices_context == Some("switch")`),
+/// which has no other input mechanism than Up/Down + Enter. Those must
+/// always navigate, on the very first press, no exceptions — dismissing
+/// `/switch` on its first Down (e.g. after the user paused a couple of
+/// seconds reading the persona names before pressing a key) would make the
+/// picker unusable, which an earlier wall-clock-based version of this fix
+/// actually did (caught by `inline_choices_switch_context_dispatches_submit`
+/// during review).
+///
+/// The #3325/#3346 residual case is narrower: an *untagged* `detect_choices`
+/// LLM list (`choices_context.is_none()`, not a live slash completion) that
+/// was offered alongside an assistant reply and then left untouched — the
+/// user's attention has moved on to composing a new message, and their first
+/// Up/Down is far more likely to be history recall than picker browsing.
+/// Untagged lists ARE still arrow-navigable by design (`draw_inline_choice_picker`
+/// highlights `choice_cursor`, and Enter inserts the highlighted item into
+/// `input_buf` for editing) — so this predicate only reinterprets the very
+/// first Up/Down on such a list, and only while the buffer is empty; once
+/// the user has genuinely started navigating it (`choices_navigated`), every
+/// further press keeps navigating.
+/// What: True (navigate) when `app.choices` is a live slash-command
+/// completion (`is_live_slash_completion`), OR `choices_context.is_some()`
+/// (covers `/switch` and any future tagged picker), OR `choices_navigated`
+/// is already `true`, OR `input_buf` is non-empty. False only for a
+/// never-navigated, untagged, non-live picker with an empty buffer — the
+/// #3346 history-recall case. Deliberately time-independent: no wall clock,
+/// no tick counter.
+/// Test: `repl_app_first_up_over_stale_untagged_picker_recalls_history`,
+/// `repl_app_first_down_over_stale_untagged_picker_recalls_history`,
+/// `repl_app_switch_picker_up_down_always_navigates`,
+/// `repl_app_live_slash_picker_up_down_still_navigates`,
+/// `repl_app_untagged_picker_navigates_once_started`.
 fn should_navigate_picker(app: &ReplApp) -> bool {
-    let is_stale = app
-        .choices_opened_at
-        .is_some_and(|t| t.elapsed() >= PICKER_STALE_AFTER);
-    is_live_slash_completion(app) || app.choices_navigated || !app.input_buf.is_empty() || !is_stale
+    is_live_slash_completion(app)
+        || app.choices_context.is_some()
+        || app.choices_navigated
+        || !app.input_buf.is_empty()
 }
 
 /// Handle one key press. Returns `Some(line)` if the user submitted.
@@ -84,10 +82,12 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                     app.choices_navigated = true;
                     return None;
                 }
-                // Stale picker, never navigated, empty input buffer: this is
+                // Untagged, never-navigated, empty input buffer: this is
                 // shell-style history recall, not picker navigation (#3346).
                 // Dismiss and fall through to the normal Up-arrow handling
-                // below instead of returning early.
+                // below instead of returning early. `/switch` and live
+                // slash completions never reach here — `should_navigate_picker`
+                // already returned `true` for both.
                 app.dismiss_choices();
             }
             KeyCode::Down => {

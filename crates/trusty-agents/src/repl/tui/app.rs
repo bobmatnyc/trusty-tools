@@ -48,7 +48,6 @@ impl ReplApp {
             choice_cursor: 0,
             choices_context: None,
             choices_navigated: false,
-            choices_opened_at: None,
             pending_submit: None,
             tick_count: 0,
             rainbow_tick: 0,
@@ -109,10 +108,8 @@ impl ReplApp {
                     self.choice_cursor = 0;
                     // LLM-offered list — generic context (insert into input).
                     self.choices_context = None;
-                    // Fresh picker instance — not yet navigated, timestamped
-                    // so `handle_key` can tell fresh from stale (#3346).
+                    // Fresh picker instance — not yet navigated (#3346).
                     self.choices_navigated = false;
-                    self.choices_opened_at = Some(std::time::Instant::now());
                 }
                 None => self.dismiss_choices(),
             }
@@ -279,26 +276,23 @@ impl ReplApp {
 
     /// Clear the inline choice picker and all of its per-instance state.
     ///
-    /// Why: `choices`, `choice_cursor`, `choices_context`,
-    /// `choices_navigated`, and `choices_opened_at` (#3346) must always be
-    /// reset together — leaving one behind (e.g. a stale
-    /// `choices_navigated == true` or a stale timestamp) would let a
+    /// Why: `choices`, `choice_cursor`, `choices_context`, and
+    /// `choices_navigated` (#3346) must always be reset together — leaving
+    /// one behind (e.g. a stale `choices_navigated == true`) would let a
     /// *later*, genuinely-fresh picker skip the history-recall
-    /// disambiguation in `handle_key` because it looks "already navigated"
-    /// or "old". Centralizing the reset here (used by every dismiss site:
-    /// Enter, Esc, submit, typing over a stale picker, and the #3346
-    /// Up/Down-as-history path) makes that invariant mechanical instead of
-    /// relying on every call site to remember all five fields.
+    /// disambiguation in `handle_key` because it looks "already navigated".
+    /// Centralizing the reset here (used by every dismiss site: Enter, Esc,
+    /// submit, typing over a stale picker, and the #3346 Up/Down-as-history
+    /// path) makes that invariant mechanical instead of relying on every
+    /// call site to remember all four fields.
     /// What: Clears `choices`, resets `choice_cursor` to 0, and sets
-    /// `choices_context` / `choices_navigated` / `choices_opened_at` to
-    /// their empty defaults.
+    /// `choices_context` / `choices_navigated` to their empty defaults.
     /// Test: `repl_app_dismiss_choices_resets_all_picker_state`.
     pub(crate) fn dismiss_choices(&mut self) {
         self.choices.clear();
         self.choice_cursor = 0;
         self.choices_context = None;
         self.choices_navigated = false;
-        self.choices_opened_at = None;
     }
 
     /// Apply a scroll delta. Negative = older (up), positive = newer (down).

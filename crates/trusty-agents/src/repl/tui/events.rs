@@ -233,10 +233,8 @@ pub(crate) async fn process_event<H: ReplHandler + 'static>(
             a.choices = items;
             a.choice_cursor = 0;
             a.choices_context = context;
-            // Fresh picker instance — not yet navigated, timestamped so
-            // `handle_key` can tell fresh from stale (#3346).
+            // Fresh picker instance — not yet navigated (#3346).
             a.choices_navigated = false;
-            a.choices_opened_at = Some(std::time::Instant::now());
         }
         ReplEvent::TmSessionCount(n) => {
             let mut a = app.lock().await;
