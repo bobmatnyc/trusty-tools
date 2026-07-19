@@ -30,11 +30,12 @@ Otherwise every library consumer pulls in the full axum + tower stack.
 
 🟡 **Skipping proportional documentation on new public items** — clippy does
 not enforce this. Scale documentation to how surprising the code is: the full
-Why/What/Test pattern is mandatory for API entry points, error contracts, and
-design-heavy code; a one-line summary suffices for trivial items (simple getters,
-obvious one-liners). Avoid defensive-reasoning paragraphs in doc comments —
-link to issues or ADRs instead (`// See issue #1234 for the full context`).
-Review public APIs manually before committing.
+Why/What/Test pattern is mandatory for API entry points, design-heavy code,
+error contracts, safety/TCC behavior, and cross-crate surfaces; a one-line summary
+suffices for trivial items (simple getters, obvious one-liners). Avoid
+defensive-reasoning paragraphs in doc comments — link to issues or ADRs instead
+(`// See issue #1234 for the full context`). Review public APIs manually before
+committing.
 
 🟡 **Building the Svelte UI manually before `cargo build`** — `trusty-search`
 uses `build.rs` to invoke pnpm if `ui-dist/` is stale. If pnpm is not

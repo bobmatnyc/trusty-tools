@@ -36,7 +36,7 @@ Always read full ticket + comments before writing code.
 - Agent: rust-engineer (model: opus)
 - No `unwrap()` in library code
 - `thiserror` for crates, `anyhow` for binaries
-- Why/What/Test doc pattern on every public item
+- Why/What/Test doc pattern proportional to code surprisingness: full pattern for API entry points, design-heavy code, error contracts, safety/TCC behavior, cross-crate surfaces; one-line summaries for trivial items
 
 ### Phase 3: Test
 - `cargo test --workspace` — all green

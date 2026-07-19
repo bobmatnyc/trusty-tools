@@ -123,8 +123,14 @@ Always verify the `name` field in the crate's `Cargo.toml` if you get a "package
 
 ## Key Conventions
 
-🔴 **Why/What/Test doc pattern** — every public item (function, struct, trait,
-module) carries three comment sections:
+🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
+documentation proportional to how surprising the code is. The full three-section
+pattern (Why/What/Test) is mandatory for API entry points, design-heavy code,
+error contracts, safety/TCC behavior, and cross-crate surfaces; a single-line doc
+or lightweight pattern suffices for trivial items (simple getters, obvious
+one-liners, thin re-exports).
+
+**Full pattern (mandatory for non-obvious code):**
 
 ```rust
 /// Why: <motivation — the problem this solves, not the mechanics>
@@ -133,8 +139,17 @@ module) carries three comment sections:
 pub fn my_function() { … }
 ```
 
-Never omit this pattern on public items. It is the primary way future readers
-understand design intent without reading git history.
+**Lighter touch (permitted for self-evident code):**
+
+```rust
+/// Returns the user's name.
+pub fn name(&self) -> &str { … }
+```
+
+**Judgment rule:** If a competent reader's first guess is right, a one-line doc
+is complete. Defensive-reasoning paragraphs and issue-history anecdotes belong in
+linked ADRs or issues, not inline comments — use `// See <issue-or-adr>` instead.
+This keeps the entry point dense and lets detail stay one hop away.
 
 🔴 **No `unwrap()` in library code** — use `?` with `anyhow::Result` for
 application/binary code and `thiserror` for library error types. Reserve

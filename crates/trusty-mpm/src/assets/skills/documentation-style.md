@@ -33,7 +33,7 @@ Why/What/Test triple (or your project's equivalent) stands on its own.
 |---|---|---|
 | **Why** | What problem does this solve? What's the motivation? | Yes for non-obvious code; lighter touch OK for trivial items |
 | **What** | What does it mechanically do? | Yes for non-obvious code; lighter touch OK for trivial items |
-| **Test** | Where is this proven? (backtick-quoted test name(s)) | Optional when adjacent test module names are self-evident; mandatory for safety/error contracts |
+| **Test** | Where is this proven? (backtick-quoted test name(s)) | Yes for non-obvious code; lighter touch OK for trivial items |
 | **Spec References** | Which spec section governs this, if any? | **Opt-in** — only when a real spec governs it |
 
 **Proportionality principle:** Documentation effort scales with how surprising the
