@@ -53,6 +53,10 @@ trusty-agents-common = { workspace = true }
 # Structured error types for library code (FsError, LlmError, etc.)
 thiserror = { workspace = true }
 
+# workstreams::path: deterministic SHA-256 project-root fingerprint for the
+# workstream store's filename (DOC-48 §3.1: "workstreams-{slug}-{hash}.json").
+sha2 = { workspace = true }
+
 # LLM client: HTTP + TLS for the OpenRouter chat-completions API
 reqwest = { workspace = true }
 
