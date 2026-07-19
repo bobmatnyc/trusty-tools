@@ -382,6 +382,45 @@ fn spawn_piped_native(cmd: std::process::Command) -> std::io::Result<PipedSpawn>
     })
 }
 
+mod pane;
+pub use pane::{PANE_DISCLAIM_SUBCOMMAND, disclaim_pane_command};
+
+/// Whether the private `responsibility_spawnattrs_setdisclaim` SPI resolves on
+/// this build.
+///
+/// Why: `tm doctor`'s TCC-taint check (issue #2997) needs to tell the operator
+/// whether managed panes can actually disclaim — a future macOS that dropped
+/// the SPI would silently degrade the whole fix to a no-op, and that should be
+/// surfaced, not invisible.
+/// What: `true` on macOS when [`macos::resolve_disclaim_fn`] finds the symbol;
+/// `false` on every non-macOS build (there is no TCC there).
+/// Test: `daemon::doctor`'s `tcc_taint_*` checks fold this into the verdict;
+/// direct coverage lives in the capture/status/piped spawn tests that only
+/// disclaim when it returns `Some`.
+pub fn disclaim_spi_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::resolve_disclaim_fn().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Whether the [`DISABLE_ENV`] escape hatch is currently set.
+///
+/// Why: the same env var that forces every spawn shape onto the plain path
+/// also disables the pane disclaim ([`disclaim_pane_command`]); `tm doctor`
+/// reports when it is set so an operator who flipped it is reminded the #2997
+/// attribution fix is off.
+/// What: `true` when the process sees `TM_DISABLE_SPAWN_DISCLAIM` set to any
+/// value.
+/// Test: exercised via `daemon::doctor`'s verdict builder.
+pub fn disclaim_disabled_by_env() -> bool {
+    std::env::var_os(DISABLE_ENV).is_some()
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 

@@ -312,9 +312,16 @@ pub(crate) async fn launch(
     if prompt_path.is_none() {
         eprintln!("warning: failed to write system prompt file; launching without prompt");
     }
-    let claude_cmd = trusty_mpm::core::model_inject::build_claude_command(
-        Some(&pm_model),
-        prompt_path.as_deref(),
+    // #2997: `tm launch` also creates a detached tmux session and types the
+    // `claude` line into it via send-keys, so the pane's `claude` is forked by
+    // the shared tmux server just like the daemon path — wrap it in the
+    // disclaim-exec so tccd blames Claude Code, not the tmux server. No-op off
+    // macOS / under TM_DISABLE_SPAWN_DISCLAIM.
+    let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
+        &trusty_mpm::core::model_inject::build_claude_command(
+            Some(&pm_model),
+            prompt_path.as_deref(),
+        ),
     );
 
     // 11. Print the full-screen robot splash then the rich info panel.
@@ -541,7 +548,12 @@ pub(crate) async fn connect(
     // 5. Start `claude` inside a freshly-created session, carrying the PM
     //    system-prompt injection plus the shared isolation flags (#2230).
     if !already_running {
-        let claude_cmd = connect_claude_cmd(prompt_path.as_deref());
+        // #2997: disclaim the pane's `claude` off the shared tmux server (same
+        // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
+        // TM_DISABLE_SPAWN_DISCLAIM.
+        let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
+            &connect_claude_cmd(prompt_path.as_deref()),
+        );
         let send = trusty_mpm::core::tmux::send_line(
             None,
             &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),

@@ -193,6 +193,17 @@ async fn main() -> anyhow::Result<()> {
         return cmd.run().await;
     }
 
+    // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
+    // tmux pane routes `claude` through so it is spawned with macOS TCC
+    // responsibility disclaimed. It must run BEFORE any daemon-URL resolution,
+    // tracing/migration setup, or client construction below — it is a bare
+    // `posix_spawn` + wait that exits with the child's code and never talks to
+    // the daemon. (Emitted into the pane command by
+    // `trusty_mpm::core::spawn_disclaim::disclaim_pane_command`.)
+    if let Some(Command::InternalSpawnDisclaimed { argv }) = cli.command {
+        return commands::spawn_disclaimed::run(argv);
+    }
+
     // Long-running daemon mode: init file-rotating tracing + bug-capture layer
     // (identical to the former trusty-mpmd binary). Short-lived CLI invocations
     // skip subscriber init entirely — they have no meaningful log volume and
@@ -597,6 +608,11 @@ async fn main() -> anyhow::Result<()> {
         // #2405 early short-circuit above, right after `Cli::try_parse`).
         // The arm still must exist for match exhaustiveness over `Command`.
         Some(Command::Config(_)) => unreachable!("config dispatched before daemon-URL resolution"),
+        // Unreachable for the same reason as `Config`: the #2997 disclaim-exec
+        // shim returned early right after `Config` above, before this match.
+        Some(Command::InternalSpawnDisclaimed { .. }) => {
+            unreachable!("internal-spawn-disclaimed dispatched before daemon-URL resolution")
+        }
     };
 
     // Top-level exit-code translation: a `tm session prune-idle` that found the
