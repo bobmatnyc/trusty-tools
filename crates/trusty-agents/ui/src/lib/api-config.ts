@@ -25,7 +25,7 @@ export const DEFAULT_API_PORT = 8765;
 export function apiBase(): string {
   const env = import.meta.env as Record<string, string | undefined>;
   if (isTauri) {
-    return env.VITE_OMPM_API ?? `http://localhost:${DEFAULT_API_PORT}`;
+    return env.VITE_TAGENT_API ?? `http://localhost:${DEFAULT_API_PORT}`;
   }
-  return env.VITE_OMPM_API ?? '';
+  return env.VITE_TAGENT_API ?? '';
 }

@@ -16,7 +16,7 @@ import { writable, derived } from 'svelte/store';
  */
 export type Theme = 'light' | 'dark' | 'system';
 
-const STORAGE_KEY = 'ompm-theme';
+const STORAGE_KEY = 'foundry-theme';
 
 export function getInitialTheme(): Theme {
   if (typeof localStorage !== 'undefined') {

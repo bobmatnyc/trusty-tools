@@ -1,6 +1,6 @@
-# open-mpm desktop UI
+# Trusty Assistant desktop UI
 
-A Tauri 2 + Svelte 4 chat interface for [open-mpm](../). Lets you:
+A Tauri 2 + Svelte 4 chat interface for [trusty-agents](../) (`tagent`). Lets you:
 
 1. Chat with **CTRL**, the top-level controller (runs in the repo cwd).
 2. Register project paths and chat with **project-scoped PMs** that run with
@@ -16,7 +16,7 @@ A Tauri 2 + Svelte 4 chat interface for [open-mpm](../). Lets you:
 
 ## How it works
 
-- The Tauri shell spawns `open-mpm --api --port 7654` as a sidecar on startup.
+- The Tauri shell spawns `tagent --api --port 7654` as a sidecar on startup.
 - Frontend `invoke('send_message', {...})` calls the Rust handler, which posts
   to `POST /api/task`, polls `GET /api/task/:id`, and emits `task-progress` /
   `task-complete` / `task-error` Tauri events to stream into the chat bubble.
@@ -27,14 +27,14 @@ A Tauri 2 + Svelte 4 chat interface for [open-mpm](../). Lets you:
 
 - Rust 1.80+ (for Tauri)
 - Node.js 20+ and `pnpm` (or npm / yarn)
-- An `open-mpm` binary on `$PATH` OR a debug/release build sitting in
-  `../target/{debug,release}/open-mpm`.
+- A `tagent` binary on `$PATH` OR a debug/release build sitting in
+  `../target/{debug,release}/tagent`.
 
 ## Running
 
 The UI is dual-mode: the same code runs as a Tauri desktop shell (full
 process spawning + native events) or as a plain browser SPA backed by the
-`open-mpm --api` HTTP server. A small pill in the top-right of the window
+`tagent --api` HTTP server. A small pill in the top-right of the window
 shows which mode is active (`⊞ Desktop` vs `⟳ Web`).
 
 ### Desktop mode (Tauri)
@@ -57,7 +57,7 @@ API and CORS is a non-issue:
 # terminal 1: start the API
 cargo run -- --api --port 7654
 
-# terminal 2: start Vite (uses VITE_OMPM_PORT to know where to proxy)
+# terminal 2: start Vite (uses VITE_TAGENT_PORT to know where to proxy)
 make ui-web
 open http://localhost:5173
 ```
@@ -66,15 +66,15 @@ Override the API port if you ran the server with `--port` other than 7654:
 
 ```sh
 cargo run -- --api --port 9000
-cd ui && VITE_OMPM_PORT=9000 pnpm dev
+cd ui && VITE_TAGENT_PORT=9000 pnpm dev
 ```
 
 For talking to a remote/non-proxied API server (e.g. a deployed instance),
-set `VITE_OMPM_API` to the absolute URL — this skips the proxy and uses the
+set `VITE_TAGENT_API` to the absolute URL — this skips the proxy and uses the
 permissive CORS layer on the API server:
 
 ```sh
-VITE_OMPM_API=https://ompm.example.com pnpm build
+VITE_TAGENT_API=https://tagent.example.com pnpm build
 ```
 
 ## Production build

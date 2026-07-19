@@ -4,10 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="description" content="open-mpm — AI agent orchestration" />
-    <meta name="theme-color" content="#3B4CCA" />
+    <meta name="description" content="Trusty Assistant — AI agent orchestration" />
+    <meta name="theme-color" content="#B7410E" />
     <meta name="color-scheme" content="light dark" />
-    <title>open-mpm</title>
+    <title>Trusty Assistant</title>
     <script>
       // Why: Apply the persisted theme before first paint so users don't see a
       // flash of the wrong palette during JS bootstrap. The theme store also
@@ -15,36 +15,20 @@
       // earlier (before any module evaluation).
       (function () {
         try {
-          var stored = localStorage.getItem('ompm-theme');
+          var stored = localStorage.getItem('foundry-theme');
           var theme = stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
           var isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
           if (isDark) document.documentElement.classList.add('dark');
         } catch (_) {}
       })();
     </script>
-    <style>
-      /* System font stack — no external HTTP requests, renders immediately.
-         Tailwind font-sans maps to Inter; we fall through to system UI fonts
-         so the page never blocks on CDN availability. */
-      @font-face {
-        font-family: 'Inter';
-        font-style: normal;
-        font-weight: 100 900;
-        font-display: swap;
-        src: local('-apple-system'), local('BlinkMacSystemFont'), local('Segoe UI'),
-             local('Helvetica Neue'), local('Arial'), local('sans-serif');
-      }
-      @font-face {
-        font-family: 'JetBrains Mono';
-        font-style: normal;
-        font-weight: 100 900;
-        font-display: swap;
-        src: local('SF Mono'), local('Monaco'), local('Cascadia Code'),
-             local('Consolas'), local('Liberation Mono'), local('monospace');
-      }
-    </style>
+    <!-- Foundry design system fonts (docs/design/gui/README.md install step). -->
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+    />
   </head>
-  <body class="bg-ompm-light-bg text-ompm-light-text dark:bg-ompm-bg dark:text-ompm-text">
+  <body class="bg-foundry-light-bg text-foundry-light-text dark:bg-foundry-bg dark:text-foundry-text">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

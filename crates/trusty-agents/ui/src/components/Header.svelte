@@ -16,7 +16,7 @@
 </script>
 
 <header
-  class="sticky top-0 z-20 flex h-12 w-full items-center justify-between border-b border-ompm-light-border dark:border-ompm-border bg-ompm-light-surface dark:bg-ompm-surface px-4"
+  class="sticky top-0 z-20 flex h-12 w-full items-center justify-between border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4"
 >
   <div class="flex items-center">
     <LogoMark size={22} />

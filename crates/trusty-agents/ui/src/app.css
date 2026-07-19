@@ -9,26 +9,27 @@ html, body, #app {
 }
 
 body {
-  font-family: 'Inter', 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 /* Why: Default body palette in light mode — Tailwind classes on <body>
    override these when the dark class is set on <html>. Avoids a flash of
-   the wrong palette before Svelte mounts. */
+   the wrong palette before Svelte mounts. Values match the Foundry design
+   system (docs/design/gui/tokens.css): --trusty-content-bg / --trusty-text-primary. */
 body {
-  background-color: #F4F6FB;
-  color: #1A1F3A;
+  background-color: #F5EFE7;
+  color: #2B1C12;
 }
 
 html.dark body {
-  background-color: #0F1221;
-  color: #E6E9F5;
+  background-color: #201612;
+  color: #F0E7D8;
 }
 
 code, pre, kbd, samp {
-  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 #app {

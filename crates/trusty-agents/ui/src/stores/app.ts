@@ -5,7 +5,7 @@ import { apiBase } from '../lib/api-config';
  * Why: The sidebar needs a single source of truth for the list of chat
  * targets (CTRL + project PMs). Each `Project` entry maps to a separate
  * conversation with its own message history. CTRL has no `path` because it
- * runs with open-mpm's own cwd.
+ * runs with tagent's own cwd.
  * What: Minimal record describing what the sidebar renders and what gets
  * forwarded to the backend as `project_path`.
  * Test: Assert the initial store contains exactly one entry with id='ctrl'
@@ -75,17 +75,17 @@ export const projects = writable<Project[]>([
 export const activeProjectId = writable<string>('ctrl');
 
 /**
- * Why: When `open-mpm --api --api-token …` runs, every `/api/*` call
+ * Why: When `tagent --api --api-token …` runs, every `/api/*` call
  * (except `/api/health` and `/api/config`) needs `Authorization: Bearer
  * <token>`. We persist the token in `localStorage` so the user only pastes
  * it once per browser, and expose it via this store so `transport.ts` and
  * any future API caller can read it reactively. (#181)
- * What: A writable store seeded from `localStorage['ompm.apiToken']`.
+ * What: A writable store seeded from `localStorage['tagent.apiToken']`.
  * `setApiToken` updates both the store and storage in one call.
  * Test: `setApiToken('abc')`, reload page, assert `apiToken` initial value
  * is `'abc'`.
  */
-const TOKEN_KEY = 'ompm.apiToken';
+const TOKEN_KEY = 'tagent.apiToken';
 const initialToken =
   typeof localStorage !== 'undefined' ? localStorage.getItem(TOKEN_KEY) ?? '' : '';
 export const apiToken = writable<string>(initialToken);

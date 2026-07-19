@@ -241,12 +241,12 @@
         return 'bg-green-500 session-pulse';
       case 'Idle':
       case 'Paused':
-        return 'bg-ompm-light-muted/60 dark:bg-ompm-text/40';
+        return 'bg-foundry-light-muted/60 dark:bg-foundry-text/40';
       case 'Orphaned':
       case 'Stopped':
         return 'bg-red-500/60';
       default:
-        return 'bg-ompm-light-muted/40 dark:bg-ompm-text/30';
+        return 'bg-foundry-light-muted/40 dark:bg-foundry-text/30';
     }
   }
 
@@ -261,7 +261,7 @@
       case 'Stopped':
         return 'bg-red-500/15 text-red-700 dark:text-red-300';
       default:
-        return 'bg-ompm-light-border/40 dark:bg-ompm-text/20 text-ompm-light-text/80 dark:text-ompm-text/70';
+        return 'bg-foundry-light-border/40 dark:bg-foundry-text/20 text-foundry-light-text/80 dark:text-foundry-text/70';
     }
   }
 
@@ -342,30 +342,30 @@
   $: cards = sortProjects(filtered, sortMode);
 </script>
 
-<section class="flex h-full flex-1 flex-col overflow-hidden bg-ompm-light-bg dark:bg-ompm-bg">
+<section class="flex h-full flex-1 flex-col overflow-hidden bg-foundry-light-bg dark:bg-foundry-bg">
   <header
-    class="flex flex-wrap items-center justify-between gap-3 border-b border-ompm-light-border dark:border-ompm-border px-6 py-3"
+    class="flex flex-wrap items-center justify-between gap-3 border-b border-foundry-light-border dark:border-foundry-border px-6 py-3"
   >
     <div class="flex items-center gap-3">
-      <h1 class="text-lg font-semibold text-ompm-light-text dark:text-ompm-text">Projects</h1>
+      <h1 class="text-lg font-semibold text-foundry-light-text dark:text-foundry-text">Projects</h1>
       {#if cards.length > 0}
-        <span class="text-xs text-ompm-light-muted dark:text-ompm-text/60">
+        <span class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
           {cards.length} {cards.length === 1 ? 'project' : 'projects'}
         </span>
       {/if}
     </div>
     <div class="flex flex-wrap items-center gap-2">
-      <span class="text-xs text-ompm-light-muted dark:text-ompm-text/60">Sort by:</span>
+      <span class="text-xs text-foundry-light-muted dark:text-foundry-text/60">Sort by:</span>
       <div
-        class="flex items-center gap-0.5 rounded-md border border-ompm-light-border dark:border-ompm-border p-0.5"
+        class="flex items-center gap-0.5 rounded-md border border-foundry-light-border dark:border-foundry-border p-0.5"
         role="group"
         aria-label="Sort mode"
       >
         <button
           type="button"
           class="rounded px-2 py-0.5 text-xs transition-colors {sortMode === 'last_connected'
-            ? 'bg-ompm-primary text-white'
-            : 'text-ompm-light-muted dark:text-ompm-text/70 hover:bg-ompm-primary/10'}"
+            ? 'bg-foundry-primary text-white'
+            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-primary/10'}"
           on:click={() => (sortMode = 'last_connected')}
         >
           Last Connected
@@ -373,8 +373,8 @@
         <button
           type="button"
           class="rounded px-2 py-0.5 text-xs transition-colors {sortMode === 'name'
-            ? 'bg-ompm-primary text-white'
-            : 'text-ompm-light-muted dark:text-ompm-text/70 hover:bg-ompm-primary/10'}"
+            ? 'bg-foundry-primary text-white'
+            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-primary/10'}"
           on:click={() => (sortMode = 'name')}
         >
           Name
@@ -382,8 +382,8 @@
         <button
           type="button"
           class="rounded px-2 py-0.5 text-xs transition-colors {sortMode === 'active_first'
-            ? 'bg-ompm-primary text-white'
-            : 'text-ompm-light-muted dark:text-ompm-text/70 hover:bg-ompm-primary/10'}"
+            ? 'bg-foundry-primary text-white'
+            : 'text-foundry-light-muted dark:text-foundry-text/70 hover:bg-foundry-primary/10'}"
           on:click={() => (sortMode = 'active_first')}
         >
           Active First
@@ -393,9 +393,9 @@
         type="search"
         placeholder="Filter…"
         bind:value={filter}
-        class="rounded-md border border-ompm-light-border dark:border-ompm-border bg-ompm-light-bg dark:bg-ompm-bg px-2 py-1 text-xs text-ompm-light-text dark:text-ompm-text placeholder:text-ompm-light-muted dark:placeholder:text-ompm-text/40 focus:border-ompm-primary focus:outline-none"
+        class="rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40 focus:border-foundry-primary focus:outline-none"
       />
-      <label class="flex items-center gap-1 text-xs text-ompm-light-muted dark:text-ompm-text/70">
+      <label class="flex items-center gap-1 text-xs text-foundry-light-muted dark:text-foundry-text/70">
         <input type="checkbox" checked={showAll} on:change={toggleShowAll} class="h-3 w-3" />
         Show all
       </label>
@@ -403,7 +403,7 @@
         type="button"
         on:click={refresh}
         disabled={loading}
-        class="inline-flex items-center gap-1 rounded-md border border-ompm-light-border dark:border-ompm-border px-2 py-1 text-xs text-ompm-light-text dark:text-ompm-text hover:bg-ompm-primary/10 disabled:opacity-50"
+        class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-primary/10 disabled:opacity-50"
         title="Refresh"
       >
         <RefreshCw class="h-3 w-3 {loading ? 'animate-spin' : ''}" />
@@ -412,7 +412,7 @@
       <button
         type="button"
         on:click={() => { showAddForm = !showAddForm; addError = ''; }}
-        class="inline-flex items-center gap-1 rounded-md border border-ompm-light-border dark:border-ompm-border px-2 py-1 text-xs text-ompm-light-text dark:text-ompm-text hover:bg-ompm-primary/10"
+        class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-primary/10"
         title="Add project by path"
       >
         <Plus class="h-3 w-3" />
@@ -427,14 +427,14 @@
       browser HTML5 validation to reject Unix filesystem paths (/Users/…, ~/…).
     -->
     <div
-      class="flex items-center gap-2 border-b border-ompm-light-border dark:border-ompm-border bg-ompm-light-surface/60 dark:bg-ompm-surface/60 px-6 py-2"
+      class="flex items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface/60 dark:bg-foundry-surface/60 px-6 py-2"
     >
       <input
         type="text"
         bind:value={newPath}
         placeholder="/absolute/path/to/project  or  ~/relative/path"
         title="Enter an absolute or relative filesystem path"
-        class="flex-1 rounded-md border border-ompm-light-border dark:border-ompm-border bg-ompm-light-bg dark:bg-ompm-bg px-2 py-1 text-xs text-ompm-light-text dark:text-ompm-text placeholder:text-ompm-light-muted dark:placeholder:text-ompm-text/40 focus:border-ompm-primary focus:outline-none"
+        class="flex-1 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-2 py-1 text-xs text-foundry-light-text dark:text-foundry-text placeholder:text-foundry-light-muted dark:placeholder:text-foundry-text/40 focus:border-foundry-primary focus:outline-none"
         on:keydown={(e) => e.key === 'Enter' && submitAddProject()}
         disabled={addLoading}
       />
@@ -442,14 +442,14 @@
         type="button"
         on:click={submitAddProject}
         disabled={addLoading || !newPath.trim()}
-        class="inline-flex items-center gap-1 rounded-md bg-ompm-primary px-3 py-1 text-xs font-medium text-white hover:bg-ompm-primary/80 disabled:opacity-50"
+        class="inline-flex items-center gap-1 rounded-md bg-foundry-primary px-3 py-1 text-xs font-medium text-white hover:bg-foundry-primary/80 disabled:opacity-50"
       >
         {addLoading ? 'Adding…' : 'Add'}
       </button>
       <button
         type="button"
         on:click={() => { showAddForm = false; newPath = ''; addError = ''; }}
-        class="inline-flex items-center justify-center rounded-md border border-ompm-light-border dark:border-ompm-border p-1 text-ompm-light-muted dark:text-ompm-text/60 hover:bg-ompm-primary/10"
+        class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary/10"
         aria-label="Cancel"
       >
         <X class="h-3 w-3" />
@@ -483,9 +483,9 @@
         {error}
       </div>
     {:else if loading && cards.length === 0}
-      <p class="text-sm text-ompm-light-muted dark:text-ompm-text/60">Loading projects…</p>
+      <p class="text-sm text-foundry-light-muted dark:text-foundry-text/60">Loading projects…</p>
     {:else if cards.length === 0}
-      <p class="text-sm text-ompm-light-muted dark:text-ompm-text/60">
+      <p class="text-sm text-foundry-light-muted dark:text-foundry-text/60">
         {filter
           ? 'No projects match the filter.'
           : showAll
@@ -503,29 +503,29 @@
           {@const isOpen = expanded.has(project.id)}
           {@const recap = $recaps.get(project.id)}
           <li
-            class="rounded-lg border border-ompm-light-border dark:border-ompm-border bg-ompm-light-surface dark:bg-ompm-surface shadow-sm overflow-hidden"
+            class="rounded-lg border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface shadow-sm overflow-hidden"
             title={recap ? `※ recap: ${recap.summary}` : undefined}
           >
             <button
               type="button"
-              class="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-ompm-primary/5 transition-colors"
+              class="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-foundry-primary/5 transition-colors"
               on:click={() => toggleExpand(project.id)}
               aria-expanded={isOpen}
             >
               <div class="flex flex-1 flex-col gap-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                   <ChevronRight
-                    class="h-4 w-4 shrink-0 text-ompm-light-muted dark:text-ompm-text/60 transition-transform {isOpen
+                    class="h-4 w-4 shrink-0 text-foundry-light-muted dark:text-foundry-text/60 transition-transform {isOpen
                       ? 'rotate-90'
                       : ''}"
                   />
-                  <Folder class="h-4 w-4 shrink-0 text-ompm-primary" />
-                  <span class="font-semibold text-ompm-light-text dark:text-ompm-text truncate">
+                  <Folder class="h-4 w-4 shrink-0 text-foundry-primary" />
+                  <span class="font-semibold text-foundry-light-text dark:text-foundry-text truncate">
                     {project.name}
                   </span>
                   {#if project.framework}
                     <span
-                      class="rounded-full bg-ompm-primary/15 px-2 py-0.5 text-xs text-ompm-primary"
+                      class="rounded-full bg-foundry-primary/15 px-2 py-0.5 text-xs text-foundry-primary"
                     >
                       {project.framework}
                     </span>
@@ -546,7 +546,7 @@
                         target="_blank"
                         rel="noopener noreferrer"
                         on:click|stopPropagation
-                        class="inline-flex items-center gap-1 rounded-full bg-ompm-amber/20 px-2 py-0.5 text-xs text-ompm-amber hover:bg-ompm-amber/30"
+                        class="inline-flex items-center gap-1 rounded-full bg-foundry-amber/20 px-2 py-0.5 text-xs text-foundry-amber hover:bg-foundry-amber/30"
                         title="Open PRs on GitHub"
                       >
                         <GitPullRequest class="h-3 w-3" />
@@ -555,7 +555,7 @@
                       </a>
                     {:else}
                       <span
-                        class="inline-flex items-center gap-1 rounded-full bg-ompm-amber/20 px-2 py-0.5 text-xs text-ompm-amber"
+                        class="inline-flex items-center gap-1 rounded-full bg-foundry-amber/20 px-2 py-0.5 text-xs text-foundry-amber"
                       >
                         <GitPullRequest class="h-3 w-3" />
                         {project.open_prs_count}
@@ -586,7 +586,7 @@
                     {/if}
                   {/if}
                 </div>
-                <div class="flex items-center gap-2 flex-wrap text-xs text-ompm-light-muted dark:text-ompm-text/60">
+                <div class="flex items-center gap-2 flex-wrap text-xs text-foundry-light-muted dark:text-foundry-text/60">
                   {#if project.path}
                     <code class="font-mono truncate max-w-md" title={project.path}
                       >{project.path}</code
@@ -599,7 +599,7 @@
                       target="_blank"
                       rel="noopener noreferrer"
                       on:click|stopPropagation
-                      class="inline-flex items-center gap-1 text-ompm-primary hover:underline"
+                      class="inline-flex items-center gap-1 text-foundry-primary hover:underline"
                     >
                       <Github class="h-3 w-3" />
                       {ghLink.replace('https://github.com/', '')}
@@ -609,7 +609,7 @@
                     <span class="font-mono">{project.git_origin}</span>
                   {/if}
                 </div>
-                <div class="text-xs text-ompm-light-muted dark:text-ompm-text/50">
+                <div class="text-xs text-foundry-light-muted dark:text-foundry-text/50">
                   Last connected: <span title={project.last_active ?? ''}>{age}</span>
                 </div>
               </div>
@@ -617,13 +617,13 @@
 
             {#if isOpen}
               <div
-                class="border-t border-ompm-light-border dark:border-ompm-border px-4 py-3 bg-ompm-light-bg/40 dark:bg-ompm-bg/40"
+                class="border-t border-foundry-light-border dark:border-foundry-border px-4 py-3 bg-foundry-light-bg/40 dark:bg-foundry-bg/40"
               >
                 {#if project.sessions && project.sessions.length > 0}
                   <ul class="flex flex-col gap-1">
                     {#each project.sessions as session (session.name)}
                       <li
-                        class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-ompm-primary/5 transition-colors"
+                        class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-foundry-primary/5 transition-colors"
                       >
                         <span
                           class="inline-block h-2 w-2 rounded-full shrink-0 {statusDotClasses(
@@ -632,12 +632,12 @@
                           aria-hidden="true"
                         ></span>
                         <span
-                          class="flex-1 truncate text-sm text-ompm-light-text dark:text-ompm-text font-mono"
+                          class="flex-1 truncate text-sm text-foundry-light-text dark:text-foundry-text font-mono"
                         >
                           {session.name}
                         </span>
                         <span
-                          class="text-xs text-ompm-light-muted dark:text-ompm-text/60 font-mono"
+                          class="text-xs text-foundry-light-muted dark:text-foundry-text/60 font-mono"
                           >{session.adapter_type}</span
                         >
                         <span
@@ -651,7 +651,7 @@
                         <button
                           type="button"
                           on:click={() => openAttachModal(session.name)}
-                          class="inline-flex items-center justify-center rounded-md border border-ompm-light-border dark:border-ompm-border p-1 text-ompm-light-muted dark:text-ompm-text/60 hover:bg-ompm-primary hover:text-white hover:border-ompm-primary transition-colors"
+                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary hover:text-white hover:border-foundry-primary transition-colors"
                           title="Attach to session"
                           aria-label="Attach to session {session.name}"
                         >
@@ -661,7 +661,7 @@
                           <button
                             type="button"
                             on:click={() => resumeSession(session.name)}
-                            class="inline-flex items-center justify-center rounded-md border border-ompm-light-border dark:border-ompm-border p-1 text-ompm-light-muted dark:text-ompm-text/60 hover:bg-green-500 hover:text-white hover:border-green-500 transition-colors"
+                            class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-green-500 hover:text-white hover:border-green-500 transition-colors"
                             title="Resume session"
                             aria-label="Resume session {session.name}"
                           >
@@ -671,7 +671,7 @@
                           <button
                             type="button"
                             on:click={() => pauseSession(session.name)}
-                            class="inline-flex items-center justify-center rounded-md border border-ompm-light-border dark:border-ompm-border p-1 text-ompm-light-muted dark:text-ompm-text/60 hover:bg-yellow-500 hover:text-white hover:border-yellow-500 transition-colors"
+                            class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-yellow-500 hover:text-white hover:border-yellow-500 transition-colors"
                             title="Pause session"
                             aria-label="Pause session {session.name}"
                           >
@@ -681,7 +681,7 @@
                         <button
                           type="button"
                           on:click={() => killSession(session.name)}
-                          class="inline-flex items-center justify-center rounded-md border border-ompm-light-border dark:border-ompm-border p-1 text-ompm-light-muted dark:text-ompm-text/60 hover:bg-red-500 hover:text-white hover:border-red-500 transition-colors"
+                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-red-500 hover:text-white hover:border-red-500 transition-colors"
                           title="Kill session"
                           aria-label="Kill session {session.name}"
                         >
@@ -690,7 +690,7 @@
                         <button
                           type="button"
                           on:click={() => connectToProject(project)}
-                          class="inline-flex items-center justify-center rounded-md border border-ompm-light-border dark:border-ompm-border p-1 text-ompm-light-muted dark:text-ompm-text/60 hover:bg-ompm-primary hover:text-white hover:border-ompm-primary transition-colors"
+                          class="inline-flex items-center justify-center rounded-md border border-foundry-light-border dark:border-foundry-border p-1 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary hover:text-white hover:border-foundry-primary transition-colors"
                           title="Connect to chat"
                           aria-label="Connect to chat {session.name}"
                         >
@@ -700,7 +700,7 @@
                     {/each}
                   </ul>
                 {:else}
-                  <p class="px-2 py-1 text-xs text-ompm-light-muted dark:text-ompm-text/60">
+                  <p class="px-2 py-1 text-xs text-foundry-light-muted dark:text-foundry-text/60">
                     No sessions running.
                   </p>
                 {/if}
@@ -708,7 +708,7 @@
                 <button
                   type="button"
                   on:click={() => newSession(project)}
-                  class="mt-2 inline-flex items-center gap-1 rounded-md border border-dashed border-ompm-light-border dark:border-ompm-border px-3 py-1.5 text-xs text-ompm-light-muted dark:text-ompm-text/60 hover:border-ompm-primary hover:text-ompm-primary transition-colors"
+                  class="mt-2 inline-flex items-center gap-1 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/60 hover:border-foundry-primary hover:text-foundry-primary transition-colors"
                 >
                   <Plus class="h-3 w-3" />
                   New Session
@@ -737,7 +737,7 @@
       on:keydown={(e) => e.key === 'Escape' && closeAttachModal()}
     >
       <div
-        class="w-full max-w-md rounded-lg border border-ompm-light-border dark:border-ompm-border bg-ompm-light-surface dark:bg-ompm-surface p-5 shadow-xl"
+        class="w-full max-w-md rounded-lg border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface p-5 shadow-xl"
         role="document"
         on:click|stopPropagation
         on:keydown|stopPropagation
@@ -745,30 +745,30 @@
         <div class="mb-3 flex items-center justify-between">
           <h2
             id="attach-modal-title"
-            class="text-base font-semibold text-ompm-light-text dark:text-ompm-text"
+            class="text-base font-semibold text-foundry-light-text dark:text-foundry-text"
           >
             Connect to session: <span class="font-mono">{attachModalName}</span>
           </h2>
           <button
             type="button"
             on:click={closeAttachModal}
-            class="text-ompm-light-muted dark:text-ompm-text/60 hover:text-ompm-light-text dark:hover:text-ompm-text"
+            class="text-foundry-light-muted dark:text-foundry-text/60 hover:text-foundry-light-text dark:hover:text-foundry-text"
             aria-label="Close"
           >
             <X class="h-4 w-4" />
           </button>
         </div>
-        <p class="mb-2 text-xs text-ompm-light-muted dark:text-ompm-text/60">
+        <p class="mb-2 text-xs text-foundry-light-muted dark:text-foundry-text/60">
           Run this in your terminal:
         </p>
         <pre
-          class="mb-3 overflow-x-auto rounded-md border border-ompm-light-border dark:border-ompm-border bg-ompm-light-bg dark:bg-ompm-bg px-3 py-2 text-xs font-mono text-ompm-light-text dark:text-ompm-text"
+          class="mb-3 overflow-x-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 text-xs font-mono text-foundry-light-text dark:text-foundry-text"
         ><code>tmux attach-session -t {attachModalName}</code></pre>
         <div class="flex justify-end gap-2">
           <button
             type="button"
             on:click={copyAttachCommand}
-            class="inline-flex items-center gap-1 rounded-md border border-ompm-light-border dark:border-ompm-border px-3 py-1.5 text-xs text-ompm-light-text dark:text-ompm-text hover:bg-ompm-primary/10"
+            class="inline-flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-text dark:text-foundry-text hover:bg-foundry-primary/10"
           >
             <Copy class="h-3 w-3" />
             {attachCopied ? 'Copied!' : 'Copy command'}
@@ -776,7 +776,7 @@
           <button
             type="button"
             on:click={closeAttachModal}
-            class="rounded-md bg-ompm-primary px-3 py-1.5 text-xs text-white hover:bg-ompm-primary/90"
+            class="rounded-md bg-foundry-primary px-3 py-1.5 text-xs text-white hover:bg-foundry-primary/90"
           >
             Close
           </button>
@@ -791,7 +791,7 @@
      we want a stronger blink so live sessions stand out at a glance.
      Test: Inspect a Running session dot in DevTools and verify the opacity
      animates between 1 and 0.3 over a 1.5s cycle. */
-  @keyframes ompm-pulse {
+  @keyframes foundry-pulse {
     0%,
     100% {
       opacity: 1;
@@ -801,6 +801,6 @@
     }
   }
   :global(.session-pulse) {
-    animation: ompm-pulse 1.5s ease-in-out infinite;
+    animation: foundry-pulse 1.5s ease-in-out infinite;
   }
 </style>

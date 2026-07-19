@@ -49,7 +49,7 @@ test.beforeEach(async ({ page }) => {
     window.EventSource = MockEventSource;
   });
 
-  // Why: All open-mpm API responses use chunked transfer encoding. Any in-flight
+  // Why: All tagent API responses use chunked transfer encoding. Any in-flight
   // fetch keeps a persistent connection that blocks Playwright's CDP channel
   // (page.content(), locators, page.evaluate() all hang indefinitely).
   // A single catch-all route (pattern "**") intercepts every request and either
@@ -101,7 +101,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // without waiting for external resources that may stall in headless mode.
 const GOTO_OPTS = { waitUntil: 'domcontentloaded' };
 
-test.describe('open-mpm web UI smoke tests', () => {
+test.describe('Trusty Assistant web UI smoke tests', () => {
 
   test('page loads and shows non-blank content', async ({ page }) => {
     // Why: Svelte renders the spinner into #app synchronously at parse time.

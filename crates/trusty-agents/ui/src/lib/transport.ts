@@ -3,7 +3,7 @@
 // Why: The Tauri build talks to Rust over `invoke()`, which handles process
 // spawning + polling + event forwarding server-side. A plain `pnpm dev`
 // browser build has no Tauri runtime, so we fall back to the REST API exposed
-// by `open-mpm --api`. Having one function means components don't care which
+// by `tagent --api`. Having one function means components don't care which
 // transport is active. Same dual-mode pattern as ai-commander's transport.ts.
 // What: `invoke(command, args)` dispatches to Tauri when available, else
 // translates to a REST call against `http://localhost:<port>/api/...`.
@@ -36,7 +36,7 @@ function emitWeb<T>(event: string, payload: T): void {
 export const emitWebEvent = emitWeb;
 
 /**
- * Why: When `open-mpm --api --api-token …` is running, every `/api/*` request
+ * Why: When `tagent --api --api-token …` is running, every `/api/*` request
  * (other than `/api/health` and `/api/config`) needs `Authorization: Bearer
  * <token>`. Centralizing header construction means callers can't accidentally
  * skip it. (#181)
@@ -58,9 +58,9 @@ async function tauriInvoke(command: string, args?: Record<string, unknown>): Pro
 /**
  * Why: Fallback used when the frontend is served by `vite` (no Tauri runtime).
  * What: Translates the small set of GUI Tauri commands to REST calls against
- * the `open-mpm --api` server so the same UI code works in the browser during
+ * the `tagent --api` server so the same UI code works in the browser during
  * development without spinning up the desktop shell.
- * Test: `VITE_OMPM_API=http://localhost:7654 pnpm dev` then load `/` — submit
+ * Test: `VITE_TAGENT_API=http://localhost:7654 pnpm dev` then load `/` — submit
  * a message, verify network shows `POST /api/task` then polls of
  * `GET /api/task/:id`.
  */

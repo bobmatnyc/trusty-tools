@@ -84,9 +84,9 @@
   }
 </script>
 
-<div bind:this={scrollEl} class="flex-1 overflow-y-auto px-6 py-4 bg-ompm-light-bg dark:bg-ompm-bg">
+<div bind:this={scrollEl} class="flex-1 overflow-y-auto px-6 py-4 bg-foundry-light-bg dark:bg-foundry-bg">
   {#if $activeMessages.length === 0}
-    <div class="mt-10 text-center text-sm text-ompm-light-muted dark:text-ompm-text/50 font-sans">
+    <div class="mt-10 text-center text-sm text-foundry-light-muted dark:text-foundry-text/50 font-sans">
       Start chatting. Messages will appear here.
     </div>
   {/if}
@@ -95,20 +95,20 @@
     {#each $activeMessages as msg (msg.id)}
       {#if msg.role === 'user'}
         <div class="flex justify-end">
-          <div class="max-w-[75%] rounded-2xl bg-ompm-light-surface dark:bg-ompm-surface px-4 py-2 text-ompm-light-text dark:text-ompm-text shadow border border-ompm-light-border dark:border-transparent">
+          <div class="max-w-[75%] rounded-2xl bg-foundry-light-surface dark:bg-foundry-surface px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow border border-foundry-light-border dark:border-transparent">
             <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
-            <p class="mt-1 text-right text-[10px] text-ompm-light-muted dark:text-ompm-text/50">{fmtTime(msg.timestamp)}</p>
+            <p class="mt-1 text-right text-[10px] text-foundry-light-muted dark:text-foundry-text/50">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
       {:else if msg.role === 'assistant'}
         <div class="flex justify-start ml-4">
-          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-ompm-teal bg-ompm-teal/10 px-4 py-2 text-ompm-light-text dark:text-ompm-text shadow-sm">
-            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-ompm-teal/80">
+          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-teal bg-foundry-teal/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
+            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-teal/80">
               <ActionIcon name="agent" size={14} />
               <span>agent</span>
             </div>
             <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
-            <p class="mt-1 text-[10px] text-ompm-teal/70">{fmtTime(msg.timestamp)}</p>
+            <p class="mt-1 text-[10px] text-foundry-teal/70">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
       {:else if msg.role === 'recap'}
@@ -117,31 +117,31 @@
              since the last recap without leaving the chat. -->
         <div class="flex justify-center">
           <div
-            class="w-full max-w-[95%] rounded-lg border border-ompm-teal/30 bg-ompm-teal/5 dark:bg-ompm-teal/10 px-3 py-2 my-2 font-mono text-xs"
+            class="w-full max-w-[95%] rounded-lg border border-foundry-teal/30 bg-foundry-teal/5 dark:bg-foundry-teal/10 px-3 py-2 my-2 font-mono text-xs"
           >
-            <div class="mb-1 flex items-center gap-2 text-ompm-teal">
+            <div class="mb-1 flex items-center gap-2 text-foundry-teal">
               <span aria-hidden="true">※</span>
               <span class="font-semibold uppercase tracking-wide">recap</span>
-              <span class="text-ompm-light-text/70 dark:text-ompm-text/70 truncate">
+              <span class="text-foundry-light-text/70 dark:text-foundry-text/70 truncate">
                 · {msg.content}
               </span>
-              <span class="ml-auto text-[10px] text-ompm-teal/60">{fmtTime(msg.timestamp)}</span>
+              <span class="ml-auto text-[10px] text-foundry-teal/60">{fmtTime(msg.timestamp)}</span>
             </div>
             {#if msg.recapRows && msg.recapRows.length > 0}
               <table class="w-full border-collapse">
                 <thead>
-                  <tr class="text-ompm-teal/70 border-b border-ompm-teal/20">
+                  <tr class="text-foundry-teal/70 border-b border-foundry-teal/20">
                     <th class="text-left py-1 pr-4 w-32 font-normal">Step</th>
                     <th class="text-left py-1 font-normal">Result</th>
                   </tr>
                 </thead>
                 <tbody>
                   {#each msg.recapRows as [step, result], i (i)}
-                    <tr class="border-b border-ompm-teal/10 last:border-0 recap-row">
-                      <td class="py-0.5 pr-4 text-ompm-teal/80 whitespace-nowrap align-top">
+                    <tr class="border-b border-foundry-teal/10 last:border-0 recap-row">
+                      <td class="py-0.5 pr-4 text-foundry-teal/80 whitespace-nowrap align-top">
                         {step}
                       </td>
-                      <td class="py-0.5 text-ompm-light-text/80 dark:text-ompm-text/70 break-words">
+                      <td class="py-0.5 text-foundry-light-text/80 dark:text-foundry-text/70 break-words">
                         {result}
                       </td>
                     </tr>
@@ -153,24 +153,24 @@
         </div>
       {:else if msg.role === 'pm'}
         <div class="flex justify-start">
-          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-ompm-primary bg-ompm-primary/10 px-4 py-2 text-ompm-light-text dark:text-ompm-text shadow-sm">
-            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-ompm-primary/80">
+          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-primary bg-foundry-primary/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
+            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-primary/80">
               <ActionIcon name="pm" size={14} />
               <span>pm</span>
             </div>
             <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
-            <p class="mt-1 text-[10px] text-ompm-primary/80">{fmtTime(msg.timestamp)}</p>
+            <p class="mt-1 text-[10px] text-foundry-primary/80">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
       {:else}
         <div class="flex justify-center">
-          <p class="max-w-[75%] text-center text-xs italic text-ompm-light-muted dark:text-ompm-text/50">{msg.content}</p>
+          <p class="max-w-[75%] text-center text-xs italic text-foundry-light-muted dark:text-foundry-text/50">{msg.content}</p>
         </div>
       {/if}
     {/each}
 
     {#if $isRunning}
-      <div class="flex items-center justify-start gap-2 text-xs text-ompm-teal">
+      <div class="flex items-center justify-start gap-2 text-xs text-foundry-teal">
         <Loader2 class="h-3 w-3 animate-spin" />
         <span>Running…</span>
       </div>

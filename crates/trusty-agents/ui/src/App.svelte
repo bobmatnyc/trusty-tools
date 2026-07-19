@@ -54,13 +54,13 @@
    * lets us detect the requirement up-front and prompt for a token.
    * What: Calls `GET /api/config` and returns whether auth is required.
    * Returns false on network errors so we don't block a working server.
-   * Test: Run `open-mpm --api --api-token secret`; load the UI; observe the
+   * Test: Run `tagent --api --api-token secret`; load the UI; observe the
    * token input form before any chat UI renders.
    */
   async function probeAuthRequired(): Promise<boolean> {
     try {
       const base = (import.meta as ImportMeta & { env: Record<string, string> }).env
-        .VITE_OMPM_API ?? '';
+        .VITE_TAGENT_API ?? '';
       const r = await fetch(`${base}/api/config`);
       if (!r.ok) return false;
       const cfg = (await r.json()) as { auth_required?: boolean };
@@ -71,7 +71,7 @@
   }
 
   /**
-   * Why: The Tauri backend spawns `open-mpm --api --port 8765` as a sidecar
+   * Why: The Tauri backend spawns `tagent --api --port 8765` as a sidecar
    * when the window opens so the REST server is already listening by the
    * time the user sends their first message. We call it once on mount; if
    * we're running under plain Vite, the command falls back to a no-op and
@@ -337,15 +337,15 @@
   });
 </script>
 
-<div class="flex flex-col h-screen w-full relative bg-ompm-light-bg dark:bg-ompm-bg text-ompm-light-text dark:text-ompm-text overflow-hidden">
+<div class="flex flex-col h-screen w-full relative bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text overflow-hidden">
   <Header />
   <div class="flex flex-1 min-h-0 w-full overflow-hidden">
   {#if $apiAuthRequired && !apiReady}
-    <main class="flex flex-1 flex-col items-center justify-center bg-ompm-light-bg dark:bg-ompm-bg px-4">
-      <div class="w-full max-w-md rounded-lg border border-ompm-primary/30 bg-ompm-light-surface dark:bg-ompm-surface p-6 shadow-lg">
-        <h1 class="mb-2 text-lg font-semibold text-ompm-light-text dark:text-ompm-text">API token required</h1>
-        <p class="mb-4 text-sm text-ompm-light-muted dark:text-ompm-text/70">
-          The open-mpm API server was started with <code class="font-mono bg-ompm-light-border/50 dark:bg-black/40 rounded px-1 py-0.5 text-xs">--api-token</code>. Paste the token to
+    <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
+      <div class="w-full max-w-md rounded-lg border border-foundry-primary/30 bg-foundry-light-surface dark:bg-foundry-surface p-6 shadow-lg">
+        <h1 class="mb-2 text-lg font-semibold text-foundry-light-text dark:text-foundry-text">API token required</h1>
+        <p class="mb-4 text-sm text-foundry-light-muted dark:text-foundry-text/70">
+          The tagent API server was started with <code class="font-mono bg-foundry-light-border/50 dark:bg-black/40 rounded px-1 py-0.5 text-xs">--api-token</code>. Paste the token to
           continue. It is saved in this browser only.
         </p>
         <form on:submit|preventDefault={submitToken} class="flex flex-col gap-3">
@@ -354,7 +354,7 @@
             bind:value={tokenInput}
             placeholder="API token"
             autocomplete="off"
-            class="rounded-md border border-ompm-light-border dark:border-ompm-primary/30 bg-ompm-light-bg dark:bg-ompm-bg text-ompm-light-text dark:text-ompm-text px-3 py-2 text-sm shadow-sm focus:border-ompm-primary focus:outline-none"
+            class="rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text px-3 py-2 text-sm shadow-sm focus:border-foundry-primary focus:outline-none"
             disabled={probingToken}
           />
           {#if tokenError}
@@ -362,7 +362,7 @@
           {/if}
           <button
             type="submit"
-            class="inline-flex items-center justify-center rounded-md bg-ompm-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-ompm-primary/80 disabled:cursor-not-allowed disabled:bg-ompm-light-surface dark:disabled:bg-ompm-surface disabled:text-ompm-light-muted dark:disabled:text-ompm-text/40"
+            class="inline-flex items-center justify-center rounded-md bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:bg-foundry-light-surface dark:disabled:bg-foundry-surface disabled:text-foundry-light-muted dark:disabled:text-foundry-text/40"
             disabled={probingToken || !tokenInput.trim()}
           >
             {probingToken ? 'Verifying…' : 'Continue'}
@@ -372,17 +372,17 @@
     </main>
   {:else if apiError}
     <!-- Full-screen error state: visible regardless of theme, never dark-on-dark -->
-    <main class="flex flex-1 flex-col items-center justify-center bg-ompm-light-bg dark:bg-ompm-bg px-4">
-      <div class="w-full max-w-md rounded-lg border border-red-500/40 bg-ompm-light-surface dark:bg-ompm-surface p-6 shadow-lg">
+    <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
+      <div class="w-full max-w-md rounded-lg border border-red-500/40 bg-foundry-light-surface dark:bg-foundry-surface p-6 shadow-lg">
         <h1 class="mb-2 text-lg font-semibold text-red-500 dark:text-red-400">API server error</h1>
-        <p class="mb-4 text-sm text-ompm-light-text/80 dark:text-ompm-text/80 leading-relaxed break-words">{apiError}</p>
-        <p class="text-xs text-ompm-light-muted dark:text-ompm-text/50">
-          Make sure <code class="font-mono bg-ompm-light-border/50 dark:bg-black/40 rounded px-1 py-0.5">open-mpm --api</code> is
+        <p class="mb-4 text-sm text-foundry-light-text/80 dark:text-foundry-text/80 leading-relaxed break-words">{apiError}</p>
+        <p class="text-xs text-foundry-light-muted dark:text-foundry-text/50">
+          Make sure <code class="font-mono bg-foundry-light-border/50 dark:bg-black/40 rounded px-1 py-0.5">tagent --api</code> is
           running, then reload the page.
         </p>
         <button
           type="button"
-          class="mt-4 inline-flex items-center justify-center rounded-md bg-ompm-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-ompm-primary/80"
+          class="mt-4 inline-flex items-center justify-center rounded-md bg-foundry-primary px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-foundry-primary/80"
           on:click={() => window.location.reload()}
         >
           Reload
@@ -391,25 +391,25 @@
     </main>
   {:else if !apiReady}
     <!-- Full-screen loading state: spinning indicator with status text, never blank -->
-    <main class="flex flex-1 flex-col items-center justify-center bg-ompm-light-bg dark:bg-ompm-bg px-4">
-      <div class="flex flex-col items-center gap-4 text-ompm-light-text dark:text-ompm-text">
-        <svg class="h-8 w-8 animate-spin text-ompm-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+    <main class="flex flex-1 flex-col items-center justify-center bg-foundry-light-bg dark:bg-foundry-bg px-4">
+      <div class="flex flex-col items-center gap-4 text-foundry-light-text dark:text-foundry-text">
+        <svg class="h-8 w-8 animate-spin text-foundry-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
         </svg>
-        <p class="text-sm font-medium text-ompm-light-text dark:text-ompm-text">Connecting to API server…</p>
-        <p class="text-xs text-ompm-light-muted dark:text-ompm-text/50">open-mpm --api on port {desktop ? 8765 : 7654}</p>
+        <p class="text-sm font-medium text-foundry-light-text dark:text-foundry-text">Connecting to API server…</p>
+        <p class="text-xs text-foundry-light-muted dark:text-foundry-text/50">tagent --api on port {desktop ? 8765 : 7654}</p>
       </div>
     </main>
   {:else}
     <Sidebar {apiReady} {apiError} />
-    <main class="flex flex-1 flex-col bg-ompm-light-bg dark:bg-ompm-bg">
-      <nav class="flex items-center gap-1 border-b border-ompm-light-border dark:border-ompm-border px-4 py-1">
+    <main class="flex flex-1 flex-col bg-foundry-light-bg dark:bg-foundry-bg">
+      <nav class="flex items-center gap-1 border-b border-foundry-light-border dark:border-foundry-border px-4 py-1">
         <button
           type="button"
           class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'chat'
-            ? 'bg-ompm-primary/20 text-ompm-primary'
-            : 'text-ompm-light-muted dark:text-ompm-text/60 hover:bg-ompm-primary/10'}"
+            ? 'bg-foundry-primary/20 text-foundry-primary'
+            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary/10'}"
           on:click={() => (activeView = 'chat')}
         >
           Chat
@@ -417,8 +417,8 @@
         <button
           type="button"
           class="rounded-md px-3 py-1 text-xs font-medium transition-colors {activeView === 'projects'
-            ? 'bg-ompm-primary/20 text-ompm-primary'
-            : 'text-ompm-light-muted dark:text-ompm-text/60 hover:bg-ompm-primary/10'}"
+            ? 'bg-foundry-primary/20 text-foundry-primary'
+            : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-primary/10'}"
           on:click={() => (activeView = 'projects')}
         >
           Projects
@@ -436,8 +436,8 @@
   </div>
   <span
     class="absolute top-14 right-3 z-30 text-[10px] px-2 py-0.5 rounded-full {desktop
-      ? 'bg-ompm-primary/20 text-ompm-primary'
-      : 'bg-ompm-amber/20 text-ompm-amber'}"
+      ? 'bg-foundry-primary/20 text-foundry-primary'
+      : 'bg-foundry-amber/20 text-foundry-amber'}"
     title={desktop ? 'Running inside Tauri (IPC)' : 'Running in browser (HTTP /api)'}
   >
     {desktop ? '⊞ Desktop' : '⟳ Web'}
