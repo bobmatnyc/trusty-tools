@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- GUI-created sessions were inert (closes #3177): the create-session form
+  called `POST /sessions` (`session.create`), which only ever minted a
+  session record — it never spawned an agent loop, so nothing typed into the
+  form actually ran. The form now calls `POST /tasks` (`task.run`, #2983
+  Slice 4), the one-shot "mint-or-reuse a session AND start executing" entry
+  point (DOC-39 §7A/AC-21), carrying the per-call `project` binding the same
+  way (PR #3189's project mismatch `400` surfaces via the form's existing
+  generic error-message handling, unchanged). `lib/create-session.ts`'s
+  `buildCreateBody`/`extractSessionId` are renamed `buildRunTaskBody`/
+  `extractTaskSessionId` to match the new wire shape (`task_description` +
+  `project`; response `{session_id, status, mode, binding}`, `202 Accepted`
+  instead of `201 Created`), with a new `isTaskRunResponse` runtime shape
+  guard replacing the old `POST /sessions`-shaped check.
+
 ### Changed
 
 - Foundry retheme (refs #3153, DOC-39 addendum AC-27): the placeholder

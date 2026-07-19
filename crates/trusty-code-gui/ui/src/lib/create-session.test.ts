@@ -9,11 +9,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   bindingLabel,
-  buildCreateBody,
+  buildRunTaskBody,
   canSubmitCreate,
   describeFsError,
-  extractSessionId,
+  extractTaskSessionId,
   isDirListing,
+  isTaskRunResponse,
   type ProjectSelection,
 } from './create-session';
 
@@ -29,28 +30,28 @@ const NON_GIT_PROJECT: ProjectSelection = {
   isGitRepo: false,
 };
 
-describe('buildCreateBody', () => {
+describe('buildRunTaskBody', () => {
   it('trims the task and omits project when projectless (AC-2.1)', () => {
-    expect(buildCreateBody('  fix the bug  ', null)).toEqual({ task: 'fix the bug' });
+    expect(buildRunTaskBody('  fix the bug  ', null)).toEqual({ task_description: 'fix the bug' });
   });
 
   it('includes project.path when a project is selected', () => {
-    expect(buildCreateBody('add a feature', GIT_PROJECT)).toEqual({
-      task: 'add a feature',
+    expect(buildRunTaskBody('add a feature', GIT_PROJECT)).toEqual({
+      task_description: 'add a feature',
       project: '/Users/bob/code/acme-api',
     });
   });
 
   it('includes a non-git project path identically to a git one (AC-2.6)', () => {
-    expect(buildCreateBody('index this', NON_GIT_PROJECT)).toEqual({
-      task: 'index this',
+    expect(buildRunTaskBody('index this', NON_GIT_PROJECT)).toEqual({
+      task_description: 'index this',
       project: '/Users/bob/code/scratch',
     });
   });
 
-  it('never sends the agent field (no pre-session roster route, see module doc)', () => {
-    const body = buildCreateBody('t', GIT_PROJECT);
-    expect('agent' in body).toBe(false);
+  it('never sends agent_name (no pre-session roster route, see module doc)', () => {
+    const body = buildRunTaskBody('t', GIT_PROJECT);
+    expect('agent_name' in body).toBe(false);
   });
 });
 
@@ -133,16 +134,38 @@ describe('isDirListing', () => {
   });
 });
 
-describe('extractSessionId', () => {
+describe('isTaskRunResponse', () => {
+  it('accepts a well-formed POST /tasks 202 body', () => {
+    expect(
+      isTaskRunResponse({
+        session_id: 'sess-abc12345',
+        status: 'running',
+        mode: 'auto',
+        binding: { state: 'projectless', root: null },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects non-object bodies and bodies missing/mistyping session_id', () => {
+    expect(isTaskRunResponse(null)).toBe(false);
+    expect(isTaskRunResponse('sess-abc')).toBe(false);
+    expect(isTaskRunResponse({})).toBe(false);
+    expect(isTaskRunResponse({ session_id: 42 })).toBe(false);
+  });
+});
+
+describe('extractTaskSessionId', () => {
   it('returns the id when it is a non-empty string', () => {
-    expect(extractSessionId({ id: 'sess-abc12345', status: 'running' })).toBe('sess-abc12345');
+    expect(extractTaskSessionId({ session_id: 'sess-abc12345', status: 'running' })).toBe(
+      'sess-abc12345',
+    );
   });
 
   it('returns null for missing, empty, or non-string ids and non-object bodies', () => {
-    expect(extractSessionId({})).toBeNull();
-    expect(extractSessionId({ id: '' })).toBeNull();
-    expect(extractSessionId({ id: 42 })).toBeNull();
-    expect(extractSessionId(null)).toBeNull();
-    expect(extractSessionId('sess-abc')).toBeNull();
+    expect(extractTaskSessionId({})).toBeNull();
+    expect(extractTaskSessionId({ session_id: '' })).toBeNull();
+    expect(extractTaskSessionId({ session_id: 42 })).toBeNull();
+    expect(extractTaskSessionId(null)).toBeNull();
+    expect(extractTaskSessionId('sess-abc')).toBeNull();
   });
 });

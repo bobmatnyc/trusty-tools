@@ -1,14 +1,32 @@
 // Why: `CreateSessionForm.svelte` (DOC-39 §4.2.1 the 7a folder picker,
 // §6.2 item 6 `project.list_dir`/`fs.list_dir`, plus the minimal
-// session-creation form this slice adds — the GUI was observe-and-cancel
+// create+prompt form this slice adds — the GUI was observe-and-cancel
 // only before this) needs typed wire shapes for `GET /fs` (mirrors
 // `crate::fs_browse::{DirListing, DirEntryInfo}`) and a handful of pure,
 // testable helpers: gating whether the create button may be clicked,
-// building the `POST /sessions` body, and describing an `RpcError`-mapped
+// building the `POST /tasks` body, and describing an `RpcError`-mapped
 // HTTP status from `GET /fs` in one line. Extracted from the component for
 // the same reason `session-status.ts`/`context-budget.ts` were: pure
 // logic independent of DOM/network concerns is unit-testable without
 // mounting anything.
+//
+// **`POST /tasks`, not `POST /sessions` (issue #3177).** The form used to
+// call `POST /sessions` (`session.create`, REST Slice 3), which only mints a
+// session record — it never spawns an agent loop, so every GUI-created
+// session sat inert until something else called `task.run` against it (which
+// nothing in the GUI did). `POST /tasks` (`task.run`,
+// `crate::serve::rest::tasks`, #2983 Slice 4) is the one-shot "mint-or-reuse
+// a session AND start executing" entry point DOC-39 §7A/AC-21 calls for —
+// typing a task and hitting submit must actually run it. This module's
+// `RunTaskBody`/[`buildRunTaskBody`]/[`extractTaskSessionId`]/
+// [`isTaskRunResponse`] all target that route instead; see each doc comment
+// for the wire-shape rationale. `project` (PR #3189, per-call project
+// binding) is forwarded the same way `POST /sessions` already forwarded it —
+// a mismatch against an existing session's own binding is rejected `400` by
+// the daemon, surfaced through the component's existing generic
+// `error.message` handling (no special-casing needed, the message is already
+// caller-actionable: "project `<path>` does not match session `<id>`'s
+// existing binding").
 //
 // **Picker mechanism note (DOC-39 §2.1 C-4).** The spec is explicit that a
 // Tauri-native `fs`/dialog plugin is barred as a functional path — it would
@@ -22,20 +40,20 @@
 // **Agent-selection gap (task item 2, explicitly noted rather than
 // invented).** `GET /sessions/{id}/agents` (`session.get_agents`) requires
 // an existing `session_id` — there is no pre-session roster route. This
-// form therefore omits `agent` from the `POST /sessions` body entirely,
-// letting the daemon apply its own default (`session::protocol::create`
-// treats an absent `agent` as `None`, matching `CreateBody`'s
-// `#[serde(default)]`). Adding a roster endpoint that does not exist would
-// violate DOC-39 §2.1 C-2 ("a UI need with no API is an unbuilt feature, not
-// a UI problem") — so this is recorded as a gap, not worked around.
+// form therefore omits `agent_name` from the `POST /tasks` body entirely,
+// letting the daemon apply its own default (`task::protocol::task_run`
+// defaults an absent `agent_name` the same way `session.create` did).
+// Adding a roster endpoint that does not exist would violate DOC-39 §2.1 C-2
+// ("a UI need with no API is an unbuilt feature, not a UI problem") — so
+// this is recorded as a gap, not worked around.
 //
 // What: [`DirListing`]/[`DirEntryInfo`] mirror the daemon's wire shape
 // field-for-field. [`ProjectSelection`] is the form's own selected-project
 // state (always built from an already-listed, already-`is_dir`-confirmed
 // entry — see the component's docs on why that makes a separate
 // "validate this path" round-trip unnecessary: the listing call itself IS
-// the exists+is-dir check DOC-39's task brief asks for). [`buildCreateBody`]
-// mirrors `crate::serve::rest::sessions_write::CreateBody` minus `agent`;
+// the exists+is-dir check DOC-39's task brief asks for). [`buildRunTaskBody`]
+// mirrors `crate::serve::rest::tasks::RunTaskBody` minus `agent_name`;
 // [`canSubmitCreate`] is the single gate the submit button's `disabled`
 // binds to (non-empty task, not already in flight); [`bindingLabel`] is the
 // small "projectless / directory / git repo" status line DOC-39 §4.2's
@@ -74,11 +92,11 @@ export interface ProjectSelection {
   isGitRepo: boolean;
 }
 
-/** Request body for `POST /sessions`, mirroring
- * `crate::serve::rest::sessions_write::CreateBody` minus `agent` (see the
- * module doc's gap note — this form never sends `agent`). */
-export interface CreateSessionBody {
-  task: string;
+/** Request body for `POST /tasks`, mirroring
+ * `crate::serve::rest::tasks::RunTaskBody` minus `agent_name` (see the
+ * module doc's gap note — this form never sends `agent_name`). */
+export interface RunTaskBody {
+  task_description: string;
   project?: string;
 }
 
@@ -86,20 +104,21 @@ export interface CreateSessionBody {
 export type SubmitPhase = 'idle' | 'submitting';
 
 /**
- * Build the `POST /sessions` request body from form state.
+ * Build the `POST /tasks` request body from form state.
  *
  * Why: the single place task text is trimmed and an optional project path
  * is attached — kept out of the component so it's testable without
  * mounting Svelte.
- * What: `task` is trimmed (never sent with leading/trailing whitespace);
- * `project` is included only when `project` is non-null (a `null` selection
- * means projectless, AC-2.1 — the field is omitted entirely rather than
- * sent as `null`, matching `CreateBody`'s `#[serde(default)]` Option
- * handling on the Rust side).
- * Test: `create-session.test.ts::buildCreateBody`.
+ * What: `task_description` is trimmed (never sent with leading/trailing
+ * whitespace); `project` is included only when `project` is non-null (a
+ * `null` selection means projectless, AC-2.1 — the field is omitted
+ * entirely rather than sent as `null`, matching `RunTaskBody`'s
+ * `#[serde(default)]` Option handling on the Rust side). `agent_name` is
+ * never sent (see the module doc's gap note).
+ * Test: `create-session.test.ts::buildRunTaskBody`.
  */
-export function buildCreateBody(task: string, project: ProjectSelection | null): CreateSessionBody {
-  const body: CreateSessionBody = { task: task.trim() };
+export function buildRunTaskBody(task: string, project: ProjectSelection | null): RunTaskBody {
+  const body: RunTaskBody = { task_description: task.trim() };
   if (project) body.project = project.path;
   return body;
 }
@@ -109,8 +128,8 @@ export function buildCreateBody(task: string, project: ProjectSelection | null):
  *
  * Why: the one gate `CreateSessionForm.svelte`'s submit button binds
  * `disabled` to — a non-empty (post-trim) task, and not already mid-flight
- * (double-submit guard, since `POST /sessions` mints a brand-new resource on
- * every call).
+ * (double-submit guard, since `POST /tasks` starts a brand-new run on every
+ * call).
  * What: `task.trim().length > 0 && phase === 'idle'`.
  * Test: `create-session.test.ts::canSubmitCreate`.
  */
@@ -193,18 +212,39 @@ export function isDirListing(body: unknown): body is DirListing {
 }
 
 /**
- * Extract the created session id from a `POST /sessions` 201 body, if any.
+ * Runtime shape guard for a `POST /tasks` 202 response body.
+ *
+ * Why: same root pattern as [`isDirListing`] (PR #3103 review findings) — a
+ * `202` status is only a promise that `task.run` accepted the request, not
+ * that whatever answered the socket returned the shape this handler
+ * dereferences. `crate::serve::rest::tasks::run_task`'s success body is
+ * `{session_id, status, mode, binding}` (mirroring `task::protocol::task_run`
+ * — see that module's `json!({...})`); the form only ever reads `session_id`
+ * for its success message, so that is the one field validated as a non-empty
+ * string before use.
+ * What: `body` is an object and `body.session_id` is a string (may be
+ * empty — emptiness is [`extractTaskSessionId`]'s concern, not the shape
+ * guard's).
+ * Test: `create-session.test.ts::isTaskRunResponse`.
+ */
+export function isTaskRunResponse(body: unknown): body is { session_id: string } {
+  if (typeof body !== 'object' || body === null) return false;
+  return typeof (body as Record<string, unknown>).session_id === 'string';
+}
+
+/**
+ * Extract the session id from a `POST /tasks` 202 body, if any.
  *
  * Why: PR #3103 review finding (MEDIUM, same root pattern as [`isDirListing`])
- * — `(await res.json()) as { id: string }` followed by `.slice(0, 8)` in the
- * template throws when a 201 body is missing or malformed. The 201 status is
- * authoritative that the session WAS created; the id is only cosmetic, so its
+ * — dereferencing a response field directly and slicing it in the template
+ * throws when the body is missing or malformed. The `202` status is
+ * authoritative that `task.run` was accepted; the id is only cosmetic, so its
  * absence must degrade the success message, never crash the form.
- * What: returns `body.id` when it is a non-empty string, else `null`.
- * Test: `create-session.test.ts::extractSessionId`.
+ * What: returns `body.session_id` when [`isTaskRunResponse`] accepts the
+ * shape AND the id is non-empty, else `null`.
+ * Test: `create-session.test.ts::extractTaskSessionId`.
  */
-export function extractSessionId(body: unknown): string | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const id = (body as Record<string, unknown>).id;
-  return typeof id === 'string' && id.length > 0 ? id : null;
+export function extractTaskSessionId(body: unknown): string | null {
+  if (!isTaskRunResponse(body)) return null;
+  return body.session_id.length > 0 ? body.session_id : null;
 }
