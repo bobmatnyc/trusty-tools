@@ -1040,3 +1040,89 @@ fn extends_shadow_fallback_searches_home_tier_when_package_resolved_there() {
         Some(&["locked_tool".to_string()][..])
     );
 }
+
+// --- #3358: Assistant + persona agents off the claude-code runner --------
+//
+// Why: The Assistant MVP (epic #3052) staged its move off the claude-code
+// CLI runner to the conversational Assistant/PM/persona agents first,
+// leaving specialist/task agents (`engineer`, `qa-agent`, …, and especially
+// `claude-code-engineer` — deliberately claude-code) untouched. These tests
+// pin the resulting `runner`/`model` shape on the bundled configs so a
+// future edit can't silently reintroduce `runner = "claude-code"` on this
+// agent set, and so the Opus-for-the-base-Assistant /
+// Sonnet-for-every-other-persona testing default stays correct.
+// What: `bundled_persona_agents_do_not_use_claude_code_runner` loads each
+// in-scope agent by name (resolving through `AgentConfig::by_name`, which
+// prefers a directory package over a same-named flat file — #482) and
+// asserts `runner != ClaudeCode` and the expected model. A second test
+// loads the two flat files that are shadowed by a directory package
+// (`cto-assistant.toml`, `izzie.toml`) directly by path, since `by_name`
+// would never reach them while the package is present — the flat `izzie`
+// file additionally serves as the `extends` shadow-fallback safety net
+// (see `AgentConfig::extends_shadow_fallback_in`), so it must stay
+// consistent even though it isn't the primary load path today.
+// Test: This module IS the test surface.
+
+#[test]
+fn bundled_persona_agents_do_not_use_claude_code_runner() {
+    use crate::agents::RunnerKind;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    // (agent name, expected model) — Opus for the base Assistant, Sonnet for
+    // every other in-scope persona (owner directive, #3358).
+    let cases = [
+        ("assistant", "claude-opus-4-6"),
+        ("pm", "claude-sonnet-4-6"),
+        ("personal-assistant", "claude-sonnet-4-6"),
+        ("cto-assistant", "claude-sonnet-4-6"),
+        ("izzie", "claude-sonnet-4-6"),
+    ];
+    for (name, expected_model) in cases {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("bundled agent '{name}' must load: {e}"));
+
+        assert_ne!(
+            cfg.agent.runner,
+            RunnerKind::ClaudeCode,
+            "bundled agent '{name}' must not declare runner = \"claude-code\" (#3358)"
+        );
+        assert_eq!(
+            cfg.agent.model, expected_model,
+            "bundled agent '{name}' model mismatch"
+        );
+    }
+}
+
+#[test]
+fn bundled_persona_shadowed_flat_duplicates_do_not_use_claude_code_runner() {
+    use crate::agents::RunnerKind;
+
+    // `cto-assistant.toml` and `izzie.toml` are shadowed by their same-named
+    // directory package (`cto-assistant/agent.toml`, `izzie/agent.toml`) and
+    // are never reached via `by_name` while the package is present — load
+    // them directly by path so this hygiene guard actually exercises them.
+    for name in ["cto-assistant", "izzie"] {
+        let path = bundled_agents_dir().join(format!("{name}.toml"));
+        let cfg = AgentConfig::load(&path)
+            .unwrap_or_else(|e| panic!("shadowed flat agent '{name}.toml' must still parse: {e}"));
+
+        assert_ne!(
+            cfg.agent.runner,
+            RunnerKind::ClaudeCode,
+            "shadowed flat agent '{name}.toml' must not declare runner = \"claude-code\" (#3358)"
+        );
+        assert_eq!(
+            cfg.agent.model, "claude-sonnet-4-6",
+            "shadowed flat agent '{name}.toml' model mismatch"
+        );
+    }
+}
