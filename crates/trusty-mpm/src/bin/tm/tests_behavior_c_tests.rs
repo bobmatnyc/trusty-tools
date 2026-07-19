@@ -861,6 +861,7 @@ fn make_session(
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        attached: false,
     }
 }
 

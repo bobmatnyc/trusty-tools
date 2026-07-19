@@ -22,6 +22,7 @@ pub mod prune;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
+pub mod rename;
 pub mod restart_ops;
 pub(crate) mod resume_workdir;
 pub mod search_gc;
@@ -48,6 +49,9 @@ mod decommission_worktree_tests;
 
 #[cfg(test)]
 mod delete_tests;
+
+#[cfg(test)]
+mod rename_tests;
 
 #[cfg(test)]
 mod liveness_tests;

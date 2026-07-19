@@ -10,10 +10,7 @@
 //! Test: `cargo test -p trusty-mpm-daemon` drives the handlers directly with an
 //! in-memory state (no socket bind needed).
 
-use std::convert::Infallible;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{convert::Infallible, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -138,8 +135,8 @@ use super::managed_routes::{
     get_managed_session, get_project_registry_route, get_session_activity, list_managed_sessions,
     list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_router,
     prune_managed_route, prune_worktrees_route, reactivate_managed_session,
-    register_project_registry_route, resume_managed_session, send_to_session, spawn_session,
-    stop_managed_session, stop_managed_session_runtime,
+    register_project_registry_route, rename_managed_session, resume_managed_session,
+    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 // Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
 use super::manager::manager_router;
@@ -291,7 +288,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         )
         .route(
             "/api/v1/sessions/managed/{id}",
-            get(get_managed_session).delete(stop_managed_session),
+            get(get_managed_session)
+                .delete(stop_managed_session)
+                .patch(rename_managed_session),
         )
         .route("/api/v1/sessions/managed/{id}/send", post(send_to_session))
         // #2605: async-spawn progress poll route, merged as a sub-router.

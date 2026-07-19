@@ -138,4 +138,21 @@ pub struct SessionSummary {
     /// `super::tests`.
     #[serde(default)]
     pub stale_assets: bool,
+    /// True when a tmux client is currently ATTACHED to this session's tmux
+    /// session (a live probe reconciled against real tmux, not the persisted
+    /// `state`).
+    ///
+    /// Why: after a daemon restart (before the reconcile pass runs) a record's
+    /// persisted `state` can read `stopped` even though its tmux session is
+    /// alive and the operator is attached — the `tm ls` picker then wrongly
+    /// showed EVERY session as `(stopped)` and offered `restart`. The list
+    /// handler now reconciles the displayed `state` against live tmux and, when
+    /// a client is attached, sets this flag so surfaces render `attached` and
+    /// offer connect rather than a destructive restart.
+    /// What: computed by [`super::list_managed_sessions`] from the live tmux
+    /// attached-session set; `false` on every non-list summary (the default).
+    /// Test: `reconcile_live_state_flips_stopped_to_active_when_alive` (unit);
+    /// end-to-end coverage in the `session_lifecycle` integration suite.
+    #[serde(default)]
+    pub attached: bool,
 }

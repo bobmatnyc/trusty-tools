@@ -319,6 +319,30 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         force: bool,
     },
+    /// Rename a managed session — from the list OR from within a session.
+    ///
+    /// Why: operators need to give a managed session a meaningful name. A
+    /// managed session's identity name IS its tmux name, so a rename updates the
+    /// record AND renames the live tmux session so `tmux attach`/`ls` reflect it.
+    /// What: two forms —
+    ///   • `tm sessions rename <id-or-name> <new-name>` (from the master list),
+    ///   • `tm sessions rename <new-name>` (from WITHIN a session — the current
+    ///     session is resolved from `$TM_MANAGED_SESSION_ID`).
+    /// The first positional is the target when a second is given; otherwise it is
+    /// the new name for the current session. PATCHes
+    /// `/api/v1/sessions/managed/{id}` with `{ "name": … }`. Collisions and
+    /// invalid names are rejected with an actionable error.
+    /// Test: `cli_parses_sessions_rename_two_args`,
+    /// `cli_parses_sessions_rename_in_session`.
+    Rename {
+        /// Target session id/name (two-arg form), or the NEW name for the
+        /// current session (one-arg, in-session form).
+        arg1: String,
+        /// New name. When present, `arg1` selects the session to rename; when
+        /// omitted, `arg1` is the new name and the session is the current one
+        /// (resolved from `$TM_MANAGED_SESSION_ID`).
+        arg2: Option<String>,
+    },
     /// Reclaim idle managed sessions: stop idle, decommission done (#1313).
     ///
     /// Why: paused orchestration sessions leave behind idle SM tmux sessions that
@@ -386,7 +410,7 @@ pub(crate) enum SessionAction {
     /// `--dry-run` reports what WOULD be pruned without mutating.
     /// Test: `cli_parses_session_prune`.
     Prune {
-        /// Which records to target: `ephemeral` | `stopped` | `decommissioned` | `all`.
+        /// Which records to target: `ephemeral` | `stopped` | `decommissioned` | `deleted` | `all`.
         #[arg(long)]
         state: String,
         /// Report what WOULD be pruned without killing, removing, or tombstoning

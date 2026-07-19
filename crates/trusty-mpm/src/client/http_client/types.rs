@@ -497,6 +497,18 @@ pub struct ManagedSessionSummary {
     /// Test: `managed_session_summary_deserializes_stale_assets_flag`.
     #[serde(default)]
     pub stale_assets: bool,
+    /// True when a tmux client is currently ATTACHED to this session (live-tmux
+    /// reconciliation; mirrors `daemon::managed_routes::SessionSummary::attached`).
+    ///
+    /// Why: the list handler reconciles the displayed state against real tmux so
+    /// a running/attached session never reads as `(stopped)` in `tm ls`. This
+    /// flag lets the picker/table render `attached` and offer connect rather
+    /// than a destructive restart. `#[serde(default)]` keeps the client tolerant
+    /// of an OLDER daemon that omits the field — it deserializes to `false`.
+    /// What: a plain bool, `false` unless the daemon found a client attached.
+    /// Test: rendered by the `tm ls` picker/table.
+    #[serde(default)]
+    pub attached: bool,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

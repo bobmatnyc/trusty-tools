@@ -82,9 +82,10 @@ impl From<Uuid> for ManagedSessionId {
 /// directory and record are INTACT and RESUMABLE. Only `Decommissioned` means
 /// the workspace has been removed from disk.
 ///
-/// What: five variants covering the full lifecycle from first provisioning
-/// through active use, voluntary/involuntary runtime stop, resume, and final
-/// teardown. `Dead`/`Orphaned`/`Idle`/`Adopted` are intentionally absent —
+/// What: six variants covering the full lifecycle from first provisioning
+/// through active use, voluntary/involuntary runtime stop, resume, final
+/// teardown (`Decommissioned`), and explicit operator deletion (`Deleted`).
+/// `Dead`/`Orphaned`/`Idle`/`Adopted` are intentionally absent —
 /// a stopped-or-gone runtime must never read as "session lost".
 /// Test: `state_display`, serde round-trips in `record_serde_round_trip`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +109,17 @@ pub enum ManagedSessionState {
     ///
     /// Entered when the operator calls `decommission`. No resume is possible.
     Decommissioned,
+    /// Terminal state: the operator explicitly DELETED the record.
+    ///
+    /// Why: `tm sessions delete` marks the record `Deleted` (rendered
+    /// `--deleted--` in the master list) instead of silently dropping it from
+    /// the store, preserving the "fully-tracked lifecycle, no fire-and-forget"
+    /// standard — a deleted session is still visible so the operator sees what
+    /// happened. Distinct from `Decommissioned` (which is the workspace-teardown
+    /// terminal state). Permanent removal from the store happens via
+    /// `tm sessions prune --state deleted` (or `--state all`). No resume is
+    /// possible.
+    Deleted,
 }
 
 impl fmt::Display for ManagedSessionState {
@@ -118,6 +130,7 @@ impl fmt::Display for ManagedSessionState {
             Self::Stopped => "stopped",
             Self::Errored => "errored",
             Self::Decommissioned => "decommissioned",
+            Self::Deleted => "deleted",
         };
         write!(f, "{s}")
     }
@@ -369,6 +382,7 @@ mod tests {
             ManagedSessionState::Decommissioned.to_string(),
             "decommissioned"
         );
+        assert_eq!(ManagedSessionState::Deleted.to_string(), "deleted");
     }
 
     #[test]

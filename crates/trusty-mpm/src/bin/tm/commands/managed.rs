@@ -167,8 +167,16 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             .unwrap_or_default();
         // #2595: flag a dead pick (stopped/errored with no workdir candidate
         // left on disk) right in the STATE column — the operator sees it
-        // without having to select the session and hit a 422 first.
-        let state = format_state_column(&s.state, s.unresumable, s.stale_assets);
+        // without having to select the session and hit a 422 first. An
+        // ATTACHED session (live-tmux reconciled by the daemon) reads
+        // `attached` rather than the raw `active` so the operator can tell a
+        // session they're connected to from a merely-running one.
+        let base_state = if s.attached {
+            "attached"
+        } else {
+            s.state.as_str()
+        };
+        let state = format_state_column(base_state, s.unresumable, s.stale_assets);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
             "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
@@ -186,18 +194,26 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
 ///
 /// Why: extracted as a pure function so the `[dead]`/`[stale-assets]` markers
 /// are unit-testable without capturing `render_session_table`'s stdout.
-/// What: returns `state` unchanged when both flags are `false`; appends
-/// `" [dead]"` when `unresumable` is `true` (the session is `stopped`/
-/// `errored` with no workdir candidate left on disk, so a resume is
-/// guaranteed to fail), and/or `" [stale-assets]"` when `stale_assets` is
-/// `true` (the session's deployed agents/skills have drifted from the
-/// catalog — `tm sessions sync-assets <id>` fixes it). Both markers can
+/// What: renders the base state (`deleted` → the `--deleted--` marker, #2012;
+/// every other state verbatim), then appends `" [dead]"` when `unresumable` is
+/// `true` (the session is `stopped`/`errored` with no workdir candidate left on
+/// disk, so a resume is guaranteed to fail), and/or `" [stale-assets]"` when
+/// `stale_assets` is `true` (the session's deployed agents/skills have drifted
+/// from the catalog — `tm sessions sync-assets <id>` fixes it). Markers can
 /// appear together.
 /// Test: `format_state_column_appends_dead_marker`,
 /// `format_state_column_appends_stale_assets_marker`,
-/// `format_state_column_leaves_healthy_state_unchanged`.
+/// `format_state_column_leaves_healthy_state_unchanged`,
+/// `format_state_column_renders_deleted_marker`.
 fn format_state_column(state: &str, unresumable: bool, stale_assets: bool) -> String {
-    let mut out = state.to_string();
+    // A `deleted` record (soft-deleted via `tm sessions delete`) renders as the
+    // `--deleted--` marker so the master list REFLECTS the deletion instead of
+    // the row silently vanishing (#2012 marker).
+    let mut out = if state == "deleted" {
+        "--deleted--".to_string()
+    } else {
+        state.to_string()
+    };
     if unresumable {
         out.push_str(" [dead]");
     }

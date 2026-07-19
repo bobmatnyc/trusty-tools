@@ -1,0 +1,181 @@
+//! `SessionManager::rename` + `validate_session_name` coverage.
+//!
+//! Why: `session_manager/tests.rs` is at the 1500-SLOC test cap; the rename
+//! coverage lives here (mirroring `delete_tests.rs`) so neither file grows past
+//! its limit. Reuses the sibling `tests` module's `make_manager`/`seed_record`
+//! helpers rather than duplicating the scaffolding.
+//! What: name-validation unit tests plus success/no-op/collision/invalid/
+//! terminal/live-tmux-rename cases for [`super::manager::SessionManager::rename`].
+//! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
+
+use tempfile::TempDir;
+
+use super::manager::{ManagedError, ManagedTmuxDriver};
+use super::record::{ManagedSessionId, ManagedSessionState};
+use super::rename::validate_session_name;
+use super::tests::{make_manager, seed_record};
+
+#[test]
+fn validate_session_name_accepts_valid_and_trims() {
+    assert_eq!(
+        validate_session_name("  tm-quiet-falcon ").unwrap(),
+        "tm-quiet-falcon"
+    );
+    assert_eq!(
+        validate_session_name("tm_worker_01").unwrap(),
+        "tm_worker_01"
+    );
+}
+
+#[test]
+fn validate_session_name_rejects_empty_and_bad_chars() {
+    assert!(
+        validate_session_name("   ").is_err(),
+        "empty/whitespace must reject"
+    );
+    assert!(
+        validate_session_name("has space").is_err(),
+        "whitespace must reject"
+    );
+    assert!(
+        validate_session_name("has.dot").is_err(),
+        "tmux-reserved '.' must reject"
+    );
+    assert!(
+        validate_session_name("has:colon").is_err(),
+        "tmux-reserved ':' must reject"
+    );
+    assert!(
+        validate_session_name(&"x".repeat(65)).is_err(),
+        "over-64-char name must reject"
+    );
+}
+
+/// `rename` updates a stopped record's name and persists it.
+#[tokio::test]
+async fn rename_updates_name_and_persists() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+
+    let updated = mgr.rename(&id, "tm-renamed-01").await.expect("rename");
+    assert_eq!(updated.tmux_name, "tm-renamed-01");
+    // The change is persisted — a fresh read sees the new name.
+    let reread = mgr.get(&id).await.expect("get");
+    assert_eq!(reread.tmux_name, "tm-renamed-01");
+}
+
+/// Renaming to the SAME name is a no-op that returns the record unchanged.
+#[tokio::test]
+async fn rename_same_name_is_noop() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+    let current = mgr.get(&id).await.expect("get").tmux_name;
+
+    let same = mgr.rename(&id, &current).await.expect("rename same");
+    assert_eq!(same.tmux_name, current);
+}
+
+/// `rename` refuses a name already held by ANOTHER managed record.
+#[tokio::test]
+async fn rename_rejects_collision_with_record() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let a = ManagedSessionId::new();
+    let b = ManagedSessionId::new();
+    seed_record(&mgr, &dir, a, ManagedSessionState::Stopped, false).await;
+    seed_record(&mgr, &dir, b, ManagedSessionState::Stopped, false).await;
+    let b_name = mgr.get(&b).await.expect("get b").tmux_name;
+
+    let err = mgr
+        .rename(&a, &b_name)
+        .await
+        .expect_err("must refuse a name another record already holds");
+    assert!(matches!(err, ManagedError::NameCollision(_)), "got {err:?}");
+}
+
+/// `rename` refuses a name held by a LIVE tmux session (even a foreign one).
+#[tokio::test]
+async fn rename_rejects_collision_with_live_tmux() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+    // A live tmux session not backed by any managed record.
+    fake.create_session("tm-foreign-live", "/tmp")
+        .expect("register foreign tmux");
+
+    let err = mgr
+        .rename(&id, "tm-foreign-live")
+        .await
+        .expect_err("must refuse a name a live tmux session holds");
+    assert!(matches!(err, ManagedError::NameCollision(_)), "got {err:?}");
+}
+
+/// `rename` rejects an invalid new name with `InvalidState`.
+#[tokio::test]
+async fn rename_rejects_invalid_name() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+
+    let err = mgr
+        .rename(&id, "bad name!")
+        .await
+        .expect_err("invalid name must be rejected");
+    assert!(
+        matches!(err, ManagedError::InvalidState(_, _)),
+        "got {err:?}"
+    );
+}
+
+/// `rename` refuses a terminal (Decommissioned) record.
+#[tokio::test]
+async fn rename_rejects_terminal_record() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Decommissioned, false).await;
+
+    let err = mgr
+        .rename(&id, "tm-new-name")
+        .await
+        .expect_err("a terminal record must not be renamed");
+    assert!(
+        matches!(err, ManagedError::InvalidState(_, _)),
+        "got {err:?}"
+    );
+}
+
+/// `rename` renames the LIVE tmux session when one backs the record.
+#[tokio::test]
+async fn rename_renames_live_tmux_session() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    // Active seed registers a live tmux session in the fake driver.
+    seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
+    let old_name = mgr.get(&id).await.expect("get").tmux_name;
+
+    mgr.rename(&id, "tm-live-renamed").await.expect("rename");
+
+    // The driver was told to rename old -> new.
+    let renames = fake.rename_calls.lock().unwrap();
+    assert!(
+        renames
+            .iter()
+            .any(|(o, n)| o == &old_name && n == "tm-live-renamed"),
+        "expected rename_session({old_name} -> tm-live-renamed), got {renames:?}"
+    );
+    drop(renames);
+    // And the live tmux session now answers to the new name, not the old.
+    assert!(
+        fake.session_exists("tm-live-renamed"),
+        "new name must be live"
+    );
+    assert!(!fake.session_exists(&old_name), "old name must be gone");
+}

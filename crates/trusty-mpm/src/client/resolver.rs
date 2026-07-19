@@ -189,6 +189,7 @@ mod tests {
             injection_status: None,
             unresumable: false,
             stale_assets: false,
+            attached: false,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

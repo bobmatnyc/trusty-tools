@@ -253,7 +253,11 @@ pub fn aggregate_project_status(
             ManagedSessionState::Active => counts.active += 1,
             ManagedSessionState::Stopped => counts.stopped += 1,
             ManagedSessionState::Errored => counts.errored += 1,
-            ManagedSessionState::Decommissioned => counts.decommissioned += 1,
+            // `Deleted` tombstones are counted alongside `Decommissioned`
+            // tombstones (both are terminal, non-live records).
+            ManagedSessionState::Decommissioned | ManagedSessionState::Deleted => {
+                counts.decommissioned += 1
+            }
         }
         counts.total += 1;
 

@@ -57,6 +57,40 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// Rename the live tmux session via `tmux rename-session -t <old> <new>`,
+    /// routed through the shared `core::tmux::run_tmux` choke point (#2398).
+    fn rename_session(&self, old: &str, new: &str) -> Result<(), ManagedError> {
+        let cmd = crate::core::tmux::TmuxCommand::RenameSession {
+            old: old.to_string(),
+            new: new.to_string(),
+        };
+        let output = crate::core::tmux::run_tmux(&cmd)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            Err(ManagedError::TmuxUnavailable(format!(
+                "tmux rename-session {old} -> {new} failed: {stderr}"
+            )))
+        }
+    }
+
+    /// Report every tmux session that currently has a client attached, via the
+    /// concrete driver's `list-sessions` (`#{session_attached}`).
+    fn attached_session_names(&self) -> Vec<String> {
+        self.driver
+            .list_sessions()
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|s| s.attached)
+                    .map(|s| s.name)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
         self.driver
             .send_line(&TmuxTarget::session(name), text)

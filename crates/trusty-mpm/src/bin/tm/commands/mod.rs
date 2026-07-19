@@ -45,6 +45,7 @@ pub(crate) mod pm_guard_routing;
 pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod prune;
+pub(crate) mod rename;
 pub(crate) mod repair;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;

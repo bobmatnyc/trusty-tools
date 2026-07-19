@@ -115,6 +115,48 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         injection_status: injection_status_wire(r.injection_status),
         unresumable: false,
         stale_assets: false,
+        // `attached` is a live-tmux reconciliation only the list handler
+        // computes (see [`super::list_managed_sessions`]); every other summary
+        // builder leaves it at its `false` default.
+        attached: false,
+    }
+}
+
+/// Reconcile each summary's displayed `state`/`attached` against LIVE tmux.
+///
+/// Why: a record's PERSISTED `state` can read `stopped` after a daemon restart
+/// (before the reconcile pass runs) even though its tmux session is alive and a
+/// client is attached — the `tm ls` picker then wrongly showed EVERY session
+/// `(stopped)` and offered a destructive `restart`. Real tmux is the
+/// authoritative signal, so the list handler probes it once and corrects the
+/// DISPLAYED state here (read-time reconciliation, mirroring how
+/// `unresumable`/`stale_assets` are computed without mutating the store).
+/// What: for each summary whose record is in the transient `Active`/`Stopped`
+/// pair, sets `state` to `"active"` when its tmux session is in `live` (else
+/// `"stopped"`), and sets `attached` when its session is in `attached`.
+/// Terminal states (`Decommissioned`/`Deleted`), `Provisioning`, and `Errored`
+/// are left as persisted — a live tmux name must never resurrect a
+/// deleted/decommissioned record's label, and `errored`/`provisioning` carry
+/// information a bare liveness probe would erase.
+/// Test: `reconcile_live_state_flips_stopped_to_active_when_alive`,
+/// `reconcile_live_state_leaves_terminal_states` in `super::tests`; end-to-end
+/// coverage in the `session_lifecycle` integration suite.
+pub(super) fn reconcile_live_state(
+    summaries: &mut [SessionSummary],
+    records: &[SessionRecord],
+    live: &std::collections::HashSet<String>,
+    attached: &std::collections::HashSet<String>,
+) {
+    for (summary, record) in summaries.iter_mut().zip(records.iter()) {
+        let name = &record.tmux_name;
+        let is_live = live.contains(name);
+        summary.attached = is_live && attached.contains(name);
+        if matches!(
+            record.state,
+            ManagedSessionState::Active | ManagedSessionState::Stopped
+        ) {
+            summary.state = if is_live { "active" } else { "stopped" }.to_string();
+        }
     }
 }
 

@@ -16,7 +16,7 @@
 
 use tempfile::TempDir;
 
-use super::manager::{ManagedError, ManagedTmuxDriver};
+use super::manager::ManagedTmuxDriver;
 use super::record::{ManagedSessionId, ManagedSessionState};
 use super::tests::{make_manager, seed_record};
 
@@ -32,7 +32,7 @@ use super::tests::{make_manager, seed_record};
 /// What: seeds an `Active` record (which, per `seed_record`, registers a live
 /// tmux session on the fake driver), then kills that session directly to
 /// simulate the daemon never having observed the crash, and asserts
-/// `delete_record(id, force=false)` succeeds and the record is gone.
+/// `delete_record(id, force=false)` succeeds and the record is marked `Deleted`.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delete_record_stale_active_deletable_when_tmux_dead() {
@@ -49,10 +49,11 @@ async fn delete_record_stale_active_deletable_when_tmux_dead() {
     mgr.delete_record(&id, false).await.expect(
         "a stale Active record whose tmux is actually dead must be deletable without --force",
     );
-    assert!(matches!(
-        mgr.get(&id).await,
-        Err(ManagedError::SessionNotFound(_))
-    ));
+    // Soft-delete: the record is marked `--deleted--`, kept in the store (#2012).
+    assert_eq!(
+        mgr.get(&id).await.expect("record still tracked").state,
+        ManagedSessionState::Deleted
+    );
 }
 
 /// A STALE `Active` record whose tmux session has actually died IS pruned

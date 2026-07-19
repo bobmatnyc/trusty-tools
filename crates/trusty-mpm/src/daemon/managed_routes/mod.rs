@@ -40,6 +40,7 @@ pub mod provision_status;
 pub mod proxy;
 pub mod prune;
 mod reactivate;
+pub mod rename;
 mod resume_error;
 mod session_summary;
 mod summary;
@@ -70,11 +71,13 @@ pub use prune::{
     PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
 };
 pub use reactivate::reactivate_managed_session;
+pub use rename::{RenameRequest, rename_managed_session};
 pub use resume_error::ResumeManagedError;
 pub use session_summary::SessionSummary;
 pub use summary::record_to_json;
 use summary::{
-    attach_cmd_for, checked_summaries, parse_id, record_to_summary, record_to_summary_checked,
+    attach_cmd_for, checked_summaries, parse_id, reconcile_live_state, record_to_summary,
+    record_to_summary_checked,
 };
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
@@ -302,10 +305,10 @@ pub struct DeleteQuery {
 
 /// Response body for POST /api/v1/sessions/managed/{id}/delete (#2012).
 ///
-/// Why: the record is gone from the store after this call succeeds, so a
-/// follow-up GET can never confirm what was deleted — the response carries the
-/// PRE-deletion snapshot (id, name, prior state, …) so the caller/CLI can
-/// render an honest confirmation.
+/// Why: delete SOFT-deletes — it marks the record `Deleted` (rendered
+/// `--deleted--`) and keeps it in the store. The response carries the
+/// PRE-deletion snapshot (id, name, the state it was in BEFORE deletion, …) so
+/// the caller/CLI can render an honest `[was <state>]` confirmation.
 /// What: the pre-deletion [`SessionSummary`] plus `deleted: true`. Distinct
 /// from [`DecommissionResponse`] — delete never mutates the workspace, so
 /// there is no `workspace_removed` field here.
@@ -315,7 +318,7 @@ pub struct DeleteResponse {
     /// Snapshot of the record as it was immediately BEFORE deletion.
     #[serde(flatten)]
     pub summary: SessionSummary,
-    /// Always `true` on success — the record was removed from the store.
+    /// Always `true` on success — the record was marked `--deleted--`.
     pub deleted: bool,
 }
 
@@ -575,7 +578,21 @@ pub async fn list_managed_sessions(
         .into_iter()
         .filter(|r| sid_filter.is_none_or(|sid| r.source_id.as_deref() == Some(sid)))
         .collect();
-    let sessions = checked_summaries(&records).await;
+    let mut sessions = checked_summaries(&records).await;
+    // Reconcile the displayed state against LIVE tmux so a running/attached
+    // session never reads as `(stopped)` (and never gets offered a destructive
+    // `restart`) just because its persisted state went stale after a daemon
+    // restart. The tmux probes are cheap single calls (one `list-sessions`
+    // each) reused across every record.
+    let live: std::collections::HashSet<String> = mgr
+        .tmux
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let attached: std::collections::HashSet<String> =
+        mgr.tmux.attached_session_names().into_iter().collect();
+    reconcile_live_state(&mut sessions, &records, &live, &attached);
     Json(ListSessionsResponse { sessions })
 }
 
@@ -831,22 +848,21 @@ pub async fn decommission_managed_session(
     }
 }
 
-/// POST /api/v1/sessions/managed/{id}/delete — hard-delete the session RECORD (#2012).
+/// POST /api/v1/sessions/managed/{id}/delete — soft-delete the RECORD, mark `--deleted--` (#2012).
 ///
 /// Why: distinct from `decommission` (stop runtime + maybe remove workspace +
-/// tombstone) — this permanently drops the record itself from the store via
-/// the existing tombstone-compaction primitive
-/// ([`crate::session_manager::SessionManager::compact_record`]), for an
-/// operator who wants a mis-provisioned or stale record gone outright rather
-/// than left as a `Decommissioned` tombstone forever. Fail-closed: a RUNNING
-/// session (`Active`/`Provisioning`) is refused unless `?force=true`.
+/// `Decommissioned` tombstone) — this marks the record `Deleted` (rendered
+/// `--deleted--`) so the operator's master list REFLECTS the deletion instead
+/// of the row vanishing, honouring the "fully-tracked lifecycle" standard.
+/// Fail-closed: a RUNNING session (`Active`/`Provisioning`) is refused unless
+/// `?force=true`.
 /// What: parses the id and the `force` query flag, delegates to
 /// [`crate::session_manager::SessionManager::delete_record`], and maps its
 /// result — `Ok` → 200 with the pre-deletion [`DeleteResponse`] snapshot;
 /// `SessionNotFound` → 404; `InvalidState` (the running-guard refusal) → 409
 /// with the manager's actionable message; any other error → 500. NEVER
 /// touches the workspace directory on disk (see `delete_record`'s doc).
-/// Test: `delete_route_removes_record`, `delete_route_refuses_running_without_force`,
+/// Test: `delete_route_marks_deleted`, `delete_route_refuses_running_without_force`,
 /// `delete_route_force_bypasses_guard` in managed_routes tests.
 pub async fn delete_managed_session(
     State(state): State<Arc<DaemonState>>,

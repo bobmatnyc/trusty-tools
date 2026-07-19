@@ -1,4 +1,4 @@
-//! `delete_record` coverage — hard-delete via `compact_record`, the fail-closed
+//! `delete_record` coverage — soft-delete `--deleted--` marker, the fail-closed
 //! running-guard, `--force` bypass, and the workspace-dir-untouched invariant (#2012).
 //!
 //! Why: `session_manager/tests.rs` is at the 1500-SLOC test cap; this
@@ -10,8 +10,8 @@
 //! check) is covered separately in `liveness_tests.rs` to keep this file
 //! focused and both files under the SLOC cap.
 //! What: four tests exercising [`super::manager::SessionManager::delete_record`]
-//! — plain removal, the running-guard refusal, the `--force` bypass, and proof
-//! that the workspace directory is never touched by a delete.
+//! — the `--deleted--` soft-delete mark, the running-guard refusal, the
+//! `--force` bypass, and proof that the workspace directory is never touched.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use tempfile::TempDir;
@@ -20,26 +20,28 @@ use super::manager::ManagedError;
 use super::record::{ManagedSessionId, ManagedSessionState};
 use super::tests::{make_manager, seed_record};
 
-/// `delete_record` hard-deletes a non-running record via `compact_record` (#2012).
+/// `delete_record` marks a non-running record `--deleted--`, keeping it in the
+/// store (#2012, soft-delete marker).
 ///
-/// Why: `tm session delete` must actually remove the record from the store for
-/// a session that is already stopped/decommissioned — the common case an
-/// operator reaches for the verb.
+/// Why: `tm sessions delete` must REFLECT the deletion in the master list
+/// (state `Deleted`, rendered `--deleted--`) rather than silently dropping the
+/// record — the "fully-tracked lifecycle, no fire-and-forget" standard.
 /// What: seeds a `Stopped` (non-running) record, deletes without `--force`, and
-/// asserts it is gone from the store.
+/// asserts it is STILL in the store with state `Deleted`.
 /// Test: this function IS the test.
 #[tokio::test]
-async fn delete_record_removes_from_store() {
+async fn delete_record_marks_deleted() {
     let dir = TempDir::new().unwrap();
     let (mgr, _fake) = make_manager(&dir).await;
     let id = ManagedSessionId::new();
     seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
 
-    mgr.delete_record(&id, false).await.expect("delete");
-    assert!(matches!(
-        mgr.get(&id).await,
-        Err(ManagedError::SessionNotFound(_))
-    ));
+    let prior = mgr.delete_record(&id, false).await.expect("delete");
+    // The returned snapshot is the PRE-deletion state.
+    assert_eq!(prior.state, ManagedSessionState::Stopped);
+    // The record is still tracked, now marked `Deleted` (rendered `--deleted--`).
+    let after = mgr.get(&id).await.expect("record must still exist");
+    assert_eq!(after.state, ManagedSessionState::Deleted);
 }
 
 /// `delete_record` fail-closed guard refuses a RUNNING session without `--force` (#2012).
@@ -78,7 +80,7 @@ async fn delete_record_refuses_running_without_force() {
 /// hard-delete a running session's record (e.g. to clear a stuck/duplicate
 /// entry) without first stopping it.
 /// What: seeds an `Active` record, calls `delete_record(id, force=true)`, and
-/// asserts the record is gone from the store.
+/// asserts the record is marked `Deleted` (kept in the store).
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delete_record_force_bypasses_running_guard() {
@@ -90,10 +92,8 @@ async fn delete_record_force_bypasses_running_guard() {
     mgr.delete_record(&id, true)
         .await
         .expect("--force must bypass the running guard");
-    assert!(matches!(
-        mgr.get(&id).await,
-        Err(ManagedError::SessionNotFound(_))
-    ));
+    let after = mgr.get(&id).await.expect("record must still exist");
+    assert_eq!(after.state, ManagedSessionState::Deleted);
 }
 
 /// `delete_record` NEVER removes the workspace directory from disk (#2012).
@@ -104,7 +104,7 @@ async fn delete_record_force_bypasses_running_guard() {
 /// (untouched) after the record is gone.
 /// What: seeds a `Stopped` record with a real on-disk workspace dir, deletes
 /// the record, and asserts the workspace directory still exists on disk even
-/// though the record is gone from the store.
+/// though the record is now marked `Deleted`.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delete_record_never_touches_workspace_dir() {
@@ -116,9 +116,10 @@ async fn delete_record_never_touches_workspace_dir() {
 
     mgr.delete_record(&id, false).await.expect("delete");
 
-    assert!(
-        matches!(mgr.get(&id).await, Err(ManagedError::SessionNotFound(_))),
-        "record must be gone from the store"
+    assert_eq!(
+        mgr.get(&id).await.expect("record still tracked").state,
+        ManagedSessionState::Deleted,
+        "record must be marked Deleted (kept in the store)"
     );
     assert!(
         ws.exists(),
