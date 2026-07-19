@@ -23,6 +23,7 @@ This index is the **single source of truth** for the ADR corpus. It serves as a 
 | [0013](./0013-rename-trusty-controller-to-trusty-installer.md) | Rename `trusty-controller` → `trusty-installer`; add `tctl` transitional alias; build out interactive installer | Accepted | trusty-controller renamed trusty-installer; `tctl` becomes transitional alias; interactive installer built out | Workspace |
 | [0014](./0014-native-mcp-support.md) | Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more) | Accepted | Consolidate MCP framework in trusty-common; ship native MCP servers for all integrations | Workspace |
 | [0015](./0015-three-product-agent-composition-model.md) | Unified agent composition: shared `.md`+YAML+`extends` format across trusty-agents, trusty-mpm, trusty-code | Proposed | Single agent-composition format across all three orchestration engines | Workspace |
+| [0016](./0016-orchestration-hierarchy-lead-pm-assistant.md) | Orchestration Hierarchy: Engineering Lead / PM / Assistant | Proposed | Three-tier agent orchestration hierarchy: Engineering Lead leads cross-tool workstreams; PM orchestrates projects; Assistant executes delegated tasks | Workspace |
 
 ## Notes
 
