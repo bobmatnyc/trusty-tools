@@ -49,7 +49,7 @@ which              = { workspace = true }
 open               = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "config-cli"] }
+trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "config-cli", "axum-server"] }  # `axum-server` (#3304): the shared same-origin write guard the console consumes via `routes::origin_guard`
 reqwest            = { workspace = true }
 
 [dev-dependencies]

@@ -8,6 +8,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Security (internal):** the write-origin (CSRF) guard implementation moved
+  to `trusty-common` (`server::origin_guard`); `routes::origin_guard` is now a
+  thin re-export so there is exactly one guard implementation shared with the
+  sibling daemons. No behavioural change — the existing guard regression suite
+  passes unchanged (architecture review tranche 1,
+  [#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)).
+
 ### Fixed
 
 - **Security (P1):** the write-origin (CSRF) guard is now applied
