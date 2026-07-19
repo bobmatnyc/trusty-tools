@@ -169,6 +169,24 @@ pub mod skills;
 /// submodule in place.
 pub mod connectors;
 
+/// Heterogeneous workstream ledger: the DOC-44 "engineering lead / virtual
+/// twin" architecture's Layer 2 persisted state (issue #3008, twin Phase 2).
+///
+/// Why: DOC-44 §8 Phase 2 needs a harness-tagged (`tm`/`tcode`) registry the
+/// eventual lead agent uses to track workstreams across both tools, built
+/// directly on Phase 1's `connectors::BackendParams` tagging. See the
+/// module's own docs for the naming correction (issue title says "DOC-42",
+/// the correct id is DOC-44) and its relationship to `session_registry`
+/// (a different, narrower, already-wired registry — left untouched).
+/// What: `Workstream`/`Harness`/`WorkstreamStatus`/`Priority`/`NewWorkstream`
+/// value types, the JSON-backed `WorkstreamLedger` (create/list/get/query/
+/// update), `LedgerError`, and the `LedgerRecovery` seam
+/// (`JsonFileRecovery` default + `TrustyMemoryRecovery` stub, blocked on
+/// issue #3228).
+/// Test: `cargo test -p trusty-agents-common workstreams::` exercises every
+/// submodule in place.
+pub mod workstreams;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

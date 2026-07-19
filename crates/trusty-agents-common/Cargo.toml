@@ -31,6 +31,8 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 # agents::deployer warns once on untracked-modified files (#2892).
 tracing = { workspace = true }
+# workstreams::ledger assigns each Workstream a UUIDv4 id (#3008, twin Phase 2).
+uuid = { workspace = true }
 
 [dev-dependencies]
 # session_registry tests use tempfile for isolated state-dir creation.

@@ -14,6 +14,18 @@
 //!
 //! NOTE: scaffolded ahead of `main.rs` wiring — `#[allow(dead_code)]` on the
 //! whole module keeps the build clean while the hookup lands incrementally.
+//!
+//! NOTE (issue #3008, twin Phase 2): the issue that requested a "heterogeneous
+//! workstream ledger" described this module as "currently dead-code". It is
+//! not, quite — `trusty-agents::runtime::startup` calls
+//! `SessionsRegistry::record_start` on every process boot (see that module),
+//! so `#[allow(dead_code)]` above is stale for `record_start`/`SessionEntry`/
+//! `SessionsRegistry::open`, though `record_end` and `list` genuinely have no
+//! caller outside this file's own tests. Since the live call site sits in
+//! `crates/trusty-agents/src/**` (out of #3008's file scope), this module was
+//! left as-is rather than generalized in place; the new harness-tagged,
+//! ticket-level DOC-44 workstream ledger lives in `super::workstreams`
+//! instead. See that module's docs for the full rationale.
 
 #![allow(dead_code)]
 
