@@ -169,13 +169,13 @@ describe('ServiceNav tab switching (issue #3153 shell rebuild)', () => {
     });
   });
 
-  it('renders all 7 canonical nav tabs', () => {
+  it('renders all 8 canonical nav tabs (Skills added by issue #3449)', () => {
     instance = mount(App, { target }) as unknown as Record<string, unknown>;
 
     const wsnav = target.querySelector('.wsnav');
     const labels = Array.from(wsnav?.querySelectorAll('button') ?? []).map((b) => b.textContent?.trim());
 
-    for (const label of ['Workstream', 'Project', 'Agents', 'Memory', 'Search', 'Files']) {
+    for (const label of ['Workstream', 'Project', 'Agents', 'Skills', 'Memory', 'Search', 'Files']) {
       expect(labels, `expected a "${label}" nav tab`).toContain(label);
     }
   });

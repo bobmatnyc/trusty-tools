@@ -364,6 +364,62 @@ async fn http_rest_get_projects_route_is_merged_in() {
     assert!(v["entries"].is_array());
 }
 
+/// `GET /agents`/`GET /skills` (issue #3449's Foundry GUI catalog-management
+/// REST groups, merged in by `build_axum_router` via
+/// `rest::agent_catalog::routes`/`rest::skill_catalog::routes`) must be
+/// reachable on the SAME router `POST /rpc` is — proving the merge actually
+/// wires both groups rather than silently dropping them. Per-route behaviour
+/// is already covered by `rest::agent_catalog::tests`/
+/// `rest::skill_catalog::tests`; this test only pins the merge itself.
+#[tokio::test]
+async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
+    let sessions = Arc::new(SessionRegistry::new());
+    let project = tempfile::tempdir().expect("project tempdir");
+    let mut router = Router::new();
+    crate::serve::methods::register(&mut router);
+    crate::session::protocol::register(
+        &mut router,
+        sessions.clone(),
+        test_workstreams_store().await,
+    );
+    crate::agents::protocol::register(
+        &mut router,
+        crate::agents::protocol::AgentsCatalogState::new(project.path().to_path_buf(), true),
+    );
+    crate::skills::protocol::register(
+        &mut router,
+        crate::skills::protocol::SkillsCatalogState::new(Some(project.path())),
+    );
+    let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
+
+    let agents_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agents_resp.status(), StatusCode::OK);
+    assert!(body_json(agents_resp).await["agents"].is_array());
+
+    let skills_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/skills")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(skills_resp.status(), StatusCode::OK);
+    assert!(body_json(skills_resp).await["skills"].is_array());
+}
+
 /// `GET /sessions/{id}/agents` (the #2983 Slice 6 REST route group,
 /// merged in by `build_axum_router` via `rest::agents::routes`) must be
 /// reachable on the SAME router `GET /sessions/{id}/events` is —

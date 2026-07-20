@@ -93,6 +93,12 @@ function fullSuccessFetch(opts?: { tasksBody?: unknown; callLog?: string[] }) {
     if (url.includes('/projects')) {
       return { ok: true, status: 200, json: async () => ROSTER } as Response;
     }
+    if (url.endsWith('/agents') && method === 'GET') {
+      // Issue #3449's mount-only agent-roster fetch (`lib/agent-roster.ts`)
+      // — this form never selects an agent by default, so an empty roster
+      // is a valid, uneventful response.
+      return { ok: true, status: 200, json: async () => ({ agents: [] }) } as Response;
+    }
     if (url.endsWith('/workstreams') && method === 'POST') {
       return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
     }
@@ -281,7 +287,10 @@ describe('StartWorkingForm submit sequence', () => {
     submitButton().click();
     await waitFor(() => target.textContent?.includes('started') ?? false);
 
-    expect(callLog).toEqual([
+    // Filters out the mount-only `GET /agents` roster fetch (issue #3449) —
+    // its timing relative to submit is not this test's concern; only the
+    // create -> run -> activate ORDER of the submit sequence itself is.
+    expect(callLog.filter((c) => c !== 'GET /agents')).toEqual([
       'POST /workstreams',
       'POST /tasks',
       'POST /workstreams/ws-abc123/activate',
@@ -402,7 +411,9 @@ describe('StartWorkingForm submit sequence', () => {
     // The error names the already-created workstream (HIGH finding: the
     // operator must know it exists, not just that the task failed).
     expect(target.textContent).toContain('was created but not activated');
-    expect(callLog).toEqual(['POST /workstreams', 'POST /tasks']);
+    // Filters out the mount-only `GET /agents` roster fetch (issue #3449) —
+    // see the identical note in the create->run->activate order test above.
+    expect(callLog.filter((c) => c !== 'GET /agents')).toEqual(['POST /workstreams', 'POST /tasks']);
     expect(callLog.some((c) => c.includes('/activate'))).toBe(false);
 
     // Retry: must reuse the SAME workstream id — no second POST
