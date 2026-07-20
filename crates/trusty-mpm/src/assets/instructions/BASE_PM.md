@@ -95,3 +95,13 @@ You have native MCP access to trusty-search and trusty-memory. Always use these 
 - trusty-search alive: `mcp__trusty-search__search_health`
 - trusty-memory alive: `mcp__trusty-memory__memory_recall` with a test query
 - Never use `curl`, `lsof`, `ps aux`, or `netstat` to check these services
+
+### External connectors — native-first (soft preference)
+When both can do the job, prefer this workspace's native MCP servers over
+claude.ai's hosted connectors: `mcp__gworkspace-mcp__*` over
+`mcp__claude_ai_Gmail__*` / `mcp__claude_ai_Google_Calendar__*` /
+`mcp__claude_ai_Google_Drive__*` for Google Workspace; `mcp__slack-mcp__*`
+over `mcp__claude_ai_Slack__*` for Slack. This is a routing preference, not a
+block (ADR-0014: trusty-tools ships first-party in-workspace MCP servers as
+its product surface, at parity) — claude.ai's connectors stay available as
+fallback whenever the native server genuinely can't perform the task.
