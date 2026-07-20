@@ -250,7 +250,20 @@ pub(super) fn extract_finish_task_summary(
 /// Why: #33 — this logic lives inline in `chat_with_tools_gated` but is
 /// cleanly testable as a pure function: we want the first plain-text turn
 /// to trigger a retry and the second (or final-turn) plain-text to be
-/// accepted gracefully.
+/// accepted gracefully. #3371 — that behavior is correct ONLY for
+/// tool-mandatory agents (`use_finish_task = true` and/or
+/// `tool_choice = "any"`, e.g. `plan-agent`/`research-agent`). Conversational
+/// / orchestrator agents (`pm`, `assistant`, personas — default
+/// `tool_choice = "auto"`, `use_finish_task = false`) correctly return plain
+/// text on turn 1 (greeting, direct answer, post-delegation synthesis); the
+/// old unconditional heuristic retried on essentially every one of their
+/// turns, paying a real extra API round trip 16/16 times in production
+/// measurement. `strict_tool_discipline` opts a caller into the old
+/// behavior; it defaults to `false` everywhere else. Separately, #3371 Bug A:
+/// a caller that offered zero tools (`tools_offered = false`) can never
+/// satisfy the discipline the retry is enforcing — dispatching a retry in
+/// that case only guarantees a wasted round trip, so it's gated off
+/// regardless of `strict_tool_discipline`.
 /// What: Returns `true` if the caller should retry (inject error + continue),
 /// `false` if it should accept the plain-text content as the final answer.
 /// Test: See `tool_discipline_decision_*` tests below.
@@ -258,8 +271,13 @@ pub fn should_retry_plain_text_turn(
     consecutive_no_tool_turns: u32,
     turn: u32,
     max_turns: u32,
+    strict_tool_discipline: bool,
+    tools_offered: bool,
 ) -> bool {
-    consecutive_no_tool_turns == 0 && turn < max_turns.saturating_sub(1)
+    strict_tool_discipline
+        && tools_offered
+        && consecutive_no_tool_turns == 0
+        && turn < max_turns.saturating_sub(1)
 }
 
 /// Pull a `(system_prompt, first_user_message)` pair out of a typed

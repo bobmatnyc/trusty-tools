@@ -262,6 +262,7 @@ pub async fn run_pm_task_with_history(
             false,
             None,
             false,
+            pm_cfg.llm.strict_tool_discipline(),
             effective_use_direct,
             &pm_cfg.llm.stop_sequences,
         )
@@ -289,6 +290,7 @@ pub async fn run_pm_task_with_history(
                     false,
                     None,
                     false,
+                    pm_cfg.llm.strict_tool_discipline(),
                     pm_cfg.llm.use_anthropic_direct,
                     &pm_cfg.llm.stop_sequences,
                 )
@@ -385,6 +387,7 @@ pub async fn run_pm_task_with_history(
         false,
         None,
         false,
+        pm_cfg.llm.strict_tool_discipline(),
         pm_cfg.llm.use_anthropic_direct,
         &pm_cfg.llm.stop_sequences,
     )
