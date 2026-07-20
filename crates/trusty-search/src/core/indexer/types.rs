@@ -160,15 +160,25 @@ pub struct SearchQuery {
     pub refine_query: Option<String>,
 
     /// Restrict results to chunks whose file path starts with this prefix
-    /// (issue #3401). Applied during candidate selection — BEFORE `top_k`
-    /// truncation — in every retrieval lane (BM25, HNSW/vector, KG expansion),
-    /// never as a post-hoc filter over an already-truncated result set. See
-    /// `CodeIndexer::apply_score_adjustments` (the single choke point every
-    /// lane's candidates flow through pre-truncation) and
-    /// `lanes::vector_search_scoped` (predicate-pushed HNSW traversal, so a
-    /// path-scoped match ranked far outside the raw-similarity oversample
-    /// window is still found). Composes with `repos` via AND, and
-    /// independently with `exclude_archived` / the branch fields.
+    /// (issue #3401), matched at a path-segment boundary — `"foo"` does NOT
+    /// also match a sibling `"foobar"` directory. Accepts either the
+    /// root-relative form chunks are stored in, or the absolute form
+    /// `CodeChunk::file` returns in results (normalized internally against
+    /// the index's `root_path`), so a prefix copied from a prior result
+    /// works without the caller having to know which form to use.
+    ///
+    /// Applied during candidate selection — BEFORE `top_k` truncation — in
+    /// every retrieval lane: BM25 (`Bm25Index::score_query_all_with_filter`,
+    /// evaluated ahead of its own internal truncate, not after),
+    /// grep-fallback (evaluated ahead of its early-exit cutoff), HNSW/vector
+    /// (`lanes::vector_search_scoped`, predicate-pushed into HNSW traversal
+    /// itself so a path-scoped match ranked far outside the raw-similarity
+    /// oversample window is still found), and KG expansion — never as a
+    /// post-hoc filter over an already-truncated result set. See
+    /// `CodeIndexer::apply_score_adjustments` for the authoritative,
+    /// pre-truncation choke point every lane's candidates flow through.
+    /// Composes with `repos` via AND, and independently with
+    /// `exclude_archived` / the branch fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_prefix: Option<String>,
 

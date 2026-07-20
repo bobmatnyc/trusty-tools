@@ -158,7 +158,7 @@ pub fn tool_descriptors() -> Value {
                     },
                     "path_prefix": {
                         "type": "string",
-                        "description": "Restrict results to chunks whose file path starts with this prefix. Applied during candidate selection in every retrieval lane (BM25, vector, KG) BEFORE top_k truncation, so a scoped match is never lost to the cutoff (issue #3401). Composes with `repos` (AND)."
+                        "description": "Restrict results to chunks whose file path starts with this prefix, matched at a path-segment boundary (\"foo\" will not also match a sibling \"foobar\" directory). Accepts either a root-relative path or the absolute form seen in a prior result's `file` field. Applied during candidate selection in every retrieval lane (BM25, vector, grep, KG) BEFORE top_k truncation, so a scoped match is never lost to the cutoff (issue #3401). Composes with `repos` (AND)."
                     },
                     "repos": {
                         "type": "array",

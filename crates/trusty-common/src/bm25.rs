@@ -391,6 +391,48 @@ impl BM25Index {
     /// This is the production search entry point. Cost is `O(sum(df_i))`
     /// over query terms — independent of total corpus size.
     pub fn score_query_all(&self, query: &str, top_k: usize) -> Vec<(String, f32)> {
+        self.score_query_all_filtered(query, top_k, None)
+    }
+
+    /// Same as [`Self::score_query_all`], but `filter` is evaluated on each
+    /// candidate `doc_id` BEFORE the `top_k` truncation (issue #3401 —
+    /// trusty-tools).
+    ///
+    /// Why: a caller-supplied scope filter (e.g. a repo/path prefix) must not
+    /// lose recall to `top_k` — a document that genuinely matches the scope
+    /// AND has real lexical overlap with the query can rank outside the
+    /// unscoped top `top_k` and still need to surface once scoped. Applying
+    /// `filter` naively AFTER this function returns cannot recover such a
+    /// document, because it was already discarded by the internal
+    /// `truncate(top_k)`. Evaluating it in the same pass, before truncation,
+    /// fixes that — `filter` only has to reject candidates, so the touched-set
+    /// cost model (`O(sum(df_i))` over query terms) is unchanged.
+    /// What: identical BM25 scoring pass as `score_query_all`; the one
+    /// difference is a `filter(|(id, _)| filter(id))` step inserted between
+    /// resolving `doc_id`s and truncating.
+    /// Test: `trusty-search::core::indexer::tests::path_filter_search::
+    /// test_path_prefix_filter_recovers_bm25_match_beyond_want` exercises this
+    /// through the full search pipeline with a target chunk that DOES share
+    /// query tokens and is one of more than `want` matching documents.
+    pub fn score_query_all_with_filter(
+        &self,
+        query: &str,
+        top_k: usize,
+        filter: &dyn Fn(&str) -> bool,
+    ) -> Vec<(String, f32)> {
+        self.score_query_all_filtered(query, top_k, Some(filter))
+    }
+
+    /// Shared scoring pass behind [`Self::score_query_all`] and
+    /// [`Self::score_query_all_with_filter`]. `filter`, when present, is
+    /// applied before the `top_k` truncation — see the doc comment on
+    /// `score_query_all_with_filter` for why that ordering matters.
+    fn score_query_all_filtered(
+        &self,
+        query: &str,
+        top_k: usize,
+        filter: Option<&dyn Fn(&str) -> bool>,
+    ) -> Vec<(String, f32)> {
         if self.live_docs == 0 || top_k == 0 {
             return Vec::new();
         }
@@ -430,6 +472,9 @@ impl BM25Index {
                     .and_then(|o| o.clone())
                     .map(|id| (id, score))
             })
+            // Issue #3401: scope filter applied BEFORE truncation — see
+            // `score_query_all_with_filter`'s doc comment.
+            .filter(|(id, _)| filter.is_none_or(|f| f(id.as_str())))
             .collect();
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
@@ -601,6 +646,44 @@ mod tests {
         let unique = ids.len();
         ids.dedup();
         assert_eq!(unique, ids.len());
+    }
+
+    /// Pins the pre-truncation guarantee `score_query_all_with_filter` exists
+    /// for (issue #3401, trusty-tools): the filter must be evaluated BEFORE
+    /// `top_k` truncation, not after, so a document that genuinely matches
+    /// the filter — and has real lexical overlap with the query — is never
+    /// lost just because it ranks outside the UNFILTERED top `top_k`.
+    #[test]
+    fn score_query_all_with_filter_recovers_match_beyond_top_k() {
+        let mut idx = BM25Index::new();
+        // 5 filler docs with higher term frequency (all outrank the target).
+        for i in 0..5 {
+            idx.upsert_document(&format!("filler{i}"), "rust rust rust async");
+        }
+        // The target: real overlap, but lower term frequency, so it ranks
+        // last among the 6 matching documents.
+        idx.upsert_document("target", "rust async");
+
+        // Precondition: unfiltered top_k=3 never returns "target" — it
+        // genuinely ranks below the cutoff.
+        let unfiltered = idx.score_query_all("rust async", 3);
+        assert_eq!(unfiltered.len(), 3);
+        assert!(
+            unfiltered.iter().all(|(id, _)| id != "target"),
+            "precondition failed: target must rank below top_k=3 unfiltered; \
+             got {unfiltered:?}"
+        );
+
+        // A naive "filter after the call" can't recover it — it was already
+        // discarded by the internal `truncate(3)`. The filter-aware entry
+        // point must, because it evaluates the filter BEFORE truncation.
+        let filtered = idx.score_query_all_with_filter("rust async", 3, &|id: &str| id == "target");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "the filter admits only \"target\" — it must be the one result: {filtered:?}"
+        );
+        assert_eq!(filtered[0].0, "target");
     }
 
     #[test]

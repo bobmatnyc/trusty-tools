@@ -22,7 +22,14 @@ use super::state::SearchAppState;
 /// project an answer lives in. A single fan-out search across every
 /// registered index, with results re-ranked via Reciprocal Rank Fusion, lets
 /// them ask one question and get one merged answer.
+///
+/// `deny_unknown_fields` (issue #3401 code review MEDIUM finding): this is
+/// one of the two public request surfaces that now carry `path_prefix` /
+/// `repos` (the other, `SearchQuery`, already derives this) — a misspelled
+/// filter field must be rejected here too, or the fan-out endpoint reopens
+/// the exact silently-ignored-filter trap the per-index endpoint just closed.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalSearchRequest {
     pub query: String,
     #[serde(default = "default_global_top_k")]

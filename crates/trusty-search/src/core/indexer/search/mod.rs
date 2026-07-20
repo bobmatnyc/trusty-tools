@@ -196,46 +196,51 @@ impl CodeIndexer {
 
         // 2) Run lanes (HNSW + BM25), then inject entity-exact-match.
         let want = query.top_k.saturating_mul(HNSW_OVERSAMPLE).max(query.top_k);
-        let bm25_fut = self.bm25_search(&query.text, want);
-        // Issue #3401: when a path/repo filter is active, the vector lane
-        // pushes the predicate into the HNSW traversal itself (see
-        // `vector_search_scoped` / `VectorStore::search_filtered`) rather
-        // than fetching raw-similarity top candidates and filtering after —
-        // the latter would silently lose recall for a chunk that only ranks
-        // highly once scoped to the filtered repo/path.
+        // Issue #3401: a single path/repo predicate, threaded into every lane
+        // BEFORE that lane's own internal truncation/early-exit — not applied
+        // as a `.retain()` afterward. `bm25_search` evaluates it inside
+        // `Bm25Index::score_query_all_with_filter` ahead of its
+        // `truncate(want)`; `grep_fallback_search` evaluates it ahead of its
+        // `out.len() >= want` early-break; the vector lane pushes it into HNSW
+        // traversal itself (`vector_search_scoped`). Filtering any of these
+        // AFTER the lane returns cannot recover a genuinely in-scope,
+        // otherwise-well-ranked candidate that the lane's own internal cutoff
+        // already discarded in favour of `want` out-of-scope hits.
+        // Issue #3401 code review HIGH finding: `path_prefix` is stored/
+        // compared root-relative, but `CodeChunk::file` in results is always
+        // absolute (issue #402) — normalize once so a caller-supplied
+        // absolute prefix (the form callers actually see) still matches.
+        let normalized_prefix = path_filter::normalized_path_prefix(query, &self.root_path);
+        let path_pred =
+            |id: &str| path_filter::matches(id, normalized_prefix.as_deref(), &query.repos);
+        let filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)> = if path_filter::is_active(query)
+        {
+            Some(&path_pred)
+        } else {
+            None
+        };
+        let bm25_fut = self.bm25_search(&query.text, want, filter);
         let hnsw_results = match &embedding {
             Some(v) => self.vector_search_scoped(v, want, query).await?,
             None => Vec::new(),
         };
         let mut bm25_results = bm25_fut.await?;
-        // Issue #3401: retain in-scope BM25 hits BEFORE RRF fuse / MMR rerank
-        // (both of which truncate their working set to `want`). Without this,
-        // a query whose lexical lane returns `want` non-matching hits (a
-        // heavily-matched but out-of-scope filler, say) would crowd the
-        // correctly-found (predicate-pushed) vector-lane candidate out of the
-        // `want`-bounded fusion/MMR stages before `apply_score_adjustments`'s
-        // authoritative retain ever runs. Checking the id string (rather than
-        // fetching each candidate's `RawChunk`) is safe here — see the
-        // `path_filter` module docs for why a chunk id always begins with its
-        // literal file path.
-        if path_filter::is_active(query) {
-            bm25_results.retain(|(id, _)| path_filter::matches(id, query));
-        }
         self.inject_entity_exact_match(&intent, &query.text, beta, &mut bm25_results)
             .await;
+        // The entity-exact-match injection above resolves its hit via a
+        // direct name lookup (`entity_exact_match`), not through BM25's own
+        // filtered scoring path, so it can't have honoured `filter` itself —
+        // a cheap retain (at most one extra element) closes that gap.
         if path_filter::is_active(query) {
-            bm25_results.retain(|(id, _)| path_filter::matches(id, query));
+            bm25_results.retain(|(id, _)| path_pred(id));
         }
 
         // 2a) Issue #75: for Definition intent, run grep as a third RRF lane.
-        let mut grep_lane: Vec<(String, f32)> = if matches!(intent, QueryIntent::Definition) {
-            self.grep_fallback_search(&query.text, want).await
+        let grep_lane: Vec<(String, f32)> = if matches!(intent, QueryIntent::Definition) {
+            self.grep_fallback_search(&query.text, want, filter).await
         } else {
             Vec::new()
         };
-        if path_filter::is_active(query) {
-            grep_lane.retain(|(id, _)| path_filter::matches(id, query));
-        }
 
         // 3) RRF fuse, then MMR diversity pass.
         let fused_raw = rrf_fuse(&hnsw_results, &bm25_results, alpha, beta, RRF_K, want);
@@ -244,11 +249,7 @@ impl CodeIndexer {
         // 3a) Issue #75: empty-result fallback — scan chunk corpus for literal
         // substring match.
         let fused_raw = if fused_raw.is_empty() {
-            let mut fallback = self.grep_fallback_search(&query.text, want).await;
-            if path_filter::is_active(query) {
-                fallback.retain(|(id, _)| path_filter::matches(id, query));
-            }
-            fallback
+            self.grep_fallback_search(&query.text, want, filter).await
         } else {
             fused_raw
         };
@@ -439,13 +440,17 @@ impl CodeIndexer {
         // `materialize_search_results`). A candidate whose chunk failed to
         // resolve (race with a concurrent removal) is dropped rather than
         // kept — the existing materialize step would have skipped it anyway.
+        // `path_prefix` is normalized against `root_path` here too (code
+        // review HIGH finding) so this authoritative check applies the exact
+        // same scope as the per-lane admission predicates above.
         let candidates: Vec<(String, f32)> = if path_filter::is_active(query) {
+            let normalized_prefix = path_filter::normalized_path_prefix(query, &self.root_path);
             candidates
                 .into_iter()
                 .filter(|(id, _)| {
-                    chunks
-                        .get(id)
-                        .is_some_and(|raw| path_filter::matches(&raw.file, query))
+                    chunks.get(id).is_some_and(|raw| {
+                        path_filter::matches(&raw.file, normalized_prefix.as_deref(), &query.repos)
+                    })
                 })
                 .collect()
         } else {

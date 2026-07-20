@@ -1009,7 +1009,9 @@ async fn test_grep_fallback_returns_substring_hits() {
     idx.add_chunk(raw("b", "src/b.rs", "fn beta() {}"))
         .await
         .unwrap();
-    let hits = idx.grep_fallback_search("alpha_qwerty_unique", 5).await;
+    let hits = idx
+        .grep_fallback_search("alpha_qwerty_unique", 5, None)
+        .await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].0, "a");
     // The score must be tiny — well below any real BM25 / vector hit.
@@ -1030,7 +1032,7 @@ async fn test_grep_fallback_treats_query_as_literal() {
         .unwrap();
     // `.` is a regex metachar. With `regex::escape` it should only match the
     // literal "a.b.c" in chunk `a` — not the wildcard-style "aXbYc" in `b`.
-    let hits = idx.grep_fallback_search("a.b.c", 5).await;
+    let hits = idx.grep_fallback_search("a.b.c", 5, None).await;
     let ids: Vec<&str> = hits.iter().map(|(id, _)| id.as_str()).collect();
     assert!(ids.contains(&"a"), "literal match in a missing: {ids:?}");
     assert!(

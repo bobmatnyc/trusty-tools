@@ -172,18 +172,33 @@ impl CodeIndexer {
     /// silently degrading recall.
     /// What: rehydrates an idle-evicted or race-evicted BM25 corpus (issue
     /// #2162 / #2846), then acquires the BM25 read lock and runs
-    /// `score_query_all`. Retries up to [`REHYDRATE_RACE_RETRIES`] times only
-    /// when the race is detected; a genuinely empty BM25 index returns `Ok(vec![])`
-    /// on the first pass with no retry.
+    /// `score_query_all` (or, when `filter` is set, `score_query_all_with_filter`
+    /// — issue #3401: the path/repo scope predicate MUST be evaluated by BM25
+    /// itself before its internal `top_k` truncation, not applied by the
+    /// caller afterward, or a genuinely in-scope, lexically-matching document
+    /// ranked outside the unscoped top `want` would already be gone by the
+    /// time this function returns). Retries up to [`REHYDRATE_RACE_RETRIES`]
+    /// times only when the race is detected; a genuinely empty BM25 index
+    /// returns `Ok(vec![])` on the first pass with no retry.
     /// Test: BM25 results are covered by every search integration test;
     /// `bm25_search_survives_reclaim_race_between_ensure_and_read` in
-    /// `indexer::tests_idle_evict` pins the race-detection retry itself.
-    pub(super) async fn bm25_search(&self, query: &str, want: usize) -> Result<Vec<(String, f32)>> {
+    /// `indexer::tests_idle_evict` pins the race-detection retry itself;
+    /// `test_path_prefix_filter_recovers_bm25_match_beyond_want` in
+    /// `indexer::tests::path_filter_search` pins the pre-truncation filter.
+    pub(super) async fn bm25_search(
+        &self,
+        query: &str,
+        want: usize,
+        filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+    ) -> Result<Vec<(String, f32)>> {
         for _ in 0..REHYDRATE_RACE_RETRIES {
             self.ensure_bm25_entities_loaded().await;
             let bm25 = self.bm25.read().await;
             if !bm25.is_empty() {
-                return Ok(bm25.score_query_all(query, want));
+                return Ok(match filter {
+                    Some(f) => bm25.score_query_all_with_filter(query, want, f),
+                    None => bm25.score_query_all(query, want),
+                });
             }
             if !self.bm25_entities_evicted.load(Ordering::Relaxed) {
                 return Ok(Vec::new());
@@ -222,6 +237,13 @@ impl CodeIndexer {
     /// Retries up to [`REHYDRATE_RACE_RETRIES`] times only when the race is
     /// detected (mirrors `bm25_search`'s flag-under-guard check); a
     /// genuinely-empty map returns immediately.
+    ///
+    /// Issue #3401: when `filter` is set, a chunk must ALSO pass it to count
+    /// toward the `out.len() >= want` early-exit. Counting an out-of-scope
+    /// match toward that cap would cut the scan short and silently drop
+    /// later in-scope matches — the same truncate-before-filter bug class as
+    /// `bm25_search`, just expressed as an early `break` instead of a
+    /// `Vec::truncate`.
     /// Test: `test_grep_fallback_returns_substring_hits` in `indexer::tests`;
     /// `grep_fallback_survives_reclaim_race_between_ensure_and_read` in
     /// `indexer::tests_idle_evict` pins the race-detection retry.
@@ -230,6 +252,7 @@ impl CodeIndexer {
         &self,
         query: &str,
         want: usize,
+        filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
     ) -> Vec<(String, f32)> {
         if query.is_empty() || want == 0 {
             return Vec::new();
@@ -247,11 +270,17 @@ impl CodeIndexer {
             }
             let mut out: Vec<(String, f32)> = Vec::new();
             for raw in chunks.values() {
-                if re.is_match(&raw.content) {
-                    out.push((raw.id.clone(), super::GREP_FALLBACK_SCORE));
-                    if out.len() >= want {
-                        break;
+                if !re.is_match(&raw.content) {
+                    continue;
+                }
+                if let Some(f) = filter {
+                    if !f(&raw.id) {
+                        continue;
                     }
+                }
+                out.push((raw.id.clone(), super::GREP_FALLBACK_SCORE));
+                if out.len() >= want {
+                    break;
                 }
             }
             return out;
@@ -296,15 +325,24 @@ impl CodeIndexer {
     /// itself via `VectorStore::search_filtered` (usearch's
     /// `Index::filtered_search`, which evaluates the predicate during graph
     /// exploration and keeps expanding until `want` matching candidates are
-    /// found or the graph is exhausted) — no recall loss, and no latency
-    /// tradeoff to calibrate.
+    /// found or the graph is exhausted) — no recall loss. This is NOT free:
+    /// a highly selective filter forces the traversal to visit far more of
+    /// the graph than an unfiltered `top_k` search would (verified against
+    /// vendored usearch 2.25.2's `filtered_search` C++ implementation,
+    /// `index.hpp`, which only stops on `top_limit` predicate-passing
+    /// candidates or frontier exhaustion) — real added latency under a very
+    /// narrow scope, traded deliberately for correctness.
     /// What: delegates to plain `store.search` when no filter is active
-    /// (identical behaviour/cost to today); otherwise builds a predicate
-    /// over the chunk id (see `path_filter` module docs for why testing the
-    /// id is safe here) and calls `store.search_filtered`.
-    /// Test: `test_vector_search_scoped_recovers_filtered_match_below_top_k`
-    /// in `indexer::tests`; `UsearchStore` predicate-pushdown itself is
-    /// covered by `store::tests::test_filtered_search_finds_match_ranked_below_top_k`.
+    /// (identical behaviour/cost to today); otherwise resolves the
+    /// root-relative `path_prefix` (`path_filter::normalized_path_prefix` —
+    /// callers may pass either a root-relative or an absolute-under-root
+    /// prefix, since `CodeChunk::file` in results is always absolute) and
+    /// calls `store.search_filtered` with a predicate over the chunk id (see
+    /// `path_filter` module docs for why testing the id is safe here).
+    /// Test: `test_path_prefix_filter_survives_top_k_truncation` in
+    /// `indexer::tests::path_filter_search`; `UsearchStore` predicate-pushdown
+    /// itself is covered by
+    /// `store::tests::test_filtered_search_finds_match_ranked_below_top_k`.
     pub(crate) async fn vector_search_scoped(
         &self,
         embedding: &[f32],
@@ -318,8 +356,9 @@ impl CodeIndexer {
             let hits = store.search(embedding, want).await?;
             return Ok(hits.into_iter().map(|h| (h.chunk_id, h.score)).collect());
         }
+        let normalized_prefix = path_filter::normalized_path_prefix(query, &self.root_path);
         let hits = store
-            .search_filtered(embedding, want, query.path_prefix.as_deref(), &query.repos)
+            .search_filtered(embedding, want, normalized_prefix.as_deref(), &query.repos)
             .await?;
         Ok(hits.into_iter().map(|h| (h.chunk_id, h.score)).collect())
     }
