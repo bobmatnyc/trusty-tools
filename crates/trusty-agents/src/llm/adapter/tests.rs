@@ -51,6 +51,56 @@ fn bedrock_adapter_strips_prefix() {
 }
 
 #[test]
+fn adapter_for_model_routes_fireworks() {
+    let a = adapter_for_model("fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct");
+    assert_eq!(a.provider(), Provider::Fireworks);
+}
+
+#[test]
+fn fireworks_adapter_strips_prefix() {
+    let a = FireworksAdapter {
+        model_id: "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string(),
+    };
+    assert_eq!(
+        a.model_id,
+        "accounts/fireworks/models/llama-v3p1-8b-instruct"
+    );
+}
+
+#[test]
+fn fireworks_tool_choice_shapes() {
+    let a = FireworksAdapter {
+        model_id: "x".to_string(),
+    };
+    assert_eq!(a.tool_choice_any().unwrap(), json!("required"));
+    assert_eq!(a.tool_choice_auto().unwrap(), json!("auto"));
+}
+
+#[test]
+fn fireworks_inject_cache_control_is_noop() {
+    let mut body = json!({"messages":[{"role":"system","content":"x"}]});
+    let before = body.clone();
+    FireworksAdapter {
+        model_id: "x".to_string(),
+    }
+    .inject_cache_control(&mut body, true);
+    assert_eq!(before, body);
+}
+
+#[test]
+fn fireworks_parse_usage_shape() {
+    let resp = json!({"usage":{"prompt_tokens":42,"completion_tokens":7}});
+    let u = FireworksAdapter {
+        model_id: "x".to_string(),
+    }
+    .parse_usage(&resp);
+    assert_eq!(u.prompt_tokens, 42);
+    assert_eq!(u.completion_tokens, 7);
+    assert_eq!(u.cache_read_tokens, 0);
+    assert_eq!(u.cache_creation_tokens, 0);
+}
+
+#[test]
 fn adapter_for_model_routes_generic_for_unknown() {
     assert_eq!(
         adapter_for_model("google/gemini-2.5-flash").provider(),
@@ -678,4 +728,140 @@ fn anthropic_direct_endpoint_env_beats_store() {
             None => std::env::remove_var("HOME"),
         }
     }
+}
+
+// --- Fireworks credential resolution (#2410 epic #2400 Step 3) ---
+//
+// Why: `FireworksAdapter::api_endpoint` must follow the exact same env >
+// `.env.local` > secure-store precedence as `openrouter_endpoint()` and
+// `AnthropicAdapter::api_endpoint()` above — these two tests mirror those
+// exactly (store-only resolution, then env-beats-store), proving the new
+// adapter reuses the shared resolver rather than a bespoke lookup.
+
+#[test]
+fn fireworks_api_endpoint_resolves_key_from_store_when_env_absent() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_fireworks = std::env::var_os("FIREWORKS_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: ENDPOINT_ENV_LOCK + ENV_LOCK + HOME_LOCK held for the whole body.
+    unsafe {
+        std::env::remove_var("FIREWORKS_API_KEY");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "fireworks",
+        "fw-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = FireworksAdapter {
+        model_id: "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string(),
+    }
+    .api_endpoint(false);
+    assert_eq!(ep.auth_source, AuthSource::Fireworks);
+    assert!(ep.base_url.contains("fireworks.ai"), "{}", ep.base_url);
+    assert_eq!(
+        ep.auth_header_value, "Bearer fw-FAKE-store-value",
+        "a store-only fireworks key must reach the built ApiEndpoint"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_fireworks {
+            Some(v) => std::env::set_var("FIREWORKS_API_KEY", v),
+            None => std::env::remove_var("FIREWORKS_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn fireworks_api_endpoint_env_beats_store() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_fireworks = std::env::var_os("FIREWORKS_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: locks held for the whole body.
+    unsafe {
+        std::env::set_var("FIREWORKS_API_KEY", "fw-FAKE-env-value");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "fireworks",
+        "fw-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = FireworksAdapter {
+        model_id: "x".to_string(),
+    }
+    .api_endpoint(false);
+    assert_eq!(
+        ep.auth_header_value, "Bearer fw-FAKE-env-value",
+        "process env must win over the store"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_fireworks {
+            Some(v) => std::env::set_var("FIREWORKS_API_KEY", v),
+            None => std::env::remove_var("FIREWORKS_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn fireworks_api_endpoint_base_url_override() {
+    // `with_env` acquires `ENDPOINT_ENV_LOCK` itself — do not lock it again
+    // here (this Mutex is not reentrant).
+    with_env(
+        &[
+            ("FIREWORKS_API_KEY", Some("fw-test")),
+            (
+                "FIREWORKS_BASE_URL",
+                Some("http://127.0.0.1:1/inference/v1"),
+            ),
+        ],
+        || {
+            let ep = FireworksAdapter {
+                model_id: "x".to_string(),
+            }
+            .api_endpoint(false);
+            assert_eq!(ep.base_url, "http://127.0.0.1:1/inference/v1");
+            assert_eq!(ep.auth_header_value, "Bearer fw-test");
+        },
+    );
 }

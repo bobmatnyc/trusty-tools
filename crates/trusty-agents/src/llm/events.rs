@@ -132,12 +132,14 @@ pub(super) fn record_dispatch_usage(
 /// Heuristic to label which provider a dispatch went through, for the
 /// `runner` field of `UsageRecord`.
 ///
-/// Why: The chat loop dispatches via three branches (native Anthropic,
-/// raw OpenRouter with cache_control, typed async-openai). All three end
-/// up at OpenRouter unless `route_native_anthropic` is true. This helper
-/// keeps the branch → label mapping in one place.
+/// Why: The chat loop dispatches via several branches (native Anthropic,
+/// raw OpenRouter/Fireworks with cache_control or a forced tool_choice,
+/// typed async-openai). Every branch besides Anthropic-direct/Bedrock/
+/// Fireworks ends up at OpenRouter. This helper keeps the branch → label
+/// mapping in one place.
 /// What: Returns `"anthropic-direct"` when `route_native_anthropic` is set,
-/// `"bedrock"` when the adapter provider is Bedrock, otherwise `"openrouter"`.
+/// `"bedrock"`/`"fireworks"` when the adapter reports that provider,
+/// otherwise `"openrouter"`.
 /// Test: Trivial branch mapping; exercised via dispatch integration.
 pub(super) fn runner_label_for(
     adapter: &dyn ModelAdapter,
@@ -147,6 +149,8 @@ pub(super) fn runner_label_for(
         "anthropic-direct"
     } else if adapter.provider() == adapter::Provider::Bedrock {
         "bedrock"
+    } else if adapter.provider() == adapter::Provider::Fireworks {
+        "fireworks"
     } else {
         "openrouter"
     }
@@ -180,4 +184,38 @@ pub(super) fn first_user_text_for_prefix(messages: &[ChatCompletionRequestMessag
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::adapter::{BedrockAdapter, FireworksAdapter, GenericAdapter};
+
+    /// Why: #2410 (epic #2400) Step 3 added the Fireworks branch to this
+    /// function; this pins the full label matrix (including the two
+    /// pre-existing branches) so a future edit can't silently drop one.
+    /// Test: itself.
+    #[test]
+    fn runner_label_for_covers_every_branch() {
+        assert_eq!(runner_label_for(&GenericAdapter, true), "anthropic-direct");
+        assert_eq!(
+            runner_label_for(
+                &BedrockAdapter {
+                    model_id: "x".to_string()
+                },
+                false
+            ),
+            "bedrock"
+        );
+        assert_eq!(
+            runner_label_for(
+                &FireworksAdapter {
+                    model_id: "x".to_string()
+                },
+                false
+            ),
+            "fireworks"
+        );
+        assert_eq!(runner_label_for(&GenericAdapter, false), "openrouter");
+    }
 }

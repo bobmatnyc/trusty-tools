@@ -85,15 +85,17 @@ async fn models_response_has_expected_shape() {
 }
 
 /// Why: #2410 tracks migrating the legacy chat dispatch onto the unified
-/// registry; until it lands the picker must not claim a provider is usable
-/// when `crate::llm::adapter::adapter_for_model` has no branch for it. This
-/// pins the documented set so an accidental edit to `models::reachable_today`
-/// is caught here rather than silently shipping a wrong claim to the UI.
-/// What: OpenRouter/Bedrock/Anthropic are `true`; Fireworks/OpenAI/Together/
-/// AtlasCloud/registry-`local` are `false`. Ollama's synthetic `local.reachable_today`
-/// (a DIFFERENT field — the top-level `local` object, not the `providers`
-/// array's `local` entry) is always `true` (it has its own legacy
-/// `ollama/`-prefix branch, independent of #2410).
+/// registry; until it fully lands the picker must not claim a provider is
+/// usable when `crate::llm::adapter::adapter_for_model` has no branch for
+/// it. This pins the documented set so an accidental edit to
+/// `models::reachable_today` is caught here rather than silently shipping a
+/// wrong claim to the UI.
+/// What: OpenRouter/Bedrock/Anthropic/Fireworks (#2410 Step 3, via
+/// `FireworksAdapter`) are `true`; OpenAI/Together/AtlasCloud/registry-`local`
+/// are `false`. Ollama's synthetic `local.reachable_today` (a DIFFERENT
+/// field — the top-level `local` object, not the `providers` array's `local`
+/// entry) is always `true` (it has its own legacy `ollama/`-prefix branch,
+/// independent of #2410).
 #[tokio::test]
 async fn reachable_today_matches_documented_set() {
     let body = get_models_body(router()).await;
@@ -111,7 +113,7 @@ async fn reachable_today_matches_documented_set() {
     assert!(reachable_today("openrouter"));
     assert!(reachable_today("bedrock"));
     assert!(reachable_today("anthropic"));
-    assert!(!reachable_today("fireworks"));
+    assert!(reachable_today("fireworks"));
     assert!(!reachable_today("openai"));
     assert!(!reachable_today("together"));
     assert!(!reachable_today("atlascloud"));

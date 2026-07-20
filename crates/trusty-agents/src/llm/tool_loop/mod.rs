@@ -182,8 +182,21 @@ pub async fn chat_with_tools_gated(
     // (e.g. `llama3.2:latest`). Force the raw HTTP path for these calls so
     // they hit the local ollama base URL instead of the async-openai client's
     // hardwired OpenRouter endpoint.
+    //
+    // #2410 (epic #2400) Step 3: `fireworks/<name>` models follow the exact
+    // same pattern — the prefix selects `FireworksAdapter` in
+    // `adapter_for_model`, is stripped here so Fireworks sees its own
+    // provider-native model id (e.g. `accounts/fireworks/models/...`), and
+    // the raw path is forced so `turn::dispatch_turn` routes through
+    // `adapter.api_endpoint()` (api.fireworks.ai + `FIREWORKS_API_KEY`)
+    // instead of the async-openai client hardwired to OpenRouter.
     let is_ollama = model.starts_with("ollama/");
-    let model_owned = model.strip_prefix("ollama/").unwrap_or(model).to_string();
+    let is_fireworks = model.starts_with("fireworks/");
+    let model_owned = model
+        .strip_prefix("ollama/")
+        .or_else(|| model.strip_prefix("fireworks/"))
+        .unwrap_or(model)
+        .to_string();
     let model = model_owned.as_str();
     // qwen3 supports `/think` and `/no_think` as in-message special tokens.
     // The system prompt sets `/no_think` as the default for speed; we inject
@@ -211,7 +224,11 @@ pub async fn chat_with_tools_gated(
     // caching) or as a raw `serde_json::Value` when we need provider-specific
     // fields (cache_control and/or a non-trivial tool_choice shape) that
     // async-openai 0.28 cannot model.
-    let needs_raw = caching_active || tool_choice.is_some() || route_native_anthropic || is_ollama;
+    let needs_raw = caching_active
+        || tool_choice.is_some()
+        || route_native_anthropic
+        || is_ollama
+        || is_fireworks;
     let routing = TurnRouting {
         caching_active,
         route_native_anthropic,

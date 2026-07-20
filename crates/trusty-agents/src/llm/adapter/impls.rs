@@ -10,10 +10,16 @@
 use serde_json::{Value, json};
 
 use super::{
-    AnthropicAdapter, ApiEndpoint, AuthSource, BedrockAdapter, GenericAdapter, ModelAdapter,
-    OllamaAdapter, OpenAiAdapter, Provider, openrouter_endpoint,
+    AnthropicAdapter, ApiEndpoint, AuthSource, BedrockAdapter, FireworksAdapter, GenericAdapter,
+    ModelAdapter, OllamaAdapter, OpenAiAdapter, Provider, openrouter_endpoint,
 };
 use crate::perf::TokenUsage;
+
+/// Env var overriding the Fireworks API base URL — mirrors the
+/// `OPENROUTER_BASE_URL`/`ANTHROPIC_BASE_URL` override convention already
+/// established in this module, so an offline mock server can be targeted
+/// end-to-end without touching process-wide defaults.
+const FIREWORKS_BASE_URL_ENV: &str = "FIREWORKS_BASE_URL";
 
 impl ModelAdapter for AnthropicAdapter {
     fn provider(&self) -> Provider {
@@ -272,6 +278,52 @@ impl ModelAdapter for OllamaAdapter {
             // Tag with OpenRouter so the existing routing/credential paths
             // treat it as a generic OpenAI-compatible endpoint.
             auth_source: AuthSource::OpenRouter,
+        }
+    }
+}
+
+impl ModelAdapter for FireworksAdapter {
+    fn provider(&self) -> Provider {
+        Provider::Fireworks
+    }
+    // Fireworks serves an OpenAI-compatible `/chat/completions` endpoint —
+    // same tool_choice shapes as `OpenAiAdapter` ("required"/"auto" strings,
+    // not Anthropic's `{"type": ...}` objects).
+    fn tool_choice_any(&self) -> Option<Value> {
+        Some(json!("required"))
+    }
+    fn tool_choice_auto(&self) -> Option<Value> {
+        Some(json!("auto"))
+    }
+    fn inject_cache_control(&self, _: &mut Value, _: bool) {
+        // Fireworks has no prompt-caching concept (matches the
+        // `trusty_common::inference` capability registry seed for this
+        // provider: `prompt_caching = false`).
+    }
+    fn parse_usage(&self, response: &Value) -> TokenUsage {
+        let usage = &response["usage"];
+        let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let completion = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        TokenUsage::new(prompt, completion, 0, 0)
+    }
+    fn api_endpoint(&self, _use_direct: bool) -> ApiEndpoint {
+        // Always route to api.fireworks.ai — an explicit `fireworks/` prefix
+        // means the caller wants Fireworks specifically, unlike Anthropic's
+        // `use_direct` ambiguity between OpenRouter and the native API.
+        // Credential resolved through the SAME shared 3-tier resolver (env >
+        // `.env.local` > secure store) every other provider in this crate
+        // uses (#2410) — never a raw `std::env::var` read.
+        let base_url = std::env::var(FIREWORKS_BASE_URL_ENV).unwrap_or_else(|_| {
+            trusty_common::inference::providers::fireworks::FIREWORKS_BASE_URL.to_string()
+        });
+        let key =
+            trusty_common::inference::credentials::resolve_key("fireworks").unwrap_or_default();
+        ApiEndpoint {
+            base_url,
+            auth_header_name: "Authorization".to_string(),
+            auth_header_value: format!("Bearer {key}"),
+            extra_headers: vec![],
+            auth_source: AuthSource::Fireworks,
         }
     }
 }
