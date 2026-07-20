@@ -347,7 +347,7 @@
     display: inline-block;
     padding: 2px 8px;
     border-radius: 4px;
-    background: var(--trusty-bg-subtle, #f3f4f6);
+    background: var(--trusty-surface-raised, #f3f4f6);
     font-size: 11px;
     color: var(--trusty-text-secondary, #6b7280);
   }
@@ -382,7 +382,7 @@
     font-size: 12px;
   }
   .btn:hover:not(:disabled) {
-    background: var(--trusty-bg-subtle, #f9fafb);
+    background: var(--trusty-surface-raised, #f9fafb);
   }
   .btn.active {
     background: var(--trusty-accent, #4f46e5);
@@ -413,7 +413,7 @@
   }
   .panel-head {
     padding: 10px 14px;
-    background: var(--trusty-bg-subtle, #fafafa);
+    background: var(--trusty-surface-raised, #fafafa);
     border-bottom: 1px solid var(--trusty-border, #e5e7eb);
     font-size: 13px;
     font-weight: 600;
@@ -450,11 +450,11 @@
     border: none;
     cursor: pointer;
     font-size: 13px;
-    color: var(--trusty-text, #111827);
-    font-family: var(--trusty-font-mono, monospace);
+    color: var(--trusty-text-primary, #111827);
+    font-family: var(--trusty-mono, monospace);
   }
   .subj-btn:hover {
-    background: var(--trusty-bg-subtle, #f3f4f6);
+    background: var(--trusty-surface-raised, #f3f4f6);
   }
   .subj-btn.active {
     background: var(--trusty-accent-soft, #e0e7ff);
@@ -472,7 +472,7 @@
     font-size: 10px;
     padding: 1px 6px;
     border-radius: 8px;
-    background: var(--trusty-bg-subtle, #f3f4f6);
+    background: var(--trusty-surface-raised, #f3f4f6);
     color: var(--trusty-text-secondary, #6b7280);
     font-family: var(--trusty-font, sans-serif);
   }
@@ -486,7 +486,7 @@
     gap: 6px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--trusty-border, #e5e7eb);
-    background: var(--trusty-bg-subtle, #fafafa);
+    background: var(--trusty-surface-raised, #fafafa);
   }
   .subj-filter {
     width: 100%;
@@ -517,10 +517,10 @@
   .table td {
     padding: 6px 10px;
     text-align: left;
-    border-bottom: 1px solid var(--trusty-border-light, #f3f4f6);
+    border-bottom: 1px solid var(--trusty-border, #f3f4f6);
   }
   .table th {
-    background: var(--trusty-bg-subtle, #fafafa);
+    background: var(--trusty-surface-raised, #fafafa);
     font-size: 11px;
     color: var(--trusty-text-secondary, #6b7280);
     text-transform: uppercase;
@@ -532,6 +532,6 @@
     justify-content: space-between;
     padding: 10px 14px;
     border-top: 1px solid var(--trusty-border, #e5e7eb);
-    background: var(--trusty-bg-subtle, #fafafa);
+    background: var(--trusty-surface-raised, #fafafa);
   }
 </style>
