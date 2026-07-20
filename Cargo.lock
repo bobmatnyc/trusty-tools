@@ -11370,7 +11370,9 @@ dependencies = [
  "tracing-subscriber",
  "trusty-agents-common",
  "trusty-common",
+ "trusty-tui",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

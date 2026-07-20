@@ -281,12 +281,30 @@ pub async fn run_http(
     info!("tcode serve --http: listening on http://{bound}");
     eprintln!("tcode serve --http: listening on http://{bound}");
 
+    // Issue #3415 (DOC-50 §3.4): write the discovery file `CodeEngine` reads
+    // to find this daemon without a hardcoded port. Best-effort — a write
+    // failure only means discovery degrades to the `TCODE_DAEMON_URL` env
+    // var; it must never block the daemon from serving.
+    let discovery_path = crate::serve::discovery::http_addr_path();
+    if let Some(path) = &discovery_path
+        && let Err(e) = crate::serve::discovery::write_http_addr_file(path, &bound)
+    {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "tcode serve --http: failed to write daemon discovery file"
+        );
+    }
+
     let app = build_axum_router(Arc::new(router), sessions, workstreams);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await
         .context("tcode serve --http: axum serve failed")?;
 
+    if let Some(path) = &discovery_path {
+        crate::serve::discovery::remove_http_addr_file(path);
+    }
     info!("tcode serve --http: stopped");
     Ok(())
 }
