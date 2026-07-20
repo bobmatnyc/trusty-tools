@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.23.4] — 2026-07-19
+
 ### Added
 
 - new `banner` module — `TRUSTY_SPLASH_ART` (the compact block-robot "TRUSTY" wordmark art) and `shade_bucket` (glyph → amber/rust RGB triple), extracted from `tm`'s previously binary-local splash renderer so both `tm` and `trusty-agents`' REPL can render the identical trusty branding without drifting apart again (closes [#3326](https://github.com/bobmatnyc/trusty-tools/issues/3326)). Zero extra dependencies — pure `&str` + `match`.
