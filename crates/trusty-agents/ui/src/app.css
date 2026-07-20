@@ -2,6 +2,90 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Why: issue #3387 — Foundry v2 token layer (docs/design/UI/design-system/
+ * tokens.css). Before this, `tailwind.config.js`'s `colors.foundry.*`
+ * namespace hardcoded 15 hex literals directly, so every component paired
+ * `text-foundry-light-X dark:text-foundry-X` by hand and there was no
+ * CSS-variable indirection at all — a v2 tokens.css drop-in could not theme
+ * this crate. This block is the single place either theme's actual color
+ * VALUES live, 1:1 with the design system's hex values converted to
+ * space-separated RGB triples, following the same convention already
+ * established in `trusty-code-gui/ui/src/app.css` (issue #3153/#3380).
+ * What: each `--color-*` custom property is a SPACE-SEPARATED RGB triple
+ * (`"R G B"`, not `"#rrggbb"`) — required by `tailwind.config.js`'s
+ * `rgb(var(--color-*) / <alpha-value>)` format, the only way Tailwind can
+ * generate opacity-modified utilities (`bg-foundry-primary/10`,
+ * `text-foundry-text/60`, used throughout every component) for a
+ * CSS-variable-backed color. `:root` sets the light theme as the default;
+ * the `.dark` block overrides every variable for dark — `.dark` (not
+ * `[data-theme='dark']`) is this crate's existing activation selector
+ * (`stores/theme.ts` toggles `.dark` on `<html>`, matched by
+ * `tailwind.config.js`'s `darkMode: 'class'`), so no change to the theme
+ * store was needed.
+ *
+ * `tailwind.config.js` maps BOTH the dark-named key (`foundry-primary`) and
+ * the light-named key (`foundry-light-primary`) to the SAME `--color-*` var
+ * — the var itself already flips value between `:root` and `.dark`, so the
+ * existing `text-foundry-light-X dark:text-foundry-X` pairing throughout
+ * every component still resolves correctly with zero component edits: in
+ * light mode only the light-named class's rule is active and it reads the
+ * light value; in dark mode the `dark:`-prefixed rule wins the cascade (as
+ * it always did) and reads the dark value — both ultimately read the one
+ * token, so whichever wins renders identically either way.
+ *
+ * `--color-text-muted` is a deliberate value correction, not a 1:1 port:
+ * the old hand-port paired dark 'muted' (#A58A6B, actually
+ * --trusty-text-muted's DARK value) with light 'light-muted' (#6E5843,
+ * actually --trusty-text-secondary's LIGHT value) — two different DS
+ * semantic tokens mismatched into one Tailwind key. This now sources both
+ * ends from the DS's actual --trusty-text-muted pair (light #8A7460 / dark
+ * #A58A6B unchanged), a light-mode-only, DS-conformant value shift.
+ * `--color-info` (foundry-teal) and `--color-warning` (foundry-amber)
+ * previously had no light-mode counterpart at all (D4) — they now inherit
+ * real light values from --trusty-info / --trusty-warning automatically.
+ *
+ * `--trusty-surface-hover` is carried over verbatim (DS naming, not
+ * Tailwind-fed) — it already bakes its own alpha per theme, so it does not
+ * fit the `<alpha-value>` RGB-triple convention; it is read directly via
+ * `var()` in component `<style>` blocks (RecapPanel.svelte, ChatView.svelte)
+ * in place of the previous unsanctioned `rgb(20 184 166 / 0.04)` teal
+ * literal (B2).
+ * Test: manual — toggle ThemeToggle through light/dark/system and confirm
+ * every foundry-* surface, text, border, and accent utility recolors; no
+ * automated test exists for this crate's CSS layer (see PersonalityPanel /
+ * models.test.ts etc. — no CSS/token test precedent in this crate to
+ * follow).
+ */
+:root {
+  color-scheme: light dark;
+
+  --color-content-bg: 245 239 231; /* #F5EFE7 */
+  --color-card-bg: 255 253 249; /* #FFFDF9 */
+  --color-text-primary: 43 28 18; /* #2B1C12 */
+  --color-text-muted: 138 116 96; /* #8A7460 — --trusty-text-muted light */
+  --color-border: 216 201 180; /* #D8C9B4 */
+  --color-primary: 183 65 14; /* #B7410E — --trusty-accent light */
+  --color-info: 61 107 138; /* #3D6B8A — --trusty-info light */
+  --color-warning: 176 125 16; /* #B07D10 — --trusty-warning light */
+  --color-sidebar-accent: 233 185 138; /* #E9B98A — same both themes */
+
+  --trusty-surface-hover: rgba(183, 65, 14, 0.06);
+}
+
+.dark {
+  --color-content-bg: 32 22 18; /* #201612 */
+  --color-card-bg: 43 28 18; /* #2B1C12 */
+  --color-text-primary: 240 231 216; /* #F0E7D8 */
+  --color-text-muted: 165 138 107; /* #A58A6B — --trusty-text-muted dark */
+  --color-border: 70 49 31; /* #46311F */
+  --color-primary: 217 119 66; /* #D97742 — --trusty-accent dark */
+  --color-info: 123 167 196; /* #7BA7C4 — --trusty-info dark */
+  --color-warning: 217 168 58; /* #D9A83A — --trusty-warning dark */
+  --color-sidebar-accent: 233 185 138; /* #E9B98A — same both themes */
+
+  --trusty-surface-hover: rgba(217, 119, 66, 0.09);
+}
+
 html, body, #app {
   height: 100%;
   margin: 0;
@@ -14,18 +98,13 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Why: Default body palette in light mode — Tailwind classes on <body>
-   override these when the dark class is set on <html>. Avoids a flash of
-   the wrong palette before Svelte mounts. Values match the Foundry design
-   system (docs/design/gui/tokens.css): --trusty-content-bg / --trusty-text-primary. */
+/* Why: Default body palette — Tailwind classes on <body> override these
+   once Svelte mounts; this just avoids a flash of the wrong palette before
+   that happens. Reads the same tokens every foundry-bg/foundry-text utility
+   reads, so it can never drift out of sync with the rest of the app. */
 body {
-  background-color: #F5EFE7;
-  color: #2B1C12;
-}
-
-html.dark body {
-  background-color: #201612;
-  color: #F0E7D8;
+  background-color: rgb(var(--color-content-bg));
+  color: rgb(var(--color-text-primary));
 }
 
 code, pre, kbd, samp {
