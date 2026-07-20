@@ -298,9 +298,14 @@ fn render_user_datetime_formats_in_named_timezone_with_weekday() {
     use chrono::TimeZone;
     // 2026-07-19T15:30:00Z is a Sunday; America/New_York is UTC-4 in July
     // (EDT), so it's still Sunday there too.
-    let at = chrono::Utc.with_ymd_and_hms(2026, 7, 19, 15, 30, 0).unwrap();
+    let at = chrono::Utc
+        .with_ymd_and_hms(2026, 7, 19, 15, 30, 0)
+        .unwrap();
     let s = render_user_datetime(at, Some("America/New_York"));
-    assert!(s.starts_with("Current date/time: Sunday, 19 July 2026"), "got: {s}");
+    assert!(
+        s.starts_with("Current date/time: Sunday, 19 July 2026"),
+        "got: {s}"
+    );
     assert!(s.contains("America/New_York"), "got: {s}");
 }
 
