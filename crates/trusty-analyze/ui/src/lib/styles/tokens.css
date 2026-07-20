@@ -1,129 +1,139 @@
 /*
- * trusty-analyzer dashboard design tokens — Catppuccin Latte (light) +
- * Catppuccin Mocha (dark), switched via [data-theme] on <html>.
+ * trusty-analyzer dashboard design tokens — Foundry v2 ("rust-on-paper"),
+ * switched via [data-theme] on <html>.
  *
- * Why: Operators want parity with editor themes. Light mode improves use
- * on high-ambient-light displays; system mode tracks OS preference.
- * What: Raw palette per theme attribute, plus the shared --trusty-* alias
- * layer (typography, spacing, radii) on :root so component CSS keeps working.
- * Test: Toggle the topbar theme switcher; --bg and --text resolve to the
- * matching Catppuccin value in DevTools.
+ * Why: Unified onto the Foundry v2 design system shared across the Trusty
+ * suite (docs/design/UI/design-system/tokens.css — canonical source, #3490,
+ * epic #3486), replacing the prior Catppuccin (Mocha/Latte) palette this
+ * file used to carry.
+ * What: Foundry hex/rgba values per theme on the --trusty-* token layer
+ * (same names/values as the canonical file), plus this crate's own
+ * component-facing alias names (--bg, --border, --text, --grade-*, etc.)
+ * repointed to those tokens via indirection — no raw palette underneath.
+ * Test: Toggle the topbar theme switcher; inspect any alias in DevTools and
+ * confirm it resolves to the matching Foundry v2 value.
  */
 
-/* ── Catppuccin Mocha (dark) — default when no data-theme set ─ */
+/* ── Foundry v2 dark ("Night Shift") — default when no data-theme set ─ */
 :root,
 [data-theme="dark"] {
-  --bg:       #1e1e2e;
-  --mantle:   #181825;
-  --surface0: #313244;
-  --surface1: #45475a;
-  --surface2: #585b70;
-  --text:     #cdd6f4;
-  --subtext1: #bac2de;
-  --subtext0: #a6adc8;
-  --overlay2: #9399b2;
-  --blue:     #89b4fa;
-  --lavender: #b4befe;
-  --green:    #a6e3a1;
-  --teal:     #94e2d5;
-  --yellow:   #f9e2af;
-  --peach:    #fab387;
-  --red:      #f38ba8;
-  --mauve:    #cba6f7;
-  --border:   #45475a;
-  --shadow:   rgba(0, 0, 0, 0.4);
+  /* Sidebar (deepest chassis) */
+  --trusty-sidebar-bg: #171009;
+  --trusty-sidebar-text: #e6d8c8;
+  --trusty-sidebar-muted: #a58a6b;
+  --trusty-sidebar-accent: #e9b98a;
+  --trusty-sidebar-active: #382513;
+  --trusty-sidebar-border: #382513;
 
-  /* Compatibility aliases for code that referenced the old palette names */
-  --surface:       var(--surface0);
-  --surface-hover: var(--surface1);
-  --subtext:       var(--subtext0);
-  --muted:         var(--overlay2);
-  --orange:        var(--peach);
-  --text-inverse:  #11111b;
+  /* Content (dark oxide) */
+  --trusty-content-bg: #201612;
+  --trusty-card-bg: #2b1c12;
+  --trusty-border: #46311f;
+  --trusty-border-strong: #5c4126;
+  --trusty-surface-raised: #382513;
+  --trusty-surface-hover: rgba(217, 119, 66, 0.09);
 
-  --sidebar-bg:     var(--mantle);
-  --sidebar-border: #11111b;
+  /* Text */
+  --trusty-text-primary: #f0e7d8;
+  --trusty-text-secondary: #cbb69c;
+  --trusty-text-muted: #a58a6b;
+  --trusty-text-inverse: #201612;
+
+  /* Accents — rust brightens one step on dark */
+  --trusty-accent: #d97742;
+  --trusty-accent-hover: #e8905c;
+  --trusty-accent-soft: rgba(217, 119, 66, 0.16);
+  --trusty-success: #8fbf6a;
+  --trusty-success-soft: rgba(143, 191, 106, 0.14);
+  --trusty-warning: #d9a83a;
+  --trusty-warning-soft: rgba(217, 168, 58, 0.14);
+  --trusty-danger: #e06a52;
+  --trusty-danger-soft: rgba(224, 106, 82, 0.14);
+  --trusty-info: #7ba7c4;
+  --trusty-info-soft: rgba(123, 167, 196, 0.14);
+
+  /* Surface */
+  --trusty-shadow-sm: none;
+  --trusty-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --trusty-shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.55);
 }
 
-/* ── Catppuccin Latte (light) ────────────────────────────── */
+/* ── Foundry v2 light ("rust-on-paper") ──────────────────────────── */
 [data-theme="light"] {
-  --bg:       #eff1f5;
-  --mantle:   #e6e9ef;
-  --surface0: #ccd0da;
-  --surface1: #bcc0cc;
-  --surface2: #acb0be;
-  --text:     #4c4f69;
-  --subtext1: #5c5f77;
-  --subtext0: #6c6f85;
-  --overlay2: #7c7f93;
-  --blue:     #1e66f5;
-  --lavender: #7287fd;
-  --green:    #40a02b;
-  --teal:     #179299;
-  --yellow:   #df8e1d;
-  --peach:    #fe640b;
-  --red:      #d20f39;
-  --mauve:    #8839ef;
-  --border:   #bcc0cc;
-  --shadow:   rgba(0, 0, 0, 0.1);
+  /* Sidebar (dark oxide chassis — Foundry keeps the chassis dark in both
+     themes; only the content area flips light/dark) */
+  --trusty-sidebar-bg: #2b1c12;
+  --trusty-sidebar-text: #e6d8c8;
+  --trusty-sidebar-muted: #a58a6b;
+  --trusty-sidebar-accent: #e9b98a;
+  --trusty-sidebar-active: #46311f;
+  --trusty-sidebar-border: #46311f;
 
-  /* Compatibility aliases */
-  --surface:       var(--surface0);
-  --surface-hover: var(--surface1);
-  --subtext:       var(--subtext0);
-  --muted:         var(--overlay2);
-  --orange:        var(--peach);
-  --text-inverse:  #eff1f5;
+  /* Content (warm paper) */
+  --trusty-content-bg: #f5efe7;
+  --trusty-card-bg: #fffdf9;
+  --trusty-border: #d8c9b4;
+  --trusty-border-strong: #c4b096;
+  --trusty-surface-raised: #efe6d8;
+  --trusty-surface-hover: rgba(183, 65, 14, 0.06);
 
-  --sidebar-bg:     var(--mantle);
-  --sidebar-border: var(--surface1);
+  /* Text */
+  --trusty-text-primary: #2b1c12;
+  --trusty-text-secondary: #6e5843;
+  --trusty-text-muted: #8a7460;
+  --trusty-text-inverse: #ffffff;
+
+  /* Accents (rust core) */
+  --trusty-accent: #b7410e;
+  --trusty-accent-hover: #8a2f0b;
+  --trusty-accent-soft: #f3d9cb;
+  --trusty-success: #3f6f2a;
+  --trusty-success-soft: #dcedd2;
+  --trusty-warning: #b07d10;
+  --trusty-warning-soft: #f5e7c4;
+  --trusty-danger: #c2331f;
+  --trusty-danger-soft: #f6d7d0;
+  --trusty-info: #3d6b8a;
+  --trusty-info-soft: #dde9f0;
+
+  /* Surface — flat, clean line borders (no offset shadows) */
+  --trusty-shadow-sm: none;
+  --trusty-shadow: 0 1px 2px rgba(43, 28, 18, 0.06);
+  --trusty-shadow-lg: 0 14px 32px rgba(43, 28, 18, 0.28);
 }
 
 /*
- * Shared aliases, typography, spacing — theme-agnostic.
- * Grade colors map to semantic palette entries so they recolor with theme.
+ * Shared aliases, typography, spacing — theme-agnostic. This crate's own
+ * (pre-Foundry) component-facing palette names and grade colors resolve to
+ * the --trusty-* tokens above via indirection, so they recolor with theme
+ * without needing to be redeclared per block.
  */
 :root {
+  /* This crate's component-facing alias names, repointed to Foundry */
+  --bg: var(--trusty-content-bg);
+  --mantle: var(--trusty-sidebar-bg);
+  --surface: var(--trusty-card-bg);
+  --surface-hover: var(--trusty-surface-hover);
+  --text: var(--trusty-text-primary);
+  --subtext: var(--trusty-text-secondary);
+  --muted: var(--trusty-text-muted);
+  --text-inverse: var(--trusty-text-inverse);
+  --border: var(--trusty-border);
+  --green: var(--trusty-success);
+  --red: var(--trusty-danger);
+  --peach: var(--trusty-accent);
+  --mauve: var(--trusty-info);
+
   /* Grade colors (semantic, theme-aware via palette vars) */
   --grade-a: var(--green);
-  --grade-b: var(--teal);
-  --grade-c: var(--yellow);
+  --grade-b: var(--trusty-info);
+  --grade-c: var(--trusty-warning);
   --grade-d: var(--peach);
   --grade-f: var(--red);
 
-  /* Trusty shell alias mapping (used by global.css) */
-  --trusty-sidebar-bg: var(--sidebar-bg);
-  --trusty-sidebar-text: var(--text);
-  --trusty-sidebar-muted: var(--muted);
-  --trusty-sidebar-accent: var(--blue);
-  --trusty-sidebar-active: var(--surface);
-  --trusty-sidebar-border: var(--sidebar-border);
-
-  --trusty-content-bg: var(--bg);
-  --trusty-card-bg: var(--surface);
-  --trusty-border: var(--border);
-  --trusty-border-strong: var(--surface-hover);
-
-  --trusty-text-primary: var(--text);
-  --trusty-text-secondary: var(--subtext);
-  --trusty-text-muted: var(--muted);
-  --trusty-text-inverse: var(--text-inverse);
-
-  --trusty-accent: var(--blue);
-  --trusty-accent-hover: var(--lavender);
-  --trusty-accent-soft: color-mix(in srgb, var(--blue) 15%, transparent);
-  --trusty-success: var(--green);
-  --trusty-success-soft: color-mix(in srgb, var(--green) 15%, transparent);
-  --trusty-warning: var(--yellow);
-  --trusty-warning-soft: color-mix(in srgb, var(--yellow) 15%, transparent);
-  --trusty-danger: var(--red);
-  --trusty-danger-soft: color-mix(in srgb, var(--red) 15%, transparent);
-  --trusty-info: var(--teal);
-  --trusty-info-soft: color-mix(in srgb, var(--teal) 15%, transparent);
-
   /* Typography */
-  --trusty-font: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  --trusty-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, monospace;
+  --trusty-font: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --trusty-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
   --trusty-fs-xs: 0.75rem;
   --trusty-fs-sm: 0.875rem;
   --trusty-fs-md: 1rem;
@@ -132,16 +142,13 @@
   --trusty-fs-2xl: 2rem;
 
   /* Surface */
-  --trusty-radius-sm: 4px;
-  --trusty-radius: 8px;
-  --trusty-radius-lg: 12px;
-  --trusty-shadow-sm: 0 1px 2px var(--shadow);
-  --trusty-shadow: 0 1px 3px var(--shadow), 0 1px 2px var(--shadow);
-  --trusty-shadow-lg: 0 10px 25px var(--shadow);
+  --trusty-radius-sm: 3px;
+  --trusty-radius: 5px;
+  --trusty-radius-lg: 8px;
 
   /* Layout */
   --trusty-sidebar-width: 240px;
-  --trusty-topbar-height: 60px;
+  --trusty-topbar-height: 56px;
   --trusty-space-1: 4px;
   --trusty-space-2: 8px;
   --trusty-space-3: 12px;
