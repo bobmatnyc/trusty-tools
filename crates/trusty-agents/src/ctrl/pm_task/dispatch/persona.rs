@@ -368,6 +368,7 @@ pub async fn run_pm_task_with_persona(
         false,
         None,
         false,
+        persona_cfg.llm.strict_tool_discipline(),
         persona_cfg.llm.use_anthropic_direct,
         &persona_cfg.llm.stop_sequences,
     )

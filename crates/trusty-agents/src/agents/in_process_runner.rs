@@ -396,6 +396,7 @@ impl InProcessAgentRunner {
             cfg.llm.enable_prompt_caching,
             tool_choice,
             cfg.llm.use_finish_task,
+            cfg.llm.strict_tool_discipline(),
             cfg.llm.use_anthropic_direct,
             &cfg.llm.stop_sequences,
         )

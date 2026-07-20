@@ -393,6 +393,16 @@ pub(super) async fn dispatch_cli_mode(
         }
     }
 
+    // #3052: `--plain` / `TAGENT_NO_TUI=1` forces the persistent plain-line
+    // REPL (`ctrl::run_plain_cli`) instead of the ratatui full-screen TUI,
+    // even when stdin is a TTY — the SSH / narrow-terminal case. Checked
+    // BEFORE the `is_tty()` branch below so it wins regardless of terminal
+    // detection; bare `trusty-agents` (neither set) falls through unchanged
+    // to the existing TUI-vs-piped-loop dispatch.
+    if super::cli_def::should_force_plain_cli(cli.plain, std::env::var("TAGENT_NO_TUI").ok()) {
+        return ctrl::run_plain_cli().await;
+    }
+
     // Default interactive mode: use the rich reedline REPL when stdin is a
     // TTY; fall back to the legacy stdin loop in `run_ctrl` otherwise so
     // piped input keeps working unchanged.

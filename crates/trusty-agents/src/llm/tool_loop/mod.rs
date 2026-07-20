@@ -82,6 +82,7 @@ pub async fn chat_with_tools(
         None,
         false,
         false,
+        false,
         &[],
     )
     .await
@@ -104,6 +105,13 @@ pub async fn chat_with_tools(
 /// `max_turns`.
 /// Test: See `tests::parallel_tool_dispatch_does_not_cancel_peers` (mocks two
 /// tools; asserts both ran and one erroring did not cancel the other).
+///
+/// `strict_tool_discipline` (#3371): gates the #33 plain-text retry (see
+/// `should_retry_plain_text_turn`). Callers for tool-mandatory agents
+/// (`use_finish_task = true` and/or `tool_choice = "any"`) should pass
+/// `true`; conversational/orchestrator callers (default `tool_choice =
+/// "auto"`, `use_finish_task = false`) should pass `false` so a correct
+/// first-turn plain-text answer isn't retried.
 //
 // Why (signature): This is the workhorse function-call loop and every
 // parameter is independently load-bearing (model routing, sampling, gating
@@ -123,6 +131,7 @@ pub async fn chat_with_tools_gated(
     enable_prompt_caching: bool,
     tool_choice: Option<serde_json::Value>,
     use_finish_task: bool,
+    strict_tool_discipline: bool,
     use_anthropic_direct: bool,
     stop_sequences: &[String],
 ) -> Result<(String, TokenUsage)> {
@@ -209,10 +218,14 @@ pub async fn chat_with_tools_gated(
         needs_raw,
         endpoint: &endpoint,
     };
-    // #33: Count consecutive turns in which the model returned plain text
-    // instead of a tool call. Reset to 0 whenever a tool call is emitted.
-    // We allow ONE plain-text-mid-task turn (injecting a reminder to use a
-    // tool), then accept the second plain-text response as the final answer.
+    // #33/#3371: Count consecutive turns in which the model returned plain
+    // text instead of a tool call. Reset to 0 whenever a tool call is
+    // emitted. When `strict_tool_discipline` is set (tool-mandatory agents
+    // only — see the doc comment above), we allow ONE plain-text-mid-task
+    // turn (injecting a reminder to use a tool), then accept the second
+    // plain-text response as the final answer. Non-strict callers accept the
+    // first plain-text turn immediately; the counter still tracks state for
+    // consistency but never gates a retry.
     let mut consecutive_no_tool_turns: u32 = 0;
 
     // #69: Apply a default 50% context-window budget trim before each turn.
@@ -319,7 +332,13 @@ pub async fn chat_with_tools_gated(
             // an error reminding the agent to use a tool and retry. On the
             // SECOND, give up and accept the text as the final answer so we
             // degrade gracefully rather than loop forever.
-            if should_retry_plain_text_turn(consecutive_no_tool_turns, turn, max_turns) {
+            if should_retry_plain_text_turn(
+                consecutive_no_tool_turns,
+                turn,
+                max_turns,
+                strict_tool_discipline,
+                !openai_tools.is_empty(),
+            ) {
                 consecutive_no_tool_turns += 1;
                 let reminder: ChatCompletionRequestMessage =
                     ChatCompletionRequestUserMessageArgs::default()

@@ -46,7 +46,14 @@ trusty-code = { workspace = true }
 #      middleware stack (`trusty_common::server::with_guarded_middleware`,
 #      `SelfOrigins`) the API server adopts router-wide for the loopback-only
 #      doctrine (mirrors trusty-console/#3317).
-trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core", "cli-help", "stdio-mcp-client", "session-naming", "config-cli", "axum-server"] }
+# `inference-client` (#2410, epic #2400): the shared OpenAI-compatible
+#      adapter layer (`Configurator`, `InferenceAdapter`, the `ChatRequest`/
+#      `ChatResponse` wire types, `test_support::MockInferenceServer` when
+#      paired with `axum-server`) that `llm::inference_bridge` /
+#      `llm::inference_client` build on. Already implied transitively by
+#      `config-cli`, but declared explicitly so that relationship is never a
+#      silent, breakable assumption.
+trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core", "cli-help", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client"] }
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting
@@ -54,7 +61,7 @@ trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memor
 #      compile the trusty-memory HTTP daemon code paths just to pick up a
 #      zero-sized service descriptor.
 trusty-memory = { path = "../trusty-memory", version = "0.19.0", default-features = false }
-trusty-search = { path = "../trusty-search", version = "0.34.0" }
+trusty-search = { path = "../trusty-search", version = "0.35.0" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }

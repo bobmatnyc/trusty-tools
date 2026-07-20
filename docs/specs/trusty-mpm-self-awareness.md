@@ -111,7 +111,9 @@ This spec defines four requirements (R1–R4) that close these four gaps.
   `crates/trusty-mpm/src/core/bundle_all.rs`'s `ALL` table with
   `rel_path: "docs/WHAT-IS-TRUSTY-MPM.md"` and `install: InstallPolicy::Overwrite` (the doc is
   framework-owned and must track upgrades, matching the policy already used for
-  `instructions/INSTRUCTIONS.md`).
+  `instructions/INSTRUCTIONS.md`). `InstallPolicy` also has a `SeedOnce` variant for
+  artifacts a user is meant to own and edit; it is not the right choice here since
+  this doc is not user-editable.
 - **Preconditions:** none — the doc has no dependency on project state.
 - **Postconditions:**
   - The file exists in the source tree at `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` and is

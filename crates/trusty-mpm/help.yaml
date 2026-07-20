@@ -74,7 +74,7 @@ commands:
     description: Install the bundled framework artifacts to ~/.trusty-mpm/framework/
     flags:
       - name: force
-        description: Overwrite artifacts that already exist on disk
+        description: Reset user-owned (seed-once) artifacts back to the shipped default; framework-owned artifacts always refresh regardless
   hook:
     description: Handle a Claude Code lifecycle hook (PreToolUse/PostToolUse/Stop)
   daemon:

@@ -187,6 +187,15 @@ pub(super) struct Cli {
     #[arg(long)]
     pub(super) ctrl: bool,
 
+    /// #3052: Force the persistent plain-line REPL instead of the ratatui
+    /// full-screen TUI, even when stdin is a TTY. Intended for SSH / narrow
+    /// terminals (e.g. Terminus on iPhone) where the alt-screen TUI reflows
+    /// badly and modal pickers can swallow keystrokes. Equivalent to setting
+    /// `TAGENT_NO_TUI=1`. Bare `trusty-agents` (neither flag nor env set)
+    /// keeps launching the TUI unchanged.
+    #[arg(long)]
+    pub(super) plain: bool,
+
     /// Run the Telegram bot gateway (#264). Requires `TELEGRAM_BOT_TOKEN`.
     ///
     /// Headless/server mode: takes over the process and runs only the bot.
@@ -327,6 +336,26 @@ pub(super) fn check_credentials_and_warn() {
     eprintln!();
 }
 
+/// Decide whether an interactive TTY invocation should be forced into the
+/// persistent plain-line CLI mode (`ctrl::run_plain_cli`) instead of the
+/// ratatui full-screen TUI (#3052).
+///
+/// Why: The decision has two independent triggers — the `--plain` clap flag
+/// and the `TAGENT_NO_TUI=1` env var — and `dispatch_cli_mode` needs to check
+/// it before the existing `repl::is_tty()` branch so it wins regardless of
+/// terminal detection. Extracted as a pure function (rather than inlined at
+/// the call site) so the decision matrix is unit-testable without spinning up
+/// a real CLI/TTY/process.
+/// What: `true` when `plain_flag` is set OR `no_tui_env` is exactly `"1"`.
+/// Any other env value (unset, empty, `"0"`, `"true"`, …) is treated as
+/// not-set, matching the literal `TAGENT_NO_TUI=1` convention documented on
+/// the `--plain` flag and in the crate README.
+/// Test: `should_force_plain_cli_flag_alone`, `_env_alone`, `_neither`,
+/// `_env_zero_is_not_forced`.
+pub(super) fn should_force_plain_cli(plain_flag: bool, no_tui_env: Option<String>) -> bool {
+    plain_flag || no_tui_env.as_deref() == Some("1")
+}
+
 /// Concatenate non-flag positional args into a single task string.
 ///
 /// Why: When the user runs `trusty-agents "say hi"` (or `trusty-agents say hi`), we
@@ -343,4 +372,43 @@ pub(super) fn argv_as_task_text(args: &[String]) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_force_plain_cli;
+
+    #[test]
+    fn should_force_plain_cli_flag_alone() {
+        assert!(should_force_plain_cli(true, None));
+    }
+
+    #[test]
+    fn should_force_plain_cli_env_alone() {
+        assert!(should_force_plain_cli(false, Some("1".to_string())));
+    }
+
+    #[test]
+    fn should_force_plain_cli_neither() {
+        assert!(!should_force_plain_cli(false, None));
+    }
+
+    #[test]
+    fn should_force_plain_cli_env_zero_is_not_forced() {
+        assert!(!should_force_plain_cli(false, Some("0".to_string())));
+    }
+
+    #[test]
+    fn should_force_plain_cli_env_garbage_is_not_forced() {
+        assert!(!should_force_plain_cli(false, Some("true".to_string())));
+    }
+
+    #[test]
+    fn should_force_plain_cli_bare_no_flags_matches_default_dispatch() {
+        // Bare `trusty-agents` — neither the clap flag parsed nor the env var
+        // set — must NOT force plain mode, so the existing
+        // is_tty()-vs-piped-loop dispatch branch is unchanged (no regression
+        // for desktop TUI users).
+        assert!(!should_force_plain_cli(false, None));
+    }
 }

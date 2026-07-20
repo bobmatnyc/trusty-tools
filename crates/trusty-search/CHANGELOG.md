@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.35.0] — 2026-07-19
+
 ### Security
 
 - **Document-extraction DoS advisories fixed** ([#3367](https://github.com/bobmatnyc/trusty-tools/issues/3367)):
@@ -35,6 +37,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (previously unhandled references were silently dropped from extracted
   text). Covered by
   `docx::tests::test_paragraphs_from_document_xml_unescapes_entities`.
+  ([#3373](https://github.com/bobmatnyc/trusty-tools/pull/3373))
 - **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
   destructive write routes (`POST /admin/stop`, `POST /indexes`,
   `DELETE /indexes/{id}`, `POST /upgrade`, reindex) are now guarded against
@@ -43,7 +46,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   SSE streams unaffected) and fail-open on a missing `Origin` (the console
   reverse proxy, `curl`, and the MCP stdio bridge keep working); the daemon's
   own resolved bind address is trusted so a non-loopback bind still serves its
-  UI.
+  UI. ([#3317](https://github.com/bobmatnyc/trusty-tools/pull/3317))
+
+## [0.34.1] — 2026-07-18
 
 ### Added
 
@@ -51,7 +56,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- restore crates.io installability against trusty-common 0.23.3 — wedge_reset_secs field now set in all SupervisorConfig initializers (closes #3131)
+- restore crates.io installability against trusty-common 0.23.3 — wedge_reset_secs field now set in all SupervisorConfig initializers (closes #3131) ([#3148](https://github.com/bobmatnyc/trusty-tools/pull/3148))
 - EmbedderSupervisor shutdown reachable + no respawn on intentional shutdown ([#3023](https://github.com/bobmatnyc/trusty-tools/pull/3023)) ([`dd5f212`](https://github.com/bobmatnyc/trusty-tools/commit/dd5f212900abff69573121e826028e941188b79a))
 - warm-boot honors skip_kg — no graph load/rebuild for skipped indexes ([#2988](https://github.com/bobmatnyc/trusty-tools/pull/2988)) ([`cdf998e`](https://github.com/bobmatnyc/trusty-tools/commit/cdf998eadf92a42e924e770ce45b8f616d172448))
 - migrate off archived serde_yml/libyml to serde_yaml 0.9 ([#2992](https://github.com/bobmatnyc/trusty-tools/pull/2992)) ([`6a67317`](https://github.com/bobmatnyc/trusty-tools/commit/6a673178d8e9db98b901ad43872f003bc81d0f40))

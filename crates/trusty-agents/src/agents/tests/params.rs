@@ -214,6 +214,72 @@ content = "base"
     assert!(cfg.llm.use_finish_task);
 }
 
+// #3371: `strict_tool_discipline()` derives the #33 plain-text-retry opt-in
+// from the two signals that already distinguish tool-mandatory agents from
+// conversational/orchestrator ones.
+
+#[test]
+fn strict_tool_discipline_false_by_default() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(!cfg.llm.strict_tool_discipline());
+}
+
+#[test]
+fn strict_tool_discipline_true_when_use_finish_task() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+use_finish_task = true
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(cfg.llm.strict_tool_discipline());
+}
+
+#[test]
+fn strict_tool_discipline_true_when_tool_choice_any() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+tool_choice = "any"
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(cfg.llm.strict_tool_discipline());
+}
+
 #[test]
 fn llm_params_use_anthropic_direct_defaults_false() {
     let toml_str = r#"

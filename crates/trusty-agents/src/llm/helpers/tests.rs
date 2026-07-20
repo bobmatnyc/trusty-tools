@@ -129,27 +129,43 @@ fn empty_stop_sequences_leave_no_stop_key_in_raw_body() {
 
 #[test]
 fn tool_discipline_decision_first_plain_text_retries() {
-    // turn 0 of 12, 0 prior no-tool turns -> retry
-    assert!(should_retry_plain_text_turn(0, 0, 12));
+    // turn 0 of 12, 0 prior no-tool turns, strict + tools offered -> retry
+    assert!(should_retry_plain_text_turn(0, 0, 12, true, true));
 }
 
 #[test]
 fn tool_discipline_decision_second_plain_text_accepts() {
     // We've already retried once (counter == 1). Do NOT retry again.
-    assert!(!should_retry_plain_text_turn(1, 1, 12));
+    assert!(!should_retry_plain_text_turn(1, 1, 12, true, true));
 }
 
 #[test]
 fn tool_discipline_decision_final_turn_accepts_even_first_time() {
     // Don't inject a retry on the very last turn — the loop would break
     // anyway; just accept whatever the model produced.
-    assert!(!should_retry_plain_text_turn(0, 11, 12));
+    assert!(!should_retry_plain_text_turn(0, 11, 12, true, true));
 }
 
 #[test]
 fn tool_discipline_decision_saturates_on_zero_max_turns() {
     // Edge case: max_turns = 0 should never retry (underflow-safe).
-    assert!(!should_retry_plain_text_turn(0, 0, 0));
+    assert!(!should_retry_plain_text_turn(0, 0, 0, true, true));
+}
+
+// #3371: non-strict (conversational/orchestrator) agents never retry on a
+// plain-text turn, even on turn 0 with tools offered — this is the primary
+// regression fix (pm/assistant/personas were retrying on ~16/16 turns).
+#[test]
+fn tool_discipline_non_strict_never_retries() {
+    assert!(!should_retry_plain_text_turn(0, 0, 12, false, true));
+}
+
+// #3371 Bug A: even a strict-discipline caller must not retry when zero
+// tools were offered to the model — the retry demands a tool call that the
+// model can never satisfy, guaranteeing a wasted round trip.
+#[test]
+fn tool_discipline_strict_but_no_tools_offered_never_retries() {
+    assert!(!should_retry_plain_text_turn(0, 0, 12, true, false));
 }
 
 /// Pure-logic simulation of the tool-discipline state machine mimicking
@@ -167,7 +183,7 @@ fn simulate_turns(events: &[&str], max_turns: u32) -> (u32, u32, Option<String>)
         }
         match *ev {
             "text" => {
-                if should_retry_plain_text_turn(counter, turn, max_turns) {
+                if should_retry_plain_text_turn(counter, turn, max_turns, true, true) {
                     counter += 1;
                     retries += 1;
                     continue;

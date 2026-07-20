@@ -358,6 +358,28 @@ pub struct LlmParams {
     pub thinking_enabled: Option<bool>,
 }
 
+impl LlmParams {
+    /// Whether this agent's `chat_with_tools_gated` calls should apply the
+    /// #33 plain-text tool-discipline retry (#3371).
+    ///
+    /// Why: The retry (see `should_retry_plain_text_turn`) is only correct
+    /// for agents that do their work entirely through tools and treat a
+    /// plain-text mid-task response as confusion — signaled by either
+    /// `use_finish_task = true` (the agent relies on an explicit terminal
+    /// tool call rather than "the model stopped calling tools") or
+    /// `tool_choice = "any"` (the agent forces a tool call every turn).
+    /// Conversational/orchestrator agents (`pm`, `assistant`, personas)
+    /// leave both at their defaults (`false` / `"auto"`) and a first-turn
+    /// plain-text answer is the CORRECT behavior for them, not confusion.
+    /// What: `use_finish_task || tool_choice == ToolChoice::Any`.
+    /// Test: `strict_tool_discipline_true_when_use_finish_task`,
+    /// `strict_tool_discipline_true_when_tool_choice_any`,
+    /// `strict_tool_discipline_false_by_default`.
+    pub fn strict_tool_discipline(&self) -> bool {
+        self.use_finish_task || self.tool_choice == ToolChoice::Any
+    }
+}
+
 /// How to drive the `tool_choice` API field.
 ///
 /// Why: Translates a user-friendly TOML keyword into the provider-agnostic
