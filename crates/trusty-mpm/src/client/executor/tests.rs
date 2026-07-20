@@ -190,7 +190,7 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns an eighteen-check report against a live daemon.
+    // `/doctor` returns a twenty-one-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
@@ -206,9 +206,11 @@ async fn execute_doctor_against_test_daemon() {
             // 15; issue #2940 added hooks_contamination + hooks_foreign_conflict,
             // bringing the total to 17; issue #2333 added output_style_staleness,
             // bringing the total to 18; issue #2997 added tcc_taint, bringing the
-            // total to 19. #1905's stale-skill cleanup is a one-time migration,
-            // not a probe here.
-            assert_eq!(report.checks.len(), 19);
+            // total to 19; issue #3453 part 2 added output_style_legacy_ids,
+            // bringing the total to 20; issue #3427 added scaffold_tracking,
+            // bringing the total to 21. #1905's stale-skill cleanup is a
+            // one-time migration, not a probe here.
+            assert_eq!(report.checks.len(), 21);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

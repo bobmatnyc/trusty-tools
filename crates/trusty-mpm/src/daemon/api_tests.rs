@@ -1096,7 +1096,7 @@ async fn pair_reset_clears_pairing() {
 
 #[tokio::test]
 async fn doctor_endpoint_returns_report() {
-    // `GET /api/v1/doctor` returns an eighteen-check report (#1840 added the
+    // `GET /api/v1/doctor` returns a twenty-one-check report (#1840 added the
     // worktrees check; DOC-28 R4(a) added the output_style check; A2
     // (tm-skills-portfolio epic) added the skill_source check;
     // #gh-account-awareness added the gh_account check; #2158 added the
@@ -1106,12 +1106,14 @@ async fn doctor_endpoint_returns_report() {
     // agent_skills + agent_skills_prose_hints; issue #2940 added the
     // hooks_contamination and hooks_foreign_conflict checks; issue #2333
     // added the output_style_staleness check; issue #2997 added the tcc_taint
-    // check). #1905's stale-skill cleanup is a one-time migration, not a
-    // `run_doctor` probe, so it does not appear here; the per-check statuses
-    // carry the diagnosis, not the HTTP status.
+    // check; issue #3453 part 2 added the output_style_legacy_ids check;
+    // issue #3427 added the scaffold_tracking check). #1905's stale-skill
+    // cleanup is a one-time migration, not a `run_doctor` probe, so it does
+    // not appear here; the per-check statuses carry the diagnosis, not the
+    // HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
-    assert_eq!(report.checks.len(), 19);
+    assert_eq!(report.checks.len(), 21);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -1122,6 +1124,7 @@ async fn doctor_endpoint_returns_report() {
             "skill_source",
             "output_style",
             "output_style_staleness",
+            "output_style_legacy_ids",
             "deployment",
             "skill_staleness",
             "legacy_sources",
@@ -1134,7 +1137,8 @@ async fn doctor_endpoint_returns_report() {
             "oauth_token",
             "hooks_contamination",
             "hooks_foreign_conflict",
-            "tcc_taint"
+            "tcc_taint",
+            "scaffold_tracking"
         ]
     );
 }

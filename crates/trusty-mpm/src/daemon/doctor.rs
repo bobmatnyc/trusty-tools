@@ -67,6 +67,12 @@ use doctor_hooks_hygiene::check_hooks_hygiene;
 mod doctor_tcc;
 use doctor_tcc::check_tcc_taint;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #3427 —
+// the harness-scaffolding tracked-in-git-AND-regenerated-locally probe).
+#[path = "doctor_scaffold_tracking.rs"]
+mod doctor_scaffold_tracking;
+use doctor_scaffold_tracking::check_scaffold_tracking;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -111,11 +117,17 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// content is current), the `output_style_legacy_ids` probe (issue #3453 part
 /// 2 — Warn-only scan of every settings LAYER, not just the effective one,
 /// for a legacy/unresolvable `outputStyle` id sitting dormant in a currently
-/// shadowed layer such as `settings.local.json`), and the `tcc_taint` probe
+/// shadowed layer such as `settings.local.json`), the `tcc_taint` probe
 /// (issue #2997 — surfaces whether managed panes spawn `claude` with macOS
 /// TCC responsibility disclaimed, so the "would like to access data…" prompt
 /// class is diagnosable rather than silent; synchronous and instantaneous, no
-/// `log show` scan) — folding the resulting twenty [`DoctorCheck`]s into a
+/// `log show` scan), and the `scaffold_tracking` probe (issue #3427 — warns
+/// when a harness-owned path under `.claude/agents/`, `.claude/skills/`, or
+/// `.claude/output-styles/` is BOTH tracked in `project_dir`'s git index AND
+/// regenerated locally by tm, the precondition for a `git merge --ff-only`
+/// "would be overwritten" collision; reports the exact true-intersection
+/// paths plus a copy-pasteable `git rm -r --cached` remediation, never runs
+/// it itself) — folding the resulting twenty-one [`DoctorCheck`]s into a
 /// [`DoctorReport`] whose `overall` status is the worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
@@ -138,7 +150,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_twenty_checks`,
+/// Test: `run_doctor_produces_twenty_one_checks`,
 /// `agents_check_scopes_to_managed_workspace_when_project_given`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -187,6 +199,11 @@ pub async fn run_doctor(
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).
     checks.push(check_tcc_taint());
+    // Issue #3427: warn when a harness-scaffolding path is BOTH tracked in
+    // git and regenerated locally by tm — the precondition for a
+    // `git merge --ff-only` "would be overwritten" collision. Warn-only;
+    // never auto-modifies the git index.
+    checks.push(check_scaffold_tracking(project_dir));
 
     DoctorReport::from_checks(checks)
 }
