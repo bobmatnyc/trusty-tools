@@ -19,8 +19,8 @@ spec_refs:
 **Status:** Draft (Rev 2)
 **Subsystem:** trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces
 **Owner:** Engineering (trusty-code)
-**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365)
-**Spec ID:** `SPEC-WS-01~draft` … `SPEC-WS-09~draft` (DOC-48)
+**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365; Rev 7: §9 Q1–Q3 resolutions — prompt-text inference, registered project_slug, no auto-transition)
+**Spec ID:** `SPEC-WS-01~draft` … `SPEC-WS-08~draft`, `SPEC-WS-09~resolved` (DOC-48)
 **Builds on:**
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-08~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-08~draft) §4B defines the Workstream domain object as a NEW prerequisite: "an infinite thread with state `active · idle · closed`… resumable across daemon restarts." This spec is the Phase 2+ implementation of that domain object and its persistence layer.
 - [`docs/specs/durable-background-agents.md`](./durable-background-agents.md) (DOC-40, merged) — [`SPEC-BGATTACH-04~draft` and `-05~draft`](./durable-background-agents.md#SPEC-BGATTACH-04~draft) define "never silently multiplex" exclusivity principle at the per-client level. This spec adopts that principle at the daemon level: one workstream is active at a time, and a client attempting to activate a different workstream must explicitly request the switch (never silent).
@@ -544,23 +544,21 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
       project" option maps onto the workstream's first session carrying no
       `project` binding — §4.1's existing optional-binding rule, unchanged.
       The GUI never surfaces "session"/"unbound" wording for this path.
-- [ ] Q1 (§9, workstream name inference from first-turn prompt text) remains
-      OPEN — issue #3365 ships only the interim default the issue itself
-      specified ("project name + date" / "new chat + date"), not real
-      prompt-derived inference.
+- [x] Q1–Q3 (§9, workstream name inference, project_slug sourcing, idle-to-active
+      timeout) all RESOLVED — Bob decisions recorded 2026-07-19.
 
 ---
 
-## 9. Open questions for Bob {#SPEC-WS-09~draft}
+## 9. Open questions for Bob (all resolved 2026-07-19) {#SPEC-WS-09~resolved}
 
-**ID:** SPEC-WS-09~draft
-**Status:** Draft
+**ID:** SPEC-WS-09~resolved
+**Status:** Resolved
 
-1. **Q1 — Workstream name inference (PARTIALLY RESOLVED, interim default shipped, issue #3365):** When a session binds to a workstream, should we infer the workstream name from the first turn's prompt text (like DOC-39 suggests), or require the operator to name it at creation? Phase 1A deferred this; issue #3365's GUI creation flow now ships an **interim, non-prompt-derived default** — `"<project display name> — <YYYY-MM-DD>"` when a project is bound, `"new chat — <YYYY-MM-DD>"` when projectless (`inferWorkstreamName`, `crates/trusty-code-gui/ui/src/lib/new-workstream.ts`) — rather than leaving the name empty/"Untitled" until first session, or real prompt-text inference. Real prompt-derived inference (the question this Q1 originally asked) **remains open**.
+1. **Q1 — Workstream name inference (RESOLVED, Bob 2026-07-19):** Derive the workstream name from the first turn's prompt text (implicit inference), replacing the interim non-prompt-derived date default (`"<project> — <date>"` / `"new chat — <date>"`) that shipped via #3365. The interim default remains the fallback when no prompt text is yet available, but the resolved target is real first-turn prompt-derived naming. This aligns with the implicit-workstream-inference direction in #3384/#3392. **Decision:** Adopt prompt-text inference as the standard name-derivation path; keep the date-based fallback for bootstrapping.
 
-2. **Q2 — Project-ID storage namespace (PARTIALLY RESOLVED):** The storage filename `workstreams-{project_slug}-{hash}.json` is derived from the daemon's `ProjectBinding` (the project path or URL the daemon was launched for). The spec now states this explicitly (§3.1 notes "This naming scheme mirrors precedent"). Any remaining ambiguity: should the `project_slug` be derived from the path's basename (e.g., `acme-api` from `/path/to/acme-api`), or from a user-friendly project name if one is registered? Current spec assumes basename; implementation may refine.
+2. **Q2 — Project-ID storage namespace (RESOLVED, Bob 2026-07-19):** Derive `project_slug` (in `workstreams-{project_slug}-{hash}.json`) from a user-friendly REGISTERED project name when one exists, falling back to the path basename when the project is not registered. This provides clarity for users when they have multiple projects with the same path basename, while remaining simple when projects are not formally registered. **Decision:** Prefer registered friendly name; fall back to path basename if not registered.
 
-3. **Q3 — Idle-to-active timeout:** How long should a workstream remain in `idle` state before it's eligible to be re-activated silently (or should it never auto-transition)? Current spec does not auto-transition; state is computed on each list/get call. CLI and GUI layers may auto-refresh.
+3. **Q3 — Idle-to-active timeout (RESOLVED, Bob 2026-07-19):** Keep the current behavior — a workstream does NOT auto-transition out of idle on any timer; state is computed on each list/get call; CLI/GUI may auto-refresh the display only. No timer/clock dependency in the domain. **Decision:** No change to current behavior; idle-to-active transitions are explicit (via `workstream.activate`), never automatic based on time.
 
 ---
 
