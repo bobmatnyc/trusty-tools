@@ -55,12 +55,32 @@ impl ClaudeConfigReader {
     /// Why: the daemon's analyzer needs the full path set; computing it from
     /// the project directory and `dirs::home_dir()` in one place keeps the
     /// convention consistent.
-    /// What: builds `<project>/.claude/...` and `<home>/.claude/...` paths.
-    /// When the home directory cannot be determined the user paths fall back to
-    /// `.claude/...` (relative), which simply never exist — degrading safely.
+    /// What: builds `<project>/.claude/...` and `<home>/.claude/...` paths via
+    /// [`Self::paths_for_project_with_home`], resolving `home` from
+    /// `dirs::home_dir()` (falling back to `.claude/...` relative paths, which
+    /// simply never exist, when it cannot be determined).
     /// Test: `paths_for_project_resolves_all`.
     pub fn paths_for_project(project: &Path) -> ClaudeConfigPaths {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self::paths_for_project_with_home(project, &home)
+    }
+
+    /// Resolve every Claude Code config path for `project`, with an
+    /// explicitly supplied `home` rather than re-deriving it from
+    /// `dirs::home_dir()`.
+    ///
+    /// Why: callers that already have a resolved (possibly test-injected)
+    /// home path — e.g. the `output_style` doctor probe (issue #3453), whose
+    /// tests must point "home" at a hermetic temp dir rather than the real
+    /// `dirs::home_dir()` — need the same four-layer path model
+    /// [`paths_for_project`](Self::paths_for_project) provides without
+    /// re-deriving it from the live environment. Splitting this out keeps
+    /// there being exactly ONE place the `.claude/settings*.json` layout is
+    /// joined, so a second, drifting implementation never appears.
+    /// What: builds `<project>/.claude/...` and `<home>/.claude/...` paths.
+    /// Test: `paths_for_project_resolves_all` (via `paths_for_project`);
+    /// `crate::daemon::doctor_output_style` tests exercise this directly.
+    pub fn paths_for_project_with_home(project: &Path, home: &Path) -> ClaudeConfigPaths {
         let user_claude = home.join(".claude");
         let project_claude = project.join(".claude");
         ClaudeConfigPaths {
