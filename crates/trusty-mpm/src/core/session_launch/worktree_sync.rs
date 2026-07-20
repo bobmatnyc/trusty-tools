@@ -346,8 +346,18 @@ mod tests {
             .output();
     }
 
+    /// Not purely mechanical (#3390): the four `TempDir::new().ok()?` sites
+    /// below became `crate::test_support::hermetic_temp_dir()` calls with the
+    /// trailing `?` dropped — `hermetic_temp_dir()` returns `TempDir`
+    /// directly (it panics via `.expect(...)` internally on temp-dir-creation
+    /// failure) rather than `Option<TempDir>`. Practically equivalent: OS
+    /// temp-directory creation failing at all is exceedingly rare (disk full
+    /// / permission denied), and unlike the git-unavailable checks below
+    /// (which legitimately `return None` to skip cleanly), an actual failure
+    /// to create a scratch directory is a real test-environment problem worth
+    /// a hard failure rather than a silent skip.
     fn build_fixture() -> Option<Fixture> {
-        let origin_dir = TempDir::new().ok()?;
+        let origin_dir = crate::test_support::hermetic_temp_dir();
         let origin = origin_dir.path().to_path_buf();
         if !git_ok(&origin, &["init", "--bare"]) {
             eprintln!("worktree_sync tests: git unavailable, skipping");
@@ -358,7 +368,7 @@ mod tests {
         // pushes it to `main` on the bare origin, then anchors the bare
         // repo's HEAD symref at `main` so a later `git clone` resolves a
         // real default branch instead of an empty/detached one.
-        let seed_dir = TempDir::new().ok()?;
+        let seed_dir = crate::test_support::hermetic_temp_dir();
         let seed = seed_dir.path().to_path_buf();
         if !git_ok(&seed, &["init"]) {
             return None;
@@ -389,7 +399,7 @@ mod tests {
         }
 
         // Base clone: stands in for the shared `.base` checkout.
-        let base_dir = TempDir::new().ok()?;
+        let base_dir = crate::test_support::hermetic_temp_dir();
         let base = base_dir.path().to_path_buf();
         // `TempDir::new` already created the directory; `git clone` refuses
         // to clone into a non-empty existing dir in some git versions, so
@@ -407,7 +417,7 @@ mod tests {
         // `configure_session_branch_tracking` (issue #2189): a new branch
         // checked out from `base`'s HEAD, with its upstream explicitly
         // pointed at `origin/main`.
-        let worktree_dir = TempDir::new().ok()?;
+        let worktree_dir = crate::test_support::hermetic_temp_dir();
         let worktree = worktree_dir.path().to_path_buf();
         let _ = std::fs::remove_dir(&worktree);
         if !git_ok(
@@ -500,7 +510,7 @@ mod tests {
 
     #[test]
     fn sync_skips_when_no_upstream_configured() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         let dir = tmp.path();
         if !git_ok(dir, &["init"]) {
             return;
@@ -516,7 +526,7 @@ mod tests {
 
     #[test]
     fn sync_reports_not_a_git_worktree_for_non_git_dir() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         assert_eq!(
             sync_worktree_with_upstream(tmp.path()),
             SyncOutcome::NotAGitWorktree
@@ -599,7 +609,7 @@ mod tests {
 
     #[test]
     fn self_heal_claude_md_strips_legacy_block() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         let begin = "<!-- trusty-mpm:delegation-directive:begin \
             (framework-owned — do not edit; regenerated on every session start, see issue #2125) -->";
         let end = "<!-- trusty-mpm:delegation-directive:end -->";
@@ -618,7 +628,7 @@ mod tests {
 
     #[test]
     fn self_heal_claude_md_noop_when_clean() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         let clean = "# My Project\n\nNotes.\n";
         std::fs::write(tmp.path().join("CLAUDE.md"), clean).unwrap();
 
@@ -631,7 +641,7 @@ mod tests {
 
     #[test]
     fn self_heal_claude_md_noop_when_absent() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         assert!(!self_heal_claude_md(tmp.path()));
     }
 }

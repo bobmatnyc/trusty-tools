@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn catalog_sync_fetches_on_first_call() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
 
         let result = sync.sync(false).unwrap();
@@ -610,7 +610,7 @@ mod tests {
         // repo/.claude/agents must report `agents_empty()` so the CLI/daemon can
         // warn honestly instead of presenting "0 agents" as a silent success. The
         // FakeGitBackend clone does not populate an agents dir, so the count is 0.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
 
         let result = sync.sync(false).unwrap();
@@ -626,7 +626,7 @@ mod tests {
     fn catalog_sync_not_empty_when_agents_present() {
         // The inverse: once composable agents exist at repo/.claude/agents, the
         // result must NOT be flagged empty.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
         sync.sync(false).unwrap();
 
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn catalog_sync_skips_on_ttl_valid() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
 
         // First sync writes the sentinel.
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn catalog_sync_force_bypasses_ttl() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
 
         // Establish a fresh sentinel.
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn catalog_ls_lists_agents() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
         sync.sync(false).unwrap();
 
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn catalog_ls_lists_skills() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
         sync.sync(false).unwrap();
 
@@ -720,7 +720,7 @@ mod tests {
         // HR-2: a `[manifest]` config value must win over the env var and the
         // compiled-in default. Config has highest precedence, so this holds
         // regardless of whether the env vars happen to be set in the test host.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let cfg = crate::core::config::ManifestConfig {
             repo: Some("https://github.com/me/fork".to_owned()),
             git_ref: Some("dev".to_owned()),
@@ -738,7 +738,7 @@ mod tests {
         // HR-2: the catalog-layer manifest path must be
         // <catalog>/repo/.claude/manifest.toml so it lines up with the synced
         // claude-mpm repo layout the resolver reads.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
         assert_eq!(
             sync.manifest_path(),
@@ -753,7 +753,7 @@ mod tests {
     fn catalog_root_returns_catalog_dir() {
         // The catalog root accessor must return the constructed catalog_dir so a
         // caller can thread the configured root into manifest resolution.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
         assert_eq!(sync.catalog_root(), root.path());
     }
@@ -773,7 +773,7 @@ mod tests {
     fn for_framework_uses_catalog_root() {
         // `for_framework` must root the sync at <framework>/catalog (the same root
         // `catalog_root_for` yields) so the CLI and launcher share one checkout.
-        let fw_root = TempDir::new().unwrap();
+        let fw_root = crate::test_support::hermetic_temp_dir();
         let sync = CatalogSync::for_framework(FakeGitBackend::new(), fw_root.path(), None);
         assert_eq!(sync.catalog_root(), fw_root.path().join("catalog"));
     }
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn catalog_ls_falls_back_to_legacy_agent_path() {
         // When .claude/agents doesn't exist, should fall back to repo/agents/.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let sync = make_sync(&root);
         sync.sync(false).unwrap();
 
@@ -801,7 +801,7 @@ mod tests {
     fn guard_remove_rejects_path_outside_catalog() {
         // Verify canonicalized guard rejects paths outside the catalog boundary
         // and also refuses to remove the catalog root itself.
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let catalog_dir = root.path().join("catalog");
         std::fs::create_dir_all(&catalog_dir).unwrap();
         let outside = root.path().join("not-catalog");
