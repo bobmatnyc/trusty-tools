@@ -111,7 +111,11 @@ pub enum ReplEvent {
     /// The daemon activated a different workstream (DOC-48 §5.3
     /// `WorkstreamActivationChanged`), pushed via
     /// `TuiEngine::subscribe_workstream_events`. `prior_id` is `None` on the
-    /// very first activation observed in this session.
+    /// very first activation observed in this session. `new_active_id` is
+    /// `None` when the active workstream was deactivated and none is now
+    /// active (DOC-48 §4.2/§4.3) — a real, daemon-published state, not an
+    /// absence of data; distinct from `prior_id: None`, which means "no
+    /// activation happened before this one."
     ///
     /// Field names are chosen to match the DOC-48 §5.3 SSE wire event
     /// exactly (`new_active_id`, `prior_id`) — NOT DOC-50 §5 Slice 6's prose
@@ -119,9 +123,13 @@ pub enum ReplEvent {
     /// adapters deserialize this from JSON (Slice 3/6), a Rust/wire name
     /// mismatch here would not be caught at compile time, only at runtime
     /// deserialization — so the Rust field is kept byte-identical to the
-    /// wire field on purpose.
+    /// wire field on purpose, including its optionality: the wire event
+    /// (`crate::events::Event::WorkstreamActivationChanged` in
+    /// `trusty-code`) declares `new_active_id: Option<String>` for exactly
+    /// this reason, and this variant now mirrors that shape rather than
+    /// forcing a lossy `StatusMessage` fallback for the `None` case.
     WorkstreamActivationChanged {
-        new_active_id: String,
+        new_active_id: Option<String>,
         prior_id: Option<String>,
     },
     /// The backend connection was lost (daemon restart, SSE stream closed,
@@ -265,7 +273,7 @@ mod tests {
     #[test]
     fn workstream_activation_changed_uses_wire_field_name() {
         let ev = ReplEvent::WorkstreamActivationChanged {
-            new_active_id: "a1b2c3d4".to_string(),
+            new_active_id: Some("a1b2c3d4".to_string()),
             prior_id: Some("00000000".to_string()),
         };
         let ReplEvent::WorkstreamActivationChanged {
@@ -275,8 +283,30 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(new_active_id, "a1b2c3d4");
+        assert_eq!(new_active_id.as_deref(), Some("a1b2c3d4"));
         assert_eq!(prior_id.as_deref(), Some("00000000"));
+    }
+
+    /// `new_active_id: None` must be representable and distinguishable from
+    /// `prior_id: None` — the whole point of this fix (issue tracked in the
+    /// commit landing this test): the daemon legitimately publishes
+    /// "deactivated, no replacement active" (DOC-48 §4.2/§4.3), and the
+    /// shared event must carry that without falling back to free text.
+    #[test]
+    fn workstream_activation_changed_represents_deactivation_with_no_replacement() {
+        let ev = ReplEvent::WorkstreamActivationChanged {
+            new_active_id: None,
+            prior_id: Some("a1b2c3d4".to_string()),
+        };
+        let ReplEvent::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } = &ev
+        else {
+            unreachable!()
+        };
+        assert_eq!(*new_active_id, None);
+        assert_eq!(prior_id.as_deref(), Some("a1b2c3d4"));
     }
 
     /// `KeyInput` default modifiers must be "nothing held" so a bare
