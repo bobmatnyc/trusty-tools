@@ -47,6 +47,10 @@ mod tests;
 mod tests_behavior_a;
 
 #[cfg(test)]
+#[path = "install_policy_tests.rs"]
+mod install_policy_tests;
+
+#[cfg(test)]
 #[path = "tests_behavior_b_tests.rs"]
 mod tests_behavior_b;
 

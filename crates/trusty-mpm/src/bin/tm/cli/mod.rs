@@ -406,7 +406,10 @@ pub(crate) enum Command {
     /// filter). Requires `--reset-agents` (there is nothing "workspace" to
     /// reset without it).
     Install {
-        /// Overwrite artifacts that already exist on disk.
+        /// Reset user-owned (seed-once) artifacts back to the shipped
+        /// default. Framework-owned artifacts always refresh on install
+        /// regardless of this flag — `--force` only changes the outcome for
+        /// artifacts a user may have edited (issue #3381).
         #[arg(long)]
         force: bool,
         /// Force-recompose agent files from the current bundle (issue #2504).

@@ -37,12 +37,12 @@ cargo test -p trusty-mpm bundle -- --nocapture
 ```
 
 ### Deployment
-Agents deploy to `~/.trusty-mpm/framework/agents/` via `trusty-mpm install`. Each agent in `ALL` is written with `InstallPolicy::Overwrite` so framework upgrades replace prior versions.
+Agents deploy to `~/.trusty-mpm/framework/agents/` via `trusty-mpm install`. Each agent in `ALL` is written with `InstallPolicy::Overwrite` so framework upgrades replace prior versions. `InstallPolicy` is a real, honored choice, not boilerplate: `Overwrite` (every agent today) always refreshes on install; `SeedOnce` exists for a genuinely user-owned artifact and is written only once, never clobbered by an upgrade (`--force` resets it back to the shipped default).
 
 ### Adding a New Agent
 1. Create `crates/trusty-mpm/src/assets/agents/<name>.md` with 5-field frontmatter
 2. Add a `pub const` in `core/bundle.rs` with `include_str!`
-3. Add a `BundledArtifact` entry to `ALL` with `InstallPolicy::Overwrite`
+3. Add a `BundledArtifact` entry to `ALL` with `InstallPolicy::Overwrite` (agents are framework-owned, not user-editable)
 4. Update the count assertion in `bundle_tests.rs`
 5. Run `cargo test -p trusty-mpm bundle` — all tests must pass
 

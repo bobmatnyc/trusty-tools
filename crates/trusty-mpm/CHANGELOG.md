@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`InstallPolicy` was defined but never honored by the installer** ([#3381](https://github.com/bobmatnyc/trusty-tools/issues/3381)): `install_to()` applied the same "skip if present unless `--force`" rule to every bundled artifact regardless of its declared `InstallPolicy`, so upgrades silently skipped refreshing any framework-owned file a user had touched. The enum is restored to two variants — `Overwrite` (framework-owned; all ~178 current entries) always refreshes on `tm install`, no `--force` needed; `SeedOnce` (reserved for a genuinely user-owned artifact) writes once and is never clobbered by an upgrade. `--force` now means "reset a seed-once artifact back to the shipped default" rather than "overwrite anything that exists" — its CLI help text is updated accordingly. As a side effect, this also closes a related staleness hazard: on non-dev installs, `install_to()` populates the `~/.trusty-mpm/framework/skills` fallback that `check_skill_staleness` diffs against, so the old skip-on-upgrade behavior could leave that source stale and make the staleness check return a false `Ok`; `Overwrite` now keeps it current. (This change does **not** touch `tm doctor`'s `skill_staleness` check itself, which is unrelated — it diffs the skill source directory against the deploy-time manifest and never reads `bundle::ALL`.)
+
 ## [0.19.27] — 2026-07-19
 
 ### Fixed

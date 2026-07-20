@@ -240,24 +240,10 @@ fn install_writes_all_artifacts() {
     }
 }
 
-#[test]
-fn install_skips_existing_without_force() {
-    // An existing artifact is left untouched without `--force` and the
-    // report says so; `--force` overwrites it.
-    let dir = tempfile::tempdir().unwrap();
-    let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    let optimizer = paths.optimizer_config();
-    std::fs::create_dir_all(&paths.hooks).unwrap();
-    std::fs::write(&optimizer, "custom").unwrap();
-
-    let report = install_to(&paths, false).unwrap();
-    assert!(report.iter().any(|l| l.contains("skipped")));
-    assert_eq!(std::fs::read_to_string(&optimizer).unwrap(), "custom");
-
-    let forced = install_to(&paths, true).unwrap();
-    assert!(forced.iter().all(|l| !l.contains("skipped")));
-    assert_ne!(std::fs::read_to_string(&optimizer).unwrap(), "custom");
-}
+// `InstallPolicy::Overwrite`-vs-`SeedOnce` behavior tests (issue #3381) live in
+// `install_policy_tests.rs` — kept out of this file to stay under the 500-SLOC
+// production-file cap (this file's basename doesn't match the `_tests.rs`
+// test-cap pattern).
 
 #[test]
 #[ignore = "requires bundled framework artifacts (base-agent) — run locally after tm install"]
