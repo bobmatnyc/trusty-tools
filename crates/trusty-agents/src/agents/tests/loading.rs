@@ -1040,3 +1040,206 @@ fn extends_shadow_fallback_searches_home_tier_when_package_resolved_there() {
         Some(&["locked_tool".to_string()][..])
     );
 }
+
+// --- #3358: Assistant + persona agents off the claude-code runner --------
+//
+// Why: The Assistant MVP (epic #3052) staged its move off the claude-code
+// CLI runner to the conversational Assistant/PM/persona agents first,
+// leaving specialist/task agents (`engineer`, `qa-agent`, …, and especially
+// `claude-code-engineer` — deliberately claude-code) untouched. These tests
+// pin the resulting `runner`/`model` shape on the bundled configs so a
+// future edit can't silently reintroduce `runner = "claude-code"` on this
+// agent set, and so the Opus-for-the-base-Assistant /
+// Sonnet-for-every-other-persona testing default stays correct.
+// What: `bundled_persona_agents_do_not_use_claude_code_runner` loads each
+// in-scope agent by name (resolving through `AgentConfig::by_name`, which
+// prefers a directory package over a same-named flat file — #482) and
+// asserts `runner != ClaudeCode` and the expected model. A second test
+// loads the two flat files that are shadowed by a directory package
+// (`cto-assistant.toml`, `izzie.toml`) directly by path, since `by_name`
+// would never reach them while the package is present — the flat `izzie`
+// file additionally serves as the `extends` shadow-fallback safety net
+// (see `AgentConfig::extends_shadow_fallback_in`), so it must stay
+// consistent even though it isn't the primary load path today.
+// Test: This module IS the test surface.
+
+#[test]
+fn bundled_persona_agents_do_not_use_claude_code_runner() {
+    use crate::agents::RunnerKind;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    // (agent name, expected model) — Opus for the base Assistant AND `pm`
+    // (the GUI's DEFAULT no-roster-selection chat backend — see
+    // `resolve_agent_config` in `src/ctrl/config.rs`, which prefers project
+    // `pm.toml` over `ctrl.toml`), Sonnet for every other in-scope persona
+    // (owner directive, #3358; `pm` bumped to Opus per the owner's ruling on
+    // the code-critic WARN on PR #3360 — the default chat must also get the
+    // Opus testing default, not just an explicit `assistant` roster pick).
+    let cases = [
+        ("assistant", "claude-opus-4-6"),
+        ("pm", "claude-opus-4-6"),
+        ("personal-assistant", "claude-sonnet-4-6"),
+        ("cto-assistant", "claude-sonnet-4-6"),
+        ("izzie", "claude-sonnet-4-6"),
+    ];
+    for (name, expected_model) in cases {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("bundled agent '{name}' must load: {e}"));
+
+        assert_ne!(
+            cfg.agent.runner,
+            RunnerKind::ClaudeCode,
+            "bundled agent '{name}' must not declare runner = \"claude-code\" (#3358)"
+        );
+        assert_eq!(
+            cfg.agent.model, expected_model,
+            "bundled agent '{name}' model mismatch"
+        );
+    }
+}
+
+#[test]
+fn bundled_persona_shadowed_flat_duplicates_do_not_use_claude_code_runner() {
+    use crate::agents::RunnerKind;
+
+    // `cto-assistant.toml` and `izzie.toml` are shadowed by their same-named
+    // directory package (`cto-assistant/agent.toml`, `izzie/agent.toml`) and
+    // are never reached via `by_name` while the package is present — load
+    // them directly by path so this hygiene guard actually exercises them.
+    for name in ["cto-assistant", "izzie"] {
+        let path = bundled_agents_dir().join(format!("{name}.toml"));
+        let cfg = AgentConfig::load(&path)
+            .unwrap_or_else(|e| panic!("shadowed flat agent '{name}.toml' must still parse: {e}"));
+
+        assert_ne!(
+            cfg.agent.runner,
+            RunnerKind::ClaudeCode,
+            "shadowed flat agent '{name}.toml' must not declare runner = \"claude-code\" (#3358)"
+        );
+        assert_eq!(
+            cfg.agent.model, "claude-sonnet-4-6",
+            "shadowed flat agent '{name}.toml' model mismatch"
+        );
+    }
+}
+
+/// #3358 code-critic MEDIUM: the two tests above assert over a hardcoded
+/// name list, so a brand-new persona added later with `runner =
+/// "claude-code"` would silently evade both guards. This test instead
+/// walks every physical TOML file under `bundled_agents_dir()` — every
+/// flat `<name>.toml` AND every directory package's `agent.toml`,
+/// independently, not deduplicated by `by_name` — and asserts that any
+/// agent NOT on the explicit `claude-code`-eligible allow-list (the
+/// specialist/task agents, which stay out of scope for #3358, plus
+/// `claude-code-engineer` which is deliberately claude-code) does not
+/// declare `runner = "claude-code"`. A future addition — a new persona
+/// TOML, or a new directory package — is caught automatically without
+/// needing a matching new assertion here.
+/// Test: This module IS the test surface.
+#[test]
+fn all_bundled_agent_tomls_outside_the_specialist_allowlist_avoid_claude_code_runner() {
+    use crate::agents::RunnerKind;
+    use std::collections::HashSet;
+
+    // Loading each package goes through `resolve_model`, which reads
+    // process-global `TAGENT_MODEL_*` / `TAGENT_DEFAULT_MODEL` env vars —
+    // guard against concurrent mutation by the env-mutating tests in this
+    // file, same as every other test here (this test doesn't itself mutate
+    // env, but reads must still be serialized against writers).
+    let _guard = ENV_LOCK.blocking_lock();
+
+    // Specialist/task agents (staged OUT of scope for #3358) plus
+    // `claude-code-engineer` (deliberately claude-code, never migrate).
+    // Every other bundled agent TOML must not declare
+    // `runner = "claude-code"`.
+    let claude_code_eligible: HashSet<&str> = [
+        "analysis-agent",
+        "bedrock-engineer",
+        "claude-code-engineer",
+        "code-agent",
+        "docs-agent",
+        "engineer",
+        "gpt-engineer",
+        "gpt5-codex-engineer",
+        "local-ops-agent",
+        "observe-agent",
+        "plan-agent",
+        "postmortem-agent",
+        "python-engineer",
+        "qa-agent",
+        "research-agent",
+        "ticketing-agent",
+    ]
+    .into_iter()
+    .collect();
+
+    let dir = bundled_agents_dir();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(&dir).expect("read bundled agents dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let file_type = entry.file_type().expect("file type");
+
+        // Directory-package agent: `<name>/agent.toml` + `persona.md`.
+        // `AgentConfig::load` can't parse a package's `agent.toml` in
+        // isolation (its system-prompt content lives in the sibling
+        // `persona.md`, merged only by the private `load_agent_package`
+        // helper) — go through the public `by_name_in`, scoped to just
+        // this one directory so it can't wander into $HOME, which resolves
+        // packages correctly (#482). Non-agent directories under
+        // `.trusty-agents/agents/` (there are none today, but be
+        // defensive) are skipped by requiring `agent.toml` to exist.
+        let (cfg, display_path) = if file_type.is_dir() {
+            let candidate = path.join("agent.toml");
+            if !candidate.is_file() {
+                continue;
+            }
+            let dir_name = entry
+                .file_name()
+                .to_str()
+                .expect("bundled agent dir name is valid UTF-8")
+                .to_string();
+            let cfg = AgentConfig::by_name_in(std::slice::from_ref(&dir), &dir_name)
+                .unwrap_or_else(|e| {
+                    panic!("bundled package {} must load: {e}", candidate.display())
+                });
+            (cfg, candidate)
+        } else if path.extension().is_some_and(|ext| ext == "toml") {
+            let cfg = AgentConfig::load(&path)
+                .unwrap_or_else(|e| panic!("bundled TOML {} must parse: {e}", path.display()));
+            (cfg, path.clone())
+        } else {
+            continue;
+        };
+        checked += 1;
+
+        if claude_code_eligible.contains(cfg.agent.name.as_str()) {
+            continue;
+        }
+        assert_ne!(
+            cfg.agent.runner,
+            RunnerKind::ClaudeCode,
+            "bundled agent '{}' ({}) declares runner = \"claude-code\" but is not on the \
+             claude-code-eligible allow-list in this test — either it's a new specialist \
+             that needs adding to the allow-list, or it's a persona that must be migrated \
+             per #3358",
+            cfg.agent.name,
+            display_path.display()
+        );
+    }
+    assert!(
+        checked >= 20,
+        "expected to scan at least 20 bundled agent TOMLs under {}, only found {checked} — \
+         bundled_agents_dir() may be resolving the wrong path",
+        dir.display()
+    );
+}

@@ -94,10 +94,14 @@ mod tests {
     /// Build a router wired with every `session.*` method plus a fresh
     /// `SessionRegistry`, then this module's route group over it — mirrors
     /// `sessions::tests::app_and_registry`.
-    fn app_and_registry() -> (AxumRouter, Arc<crate::session::SessionRegistry>) {
+    async fn app_and_registry() -> (AxumRouter, Arc<crate::session::SessionRegistry>) {
         let sessions = Arc::new(crate::session::SessionRegistry::new());
         let mut router = Router::new();
-        crate::session::protocol::register(&mut router, sessions.clone());
+        crate::session::protocol::register(
+            &mut router,
+            sessions.clone(),
+            crate::workstreams::test_shared_store().await,
+        );
         let app = routes(Arc::new(router));
         (app, sessions)
     }
@@ -124,7 +128,7 @@ mod tests {
     /// yet must return `200` with an empty `agents` array, not an error.
     #[tokio::test]
     async fn get_agents_found_returns_200_with_empty_roster() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, &format!("/sessions/{}/agents", session.id)).await;
@@ -137,7 +141,7 @@ mod tests {
     /// a `session_not_found` envelope.
     #[tokio::test]
     async fn get_agents_missing_returns_404_session_not_found() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/does-not-exist/agents").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

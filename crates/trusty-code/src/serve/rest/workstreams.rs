@@ -37,6 +37,10 @@
 //!   - `POST /workstreams/{id}/deactivate` -> `workstream.deactivate{id}`
 //!     (no body, mirroring `super::sessions_write`'s `POST
 //!     /sessions/{id}/cancel`)
+//!   - `POST /workstreams/{id}/rename` -> `workstream.rename{id, name}`
+//!     (JSON body `{"name": string}`, issue #3300, Phase C — DOC-48 §5.1
+//!     marked this verb "future, Phase C" when Phase 1A shipped; this is
+//!     that phase)
 //!
 //! `crate::serve::http::build_axum_router` merges this into the daemon's main
 //! router alongside `POST /rpc`, `GET /health`, and the other REST resource
@@ -87,6 +91,7 @@ pub fn routes(router: Arc<Router>) -> AxumRouter {
         .route("/workstreams/{id}/close", post(close_workstream))
         .route("/workstreams/{id}/activate", post(activate))
         .route("/workstreams/{id}/deactivate", post(deactivate))
+        .route("/workstreams/{id}/rename", post(rename))
         .with_state(WorkstreamsState { router })
 }
 
@@ -113,6 +118,13 @@ struct ListQuery {
 struct ActivateBody {
     #[serde(default)]
     force: bool,
+}
+
+/// Request body for `POST /workstreams/{id}/rename` — `id` comes from the
+/// path, so only `name` remains.
+#[derive(Deserialize)]
+struct RenameBody {
+    name: String,
 }
 
 /// Like [`super::respond`] but reports `201 Created` on success — the one
@@ -236,6 +248,27 @@ async fn activate(
 /// Test: `tests::deactivate_returns_200_empty_object`.
 async fn deactivate(State(state): State<WorkstreamsState>, Path(id): Path<String>) -> RestResult {
     respond(&state.router, "workstream.deactivate", json!({"id": id})).await
+}
+
+/// `POST /workstreams/{id}/rename` -> `workstream.rename`.
+///
+/// Why: the REST entry point for the GUI switcher's rename action (issue
+/// #3300, Phase C).
+/// What: `200` with the updated `Workstream` JSON on success; `404` for an
+/// unknown `id`.
+/// Test: `tests::rename_returns_200_with_updated_name`,
+/// `tests::rename_missing_returns_404`.
+async fn rename(
+    State(state): State<WorkstreamsState>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> RestResult {
+    respond(
+        &state.router,
+        "workstream.rename",
+        json!({"id": id, "name": body.name}),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -499,5 +532,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v, json!({}));
+    }
+
+    /// Renaming must return `200` with the updated `name` (issue #3300).
+    #[tokio::test]
+    async fn rename_returns_200_with_updated_name() {
+        let (app, id, _dir) = app_and_id().await;
+
+        let resp = post(
+            &app,
+            &format!("/workstreams/{id}/rename"),
+            r#"{"name": "renamed"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["name"], "renamed");
+    }
+
+    /// Renaming an unknown id must return a real HTTP `404`.
+    #[tokio::test]
+    async fn rename_missing_returns_404() {
+        let app = app().await;
+
+        let resp = post(
+            &app,
+            "/workstreams/00000000-0000-0000-0000-000000000000/rename",
+            r#"{"name": "renamed"}"#,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["code"], -32002);
     }
 }

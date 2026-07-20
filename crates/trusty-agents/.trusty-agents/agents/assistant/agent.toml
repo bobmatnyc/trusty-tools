@@ -14,8 +14,12 @@
 [agent]
 name = "assistant"
 role = "assistant"
-runner = "claude-code"
-model = "claude-sonnet-4-6"
+# #3358: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path (AnthropicDirect
+# when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
+# in `src/llm/credentials.rs`. This is the base "Assistant" agent
+# (BASE_AGENT_ID in ui/src/lib/roster.ts) — testing default is Opus.
+model = "claude-opus-4-6"
 description = "General-purpose productivity assistant (base template; personalize via `extends`)"
 # Intentionally NO display_name / prompt_label: the base is nameless. A persona
 # identity (name + prompt label) is contributed by the personalization overlay.

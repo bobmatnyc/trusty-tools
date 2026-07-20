@@ -322,6 +322,7 @@ mod tests {
             status,
             created_at: Utc::now(),
             mode: None,
+            workstream_id: None,
         }
     }
 

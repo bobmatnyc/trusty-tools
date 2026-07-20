@@ -173,10 +173,14 @@ mod tests {
     /// `SessionRegistry`, then the REST route group over it — mirrors
     /// `crate::serve::http::tests::router_and_sessions` but only needs the
     /// registry to seed sessions directly (these routes never touch it).
-    fn app_and_registry() -> (AxumRouter, Arc<crate::session::SessionRegistry>) {
+    async fn app_and_registry() -> (AxumRouter, Arc<crate::session::SessionRegistry>) {
         let sessions = Arc::new(crate::session::SessionRegistry::new());
         let mut router = Router::new();
-        crate::session::protocol::register(&mut router, sessions.clone());
+        crate::session::protocol::register(
+            &mut router,
+            sessions.clone(),
+            crate::workstreams::test_shared_store().await,
+        );
         let app = routes(Arc::new(router));
         (app, sessions)
     }
@@ -203,7 +207,7 @@ mod tests {
     /// currently owned by the registry.
     #[tokio::test]
     async fn list_sessions_returns_sessions_array() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, "/sessions").await;
@@ -216,7 +220,7 @@ mod tests {
     /// `Session` JSON, `id` included.
     #[tokio::test]
     async fn get_session_found_returns_200_with_session_json() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, &format!("/sessions/{}", session.id)).await;
@@ -229,7 +233,7 @@ mod tests {
     /// JSON-RPC `session_not_found` envelope, not a 200-wrapped error.
     #[tokio::test]
     async fn get_session_missing_returns_404_session_not_found() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/does-not-exist").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -245,7 +249,7 @@ mod tests {
     /// validation.
     #[tokio::test]
     async fn get_session_percent_encoded_missing_id_returns_404() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/not%20a%20real%20id").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -257,7 +261,7 @@ mod tests {
     /// HTTP 200 with an empty `turns` array, not an error.
     #[tokio::test]
     async fn get_transcript_found_returns_200_with_empty_turns() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, &format!("/sessions/{}/transcript", session.id)).await;
@@ -269,7 +273,7 @@ mod tests {
     /// `GET /sessions/{id}/transcript` on an unknown id must 404.
     #[tokio::test]
     async fn get_transcript_missing_returns_404_session_not_found() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/does-not-exist/transcript").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -281,7 +285,7 @@ mod tests {
     /// HTTP 200 with `status: "never_probed"`, not an error.
     #[tokio::test]
     async fn get_readiness_found_returns_200_never_probed() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, &format!("/sessions/{}/readiness", session.id)).await;
@@ -293,7 +297,7 @@ mod tests {
     /// `GET /sessions/{id}/readiness` on an unknown id must 404.
     #[tokio::test]
     async fn get_readiness_missing_returns_404_session_not_found() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/does-not-exist/readiness").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -305,7 +309,7 @@ mod tests {
     /// 200 with an empty `goals` array, not an error.
     #[tokio::test]
     async fn get_goals_found_returns_200_with_empty_goals() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, &format!("/sessions/{}/goals", session.id)).await;
@@ -317,7 +321,7 @@ mod tests {
     /// `GET /sessions/{id}/goals` on an unknown id must 404.
     #[tokio::test]
     async fn get_goals_missing_returns_404_session_not_found() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/does-not-exist/goals").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -329,7 +333,7 @@ mod tests {
     /// return HTTP 200 with `status: "never_recorded"`, not an error.
     #[tokio::test]
     async fn get_context_budget_found_returns_200_never_recorded() {
-        let (app, sessions) = app_and_registry();
+        let (app, sessions) = app_and_registry().await;
         let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
         let resp = get(&app, &format!("/sessions/{}/budget", session.id)).await;
@@ -341,7 +345,7 @@ mod tests {
     /// `GET /sessions/{id}/budget` on an unknown id must 404.
     #[tokio::test]
     async fn get_context_budget_missing_returns_404_session_not_found() {
-        let (app, _sessions) = app_and_registry();
+        let (app, _sessions) = app_and_registry().await;
 
         let resp = get(&app, "/sessions/does-not-exist/budget").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

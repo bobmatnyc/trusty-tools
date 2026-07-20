@@ -1,8 +1,16 @@
 [agent]
 name = "pm"
 role = "orchestrator"
-runner = "claude-code"
-model = "claude-sonnet-4-6"
+# #3358: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path (AnthropicDirect
+# when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
+# in `src/llm/credentials.rs`. Model is Opus, matching `assistant/agent.toml`
+# — `pm` is the GUI's DEFAULT no-roster-selection chat backend
+# (`resolve_agent_config` in `src/ctrl/config.rs` prefers project
+# `pm.toml`), so a user who just opens the GUI and types must also get the
+# Opus testing default, not just an explicit `assistant` roster pick
+# (owner decision on code-critic WARN, PR #3360).
+model = "claude-opus-4-6"
 description = "PM orchestrator — receives user requests, delegates to sub-agents"
 
 [llm]

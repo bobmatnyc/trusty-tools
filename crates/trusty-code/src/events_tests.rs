@@ -40,6 +40,27 @@ fn session_id_returns_correct_field() {
     assert_eq!(Event::Ping.session_id(), None);
 }
 
+/// (issue #3298) `SessionAdded`/`SessionActivityUpdate` ARE session-scoped —
+/// unlike the daemon-scoped workstream events below.
+#[test]
+fn session_added_and_activity_update_are_session_scoped() {
+    let added = Event::SessionAdded {
+        session_id: "s-1".into(),
+        workstream_id: "ws-1".into(),
+        binding_time: Utc::now(),
+    };
+    assert_eq!(added.session_id(), Some("s-1"));
+    assert_eq!(added.kind(), "session_added");
+
+    let activity = Event::SessionActivityUpdate {
+        session_id: "s-1".into(),
+        last_turn_at: Utc::now(),
+        has_running_task: false,
+    };
+    assert_eq!(activity.session_id(), Some("s-1"));
+    assert_eq!(activity.kind(), "session_activity_update");
+}
+
 /// (issue #3297) `WorkstreamActivationChanged` is daemon-scoped, not
 /// session-scoped — mirrors `Event::Ping`'s `None`.
 #[test]
@@ -213,6 +234,16 @@ fn kind_matches_serde_tag_for_every_variant() {
             within_budget: true,
             compaction_fired: false,
             compaction_rounds: 0,
+        },
+        Event::SessionAdded {
+            session_id: "s".into(),
+            workstream_id: "ws-1".into(),
+            binding_time: Utc::now(),
+        },
+        Event::SessionActivityUpdate {
+            session_id: "s".into(),
+            last_turn_at: Utc::now(),
+            has_running_task: false,
         },
         Event::WorkstreamActivationChanged {
             new_active_id: Some("ws-2".into()),
