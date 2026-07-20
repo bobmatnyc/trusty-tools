@@ -86,13 +86,20 @@ impl EngineState {
             .clone()
     }
 
-    pub(super) fn picker(&self, name: &str) -> Vec<PickerItem> {
+    /// Raw cached picker items for `name`, or `None` if this engine has no
+    /// picker under that name (distinct from `Some(vec![])`, which means
+    /// "this picker exists but currently has zero items" — e.g. the
+    /// `"workstream"` picker after `refresh_workstream_cache` observes a
+    /// daemon with zero workstreams). `engine.rs`'s `TuiEngine::picker` wraps
+    /// this into the trait's `PickerRequest` shape (title + dispatch
+    /// command), which is a per-picker-name concern this cache-only helper
+    /// deliberately doesn't know about.
+    pub(super) fn picker_items(&self, name: &str) -> Option<Vec<PickerItem>> {
         self.picker_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .cloned()
-            .unwrap_or_default()
     }
 
     /// Re-fetch `workstream.list` and refresh both `active_workstream` and
@@ -122,7 +129,11 @@ impl EngineState {
                 } else {
                     name.to_string()
                 };
-                Some(PickerItem { id, label })
+                Some(PickerItem {
+                    id,
+                    label,
+                    description: None,
+                })
             })
             .collect();
         *self.picker_cache.lock().unwrap_or_else(|e| e.into_inner()) = {
@@ -165,7 +176,7 @@ impl EngineState {
     ) -> Result<(), EngineError> {
         if rest.is_empty() || rest == "list" {
             let ws = self.refresh_workstream_cache().await;
-            let items = self.picker("workstream");
+            let items = self.picker_items("workstream").unwrap_or_default();
             let active_id = ws.as_ref().map(|w| w.id.as_str());
             let rows: Vec<String> = items
                 .iter()

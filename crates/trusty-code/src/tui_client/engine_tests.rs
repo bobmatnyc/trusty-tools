@@ -203,11 +203,31 @@ fn is_retryable_status_covers_502_and_503_only() {
 }
 
 /// The caches must start empty before `setup()` populates them —
-/// `commands()`/`picker()` must degrade to "nothing yet," never panic,
-/// when queried before `setup()` runs.
+/// `TuiEngine::commands()`/`picker()` must degrade to "nothing yet," never
+/// panic, when queried before `setup()` runs.
 #[test]
 fn caches_are_empty_before_setup() {
     let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), "http://127.0.0.1:1", None);
     assert!(engine.commands().is_empty());
-    assert!(engine.picker("workstream").is_empty());
+    assert!(engine.picker("workstream").is_none());
+}
+
+/// `picker("workstream")` must carry the exact dispatch command
+/// `workstream_subcommand` parses back — proves the picker-selection
+/// round trip (`"{dispatch_command} {selected.id}"`) actually reaches
+/// `handle_workstream_command`'s `activate <id>` branch, not some other
+/// unparsed string.
+#[test]
+fn workstream_picker_dispatch_command_round_trips_through_workstream_subcommand() {
+    let dispatch_command = "/workstream activate";
+    let resubmitted = format!("{dispatch_command} ws-1");
+    assert_eq!(workstream_subcommand(&resubmitted), Some("activate ws-1"));
+}
+
+/// An unknown picker name must be `None`, not an empty-but-`Some` request —
+/// this engine has exactly one picker.
+#[test]
+fn picker_unknown_name_is_none() {
+    let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), "http://127.0.0.1:1", None);
+    assert!(engine.picker("model").is_none());
 }

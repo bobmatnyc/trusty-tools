@@ -87,18 +87,53 @@ pub(super) async fn run_workstream_subscription(
                         continue;
                     };
                     if let Event::WorkstreamActivationChanged {
-                        new_active_id: Some(new_id),
+                        new_active_id,
                         prior_id,
                     } = env.payload
                     {
-                        let _ = tx.send(ReplEvent::WorkstreamActivationChanged {
-                            new_active_id: new_id.clone(),
-                            prior_id,
-                        });
+                        // Always refresh — a `None` new_active_id (this
+                        // workstream deactivated with no replacement, DOC-48
+                        // §4.2/§4.3) is just as real a state change as an
+                        // activation and must invalidate the cache too
+                        // (HIGH finding: silently skipping this arm left
+                        // `active_workstream`/the `"workstream"` picker
+                        // stale indefinitely).
                         state.refresh_workstream_cache().await;
-                        if new_id != current_id {
-                            current_id = new_id;
-                            break; // reconnect to the newly-active workstream's endpoint
+                        match new_active_id {
+                            Some(new_id) => {
+                                let _ = tx.send(ReplEvent::WorkstreamActivationChanged {
+                                    new_active_id: new_id.clone(),
+                                    prior_id,
+                                });
+                                if new_id != current_id {
+                                    current_id = new_id;
+                                    break; // reconnect to the newly-active workstream's endpoint
+                                }
+                            }
+                            None => {
+                                // Deactivated, no replacement active. The
+                                // SHARED `ReplEvent::WorkstreamActivationChanged`
+                                // (`trusty_tui::event`) declares `new_active_id`
+                                // as a non-optional `String` — this state
+                                // genuinely cannot be carried by that variant
+                                // without a breaking change to `trusty-tui`
+                                // (out of this crate's ownership), so a
+                                // `StatusMessage` is the honest signal
+                                // available today; the cache refresh above
+                                // is what actually clears the stale
+                                // indicator (`active_workstream` -> `None`,
+                                // the `"workstream"` picker's active marker
+                                // gone). Stay connected to `current_id`'s
+                                // stream rather than reconnecting anywhere:
+                                // deactivation is not closure (DOC-48 §4.4),
+                                // and `crate::workstreams::sse`'s
+                                // `classify()` still forwards a LATER
+                                // activation naming `current_id` as its
+                                // `prior_id` to this same connection.
+                                let _ = tx.send(ReplEvent::StatusMessage(format!(
+                                    "workstream {current_id} deactivated — no workstream is now active"
+                                )));
+                            }
                         }
                     }
                 }

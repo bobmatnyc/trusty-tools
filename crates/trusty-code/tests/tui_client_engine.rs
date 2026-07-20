@@ -161,10 +161,48 @@ fn workstream_activation_body() -> String {
     format!("data: {activation}\n\n")
 }
 
+/// An SSE body for `GET /workstreams/{WS_1}/events`: one
+/// `WorkstreamActivationChanged` event with `new_active_id: null` — the
+/// "deactivated, no replacement active" case (DOC-48 §4.2/§4.3), verified
+/// server-side by `workstreams::activation_tests` and forwarded to THIS
+/// stream (not just the new active workstream's) by `workstreams::sse`'s
+/// `classify()`, which matches on `prior_id == target` too.
+fn workstream_deactivated_body() -> String {
+    let deactivated = json!({
+        "session_id": "",
+        "event_type": "workstream_activation_changed",
+        "payload": {
+            "type": "workstream_activation_changed",
+            "new_active_id": null,
+            "prior_id": WS_1,
+        },
+    });
+    format!("data: {deactivated}\n\n")
+}
+
+/// Count how many `POST /rpc` requests the mock daemon has received for
+/// `method`.
+async fn count_rpc_calls(server: &MockServer, method: &str) -> usize {
+    server
+        .received_requests()
+        .await
+        .expect("received requests")
+        .iter()
+        .filter(|r| {
+            r.url.path() == "/rpc"
+                && serde_json::from_slice::<serde_json::Value>(&r.body)
+                    .ok()
+                    .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
+                    .as_deref()
+                    == Some(method)
+        })
+        .count()
+}
+
 /// `setup` must create a session via `session.create` and report the
-/// daemon's active workstream — and, ahead of `trusty-tui` Slice 1.5's
-/// synchronous `TuiEngine::commands()`/`picker()` accessors (#3428), must
-/// have already populated `CodeEngine`'s pre-fetched caches for them.
+/// daemon's active workstream — and must have already populated
+/// `CodeEngine`'s pre-fetched caches for `trusty-tui`'s synchronous
+/// `TuiEngine::commands()`/`picker()` accessors (#3428).
 #[tokio::test]
 async fn setup_creates_session_and_reports_active_workstream() {
     let server = MockServer::start().await;
@@ -189,13 +227,13 @@ async fn setup_creates_session_and_reports_active_workstream() {
     assert_eq!(
         engine.commands().len(),
         1,
-        "setup must populate the commands cache ahead of TuiEngine::commands() (#3428)"
+        "setup must populate the commands cache for TuiEngine::commands() (#3428)"
     );
-    assert_eq!(
-        engine.picker("workstream").len(),
-        1,
-        "setup must populate the workstream picker cache ahead of TuiEngine::picker() (#3428)"
-    );
+    let picker = engine
+        .picker("workstream")
+        .expect("setup must populate the workstream picker cache for TuiEngine::picker() (#3428)");
+    assert_eq!(picker.items.len(), 1);
+    assert_eq!(picker.dispatch_command, "/workstream activate");
 }
 
 /// `handle_input` on a chat line must call `task.run` against the current
@@ -276,17 +314,9 @@ async fn cancel_session_calls_session_cancel_rpc() {
 
     engine.cancel_session().await.expect("cancel_session");
 
-    let requests = server.received_requests().await.expect("received requests");
-    let saw_cancel = requests.iter().any(|r| {
-        r.url.path() == "/rpc"
-            && serde_json::from_slice::<serde_json::Value>(&r.body)
-                .ok()
-                .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
-                .as_deref()
-                == Some("session.cancel")
-    });
-    assert!(
-        saw_cancel,
+    assert_eq!(
+        count_rpc_calls(&server, "session.cancel").await,
+        1,
         "cancel_session must call the daemon's session.cancel RPC, not just stop client-side \
          rendering (DOC-39 §2.1 C-2)"
     );
@@ -351,6 +381,83 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
         }
         other => panic!("unexpected {other:?}"),
     }
+
+    engine.shutdown().await.expect("shutdown");
+}
+
+/// Regression test (HIGH finding, code-critic review of PR #3436): a
+/// `WorkstreamActivationChanged` event with `new_active_id: null` (this
+/// workstream deactivated with no replacement active — a state the daemon
+/// legitimately publishes, DOC-48 §4.2/§4.3) must NOT be silently dropped.
+/// Before the fix, `run_workstream_subscription` only matched
+/// `new_active_id: Some(..)`, so the whole event fell through the `if let`
+/// unhandled: no `ReplEvent` was sent and `refresh_workstream_cache` never
+/// ran, leaving the TUI's status line and the `"workstream"` picker cache
+/// stale indefinitely. This asserts BOTH halves of the fix: the cache
+/// actually refreshes (a second `workstream.list` call beyond `setup()`'s
+/// own), and the engine surfaces a user-visible signal (a `StatusMessage`
+/// naming the deactivation — `trusty-tui`'s `ReplEvent::WorkstreamActivationChanged`
+/// declares `new_active_id` as a non-optional `String`, so it structurally
+/// cannot carry this state; see `workstream_subscription.rs`'s docs).
+#[tokio::test]
+async fn subscribe_workstream_events_refreshes_cache_on_deactivation_with_no_replacement() {
+    let server = MockServer::start().await;
+    mount_common(&server).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/workstreams/{WS_1}/events")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(workstream_deactivated_body(), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), server.uri(), None);
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx.clone()).await.expect("setup");
+    while rx.try_recv().is_ok() {} // drain setup's own events
+
+    let calls_before = count_rpc_calls(&server, "workstream.list").await;
+    assert_eq!(
+        calls_before, 1,
+        "setup must have called workstream.list exactly once so far"
+    );
+
+    engine
+        .subscribe_workstream_events(tx)
+        .await
+        .expect("subscribe_workstream_events");
+
+    // Half 1 of the fix: the cache must actually refresh on the `None` arm
+    // — proven by a SECOND workstream.list call beyond setup()'s own.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if count_rpc_calls(&server, "workstream.list").await > calls_before {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for refresh_workstream_cache to re-call workstream.list");
+
+    // Half 2 of the fix: the engine must not go silent — some ReplEvent
+    // must report the deactivation.
+    let saw_deactivation_status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Some(ReplEvent::StatusMessage(msg)) if msg.contains("deactivated") => return true,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for a deactivation status message");
+    assert!(
+        saw_deactivation_status,
+        "expected a StatusMessage naming the deactivation"
+    );
 
     engine.shutdown().await.expect("shutdown");
 }

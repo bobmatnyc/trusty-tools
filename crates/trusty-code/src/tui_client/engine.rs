@@ -14,10 +14,14 @@
 //! What: [`CodeEngine`] is a thin `Arc<EngineState>` wrapper so the
 //! background workstream-subscription task spawned by
 //! `subscribe_workstream_events` can share the SAME state (and refresh the
-//! SAME caches) without a second, divergent copy. Ahead of `trusty-tui`
-//! Slice 1.5's SYNCHRONOUS `TuiEngine::commands()`/`picker(name)`
-//! accessors (#3428) — see [`CodeEngine::commands`]/[`CodeEngine::picker`]'s
-//! docs.
+//! SAME caches) without a second, divergent copy. `trusty-tui` Slice 1.5
+//! (#3428, merged) added the SYNCHRONOUS `TuiEngine::commands()`/
+//! `picker(name)` accessors this `impl TuiEngine` block implements directly
+//! (not as inherent methods — see the `impl TuiEngine for CodeEngine`
+//! block's `commands`/`picker` for why serving from `EngineState`'s
+//! `std::sync::Mutex`-guarded caches, populated during `setup()`, is the
+//! only way to satisfy a synchronous trait method with no I/O on the
+//! calling path).
 //! Test: `engine_tests::*` (in the sibling `engine_tests.rs`, included
 //! below) for the pure event-mapping/parsing helpers this module's siblings
 //! define; the full discover -> setup -> stream -> cancel ->
@@ -31,7 +35,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_tui::{CommandDescriptor, PickerItem, ReplEvent, TuiEngine};
+use trusty_tui::{CommandDescriptor, CommandRouting, PickerRequest, ReplEvent, TuiEngine};
 
 use super::discovery::discover_daemon_url;
 use super::engine_state::EngineState;
@@ -128,25 +132,6 @@ impl CodeEngine {
     pub fn daemon_url(&self) -> &str {
         self.state.rpc.base_url()
     }
-
-    /// Engine-routed slash commands this MVP supports (ahead of
-    /// `trusty-tui` Slice 1.5's synchronous `TuiEngine::commands()`, #3428 —
-    /// see module docs). Returns the cache populated during `setup()`;
-    /// **move this into the `impl TuiEngine for CodeEngine` block once this
-    /// crate rebases onto the trait revision that declares `commands()`.**
-    pub fn commands(&self) -> Vec<CommandDescriptor> {
-        self.state.commands()
-    }
-
-    /// Picker items for `name` (ahead of `trusty-tui` Slice 1.5's
-    /// synchronous `TuiEngine::picker(name)`, #3428 — see module docs).
-    /// Returns the cache populated during `setup()`/refreshed on workstream
-    /// changes; `[]` for an unknown picker name. **Move this into the
-    /// `impl TuiEngine for CodeEngine` block once this crate rebases onto
-    /// the trait revision that declares `picker()`.**
-    pub fn picker(&self, name: &str) -> Vec<PickerItem> {
-        self.state.picker(name)
-    }
 }
 
 #[async_trait::async_trait]
@@ -187,8 +172,8 @@ impl TuiEngine for CodeEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
 
-        // Ahead-of-Slice-1.5 `commands()` cache — see struct docs. The one
-        // engine-routed command this MVP supports.
+        // `TuiEngine::commands()` cache — see `EngineState`'s struct docs.
+        // The one engine-routed command this MVP supports.
         *self
             .state
             .commands_cache
@@ -196,6 +181,8 @@ impl TuiEngine for CodeEngine {
             .unwrap_or_else(|e| e.into_inner()) = vec![CommandDescriptor {
             name: "workstream".to_string(),
             summary: "List or activate the daemon's workstreams".to_string(),
+            routing: CommandRouting::Engine,
+            args_hint: Some("[list | activate <id>]".to_string()),
         }];
 
         if let Some(ws) = self.state.refresh_workstream_cache().await {
@@ -264,6 +251,37 @@ impl TuiEngine for CodeEngine {
     async fn shutdown(&self) -> anyhow::Result<()> {
         self.state.shutting_down.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Engine-routed slash commands this MVP supports — served from the
+    /// cache `setup()` populates (`EngineState::commands_cache`). This is a
+    /// SYNCHRONOUS trait method (#3428) — the cache exists precisely so
+    /// this never needs to perform network I/O on the calling path; see
+    /// `EngineState::commands`'s docs for the `std::sync::Mutex` rationale.
+    fn commands(&self) -> Vec<CommandDescriptor> {
+        self.state.commands()
+    }
+
+    /// The `"workstream"` picker — served from the cache
+    /// `EngineState::refresh_workstream_cache` populates (in `setup()`,
+    /// after `/workstream activate`, and on every observed
+    /// `WorkstreamActivationChanged`). `None` for any other picker name
+    /// (this engine has exactly one) or before the cache has been
+    /// populated at least once. `dispatch_command` is `"/workstream
+    /// activate"` — matching `workstream_subcommand`'s parsing exactly, so
+    /// the shared event loop's `"{dispatch_command} {selected.id}"`
+    /// resubmission (`"/workstream activate <id>"`) round-trips through
+    /// `handle_input` correctly.
+    fn picker(&self, name: &str) -> Option<PickerRequest> {
+        if name != "workstream" {
+            return None;
+        }
+        let items = self.state.picker_items("workstream")?;
+        Some(PickerRequest {
+            title: "Workstreams".to_string(),
+            items,
+            dispatch_command: "/workstream activate".to_string(),
+        })
     }
 }
 

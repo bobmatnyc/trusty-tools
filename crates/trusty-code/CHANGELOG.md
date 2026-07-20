@@ -8,7 +8,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CodeEngine`'s workstream-activation subscription no longer drops
+  deactivation events (code-critic HIGH, PR #3436).** The daemon
+  legitimately publishes `WorkstreamActivationChanged{new_active_id: None,
+  ...}` when the active workstream is deactivated with no replacement
+  (DOC-48 §4.2/§4.3); the subscription's `if let` previously matched only
+  `new_active_id: Some(..)`, silently dropping the `None` case — no cache
+  refresh, no user-visible signal, a stale status line/picker indefinitely.
+  Both arms now refresh `EngineState`'s workstream cache; the `None` case
+  surfaces a `StatusMessage` (the shared `ReplEvent::WorkstreamActivationChanged`
+  declares `new_active_id` as a non-optional `String`, so it cannot carry
+  this state without a `trusty-tui` change).
+
 ### Added
+
+- **`CodeEngine::commands()`/`picker()` implement `trusty-tui`'s
+  synchronous `TuiEngine` accessors (Slice 1.5, #3428).** Previously shipped
+  as inherent methods (ahead of #3428 landing); now real trait-impl
+  overrides, so the shared TUI's generic `E: TuiEngine` path picks up the
+  real implementations instead of silently falling back to the trait's
+  default "supply nothing." Backed by the same `std::sync::Mutex`-guarded
+  caches populated in `setup()`/on workstream changes.
 
 - **`tui_client::CodeEngine` — `trusty-tui` engine adapter for `tcode tui`
   (issue #3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3).** A thin
