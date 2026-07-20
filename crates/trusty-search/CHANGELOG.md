@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`)** — epic
+  #3524 slices 2-4 (refs #3498, #3493). A new `TRUSTY_EMBEDDER=python` arm in
+  `commands/start/embedder.rs` eager-bootstraps a pinned Python venv (via the
+  new `trusty-embedderd-py` launcher crate) and arms the existing
+  `LazyEmbedderHandle` against it — reusing `EmbedderSupervisor` /
+  `StdioEmbedderClient` with **ZERO changes** to the supervisor/stdio/protocol
+  wire code. On Apple Silicon the torch/MPS sentence-transformers sidecar
+  embeds ~2.4x faster than the Rust ort path with numerically identical
+  results. **DEFAULT-OFF and fully backward-compatible**: unset / `auto` /
+  `stdio` behaviour is unchanged, and on ANY bootstrap or launcher-discovery
+  failure the daemon logs a loud warning and **falls back to the Rust ort
+  embedder** so search never hard-fails. The Rust build does not require
+  torch/venv. Default-on-Apple-Silicon is a later slice.
+
 ## [0.36.1] — 2026-07-20
 
 ### Changed

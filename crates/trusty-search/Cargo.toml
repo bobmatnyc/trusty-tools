@@ -81,6 +81,11 @@ trusty-common = { version = "0.23.0", default-features = false, features = ["axu
 trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.8", default-features = false, features = [
     "http-server",
 ] }
+# Opt-in Python/MPS embedding sidecar launcher (epic #3524, slices 2-4). Pulls
+# in NO torch/ORT — it is a lightweight uv/venv bootstrapper + launcher used
+# only when `TRUSTY_EMBEDDER=python` selects it (DEFAULT-OFF). Building it does
+# not require a venv; that is all runtime.
+trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.1.0" }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-search (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.

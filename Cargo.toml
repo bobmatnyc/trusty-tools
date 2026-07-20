@@ -57,6 +57,7 @@ default-members = [
     "crates/trusty-console",
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
+    "crates/trusty-embedderd-py",
     "crates/trusty-git-analytics",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",

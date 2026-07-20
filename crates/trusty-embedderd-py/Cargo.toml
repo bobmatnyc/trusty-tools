@@ -1,0 +1,55 @@
+[package]
+name = "trusty-embedderd-py"
+version = "0.1.0"
+publish = true
+edition = "2021"
+license.workspace = true
+repository = "https://github.com/bobmatnyc/trusty-tools"
+description = "Opt-in Python/MPS embedding sidecar launcher for trusty-search: uv-bootstraps a pinned venv and execs the trusty_embed_sidecar stdio JSON-RPC server (epic #3524)."
+readme = "README.md"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["embeddings", "sidecar", "mps", "torch", "uv"]
+categories = ["command-line-utilities", "artificial-intelligence"]
+
+[lib]
+name = "trusty_embedderd_py"
+path = "src/lib.rs"
+
+# The launcher binary the trusty-search EmbedderSupervisor spawns in place of
+# the Rust `trusty-embedderd`. It ensures the venv then execs the Python
+# sidecar. A real Mach-O (signable) discovered by the sibling/PATH logic.
+[[bin]]
+name = "trusty-embedderd-py"
+path = "src/main.rs"
+
+[dependencies]
+# resolve_data_dir + TRUSTY_DATA_DIR_OVERRIDE honouring (venv placement). Only
+# the always-on core of trusty-common (no embedder/ORT/torch) is pulled in.
+trusty-common = { workspace = true }
+
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Embed the Python project (pyproject + hashed uv.lock + package src + tests)
+# into the binary and materialize it to the data dir at bootstrap.
+include_dir = "0.7"
+
+# Lockfile-hash → venv directory keying, and sentinel content.
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Advisory flock over the venv dir against concurrent bootstraps, plus
+# available-space precheck.
+fs4 = { version = "0.8", features = ["sync"] }
+
+# `uv` discovery on PATH.
+which = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+# The real supervisor + stdio client, to prove ZERO wire-code changes are
+# needed. Only used by the `#[ignore]`-gated e2e test (needs a built venv);
+# ORT is already compiled workspace-wide, so this adds no new heavy build.
+trusty-common = { workspace = true, features = ["embedder-client", "embedder-bundled-ort"] }
