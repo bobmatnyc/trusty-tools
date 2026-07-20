@@ -13,6 +13,15 @@
 //! binding, not a multi-project registry), so this is a fresh, best-effort
 //! filesystem scan, deliberately narrow in scope (see `MAX_ENTRIES`).
 //!
+//! **Update (issue #3435):** trusty-mpm's shared project registry — a real
+//! cross-machine registry this crate does not own — is now the PRIMARY
+//! source for the roster the GUI actually renders; this module's scan has
+//! been demoted to the SECONDARY source (surfacing local-only, unregistered
+//! candidates the registry doesn't know about) plus the graceful-degradation
+//! fallback for when the mpm daemon is unreachable. See `super::mpm_registry`
+//! for the merge step and [`ProjectCandidate::registered`]. This module's own
+//! scan behavior and discovery heuristic below are otherwise unchanged.
+//!
 //! **Discovery heuristic.** This workspace's own convention — visible in the
 //! very checkout this crate lives in — is `~/trusty-mpm-projects/<owner>/
 //! <repo>` (an owner-scoped project root trusty-mpm's own tooling
@@ -54,9 +63,12 @@ use super::is_git_repo;
 /// the fallback case, a large home directory) must never turn a "small
 /// roster" call into a slow, huge response. 200 comfortably covers a
 /// realistic multi-owner project tree while staying obviously "small" per
-/// the issue's own requirement.
+/// the issue's own requirement. `pub(super)` (not private) so
+/// `super::mpm_registry`'s merge step (issue #3435) truncates the
+/// registry-augmented roster to the same cap rather than duplicating the
+/// magic number.
 /// Test: `tests::scan_is_capped_at_max_entries`.
-const MAX_ENTRIES: usize = 200;
+pub(super) const MAX_ENTRIES: usize = 200;
 
 /// One candidate project row — everything the picker needs to render and
 /// bind it without a further round-trip.
@@ -69,6 +81,11 @@ const MAX_ENTRIES: usize = 200;
 /// layout's owner segment when the scan found it that way, so the picker can
 /// disambiguate two repos that share a name under different owners; `None`
 /// on the home-directory fallback path, where there is no owner segment.
+/// `registered` (issue #3435) distinguishes a project known to trusty-mpm's
+/// shared project registry from one this crate found only by scanning the
+/// filesystem — a plain fs scan can never set it `true` on its own, so every
+/// candidate this module produces starts `false`; only
+/// `super::mpm_registry::merge` (the registry-primary merge step) flips it.
 /// Test: `tests::trusty_mpm_projects_layout_is_scanned_two_levels_deep`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProjectCandidate {
@@ -80,6 +97,38 @@ pub struct ProjectCandidate {
     /// scan found this candidate that way; `None` on the home-directory
     /// fallback path.
     pub owner: Option<String>,
+    /// Whether this candidate is also known to trusty-mpm's shared project
+    /// registry (issue #3435). Always `false` from a bare filesystem scan —
+    /// see the struct docs.
+    pub registered: bool,
+}
+
+/// Which source produced a [`ProjectRoster`] (issue #3435, code-critic PR
+/// #3439 review, HIGH 2).
+///
+/// Why: the #3363 lesson — "nothing registered" and "the registry was
+/// unreachable" are different operator-facing situations and must not
+/// collapse into the same-looking empty/all-unregistered roster. A bare
+/// `bool` would work, but a named enum reads at the call site
+/// (`source == RosterSource::FsOnly`) without a comment explaining which
+/// state `true`/`false` means, and its `serde` rendering (`"registry"` /
+/// `"fs_only"`) is self-describing on the wire too.
+/// What: [`Self::Registry`] means the mpm daemon was reached and `entries`
+/// is the registry-primary/fs-secondary merge (see `super::mpm_registry`);
+/// [`Self::FsOnly`] means the registry was never reached (unreachable
+/// daemon, or not yet queried) and `entries` is the bare filesystem scan,
+/// every candidate `registered: false`.
+/// Test: `super::mpm_registry::tests::merged_roster_with_uses_registry_when_daemon_reachable`,
+/// `super::mpm_registry::tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RosterSource {
+    /// The mpm registry was reached; `entries` is the registry-primary merge.
+    Registry,
+    /// The mpm registry was unreachable (or never queried); `entries` is the
+    /// filesystem scan alone.
+    #[default]
+    FsOnly,
 }
 
 /// The `fs.list_projects` response body — everything the picker needs for
@@ -88,13 +137,20 @@ pub struct ProjectCandidate {
 /// Why: a bare `Vec<ProjectCandidate>` would work equally well over the
 /// wire, but wrapping it in a named struct (mirroring [`super::DirListing`])
 /// leaves room to add roster-level metadata later (e.g. a `truncated: bool`
-/// flag) without a breaking wire-shape change.
+/// flag) without a breaking wire-shape change — `source` (issue #3435) is
+/// exactly that: an additive field a client predating it can simply ignore.
 /// Test: `tests::empty_home_returns_empty_roster`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct ProjectRoster {
     /// Candidate projects, sorted case-insensitively by `name`, capped at
     /// [`MAX_ENTRIES`].
     pub entries: Vec<ProjectCandidate>,
+    /// Which source produced `entries` (issue #3435). A bare filesystem scan
+    /// (this module's own [`list_projects`]/[`list_projects_in`]) always
+    /// reports [`RosterSource::FsOnly`] — only `super::mpm_registry::merge`
+    /// reports [`RosterSource::Registry`], on a successful registry fetch.
+    #[serde(default)]
+    pub source: RosterSource,
 }
 
 /// `fs.list_projects()` — the daemon-side entry point (issue #3365).
@@ -131,7 +187,12 @@ pub fn list_projects() -> ProjectRoster {
 /// `tests::non_git_directories_are_excluded`,
 /// `tests::scan_is_capped_at_max_entries`,
 /// `tests::empty_home_returns_empty_roster`.
-fn list_projects_in(home: &Path) -> ProjectRoster {
+///
+/// `pub(super)` (not private) so `super::mpm_registry`'s tests (issue #3435)
+/// can build a hermetic filesystem-only `ProjectRoster` against a tempdir
+/// `home`, the same seam this module's own tests already use, rather than
+/// hand-rolling a second scan helper.
+pub(super) fn list_projects_in(home: &Path) -> ProjectRoster {
     let mpm_root = home.join("trusty-mpm-projects");
     let mut entries = if mpm_root.is_dir() {
         scan_owner_layout(&mpm_root)
@@ -140,7 +201,10 @@ fn list_projects_in(home: &Path) -> ProjectRoster {
     };
     entries.sort_by_key(|e| e.name.to_lowercase());
     entries.truncate(MAX_ENTRIES);
-    ProjectRoster { entries }
+    ProjectRoster {
+        entries,
+        source: RosterSource::FsOnly,
+    }
 }
 
 /// Scan `<home>/trusty-mpm-projects/<owner>/<repo>` two levels deep,
@@ -184,6 +248,7 @@ fn scan_owner_layout(mpm_root: &Path) -> Vec<ProjectCandidate> {
                 name: repo_name,
                 path: repo_path.display().to_string(),
                 owner: Some(owner_name.clone()),
+                registered: false,
             });
         }
     }
@@ -217,6 +282,7 @@ fn scan_flat_layout(home: &Path) -> Vec<ProjectCandidate> {
             name,
             path: path.display().to_string(),
             owner: None,
+            registered: false,
         });
     }
     out

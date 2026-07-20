@@ -8,6 +8,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`fs.list_projects` / `GET /projects` re-sourced from trusty-mpm's shared
+  project registry (issue #3435).** The project-picker roster's PRIMARY
+  source is now a loopback call to the mpm daemon's `GET /api/v1/projects`
+  (`http://127.0.0.1:7880`, overridable via `TRUSTY_MPM_URL`); the prior
+  filesystem scan (`fs_browse::roster`, issue #3365) is demoted to
+  SECONDARY — local-only/unregistered candidates (e.g. a `bakeoff-l1`
+  scratch checkout) still appear, never silently dropped, now flagged via a
+  new additive `registered: bool` field on each roster entry. An
+  unreachable mpm daemon degrades gracefully to the filesystem-only roster
+  rather than erroring, and is now caller-distinguishable via a new
+  additive `source: "registry" | "fs_only"` field on the roster
+  (code-critic PR #3439 review, HIGH 2 — the #3363 lesson: "nothing
+  registered" and "registry unreachable" must not collapse into the same
+  shape). The merge also normalizes both sides (`std::fs::canonicalize`)
+  before comparing paths, so a case-differing or symlink-indirected path to
+  the SAME checkout no longer double-lists it (code-critic PR #3439 review,
+  HIGH 1), and `repo_url` parsing now rejects compound remainders (GitLab
+  subgroups, a port-qualified host) instead of fabricating a bogus
+  multi-level lookup path (code-critic PR #3439 review, MEDIUM 1). New
+  module: `crates/trusty-code/src/fs_browse/mpm_registry.rs`. Spec: DOC-39
+  §5.8.1.
+
 ### Fixed
 
 - **Every daemon-default task run (including every GUI-initiated run) failed

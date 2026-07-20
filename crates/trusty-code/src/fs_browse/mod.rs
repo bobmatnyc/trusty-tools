@@ -42,6 +42,7 @@
 //! Test: `fs_browse::tests::*` (resolution, git-ness incl. the linked-worktree
 //! `.git`-as-file shape, error distinguishability, 7a response shape).
 
+pub mod mpm_registry;
 pub mod protocol;
 pub mod roster;
 

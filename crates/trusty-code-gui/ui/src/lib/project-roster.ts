@@ -17,6 +17,20 @@
 // answered the socket, so the shape must be verified before it becomes
 // reactive state. [`projectCandidateLabel`] is the one-line display label
 // the modal's row buttons render.
+//
+// Update (issue #3435): the daemon now merges trusty-mpm's shared project
+// registry (primary) with this crate's filesystem scan (secondary,
+// local-only/unregistered candidates) before responding — `registered`
+// distinguishes the two. It is OPTIONAL here (not required) so this client
+// keeps working unchanged against an older daemon that predates the field —
+// additive-only wire evolution, per the daemon side's own backward-
+// compatibility goal.
+//
+// Update (code-critic PR #3439 review, HIGH 2): `ProjectRoster.source`
+// distinguishes "the registry has nothing registered" from "the registry was
+// unreachable" (the #3363 lesson — those must not collapse into the same
+// all-`registered: false` shape with no operator-visible signal). Also
+// OPTIONAL, for the same backward-compatibility reason.
 // Test: `project-roster.test.ts`.
 
 /** Mirrors `crate::fs_browse::roster::ProjectCandidate` field-for-field. */
@@ -24,12 +38,25 @@ export interface ProjectCandidate {
   name: string;
   path: string;
   owner: string | null;
+  /** Known to trusty-mpm's shared project registry (issue #3435). Optional
+   * for backward compatibility with a daemon predating this field; treat a
+   * missing value the same as `false` (unregistered/unknown). */
+  registered?: boolean;
 }
+
+/** Mirrors `crate::fs_browse::roster::RosterSource` field-for-field (issue
+ * #3435, code-critic PR #3439 review HIGH 2). */
+export type RosterSource = 'registry' | 'fs_only';
 
 /** Mirrors `crate::fs_browse::roster::ProjectRoster` field-for-field — the
  * `GET /projects` response body. */
 export interface ProjectRoster {
   entries: ProjectCandidate[];
+  /** Which source produced `entries`. Optional for backward compatibility
+   * with a daemon predating this field; treat a missing value as unknown
+   * (the modal does not render the fs-only banner when absent, rather than
+   * guessing). */
+  source?: RosterSource;
 }
 
 /**
@@ -40,21 +67,26 @@ export interface ProjectRoster {
  * proxy, a future daemon) flow into `roster.entries` and throw once the
  * modal iterates it.
  * What: structural check of every field the modal dereferences: `entries`
- * is an array whose members each carry string `name`/`path` and an
- * `owner` that is a string or `null`.
+ * is an array whose members each carry string `name`/`path`, an `owner`
+ * that is a string or `null`, and — if present at all — a boolean
+ * `registered` (absent is accepted, for an older daemon; present-but-wrong-
+ * typed is rejected, same strictness as every other field here). Top-level
+ * `source`, if present, must be exactly `'registry'` or `'fs_only'`.
  * Test: `project-roster.test.ts::isProjectRoster`.
  */
 export function isProjectRoster(body: unknown): body is ProjectRoster {
   if (typeof body !== 'object' || body === null) return false;
   const b = body as Record<string, unknown>;
   if (!Array.isArray(b.entries)) return false;
+  if (b.source !== undefined && b.source !== 'registry' && b.source !== 'fs_only') return false;
   return b.entries.every((e: unknown) => {
     if (typeof e !== 'object' || e === null) return false;
     const c = e as Record<string, unknown>;
     return (
       typeof c.name === 'string' &&
       typeof c.path === 'string' &&
-      (c.owner === null || typeof c.owner === 'string')
+      (c.owner === null || typeof c.owner === 'string') &&
+      (c.registered === undefined || typeof c.registered === 'boolean')
     );
   });
 }
