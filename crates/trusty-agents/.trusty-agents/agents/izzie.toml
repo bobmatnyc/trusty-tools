@@ -12,7 +12,13 @@
 [agent]
 name = "izzie"
 role = "assistant"
-runner = "claude-code"
+# #3358: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path (AnthropicDirect
+# when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
+# in `src/llm/credentials.rs`. NOTE: this flat file is shadowed by the
+# directory package at `izzie/agent.toml` (loader prefers packages, #482)
+# but is also the `extends_shadow_fallback_in` safety net if the package's
+# `extends = "assistant"` chain ever fails to resolve — kept in sync.
 model = "claude-sonnet-4-6"
 description = "Izzie — personal assistant"
 display_name = "Izzie"

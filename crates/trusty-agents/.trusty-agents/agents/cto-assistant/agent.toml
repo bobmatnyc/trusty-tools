@@ -1,7 +1,10 @@
 [agent]
 name = "cto-assistant"
 role = "assistant"
-runner = "claude-code"
+# #3358: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path (AnthropicDirect
+# when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
+# in `src/llm/credentials.rs`.
 model = "claude-sonnet-4-6"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
 display_name = "CTO Assistant"
