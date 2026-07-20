@@ -102,7 +102,7 @@ pub(super) async fn run_workstream_subscription(
                         match new_active_id {
                             Some(new_id) => {
                                 let _ = tx.send(ReplEvent::WorkstreamActivationChanged {
-                                    new_active_id: new_id.clone(),
+                                    new_active_id: Some(new_id.clone()),
                                     prior_id,
                                 });
                                 if new_id != current_id {
@@ -112,14 +112,11 @@ pub(super) async fn run_workstream_subscription(
                             }
                             None => {
                                 // Deactivated, no replacement active. The
-                                // SHARED `ReplEvent::WorkstreamActivationChanged`
-                                // (`trusty_tui::event`) declares `new_active_id`
-                                // as a non-optional `String` — this state
-                                // genuinely cannot be carried by that variant
-                                // without a breaking change to `trusty-tui`
-                                // (out of this crate's ownership), so a
-                                // `StatusMessage` is the honest signal
-                                // available today; the cache refresh above
+                                // shared `ReplEvent::WorkstreamActivationChanged`
+                                // (`trusty_tui::event`) now carries
+                                // `new_active_id: Option<String>`, so this
+                                // state is representable structurally rather
+                                // than as free text. The cache refresh above
                                 // is what actually clears the stale
                                 // indicator (`active_workstream` -> `None`,
                                 // the `"workstream"` picker's active marker
@@ -130,9 +127,10 @@ pub(super) async fn run_workstream_subscription(
                                 // `classify()` still forwards a LATER
                                 // activation naming `current_id` as its
                                 // `prior_id` to this same connection.
-                                let _ = tx.send(ReplEvent::StatusMessage(format!(
-                                    "workstream {current_id} deactivated — no workstream is now active"
-                                )));
+                                let _ = tx.send(ReplEvent::WorkstreamActivationChanged {
+                                    new_active_id: None,
+                                    prior_id,
+                                });
                             }
                         }
                     }

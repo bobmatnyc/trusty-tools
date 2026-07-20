@@ -45,6 +45,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   surfaces a `StatusMessage` (the shared `ReplEvent::WorkstreamActivationChanged`
   declares `new_active_id` as a non-optional `String`, so it cannot carry
   this state without a `trusty-tui` change).
+- **The `StatusMessage` fallback above is now a structured event (closes #3452, part of epic #3411).** `trusty-tui`'s `ReplEvent::WorkstreamActivationChanged.new_active_id` is now `Option<String>`, matching the wire shape exactly; `workstream_subscription.rs`'s deactivation arm now emits `ReplEvent::WorkstreamActivationChanged { new_active_id: None, prior_id: Some(..) }` instead of free text, so a UI can structurally clear its "active workstream" indicator.
 
 ### Added
 

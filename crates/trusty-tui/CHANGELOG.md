@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ReplEvent::WorkstreamActivationChanged.new_active_id` is now `Option<String>` (closes #3452, part of epic #3411).** The field was non-optional `String`, but the daemon legitimately publishes a `None` activation target when the active workstream is deactivated with no replacement (DOC-48 §4.2/§4.3) — mirroring `crate::events::Event::WorkstreamActivationChanged` in `trusty-code`, which already declares this field as `Option<String>`. The non-optional shape forced `trusty-code`'s Slice 3 consumer to fall back to a free-text `StatusMessage` for that case (PR #3436); this closes the gap found in that review, while `trusty-tui` still has essentially one consumer.
+
 ### Added
 
 - Initial crate scaffold (Slice 1, closes #3412, part of epic #3411, DOC-50 §3/§5): the `TuiEngine` trait (`setup`, `handle_input`, `cancel_session`, `subscribe_workstream_events`, `shutdown`) and the `ReplEvent` enum (terminal input, submit/cancel, streamed assistant output, tool invocation, statusline/workstream updates, connection loss, clear-scrollback), generalized from tagent's existing `crates/trusty-agents/src/repl/tui/` REPL event model. Also ships the small shared payload stubs (`StatuslineSegment`, `PickerItem`, `CommandDescriptor`, `WorkstreamSummary`) that Slice 1.5 (#3413) will flesh out. No ratatui/crossterm dependency yet — the terminal layer lands in Slice 2 (#3414).
