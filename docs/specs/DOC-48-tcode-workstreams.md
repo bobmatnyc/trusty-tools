@@ -546,12 +546,12 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
 
 ### Setup
 
-Assume a tcode daemon is running on `localhost:7881` (default).
+Assume a tcode daemon is running on `localhost:7882` (default).
 
 ### Create a workstream
 
 ```bash
-curl -X POST http://localhost:7881/rpc \
+curl -X POST http://localhost:7882/rpc \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -573,7 +573,7 @@ curl -X POST http://localhost:7881/rpc \
 ### List workstreams
 
 ```bash
-curl -X POST http://localhost:7881/rpc \
+curl -X POST http://localhost:7882/rpc \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -605,7 +605,7 @@ curl -X POST http://localhost:7881/rpc \
 ### Activate a workstream
 
 ```bash
-curl -X POST http://localhost:7881/rpc \
+curl -X POST http://localhost:7882/rpc \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -631,7 +631,7 @@ curl -X POST http://localhost:7881/rpc \
 ### Switch to a different workstream
 
 ```bash
-curl -X POST http://localhost:7881/rpc \
+curl -X POST http://localhost:7882/rpc \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",

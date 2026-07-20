@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.2.3] — 2026-07-19
+
 ### Fixed
 
 - `events::tests::publish_round_trips_through_subscribe` (and sibling tests `bus_is_singleton`, `seq_is_monotonic`) now carry `#[serial_test::serial]` — these three tests share the process-global `HarnessEvent` broadcast bus, so a concurrent workspace test run could deliver an unrelated event or interleave `publish()` sequence numbers between them, causing an intermittent assertion failure (closes #2961; same pattern as the #2271 `bm25_client` fix).

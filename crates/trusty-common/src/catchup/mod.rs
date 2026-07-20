@@ -76,11 +76,28 @@ impl Default for CatchupOptions {
 /// Derive the palace_id for a project directory (fail-open).
 ///
 /// Why: the catch-up state is keyed by palace_id; deriving it from the project
-/// directory keeps it consistent with the session-launch palace pinning.
+/// directory keeps it consistent with the session-launch palace pinning AND
+/// with the memory daemon's own `cwd_palace_slug_at`
+/// (`trusty-memory::messaging::operations`), which resolves the identical
+/// three-level precedence through the same `crate::derive_palace_id` core.
+/// Previously this function re-implemented its own 4th fallback — the RAW,
+/// unslugified `file_name()` basename — whenever `derive_palace_id` returned
+/// `None` (e.g. a leaf directory name that slugifies to empty). That
+/// caller-local fallback could both (a) diverge from the daemon, which has no
+/// such fallback and errors instead, and (b) leak a storage-unsafe,
+/// unslugified token as a palace id (see issue #1772). `derive_palace_id` is
+/// now the single source of truth for every precedence level, so this
+/// function no longer re-derives anything from `project_dir` on failure — it
+/// falls back to a fixed literal, never a directory-derived value — meaning
+/// it can never disagree with the daemon on a real project.
 /// What: probes git remote origin from the project dir, then calls
-/// `crate::derive_palace_id`. Returns a fallback slug from the dir
-/// basename when derivation yields None (no git remote, no override).
-/// Test: covered indirectly by `generate_catchup_context_renders_all_sections`.
+/// `crate::derive_palace_id`. Falls back to the fixed literal
+/// `"unknown-project"` only when derivation yields `None` for every
+/// precedence level.
+/// Test: `derive_palace_id_for_agrees_with_daemon_path_no_remote_no_env`,
+/// `derive_palace_id_for_env_override_unchanged`,
+/// `derive_palace_id_for_git_remote_unchanged`; also covered indirectly by
+/// `generate_catchup_context_renders_all_sections`.
 fn derive_palace_id_for(project_dir: &Path) -> String {
     let remote = std::process::Command::new("git")
         .arg("-C")
@@ -93,15 +110,8 @@ fn derive_palace_id_for(project_dir: &Path) -> String {
         .filter(|s| !s.is_empty());
 
     let override_val = crate::palace_override_from_env();
-    crate::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref()).unwrap_or_else(
-        || {
-            project_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown-project")
-                .to_string()
-        },
-    )
+    crate::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref())
+        .unwrap_or_else(|| "unknown-project".to_string())
 }
 
 /// Probe the HEAD git SHA of a repo (for watermark advancement).
@@ -438,5 +448,104 @@ mod tests {
             !ctx.is_empty(),
             "blocking wrapper should return non-empty context"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_palace_id_for — agreement with the shared derivation core (#1772)
+    // -----------------------------------------------------------------------
+
+    /// Why: issue #1772 — before this fix, `derive_palace_id_for` (the
+    /// catch-up path) re-implemented its own divergent 4th fallback (a raw,
+    /// unslugified `file_name()` basename) whenever `derive_palace_id`
+    /// returned `None`, which could disagree with the memory daemon's
+    /// `cwd_palace_slug_at` (trusty-memory) — the only other caller that
+    /// reaches the "no override, no git remote" branch. Both now call
+    /// `crate::derive_palace_id` with identical inputs and no caller-local
+    /// re-derivation, so for a project with no git remote and no
+    /// `TRUSTY_MEMORY_PALACE` override, the catch-up-path value MUST equal
+    /// the value `derive_palace_id` itself produces for the exact same
+    /// inputs — the same call the daemon path makes at its own step 3.
+    /// What: a plain (non-git) temp directory has no remote to probe, and the
+    /// env override is left unset, so `derive_palace_id_for` falls straight
+    /// through to `derive_palace_id(project_dir, None, None)`. Asserts the
+    /// two calls agree byte-for-byte.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn derive_palace_id_for_agrees_with_daemon_path_no_remote_no_env() {
+        // SAFETY: #[serial] serialises this against the other TRUSTY_MEMORY_PALACE
+        // mutating test in this module; ensure a clean slate first.
+        unsafe {
+            std::env::remove_var(crate::PALACE_OVERRIDE_ENV);
+        }
+        let tmp = TempDir::new().unwrap();
+
+        let catchup_value = derive_palace_id_for(tmp.path());
+
+        // The "daemon path": trusty-memory's `cwd_palace_slug_at` step 3 calls
+        // `crate::derive_palace_id(project_root, git_remote, None)` directly.
+        // A plain temp dir has no git remote, mirroring that exact call.
+        let daemon_value = crate::derive_palace_id(tmp.path(), None, None)
+            .expect("a real temp dir always has a usable parent/dir slug");
+
+        assert_eq!(
+            catchup_value, daemon_value,
+            "catch-up and daemon derivations must agree with no remote and no env override"
+        );
+    }
+
+    /// Why: regression guard — the `TRUSTY_MEMORY_PALACE` override must still
+    /// win unconditionally (precedence level 1), unaffected by removing the
+    /// divergent fallback.
+    /// What: sets the env override, asserts `derive_palace_id_for` returns the
+    /// slugified override value regardless of the (non-git) directory.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn derive_palace_id_for_env_override_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        // SAFETY: #[serial] serialises env access against the other
+        // TRUSTY_MEMORY_PALACE-mutating test in this module.
+        unsafe {
+            std::env::set_var(crate::PALACE_OVERRIDE_ENV, "My Override");
+        }
+        let got = derive_palace_id_for(tmp.path());
+        unsafe {
+            std::env::remove_var(crate::PALACE_OVERRIDE_ENV);
+        }
+        assert_eq!(got, "my-override");
+    }
+
+    /// Why: regression guard — a valid git remote must still win over the
+    /// parent/dir fallback (precedence level 2), unaffected by removing the
+    /// divergent fallback. Uses the real `bobmatnyc/trusty-tools` shape so the
+    /// expected slug matches this repo's own palace id.
+    /// What: inits a temp git repo, adds an `origin` remote, asserts
+    /// `derive_palace_id_for` returns the owner-repo slug.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn derive_palace_id_for_git_remote_unchanged() {
+        // SAFETY: #[serial] serialises env access against the other
+        // TRUSTY_MEMORY_PALACE-mutating tests in this module.
+        unsafe {
+            std::env::remove_var(crate::PALACE_OVERRIDE_ENV);
+        }
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(&tmp);
+        Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:bobmatnyc/trusty-tools.git",
+            ])
+            .output()
+            .unwrap();
+
+        let got = derive_palace_id_for(tmp.path());
+        assert_eq!(got, "bobmatnyc-trusty-tools");
     }
 }

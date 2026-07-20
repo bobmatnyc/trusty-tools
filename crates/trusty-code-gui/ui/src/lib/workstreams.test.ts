@@ -21,7 +21,7 @@ import {
   type WorkstreamListResponse,
 } from './workstreams';
 
-const BASE = 'http://127.0.0.1:7881';
+const BASE = 'http://127.0.0.1:7882';
 
 afterEach(() => {
   vi.unstubAllGlobals();

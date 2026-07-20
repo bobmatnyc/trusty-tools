@@ -10800,7 +10800,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10978,6 +10978,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+ "trusty-code",
 ]
 
 [[package]]

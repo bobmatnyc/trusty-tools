@@ -27,31 +27,30 @@ pub struct BundledArtifact {
 
 /// How the installer writes a [`BundledArtifact`] when the target already exists.
 ///
-/// Why: framework-owned files (instructions, policy) must track upgrades, but
-/// user-editable stubs must not be clobbered — one enum makes the distinction
-/// explicit and data-driven.
+/// Why: every bundled artifact is currently framework-owned and must track
+/// upgrades. The former `SeedOnce` variant (used only by the now-removed
+/// `CLAUDE.md` stub artifact — issue #3374: that stub was never read back by
+/// any consumer) is gone; the enum is kept single-variant rather than
+/// collapsed so a future genuinely user-editable bundled artifact has a place
+/// to opt out of overwrite without redesigning the table.
 /// What: [`Overwrite`](InstallPolicy::Overwrite) always writes the embedded
-/// contents; [`SeedOnce`](InstallPolicy::SeedOnce) writes only when absent.
-/// Test: `claude_stub_is_seed_once`, `framework_instructions_overwrites`.
+/// contents.
+/// Test: `framework_instructions_overwrites`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPolicy {
     /// Always write the embedded contents, replacing any existing file.
     Overwrite,
-    /// Write the embedded contents only if the target file does not exist.
-    SeedOnce,
 }
 
 /// Build an [`InstallPolicy::Overwrite`] artifact entry.
 ///
-/// Why: nearly every bundled artifact is framework-owned and must track
-/// upgrades (`InstallPolicy::Overwrite`) — only the user-editable `CLAUDE.md`
-/// stub uses [`InstallPolicy::SeedOnce`]. Spelling out the 5-line
-/// [`BundledArtifact`] struct literal for all ~164 entries would blow the
-/// 500-SLOC production cap (issue #2903 alone adds 93 skill-port entries);
-/// this shorthand collapses the common case to one line per entry so [`ALL`]
-/// stays a single, cap-compliant table instead of being split across files
-/// (which Rust cannot do for one array literal without unsafe const-array
-/// concatenation or forbidden global/lazy state).
+/// Why: every bundled artifact is framework-owned and must track upgrades.
+/// Spelling out the 5-line [`BundledArtifact`] struct literal for all ~164
+/// entries would blow the 500-SLOC production cap (issue #2903 alone adds 93
+/// skill-port entries); this shorthand collapses the common case to one line
+/// per entry so [`ALL`] stays a single, cap-compliant table instead of being
+/// split across files (which Rust cannot do for one array literal without
+/// unsafe const-array concatenation or forbidden global/lazy state).
 /// What: returns a [`BundledArtifact`] with `install: InstallPolicy::Overwrite`.
 /// Test: `bundle_table_is_complete` (exercises every entry `ALL` produces,
 /// including those built by this helper).
@@ -66,18 +65,13 @@ const fn overwrite(rel_path: &'static str, contents: &'static str) -> BundledArt
 /// Every bundled framework artifact, in install order.
 ///
 /// Why: gives the installer (and tests) one canonical list to walk.
-/// What: optimizer policy, framework instructions, user stub, agent catalog,
-/// placeholder skill, and Phase 1 (#770) mpm-* guidance skills.
+/// What: optimizer policy, framework instructions, agent catalog, placeholder
+/// skill, and Phase 1 (#770) mpm-* guidance skills.
 /// Test: `bundle_table_is_complete`.
 pub const ALL: &[BundledArtifact] = &[
     overwrite("hooks/optimizer.toml", OPTIMIZER_TOML),
     overwrite("hooks/overseer.toml", OVERSEER_TOML),
     overwrite("instructions/INSTRUCTIONS.md", FRAMEWORK_INSTRUCTIONS),
-    BundledArtifact {
-        rel_path: "instructions/CLAUDE.md",
-        contents: CLAUDE_STUB,
-        install: InstallPolicy::SeedOnce,
-    },
     overwrite("agents/BASE-AGENT.md", BASE_AGENT),
     overwrite("agents/BASE-ENGINEER.md", BASE_ENGINEER),
     overwrite("agents/BASE-RESEARCH.md", BASE_RESEARCH),
