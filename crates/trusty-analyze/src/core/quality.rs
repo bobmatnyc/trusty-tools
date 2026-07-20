@@ -4,12 +4,30 @@
 //! both want a one-shot summary number — average cyclomatic complexity, %
 //! grade-A chunks, total smell count. Pulling the math into a pure function
 //! keeps the HTTP/MCP layers thin.
+//!
+//! Language dispatch: every chunk is scored via `compute_complexity_for`
+//! (dispatched on `crate::lang::ext_map::lang_for_extension(&c.file)`) rather
+//! than the raw text heuristic. The text heuristic's own module docs admit it
+//! is "wrong on common idioms" (see `complexity_ts.rs`); routing through the
+//! language-aware dispatcher gives Rust/TypeScript chunks accurate
+//! tree-sitter-backed smell detection instead of whitespace-based guesses,
+//! which is what made the whole-codebase smell count trustworthy again
+//! (previously every chunk was scored 3x redundantly with the text-only
+//! `compute_complexity`, regardless of its actual language).
 
-use crate::types::complexity::ComplexityGrade;
+use crate::types::complexity::{ComplexityGrade, ComplexityMetrics};
 use crate::types::CodeChunk;
 use serde::Serialize;
 
-use crate::core::complexity::compute_complexity;
+use crate::core::complexity::compute_complexity_for;
+
+/// Score a chunk once, using the language dispatcher keyed off its file
+/// extension, so callers don't each re-derive the language or re-run
+/// complexity analysis on the same content.
+fn metrics_of(c: &CodeChunk) -> ComplexityMetrics {
+    let lang = crate::lang::ext_map::lang_for_extension(&c.file);
+    compute_complexity_for(&c.content, lang)
+}
 
 /// One-shot quality summary over a chunk corpus.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -43,13 +61,12 @@ pub struct HotspotItem {
 
 /// Sort `chunks` by descending cyclomatic complexity and return the top N,
 /// each carrying the cyclomatic + cognitive numbers it was ranked on.
-/// Chunks without a pre-computed `complexity` field are scored on demand from
-/// `content`.
+/// Chunks are scored via the language-aware `metrics_of` dispatcher.
 pub fn complexity_hotspots(chunks: &[CodeChunk], top_n: usize) -> Vec<HotspotItem> {
     let mut scored: Vec<HotspotItem> = chunks
         .iter()
         .map(|c| {
-            let metrics = compute_complexity(&c.content);
+            let metrics = metrics_of(c);
             HotspotItem {
                 chunk: c.clone(),
                 cyclomatic: metrics.cyclomatic,
@@ -62,13 +79,11 @@ pub fn complexity_hotspots(chunks: &[CodeChunk], top_n: usize) -> Vec<HotspotIte
     scored
 }
 
-/// Return chunks that have at least one detected smell. Re-runs `detect_smells`
-/// for chunks lacking pre-computed `complexity` so the caller doesn't have to
-/// require trusty-search to populate the field.
+/// Return chunks that have at least one detected smell.
 pub fn smelly_chunks(chunks: &[CodeChunk]) -> Vec<CodeChunk> {
     chunks
         .iter()
-        .filter(|c| !smells_of(c).is_empty())
+        .filter(|c| !metrics_of(c).smells.is_empty())
         .cloned()
         .collect()
 }
@@ -78,11 +93,17 @@ pub fn aggregate_quality(chunks: &[CodeChunk]) -> QualityReport {
     let chunk_count = chunks.len();
     let (sum_cyclo, grade_a, smell_count) =
         chunks.iter().fold((0u64, 0usize, 0usize), |(s, a, sm), c| {
-            let metrics_cyclo = cyclomatic_of(c);
-            let grade = grade_of(c);
-            let smell_total = smells_of(c).len();
-            let a_inc = if grade == ComplexityGrade::A { 1 } else { 0 };
-            (s + metrics_cyclo as u64, a + a_inc, sm + smell_total)
+            let metrics = metrics_of(c);
+            let a_inc = if metrics.grade == ComplexityGrade::A {
+                1
+            } else {
+                0
+            };
+            (
+                s + metrics.cyclomatic as u64,
+                a + a_inc,
+                sm + metrics.smells.len(),
+            )
         });
     let avg_cyclomatic = if chunk_count == 0 {
         0.0_f32
@@ -100,18 +121,6 @@ pub fn aggregate_quality(chunks: &[CodeChunk]) -> QualityReport {
         smell_count,
         chunk_count,
     }
-}
-
-fn cyclomatic_of(c: &CodeChunk) -> u32 {
-    compute_complexity(&c.content).cyclomatic
-}
-
-fn grade_of(c: &CodeChunk) -> ComplexityGrade {
-    compute_complexity(&c.content).grade
-}
-
-fn smells_of(c: &CodeChunk) -> Vec<crate::types::complexity::CodeSmell> {
-    crate::core::complexity::detect_smells(&c.content)
 }
 
 #[cfg(test)]
@@ -185,5 +194,40 @@ mod tests {
         let out = smelly_chunks(&[clean, big]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, "b");
+    }
+
+    #[test]
+    fn idiomatic_private_enumerate_chunk_is_not_smelly() {
+        // End-to-end regression test for the reported false positive: a
+        // whole-codebase quality scan must not flag an ordinary, private
+        // helper function that uses idiomatic `.iter().enumerate()`.
+        let src = r#"fn process(items: &[i32]) -> i32 {
+    let mut total = 0;
+    for (i, item) in items.iter().enumerate() {
+        total += i as i32 + item;
+    }
+    total
+}
+"#;
+        let c = chunk("enum1", src);
+        assert!(
+            smelly_chunks(std::slice::from_ref(&c)).is_empty(),
+            "idiomatic private .enumerate() chunk must not be reported as smelly"
+        );
+        let report = aggregate_quality(&[c]);
+        assert_eq!(
+            report.smell_count, 0,
+            "idiomatic private .enumerate() chunk must contribute zero smells"
+        );
+    }
+
+    #[test]
+    fn undocumented_pub_chunk_still_counts_as_smelly() {
+        // The fix must not silence real signal: an undocumented `pub` item
+        // is still part of the public API and should still be flagged.
+        let c = chunk("pub1", "pub fn f() {}\n");
+        assert_eq!(smelly_chunks(std::slice::from_ref(&c)).len(), 1);
+        let report = aggregate_quality(&[c]);
+        assert_eq!(report.smell_count, 1);
     }
 }
