@@ -18,12 +18,18 @@
 //! passthrough. Bypassing `ReplBridge` (the TUI's event/picker layer) means
 //! `/model` and `/provider` with no argument print their list as plain text
 //! instead of opening a ratatui modal — the whole point of this mode.
-//! What: `run_plain_cli` — builds a `TrustyAgentsRepl`, optionally switches
-//! it into thin-client mode when a `--service` daemon is already running
-//! (mirrors the TUI startup path in `mode_dispatch`), prints a startup
-//! banner showing the resolved agent model/runner/credential, then loops
-//! reading one line at a time until `/exit`, `/quit`, `/disconnect`, or EOF
-//! (Ctrl-D).
+//! What: `run_plain_cli` — builds a `TrustyAgentsRepl`, defaults its active
+//! conversational agent to `assistant` (Opus) by internally issuing
+//! `/switch assistant` — the same mechanism a user typing that command would
+//! trigger — so the owner's actual testing surface is answered by the
+//! assistant persona out of the box, not the `ctrl` coordinator (local
+//! ollama). `ctrl` remains fully reachable via `/switch ctrl`, and
+//! machine-coordination commands (`/connect`, `/status`, controller socket)
+//! are untouched. Optionally switches into thin-client mode when a
+//! `--service` daemon is already running (mirrors the TUI startup path in
+//! `mode_dispatch`), prints a startup banner showing the resolved agent
+//! name/model/runner/credential, then loops reading one line at a time
+//! until `/exit`, `/quit`, `/disconnect`, or EOF (Ctrl-D).
 //! Test: `should_force_plain_cli_*` (mode-dispatch selector, in
 //! `runtime::cli_def`); `tests/plain_cli_repl.rs` (piped-stdin integration
 //! test driving the real compiled binary).
@@ -32,7 +38,14 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::profile::load_or_create_user_profile;
+use crate::agents::RunnerKind;
 use crate::ctrl::state::ConversationTurn;
+
+/// Persona the plain CLI defaults its conversational agent to at startup
+/// (owner decision, #3406 follow-up): the assistant (Opus) is what an SSH
+/// tester is actually exercising, not the `ctrl` machine-coordination
+/// persona (local ollama). `ctrl` stays one `/switch ctrl` away.
+const DEFAULT_PERSONA: &str = "assistant";
 
 /// Cap on retained conversation turns for the plain CLI loop.
 ///
@@ -45,6 +58,33 @@ const PLAIN_CLI_MAX_HISTORY_TURNS: usize = 20;
 pub async fn run_plain_cli() -> Result<()> {
     let user_profile = load_or_create_user_profile().await?;
     let mut repl = crate::repl::TrustyAgentsRepl::new(user_profile)?;
+
+    // Owner decision (#3406 follow-up): default the plain CLI's active
+    // conversational agent to `assistant` instead of the `ctrl` coordinator
+    // it inherits from `TrustyAgentsRepl::new`. Reuses the SAME dispatch a
+    // user typing `/switch assistant` would trigger — not a new mechanism —
+    // so behavior (persona resolution, display-name lookup, history reset)
+    // matches exactly. Missing/broken `assistant/agent.toml` degrades
+    // gracefully: the error is surfaced and the session stays on `ctrl`.
+    match repl
+        .try_handle_slash(&format!("/switch {DEFAULT_PERSONA}"))
+        .await
+    {
+        Some(Ok((_, output))) => {
+            if !output.is_empty() {
+                print!("{output}");
+                if !output.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+        Some(Err(e)) => {
+            eprintln!(
+                "warning: failed to default to the '{DEFAULT_PERSONA}' persona ({e:#}); staying on ctrl"
+            );
+        }
+        None => unreachable!("\"/switch ...\" always starts with '/'"),
+    }
 
     if crate::service::is_service_running(crate::service::DEFAULT_SERVICE_PORT).await {
         let url = format!("http://localhost:{}", crate::service::DEFAULT_SERVICE_PORT);
@@ -68,11 +108,13 @@ pub async fn run_plain_cli() -> Result<()> {
         "{} — plain CLI mode (no TUI)\ntype /help for commands, /quit or /exit to leave\n",
         crate::build_info::version_string()
     );
+    let (agent_name, model, runner) = resolve_endpoint_agent(&repl);
     println!(
-        "resolved agent endpoint: model={} runner={:?} credential={}\n",
-        repl.resolve_active_model(),
-        repl.resolve_active_runner(),
-        resolved_credential_label(),
+        "resolved agent endpoint: agent={} model={} runner={:?} credential={}\n",
+        agent_name,
+        model,
+        runner,
+        resolved_credential_label(runner),
     );
 
     let mut stdin = BufReader::new(tokio::io::stdin());
@@ -151,19 +193,56 @@ async fn dispatch_free_text(repl: &mut crate::repl::TrustyAgentsRepl, trimmed: &
     }
 }
 
-/// Which credential env var `run_plain_cli`'s startup banner resolved, so an
-/// SSH tester can see at a glance which auth path a message will use.
-/// Mirrors the precedence documented in `cli_def::check_credentials_and_warn`.
-fn resolved_credential_label() -> &'static str {
-    if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty()) {
-        "CLAUDE_CODE_OAUTH_TOKEN"
-    } else if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty()) {
-        "ANTHROPIC_API_KEY"
-    } else if std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
-        .is_ok_and(|v| !v.is_empty())
-    {
-        "OPENROUTER_API_KEY"
-    } else {
-        "none configured"
+/// Resolve the agent name/model/runner the startup banner should display,
+/// reflecting whichever persona is ACTUALLY active after the default-persona
+/// switch above (or a later `/switch`/`/agent`).
+///
+/// Why: `TrustyAgentsRepl::resolve_active_model` / `resolve_active_runner`
+/// only ever consult `ctrl.toml` / `pm.toml` (see their doc comments in
+/// `repl/mod.rs`) — they predate per-persona chat and don't know about
+/// `active_persona`. Using them directly here would keep showing `ctrl`'s
+/// model/runner even after defaulting (or switching) to `assistant`. This
+/// resolves the SAME way `/agent`/`/switch` do — `AgentConfig::by_name_in`
+/// against the REPL's own `agents_dir` + the `$HOME` fallback — so the
+/// banner always matches what the next `attempt_forward` call will actually
+/// dispatch. Falls back to the ctrl-only resolvers if the lookup fails
+/// (e.g. a persona whose TOML was deleted after activation).
+/// What: Returns `(agent_name, model_id, runner_kind)`.
+fn resolve_endpoint_agent(repl: &crate::repl::TrustyAgentsRepl) -> (String, String, RunnerKind) {
+    let agent_name = repl
+        .active_persona
+        .clone()
+        .unwrap_or_else(|| "ctrl".to_string());
+
+    let mut dirs = vec![repl.agents_dir.clone()];
+    if let Some(home) = dirs::home_dir() {
+        let home_dir = home.join(".trusty-agents").join("agents");
+        if home_dir != repl.agents_dir {
+            dirs.push(home_dir);
+        }
     }
+
+    match crate::agents::AgentConfig::by_name_in(&dirs, &agent_name) {
+        Ok(cfg) => (agent_name, cfg.agent.model.clone(), cfg.agent.runner),
+        Err(_) => (
+            agent_name,
+            repl.resolve_active_model(),
+            repl.resolve_active_runner(),
+        ),
+    }
+}
+
+/// Which credential source `run_plain_cli`'s startup banner resolved, so an
+/// SSH tester can see at a glance which auth path a message will use.
+///
+/// Why (#3407): the previous implementation read `std::env::var(...)`
+/// directly, so a credential configured ONLY via the secure keystore
+/// (`tagent config keys set`, never exported to the shell) showed as "none
+/// configured" even though dispatch would resolve and use it fine. Routes
+/// through the same `pick_credentials` resolver the TUI's own startup
+/// banner uses (`repl/run.rs`), which checks env → `.env.local` → the store.
+fn resolved_credential_label(runner: RunnerKind) -> &'static str {
+    crate::llm::credentials::pick_credentials(Some(runner))
+        .map(|c| c.label())
+        .unwrap_or("none")
 }

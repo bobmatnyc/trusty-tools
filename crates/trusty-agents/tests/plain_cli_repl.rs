@@ -19,6 +19,7 @@
 //! Test: this file IS the test.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -58,7 +59,21 @@ fn run_piped(
     extra_env: &[(&str, &str)],
     stdin_input: &str,
 ) -> (bool, String, String) {
+    run_piped_with_setup(extra_args, extra_env, stdin_input, |_| {})
+}
+
+/// Same as [`run_piped`], but calls `setup(tempdir_path)` after creating the
+/// isolated cwd and before spawning — lets a test seed fixture files (e.g. a
+/// minimal `assistant.toml`) into the isolated project without touching the
+/// real crate-root `.trusty-agents/`.
+fn run_piped_with_setup(
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+    stdin_input: &str,
+    setup: impl FnOnce(&Path),
+) -> (bool, String, String) {
     let isolated_cwd = tempfile::tempdir().expect("create isolated tempdir for tagent cwd");
+    setup(isolated_cwd.path());
 
     let mut cmd = Command::new(BIN);
     cmd.args(extra_args)
@@ -154,4 +169,82 @@ fn quit_command_stops_the_loop_immediately() {
     let (success, stdout, stderr) = run_piped(&["--plain"], &[], "/quit\n");
     assert!(success, "a bare /quit should exit 0; stderr:\n{stderr}");
     assert!(stdout.contains("you> "), "got:\n{stdout}");
+}
+
+/// Seed an isolated project's `.trusty-agents/agents/assistant.toml` with a
+/// minimal, deterministic fixture — a distinctive `model` id so the
+/// assertion doesn't depend on (or drift with) the real bundled
+/// `assistant/agent.toml`'s actual model.
+fn seed_fixture_assistant_agent(project_root: &Path) {
+    let agents_dir = project_root.join(".trusty-agents").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("create fixture agents dir");
+    std::fs::write(
+        agents_dir.join("assistant.toml"),
+        "[agent]\n\
+         name = \"assistant\"\n\
+         role = \"assistant\"\n\
+         model = \"test-vendor/test-opus-fixture\"\n\
+         description = \"fixture assistant persona for plain-CLI default test\"\n\
+         \n\
+         [llm]\n\
+         temperature = 0.7\n\
+         max_tokens = 4096\n\
+         \n\
+         [system_prompt]\n\
+         content = \"You are a fixture assistant persona used only by an automated test.\"\n",
+    )
+    .expect("write fixture assistant.toml");
+}
+
+#[test]
+fn plain_cli_defaults_active_agent_to_assistant_not_ctrl() {
+    // Owner decision (#3406 follow-up): the plain CLI's out-of-the-box
+    // conversational agent must be `assistant` (what testers actually
+    // exercise), not `ctrl` (the local-ollama machine-coordination
+    // persona) — even though `TrustyAgentsRepl::new` itself still
+    // constructs with `project_name = "ctrl"` / `active_persona = None`.
+    let (success, stdout, stderr) =
+        run_piped_with_setup(&["--plain"], &[], "/quit\n", seed_fixture_assistant_agent);
+    assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Switched to: assistant"),
+        "startup should default-switch to the assistant persona; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "resolved agent endpoint: agent=assistant model=test-vendor/test-opus-fixture"
+        ),
+        "resolved agent endpoint banner should report agent=assistant with the assistant's \
+         actual model (not ctrl's); got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("agent=ctrl"),
+        "default agent must not be ctrl; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn switch_ctrl_still_reaches_the_ctrl_coordinator() {
+    // `ctrl` must remain fully reachable via `/switch ctrl` — defaulting to
+    // `assistant` changes the DEFAULT, not ctrl's availability. `/switch
+    // ctrl` doesn't need an agent-config lookup (it's special-cased to clear
+    // `active_persona` and reset `project_name` to "ctrl"), so no fixture
+    // seeding is needed here. `/connect` (TM-session coordination, not the
+    // controller-socket path) is exercised separately by the live manual
+    // transcript in the PR description — it doesn't need a real project
+    // fixture to prove the slash routes correctly here.
+    let (success, stdout, stderr) = run_piped(&["--plain"], &[], "/switch ctrl\n/connect\n/quit\n");
+    assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Switched to: ctrl"),
+        "/switch ctrl should report switching back to ctrl; got:\n{stdout}"
+    );
+    // `/connect` with no args prints its usage line — proves the
+    // machine-coordination slash command is still routed/reachable (not
+    // shadowed or broken by the default-persona change), independent of
+    // whether a real project path is supplied.
+    assert!(
+        stdout.contains("usage: /connect"),
+        "/connect should still be reachable as a slash command; got:\n{stdout}"
+    );
 }
