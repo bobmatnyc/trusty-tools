@@ -227,3 +227,200 @@ fn tool_discipline_all_tool_calls_never_increments_counter() {
     assert_eq!(retries, 0);
     assert!(final_text.is_none());
 }
+
+// --- `create_client` secure-store credential resolution regression tests ---
+//
+// Why: `create_client()` previously read `OPENROUTER_API_KEY` via a raw
+// `std::env::var`, so a credential configured ONLY via the secure store
+// (`tagent config keys set openrouter`) built an `OpenAIConfig` with an EMPTY
+// api key even though the adjacent `pick_credentials(None).is_none()` bail
+// check (which already used the shared resolver, #3248) correctly saw the
+// credential and did NOT bail — silently sending an unauthenticated request
+// that 401s. These tests assert the key VALUE that reaches the built
+// `async-openai` client's config, using `secrecy::ExposeSecret` to read the
+// otherwise-redacted `SecretString` — not just that construction doesn't
+// panic.
+
+#[test]
+fn create_client_resolves_key_from_store_when_env_absent() {
+    use async_openai::config::Config as _;
+    use secrecy::ExposeSecret as _;
+
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
+    let prev_oauth = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
+    unsafe {
+        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "openrouter",
+        "sk-or-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let client = create_client().expect("store-only credential must build a client, not bail");
+    assert_eq!(
+        client.config().api_key().expose_secret(),
+        "sk-or-FAKE-store-value",
+        "the resolved store key must reach the async-openai client config"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_openrouter {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        match prev_anthropic {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match prev_oauth {
+            Some(v) => std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", v),
+            None => std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn create_client_env_beats_store() {
+    use async_openai::config::Config as _;
+    use secrecy::ExposeSecret as _;
+
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
+    let prev_oauth = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: locks held for the whole body.
+    unsafe {
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-FAKE-env-value");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "openrouter",
+        "sk-or-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let client = create_client().expect("build client");
+    assert_eq!(
+        client.config().api_key().expose_secret(),
+        "sk-or-FAKE-env-value",
+        "process env must win over the store"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_openrouter {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        match prev_anthropic {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match prev_oauth {
+            Some(v) => std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", v),
+            None => std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+/// Why: when NO tier (env, `.env.local`, or store) resolves any of the three
+/// ctrl/PM credentials, `create_client()` must fail with the clear
+/// multi-provider error instead of building a client with an empty key.
+/// Test: itself.
+#[test]
+fn create_client_missing_everywhere_errors_clearly() {
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
+    let prev_oauth = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: locks held for the whole body.
+    unsafe {
+        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    // No store seeded — every tier is absent for every provider.
+
+    let err = create_client().expect_err("no credential anywhere must error, not build a client");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("openrouter") && msg.contains("anthropic") && msg.contains("claude-code"),
+        "error must name all three supported providers: {msg}"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_openrouter {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        match prev_anthropic {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match prev_oauth {
+            Some(v) => std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", v),
+            None => std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}

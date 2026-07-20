@@ -313,12 +313,13 @@ impl SkillsLoader {
             return Ok(hit.clone());
         }
 
-        // Need an API key to call OpenRouter.
-        if std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            anyhow::bail!("OPENROUTER_API_KEY not set");
+        // Need an API key to call OpenRouter. Resolve via the shared 3-tier
+        // resolver (env > .env.local > secure store) rather than a raw env
+        // read — a store-only credential must not false-negative this gate
+        // before `crate::llm::create_client()` (below) ever gets a chance to
+        // resolve it.
+        if trusty_common::inference::credentials::resolve_key("openrouter").is_none() {
+            anyhow::bail!("openrouter credential not found (env, .env.local, or secure store)");
         }
 
         let client = crate::llm::create_client()?;

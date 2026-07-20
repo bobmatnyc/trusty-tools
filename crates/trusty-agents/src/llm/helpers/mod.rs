@@ -63,7 +63,13 @@ pub struct ChatResponse {
 ///
 /// Why: OpenRouter exposes an OpenAI-compatible API on a different base URL;
 /// using async-openai's `OpenAIConfig` keeps us on a well-maintained client.
-/// What: Reads `OPENROUTER_API_KEY` from env, sets base URL to OpenRouter.
+/// What: Resolves the OpenRouter credential via the shared 3-tier resolver
+/// (`trusty_common::inference::credentials::resolve_key` — process env >
+/// `.env.local` > secure store, #3248), sets base URL to OpenRouter. Before
+/// this fix the key was read via a raw `std::env::var`, so a credential
+/// configured ONLY via the secure store (`tagent config keys set`) produced
+/// an empty bearer token here even though `pick_credentials` correctly
+/// reported OpenRouter as the active credential.
 /// Test: Called with a dummy env var set; assert no panic. Real calls are
 /// integration-tested via the smoke test.
 pub fn create_client() -> Result<Client<OpenAIConfig>> {
@@ -75,7 +81,7 @@ pub fn create_client() -> Result<Client<OpenAIConfig>> {
     // stays OpenRouter so any OpenRouter-routed call still works when its
     // key is present.
     let api_key =
-        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_else(|_| {
+        trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_else(|| {
             // Empty key — async-openai will only fail if the request actually
             // tries to use it. Direct-Anthropic / claude-code paths short-circuit
             // before then.

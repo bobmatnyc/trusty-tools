@@ -41,13 +41,14 @@ impl MemorySearchTool {
         Self { store_dir, api_key }
     }
 
-    /// Convenience constructor that reads `OPENROUTER_API_KEY` from env and
-    /// defaults the store dir to `.trusty-agents/history`.
+    /// Convenience constructor that resolves the OpenRouter credential via
+    /// the shared 3-tier resolver (env > `.env.local` > secure store, #3248)
+    /// and defaults the store dir to `.trusty-agents/history`.
     #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self::new(
             PathBuf::from(".trusty-agents").join("history"),
-            std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default(),
+            trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default(),
         )
     }
 }

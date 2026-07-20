@@ -84,7 +84,10 @@ impl WorkflowEngine {
             {
                 Ok(results) if !results.is_empty() => {
                     // Merge file trees into the phase_out_dir via ConflictResolver.
-                    let api_key = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
+                    // Resolve via the shared 3-tier resolver (env > .env.local >
+                    // secure store, #3248) rather than a raw env read, so a
+                    // store-only credential isn't silently invisible here.
+                    let api_key = trusty_common::inference::credentials::resolve_key("openrouter")
                         .unwrap_or_default();
                     let resolver = ConflictResolver::new(api_key);
                     let merge_report = resolver

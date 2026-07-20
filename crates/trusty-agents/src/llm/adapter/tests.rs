@@ -470,3 +470,212 @@ fn empty_oauth_token_with_api_key_uses_api_key() {
         },
     );
 }
+
+// --- Secure-store credential resolution regression tests ---
+//
+// Why: `openrouter_endpoint()` and `AnthropicAdapter::api_endpoint()`
+// previously read their API key via a raw `std::env::var`, so a credential
+// configured ONLY via `tagent config keys set <provider>` (the secure store)
+// silently produced an empty bearer/x-api-key value and a 401 — even though
+// `pick_credentials`/the startup banner correctly reported the credential as
+// configured (they already consulted the shared resolver since #3431). These
+// tests seed a `FileKeyStore` directly (env absent, `$HOME` sandboxed to a
+// tempdir) and assert the resolved VALUE reaches the built `ApiEndpoint`, not
+// just that construction doesn't panic. Locks both `ENDPOINT_ENV_LOCK` (this
+// file's existing env-var lock) and `crate::test_env::{ENV_LOCK,HOME_LOCK}`
+// since these tests are the first in this file to also mutate `$HOME`.
+
+#[test]
+fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: ENDPOINT_ENV_LOCK + ENV_LOCK + HOME_LOCK held for the whole body.
+    unsafe {
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "openrouter",
+        "sk-or-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = openrouter_endpoint();
+    assert_eq!(
+        ep.auth_header_value, "Bearer sk-or-FAKE-store-value",
+        "a store-only openrouter key must reach the built ApiEndpoint"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_openrouter {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn openrouter_endpoint_env_beats_store() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: locks held for the whole body.
+    unsafe {
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-FAKE-env-value");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "openrouter",
+        "sk-or-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = openrouter_endpoint();
+    assert_eq!(
+        ep.auth_header_value, "Bearer sk-or-FAKE-env-value",
+        "process env must win over the store"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_openrouter {
+            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: locks held for the whole body.
+    unsafe {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "anthropic",
+        "sk-ant-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = AnthropicAdapter.api_endpoint(true);
+    assert_eq!(ep.auth_source, AuthSource::AnthropicApiKey);
+    assert_eq!(ep.auth_header_name, "x-api-key");
+    assert_eq!(
+        ep.auth_header_value, "sk-ant-FAKE-store-value",
+        "a store-only anthropic key must reach the built ApiEndpoint"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_anthropic {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn anthropic_direct_endpoint_env_beats_store() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: locks held for the whole body.
+    unsafe {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-FAKE-env-value");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::inference::credentials::KeyStore::set(
+        &store,
+        "anthropic",
+        "sk-ant-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = AnthropicAdapter.api_endpoint(true);
+    assert_eq!(
+        ep.auth_header_value, "sk-ant-FAKE-env-value",
+        "process env must win over the store"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_anthropic {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
