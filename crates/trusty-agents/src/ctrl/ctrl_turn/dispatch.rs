@@ -198,6 +198,7 @@ pub(crate) async fn run_ctrl_turn_via_rest(
         false,
         None,
         false,
+        routed_cfg.llm.strict_tool_discipline(),
         effective_use_direct,
         &routed_cfg.llm.stop_sequences,
     )
@@ -226,6 +227,7 @@ pub(crate) async fn run_ctrl_turn_via_rest(
                 false,
                 None,
                 false,
+                routed_cfg.llm.strict_tool_discipline(),
                 routed_cfg.llm.use_anthropic_direct,
                 &routed_cfg.llm.stop_sequences,
             )
