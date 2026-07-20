@@ -141,7 +141,7 @@ baseline new names should follow.
 
 1. Create `crates/trusty-mpm/src/assets/skills/<name>.md`
 2. Add a `pub const` in `core/bundle.rs` with `include_str!`
-3. Add a `BundledArtifact` entry to `ALL` with `InstallPolicy::Overwrite`
+3. Add a `BundledArtifact` entry to `ALL` with `InstallPolicy::Overwrite` — skills are framework-owned, so they must track upgrades; `InstallPolicy::SeedOnce` is reserved for a genuinely user-owned artifact that should be written once and never clobbered (`--force` resets it back to the shipped default)
 4. Update the count assertion in `bundle_tests.rs`
 5. Run `cargo test -p trusty-mpm bundle` — all tests must pass
 6. Commit with `feat(trusty-mpm): add <skill-name> skill — <reason>`

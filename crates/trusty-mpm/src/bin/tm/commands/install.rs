@@ -4,10 +4,13 @@
 //! assembles the PM prompt, deploys agents and skills, and wires Claude Code
 //! hooks — and benefits from its own file so it stays reviewable.
 //! What: `install`, `install_claude_hooks` / `install_claude_hooks_at`,
-//! `mpm_hook_additions`, `install_to`, `deploy_report_lines`,
+//! `mpm_hook_additions`, `install_to`, `install_one`, `deploy_report_lines`,
 //! `reset_report_lines`, `skill_report_lines`, `remove_global_trusty_mpm_hooks`,
 //! `write_project_hooks_for_dir`.
-//! Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
+//! Test: `install_writes_all_artifacts`,
+//! `overwrite_artifact_refreshes_modified_file_without_force`,
+//! `seed_once_artifact_is_not_clobbered_without_force`,
+//! `seed_once_artifact_force_resets_to_shipped_default`,
 //! `install_claude_hooks_at_writes_only_the_managed_config_dir`,
 //! `install_claude_hooks_at_is_idempotent`,
 //! `install_claude_hooks_at_never_touches_a_sibling_project_dir`,
@@ -472,14 +475,74 @@ pub(crate) fn skill_report_lines(
     lines
 }
 
+/// Write one bundled artifact to `dest` according to its declared
+/// [`InstallPolicy`](trusty_mpm::core::bundle::InstallPolicy), returning its
+/// report line.
+///
+/// Why: split out of [`install_to`] so the two policy branches are testable
+/// against a synthetic [`BundledArtifact`](trusty_mpm::core::bundle::BundledArtifact)
+/// fixture without adding a fake entry to the real
+/// [`ALL`](trusty_mpm::core::bundle::ALL) table (issue #3381 — no shipped
+/// artifact currently uses `SeedOnce`).
+/// What: [`Overwrite`](trusty_mpm::core::bundle::InstallPolicy::Overwrite)
+/// always writes the embedded contents, replacing any existing file — this is
+/// what makes `tm install` actually deliver refreshed framework assets on
+/// upgrade; `force` has no additional effect. `SeedOnce` writes only if
+/// `dest` is absent, preserving a user edit across upgrades; `force` is the
+/// escape hatch that resets it back to the shipped default. The report line
+/// distinguishes written / refreshed / preserved-user-file outcomes so
+/// `tm install` output stays honest about what it did and did not touch.
+/// Test: `overwrite_artifact_refreshes_modified_file_without_force`,
+/// `seed_once_artifact_is_not_clobbered_without_force`,
+/// `seed_once_artifact_force_resets_to_shipped_default`.
+pub(crate) fn install_one(
+    dest: &std::path::Path,
+    artifact: &trusty_mpm::core::bundle::BundledArtifact,
+    force: bool,
+) -> anyhow::Result<String> {
+    use trusty_mpm::core::bundle::InstallPolicy;
+
+    let exists = dest.exists();
+    match artifact.install {
+        InstallPolicy::Overwrite => {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(dest, artifact.contents)?;
+            Ok(if exists {
+                format!("\u{2713} {} (refreshed)", artifact.rel_path)
+            } else {
+                format!("\u{2713} {}", artifact.rel_path)
+            })
+        }
+        InstallPolicy::SeedOnce => {
+            if exists && !force {
+                return Ok(format!(
+                    "- {} (exists, preserved \u{2014} user-owned)",
+                    artifact.rel_path
+                ));
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(dest, artifact.contents)?;
+            Ok(if exists {
+                format!("\u{2713} {} (reset to shipped default)", artifact.rel_path)
+            } else {
+                format!("\u{2713} {}", artifact.rel_path)
+            })
+        }
+    }
+}
+
 /// Write every bundled artifact under `paths`, returning a per-file report.
 ///
 /// Why: separating the filesystem work from argument parsing and stdout makes
 /// the installer unit-testable against a `tempfile::TempDir`.
-/// What: for each [`trusty_mpm::core::bundle::ALL`] artifact, creates parent
-/// directories and writes the file; an existing file is skipped unless `force`.
-/// Returns one human-readable status line per artifact.
-/// Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`.
+/// What: for each [`trusty_mpm::core::bundle::ALL`] artifact, resolves its
+/// destination under `paths.framework` and delegates the policy-driven write
+/// to [`install_one`].
+/// Test: `install_writes_all_artifacts`.
 pub(crate) fn install_to(
     paths: &trusty_mpm::core::paths::FrameworkPaths,
     force: bool,
@@ -487,15 +550,7 @@ pub(crate) fn install_to(
     let mut report = Vec::new();
     for artifact in trusty_mpm::core::bundle::ALL {
         let dest = paths.framework.join(artifact.rel_path);
-        if dest.exists() && !force {
-            report.push(format!("- {} (exists, skipped)", artifact.rel_path));
-            continue;
-        }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dest, artifact.contents)?;
-        report.push(format!("\u{2713} {}", artifact.rel_path));
+        report.push(install_one(&dest, artifact, force)?);
     }
     Ok(report)
 }

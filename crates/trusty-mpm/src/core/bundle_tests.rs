@@ -322,6 +322,18 @@ fn framework_instructions_overwrites() {
 }
 
 #[test]
+fn seed_once_constructor_builds_the_expected_artifact() {
+    // Issue #3381: no shipped artifact currently uses `SeedOnce`, so the
+    // `seed_once()` constructor (the counterpart to `overwrite()`) is only
+    // exercised here rather than via a real `ALL` entry. Pins its shape so
+    // a future user-owned artifact can rely on it.
+    let artifact = all_inner::seed_once("instructions/CLAUDE.md", "stub contents");
+    assert_eq!(artifact.rel_path, "instructions/CLAUDE.md");
+    assert_eq!(artifact.contents, "stub contents");
+    assert_eq!(artifact.install, InstallPolicy::SeedOnce);
+}
+
+#[test]
 fn optimizer_toml_is_parseable() {
     // The shipped policy must be valid TOML or the installer would deploy
     // a file the daemon then fails to load.
