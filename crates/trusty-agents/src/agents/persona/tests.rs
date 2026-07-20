@@ -9,11 +9,16 @@
 //! Test: This module IS the test surface.
 
 use super::*;
-use std::sync::Mutex;
 
-// Tests in this module mutate `TAGENT_CONFIG_DIR`, so they share a lock
-// to avoid clobbering each other when run in parallel under cargo test.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+// Tests in this module mutate `TAGENT_CONFIG_DIR`. #3465-followup: this file
+// previously defined its OWN `ENV_LOCK` static, separate from
+// `agents::tests::loading::ENV_LOCK` (also a `TAGENT_CONFIG_DIR` mutator) —
+// two different lock objects guarding the same process-global var don't
+// exclude each other, so the two files' tests raced. Use the shared lock
+// instead so every `TAGENT_CONFIG_DIR` mutator in the crate is mutually
+// exclusive. It's a `tokio::sync::Mutex`; `blocking_lock()` is safe here
+// because none of this file's tests run inside a tokio runtime.
+use crate::agents::tests::loading::ENV_LOCK;
 
 fn fresh_tempdir() -> PathBuf {
     let base = std::env::temp_dir().join(format!("trusty-agents-persona-{}", uuid::Uuid::new_v4()));
@@ -242,7 +247,7 @@ fn strip_frontmatter_local_passthrough() {
 
 #[test]
 fn persona_path_uses_env_override() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.blocking_lock();
     let dir = fresh_tempdir();
     // Caller normally sets TAGENT_CONFIG_DIR to <root>/agents; we
     // replicate that here so we can verify the parent-stripping logic.
@@ -262,7 +267,7 @@ fn persona_path_uses_env_override() {
 
 #[test]
 fn assemble_task_with_context_includes_both_blocks() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.blocking_lock();
     let dir = fresh_tempdir();
     let agents_dir = dir.join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -322,7 +327,7 @@ fn assemble_task_with_context_includes_both_blocks() {
 
 #[test]
 fn assemble_task_with_context_strips_tag() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.blocking_lock();
     let dir = fresh_tempdir();
     let agents_dir = dir.join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -353,7 +358,7 @@ fn assemble_task_with_context_strips_tag() {
 
 #[test]
 fn assemble_task_with_context_no_language_for_unknown_agent() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.blocking_lock();
     let dir = fresh_tempdir();
     let agents_dir = dir.join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -380,7 +385,7 @@ fn assemble_task_with_context_no_language_for_unknown_agent() {
 
 #[test]
 fn assemble_task_falls_back_to_plain_task_when_no_skills_present() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.blocking_lock();
     let dir = fresh_tempdir();
     let agents_dir = dir.join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();

@@ -169,6 +169,11 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# IANA named-timezone support (e.g. "America/New_York") for chrono. Already
+# resolved in Cargo.lock transitively via `tera` (trusty-git-analytics); pinned
+# here as a first-class workspace dep for trusty-agents' user-timezone-aware
+# date/time rendering (#3052 follow-up).
+chrono-tz = "0.9"
 base64 = "0.22"
 # jsonwebtoken 10 splits the crypto backend behind a feature flag (no backend
 # in default features). We select `aws_lc_rs` (already built via aws-smithy) so

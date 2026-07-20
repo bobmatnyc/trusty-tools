@@ -27,7 +27,7 @@ pub mod prompt_builder;
 pub mod registry;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 // Re-export the config data shapes so `crate::agents::<Type>` keeps resolving
 // for every external consumer after the #358 file split.

@@ -8,6 +8,7 @@
 
 use super::*;
 use async_openai::types::ChatCompletionToolType;
+use serial_test::serial;
 
 #[test]
 fn arguments_parse_as_json() {
@@ -240,8 +241,19 @@ fn tool_discipline_all_tool_calls_never_increments_counter() {
 // `async-openai` client's config, using `secrecy::ExposeSecret` to read the
 // otherwise-redacted `SecretString` — not just that construction doesn't
 // panic.
+//
+// SAFETY: each test below is `#[serial]` AND holds `crate::test_env::{ENV_LOCK,
+// HOME_LOCK}` for its full body (mirrors `llm::credentials::tests`'s documented
+// convention, #274). `#[serial]` is required because `llm::http::tests` and
+// `llm::inference_client::tests` mutate the same credential env vars from
+// `#[tokio::test]`s that cannot hold a `std::sync::Mutex` guard across
+// `.await` and rely on `#[serial]` alone for exclusion — so every sync test
+// touching these vars must also carry `#[serial]` to stay mutually exclusive
+// with them (a prior gap here caused a flaky cross-test env-var race under
+// `cargo test --workspace`).
 
 #[test]
+#[serial]
 fn create_client_resolves_key_from_store_when_env_absent() {
     use async_openai::config::Config as _;
     use secrecy::ExposeSecret as _;
@@ -306,6 +318,7 @@ fn create_client_resolves_key_from_store_when_env_absent() {
 }
 
 #[test]
+#[serial]
 fn create_client_env_beats_store() {
     use async_openai::config::Config as _;
     use secrecy::ExposeSecret as _;
@@ -373,6 +386,7 @@ fn create_client_env_beats_store() {
 /// multi-provider error instead of building a client with an empty key.
 /// Test: itself.
 #[test]
+#[serial]
 fn create_client_missing_everywhere_errors_clearly() {
     let _env_guard = crate::test_env::ENV_LOCK
         .lock()

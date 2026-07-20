@@ -265,11 +265,28 @@ async fn test_refresh_skips_non_md_files() {
 // helper swallows all errors, so the observable contract is "the index file is
 // created and is valid JSON" after a refresh against an empty project.
 #[tokio::test]
+// Why: `crate::test_env::HOME_LOCK` is held intentionally across the
+// `.await` below so this test doesn't race other `$HOME`-sandboxing tests
+// crate-wide — matches the established, deliberate pattern in
+// `api::server::tests` (see that module's identical `#![allow]`).
+#[allow(clippy::await_holding_lock)]
 async fn refresh_global_cache_is_noop_on_missing_sources() {
+    // #3465-followup: this test sandboxes `$HOME` but previously mutated it
+    // without `crate::test_env::HOME_LOCK` (the claim "tests run
+    // single-threaded by default" is false under `cargo test`'s default
+    // multi-threaded runner), so it could race any other HOME-sandboxing
+    // test in the binary. Hold the shared lock across the `.await` below —
+    // this crate already holds `std::sync::Mutex` guards across `.await` in
+    // other files (`api::server::tests::ctrl_sessions`,
+    // `api::server::tests::models`) without issue.
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
 
-    // SAFETY: tests run single-threaded by default; HOME restored before return.
+    // SAFETY: HOME_LOCK held for the entire test body; HOME restored before return.
     let prev_home = std::env::var_os("HOME");
     unsafe {
         std::env::set_var("HOME", home.path());
