@@ -371,8 +371,37 @@ pub struct ManagedSessionSummary {
     pub id: String,
     /// tmux session name.
     pub name: String,
-    /// Lifecycle state word.
+    /// Lifecycle state word (#3302: reconciled against LIVE tmux for DISPLAY
+    /// by the list/get endpoints — an `active`/`stopped` record whose tmux
+    /// session is absent/present is shown as `stopped`/`active` regardless of
+    /// what is actually persisted). Use [`Self::persisted_state`], not this
+    /// field, for any RESUME/RESTART decision (#3531).
     pub state: String,
+    /// The RAW, un-reconciled lifecycle state exactly as persisted in the
+    /// daemon's store, mirroring
+    /// `daemon::managed_routes::SessionSummary::persisted_state` field-for-field
+    /// (additive; #3531).
+    ///
+    /// Why: the daemon's own `/resume` endpoint validates a restart against
+    /// the PERSISTED state only, with no idea a caller's copy of `state` was
+    /// display-reconciled. Before this field existed, a zombie session
+    /// (record still `active`/`provisioning` but its tmux pane gone) had its
+    /// displayed `state` collapsed to `stopped` — indistinguishable, from the
+    /// CLI's point of view, from a session that is GENUINELY stopped. The
+    /// CLI's own zombie auto-reconcile
+    /// (`bin/tm/commands/guided_resume::plan_resume`) then misclassified the
+    /// zombie as a plain restart instead of a reconcile-then-restart, and the
+    /// daemon's `/resume` rejected it with a 409 — the #3531 dead-end.
+    /// Resume/restart decisions must key off THIS field.
+    /// `#[serde(default)]` keeps the client tolerant of an OLDER daemon that
+    /// omits it — it deserializes to `None`, and callers fall back to `state`
+    /// (the pre-#3531 behavior).
+    /// What: `Some(<raw state>)` when the daemon sends it; `None` for an older
+    /// daemon.
+    /// Test: `guided_resume_plan_resume_prefers_persisted_state_over_display_state`
+    /// in `bin/tm/tests_behavior_c_tests.rs`.
+    #[serde(default)]
+    pub persisted_state: Option<String>,
     /// Provisioned workspace path, if any.
     #[serde(default)]
     pub workspace_path: Option<String>,

@@ -173,6 +173,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             state: "Running".to_string(),
+            persisted_state: None,
             workspace_path: None,
             repo_url: None,
             branch: None,

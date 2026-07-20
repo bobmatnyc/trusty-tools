@@ -396,6 +396,125 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     );
 }
 
+/// #3531 core regression: reproduces the reported interactive-picker
+/// dead-end against a REAL hermetic daemon (not a hand-rolled stub) — a
+/// session whose tmux window is gone but whose PERSISTED record is still
+/// `Active` (a zombie) must auto-reconcile and restart successfully via
+/// `session_resume`, never surface the daemon's raw 409 ("cannot resume a
+/// session in state 'active'").
+///
+/// Why: `spawn_test_daemon` (the isolated `FakeNoopTmuxDriver`-backed daemon)
+/// always reports zero live tmux sessions (`list_sessions` → `Ok(vec![])`),
+/// so ANY session summary the list/get endpoints return here is
+/// display-reconciled to `state = "stopped"` (`reconcile_live_state`,
+/// `summary.rs`) regardless of what is actually persisted — this is
+/// EXACTLY the #3302 reconciliation that, pre-#3531, made the CLI's zombie
+/// classification (`guided_resume::plan_resume`) misfire: it read the
+/// display-reconciled `"stopped"` instead of the daemon's authoritative
+/// persisted state, took the plain `Restart` branch, and the daemon's
+/// `/resume` (which validates the REAL persisted state) rejected it with a
+/// 409. Seeding the record `Active` (via `set_workspace`, mirroring a real
+/// zombie — the runtime died/rebooted before the daemon's own reap tick
+/// caught up) against this fake-tmux daemon reproduces that exact mismatch
+/// deterministically, with no dependency on real tmux/TTY state.
+/// What: seeds a session `Active` with a workspace directory that genuinely
+/// exists on disk (so the eventual restart is NOT blocked by
+/// `WorkspaceMissing`); asserts the GET response shows the #3531 mismatch
+/// (`state: "stopped"`, `persisted_state: "active"`); calls the real
+/// `session_resume` CLI function and asserts `Ok(())` — proving the
+/// auto-reconcile (`/runtime-stop` then `/resume`) fired instead of
+/// dead-ending on the daemon's 409; and confirms the daemon's final record is
+/// genuinely `active` again (a successful restart, not a silent no-op).
+#[tokio::test]
+async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
+    use trusty_mpm::daemon::{api, state::DaemonState};
+    use trusty_mpm::runtime::RuntimeKind;
+    use trusty_mpm::session_manager::{ManagedSessionId, ManagedSessionState};
+
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.clone()).await);
+    let id = ManagedSessionId::new();
+    let ws = root.join(format!("{id}-zombie-ws"));
+    tokio::fs::create_dir_all(&ws)
+        .await
+        .expect("create a REAL workspace dir so the restart can fully succeed");
+
+    let mgr = state.session_manager().await;
+    mgr.create_with_id(
+        id,
+        "regression: #3531 zombie-restart CLI test".to_string(),
+        Some(ws.clone()),
+        None,
+        Some(ws.clone()),
+        Some("https://example.com/r.git".to_string()),
+        Some("main".to_string()),
+        RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed session");
+
+    // Force the record to the zombie shape: PERSISTED Active, but this
+    // isolated daemon's fake tmux driver reports no live sessions at all —
+    // exactly "tmux window gone, daemon still says active".
+    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
+        .await
+        .expect("force record to Active (simulating a zombie)");
+
+    let router = api::router(std::sync::Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    let url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Sanity check: reproduce the #3531 mismatch at the wire level BEFORE
+    // touching the resume path — the display `state` must already disagree
+    // with `persisted_state`, exactly what made the pre-#3531 CLI misfire.
+    let before: serde_json::Value = client
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        before.get("state").and_then(|v| v.as_str()),
+        Some("stopped"),
+        "sanity: the list/get endpoint's display reconciliation must show \
+         'stopped' for an Active record with no live tmux (the #3302 behavior)"
+    );
+    assert_eq!(
+        before.get("persisted_state").and_then(|v| v.as_str()),
+        Some("active"),
+        "sanity: persisted_state must still carry the TRUE record state"
+    );
+
+    // The actual #3531 fix under test: session_resume must auto-reconcile
+    // this zombie and succeed, never surface the daemon's raw 409.
+    session_resume(&client, &url, id.to_string()).await.expect(
+        "a zombie session (persisted Active, tmux absent) must auto-reconcile and restart \
+         successfully, not error with the daemon's raw 409",
+    );
+
+    let after: serde_json::Value = client
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.get("persisted_state").and_then(|v| v.as_str()),
+        Some("active"),
+        "the restart must have genuinely succeeded — the record is Active again \
+         (not left Stopped by a failed/skipped restart)"
+    );
+}
+
 /// #2457: a 404 from `decommission` on a nonexistent id must propagate as
 /// `Err` — `prune.rs`'s bulk loop relies on this via `?`.
 #[tokio::test]
