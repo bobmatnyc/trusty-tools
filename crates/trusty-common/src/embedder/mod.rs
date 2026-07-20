@@ -450,6 +450,59 @@ mod tests {
         }
     }
 
+    /// Why: issue #3486 / #3493 P0 — the default embedding model must be the
+    /// non-quantized fp32 variant (faster AND more accurate on the CPU EP
+    /// this model actually runs on), not the previous INT8 default.
+    /// What: clears `TRUSTY_EMBEDDER_MODEL` and asserts the resolver returns
+    /// `AllMiniLML6V2` (fp32).
+    /// Test: this test.
+    #[test]
+    fn resolve_default_embedding_model_defaults_to_fp32() {
+        use crate::embedder::fast_embedder::resolve_default_embedding_model;
+        let _g = ENV_LOCK.lock().unwrap();
+        let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
+        assert_eq!(
+            resolve_default_embedding_model(),
+            fastembed::EmbeddingModel::AllMiniLML6V2,
+            "default must be the non-quantized fp32 model, not INT8"
+        );
+    }
+
+    /// Why: operators who need the smaller ~23MB INT8 footprint more than
+    /// speed/accuracy must still be able to opt back in without a rebuild.
+    /// What: sets `TRUSTY_EMBEDDER_MODEL` to each accepted spelling
+    /// (case-insensitive) and asserts `AllMiniLML6V2Q` is selected.
+    /// Test: this test.
+    #[test]
+    fn resolve_default_embedding_model_int8_opt_in() {
+        use crate::embedder::fast_embedder::resolve_default_embedding_model;
+        let _g = ENV_LOCK.lock().unwrap();
+        for spelling in ["int8", "INT8", "quantized", "Quantized", "q", "Q"] {
+            let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some(spelling));
+            assert_eq!(
+                resolve_default_embedding_model(),
+                fastembed::EmbeddingModel::AllMiniLML6V2Q,
+                "{spelling:?} must select the INT8 opt-in model"
+            );
+        }
+    }
+
+    /// Why: an unrecognised value must never panic or silently pick INT8 —
+    /// it must fall back to the safe, accurate fp32 default.
+    /// What: sets an unknown value and asserts the fp32 default wins.
+    /// Test: this test.
+    #[test]
+    fn resolve_default_embedding_model_ignores_unknown() {
+        use crate::embedder::fast_embedder::resolve_default_embedding_model;
+        let _g = ENV_LOCK.lock().unwrap();
+        let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some("not-a-real-model"));
+        assert_eq!(
+            resolve_default_embedding_model(),
+            fastembed::EmbeddingModel::AllMiniLML6V2,
+            "an unrecognised value must fall back to the fp32 default, not INT8"
+        );
+    }
+
     #[tokio::test]
     async fn mock_embedder_round_trip() {
         let e = MockEmbedder::new(EMBED_DIM);
@@ -490,6 +543,71 @@ mod tests {
         let v1 = embed_one(&e, "cached").await.unwrap();
         let v2 = embed_one(&e, "cached").await.unwrap();
         assert_eq!(v1, v2);
+    }
+
+    /// Fixed sample used by [`default_model_matches_sentence_transformers_reference`].
+    ///
+    /// Why: issue #3486 / #3493 P0 — the default model swap (INT8 →
+    /// `AllMiniLML6V2` fp32) must be verified against a genuine, independent
+    /// reference, not just "fastembed didn't error". These 5 texts and their
+    /// reference vectors were generated with a real
+    /// `sentence-transformers/all-MiniLM-L6-v2` CPU fp32 model (`device="cpu"`,
+    /// `normalize_embeddings=True`) — the same independent-library method the
+    /// #3486 CoreML/fp16 experiment's correctness gate used (there: 0.999999+
+    /// mean cosine for fp32/fp16 vs 0.9897 for INT8, across a 50-chunk sample).
+    const REFERENCE_TEXTS: [&str; 5] = [
+        "fn authenticate(user: &str) -> bool",
+        "pub struct Embedder { model: TextEmbedding }",
+        "the quick brown fox jumps over the lazy dog",
+        "async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>",
+        "memory palace consolidation cycle",
+    ];
+
+    include!("reference_vectors_test_data.rs");
+
+    /// Why: verifies the actual production default (`FastEmbedder::new()`,
+    /// which now resolves to `AllMiniLML6V2` fp32 per
+    /// `resolve_default_embedding_model`) produces embeddings numerically
+    /// consistent with a genuine, independent `sentence-transformers`
+    /// reference — not just "some vector came back" (issue #3486 / #3493 P0).
+    /// What: embeds [`REFERENCE_TEXTS`] with the default embedder and asserts
+    /// mean cosine similarity against `REFERENCE_VECTORS` is `>= 0.999`
+    /// (matching the experiment's fp32/fp16 threshold, well above INT8's
+    /// measured 0.9897).
+    /// Test: this test (`#[ignore]` — downloads/loads a real ONNX model, like
+    /// the other fastembed-backed tests in this module).
+    #[tokio::test]
+    #[ignore]
+    async fn default_model_matches_sentence_transformers_reference() {
+        fn cosine(a: &[f32], b: &[f32]) -> f64 {
+            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            dot / (norm_a * norm_b)
+        }
+
+        let e = FastEmbedder::new().await.unwrap();
+        let texts: Vec<String> = REFERENCE_TEXTS.iter().map(|s| s.to_string()).collect();
+        let vectors = e.embed_batch(&texts).await.unwrap();
+        assert_eq!(vectors.len(), REFERENCE_VECTORS.len());
+
+        let sims: Vec<f64> = vectors
+            .iter()
+            .zip(REFERENCE_VECTORS.iter())
+            .map(|(v, r)| cosine(v, r))
+            .collect();
+        let mean_sim = sims.iter().sum::<f64>() / sims.len() as f64;
+        let min_sim = sims.iter().cloned().fold(f64::INFINITY, f64::min);
+        println!(
+            "default_model_matches_sentence_transformers_reference: mean_cosine={mean_sim:.6} min_cosine={min_sim:.6}"
+        );
+
+        assert!(
+            mean_sim >= 0.999,
+            "default model must match the sentence-transformers reference to \
+             >= 0.999 mean cosine similarity (got {mean_sim:.6}, min {min_sim:.6}); \
+             the previous INT8 default only reached 0.9897 (issue #3486 / #3493 P0)"
+        );
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
