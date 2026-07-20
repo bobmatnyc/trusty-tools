@@ -15,7 +15,6 @@ fn constants_are_non_empty() {
     assert!(!OPTIMIZER_TOML.trim().is_empty());
     assert!(!OVERSEER_TOML.trim().is_empty());
     assert!(!FRAMEWORK_INSTRUCTIONS.trim().is_empty());
-    assert!(!CLAUDE_STUB.trim().is_empty());
     assert!(!BASE_AGENT.trim().is_empty());
     assert!(!BASE_ENGINEER.trim().is_empty());
     assert!(!BASE_RESEARCH.trim().is_empty());
@@ -313,24 +312,6 @@ fn output_style_registry_default_resolves() {
 }
 
 #[test]
-fn framework_instructions_and_stub_differ() {
-    // The framework artifact and the user stub are distinct files with
-    // distinct content; conflating them would lose either upgrades or
-    // user edits.
-    assert_ne!(FRAMEWORK_INSTRUCTIONS, CLAUDE_STUB);
-}
-
-#[test]
-fn claude_stub_is_seed_once() {
-    // The user stub must never be overwritten on re-install.
-    let stub = ALL
-        .iter()
-        .find(|a| a.rel_path == "instructions/CLAUDE.md")
-        .expect("CLAUDE.md stub present in bundle");
-    assert_eq!(stub.install, InstallPolicy::SeedOnce);
-}
-
-#[test]
 fn framework_instructions_overwrites() {
     // The framework instructions must be refreshed on every install.
     let instr = ALL
@@ -407,11 +388,16 @@ fn bundle_table_is_complete() {
     // rust-build-performance (1, per Bob directive 2026-07-17): a single
     //   flat-file bundled skill (no references/ — small enough to not need
     //   one), declared by rust-engineer and tauri-engineer. 178 + 1 = 179.
-    assert_eq!(ALL.len(), 179);
+    // Issue #3374: the dead `instructions/CLAUDE.md` SeedOnce stub artifact
+    //   was removed — it was never read back by any consumer; the project
+    //   `CLAUDE.md` actually delivered to users is `CLAUDE_MD_STUB` in
+    //   `instruction_pipeline.rs`, a separate string not part of this table.
+    //   179 - 1 = 178.
+    assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 179, "artifact paths must be unique");
+    assert_eq!(paths.len(), 178, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

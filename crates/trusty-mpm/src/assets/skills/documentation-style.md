@@ -36,7 +36,9 @@ Why/What/Test triple (or your project's equivalent) stands on its own.
 | **Test** | Where is this proven? (backtick-quoted test name(s)) | Yes for non-obvious code; lighter touch OK for trivial items |
 | **Spec References** | Which spec section governs this, if any? | **Opt-in** — only when a real spec governs it |
 
-**Proportionality principle:** Documentation effort scales with how surprising the
+**Proportionality principle** (canonical statement lives in the non-overridable
+`BASE_PM.md` "Framework-Guaranteed Conventions" section — this is elaboration,
+not the source of truth): documentation effort scales with how surprising the
 code is. For self-evident items (obvious one-liners, trivial getters, thin facades),
 a single-line summary suffices; for API entry points and design-heavy code, the
 full Why/What/Test pattern is mandatory. **Why**/**What**/**Test** stay exactly what
@@ -76,13 +78,14 @@ contracts, safety/TCC behavior, cross-crate surfaces.
 re-exports, one-line helpers. If a competent reader's first guess is right,
 one line is enough.
 
-**Ticket-attributed changes:** When you modify a function, class, or module
-*because of* a ticket, add a concise inline pointer at the change site —
-`// #1234: <one-line reason>`, or `// See #1234` when the ticket title says
-it all. This uses the same pointer convention described above for
-defensive-reasoning paragraphs: the ticket reference is the pointer, never a
-narrative. Full context stays in the ticket, not a changelog embedded in
-comments.
+**Ticket-attributed changes** (canonical statement lives in `BASE_PM.md`
+"Framework-Guaranteed Conventions" — this is elaboration, not the source of
+truth): when you modify a function, class, or module *because of* a ticket,
+add a concise inline pointer at the change site — `// #1234: <one-line
+reason>`, or `// See #1234` when the ticket title says it all. This uses the
+same pointer convention described above for defensive-reasoning paragraphs:
+the ticket reference is the pointer, never a narrative. Full context stays in
+the ticket, not a changelog embedded in comments.
 
 ## Per-Type Guides
 

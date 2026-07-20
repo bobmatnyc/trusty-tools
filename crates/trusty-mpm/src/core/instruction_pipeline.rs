@@ -133,6 +133,12 @@ const CLAUDE_MD_STUB: &str = "# Project Instructions
 
 ## Commit & PR Attribution
 
+The non-overridable framework instructions (`BASE_PM.md` \"Framework-Guaranteed
+Conventions\") are the source of truth for this convention and apply
+regardless of what this file says. This restatement exists so a `claude`
+session launched directly in this project (outside `tm` orchestration) still
+sees it, since only `tm`-orchestrated launches receive the BASE_PM floor.
+
 Every commit message and PR body in this project ends with exactly this footer:
 
 ```

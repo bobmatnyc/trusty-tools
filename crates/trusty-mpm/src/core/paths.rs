@@ -297,17 +297,6 @@ impl FrameworkPaths {
         self.framework_instructions()
     }
 
-    /// Path of the user-editable instruction stub (`instructions/CLAUDE.md`).
-    ///
-    /// Why: the installer seeds this stub once for project-specific notes;
-    /// distinguishing it from `framework_instructions()` lets the installer
-    /// avoid clobbering user edits on re-install.
-    /// What: `instructions/CLAUDE.md` under the framework root.
-    /// Test: `claude_stub_path_is_under_instructions`.
-    pub fn claude_stub(&self) -> PathBuf {
-        self.instructions.join("CLAUDE.md")
-    }
-
     /// Directory holding the trusty-mpm agent *source* files.
     ///
     /// Why: the agent build pipeline reads `extends:`-bearing source agents
@@ -787,17 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_stub_path_is_under_instructions() {
-        // The user stub lives alongside the framework instructions but under
-        // the `CLAUDE.md` name Claude Code reads by convention.
-        let paths = FrameworkPaths::under("/base");
-        assert_eq!(
-            paths.claude_stub(),
-            PathBuf::from("/base/.trusty-mpm/framework/instructions/CLAUDE.md")
-        );
-    }
-
-    #[test]
     fn agent_source_dir_is_framework_agents() {
         // With no submodule, agent sources fall back to `framework/agents`.
         let mut paths = FrameworkPaths::under("/base");
@@ -817,14 +795,6 @@ mod tests {
             paths.claude_agents_dir(),
             PathBuf::from("/base/.claude/agents")
         );
-    }
-
-    #[test]
-    fn framework_instructions_and_stub_are_distinct() {
-        // The framework artifact and the user stub must never resolve to the
-        // same path, or the installer would overwrite user edits.
-        let paths = FrameworkPaths::under("/base");
-        assert_ne!(paths.framework_instructions(), paths.claude_stub());
     }
 
     #[test]
