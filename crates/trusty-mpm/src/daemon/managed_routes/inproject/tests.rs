@@ -77,7 +77,7 @@ fn launch_and_daemon_agree_on_repos_root_env() {
 #[test]
 fn ensure_base_clone_migrates_old_layout_dir_aside() {
     // 1. Build a real source repo to clone from.
-    let src = tempfile::TempDir::new().expect("src tmp dir");
+    let src = crate::test_support::hermetic_temp_dir();
     let src_path = src.path();
     let init = std::process::Command::new("git")
         .args(["init", src_path.to_str().expect("src utf8")])
@@ -111,7 +111,7 @@ fn ensure_base_clone_migrates_old_layout_dir_aside() {
 
     // 2. Build an OLD-LAYOUT base dir: <parent>/owner/repo/ containing a fake
     //    per-session UUID full-clone subdir and NO top-level `.git`.
-    let parent = tempfile::TempDir::new().expect("parent tmp dir");
+    let parent = crate::test_support::hermetic_temp_dir();
     let base = parent.path().join("owner").join("repo");
     let old_session = base.join("00000000-old-session-uuid");
     std::fs::create_dir_all(&old_session).expect("create old-layout subdir");
@@ -164,7 +164,7 @@ fn ensure_base_clone_migrates_old_layout_dir_aside() {
 #[test]
 fn migrate_old_layout_aside_ignores_empty_and_git_dirs() {
     // Empty dir → Ok(None), dir untouched.
-    let empty = tempfile::TempDir::new().expect("empty tmp");
+    let empty = crate::test_support::hermetic_temp_dir();
     let empty_base = empty.path().join("owner").join("repo");
     std::fs::create_dir_all(&empty_base).expect("create empty base");
     assert!(
@@ -176,7 +176,7 @@ fn migrate_old_layout_aside_ignores_empty_and_git_dirs() {
     assert!(empty_base.is_dir(), "empty base dir must remain in place");
 
     // Dir with a top-level `.git` → Ok(None), dir untouched.
-    let git = tempfile::TempDir::new().expect("git tmp");
+    let git = crate::test_support::hermetic_temp_dir();
     let git_base = git.path().join("owner").join("repo");
     std::fs::create_dir_all(git_base.join(".git")).expect("create .git");
     std::fs::write(git_base.join("file"), b"x").expect("write file");
@@ -269,7 +269,7 @@ fn session_worktree_path_uses_dot_prefix() {
     // — NOT derived from production code. If `create_session_worktree` changed
     // to `base_path.join("worktrees").join(...)` the `starts_with` assertion
     // would fail because `base/worktrees/<name>` does NOT start with `base/.worktrees`.
-    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let tmp = crate::test_support::hermetic_temp_dir();
     let base = tmp.path();
 
     // Initialise a real git repo so `git worktree add` can run.
@@ -355,7 +355,7 @@ fn session_worktree_path_uses_dot_prefix() {
 /// Test: this function IS the test.
 #[test]
 fn worktree_name_collides_detects_existing_dir_and_branch() {
-    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let tmp = crate::test_support::hermetic_temp_dir();
     let base = tmp.path();
 
     let init = std::process::Command::new("git")
@@ -434,7 +434,7 @@ fn worktree_name_collides_detects_existing_dir_and_branch() {
 /// Test: this function IS the test.
 #[test]
 fn create_session_worktree_rejects_existing_worktree_dir() {
-    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let tmp = crate::test_support::hermetic_temp_dir();
     let base = tmp.path();
 
     let init = std::process::Command::new("git")
@@ -479,7 +479,7 @@ fn create_session_worktree_rejects_existing_worktree_dir() {
 fn ensure_worktrees_gitignored_idempotent() {
     // ensure_worktrees_gitignored must write .worktrees/ to .git/info/exclude
     // exactly ONCE even when called multiple times (idempotent) (#1803).
-    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let tmp = crate::test_support::hermetic_temp_dir();
     let base = tmp.path();
     // Create a minimal .git dir (not a real git repo, but enough for the function).
     std::fs::create_dir_all(base.join(".git")).expect("create .git");
@@ -536,7 +536,7 @@ async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
 
     // 1. Build a real source repo to clone from (mirrors the fixture used by
     //    `ensure_base_clone_migrates_old_layout_dir_aside` above).
-    let src = tempfile::TempDir::new().expect("src tmp dir");
+    let src = crate::test_support::hermetic_temp_dir();
     let src_path = src.path();
     let init = std::process::Command::new("git")
         .args(["init", src_path.to_str().expect("src utf8")])
@@ -568,7 +568,7 @@ async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
         .expect("git commit");
     assert!(commit.success(), "git commit failed");
 
-    let parent = tempfile::TempDir::new().expect("parent tmp dir");
+    let parent = crate::test_support::hermetic_temp_dir();
     let base = parent.path().join("owner").join("repo");
     let url = src_path.to_str().expect("src url utf8").to_string();
 
@@ -635,7 +635,7 @@ async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
 fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
     // 1. A real bare `origin` remote, explicitly on `main` so the assertions
     //    below are not at the mercy of the host's `init.defaultBranch`.
-    let origin_dir = tempfile::TempDir::new().expect("origin tmp dir");
+    let origin_dir = crate::test_support::hermetic_temp_dir();
     let origin_path = origin_dir.path();
     let init = std::process::Command::new("git")
         .args([
@@ -655,7 +655,7 @@ fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
 
     // 2. Seed the bare origin with one commit via a scratch clone (a bare repo
     //    has no working tree to commit into directly).
-    let seed = tempfile::TempDir::new().expect("seed tmp dir");
+    let seed = crate::test_support::hermetic_temp_dir();
     let seed_path = seed.path();
     let clone_seed = std::process::Command::new("git")
         .args([
@@ -709,7 +709,7 @@ fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
     // 3. Clone the now-non-empty bare origin into `base` — this mirrors what
     //    `ensure_base_clone` produces in production: `origin` remote wired up
     //    and `refs/remotes/origin/HEAD` set by the clone itself.
-    let base_parent = tempfile::TempDir::new().expect("base parent tmp dir");
+    let base_parent = crate::test_support::hermetic_temp_dir();
     let base = base_parent.path().join("base");
     let clone_base = std::process::Command::new("git")
         .args([

@@ -242,7 +242,6 @@ fn write_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     /// RAII guard that clears an env var for the duration of a test and restores
     /// the prior value on drop.
@@ -296,7 +295,7 @@ mod tests {
     fn run_prepare_session_pins_palace_from_clone_url() {
         // Hermetic: an ambient override would win over the URL-derived slug.
         let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         // Deliberately a session-id-like basename: the pin must come from the
         // clone URL, NOT this directory name.
         let repo = tmp.path().join("0c8f1a2b3c4d");
@@ -339,7 +338,7 @@ mod tests {
     #[serial_test::serial]
     fn run_prepare_session_bare_stub_when_no_identity() {
         let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         // A basename that slugifies to empty (only separators) cannot yield a
         // parent-dir slug, so with no URL/remote/override the stub stays bare.
         let repo = tmp.path().join("---");
@@ -413,7 +412,7 @@ mod tests {
     fn run_prepare_session_never_writes_real_home_claude_dirs() {
         let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
 
-        let fake_home = TempDir::new().unwrap();
+        let fake_home = crate::test_support::hermetic_temp_dir();
         let _home_guard = {
             let prior = std::env::var("HOME").ok();
             // SAFETY: serialized via `#[serial_test::serial]`.
@@ -435,7 +434,7 @@ mod tests {
 
         // repo/ lives under a SEPARATE temp dir so it can never coincidentally
         // land inside the fake home tree.
-        let project_root = TempDir::new().unwrap();
+        let project_root = crate::test_support::hermetic_temp_dir();
         let repo = project_root.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
 
@@ -472,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_marker_write_round_trip() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = crate::test_support::hermetic_temp_dir();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let cfg = tmp.path().join("claude-config");
