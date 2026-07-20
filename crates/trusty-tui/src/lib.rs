@@ -10,16 +10,22 @@
 //!
 //! What: **Slice 1** (#3412, epic #3411) shipped the seam itself — the
 //! [`TuiEngine`] trait and the [`ReplEvent`] enum both products' adapters
-//! and the shared event loop speak. **Slice 2** (#3414) adds the terminal
-//! layer this doc comment used to say was missing: the panic-safe
+//! and the shared event loop speak. **Slice 1.5** (#3413) added the
+//! [`model`] module: the engine-supplied data types ([`StatuslineSegment`],
+//! [`PickerItem`]/[`PickerRequest`], [`CommandDescriptor`]) that keep the
+//! statusline, pickers, and slash-command help free of any product-specific
+//! constant (no hardcoded model lists, no hardcoded `/model`/`/provider`
+//! strings, no cost formula). **Slice 2** (#3414) adds the terminal layer
+//! this doc comment used to say was missing: the panic-safe
 //! [`TerminalGuard`] ([`terminal`]), the generic-over-`TuiEngine` render/event
 //! loop ([`run`]), and the `crossterm` → [`KeyInput`] translation boundary
 //! ([`keys`]). `ratatui`/`crossterm` are now real dependencies of this crate
 //! (0.30/0.29 — see `Cargo.toml`'s comment on why that diverges from the
 //! rest of the workspace's 0.29/0.28 pin during the migration window) but
-//! stay confined to `terminal`/`run`/`keys`; [`event`] itself still has zero
-//! terminal-library dependency, by design. See DOC-50 §5 for the full slice
-//! breakdown (Slice 4 adds the widgets, Slice 10 the tagent cutover).
+//! stay confined to `terminal`/`run`/`keys`; [`event`] and [`model`]
+//! themselves still have zero terminal-library dependency, by design. See
+//! DOC-50 §5 for the full slice breakdown (Slice 4 adds the widgets, Slice
+//! 10 the tagent cutover).
 //!
 //! Dependency direction (DOC-50 §2.2, binding): `trusty-code` and
 //! `trusty-agents` depend on `trusty-tui`; `trusty-tui` depends on neither.
@@ -34,14 +40,13 @@
 pub mod engine;
 pub mod event;
 pub mod keys;
+pub mod model;
 pub mod run;
 pub mod terminal;
 
 pub use engine::TuiEngine;
-pub use event::{
-    CommandDescriptor, KeyCode, KeyInput, KeyModifiers, PickerItem, ReplEvent, StatuslineSegment,
-    WorkstreamSummary,
-};
+pub use event::{KeyCode, KeyInput, KeyModifiers, ReplEvent, WorkstreamSummary};
 pub use keys::translate_key_event;
+pub use model::{CommandDescriptor, CommandRouting, PickerItem, PickerRequest, StatuslineSegment};
 pub use run::{KeyReaderGuard, TuiModel, event_loop, run, spawn_key_reader};
 pub use terminal::TerminalGuard;
