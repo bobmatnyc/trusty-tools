@@ -19,6 +19,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (independent of the walker's existing gate) and regression tests covering
   pathological deeply-nested/high-attribute-count inputs for all three
   formats.
+  **Intentional behavioral side effect:** the calamine 0.36 upgrade also
+  changes xlsx/xls cell-text extraction — shared/inline string cells now have
+  leading/trailing ASCII whitespace trimmed (unless `xml:space="preserve"` is
+  set) and embedded `\r\n` normalized to `\n`, per upstream calamine's own
+  `Changelog.md` for 0.31–0.36. This is upstream, not a bug in this crate; it
+  means re-indexed `.xlsx`/`.xls` content may differ slightly (whitespace,
+  line endings) from what was indexed pre-bump, which is worth knowing when
+  diffing search results across this change. Covered by
+  `xlsx::tests::test_cell_whitespace_trimmed_and_eol_normalized`. The
+  quick-xml 0.41 upgrade also changed how the docx path receives XML entity
+  references (`&amp;`, `&#233;`, ...): they now arrive as standalone
+  `Event::GeneralRef` events instead of being inlined into `Event::Text`,
+  which this PR now handles explicitly in `docx::paragraphs_from_document_xml`
+  (previously unhandled references were silently dropped from extracted
+  text). Covered by
+  `docx::tests::test_paragraphs_from_document_xml_unescapes_entities`.
 - **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
   destructive write routes (`POST /admin/stop`, `POST /indexes`,
   `DELETE /indexes/{id}`, `POST /upgrade`, reindex) are now guarded against

@@ -267,6 +267,45 @@ mod tests {
         );
     }
 
+    /// Regression test for the calamine 0.26 → 0.36 bump (issue #3367):
+    /// upstream calamine `Changelog.md` documents two behavioral side
+    /// effects bundled with the CVE fix, both intentional and not something
+    /// this crate should "fix" back to the old behavior:
+    /// - 0.36.0 trims leading/trailing ASCII whitespace on shared/inline
+    ///   string cell text unless the cell carries `xml:space="preserve"`;
+    /// - the 0.31.0 quick-xml upgrade normalizes `\r\n` line endings to `\n`
+    ///   within string content.
+    ///
+    /// This locks in the POST-bump behavior so a future dependency bump that
+    /// silently reverts either change is caught here rather than surfacing
+    /// as a confusing re-indexing diff downstream. See the CHANGELOG.md
+    /// entry for this PR for the user-facing note.
+    #[test]
+    fn test_cell_whitespace_trimmed_and_eol_normalized() {
+        let xlsx = build_minimal_xlsx(&[("Sheet1", vec![vec!["  padded  ", "line1\r\nline2"]])]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("book.xlsx");
+        std::fs::write(&path, xlsx).unwrap();
+
+        let extracted = extract(&path).expect("extraction must succeed");
+        // Leading/trailing whitespace is trimmed from the cell text.
+        assert!(
+            extracted.text.contains("padded\tline1\nline2"),
+            "expected trimmed + \\n-normalized cell text, got: {:?}",
+            extracted.text
+        );
+        assert!(
+            !extracted.text.contains("  padded  "),
+            "whitespace should have been trimmed, got: {:?}",
+            extracted.text
+        );
+        assert!(
+            !extracted.text.contains("line1\r\nline2"),
+            "\\r\\n should have been normalized to \\n, got: {:?}",
+            extracted.text
+        );
+    }
+
     #[test]
     fn test_not_a_workbook_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
