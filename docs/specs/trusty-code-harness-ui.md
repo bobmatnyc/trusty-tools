@@ -99,6 +99,17 @@ The proposal has no non-goals. A spec must. **Out of scope for this document:**
 6. **No new persistence engine.** Workstream durability (§4.10) names a requirement and
    a prerequisite; it does not pick a store.
 
+### 1.4 Secondary Entry Point — the Interactive TUI {#SPEC-TCUI-10~draft}
+
+**ID:** SPEC-TCUI-10~draft
+**Status:** Draft
+
+**Platform designation (reaffirmed):** The primary interactive Platform is the SPA (web/Tauri) defined in §1.2. "Not a TUI, not a terminal renderer" refers to this primary platform.
+
+**Secondary/Alternative Entry Point — DOC-50 (trusty-code Interactive TUI):** The vision spec (§1.2) reserves the TUI layer as a "future layer… a foundation for later UI layers: TUI, TELGUI, REST — all thin clients over the same JSON-RPC surface." DOC-50 implements this future TUI layer as a **sanctioned secondary entry point** for terminal-native users and automation workflows. The TUI is **NOT a competing platform** — it is an additional thin client adhering to the same daemon-communication model (API → CLI → TUI → Web layer priority, C-1 through C-4 thin-client axioms) and sharing the same daemon API surface with the SPA.
+
+**Scope:** The TUI remains a thin client (no business logic, no filesystem access, all daemon-sourced). It is an alternative to the SPA for interactive use, not a replacement. See [`docs/specs/DOC-50-tcode-tui-claude-code-clone.md`](./DOC-50-tcode-tui-claude-code-clone.md) for the TUI specification.
+
 ---
 
 ## 2. Product framing → what the shell must be
