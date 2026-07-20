@@ -312,7 +312,7 @@ fn has_child_kind(node: Node, kind: &str) -> bool {
 /// What: a private-by-default language (no `visibility_modifier` child)
 /// returns `false`; any `pub` variant returns `true`.
 /// Test: `missing_docstring_skips_private_rust_fn`,
-/// `missing_docstring_fires_for_undocumented_pub_rust_fn`.
+/// `missing_docstring_smell_for_undocumented_pub_rust_fn`.
 fn is_pub_rust(fn_node: Node) -> bool {
     has_child_kind(fn_node, "visibility_modifier")
 }
@@ -325,7 +325,7 @@ fn is_pub_rust(fn_node: Node) -> bool {
 /// `MissingDocstring` against the caller-supplied `thresholds`. `MissingDocstring`
 /// only fires for `pub` items — see `is_pub_rust`.
 /// Test: `long_function_smell_fires_for_long_fn` and
-/// `missing_docstring_smell_for_undocumented_rust_fn` in the tests module.
+/// `missing_docstring_smell_for_undocumented_pub_rust_fn` in the tests module.
 fn detect_smells_rust(
     root: Node,
     src: &[u8],
