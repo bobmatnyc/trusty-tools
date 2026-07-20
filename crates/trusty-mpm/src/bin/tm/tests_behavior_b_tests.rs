@@ -1249,9 +1249,52 @@ async fn guided_fallback_blocks_github_git_from_subdirectory() {
         .current_dir(repo_dir.path())
         .status();
 
+    // ── Hermetic base-clone root (#3450) ─────────────────────────────────────
+    // Without this override, `fallback_protected` → `ensure_base_clone` resolves
+    // `repos_root()` to its PRODUCTION default (`~/trusty-mpm-projects`) and
+    // attempts a real (failing) network clone of the fake GitHub URL above,
+    // depositing `trusty-ci-nonexistent/subdir-test-1724(.old-layout-backup-*)`
+    // directly into the operator's real projects root — every single run, on
+    // every machine, regardless of `$TMPDIR`. Mirrors the stub-base-clone
+    // pattern in `guided_fallback_never_pollutes_github_git_checkout` above:
+    // pre-create a fake `.git` marker so `ensure_base_clone` short-circuits
+    // without ever touching the network, and `create_session_worktree` then
+    // fails (not a real repo) — the error path this test wants to observe.
+    //
+    // SAFETY: env-var mutation is accepted by the project convention (same
+    // pattern as the sibling tests in this file); `#[serial_test::serial]`
+    // above prevents cross-test races on the process-global env var.
+    let repos_root = tempfile::tempdir().unwrap();
+    let fake_base = repos_root
+        .path()
+        .join("trusty-ci-nonexistent")
+        .join("subdir-test-1724");
+    std::fs::create_dir_all(fake_base.join(".git")).unwrap();
+
+    let prev = std::env::var(trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV).ok();
+    unsafe {
+        std::env::set_var(
+            trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV,
+            repos_root.path(),
+        );
+    }
+
     let client = reqwest::Client::new();
     let result =
         crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", &subdir).await;
+
+    // Restore the env var regardless of the outcome.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(
+                trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV,
+                v,
+            ),
+            None => {
+                std::env::remove_var(trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV)
+            }
+        }
+    }
 
     // ── Acceptance criterion (#1724 HIGH gap) ────────────────────────────────
     // No framework files must exist anywhere in the repo tree.

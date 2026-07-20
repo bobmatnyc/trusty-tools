@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- `BM25Index::score_query_all_with_filter` — same ranking as `score_query_all`,
+  but evaluates a caller-supplied `Fn(&str) -> bool` predicate on each
+  candidate `doc_id` BEFORE the internal `top_k` truncation, not after
+  (trusty-search issue #3401: a scope filter applied only on the already-
+  truncated result set can silently drop a genuinely matching, lexically
+  relevant document). Purely additive — `score_query_all`'s signature and
+  behaviour are unchanged, so existing callers (`trusty-bm25-daemon`) are
+  unaffected.
+
 ## [0.23.4] — 2026-07-19
 
 ### Added

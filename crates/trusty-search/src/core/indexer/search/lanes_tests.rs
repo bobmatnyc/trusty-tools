@@ -83,7 +83,8 @@ async fn bm25_search_survives_reclaim_race_between_ensure_and_read() {
     let write_guard = idx.bm25.write().await;
 
     let idx_bg = Arc::clone(&idx);
-    let search_task = tokio::spawn(async move { idx_bg.bm25_search("authenticate", 5).await });
+    let search_task =
+        tokio::spawn(async move { idx_bg.bm25_search("authenticate", 5, None).await });
 
     let_background_task_reach_its_read_lock().await;
 
@@ -131,7 +132,7 @@ async fn grep_fallback_survives_reclaim_race_between_ensure_and_read() {
     let idx_bg = Arc::clone(&idx);
     let search_task = tokio::spawn(async move {
         idx_bg
-            .grep_fallback_search("authenticate_user_via_token", 5)
+            .grep_fallback_search("authenticate_user_via_token", 5, None)
             .await
     });
 

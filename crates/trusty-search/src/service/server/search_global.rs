@@ -22,7 +22,14 @@ use super::state::SearchAppState;
 /// project an answer lives in. A single fan-out search across every
 /// registered index, with results re-ranked via Reciprocal Rank Fusion, lets
 /// them ask one question and get one merged answer.
+///
+/// `deny_unknown_fields` (issue #3401 code review MEDIUM finding): this is
+/// one of the two public request surfaces that now carry `path_prefix` /
+/// `repos` (the other, `SearchQuery`, already derives this) — a misspelled
+/// filter field must be rejected here too, or the fan-out endpoint reopens
+/// the exact silently-ignored-filter trap the per-index endpoint just closed.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalSearchRequest {
     pub query: String,
     #[serde(default = "default_global_top_k")]
@@ -71,6 +78,15 @@ pub struct GlobalSearchRequest {
     /// Takes precedence over `max_fanout_concurrency`.
     #[serde(default)]
     pub serial: bool,
+
+    /// Path/repo scoping forwarded to every per-index search (issue #3401).
+    /// See `SearchQuery::path_prefix` / `SearchQuery::repos` for the
+    /// pre-truncation guarantee; identical semantics here, just applied
+    /// per-index before this handler's own cross-index RRF fusion.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 fn default_global_top_k() -> usize {
@@ -251,6 +267,9 @@ pub(super) async fn global_search_handler(
         // lexical when the semantic lane isn't ready (issue #109 Phase 1).
         stage: None,
         refine_query: None,
+        // Issue #3401: forward path/repo scoping to every per-index search.
+        path_prefix: req.path_prefix.clone(),
+        repos: req.repos.clone(),
     };
 
     // Run the per-index searches with *bounded* concurrency (issue #2845).

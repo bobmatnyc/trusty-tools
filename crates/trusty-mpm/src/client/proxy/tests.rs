@@ -18,16 +18,23 @@ use crate::client::CommandExecutor;
 /// Why: lets the proxy be tested against genuine daemon routes with no live
 /// daemon, tmux, or network. With no managed sessions, every resolve yields the
 /// "not found" error the auto-unfocus path keys on.
-/// What: mirrors the isolated-managed helper in `executor/tests.rs`.
-async fn spawn_test_daemon() -> String {
+/// What: mirrors the isolated-managed helper in `executor/tests.rs`. Returns
+/// the root [`tempfile::TempDir`] guard alongside the URL — the caller MUST
+/// hold it for the test's duration (#3450: the previous
+/// `tempfile::tempdir().unwrap().keep()` both rooted under a possibly-polluted
+/// `$TMPDIR` (see `crate::test_support`'s #3382 doc) AND permanently disabled
+/// cleanup, so every test run left a fresh, un-reapable root behind).
+async fn spawn_test_daemon() -> (tempfile::TempDir, String) {
     use crate::daemon::{api, state::DaemonState};
-    let root = tempfile::tempdir().unwrap().keep();
-    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let root_guard = crate::test_support::hermetic_temp_dir();
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root_guard.path().to_owned()).await,
+    );
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, router).into_future());
-    format!("http://{addr}")
+    (root_guard, format!("http://{addr}"))
 }
 
 /// A proxy over an unreachable daemon (for the pure / transient-error tests).
@@ -74,7 +81,7 @@ async fn is_missing_session_matches_live_resolver_not_found_format() {
     // error satisfies the predicate — if the resolver's message ever drifts
     // (e.g. `executor::managed::resolve_managed`'s wording changes), this test
     // fails loudly instead of silently disabling the auto-unfocus safety net.
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let backend = CommandExecutor::new(url);
     let err = backend
         .resolve("no-such-session")
@@ -116,7 +123,7 @@ async fn focus_empty_reports_current() {
 #[tokio::test]
 async fn focus_unknown_is_not_found() {
     // Focusing a session that does not exist reports NotFound and sets no focus.
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let proxy = SessionProxy::new(Arc::new(CommandExecutor::new(url)));
     match proxy.focus("c1", "no-such-session").await {
         FocusOutcome::NotFound { target, .. } => assert_eq!(target, "no-such-session"),
@@ -135,7 +142,7 @@ async fn inject_no_focus() {
 async fn inject_auto_unfocuses_dead_session() {
     // A focused session that no longer exists: the send resolves to "not found",
     // so focus is auto-cleared and the outcome names the vanished session.
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let proxy = SessionProxy::new(Arc::new(CommandExecutor::new(url)));
     proxy.lock().insert(
         "c1".to_string(),
@@ -179,7 +186,7 @@ async fn summarize_no_focus() {
 #[tokio::test]
 async fn summarize_auto_unfocuses_dead_session() {
     // Summarizing a vanished focused session auto-clears the focus.
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let proxy = SessionProxy::new(Arc::new(CommandExecutor::new(url)));
     proxy.lock().insert(
         "c1".to_string(),

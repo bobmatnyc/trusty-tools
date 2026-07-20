@@ -468,6 +468,30 @@ pub mod task;
 /// end-to-end coverage in `tests/cli_e2e.rs`.
 pub mod cli_client;
 
+/// `CodeEngine` — the `trusty-tui` engine adapter driving a long-lived
+/// `tcode serve --http` daemon for the interactive `tcode tui` (#3415,
+/// DOC-50 §3.3/§3.4, epic #3411 Slice 3).
+///
+/// Why: `cli_client` (above) spawns an EPHEMERAL `--stdio` child per CLI
+/// invocation — the right shape for one-shot commands, wrong for an
+/// interactive REPL that needs to hold a session open, stream responses
+/// live, and observe workstream activation pushed from OTHER clients. This
+/// module is the HTTP counterpart: a thin `trusty_tui::TuiEngine`
+/// implementation that discovers an already-running daemon and drives it
+/// over pooled HTTP + SSE, translating daemon responses into
+/// `trusty_tui::ReplEvent`s — no business logic of its own (DOC-39 §2.1
+/// thin-client axiom).
+/// What: `tui_client::discovery` (daemon lookup: `TCODE_DAEMON_URL` env var
+/// -> `serve::discovery`'s `http_addr` file -> liveness ping), `tui_client::rpc`
+/// (pooled `POST /rpc` client, reusing `trusty_common::mcp::{Request,Response}`
+/// exactly like `cli_client::stdio` does over STDIO), `tui_client::sse` (a
+/// minimal SSE line pump over `reqwest`'s byte stream), and
+/// `tui_client::engine::CodeEngine` (the `TuiEngine` impl itself).
+/// Test: `tui_client::*::tests` for the pure helpers; the full
+/// discover/setup/stream/cancel/workstream-activation flow against a mock
+/// HTTP daemon in `tests/tui_client_engine.rs`.
+pub mod tui_client;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without

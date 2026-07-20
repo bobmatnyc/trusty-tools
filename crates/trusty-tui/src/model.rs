@@ -88,8 +88,74 @@ pub enum StatuslineSegment {
     /// Escape hatch for an engine-specific segment that doesn't warrant a
     /// first-class variant (e.g. tagent's `TM: N sessions` / `MPM: N
     /// sessions` counts). `label` is the short prefix, `value` is the
-    /// rendered text.
-    Custom { label: String, value: String },
+    /// rendered text; `emphasis` is the same wire-safe style hint
+    /// [`Chrome`](Self::Chrome) carries — added so a labeled segment like
+    /// `MPM: 2 sessions` can render bold/accented the way tagent's
+    /// `status.rs` distinguishes it from the plainer `TM: N sessions`
+    /// segment, without the shared crate encoding either label's meaning.
+    Custom {
+        label: String,
+        value: String,
+        emphasis: StatuslineEmphasis,
+    },
+    /// Free-form styled text with no `label: value` structure — the
+    /// generalization of tagent's un-labeled statusline chrome (the bold-
+    /// cyan `"[trusty-agents] "` bracket prefix, the green `"✓ "` / `"All
+    /// systems go."` success framing, `status.rs`'s `style_status_chunk`).
+    /// Why a separate variant from `Custom` rather than an empty `label`:
+    /// `Custom`'s renderer always emits the `"{label}: "` separator, which
+    /// is wrong for chrome that isn't a label/value pair at all — an empty
+    /// label would still render `": ✓ All systems go."`.
+    /// What: `text` renders verbatim, styled per `emphasis`. No tagent-
+    /// specific color/text is hardcoded here — the engine supplies both.
+    Chrome {
+        text: String,
+        emphasis: StatuslineEmphasis,
+    },
+}
+
+/// A generic, wire-safe (JSON, via `serde`) style hint an engine can attach
+/// to a free-form statusline segment ([`StatuslineSegment::Custom`]/
+/// [`StatuslineSegment::Chrome`]).
+///
+/// Why: tagent's statusline (`crates/trusty-agents/src/repl/tui/status.rs`,
+/// NOT migrated to this crate — see `crate::widgets::status_line`'s module
+/// doc comment) has real chrome this crate's Slice 1.5 segment set couldn't
+/// express at all: a bold-cyan bracket prefix, green success framing, and a
+/// bold/dim distinction between two otherwise-identical `Custom`-shaped
+/// segments (`TM: N sessions` vs `MPM: N sessions`). Without a style hook,
+/// Slice 10's tagent cutover would have no way to reproduce that chrome
+/// through this crate's widgets — a silent UX regression Slice 10 wouldn't
+/// discover until it tried. This enum is deliberately independent of any
+/// terminal-rendering library (`crate::model` has zero terminal-library
+/// dependency, by design, per the crate root doc comment — even though
+/// `trusty-tui` as a whole now depends on `ratatui`) so it stays JSON-safe
+/// for an HTTP-transported engine (`CodeEngine`, Slice 3) and so this module
+/// never needs a `ratatui::style::Color`/`Modifier` in its public API.
+/// What: a small, closed set of semantic emphases — not raw RGB/attribute
+/// bits — so an engine names *what kind* of emphasis it wants (`Success`,
+/// `Accent`, …) and [`crate::widgets::status_line`] owns the actual
+/// `ratatui::style::Style` each maps to. `Normal` (the default) renders
+/// exactly like today's unstyled segments, so this is purely additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StatuslineEmphasis {
+    /// No special styling — today's default rendering.
+    #[default]
+    Normal,
+    /// De-emphasized (tagent's `Modifier::DIM`).
+    Dim,
+    /// Emphasized (tagent's `Modifier::BOLD`).
+    Bold,
+    /// A positive/OK signal (tagent's green "✓ … All systems go.").
+    Success,
+    /// A caution signal.
+    Warning,
+    /// A problem signal.
+    Error,
+    /// The product's accent color (tagent's bold-cyan `"[trusty-agents] "`
+    /// bracket prefix).
+    Accent,
 }
 
 /// One selectable row in an engine-supplied picker (model, provider,
@@ -199,6 +265,16 @@ mod tests {
             StatuslineSegment::Custom {
                 label: "TM".to_string(),
                 value: "2 sessions".to_string(),
+                emphasis: StatuslineEmphasis::Normal,
+            },
+            StatuslineSegment::Custom {
+                label: "MPM".to_string(),
+                value: "2 sessions".to_string(),
+                emphasis: StatuslineEmphasis::Bold,
+            },
+            StatuslineSegment::Chrome {
+                text: "✓ All systems go.".to_string(),
+                emphasis: StatuslineEmphasis::Success,
             },
         ];
         for seg in segments {
@@ -217,6 +293,31 @@ mod tests {
         let session = StatuslineSegment::SessionId("x".to_string());
         let project = StatuslineSegment::Project("x".to_string());
         assert_ne!(session, project);
+    }
+
+    /// `Custom` segments that differ ONLY in `emphasis` must be distinct —
+    /// the whole point of adding the field is to distinguish a bold `MPM:`
+    /// segment from an otherwise-identical plain one.
+    #[test]
+    fn custom_segments_with_different_emphasis_are_distinct() {
+        let plain = StatuslineSegment::Custom {
+            label: "TM".to_string(),
+            value: "2 sessions".to_string(),
+            emphasis: StatuslineEmphasis::Normal,
+        };
+        let bold = StatuslineSegment::Custom {
+            label: "TM".to_string(),
+            value: "2 sessions".to_string(),
+            emphasis: StatuslineEmphasis::Bold,
+        };
+        assert_ne!(plain, bold);
+    }
+
+    /// `StatuslineEmphasis::default()` must be `Normal` so an engine that
+    /// doesn't care about styling gets today's plain rendering for free.
+    #[test]
+    fn statusline_emphasis_defaults_to_normal() {
+        assert_eq!(StatuslineEmphasis::default(), StatuslineEmphasis::Normal);
     }
 
     /// `PickerItem`/`PickerRequest` must round-trip through JSON for the
