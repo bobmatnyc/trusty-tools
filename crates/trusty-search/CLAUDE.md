@@ -331,7 +331,12 @@ set -euo pipefail
 INDEX_ID="my-project"
 DAEMON="http://127.0.0.1:$(trusty-search port)"
 
-git diff --name-status "$PREV_HEAD" HEAD | while read -r status path; do
+# IFS=$'\t': git's --name-status output is TAB-delimited (not generic
+# whitespace), so this also handles paths containing spaces correctly. A
+# rename line has a THIRD field ("R100<TAB>old_path<TAB>new_path"); reading
+# into three variables leaves $new_path empty for D/A/M lines and populated
+# only for renames.
+git diff --name-status "$PREV_HEAD" HEAD | while IFS=$'\t' read -r status path new_path; do
   case "$status" in
     D)
       curl -sf -X POST "$DAEMON/indexes/$INDEX_ID/remove-file" \
@@ -343,6 +348,20 @@ git diff --name-status "$PREV_HEAD" HEAD | while read -r status path; do
       curl -sf -X POST "$DAEMON/indexes/$INDEX_ID/index-file" \
         -H 'Content-Type: application/json' \
         -d "$(jq -n --arg path "$path" --argjson content "$content" \
+              '{path: $path, content: $content}')"
+      ;;
+    R*)
+      # Rename (any similarity index, e.g. R100 or R087): $path is the OLD
+      # path, $new_path is the new one. git diff --name-status gives no
+      # chunk-level delta for a rename, so remove the old path's chunks and
+      # index the new path fresh — simplest and correct.
+      curl -sf -X POST "$DAEMON/indexes/$INDEX_ID/remove-file" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg path "$path" '{path: $path}')"
+      content=$(jq -Rs . < "$new_path")
+      curl -sf -X POST "$DAEMON/indexes/$INDEX_ID/index-file" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg path "$new_path" --argjson content "$content" \
               '{path: $path, content: $content}')"
       ;;
   esac

@@ -163,7 +163,16 @@ mod imp {
         // Primary signal: the statfs magic number — a single syscall, no
         // /proc parsing, and unambiguous for NFS/legacy-SMB/CIFS.
         if let Ok(stat) = nix::sys::statfs::statfs(path) {
-            if classify_magic(stat.filesystem_type().0 as i64).is_network() {
+            // `nix`'s underlying `fs_type_t` varies by Linux arch/libc
+            // (`__fsword_t` — i64 — on the common glibc target CI runs on,
+            // but `c_uint`/`c_ulong`/`c_int` on s390x/musl/uclibc). The cast
+            // is a genuine no-op on x86_64-unknown-linux-gnu (hence clippy's
+            // complaint here), but is still required for the build to be
+            // portable to those other Linux targets, so it stays with an
+            // explicit `allow` rather than being deleted.
+            #[allow(clippy::unnecessary_cast)]
+            let magic = stat.filesystem_type().0 as i64;
+            if classify_magic(magic).is_network() {
                 return MountKind::Network;
             }
         } else {
@@ -196,15 +205,23 @@ mod imp {
             let Some(_device) = fields.next() else {
                 continue;
             };
-            let Some(mount_point) = fields.next() else {
+            let Some(raw_mount_point) = fields.next() else {
                 continue;
             };
             let Some(fstype) = fields.next() else {
                 continue;
             };
+            // `mounts(5)`: the kernel octal-escapes space/tab/backslash/newline
+            // in this field (` ` → `\040`, etc). Without unescaping first, a
+            // network mount at a path containing a space (e.g. `/mnt/My Docs`)
+            // never matches `starts_with` against the real (unescaped)
+            // canonical path and silently falls through to `Local` —
+            // reproducing the exact silent-watcher-never-fires bug this
+            // module exists to fix, for that one case.
+            let mount_point = unescape_proc_mounts_field(raw_mount_point);
             // Longest-prefix match: the deepest mount point that contains
             // `path` wins (mirrors how the kernel resolves nested mounts).
-            if canonical.starts_with(mount_point) {
+            if canonical.starts_with(&mount_point) {
                 let len = mount_point.len();
                 if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
                     best = Some((len, fstype.to_string()));
@@ -212,6 +229,105 @@ mod imp {
             }
         }
         best.map(|(_, fstype)| fstype)
+    }
+
+    /// Unescape the octal `\NNN` sequences the kernel uses in `/proc/mounts`
+    /// fields (`mounts(5)`): ` ` is `\040`, `\t` is `\011`, `\\` is `\134`,
+    /// `\n` is `\012`. Operates on raw bytes (not `char`s) so it never splits
+    /// a multi-byte UTF-8 sequence — the escape marker (`\`) and octal digits
+    /// are all single-byte ASCII, and UTF-8 continuation bytes can never
+    /// collide with them. An incomplete or non-octal `\NNN`-shaped sequence
+    /// (or a lone trailing `\`) is copied through byte-for-byte rather than
+    /// erroring — fail-open, matching the rest of this module.
+    ///
+    /// Test: `unescape_handles_space_tab_and_backslash`,
+    /// `unescape_leaves_plain_path_untouched`,
+    /// `unescape_passes_through_malformed_escape`.
+    fn unescape_proc_mounts_field(field: &str) -> String {
+        let bytes = field.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let is_octal_digit = |b: u8| (b'0'..=b'7').contains(&b);
+            if bytes[i] == b'\\'
+                && i + 3 < bytes.len()
+                && is_octal_digit(bytes[i + 1])
+                && is_octal_digit(bytes[i + 2])
+                && is_octal_digit(bytes[i + 3])
+            {
+                let value = u32::from(bytes[i + 1] - b'0') * 64
+                    + u32::from(bytes[i + 2] - b'0') * 8
+                    + u32::from(bytes[i + 3] - b'0');
+                if let Ok(byte_value) = u8::try_from(value) {
+                    out.push(byte_value);
+                    i += 4;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        // Any escape sequence we decoded came from valid octal-encoded bytes
+        // reconstructing the original path bytes, and everything else was
+        // copied through verbatim, so this is UTF-8 iff the original field
+        // was (which it always is, since it came from a Rust `&str`). Fall
+        // back to the raw field on the (should-be-impossible) failure case
+        // rather than panicking.
+        String::from_utf8(out).unwrap_or_else(|_| field.to_string())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::unescape_proc_mounts_field;
+
+        /// Why: this is the exact regression from the code-critic review of
+        /// PR #3424 — a mount point containing a space (e.g. `/mnt/My Docs`,
+        /// a legitimate path) is octal-escaped by the kernel as `\040` in
+        /// `/proc/mounts`. Without unescaping, `starts_with` against the real
+        /// canonical path never matches and the lookup silently falls
+        /// through to `Local`, reproducing the silent-watcher-never-fires bug
+        /// this whole module exists to fix, for that one case. Also covers
+        /// `\t` (`\011`) and a literal backslash (`\134`) per `mounts(5)`.
+        /// Test: this test.
+        #[test]
+        fn unescape_handles_space_tab_and_backslash() {
+            assert_eq!(
+                unescape_proc_mounts_field(r"/mnt/My\040Docs"),
+                "/mnt/My Docs"
+            );
+            assert_eq!(
+                unescape_proc_mounts_field(r"/mnt/tab\011here"),
+                "/mnt/tab\there"
+            );
+            assert_eq!(
+                unescape_proc_mounts_field(r"/mnt/back\134slash"),
+                "/mnt/back\\slash"
+            );
+        }
+
+        /// Why: the overwhelming majority of real mount points have no
+        /// escapes at all — a plain path must round-trip unchanged.
+        /// Test: this test.
+        #[test]
+        fn unescape_leaves_plain_path_untouched() {
+            assert_eq!(unescape_proc_mounts_field("/mnt/data"), "/mnt/data");
+            assert_eq!(unescape_proc_mounts_field("/"), "/");
+        }
+
+        /// Why: a `\` not followed by exactly 3 octal digits (or at the very
+        /// end of the field) is not a valid `mounts(5)` escape — it must be
+        /// copied through byte-for-byte rather than panicking or eating
+        /// characters, matching this module's fail-open philosophy.
+        /// Test: this test.
+        #[test]
+        fn unescape_passes_through_malformed_escape() {
+            // Not enough digits after the backslash.
+            assert_eq!(unescape_proc_mounts_field(r"/mnt/x\04"), r"/mnt/x\04");
+            // Non-octal digit (8/9) in the escape.
+            assert_eq!(unescape_proc_mounts_field(r"/mnt/x\089"), r"/mnt/x\089");
+            // Trailing lone backslash.
+            assert_eq!(unescape_proc_mounts_field(r"/mnt/x\"), r"/mnt/x\");
+        }
     }
 }
 
