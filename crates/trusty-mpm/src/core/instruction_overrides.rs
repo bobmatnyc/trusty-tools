@@ -451,4 +451,68 @@ mod tests {
         assert!(prompt.contains(STACK_PROFILE_HEADING));
         assert!(prompt.contains("Do NOT assume any stack"));
     }
+
+    #[test]
+    fn framework_guaranteed_conventions_survive_every_override_combination() {
+        // Issue #3374 (mirrors `primary_directive_mandate_not_duplicated_across_
+        // channels` in instruction_pipeline.rs): the commit/PR attribution
+        // footer, the proportional-documentation policy, and the ticket-
+        // attribution-at-change-site convention must live in the BASE_PM floor
+        // and therefore survive EVERY override combination — including the
+        // full-PM-replacement branch, where every bundled body section is
+        // discarded but the floor is still appended.
+        const MARKERS: &[&str] = &[
+            "Generated with trusty-mpm",
+            "Proportional documentation",
+            "Ticket attribution at the change site",
+        ];
+
+        // No overrides at all: conventions present via the bundled floor.
+        let tmp = TempDir::new().unwrap();
+        let prompt = resolve_pm_prompt(tmp.path());
+        for marker in MARKERS {
+            assert!(
+                prompt.contains(marker),
+                "no-override prompt must carry the guaranteed convention {marker:?}"
+            );
+        }
+
+        // Section-by-section overrides (workflow + delegation + instructions):
+        // the floor is untouched by any of these, so the conventions persist.
+        let tmp2 = TempDir::new().unwrap();
+        write_override(tmp2.path(), FILE_WORKFLOW, "# Custom Workflow\n\nX\n");
+        write_override(
+            tmp2.path(),
+            FILE_AGENT_DELEGATION,
+            "# Custom Routing\n\nY\n",
+        );
+        write_override(tmp2.path(), FILE_INSTRUCTIONS, "# Project Rules\n\nZ\n");
+        let prompt2 = resolve_pm_prompt(tmp2.path());
+        for marker in MARKERS {
+            assert!(
+                prompt2.contains(marker),
+                "section-override prompt must still carry {marker:?}"
+            );
+        }
+
+        // Full-PM-replacement branch: every bundled body section is discarded,
+        // but the non-overridable floor — and therefore these conventions —
+        // must still be appended last.
+        let tmp3 = TempDir::new().unwrap();
+        write_override(
+            tmp3.path(),
+            FILE_PM_DEPLOYED,
+            "# Wholly Custom PM\n\nDO_THIS\n",
+        );
+        let prompt3 = resolve_pm_prompt(tmp3.path());
+        for marker in MARKERS {
+            assert!(
+                prompt3.contains(marker),
+                "full-replacement prompt must still carry {marker:?} via the floor"
+            );
+        }
+        let body = prompt3.find("DO_THIS").expect("custom body");
+        let base = prompt3.find("# BASE_PM Framework Floor").expect("base");
+        assert!(body < base, "floor (and its conventions) must come last");
+    }
 }

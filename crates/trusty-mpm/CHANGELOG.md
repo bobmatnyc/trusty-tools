@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Framework-guaranteed conventions delivered only via user-editable channels** ([#3374](https://github.com/bobmatnyc/trusty-tools/issues/3374)): the commit/PR attribution footer, the proportional-documentation policy, and the ticket-attribution-at-change-site convention are now stated in the non-overridable `BASE_PM.md` floor — the one channel `resolve_pm_prompt` appends unconditionally in every override branch. Previously the proportional-documentation and ticket-attribution conventions lived only in the bundled `documentation-style` skill (user-editable; the deployer skips re-syncing a locally modified skill) and were guaranteed nowhere; the attribution footer was duplicated across three non-floor locations including a dead, never-consumed `assets/instructions/CLAUDE.md` stub. That dead asset (and its `CLAUDE_STUB` constant, `bundle_all.rs` `SeedOnce` registration, and `paths.rs` `claude_stub()` accessor) has been removed. `assets/skills/documentation-style.md` and the seeded project `CLAUDE.md` stub now point back to `BASE_PM.md` as the source of truth. A new CI guard (`scripts/check_instruction_floor.sh` + `.github/workflows/instruction-floor-guard.yml`) mechanically enforces that the floor keeps carrying these conventions and that the dead asset never reappears.
+
 ### Changed
 
 - `tm`'s launch/connect splash art now sources from the shared `trusty_common::banner::TRUSTY_SPLASH_ART` / `shade_bucket` instead of a locally embedded `image.txt` + `shade_bucket` copy, so it can never silently drift from `trusty-agents`' REPL splash again (issue [#3326](https://github.com/bobmatnyc/trusty-tools/issues/3326)). Byte-identical art and rendering — `tm`'s own banner is unchanged; all 41 existing banner unit tests pass unmodified.

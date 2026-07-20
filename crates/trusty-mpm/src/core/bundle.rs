@@ -1,10 +1,13 @@
 //! Compile-time embedded framework artifacts.
 //!
 //! Why: `trusty-mpm install` must deploy a working set of default artifacts
-//! (optimizer policy, framework instructions, user instruction stub,
-//! placeholder agent/skill) without depending on files shipped alongside the
-//! binary — embedding them at compile time keeps the installer a single
-//! self-contained executable.
+//! (optimizer policy, framework instructions, placeholder agent/skill)
+//! without depending on files shipped alongside the binary — embedding them
+//! at compile time keeps the installer a single self-contained executable.
+//! (Issue #3374: the former `CLAUDE_STUB` user-instruction-stub artifact was
+//! removed — it was never read back by any consumer; the project `CLAUDE.md`
+//! actually delivered to users is [`crate::core::instruction_pipeline`]'s
+//! `CLAUDE_MD_STUB`.)
 //! What: exposes each default artifact under `crates/trusty-mpm-core/assets/`
 //! as a `pub const &str` via `include_str!`, plus a [`BundledArtifact`] table
 //! describing the relative install path of each one.
@@ -25,12 +28,6 @@ pub const OVERSEER_TOML: &str = include_str!("../assets/hooks/overseer.toml");
 /// This is the framework-owned artifact: `trusty-mpm install` overwrites it on
 /// every run so framework upgrades take effect.
 pub const FRAMEWORK_INSTRUCTIONS: &str = include_str!("../assets/instructions/INSTRUCTIONS.md");
-
-/// User-editable instruction stub installed to `instructions/CLAUDE.md`.
-///
-/// This is a one-time seed: the installer writes it only when absent so any
-/// project-specific edits the user makes survive subsequent installs.
-pub const CLAUDE_STUB: &str = include_str!("../assets/instructions/CLAUDE.md");
 
 /// Base agent — the root of every trusty-mpm inheritance chain.
 pub const BASE_AGENT: &str = include_str!("../assets/agents/BASE-AGENT.md");
