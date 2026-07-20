@@ -638,9 +638,9 @@ async fn subscribe_workstream_events_refreshes_cache_on_deactivation_with_no_rep
     // `refresh_workstream_cache` actually commits, etc.) would fail this
     // test instead of passing every other green assertion here.
     assert!(
-        events.iter().any(
-            |e| matches!(e, ReplEvent::StatuslineUpdate(segs) if segs.is_empty())
-        ),
+        events
+            .iter()
+            .any(|e| matches!(e, ReplEvent::StatuslineUpdate(segs) if segs.is_empty())),
         "expected a StatuslineUpdate with an empty segment list clearing the Workstream segment \
          on deactivation; got {events:?}"
     );
