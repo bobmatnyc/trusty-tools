@@ -26,18 +26,24 @@
 #     but because it isn't wired to push/pull_request it can't block anyone
 #     from merging.
 #
-# KNOWN OPEN ADVISORIES (as of this PR — expect the first scheduled runs to
-# be RED until these are resolved; that is intentional, not a workflow bug):
-#   - #2433: serde_yml/libyml are unsound and unmaintained with no fix
-#     upstream (GHSA-gfxp-f68g-8x78, high) — requires migrating off
-#     serde_yml/libyml entirely, not a version bump.
-#   - #2434: legacy rustls 0.21 / rustls-webpki 0.101.7 pulled in via
-#     aws-smithy default features (GHSA-82j2-j2ch-gfr8, high) — DoS via
-#     panic on malformed CRL BIT STRING; requires dropping the legacy
-#     rustls-webpki from aws-smithy's default feature set.
+# KNOWN OPEN ADVISORIES (last reviewed alongside issue #3367 — this list is
+# maintained by hand and can drift from `cargo audit`'s live output; re-check
+# it whenever this workflow goes red):
+#   - #2433 (serde_yml/libyml) and #2434 (legacy rustls-webpki via aws-smithy)
+#     are RESOLVED — no longer present in `cargo audit` output as of #3367.
+#   - #3367: `pdf-extract`/`calamine` pulled vulnerable `lopdf` 0.36.0
+#     (RUSTSEC-2026-0187, stack-overflow DoS) and `quick-xml` 0.31.0/0.37.5
+#     (RUSTSEC-2026-0194/0195, DoS) into trusty-search's document-extraction
+#     path — RESOLVED by bumping pdf-extract/calamine/quick-xml off the
+#     vulnerable versions (see that issue for the reachability analysis).
 #   - #2437: nltk 3.9.4 path traversal, transitive via pipecat-ai in
 #     python/trusty-voice/uv.lock (GHSA-p4gq-832x-fm9v, high) — no patched
-#     version exists upstream yet.
+#     version exists upstream yet. NOT covered by this workflow: `cargo audit`
+#     only scans Cargo.lock, not the Python uv.lock.
+#
+# As of #3367 the remaining `cargo audit` output is warnings-only (allowed,
+# unmaintained/unsound/yanked transitive deps mostly behind the tauri GUI
+# crates) — no unresolved vulnerabilities.
 name: Cargo audit (scheduled)
 
 on:

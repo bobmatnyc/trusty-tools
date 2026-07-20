@@ -109,7 +109,8 @@ fn read_entry_bounded<R: Read>(entry: R, declared: u64, cap: u64) -> Result<Stri
 /// What: streams `<w:t>` run text, appending it to the current paragraph
 /// buffer; on `</w:p>` the buffer is flushed with a trailing blank line.
 /// Test: `test_paragraphs_from_document_xml_basic`,
-/// `test_paragraphs_from_document_xml_multiple_runs_per_paragraph`.
+/// `test_paragraphs_from_document_xml_multiple_runs_per_paragraph`,
+/// `test_paragraphs_from_document_xml_unescapes_entities`.
 fn paragraphs_from_document_xml(xml: &str) -> Result<String, ExtractError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -122,10 +123,42 @@ fn paragraphs_from_document_xml(xml: &str) -> Result<String, ExtractError> {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" => in_text = true,
             Ok(Event::End(e)) if e.local_name().as_ref() == b"t" => in_text = false,
             Ok(Event::Text(t)) if in_text => {
-                para.push_str(
-                    &t.unescape()
-                        .map_err(|e| ExtractError::Docx(e.to_string()))?,
-                );
+                // quick-xml 0.41 removed `BytesText::unescape()` (dependency
+                // bump for RUSTSEC-2026-0194/0195, issue #3367): decode the
+                // raw bytes first, then unescape XML entities via the
+                // free-function equivalent. In 0.41 a `Text` event itself
+                // never contains an escaped entity (see the `GeneralRef` arm
+                // below), so `unescape` is a no-op here in practice — kept
+                // for defence-in-depth in case that reader behavior changes.
+                let decoded = t.decode().map_err(|e| ExtractError::Docx(e.to_string()))?;
+                let unescaped = quick_xml::escape::unescape(&decoded)
+                    .map_err(|e| ExtractError::Docx(e.to_string()))?;
+                para.push_str(&unescaped);
+            }
+            // quick-xml 0.41 stopped inlining entity/character references
+            // (`&amp;`, `&#233;`, ...) into surrounding `Text` events; each
+            // reference is now its own `GeneralRef` event. Without this arm,
+            // entity references inside `<w:t>` were silently dropped
+            // (`Tom &amp; Jerry` extracted as `Tom  Jerry`) rather than
+            // resolved — caught by
+            // `test_paragraphs_from_document_xml_unescapes_entities`.
+            Ok(Event::GeneralRef(r)) if in_text => {
+                if let Some(c) = r
+                    .resolve_char_ref()
+                    .map_err(|e| ExtractError::Docx(e.to_string()))?
+                {
+                    para.push(c);
+                } else {
+                    let name = r.decode().map_err(|e| ExtractError::Docx(e.to_string()))?;
+                    match quick_xml::escape::resolve_predefined_entity(&name) {
+                        Some(resolved) => para.push_str(resolved),
+                        None => {
+                            return Err(ExtractError::Docx(format!(
+                                "unresolvable XML entity reference: &{name};"
+                            )));
+                        }
+                    }
+                }
             }
             Ok(Event::End(e)) if e.local_name().as_ref() == b"p" => {
                 out.push_str(para.trim_end());
@@ -242,6 +275,21 @@ mod tests {
         assert_eq!(text.trim(), "Hello world");
     }
 
+    /// Regression test for the `BytesText::unescape()` → `.decode()` +
+    /// `escape::unescape()` replacement (issue #3367, quick-xml 0.41 bump):
+    /// the two-step decode-then-unescape path must still resolve XML
+    /// entities (named and numeric) exactly as the removed single-call API
+    /// did — an equivalence that was verified by hand against vendored
+    /// sources but had no direct test coverage.
+    #[test]
+    fn test_paragraphs_from_document_xml_unescapes_entities() {
+        let xml = format!(
+            r#"<w:document {NS}><w:body><w:p><w:r><w:t>Tom &amp; Jerry: 1 &lt; 2 &gt; 0, caf&#233;</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let text = paragraphs_from_document_xml(&xml).unwrap();
+        assert_eq!(text.trim(), "Tom & Jerry: 1 < 2 > 0, café");
+    }
+
     #[test]
     fn test_missing_document_xml_errors() {
         let mut buf = Vec::new();
@@ -261,6 +309,32 @@ mod tests {
         assert!(
             result.is_err(),
             "a zip without word/document.xml must error"
+        );
+    }
+
+    /// Regression test for RUSTSEC-2026-0194 (issue #3367): pre-patch
+    /// quick-xml checked start-tag attributes for duplicate names in
+    /// quadratic time, so a tag with a large number of attributes (duplicate
+    /// or not) could pin CPU well within the existing size caps. Bounded
+    /// join turns a reintroduced quadratic-time regression into a
+    /// deterministic test failure instead of a slow/hung CI job.
+    #[test]
+    fn test_pathological_attribute_count_does_not_hang() {
+        let n = 20_000;
+        let attrs: String = (0..n).map(|i| format!(r#" a{i}="v""#)).collect();
+        let xml = format!(
+            r#"<w:document {NS}><w:body><w:p><w:r><w:t{attrs}>hi</w:t></w:r></w:p></w:body></w:document>"#
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = paragraphs_from_document_xml(&xml);
+            let _ = tx.send(result.is_ok());
+        });
+        let completed = rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            completed.is_ok(),
+            "a tag with many attributes must parse (Ok or Err) in bounded time, not hang"
         );
     }
 
