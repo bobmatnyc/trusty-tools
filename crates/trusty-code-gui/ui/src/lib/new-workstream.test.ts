@@ -1,5 +1,5 @@
 // Why: `lib/new-workstream.ts` carries every piece of pure gating/body-
-// construction/name-inference logic `NewWorkstreamForm.svelte` depends on
+// construction/name-inference logic `StartWorkingForm.svelte` depends on
 // for correctness — covering it here means those invariants are checked
 // without mounting Svelte or touching `fetch`, mirroring the split
 // `create-session.test.ts` (this file's predecessor) established.
@@ -11,10 +11,8 @@ import {
   buildCreateWorkstreamBody,
   buildRunTaskBody,
   canSubmitCreate,
-  extractTaskSessionId,
   extractWorkstreamId,
   inferWorkstreamName,
-  isTaskRunResponse,
   isWorkstreamCreateResponse,
   type ProjectSelection,
 } from './new-workstream';
@@ -151,41 +149,5 @@ describe('extractWorkstreamId', () => {
     expect(extractWorkstreamId({ id: '' })).toBeNull();
     expect(extractWorkstreamId({ id: 42 })).toBeNull();
     expect(extractWorkstreamId(null)).toBeNull();
-  });
-});
-
-describe('isTaskRunResponse', () => {
-  it('accepts a well-formed POST /tasks 202 body', () => {
-    expect(
-      isTaskRunResponse({
-        session_id: 'sess-abc12345',
-        status: 'running',
-        mode: 'auto',
-        binding: { state: 'projectless', root: null },
-      }),
-    ).toBe(true);
-  });
-
-  it('rejects non-object bodies and bodies missing/mistyping session_id', () => {
-    expect(isTaskRunResponse(null)).toBe(false);
-    expect(isTaskRunResponse('sess-abc')).toBe(false);
-    expect(isTaskRunResponse({})).toBe(false);
-    expect(isTaskRunResponse({ session_id: 42 })).toBe(false);
-  });
-});
-
-describe('extractTaskSessionId', () => {
-  it('returns the id when it is a non-empty string', () => {
-    expect(extractTaskSessionId({ session_id: 'sess-abc12345', status: 'running' })).toBe(
-      'sess-abc12345',
-    );
-  });
-
-  it('returns null for missing, empty, or non-string ids and non-object bodies', () => {
-    expect(extractTaskSessionId({})).toBeNull();
-    expect(extractTaskSessionId({ session_id: '' })).toBeNull();
-    expect(extractTaskSessionId({ session_id: 42 })).toBeNull();
-    expect(extractTaskSessionId(null)).toBeNull();
-    expect(extractTaskSessionId('sess-abc')).toBeNull();
   });
 });

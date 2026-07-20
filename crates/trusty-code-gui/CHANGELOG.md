@@ -25,6 +25,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `ui/src/lib/api-config.test.ts` parsing `trusty-code/src/serve/mod.rs`
   directly to assert the two stay in sync.
 
+### Changed
+
+- **Implicit workstream inference — no creation ceremony (closes #3384,
+  DOC-48 §8 Phase C++, DOC-39 §7A/§6.2 amendment).** Bob, after test-driving
+  the workstream-first flow below: *"We shouldn't need to 'create' a
+  workstream, it should be inferred. Just pick a project and start
+  working."* `NewWorkstreamForm.svelte` renamed `StartWorkingForm.svelte` —
+  the dedicated "new workstream" section header and "create workstream"
+  button are gone; the card now reads "start working" and the submit button
+  reads "go". The success message drops the "workstream created — session
+  <id>" ceremony text (and the internal session id it exposed) for a plain
+  "started". The underlying create → run → activate orchestration (issue
+  #3365/PR #3375, incl. the code-critic HIGH fix that made activation the
+  LAST step and added `pendingWorkstreamId` retry-reuse) is byte-for-byte
+  unchanged — only the UI framing that made minting look like a distinct
+  management action is gone. Renaming/closing/switching an existing
+  workstream (`WorkstreamSwitcher.svelte`, issue #3300) is untouched.
+- **Monitoring reframed around the active workstream (same issue).** Bob:
+  *"'SESSION MONITOR — no active session to monitor' — this doesn't make
+  sense in the workstream context."* `SessionMonitor.svelte` renamed
+  `WorkstreamActivity.svelte` (header: "workstream activity") and re-scoped:
+  polls `GET /workstreams` to find the ACTIVE workstream, then selects a
+  session from among ONLY that workstream's own bound `session_ids`
+  (`pickActiveSessionInWorkstream`, `lib/session-status.ts`) — never a
+  session belonging to a different (or no) workstream, closing a real
+  correctness gap the prior daemon-wide `pickActiveSession` heuristic had.
+  Empty state: **"no active workstream — pick a project to start"**
+  (verbatim from the issue); a real active workstream with nothing bound yet
+  renders its own "no activity yet" sub-state. Also subscribes to
+  `GET /workstreams/{id}/events` (DOC-48 §5.3's SSE aggregation route, issue
+  #3343) as a latency nudge on top of the existing REST poll, mirroring
+  `WorkstreamSwitcher.svelte`'s identical pattern over the same route — the
+  poll stays authoritative.
+- **Session vocabulary swept from remaining user-facing GUI text.**
+  `StatusBar.svelte` ("no active session" -> "no active workstream", "no
+  project bound to this session" -> "no project bound yet", the trailing
+  "session &lt;id&gt;" chip -> "id &lt;id&gt;"), `SearchTab.svelte` ("no
+  active session — nothing to audit yet" -> "no active workstream — nothing
+  to audit yet"), `ServiceNav.svelte` (the Workstream tab's live-dot tooltip
+  "session running" -> "workstream active"), `WorkstreamRail.svelte`
+  ("start one from the Workstream tab" -> "start working from the
+  Workstream tab"). Internal type/variable names (`SessionSummary`,
+  `pickActiveSession`, `GET /sessions`, etc.) and API surfaces are
+  unchanged — only user-facing labels/empty-states/error strings moved.
+  Judgment call: `StatusBar.svelte`/`SearchTab.svelte`/`WorkstreamRail.svelte`
+  keep their existing daemon-wide (not workstream-scoped) session-selection
+  logic — only `WorkstreamActivity.svelte`'s underlying data source was
+  re-architected, since that was the component Bob specifically called out.
+
 ### Added
 
 - **Workstream-first creation flow (closes #3365, DOC-48 §8 Phase C+,

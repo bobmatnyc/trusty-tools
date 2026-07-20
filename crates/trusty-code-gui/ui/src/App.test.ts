@@ -5,18 +5,20 @@
 // the nesting. The remaining assertions were rewritten for the issue #3153
 // shell rebuild: `App.svelte` no longer stacks every card in one flat
 // `.body` — content now lives behind `ServiceNav`'s 7 tabs, with Workstream
-// (hosting `NewWorkstreamForm`/`SessionMonitor`, via `WorkstreamTab.svelte`)
+// (hosting `StartWorkingForm`/`WorkstreamActivity`, via `WorkstreamTab.svelte`)
 // as the default `activeTab`, and `SearchTab` reachable only after
 // selecting the Search nav button. These assertions exercise that through
 // the same "mount the real component" approach as before, just following
 // the new default-tab / tab-switch shape rather than assuming simultaneous
-// rendering. Issue #3365 renamed `CreateSessionForm` to `NewWorkstreamForm`
-// (workstream-first entry, replacing the session-first one) — the
-// assertions below follow that rename.
+// rendering. Renamed twice since: issue #3365 `CreateSessionForm` ->
+// `NewWorkstreamForm` (workstream-first entry), then issue #3384
+// `NewWorkstreamForm` -> `StartWorkingForm` (explicit creation ceremony
+// removed) + `SessionMonitor` -> `WorkstreamActivity` (reframed around the
+// active workstream) — the assertions below follow both renames.
 // What: Mounts the real `App.svelte` (with `fetch` stubbed so the mount
 // doesn't make a real network call) and asserts `.statusbar` is a direct
 // child of `.app` and NOT a descendant of `.body`, that the Workstream
-// tab's content (`SessionMonitor`/`NewWorkstreamForm`) renders inside
+// tab's content (`WorkstreamActivity`/`StartWorkingForm`) renders inside
 // `.body` by default, and that clicking the Search nav tab swaps in
 // `SearchTab`'s content.
 // Test: this file.
@@ -90,24 +92,24 @@ describe('App shell structure (DOC-39 §8.1, AC-18.1)', () => {
 });
 
 describe('Workstream tab (default activeTab) — DOC-39 §4.6/§4.2.1', () => {
-  it('SessionMonitor (8b card) renders inside .body by default', () => {
+  it('WorkstreamActivity (8b card) renders inside .body by default', () => {
     instance = mount(App, { target }) as unknown as Record<string, unknown>;
 
     const body = target.querySelector('.body');
     const headings = Array.from(body?.querySelectorAll('h2') ?? []);
 
     expect(body).not.toBeNull();
-    expect(headings.some((h) => h.textContent === 'session monitor')).toBe(true);
+    expect(headings.some((h) => h.textContent === 'workstream activity')).toBe(true);
   });
 
-  it('NewWorkstreamForm (issue #3365 workstream-first create+prompt form) renders inside .body by default', () => {
+  it('StartWorkingForm (issue #3384 — no explicit creation ceremony) renders inside .body by default', () => {
     instance = mount(App, { target }) as unknown as Record<string, unknown>;
 
     const body = target.querySelector('.body');
     const headings = Array.from(body?.querySelectorAll('h2') ?? []);
 
     expect(body).not.toBeNull();
-    expect(headings.some((h) => h.textContent === 'new workstream')).toBe(true);
+    expect(headings.some((h) => h.textContent === 'start working')).toBe(true);
   });
 });
 

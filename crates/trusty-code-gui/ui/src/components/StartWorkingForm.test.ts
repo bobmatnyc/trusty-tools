@@ -1,20 +1,21 @@
-// Why: `NewWorkstreamForm.svelte` is issue #3365's main deliverable — the
-// workstream-first create flow that replaces `CreateSessionForm`'s
-// session-first one. Its pure logic is covered by
-// `lib/new-workstream.test.ts`; this file covers what only mounting the
-// real component (plus its `ProjectPickerModal` child) can: the submit
-// button's disabled/enabled states, the no-double-submit guard, the
-// picker-modal wiring (open -> pick a roster row / go projectless ->
-// "selected:" line updates), the create -> run -> activate submit sequence
-// (code-critic PR #3375 review, HIGH — activation now fires ONLY after a
-// successful task-run, never before, and a task-run failure after a
-// successful create reuses the same workstream id on retry rather than
-// minting another), and the carried-over Enter/Shift+Enter keyboard
-// behavior (issue #3132).
+// Why: `StartWorkingForm.svelte` (renamed from `NewWorkstreamForm.svelte`,
+// issue #3384) is the primary GUI entry point — issue #3365/PR #3375's
+// explicit "create workstream" ceremony is gone; this file pins that it
+// STAYS gone (no "new workstream" header, no "create workstream" button
+// text anywhere) while the underlying create -> run -> activate machinery
+// is unchanged. Its pure logic is covered by `lib/new-workstream.test.ts`;
+// this file covers what only mounting the real component (plus its
+// `ProjectPickerModal` child) can: the submit button's disabled/enabled
+// states, the no-double-submit guard, the picker-modal wiring (open -> pick
+// a roster row / go projectless -> "selected:" line updates), the create ->
+// run -> activate submit sequence (code-critic PR #3375 review, HIGH —
+// activation now fires ONLY after a successful task-run, never before, and
+// a task-run failure after a successful create reuses the same workstream
+// id on retry rather than minting another), and the carried-over
+// Enter/Shift+Enter keyboard behavior (issue #3132).
 // What: Mounts the real component with `fetch` stubbed to answer
 // `GET /projects`, `POST /workstreams`, `POST /workstreams/{id}/activate`,
-// and `POST /tasks` by URL/method — mirrors
-// `CreateSessionForm.test.ts` (this file's predecessor)'s
+// and `POST /tasks` by URL/method — mirrors this file's own predecessors'
 // stub-fetch-by-URL-suffix mounting pattern. `fullSuccessFetch`'s optional
 // `callLog` records `{method, url}` per call, in order, so tests can assert
 // the CALL SEQUENCE itself (e.g. "no `/activate` call before `/tasks`
@@ -22,7 +23,7 @@
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
-import NewWorkstreamForm from './NewWorkstreamForm.svelte';
+import StartWorkingForm from './StartWorkingForm.svelte';
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -38,14 +39,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 
 function submitButton(): HTMLButtonElement {
   const button = Array.from(target.querySelectorAll('button')).find(
-    (b) => b.textContent === 'create workstream' || b.textContent === 'creating…',
+    (b) => b.textContent === 'go' || b.textContent === 'starting…',
   );
   if (!button) throw new Error('submit button not found');
   return button as HTMLButtonElement;
 }
 
 function taskField(): HTMLTextAreaElement {
-  return target.querySelector('#new-workstream-task') as HTMLTextAreaElement;
+  return target.querySelector('#start-working-task') as HTMLTextAreaElement;
 }
 
 function openPickerButton(): HTMLButtonElement {
@@ -100,9 +101,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('NewWorkstreamForm submit gating', () => {
+describe('StartWorkingForm submit gating', () => {
   it('disables submit when the task is empty, enables it once text is entered', async () => {
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
 
     expect(submitButton().disabled).toBe(true);
 
@@ -121,16 +122,26 @@ describe('NewWorkstreamForm submit gating', () => {
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     expect(target.textContent).toContain('projectless');
+  });
+
+  it('issue #3384: no explicit creation ceremony — header reads "start working", submit reads "go", no "new workstream"/"create workstream" text anywhere', () => {
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+
+    const heading = target.querySelector('h2');
+    expect(heading?.textContent?.trim()).toBe('start working');
+    expect(submitButton().textContent).toBe('go');
+    expect(target.textContent).not.toContain('new workstream');
+    expect(target.textContent).not.toContain('create workstream');
   });
 });
 
-describe('NewWorkstreamForm project picker wiring', () => {
+describe('StartWorkingForm project picker wiring', () => {
   it('opens the modal, and picking a roster row updates the selected-project line', async () => {
     vi.stubGlobal('fetch', fullSuccessFetch());
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     openPickerButton().click();
 
     await waitFor(() => target.textContent?.includes('acme-api') ?? false);
@@ -146,7 +157,7 @@ describe('NewWorkstreamForm project picker wiring', () => {
   it('"start chatting without a project" closes the modal and keeps the selection projectless', async () => {
     vi.stubGlobal('fetch', fullSuccessFetch());
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     openPickerButton().click();
 
     await waitFor(
@@ -164,7 +175,7 @@ describe('NewWorkstreamForm project picker wiring', () => {
   it('the "clear" button resets a selection back to projectless', async () => {
     vi.stubGlobal('fetch', fullSuccessFetch());
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     openPickerButton().click();
     await waitFor(() => target.textContent?.includes('acme-api') ?? false);
     (Array.from(target.querySelectorAll('button')).find(
@@ -182,19 +193,23 @@ describe('NewWorkstreamForm project picker wiring', () => {
   });
 });
 
-describe('NewWorkstreamForm submit sequence', () => {
-  it('creates a workstream, activates it, and runs the task — success message includes the session id', async () => {
+describe('StartWorkingForm submit sequence', () => {
+  it('creates a workstream, runs the task, and activates it — plain "started" message, no ceremony/id exposed', async () => {
     vi.stubGlobal('fetch', fullSuccessFetch());
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
 
     submitButton().click();
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
 
-    expect(target.textContent).toContain('workstream created — session sess-abc');
+    // Issue #3384: no "new workstream"/"create workstream" ceremony
+    // language anywhere, and no internal session id exposed.
+    expect(target.textContent).not.toContain('new workstream');
+    expect(target.textContent).not.toContain('create workstream');
+    expect(target.textContent).not.toContain('sess-abc');
     expect(taskField().value).toBe('');
     expect(submitButton().disabled).toBe(true); // task cleared on success
   });
@@ -203,7 +218,7 @@ describe('NewWorkstreamForm submit sequence', () => {
     const opts: { tasksBody: unknown } = { tasksBody: null };
     vi.stubGlobal('fetch', fullSuccessFetch(opts));
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     openPickerButton().click();
     await waitFor(() => target.textContent?.includes('acme-api') ?? false);
     (Array.from(target.querySelectorAll('button')).find(
@@ -216,7 +231,7 @@ describe('NewWorkstreamForm submit sequence', () => {
     await waitFor(() => !submitButton().disabled);
 
     submitButton().click();
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
 
     expect(opts.tasksBody).toEqual({
       task_description: 'ship the feature',
@@ -229,13 +244,13 @@ describe('NewWorkstreamForm submit sequence', () => {
     const callLog: string[] = [];
     vi.stubGlobal('fetch', fullSuccessFetch({ callLog }));
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
 
     submitButton().click();
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
 
     expect(callLog).toEqual([
       'POST /workstreams',
@@ -267,13 +282,13 @@ describe('NewWorkstreamForm submit sequence', () => {
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
 
     submitButton().click();
-    await waitFor(() => submitButton().disabled && submitButton().textContent === 'creating…');
+    await waitFor(() => submitButton().disabled && submitButton().textContent === 'starting…');
 
     // A second click while in flight must be a no-op.
     submitButton().click();
@@ -284,7 +299,7 @@ describe('NewWorkstreamForm submit sequence', () => {
       json: async () => ({ session_id: 'sess-abc12345' }),
     } as Response);
 
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
     expect(submitButton().disabled).toBe(true); // task cleared on success
   });
 
@@ -304,7 +319,7 @@ describe('NewWorkstreamForm submit sequence', () => {
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
@@ -345,7 +360,7 @@ describe('NewWorkstreamForm submit sequence', () => {
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
@@ -402,7 +417,7 @@ describe('NewWorkstreamForm submit sequence', () => {
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
@@ -411,7 +426,7 @@ describe('NewWorkstreamForm submit sequence', () => {
     await waitFor(() => target.textContent?.includes('was created but not activated') ?? false);
 
     submitButton().click();
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
 
     // Exactly one workstream minted, reused by both /tasks calls; exactly
     // one activation, and it happens only after the SECOND (successful)
@@ -446,21 +461,21 @@ describe('NewWorkstreamForm submit sequence', () => {
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
 
     submitButton().click();
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
 
-    expect(target.textContent).toContain('workstream created');
+    expect(target.textContent).toContain('started');
     expect(target.textContent).toContain('could not activate');
     expect(taskField().value).toBe(''); // still cleared — the sequence still succeeded overall
   });
 });
 
-describe('NewWorkstreamForm keyboard submit (issue #3132, carried over)', () => {
+describe('StartWorkingForm keyboard submit (issue #3132, carried over)', () => {
   it('Enter (no Shift) submits the task field, and a rapid second Enter while in flight causes no second POST', async () => {
     let postCount = 0;
     let resolveTasks: ((value: Response) => void) | null = null;
@@ -486,7 +501,7 @@ describe('NewWorkstreamForm keyboard submit (issue #3132, carried over)', () => 
       }),
     );
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'ship the feature';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
     await waitFor(() => !submitButton().disabled);
@@ -506,14 +521,14 @@ describe('NewWorkstreamForm keyboard submit (issue #3132, carried over)', () => 
       json: async () => ({ session_id: 'sess-abc12345' }),
     } as Response);
 
-    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+    await waitFor(() => target.textContent?.includes('started') ?? false);
     expect(postCount).toBe(1);
   });
 
   it('Shift+Enter does not submit, letting the textarea insert a newline', () => {
     vi.stubGlobal('fetch', fullSuccessFetch());
 
-    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
     taskField().value = 'line one';
     taskField().dispatchEvent(new Event('input', { bubbles: true }));
 

@@ -1,4 +1,4 @@
-// Why: `NewWorkstreamForm.svelte` (issue #3365 — Bob's product direction:
+// Why: `StartWorkingForm.svelte` (issue #3365 — Bob's product direction:
 // "Let's call it a new workstream, and users pick a project or just start
 // chatting… let's focus on 'workstreams' as the primary connection path, not
 // sessions") replaces the prior session-first create+prompt flow
@@ -24,7 +24,7 @@
 // timing.
 //
 // **Activation is best-effort, LAST, and never re-mints on retry (see
-// `NewWorkstreamForm.svelte`'s own docs for the full sequencing and the
+// `StartWorkingForm.svelte`'s own docs for the full sequencing and the
 // code-critic PR #3375 review that moved it here).** Activation is
 // deliberately the FINAL step, after a successful task-run — not the second
 // step — because `force: true` unconditionally deactivates whatever was
@@ -52,15 +52,21 @@
 // exist" round-trip, mirroring the prior form's identical reasoning for its
 // own picker). [`inferWorkstreamName`] builds the default workstream name
 // (DOC-48 §9 Q1 defers real name inference; this ticket's own brief asks
-// for "project name + date" as the interim default). [`buildCreateWorkstreamBody`]/
-// [`buildRunTaskBody`] mirror `POST /workstreams`'/`POST /tasks`' request
-// bodies; [`canSubmitCreate`]/[`bindingLabel`] are unchanged carry-overs from
-// the prior form (the gating rule and the "selected:" status line are
-// identical concepts, just now populated by the modal instead of an inline
-// browse); [`extractWorkstreamId`]/[`extractTaskSessionId`] extract the ids
-// the success message needs from each step's response body, both guarded by
-// a runtime shape check for the same PR #3103 reasons `create-session.ts`
-// originally documented.
+// for "project name + date" as the interim default — issue #3384 makes this
+// MORE load-bearing, not less: the operator never types a name at all now).
+// [`buildCreateWorkstreamBody`]/[`buildRunTaskBody`] mirror `POST
+// /workstreams`'/`POST /tasks`' request bodies; [`canSubmitCreate`]/
+// [`bindingLabel`] are unchanged carry-overs from the prior form (the gating
+// rule and the "selected:" status line are identical concepts, just now
+// populated by the modal instead of an inline browse);
+// [`extractWorkstreamId`] extracts the id `submit()` needs to bind the task
+// run and (later) activate, guarded by a runtime shape check for the same PR
+// #3103 reasons `create-session.ts` originally documented. (Issue #3384:
+// this module used to also export `isTaskRunResponse`/`extractTaskSessionId`
+// for `POST /tasks`' response — removed as dead code once
+// `StartWorkingForm.svelte` stopped reading a session id out of that body
+// for its success message; the `POST /tasks` response shape itself is
+// unchanged, only this module's need to parse it went away.)
 // Test: `new-workstream.test.ts`.
 
 /**
@@ -162,7 +168,7 @@ export function buildRunTaskBody(
 /**
  * Whether the create-workstream button may be clicked right now.
  *
- * Why: the one gate `NewWorkstreamForm.svelte`'s submit button binds
+ * Why: the one gate `StartWorkingForm.svelte`'s submit button binds
  * `disabled` to — a non-empty (post-trim) task, and not already mid-flight
  * (double-submit guard, since submitting starts a brand-new
  * create-workstream/activate/run-task sequence on every call).
@@ -211,10 +217,9 @@ export function isWorkstreamCreateResponse(body: unknown): body is { id: string 
 /**
  * Extract the workstream id from a `POST /workstreams` 201 body, if any.
  *
- * Why: mirrors [`extractTaskSessionId`]'s reasoning — the `201` status is
- * authoritative that the workstream was created; a missing/malformed id in
- * the body must degrade the caller's next step to a clear error, never
- * throw.
+ * Why: the `201` status is authoritative that the workstream was created; a
+ * missing/malformed id in the body must degrade the caller's next step to a
+ * clear error, never throw.
  * What: returns `body.id` when [`isWorkstreamCreateResponse`] accepts the
  * shape AND the id is non-empty, else `null`.
  * Test: `new-workstream.test.ts::extractWorkstreamId`.
@@ -222,38 +227,4 @@ export function isWorkstreamCreateResponse(body: unknown): body is { id: string 
 export function extractWorkstreamId(body: unknown): string | null {
   if (!isWorkstreamCreateResponse(body)) return null;
   return body.id.length > 0 ? body.id : null;
-}
-
-/**
- * Runtime shape guard for a `POST /tasks` 202 response body.
- *
- * Why: carried over from `create-session.ts` unchanged — a `202` status is
- * only a promise that `task.run` accepted the request, not that whatever
- * answered the socket returned the shape this handler dereferences
- * (`crate::serve::rest::tasks::run_task`'s success body is `{session_id,
- * status, mode, binding}`; the form only ever reads `session_id`).
- * What: `body` is an object and `body.session_id` is a string (may be
- * empty — emptiness is [`extractTaskSessionId`]'s concern, not the shape
- * guard's).
- * Test: `new-workstream.test.ts::isTaskRunResponse`.
- */
-export function isTaskRunResponse(body: unknown): body is { session_id: string } {
-  if (typeof body !== 'object' || body === null) return false;
-  return typeof (body as Record<string, unknown>).session_id === 'string';
-}
-
-/**
- * Extract the session id from a `POST /tasks` 202 body, if any.
- *
- * Why: carried over from `create-session.ts` unchanged — dereferencing a
- * response field directly and slicing it in the template throws when the
- * body is missing or malformed; the `202` status is authoritative that
- * `task.run` was accepted, the id is only cosmetic.
- * What: returns `body.session_id` when [`isTaskRunResponse`] accepts the
- * shape AND the id is non-empty, else `null`.
- * Test: `new-workstream.test.ts::extractTaskSessionId`.
- */
-export function extractTaskSessionId(body: unknown): string | null {
-  if (!isTaskRunResponse(body)) return null;
-  return body.session_id.length > 0 ? body.session_id : null;
 }

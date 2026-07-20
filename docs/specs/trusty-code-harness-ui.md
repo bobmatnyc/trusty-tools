@@ -1043,6 +1043,30 @@ for 7a (§6.2.1).
 (§4.2.1). These are the surfaces that require **no** new domain object — they render
 Phase 1's events against today's non-durable registry.
 
+> **Phase C+ update — the 8b inline monitor card is reframed around the active
+> workstream, not "whichever session happens to be running" (issue #3384 Scope B, Bob,
+> 2026-07-20).** *"'SESSION MONITOR — no active session to monitor' — this doesn't make
+> sense in the workstream context."* The Phase 1 implementation of this card
+> (`SessionMonitor.svelte`, shipped observe-only against `GET /sessions`' daemon-wide
+> `pickActiveSession` heuristic with no workstream awareness at all) is renamed
+> `WorkstreamActivity.svelte` and re-scoped: it now polls `GET /workstreams` first to
+> find the ACTIVE workstream, then selects a session from among that workstream's own
+> bound `session_ids` only — never a session belonging to a different (or no)
+> workstream, even if that other session is more recent. Its empty state reads **"no
+> active workstream — pick a project to start"** (verbatim from the issue), pointing at
+> the primary flow (§7A) rather than naming "session" at all; a real active workstream
+> with no bound session yet renders its own "no activity yet" sub-state instead of
+> falling through to an unrelated session. **Live activity now also uses DOC-48 §5.3's
+> workstream-level SSE aggregation route** (`GET /workstreams/{id}/events`, issue #3343)
+> as a latency nudge on top of the existing REST poll — mirroring the identical
+> "REST poll is authoritative, SSE narrows the gap between ticks" pattern the GUI
+> workstream switcher (DOC-48 §8, issue #3300) already established over the same
+> route — never as a client-side event-log buffer (this section's own §4.6 already reasons
+> through why that would be more state/derivation than a thin client should introduce
+> ad hoc; unchanged here). This does not change the AC-6.3 gap this card still does not
+> close (§4.6, issue #3108) — only WHICH unit of work the card's Phase-1-shaped stopgap
+> tracks.
+
 #### 6.2.1 Projectless — **Bob mandated it; here is where it lands and why**
 
 **Projectless is Phase 1.** Rationale, stated deliberately:
@@ -1189,16 +1213,18 @@ indicator (§4.5) need a per-agent story once fan-out is routine? **Owner: engin
 
 > **Phase C update — workstreams are the entry concept, not sessions (issue #3365, Bob's product direction, 2026-07-19).** *"Let's call it a new workstream, and users pick a project or just start chatting. Use a modal for project selection. Let's focus on 'workstreams' as the primary connection path, not sessions — since we have infinite sessions, we shouldn't need them."* DOC-48 (epic #3292) landed the workstream domain object after this section was written; **item 3 below is superseded**: the entry action is **NEW WORKSTREAM**, not an inferred session. Concretely: (a) the primary GUI entry control reads **NEW WORKSTREAM**, replacing any session-labeled affordance; (b) project selection happens in a **modal** (`ProjectPickerModal`) opened from that entry control, not an inline recents/registered list embedded in the empty-state screen as originally sketched — the modal lists a **roster** of known project directories (`GET /projects`, `crate::fs_browse::roster`) rather than `trusty-mpm GET /projects/discover` (7A.1 below is accordingly the *aspirational* recents/registered vision; the shipped Phase C roster is the interim, daemon-local source — see §5.8.1); (c) picking a project OR choosing **"start chatting without a project"** creates a workstream (`POST /workstreams`, optionally named from the project + date), runs the first task **bound to that workstream** (`POST /tasks` with `workstream_id` — DOC-48 §5.1, issue #3298/PR #3354's binding support), and only THEN activates it (`POST /workstreams/{id}/activate{force:true}`) — **activation is deliberately the LAST step, not the second one** (code-critic PR #3375 review, HIGH): `force:true` unconditionally deactivates whatever was previously active, so firing it before the task-run is known to succeed can strand an empty, now-active workstream with no restore path if the run then fails. A task-run failure after a successful create keeps that workstream id for the client to reuse on retry, rather than minting another. **Sessions remain the internal execution unit** (§3.1, §4B) — "infinite sessions" ride under the workstream, per Bob's framing; they are never again the thing the operator is asked to name or pick. **Projectless <-> unbound-session mapping (design call, recorded here as the issue instructed):** "start chatting without a project" in the modal maps 1:1 onto §4.2's existing **Projectless** binding state — the workstream's first session simply carries no `project` binding. The UI never surfaces the words "session" or "unbound" for this path; it stays workstream-neutral throughout, exactly as it does for the bound-project path.
 
+> **Phase C+ update — implicit workstream inference, no creation ceremony at all (issue #3384, Bob, 2026-07-20, after test-driving the Phase C flow above).** *"We shouldn't need to 'create' a workstream, it should be inferred. Just pick a project and start working."* This **supersedes the Phase C update's own "NEW WORKSTREAM" entry-control framing** one release later: there is no longer a dedicated **NEW WORKSTREAM** button/section/ceremony at all — the primary flow (`StartWorkingForm.svelte`, renamed from `NewWorkstreamForm.svelte`) collapses to exactly what Bob describes: pick a project (the SAME `ProjectPickerModal` from the Phase C update, unchanged) or skip for projectless, type the task, press **go**. The create → run → activate machinery from the Phase C update is **entirely unchanged** — the workstream still mints implicitly on first submit, still runs the task before activating, still reuses a pending workstream id on a create-succeeded-but-run-failed retry — only the user-facing "this is a creation action" framing is gone; minting is now genuinely invisible/inferred, matching principle 4 (cold start is the empty state of the same shell, not a ceremony). Renaming/closing/switching an EXISTING workstream is untouched — that stays in `WorkstreamSwitcher.svelte` (§8, issue #3300/PR #3356) for power users; nothing about THAT surface changes. DOC-48 §9 Q1 (prompt-derived workstream naming) is **not resolved by this update** — the interim `"<project> — <date>"` default (Phase C) still applies — but Q1 is now MORE load-bearing, not less: the operator never types a name at all, so a future real inference upgrade has more value than before, not less.
+
 **Requirement — project selection drives immediate task creation:**
 
 1. **Project picker** — a curated list of recent/registered projects (from `trusty-mpm GET /projects/discover`), not raw filesystem browse. Selection is fast and repeatable. *(Aspirational; Phase C ships the narrower `GET /projects` roster instead — see the Phase C update above and §5.8.1.)*
 2. **Live prompt box on selection** — once a project is picked, a **single text input + Enter** is the entry point. No separate form step.
-3. ~~**One-shot create+prompt** — typing the prompt text and pressing Enter calls `POST /tasks` with the prompt as the first `task_run`, binding the project per-call (§5.5 / §7). The session is created (or resumed into an existing workstream) as a side effect; the prompt is the primary action.~~ **Superseded by the Phase C update above:** the workstream is what gets created (and activated) as the primary action; the session is the under-the-hood side effect, not the other way around.
+3. ~~**One-shot create+prompt** — typing the prompt text and pressing Enter calls `POST /tasks` with the prompt as the first `task_run`, binding the project per-call (§5.5 / §7). The session is created (or resumed into an existing workstream) as a side effect; the prompt is the primary action.~~ **Superseded by the Phase C+ update above:** typing the task and pressing "go" is the ENTIRE primary action — no separate "create workstream" step ever existed for the operator to notice; the workstream mints (and later activates) invisibly under the hood.
 
 **AC-21.1** The project picker shows recent projects (cached from prior selections) alongside registered projects from `trusty-mpm`. *(Aspirational — not yet built; Phase C's roster, §5.8.1, has no recents cache.)*
 **AC-21.2** Selecting a project populates the session shell with that project's context (§7B); the prompt box becomes the only input.
 **AC-21.3** `POST /tasks` wired to accept per-call `project` binding (§5.5, issue #3178) so the prompt-box entry is possible at all.
-**AC-21.4** ~~Session creation is now inferred from the first task, not a separate step (issue #3177).~~ **Superseded (issue #3365):** WORKSTREAM creation is the explicit primary step (NEW WORKSTREAM); session creation remains inferred from the first task, but as a consequence of the workstream step, not a replacement for it.
+**AC-21.4** ~~Session creation is now inferred from the first task, not a separate step (issue #3177).~~ **Superseded twice: first (issue #3365) to** "WORKSTREAM creation is the explicit primary step (NEW WORKSTREAM); session creation remains inferred from the first task, but as a consequence of the workstream step, not a replacement for it," **then (issue #3384) to:** WORKSTREAM creation is ALSO now inferred, not an explicit step — picking a project (or skipping it) and typing a task is the entire operator-visible flow; the workstream mints, runs, and activates invisibly underneath it, exactly as session creation already did under the Phase C flow.
 
 ### 7A.1 Recents and project discovery
 
@@ -1457,6 +1483,21 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 ## Changelog
 
+- **2026-07-20** — **Implicit workstream inference + monitoring reframe** (issue #3384,
+  Phase C+). Amends §7A (`SPEC-TCUI-10~draft`) to record Bob's follow-up direction after
+  test-driving the Phase C flow: the explicit **NEW WORKSTREAM** entry-control ceremony is
+  GONE — picking a project (or skipping it) and typing a task is the entire operator-visible
+  flow, with the workstream minting/running/activating invisibly underneath, exactly like
+  session creation already did. The create → run → activate machinery itself is unchanged.
+  Amends §6.2 (Phase 1 UI) to record that the 8b inline monitor card
+  (`SessionMonitor.svelte` -> `WorkstreamActivity.svelte`) is reframed around the ACTIVE
+  WORKSTREAM (via `GET /workstreams` + a workstream-scoped session pick, never a session
+  belonging to a different workstream) rather than a daemon-wide "whichever session is
+  running" heuristic; its empty state reads "no active workstream — pick a project to
+  start" (verbatim from the issue); live activity additionally uses DOC-48 §5.3's
+  workstream-level SSE aggregation route (issue #3343) as a latency nudge, mirroring the
+  GUI workstream switcher's identical pattern over the same route. Renaming/closing/
+  switching an existing workstream (DOC-48 §8, issue #3300) is untouched.
 - **2026-07-19** — **Workstream-first entry amendment** (issue #3365, Phase C). Amends §7A
   (`SPEC-TCUI-10~draft`) to record Bob's product direction: workstreams, not sessions, are
   the GUI's primary entry/connection concept — the entry control is **NEW WORKSTREAM**,

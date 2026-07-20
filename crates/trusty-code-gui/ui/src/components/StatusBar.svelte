@@ -6,7 +6,7 @@
   // landed with REST Slice 2 (#2983, squash 15156b42), `GET
   // /sessions/{id}/budget` (issue #3015, PR #3042) supplies TOKENS, and
   // this rebuild adds one more chained fetch — `GET /sessions/{id}` — for
-  // the fields already used elsewhere (`SessionMonitor.svelte`) that this
+  // the fields already used elsewhere (`WorkstreamActivity.svelte`) that this
   // bar didn't previously read: `project` (the PROJECT segment) and `agent`
   // (the AGENTS-mode segment). MEM and COST have no daemon route yet
   // (memory-palace stats need #3181's aggregation; live cost is #3254) —
@@ -216,12 +216,12 @@
   {:else if phase === 'no-session'}
     <span class="flex items-center gap-1.5 text-trusty-text-muted">
       <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
-      no active session
+      no active workstream
     </span>
   {:else}
     <div class="flex items-center gap-4 overflow-x-auto">
       <span title={session?.id}>workstream: {session?.status ?? 'unknown'}</span>
-      <span title={detail?.project ?? session?.project ?? 'no project bound to this session'}>
+      <span title={detail?.project ?? session?.project ?? 'no project bound yet'}>
         project: {detail?.project ?? session?.project ?? 'projectless'}
       </span>
       <span class="flex items-center gap-1.5" title={session?.id}>
@@ -243,7 +243,7 @@
     </div>
     {#if session}
       <span class="truncate normal-case text-trusty-text-muted" title={session.id}
-        >session {session.id.slice(0, 8)}</span
+        >id {session.id.slice(0, 8)}</span
       >
     {/if}
   {/if}

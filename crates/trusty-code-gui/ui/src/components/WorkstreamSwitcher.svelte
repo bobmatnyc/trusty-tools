@@ -12,7 +12,7 @@
   //
   // What: Polls `GET /workstreams` every `POLL_MS` (the same
   // `$effect`/`AbortController`/`setInterval` shape `StatusBar.svelte`/
-  // `SessionMonitor.svelte` already establish — one controller for the
+  // `WorkstreamActivity.svelte` already establish — one controller for the
   // whole mounted lifetime, `signal.aborted` re-checked after every
   // `await`). A second `$effect` opens an `EventSource` on
   // `/workstreams/{active_id}/events` whenever the polled
@@ -40,11 +40,11 @@
   // rather than silently retrying with `force: true` (an explicit switch is
   // never silent, and DOC-48's own wording for this issue's scope is
   // "surface it, offer refresh"). Rename swaps a row into an inline
-  // text-input edit (no `window.prompt()` — see `SessionMonitor.svelte`'s
+  // text-input edit (no `window.prompt()` — see `WorkstreamActivity.svelte`'s
   // identical rationale); allowed on a closed row too, matching the
   // backend's `rename_closed_workstream_succeeds` contract (§4.4: closure
   // only rejects new session bindings, never label edits). Close requires
-  // the same two-step in-row confirm `SessionMonitor.svelte`'s cancel action
+  // the same two-step in-row confirm `WorkstreamActivity.svelte`'s cancel action
   // already establishes (no `window.confirm()`). `resetRowState()` clears
   // every armed rename/close/conflict control at EVERY open-state
   // transition (code-critic PR #3356 review, HIGH) — both `toggleOpen()`

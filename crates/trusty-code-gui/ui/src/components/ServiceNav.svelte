@@ -61,7 +61,7 @@
       }`}
     >
       {#if tab.id === 'workstream' && sessionRunning}
-        <span class="h-1.5 w-1.5 rounded-full bg-status-ok" title="session running"></span>
+        <span class="h-1.5 w-1.5 rounded-full bg-status-ok" title="workstream active"></span>
       {/if}
       {tab.label}
     </button>

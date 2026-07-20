@@ -12,7 +12,7 @@
   // honest stub rather than fabricated rows: Workstream shows the one
   // synthetic "current session" entry when a session is active (7b);
   // Project shows only the dashed "+ Add project" affordance (7a), which
-  // just switches to the Workstream tab where `CreateSessionForm`'s picker
+  // just switches to the Workstream tab where `StartWorkingForm`'s picker
   // already lives (no separate picker is built here — one picker, one
   // owner).
   //
@@ -104,7 +104,7 @@
           </div>
         {:else}
           <p class="px-1 py-2 text-[11px] text-trusty-sidebar-muted">
-            no active workstream yet — start one from the Workstream tab
+            no active workstream yet — start working from the Workstream tab
           </p>
         {/if}
       {:else}

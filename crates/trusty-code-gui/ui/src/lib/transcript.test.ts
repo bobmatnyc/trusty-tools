@@ -1,5 +1,5 @@
 // Why: `selectTranscriptTail` and `formatElapsed` are the two pieces of
-// client-side derivation `SessionMonitor.svelte` relies on — a wrong tail
+// client-side derivation `WorkstreamActivity.svelte` relies on — a wrong tail
 // selection or a wrong elapsed format would silently mislead the operator
 // about session state, with no error surfaced anywhere. Worth pinning
 // directly, independent of the component's DOM/polling concerns.

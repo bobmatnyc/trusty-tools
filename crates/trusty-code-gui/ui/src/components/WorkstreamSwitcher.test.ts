@@ -3,7 +3,7 @@
 // This covers every phase and interaction the component's own module docs
 // describe: state display, the dropdown list with an active indicator,
 // activation (including the `409` conflict banner), rename, and close —
-// mirroring `SessionMonitor.test.ts`'s "mount the real component, stub
+// mirroring `WorkstreamActivity.test.ts`'s "mount the real component, stub
 // fetch, `waitFor` the settled DOM" approach, since this component shares
 // its polling shape.
 // What: A small in-memory fake daemon (`fakeDaemon`) backs a stubbed global

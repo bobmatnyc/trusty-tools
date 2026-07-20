@@ -151,7 +151,7 @@ export function workstreamLabel(ws: Pick<Workstream, 'name'>): string {
 
 /**
  * Status-dot Tailwind class for a workstream's [`WorkstreamState`] — reuses
- * the same `bg-status-*` token set `StatusBar.svelte`/`SessionMonitor.svelte`
+ * the same `bg-status-*` token set `StatusBar.svelte`/`WorkstreamActivity.svelte`
  * already establish (`ok` = green settled, `warn` = amber in-progress,
  * `neutral` = closed/inactive).
  * Test: `workstreams.test.ts::workstreamStateDotClass`.
