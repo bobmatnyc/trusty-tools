@@ -5,7 +5,20 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.36.0] — 2026-07-20
+
+### Changed
+
+- **BREAKING: unknown search-filter fields now error instead of being
+  silently ignored.** `SearchQuery` (`/indexes/:id/search`) and
+  `GlobalSearchRequest` (`/search`) both now derive `#[serde(deny_unknown_fields)]`.
+  A misspelled or unsupported filter field (e.g. `path_prefx` instead of
+  `path_prefix`) previously deserialized successfully and silently returned
+  an unscoped/unfiltered result set; it now fails deserialization with a
+  clear error. Any client sending fields the schema doesn't recognize —
+  intentionally or by typo — will start seeing request failures after this
+  upgrade. Check request payloads against the current `SearchQuery` /
+  `GlobalSearchRequest` field set before upgrading.
 
 ### Added
 
