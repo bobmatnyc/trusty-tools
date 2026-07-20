@@ -1,13 +1,19 @@
 [agent]
 name = "analysis-agent"
 role = "analysis"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360.
 model = "claude-sonnet-4-6"
 description = "Code quality analyst: complexity metrics, smell detection, dependency cycles, call graphs"
 
 [llm]
 temperature = 0.1
 max_tokens = 8192
+# #3458: `finish_task` was already in [tools] allowed below but never wired
+# up as the harness completion signal — this agent is now genuinely
+# tool-mandatory, which makes the #3389 plain-text-retry safety net engage.
+use_finish_task = true
 
 [tools]
 allowed = [

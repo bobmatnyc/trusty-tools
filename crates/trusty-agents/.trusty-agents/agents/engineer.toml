@@ -3,7 +3,9 @@ name = "engineer"
 role = "engineer"
 model = "claude-sonnet-4-6"
 description = "General-purpose engineer agent with operating principles. Skills injected at runtime."
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360.
 
 [llm]
 temperature = 0.2
@@ -11,7 +13,11 @@ temperature = 0.2
 max_tokens = 16384
 max_turns = 40
 tool_choice = "auto"
-use_finish_task = false
+# #3458: the system prompt below already talks about "calling finish_task"
+# as the completion signal — this flag was out of sync with that prompt
+# text. Flipped to true so the agent is genuinely tool-mandatory, which
+# makes the #3389 plain-text-retry safety net engage.
+use_finish_task = true
 use_anthropic_direct = false
 # #299: Disable extended thinking — task specs are deterministic; CoT adds 2-4x token cost.
 thinking_enabled = false

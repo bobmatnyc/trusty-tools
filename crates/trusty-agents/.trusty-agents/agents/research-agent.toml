@@ -2,7 +2,10 @@
 name = "research-agent"
 role = "researcher"
 model = "claude-sonnet-4-6"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360. `use_finish_task = true` already makes this
+# agent tool-mandatory (`LlmParams::strict_tool_discipline`, #3389).
 description = "Read-only investigator. Unified 'find out' agent covering codebase exploration (read_file/list_dir/grep), semantic/vector search, kuzu memory recall, skills loading, and web research. CANNOT write files. Do NOT select for any task that requires producing output artifacts (code, README, docs, config) — use engineers for code, docs-agent for documentation."
 
 [llm]

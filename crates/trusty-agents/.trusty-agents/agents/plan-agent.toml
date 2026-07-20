@@ -3,7 +3,10 @@ name = "plan-agent"
 role = "planner"
 model = "claude-sonnet-4-6"
 description = "Plans a detailed TDD implementation from a task and research summary"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360. `use_finish_task = true` + `tool_choice =
+# "any"` already make this agent tool-mandatory (#3389).
 
 [llm]
 temperature = 0.2

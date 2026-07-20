@@ -1132,18 +1132,178 @@ fn bundled_persona_shadowed_flat_duplicates_do_not_use_claude_code_runner() {
     }
 }
 
+// --- #3458: specialist/task agents off the claude-code runner ------------
+//
+// Why: #3358 staged the Assistant + persona agents off `runner =
+// "claude-code"` first and left the specialist/task-agent roster (engineer,
+// qa-agent, research-agent, …) explicitly out of scope. This picks that up:
+// every specialist except `claude-code-engineer` (deliberately claude-code
+// — its entire purpose is exercising the `claude` CLI/OAuth path) now
+// resolves off that runner, routing through `SubprocessAgentRunner` →
+// `chat_with_tools_gated` like every other native-path agent.
+// What: `bundled_specialist_agents_do_not_use_claude_code_runner` mirrors
+// the #3358 persona test — loads each migrated specialist by name and
+// asserts `runner != ClaudeCode`.
+// Test: This module IS the test surface.
+#[test]
+fn bundled_specialist_agents_do_not_use_claude_code_runner() {
+    use crate::agents::RunnerKind;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    let names = [
+        "analysis-agent",
+        "code-agent",
+        "docs-agent",
+        "engineer",
+        "local-ops-agent",
+        "observe-agent",
+        "plan-agent",
+        "postmortem-agent",
+        "python-engineer",
+        "qa-agent",
+        "research-agent",
+        "ticketing-agent",
+    ];
+    for name in names {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("bundled specialist '{name}' must load: {e}"));
+
+        assert_ne!(
+            cfg.agent.runner,
+            RunnerKind::ClaudeCode,
+            "bundled specialist '{name}' must not declare runner = \"claude-code\" (#3458)"
+        );
+    }
+}
+
+/// `claude-code-engineer` is the one specialist that must NEVER migrate —
+/// its entire purpose is exercising the `claude` CLI/OAuth path. A future
+/// edit that accidentally strips its `runner` line would silently defeat
+/// that purpose without failing any other guard in this file (it's the one
+/// name excluded from `bundled_specialist_agents_do_not_use_claude_code_runner`
+/// above), so pin the opposite assertion here.
+/// Test: This module IS the test surface.
+#[test]
+fn claude_code_engineer_still_uses_claude_code_runner() {
+    use crate::agents::RunnerKind;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    clear_model_env("claude-code-engineer");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+    }
+    let cfg = AgentConfig::by_name("claude-code-engineer");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("bundled 'claude-code-engineer' must load");
+
+    assert_eq!(
+        cfg.agent.runner,
+        RunnerKind::ClaudeCode,
+        "claude-code-engineer must keep runner = \"claude-code\" — it exists to exercise that path"
+    );
+}
+
+/// #3389 invariant, applied to the freshly-migrated specialists: moving an
+/// agent off `runner = "claude-code"` routes it through
+/// `chat_with_tools_gated(..., cfg.llm.strict_tool_discipline())` for the
+/// first time — previously `ClaudeCodeAgentRunner` never consulted that
+/// path at all, so `strict_tool_discipline()` was dormant for every one of
+/// these agents. This test proves the specific claim in #3458's migration:
+/// every specialist that is genuinely tool-mandatory
+/// (`use_finish_task = true` and/or `tool_choice = "any"`) resolves
+/// `strict_tool_discipline() == true` post-migration, AND that
+/// `should_retry_plain_text_turn` (the actual #3389 retry gate) fires for
+/// them at turn 0 when the model produces plain text with tools on offer —
+/// exactly the regression #3389 fixed for `pm`/`assistant`/personas, now
+/// verified for the specialist roster instead of asserted by inspection.
+/// The non-strict specialists (`code-agent`, `observe-agent`,
+/// `postmortem-agent`, `python-engineer`, `qa-agent`) are asserted in the
+/// opposite direction — the retry must NOT fire for them, because each has
+/// a documented reason (see the comment on its TOML) why a plain-text final
+/// turn is its correct, intended behavior.
+/// Test: This module IS the test surface.
+#[test]
+fn migrated_specialist_tool_discipline_matches_should_retry_plain_text_turn() {
+    use crate::llm::should_retry_plain_text_turn;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    // (agent name, expected strict_tool_discipline)
+    let cases = [
+        ("analysis-agent", true),
+        ("code-agent", false),
+        ("docs-agent", true),
+        ("engineer", true),
+        ("local-ops-agent", true),
+        ("observe-agent", false),
+        ("plan-agent", true),
+        ("postmortem-agent", false),
+        ("python-engineer", false),
+        ("qa-agent", false),
+        ("research-agent", true),
+        ("ticketing-agent", true),
+    ];
+    for (name, expect_strict) in cases {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("bundled specialist '{name}' must load: {e}"));
+
+        let strict = cfg.llm.strict_tool_discipline();
+        assert_eq!(
+            strict, expect_strict,
+            "specialist '{name}' strict_tool_discipline() mismatch (use_finish_task={}, tool_choice={:?})",
+            cfg.llm.use_finish_task, cfg.llm.tool_choice
+        );
+
+        // Turn 0, tools offered, no prior no-tool turns: the exact shape a
+        // freshly-migrated specialist hits on its first plain-text reply.
+        let retries = should_retry_plain_text_turn(0, 0, cfg.llm.max_turns, strict, true);
+        assert_eq!(
+            retries, expect_strict,
+            "specialist '{name}' should_retry_plain_text_turn mismatch at turn 0"
+        );
+    }
+}
+
 /// #3358 code-critic MEDIUM: the two tests above assert over a hardcoded
 /// name list, so a brand-new persona added later with `runner =
 /// "claude-code"` would silently evade both guards. This test instead
 /// walks every physical TOML file under `bundled_agents_dir()` — every
 /// flat `<name>.toml` AND every directory package's `agent.toml`,
 /// independently, not deduplicated by `by_name` — and asserts that any
-/// agent NOT on the explicit `claude-code`-eligible allow-list (the
-/// specialist/task agents, which stay out of scope for #3358, plus
-/// `claude-code-engineer` which is deliberately claude-code) does not
+/// agent NOT on the explicit `claude-code`-eligible allow-list does not
 /// declare `runner = "claude-code"`. A future addition — a new persona
 /// TOML, or a new directory package — is caught automatically without
 /// needing a matching new assertion here.
+///
+/// #3458: the specialist/task-agent roster that #3358 staged out of scope
+/// (`analysis-agent`, `code-agent`, `docs-agent`, `engineer`,
+/// `local-ops-agent`, `observe-agent`, `plan-agent`, `postmortem-agent`,
+/// `python-engineer`, `qa-agent`, `research-agent`, `ticketing-agent`) has
+/// now migrated too — see `bundled_specialist_agents_do_not_use_claude_code_runner`
+/// below. The allow-list shrinks to just `claude-code-engineer`, whose
+/// entire purpose is exercising the `claude` CLI/OAuth path and is
+/// deliberately never migrated.
 /// Test: This module IS the test surface.
 #[test]
 fn all_bundled_agent_tomls_outside_the_specialist_allowlist_avoid_claude_code_runner() {
@@ -1157,30 +1317,9 @@ fn all_bundled_agent_tomls_outside_the_specialist_allowlist_avoid_claude_code_ru
     // env, but reads must still be serialized against writers).
     let _guard = ENV_LOCK.blocking_lock();
 
-    // Specialist/task agents (staged OUT of scope for #3358) plus
-    // `claude-code-engineer` (deliberately claude-code, never migrate).
-    // Every other bundled agent TOML must not declare
-    // `runner = "claude-code"`.
-    let claude_code_eligible: HashSet<&str> = [
-        "analysis-agent",
-        "bedrock-engineer",
-        "claude-code-engineer",
-        "code-agent",
-        "docs-agent",
-        "engineer",
-        "gpt-engineer",
-        "gpt5-codex-engineer",
-        "local-ops-agent",
-        "observe-agent",
-        "plan-agent",
-        "postmortem-agent",
-        "python-engineer",
-        "qa-agent",
-        "research-agent",
-        "ticketing-agent",
-    ]
-    .into_iter()
-    .collect();
+    // `claude-code-engineer` is the sole deliberate holdout (#3458) — every
+    // other bundled agent TOML must not declare `runner = "claude-code"`.
+    let claude_code_eligible: HashSet<&str> = ["claude-code-engineer"].into_iter().collect();
 
     let dir = bundled_agents_dir();
     let mut checked = 0usize;

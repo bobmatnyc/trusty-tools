@@ -2,7 +2,13 @@
 name = "python-engineer"
 role = "engineer"
 model = "claude-sonnet-4-6"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360. Left non-strict deliberately (no
+# `use_finish_task`) — this agent's own prompt mandates returning every
+# file as a prose "## File: <path>" + code-fence section (see
+# `[system_prompt]` below), the opposite of a tool-call-driven finish;
+# forcing tool-mandatory discipline here would fight its own contract.
 description = "Python software engineer — writes Python scripts and applications"
 
 [llm]

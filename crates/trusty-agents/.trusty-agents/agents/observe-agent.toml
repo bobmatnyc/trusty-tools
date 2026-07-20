@@ -3,7 +3,12 @@ name = "observe-agent"
 role = "observer"
 model = "claude-sonnet-4-6"
 description = "Synthesizes the full workflow execution into a single report"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360. Left non-strict deliberately (no
+# `use_finish_task`) — this agent's job IS to produce a prose Markdown
+# report as its final answer, the same "plain text is the correct final
+# turn" shape #3389 carved out for `pm`/`assistant`/personas.
 
 [llm]
 temperature = 0.2

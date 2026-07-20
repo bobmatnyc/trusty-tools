@@ -2,7 +2,10 @@
 name = "local-ops-agent"
 role = "ops"
 model = "claude-haiku-4-5"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360. `use_finish_task = true` already makes this
+# agent tool-mandatory (`LlmParams::strict_tool_discipline`, #3389).
 description = "Local deployment and operations agent. Handles running scripts, installing packages, starting servers, and verifying deployments using shell commands."
 
 [llm]

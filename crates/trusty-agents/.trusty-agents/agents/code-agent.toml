@@ -3,13 +3,19 @@ name = "code-agent"
 role = "engineer"
 model = "claude-opus-4-6"
 description = "Writes Python code following a pre-written plan using TDD"
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360.
 
 [llm]
 temperature = 0.2
 max_tokens = 16384
 max_turns = 50
 tool_choice = "auto"
+# #3458: left non-strict deliberately — this agent's own prompt drives
+# completion via `advance_workflow_phase`, not `finish_task` (see
+# `[system_prompt]` below), so `strict_tool_discipline` must stay false or
+# the #3389 retry would fire against its intended plain-text/tool mix.
 use_finish_task = false
 use_anthropic_direct = false
 # #299: Disable extended thinking — task specs are deterministic; CoT adds 2-4x token cost.

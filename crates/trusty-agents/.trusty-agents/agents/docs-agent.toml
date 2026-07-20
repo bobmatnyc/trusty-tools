@@ -6,7 +6,11 @@ description = "Documentation specialist. Reads generated code and produces or up
 # #198 / Phase C: docs-agent is read-heavy (list_dir / read_file / search_code)
 # with one bulk write_file pass at the end — a perfect candidate for the
 # in-process runner. Eliminates the 2–3s subprocess startup tax per delegation.
-runner = "claude-code"
+# #3458: no `runner` — falls back to the default (Subprocess), routing off
+# the claude-code CLI onto the direct-API credential path, same as the
+# persona migration in #3360. `use_finish_task = true` already makes this
+# agent tool-mandatory (see `LlmParams::strict_tool_discipline`, #3389), so
+# the #3389 plain-text-retry safety net now actually engages for real turns.
 
 [llm]
 temperature = 0.2

@@ -232,12 +232,17 @@ async fn qa_receives_correct_path_for_claude_code_runner() {
     let workflows_dir = tmp.path().join("workflows");
     tokio::fs::create_dir_all(&workflows_dir).await.unwrap();
     let wf_path = workflows_dir.join("qa-path.json");
-    // The "engineer" agent ships with `runner = "claude-code"` in its
-    // bundled TOML, so the engine sets `code_phase_used_claude_code`.
+    // #3458: "engineer" moved off `runner = "claude-code"` onto the native
+    // path, so it can no longer exercise this claude-code-specific hint.
+    // "claude-code-engineer" is the one specialist deliberately left on
+    // `runner = "claude-code"` (its entire purpose is exercising that path
+    // — see `claude_code_engineer_still_uses_claude_code_runner` in
+    // `agents::tests::loading`), so the engine still sets
+    // `code_phase_used_claude_code` for it.
     let wf_json = r#"{
             "name": "qa-path",
             "phases": [
-                {"name":"code","agent":"engineer","context_template":"CODE={{task}}"},
+                {"name":"code","agent":"claude-code-engineer","context_template":"CODE={{task}}"},
                 {"name":"qa","agent":"qa-agent","context_template":"QA={{task}} ROOT={{project_root}}"}
             ]
         }"#;

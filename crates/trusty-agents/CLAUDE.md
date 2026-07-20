@@ -183,13 +183,19 @@ Credential priority (highest → lowest, applied per-agent at dispatch time — 
 
 1. **`CLAUDE_CODE_OAUTH_TOKEN`** — primary local-dev credential. When this is set
    AND the agent's TOML declares `runner = "claude-code"`, the harness routes the
-   call through the `claude` CLI subprocess (`ClaudeCodeAgentRunner`). This is
-   the default for specialist/task agents (`engineer`, `qa-agent`,
-   `ticketing-agent`, etc.). As of #3358, the Assistant + persona agents
-   (`assistant`, `pm`, `cto-assistant`, `izzie`, `personal-assistant`) no
-   longer declare `runner = "claude-code"` — they fall back to `Subprocess`
-   and route via `AnthropicDirect`/`OpenRouter` instead (see path 2/3 below).
-   `ctrl` never used the claude-code runner — it runs a local Ollama model.
+   call through the `claude` CLI subprocess (`ClaudeCodeAgentRunner`). As of
+   #3358, the Assistant + persona agents (`assistant`, `pm`, `cto-assistant`,
+   `izzie`, `personal-assistant`) no longer declare `runner = "claude-code"` —
+   they fall back to `Subprocess` and route via `AnthropicDirect`/`OpenRouter`
+   instead (see path 2/3 below). As of #3458, the specialist/task-agent roster
+   (`analysis-agent`, `code-agent`, `docs-agent`, `engineer`, `local-ops-agent`,
+   `observe-agent`, `plan-agent`, `postmortem-agent`, `python-engineer`,
+   `qa-agent`, `research-agent`, `ticketing-agent`) made the same move — they
+   also fall back to `Subprocess`/`AnthropicDirect`/`OpenRouter`. `ctrl` never
+   used the claude-code runner — it runs a local Ollama model. The one
+   deliberate holdout is `claude-code-engineer`, whose entire purpose is
+   exercising the `claude` CLI/OAuth path; it keeps `runner = "claude-code"`
+   permanently.
 2. **`ANTHROPIC_API_KEY`** — when set AND the agent TOML has
    `[llm] use_anthropic_direct = true`, the harness POSTs directly to
    `api.anthropic.com` with `x-api-key`. Lower latency than OpenRouter; requires
