@@ -22,6 +22,7 @@ spec_refs:
 **Last-updated:** 2026-07-20
 **Spec ID:** `SPEC-TTUI-01~draft` … `SPEC-TTUI-09~draft` (DOC-50)
 **Builds on:**
+- [`docs/trusty-code/vision-and-architecture-spec.md`](../trusty-code/vision-and-architecture-spec.md) — Axiom §1 reserves the TUI layer as a "future layer" and foundation for interactive use. (Note: DOC-39 §1.2 explicitly states the Platform is "an SPA (web/Tauri)… Not a TUI," positioning DOC-50 as a secondary/alternative entry point, not the primary platform. See §9 Q8.)
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-01~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-01~draft) §1 and [`SPEC-TCUI-09~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-09~draft) §2.1 establish the **layer priority (API → CLI → TUI → Web)** and **thin-client axiom**: "The UI communicates with the daemon. All UI services talk to the daemon; the daemon provides all functionality." This spec is the TUI implementation of that constraint.
 - [`docs/specs/DOC-48-tcode-workstreams.md`](./DOC-48-tcode-workstreams.md) (merged) — [`SPEC-WS-08~draft`](./DOC-48-tcode-workstreams.md#SPEC-WS-08~draft) §8 establishes workstream phasing. This spec's TUI must surface the active workstream (§4B below) and participate in workstream activation events (DOC-48 §5.3).
 - [`crates/trusty-agents/src/repl/tui/`](../../../crates/trusty-agents/src/repl/tui/) (merged, second-gen tagent REPL) — The mature ratatui-based interactive REPL that is the **extraction target** and **reuse model** for this spec. Stack: ratatui 0.29 + crossterm 0.28, alt-screen + raw mode, mouse capture, 100ms-tick render loop (run.rs:197–251), mpsc `ReplEvent` channel architecture, slash-command framework, history recall + in-flight cancel, line editing (Ctrl-a/e/u/c/d), status line with daily-cost accumulator.
@@ -44,9 +45,9 @@ spec_refs:
 
 ### 1.1 The goal — Claude Code clone: interactive terminal UI over tcode daemon
 
-**trusty-code has no TUI today, by design.** The one-shot `tcode run-task` CLI (in `crates/trusty-code/src/cli_client/`) is the current entry point. DOC-39 explicitly plans "a future TUI" and reserves the layer in its architecture; this spec is that implementation.
+**trusty-code has no TUI today, by design.** The one-shot `tcode run-task` CLI (in `crates/trusty-code/src/cli_client/`) is the current entry point. The vision-and-architecture spec reserves the TUI layer as a future interactive surface; this spec is that implementation.
 
-**The goal:** Build an **interactive terminal UI that mimics Claude Code's core UX** — streaming assistant output, tool-call rendering, an input composer, slash commands, scrollback, status line, and workstream awareness — while strictly adhering to DOC-39's **thin-client axiom** (§2.1): the TUI drives the existing `tcode serve --stdio` JSON-RPC API; all agent logic stays server-side in the daemon.
+**The goal:** Build an **interactive terminal UI that mimics Claude Code's core UX** — streaming assistant output, tool-call rendering, an input composer, slash commands, scrollback, status line, and workstream awareness — while strictly adhering to DOC-39's **thin-client axiom** (§2.1): the TUI communicates with the daemon over a long-lived transport (see §9 Q7 for the transport fork: --stdio vs --http); all agent logic stays server-side in the daemon.
 
 **What "Claude Code clone" means here:**
 - **Streaming input/output:** Assistant responses stream to the TUI; the user sees partial output in real time.
@@ -55,14 +56,14 @@ spec_refs:
 - **Slash commands:** `/help`, `/clear`, `/model`, `/agent`, `/workstream`, etc. — routed through the engine adapter to the daemon or handled client-side.
 - **Scrollback:** Mouse-wheel scroll, page-up/down, history recall. Rendering is diff-based for performance.
 - **Workstream awareness:** The TUI shows the active workstream name/ID and participates in activation events (DOC-48 §5.3).
-- **Status line:** Session ID, current model, project name, workstream state, daily cost (loaded from the daemon), tmux session count (if observed).
+- **Status line:** Session ID, current model, project name, workstream state, tmux session count (if observed). *(Daily cost display: out of scope for MVP pending daemon API support; see §9 Q9.)*
 - **Permission/diff prompts:** Future phases — the TUI surfaces permission gates and diffs for code changes (part of DOC-39 Phase 2).
 
 **Non-requirement:** This spec does NOT aim for pixel-perfect parity with Claude Code's visual design. The goal is **functional parity** in interaction model and information architecture.
 
 ### 1.2 Non-goals
 
-1. **Not a replacement for the web/Tauri GUI.** DOC-39 commits to an SPA (web + Tauri shell); this TUI is an *alternative* entry point, not the primary one. Both coexist.
+1. **Not the primary platform.** DOC-39 §1.2 commits the platform to an SPA (web + Tauri shell); this TUI is a *secondary/alternative* entry point for terminal-native users. Both coexist; the SPA is the primary interactive surface.
 2. **Not a general-purpose IDE.** The Project/IDE half (DOC-39 §7, Q4) remains out of scope.
 3. **Not feature-complete on day 1.** MVP is the core streaming loop + essential tool rendering + basic slash commands (§4, MVP). Permission/diff prompts, workstream switcher UX, plain-line fallback (#3405) are later phases.
 4. **Not SSH-hardened in MVP.** Issue #3405 (plain-line/no-TUI fallback for SSH/narrow terminals) is Phase 2.
@@ -246,69 +247,44 @@ pub use {run_tui, ReplStartup};
 // NOT exported: ratatui, crossterm (encapsulated)
 ```
 
-### 3.2 Step 2: Extract tagent REPL into trusty-tui
+### 3.2 Step 2: Generalization layer (ReplApp → engine-supplied data)
 
-**PR 1 (extraction):** Move the above modules from `crates/trusty-agents/src/repl/tui/` to `trusty-tui/src/`.
+**Critical finding:** `ReplApp` (from tagent's types.rs:78+) currently interleaves generic UI fields with ~15 tagent-specific ones (tm_session_count, claude_mpm_session_count, local_model, daily_cost_start, usage_project_dir, model_name, provider_name). The statusline hardcodes OpenRouter pricing (status.rs:145–155). Pickers and slash commands are likewise hardcoded to tagent's needs.
 
-**Compatibility layer (in tagent, Phase 1A):** Add a re-export:
-```rust
-// crates/trusty-agents/src/repl/tui/mod.rs (AFTER extraction)
-pub use trusty_tui::{run_tui, ReplApp, ReplStartup, ReplEvent};
-// Old imports from tagent still work for a transition period
-```
+**Fix (Slice 1.5 — INSERT between Slice 1 and Slice 2):** Explicitly split `ReplApp` into:
+- **Engine-agnostic core:** chat buffer, input state, history, cursor, tick counters.
+- **Engine-supplied adapters:** statusline segments (enum-driven, engine-populated), picker data sources (engine callback), slash-command registry (engine-provided).
 
-**Tagent REPL behavior is unchanged.** No UX regression. The event loop and terminal behavior remain identical.
+**Result:** Widgets and state machine remain UI-generic; all semantic data flows from the engine. This is a prerequisite for Slice 4+ to work without tagent/tcode divergence.
 
-### 3.3 Step 3: Implement CodeEngine (tcode engine adapter)
+### 3.3 Step 3: Scaffold trusty-tui (framework + trait)
 
-**New file:** `crates/trusty-code/src/tui_client/engine.rs`
+**Phase 1A.1:** Create `trusty-tui` crate (new).
 
-```rust
-pub struct CodeEngine {
-    project_path: PathBuf,
-    daemon_url: String,  // e.g., "http://localhost:7882"
-    http_client: HttpClient,
-}
+**Phase 1A.2:** Scaffold only the **framework** (terminal setup/restore RAII, TuiEngine trait, ReplEvent enum, event_loop skeleton) and move/adapt tests. No widgets yet.
 
-#[async_trait::async_trait]
-impl TuiEngine for CodeEngine {
-    async fn handle_input(&self, line: String, tx: UnboundedSender<ReplEvent>) -> Result<bool> {
-        // Parse line: is it a slash command or a chat prompt?
-        if line.starts_with('/') {
-            self.handle_slash_command(&line, tx).await
-        } else {
-            // Send to daemon: task.run {prompt: line}
-            // Stream responses as ReplEvent::AssistantOutput, ReplEvent::ToolInvocation, etc.
-            self.handle_chat(&line, tx).await
-        }
-    }
-    
-    async fn setup(&self, tx: UnboundedSender<ReplEvent>) -> Result<()> {
-        // Fetch initial state: active workstream, session ID, model, etc.
-        // Call daemon APIs to populate initial state
-        let ws = self.daemon_call::<Workstream>("workstream.get", ???).await?;
-        tx.send(ReplEvent::WorkstreamUpdated(ws))?;
-        Ok(())
-    }
-}
-```
+### 3.4 Step 4: Implement CodeEngine (tcode engine adapter)
 
-### 3.4 Step 4: Refactor tagent REPL to use AgentEngine adapter
+**Phase 1A.3:** New file: `crates/trusty-code/src/tui_client/engine.rs`
 
-**Refactor:** Move agent-specific logic in `TrustyAgentsRepl` into an `AgentEngine` impl.
+**Note (BLOCKING for Slices 3/6):** The daemon transport is unsettled (see §9 Q7 below). The CodeEngine sketch assumes a choice between `tcode serve --stdio` (JSON-RPC stdin/stdout, no SSE) and `tcode serve --http` (daemon URL-based, SSE-enabled). Since workstream activation (MVP Slice 6) requires `WorkstreamActivationChanged` SSE events (DOC-48 §5.3), the transport choice is a blocker:
 
-**No behavioral change.** Tagent's REPL continues to work exactly as today.
+- **Option (a):** Long-lived `--stdio` child for the session; workstream awareness polls instead of subscribes (move to Phase 2).
+- **Option (b):** Require/spawn a discoverable long-lived `--http` daemon; SSE works, but discovery pattern is undefined today.
 
-### 3.5 Adoption order (critical for safety)
+**This must be resolved before Slice 3 is finalized.** See §9 Q7 for the open question and recommended path.
 
-1. **Phase 1A.1:** Create `trusty-tui` crate (new, empty shell).
-2. **Phase 1A.2:** Move only the **framework** (terminal setup, event loop, TuiEngine trait definition) to `trusty-tui`. No ratatui widgets yet; focus on the trait and event plumbing.
-3. **Phase 1A.3:** Implement `CodeEngine` (thin) against the trait. Test that it compiles and runs (bare REPL, no output yet).
-4. **Phase 1A.4:** Move the **widgets and rendering** to `trusty-tui`. Regression-test tagent's REPL (must work identically).
-5. **Phase 1A.5:** Implement `AgentEngine` (thin) and refactor tagent to use it.
-6. **Phase 1B+:** Add tcode-specific features (workstream switcher, toolcard rendering, etc.).
+### 3.5 Step 5: Add widgets and render layer (trusty-tui)
 
-**Critical invariant:** At no point is tagent's REPL broken or regressed. Each PR is independently shippable with a working, tested REPL.
+**Phase 1A.4:** Move widgets (scrollback, input_composer, status_line, pickers) and layout from tagent to trusty-tui/src/widgets/. Tests must migrate (no coverage drops).
+
+### 3.6 Step 6: Refactor tagent onto trusty-tui (ATOMIC CUTOVER)
+
+**Phase 1A.5:** Create `AgentEngine` impl in tagent. Refactor tagent's REPL to use `run_tui<AgentEngine>`.
+
+**CRITICAL — Atomicity:** All file deletions from tagent/src/repl/tui/, the new AgentEngine impl, the new trusty-tui dependency, and the compat-shim (if any) MUST land in the SAME commit. Tagent's REPL must never be broken on main (no intermediate state where files are deleted but engine is not wired).
+
+**Regression test:** Tagent REPL behavior unchanged (minus panic-safety improvement; see Slice 2 AC).
 
 ---
 
@@ -400,55 +376,87 @@ Each slice is independently shippable and critic-gateable.
 
 **Effort:** 1 engineer-day.
 
-### Slice 2: Terminal setup and event loop (Phase 1A.2)
+### Slice 1.5: Generalization layer — ReplApp engine-supplied data (Phase 1A.2)
 
-**What:** Implement the panic-safe terminal RAII guards, event channel, key reader thread, and the 100ms-tick loop structure.
+**What:** Separate engine-agnostic UI state from engine-supplied data (statusline segments, picker data, slash-command registry).
+
+**Deliverable:**
+- Refactor `ReplApp` to expose engine-provided callbacks/adapters for statusline content, picker data sources, and command registry.
+- Define `StatuslineSegment` enum (engine-populated); statusline widget consumes it (not hardcoded).
+- Define `SlashCommandRegistry` trait; engine provides the command table (not a hardcoded array).
+- Define `PickerDataSource` trait; pickers query it dynamically (not hardcoded lists).
+- Migrate tagent's hardcoded pricing, model/provider pickers, command array into AgentEngine-supplied data (deferred to Slice 10, but interface exists now).
+
+**Acceptance:**
+- `ReplApp` compiles and has no tagent/tcode-specific imports.
+- Tests verify engine can supply arbitrary statusline segments and command registries.
+- Widgets consume engine data, not hardcoded values.
+
+**Effort:** 1 engineer-day.
+
+### Slice 2: Terminal setup, event loop, and ratatui 0.30 spike (Phase 1A.2)
+
+**What:** Implement the panic-safe terminal RAII guards, event channel, key reader thread, 100ms-tick loop, and validate ratatui 0.30 compatibility.
 
 **Deliverable:**
 - `setup_terminal()` → Terminal with alt-screen + raw mode + mouse capture.
-- `restore_terminal()` RAII guard (panic-safe).
+- `restore_terminal()` RAII guard implemented as Drop trait (panic-safe: terminal is restored even if event loop panics).
 - Key reader thread spawned; KeyEvent routed to mpsc channel.
-- 100ms-tick interval.
+- 100ms-tick interval with backpressure note (see §10 below).
 - `event_loop<H: TuiEngine>` scaffold: `tokio::select!` pattern, tick + rx.recv() branches, process ReplEvent, call `engine.handle_input()`, loop on `app.quit`.
+- **Spike:** Compile tagent's chat.rs, markdown.rs, banner.rs, and layout code against ratatui 0.30 (before moving them in Slice 4). Verify no breaking API changes; document any migration steps. This de-risks the 0.30 bump (Q2 resolution).
 
 **Acceptance:**
-- `cargo run -p trusty-tui --example minimal` enters alt-screen without panic on Ctrl-C.
-- Key presses are captured and routed to the event channel.
-- Tick fires every 100ms (counter increments).
+- `cargo run -p trusty-tui --example minimal` enters alt-screen; panic in event loop triggers Drop guard → terminal restored to cooked mode.
+- Key presses captured and routed.
+- Tick fires every 100ms.
+- Ratatui 0.30 spike compiles; breaking changes (if any) documented.
+- **Behavioral change from tagent:** Tagent's REPL now gains panic-safety (previously, a panic left the terminal in raw/alt-screen mode). This is a bug fix, not a regression.
 
-**Effort:** 1 engineer-day.
+**Effort:** 1.5 engineer-days.
 
-### Slice 3: CodeEngine implementation (Phase 1A.2–1A.3)
+### Slice 3: CodeEngine implementation (Phase 1A.3, BLOCKED ON Q7)
 
-**What:** Implement `CodeEngine` (the tcode engine adapter) that speaks to `tcode serve --stdio`.
+**What:** Implement `CodeEngine` (the tcode engine adapter) against a determined transport (see §9 Q7).
 
 **Deliverable:**
 - `crates/trusty-code/src/tui_client/engine.rs`: `CodeEngine` struct, `TuiEngine` impl.
-- `handle_input`: parse slash commands vs. chat, call daemon JSON-RPC (or stdio), stream responses as `ReplEvent::AssistantOutput`.
+- `handle_input`: parse slash commands vs. chat, call daemon, stream responses as `ReplEvent::AssistantOutput`.
 - `setup`: fetch initial workstream, session ID, etc.
-- Bare-bones implementation: no error recovery yet.
+- `cancel_session()`: call `session.cancel` RPC on the daemon (for Ctrl-c in Slice 5).
+- Transport is determined by Q7 resolution: **--stdio** (no SSE, workstream awareness polls) or **--http** (SSE-enabled, discovery TBD).
+- Error recovery: auto-reconnect on daemon loss.
 
 **Acceptance:**
-- Code compiles.
-- Integration test: spawn a mock daemon, send a prompt via CodeEngine, verify ReplEvent is emitted.
+- Code compiles (transport-agnostic to B or A in Q7).
+- Integration test: spawn mock daemon, send prompt, verify ReplEvent emitted.
+- Cancel test: verify `cancel_session()` calls daemon RPC.
 
-**Effort:** 1 engineer-day.
+**Effort:** 1 engineer-day (plus design time awaiting Q7 decision).
 
-### Slice 4: ReplApp state and basic widgets (Phase 1A.4)
+**BLOCKER NOTE:** This slice depends on resolving §9 Q7 (transport choice). Slice 6 (workstream awareness) also depends on it (SSE vs polling).
 
-**What:** Move `ReplApp` from tagent, implement scrollback (Paragraph widget), input composer (editable text), status line.
+### Slice 4: ReplApp state, widgets, and tagent file migration (Phase 1A.4)
+
+**What:** Move `ReplApp` and widgets from tagent to trusty-tui; migrate tests; inventory/migrate orphaned files.
 
 **Deliverable:**
-- `trusty_tui::ReplApp` struct: chat messages, input buffer, history, cursor position, tick counter.
-- `ReplApp::push_message(role: &str, text: String)` and `ReplApp::push_status(text: String)`.
-- Widgets: scrollback (Paragraph with line wrapping), input composer (Block + editable area), status line (Gauge + Spans).
-- `draw(Frame, ReplApp)` function: renders widgets to the frame.
+- `trusty_tui::ReplApp` struct (generalized per Slice 1.5): chat messages, input buffer, history, cursor, tick counter, engine-supplied adapters.
+- Widgets: scrollback (Paragraph + line wrapping), input_composer (Block + editable), status_line (Gauge + engine-supplied Spans).
+- `draw(Frame, ReplApp)` function: renders widgets.
+- **File migration from tagent/src/repl/tui/ to trusty-tui/src/:**
+  - `chat.rs` (454L) → `trusty-tui/src/widgets/chat.rs` (or delete if subsumed by scrollback.rs + input_composer.rs).
+  - `markdown.rs` (297L) → `trusty-tui/src/render/markdown.rs` (formatting helper).
+  - `banner.rs` (247L) → `trusty-tui/src/widgets/banner.rs` (or Phase 2, status quo TBD).
+  - `tests_render.rs, tests_input.rs, tests_state.rs` (~1,436L total) → **MUST MIGRATE** to trusty-tui/ (no coverage drops). Create `trusty-tui/src/tests/` with equivalent structure.
+  - Spike output (Slice 2) informs any ratatui 0.30 fixes needed during migration.
 
 **Acceptance:**
-- `cargo test` passes for ReplApp state transitions.
-- Visual test: spawn tcode tui, see scrollback + input + status line rendered correctly (no assertion, manual inspection).
+- `cargo test -p trusty-tui` passes (all tagent tests now trusty-tui tests).
+- Visual test: `tcode tui` renders scrollback, input, status line correctly.
+- All orphaned files have a home; none left behind without justification.
 
-**Effort:** 1.5 engineer-days.
+**Effort:** 2 engineer-days (file migration is careful work, tests must not regress).
 
 ### Slice 5: Event dispatch and line editing (Phase 1A.4)
 
@@ -462,7 +470,7 @@ Each slice is independently shippable and critic-gateable.
 - Ctrl-a → cursor to start of line.
 - Ctrl-e → cursor to end of line.
 - Ctrl-u → clear input.
-- Ctrl-c → cancel in-flight request (set a flag; handler sees it on next poll).
+- Ctrl-c → cancel in-flight request: calls `engine.cancel_session()` which relays a daemon `session.cancel` RPC call (per DOC-39 C-2, thin-client axiom — the daemon must perform the actual cancellation, not just the UI's render stop). Blocks user input until cancel completes.
 - Ctrl-d → quit.
 
 **Acceptance:**
@@ -637,6 +645,47 @@ Each slice is independently shippable and critic-gateable.
 
 **Recommendation:** Inline list (below input). Tagent's picker is familiar, and it's simpler to implement. If the visual design later calls for a modal, we can change it.
 
+### Q7 — Daemon transport: --stdio vs --http (BLOCKING for Slices 3, 6)
+
+**Context:** The spec's goal (§1.1) says "the TUI communicates with the daemon," but the daemon has two mutually-exclusive modes (serve/mod.rs:28-29):
+- `tcode serve --stdio`: stdin/stdout JSON-RPC, no SSE, useful for piping.
+- `tcode serve --http`: daemon URL-based, SSE-enabled, default port 7881.
+
+MVP Slice 6 (workstream awareness) requires `WorkstreamActivationChanged` SSE events (DOC-48 §5.3). **SSE is HTTP-only; `--stdio` cannot support it.** The transport choice is a hard fork:
+
+**Option (a) — Keep --stdio, poll instead of subscribe:**
+- CodeEngine spawns/manages a long-lived `tcode serve --stdio` child.
+- Workstream awareness polls `workstream.list` instead of subscribing to SSE (slower feedback, higher daemon load).
+- Workstream switcher (Slice 6) moves to Phase 2 (pending faster poll strategy or Phase 2 async refresh).
+- **Pro:** Simpler launch (no daemon discovery).
+- **Con:** No SSE; slackens real-time feel; code_engine owns daemon child lifecycle.
+
+**Option (b) — Require/spawn --http daemon:**
+- CodeEngine discovers or spawns a `tcode serve --http` daemon on a known port (or find one).
+- Workstream awareness uses SSE subscriptions (real-time, lower daemon load).
+- **Pro:** SSE works; clean real-time semantics; session isolation is cleaner.
+- **Con:** Daemon discovery/spawning is undefined today; port contention risk.
+
+**Decision needed:** (a) or (b)?
+
+**Recommendation:** **(b) with deferred discovery.** Slice 3 assumes --http; Slice 6 uses SSE subscriptions. For MVP, assume a locally-running `tcode serve --http` (documented limitation: "tcode tui assumes a running tcode daemon on localhost:7881; see `tcode daemon --help` to start one"). Discovery/auto-spawn is Phase 2. **Blocking note:** Slices 3 and 6 cannot proceed without this decision.
+
+### Q8 — DOC-39 amendment needed?
+
+**Context:** DOC-39 §1.2 explicitly states the Platform is "an SPA (web/Tauri)… Not a TUI, not a terminal renderer." DOC-50 positions the TUI as a secondary/alternative entry point (§1.2 non-goal 1), not the primary platform. This is architecturally sound but may warrant an amendment to DOC-39 to acknowledge the secondary entry point.
+
+**Decision needed:** Should DOC-39 be amended to mention the TUI as a deferred alternative layer, or does the current "future layers" language suffice?
+
+**Recommendation:** Defer to Bob; note it here for visibility. If amending, a one-liner in DOC-39 §1.3 (Non-goals) suffices: "The TUI is a deferred alternative terminal entry point, not part of the primary platform (SPA)."
+
+### Q9 — Daily cost display: daemon API gap or out-of-scope for MVP?
+
+**Context:** §1.1 mentions "daily cost (loaded from the daemon)" in the status line. DOC-48 has no `cost` field or RPC to fetch it. Either:
+- (a) Flag as a MISSING daemon-API gap (per DOC-39 C-2); remove from MVP ACs; defer to Phase 2 pending daemon support.
+- (b) Remove the cost mention entirely; feature falls out of scope.
+
+**Recommendation:** (a) — Flag as MISSING API. MVP ACs do not include cost display; statusline shows session ID, model, project, workstream only. Cost is Phase 2 pending a daemon API (e.g., `session.get_cost()` or async cost tracking).
+
 ---
 
 ## 7. Acceptance Criteria {#SPEC-TTUI-07~draft}
@@ -658,7 +707,7 @@ Each slice is independently shippable and critic-gateable.
 
 **AC-2.2** `TuiEngine` trait is defined and documented. Both `CodeEngine` and `AgentEngine` implement it without breaking changes.
 
-**AC-2.3** Tagent's REPL is refactored to use `trusty-tui` with **zero UX regression**. All existing commands work; scrollback, history, line editing are identical.
+**AC-2.3** Tagent's REPL is refactored to use `trusty-tui` with **UX parity + panic-safety improvement**. All existing commands, scrollback, history, and line editing work identically. **Behavioral change (bug fix):** Tagent gains panic-safe terminal restoration (RAII Drop guard); a panic in the event loop no longer leaves the terminal in raw/alt-screen mode (tagent's current bug, fixed by Slice 2).
 
 **AC-2.4** CodeEngine is implemented and tcode can launch a REPL with `tcode tui` command.
 
@@ -690,7 +739,7 @@ Each slice is independently shippable and critic-gateable.
 
 ### AC-5: Phasing adherence
 
-**AC-5.1** MVP ships all Slices 1–7 and 10 (framework, event loop, CodeEngine, ReplApp, line editing, workstream awareness, slash commands, tagent refactoring).
+**AC-5.1** MVP ships all Slices 1–7 and 10 (framework, generalization layer, event loop + panic-safety + 0.30 spike, CodeEngine [blocked on Q7], generalized ReplApp + widgets + test migration, event dispatch + Ctrl-C daemon cancel, workstream awareness + SSE, slash commands, tagent refactoring). Slice 3/6 are blocked on Q7 resolution.
 
 **AC-5.2** Phase 2 ships Slices 8–9 (tool cards, permission prompts).
 
@@ -764,6 +813,12 @@ cargo test -p trusty-code --release
 cargo test -p trusty-agents --release
 bash scripts/check_sld.sh    # SLD spec-doc lint (this spec)
 ```
+
+---
+
+## 11a. Event channel backpressure note
+
+The ReplEvent channel feeding the event loop is an **unbounded mpsc::unbounded_channel** (no flow control). At 100ms tick intervals and typical TUI event rates (key presses, key reader thread emissions), this is safe for MVP. **If streaming daemon responses significantly outpace the 100ms render loop, backlog can grow unbounded.** A future optimization (Phase 2+) may adopt a bounded channel with drop-oldest or a ring buffer (ringbuf-like semantics). For now, log cumulative backlog depth at startup and in tests; flag if > 1000 events queued.
 
 ---
 
