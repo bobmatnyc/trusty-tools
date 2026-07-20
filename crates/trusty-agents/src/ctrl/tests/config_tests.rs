@@ -254,10 +254,29 @@ content = "ctrl-from-project-disk"
 }
 
 #[tokio::test]
+// Why: `crate::test_env::HOME_LOCK` is held intentionally across the
+// `.await` below so this test doesn't race other `$HOME`-sandboxing tests
+// crate-wide — matches the established, deliberate pattern in
+// `api::server::tests` (see that module's identical `#![allow]`).
+#[allow(clippy::await_holding_lock)]
 async fn resolve_agent_config_returns_builtin_when_no_disk_config() {
+    // #3465-followup: this test mutates `$HOME` but previously took NO lock
+    // at all (not even this file's own `with_sandboxed_home` helper, which
+    // is sync-only and can't wrap an `.await`), so it raced every other
+    // HOME-sandboxing test in this file (e.g.
+    // `render_user_context_block_includes_location_when_set`) even when run
+    // in isolation from the rest of the crate. Hold the shared
+    // `crate::test_env::HOME_LOCK` across the `.await` below — this crate
+    // already holds `std::sync::Mutex` guards across `.await` in other files
+    // (`api::server::tests::ctrl_sessions`, `api::server::tests::models`)
+    // without issue.
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("HOME");
-    // SAFETY: test-only env mutation
+    // SAFETY: HOME_LOCK held for the entire test body.
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
@@ -266,7 +285,7 @@ async fn resolve_agent_config_returns_builtin_when_no_disk_config() {
     assert_eq!(cfg.agent.name, "ctrl");
     assert!(cfg.system_prompt.content.contains("Standalone"));
 
-    // SAFETY: restore HOME so other tests aren't affected
+    // SAFETY: HOME_LOCK still held; restore HOME so other tests aren't affected.
     unsafe {
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),

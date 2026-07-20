@@ -25,7 +25,15 @@ use tokio::sync::Mutex;
 // this and its guard is `Send`. Sync `#[test]` functions use
 // `blocking_lock()`, which is safe here because none of them run inside a
 // tokio runtime.
-static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+//
+// `pub(crate)`: #3465-followup — `agents::persona::tests` ALSO mutates
+// `TAGENT_CONFIG_DIR` and previously defined its OWN separate, same-named
+// `ENV_LOCK` static, which is a DIFFERENT object and does not exclude
+// against this one — the two files' tests raced on `TAGENT_CONFIG_DIR`
+// despite each individually looking "guarded". `agents::persona::tests` now
+// takes THIS lock instead of defining its own, so every `TAGENT_CONFIG_DIR`
+// mutator in the crate shares one exclusion domain.
+pub(crate) static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn clear_model_env(agent_name: &str) {
     let suffix = agent_env_suffix(agent_name);
@@ -809,6 +817,15 @@ allowed = ["locked_tool"]
 #[test]
 fn by_name_finds_flat_md_in_home_tier_when_project_dir_misses() {
     let _guard = ENV_LOCK.blocking_lock();
+    // #3465-followup: this file's local `ENV_LOCK` only serializes tests
+    // WITHIN this file — it is a different static from
+    // `crate::test_env::HOME_LOCK`, so a test here mutating `$HOME` could
+    // still race any of the many other files that DO use the shared
+    // `HOME_LOCK`. Take it too so this and every other HOME-sandboxing test
+    // in the crate are mutually exclusive.
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let primary_tmp = tempfile::tempdir().expect("primary temp dir");
     let home_tmp = tempfile::tempdir().expect("home temp dir");
     let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
@@ -848,8 +865,21 @@ fn by_name_finds_flat_md_in_home_tier_when_project_dir_misses() {
 /// the #3061 fix (both call `agents_dir_candidates()`, not a bare
 /// `agents_dir()`).
 #[tokio::test]
+// Why: `crate::test_env::HOME_LOCK` (a `std::sync::Mutex`) is held
+// intentionally across the `.await` below so this test doesn't race other
+// `$HOME`-sandboxing tests crate-wide — matches the established, deliberate
+// pattern in `api::server::tests` (see that module's identical `#![allow]`).
+#[allow(clippy::await_holding_lock)]
 async fn by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses() {
     let _guard = ENV_LOCK.lock().await;
+    // #3465-followup: also take the shared crate::test_env::HOME_LOCK (see
+    // the sync counterpart's comment) across the `.await` below — this
+    // crate already holds `std::sync::Mutex` guards across `.await` in
+    // other files (`api::server::tests::ctrl_sessions`,
+    // `api::server::tests::models`) without issue.
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let primary_tmp = tempfile::tempdir().expect("primary temp dir");
     let home_tmp = tempfile::tempdir().expect("home temp dir");
     let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
@@ -890,6 +920,11 @@ async fn by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses() {
 #[test]
 fn same_name_project_local_shadows_home_tier() {
     let _guard = ENV_LOCK.blocking_lock();
+    // #3465-followup: also take the shared crate::test_env::HOME_LOCK (see
+    // `by_name_finds_flat_md_in_home_tier_when_project_dir_misses`'s comment).
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let primary_tmp = tempfile::tempdir().expect("primary temp dir");
     let home_tmp = tempfile::tempdir().expect("home temp dir");
     let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
@@ -930,8 +965,17 @@ fn same_name_project_local_shadows_home_tier() {
 
 /// Async counterpart of `same_name_project_local_shadows_home_tier`.
 #[tokio::test]
+// Why: see `by_name_async_finds_flat_md_in_home_tier_when_project_dir_misses`
+// — `HOME_LOCK` is deliberately held across `.await` (established pattern
+// also used by `api::server::tests`).
+#[allow(clippy::await_holding_lock)]
 async fn by_name_async_same_name_project_local_shadows_home_tier() {
     let _guard = ENV_LOCK.lock().await;
+    // #3465-followup: also take the shared crate::test_env::HOME_LOCK across
+    // the `.await` below (see the sync counterpart's comment).
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let primary_tmp = tempfile::tempdir().expect("primary temp dir");
     let home_tmp = tempfile::tempdir().expect("home temp dir");
     let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
@@ -979,6 +1023,11 @@ async fn by_name_async_same_name_project_local_shadows_home_tier() {
 #[test]
 fn extends_shadow_fallback_searches_home_tier_when_package_resolved_there() {
     let _guard = ENV_LOCK.blocking_lock();
+    // #3465-followup: also take the shared crate::test_env::HOME_LOCK (see
+    // `by_name_finds_flat_md_in_home_tier_when_project_dir_misses`'s comment).
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let primary_tmp = tempfile::tempdir().expect("primary temp dir");
     let home_tmp = tempfile::tempdir().expect("home temp dir");
     let home_agents = home_tmp.path().join(".trusty-agents").join("agents");
