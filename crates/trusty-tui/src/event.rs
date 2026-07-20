@@ -78,13 +78,27 @@ pub enum ReplEvent {
     /// vs. fancy card) is a Slice 8 (#TBD, Phase 2) concern; the event shape
     /// is defined now so `TuiEngine` implementations don't need a breaking
     /// change later.
+    ///
+    /// `id` correlates a call's start (`result: None`) with its completion
+    /// (`result: Some(..)`) — two separate `ToolInvocation` events sharing
+    /// the same `id`. Required because `tool_name` alone can't disambiguate
+    /// repeated or parallel calls to the same tool (e.g. two concurrent
+    /// `fs.read` calls); the engine adapter mints this id (a UUID or a
+    /// backend-supplied call id, whichever it has) and must reuse it across
+    /// the start/complete pair.
     ToolInvocation {
+        id: String,
         tool_name: String,
         args: serde_json::Value,
         result: Option<String>,
     },
     /// A one-line status message (e.g. "cancelled", "Switched to: izzie").
     StatusMessage(String),
+    /// Clear the scrollback buffer. Emitted by the shared `/clear` built-in
+    /// slash command (DOC-50 §5 Slice 7) rather than handled ad hoc by each
+    /// engine, so `TuiEngine` implementations never touch scrollback state
+    /// directly.
+    ClearScrollback,
     /// Engine-supplied statusline segments replacing the current set
     /// (session id, model, project, workstream, …). See
     /// [`StatuslineSegment`]; full segment taxonomy lands in Slice 1.5
@@ -97,8 +111,16 @@ pub enum ReplEvent {
     /// `WorkstreamActivationChanged`), pushed via
     /// `TuiEngine::subscribe_workstream_events`. `prior_id` is `None` on the
     /// very first activation observed in this session.
+    ///
+    /// Field names are chosen to match the DOC-48 §5.3 SSE wire event
+    /// exactly (`new_active_id`, `prior_id`) — NOT DOC-50 §5 Slice 6's prose
+    /// (`new_id`), which drifted from the actual wire schema. Since engine
+    /// adapters deserialize this from JSON (Slice 3/6), a Rust/wire name
+    /// mismatch here would not be caught at compile time, only at runtime
+    /// deserialization — so the Rust field is kept byte-identical to the
+    /// wire field on purpose.
     WorkstreamActivationChanged {
-        new_id: String,
+        new_active_id: String,
         prior_id: Option<String>,
     },
     /// The backend connection was lost (daemon restart, SSE stream closed,
@@ -169,6 +191,13 @@ pub struct KeyModifiers {
 /// What: a flat `label`/`value` pair; ordering in the containing `Vec` is
 /// render order. Deliberately minimal — populated in full by Slice 1.5
 /// (#3413).
+///
+/// **Provisional shape.** DOC-50 §3.2 specifies the Slice-1.5 deliverable as
+/// an ENUM (one variant per segment kind — session id, model, workstream,
+/// project, connection state, …), not this flat struct. This struct is a
+/// zero-consumer placeholder only; Slice 1.5's implementer should treat the
+/// wire/type shape as unlocked and free to replace with the spec's enum
+/// design rather than extend this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatuslineSegment {
     pub label: String,
@@ -241,6 +270,68 @@ mod tests {
             name: "Token rotation".to_string(),
         });
         assert_eq!(ws.clone(), ws);
+    }
+
+    /// Two `ToolInvocation` events sharing the same `id` (a pending call and
+    /// its completion) must be distinguishable ONLY by `result`, not by
+    /// `id` — that's the whole point of adding the correlation id (Slice 8's
+    /// "pending → complete" tool cards match on it, not on `tool_name`,
+    /// which breaks for repeated/parallel calls to the same tool).
+    #[test]
+    fn tool_invocation_start_and_complete_share_a_correlation_id() {
+        let start = ReplEvent::ToolInvocation {
+            id: "call-1".to_string(),
+            tool_name: "fs.read".to_string(),
+            args: serde_json::json!({"path": "a.txt"}),
+            result: None,
+        };
+        let complete = ReplEvent::ToolInvocation {
+            id: "call-1".to_string(),
+            tool_name: "fs.read".to_string(),
+            args: serde_json::json!({"path": "a.txt"}),
+            result: Some("contents".to_string()),
+        };
+        assert_ne!(start, complete);
+        let ReplEvent::ToolInvocation { id: start_id, .. } = &start else {
+            unreachable!()
+        };
+        let ReplEvent::ToolInvocation {
+            id: complete_id, ..
+        } = &complete
+        else {
+            unreachable!()
+        };
+        assert_eq!(start_id, complete_id);
+    }
+
+    /// `/clear` (DOC-50 §5 Slice 7) emits `ClearScrollback` — a unit
+    /// variant, just confirming it exists and round-trips like any other.
+    #[test]
+    fn clear_scrollback_is_a_distinct_unit_variant() {
+        assert_eq!(ReplEvent::ClearScrollback, ReplEvent::ClearScrollback);
+        assert_ne!(ReplEvent::ClearScrollback, ReplEvent::Cancel);
+    }
+
+    /// `WorkstreamActivationChanged`'s field is named `new_active_id` to
+    /// match the DOC-48 §5.3 SSE wire event exactly (not DOC-50 §5 Slice 6's
+    /// prose, which drifted to `new_id`) — a JSON field-name mismatch here
+    /// would only surface at deserialization time, not compile time, so
+    /// this test exists to keep the field name from silently drifting back.
+    #[test]
+    fn workstream_activation_changed_uses_wire_field_name() {
+        let ev = ReplEvent::WorkstreamActivationChanged {
+            new_active_id: "a1b2c3d4".to_string(),
+            prior_id: Some("00000000".to_string()),
+        };
+        let ReplEvent::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } = &ev
+        else {
+            unreachable!()
+        };
+        assert_eq!(new_active_id, "a1b2c3d4");
+        assert_eq!(prior_id.as_deref(), Some("00000000"));
     }
 
     /// `KeyInput` default modifiers must be "nothing held" so a bare
