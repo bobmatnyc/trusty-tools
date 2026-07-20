@@ -308,6 +308,8 @@ async fn run_type_checks(engine: Arc<NoopEngine>) -> anyhow::Result<()> {
 
 use crate::app::{ReplApp, apply as app_apply};
 use crate::event::{KeyCode, KeyInput, KeyModifiers};
+use std::sync::atomic::AtomicU64;
+use tokio::sync::Notify;
 
 #[derive(Default)]
 struct MockEngine {
@@ -316,6 +318,30 @@ struct MockEngine {
     /// When set, `handle_input` returns this instead of `Ok(true)` — lets a
     /// test exercise the `Ok(false)` → `ReplEvent::Quit` relay.
     handle_input_returns_quit: AtomicBool,
+    /// When `Some`, `handle_input` sends one `AssistantOutput` chunk, sets
+    /// [`Self::chunk_sent`], and then blocks on this `Notify` before
+    /// returning — a controllable await point so a test can prove the task
+    /// is genuinely mid-poll (parked at an `.await`, not merely spawned-and-
+    /// never-scheduled) at the moment it gets aborted. `None` (the default)
+    /// keeps every other test's fire-and-return-immediately behavior
+    /// unchanged. See issue raised on PR #3477: the original
+    /// `dispatch_pending_cancel_aborts_in_flight_submit_task` proved nothing
+    /// because a `MockEngine` with no internal `.await` is never actually
+    /// polled by a current-thread runtime before `abort()` lands, making
+    /// "genuinely interrupted" indistinguishable from "never started".
+    hold_until: Option<Arc<Notify>>,
+    /// Set by `handle_input` immediately after sending its chunk and before
+    /// waiting on [`Self::hold_until`] — a test polls this (not a fixed
+    /// sleep) to know the task has reached its await point.
+    chunk_sent: AtomicBool,
+    /// Set by `handle_input` only AFTER `hold_until`'s wait resolves — never
+    /// set at all if the task is aborted while parked there. A test that
+    /// observes `chunk_sent == true` (task genuinely reached the await
+    /// point) followed by `completed` staying `false` forever (even after
+    /// further scheduling opportunities, with `notify` never released) has
+    /// proven the task was truly interrupted mid-flight, not merely
+    /// unpolled.
+    completed: AtomicBool,
 }
 
 #[async_trait]
@@ -323,9 +349,19 @@ impl TuiEngine for MockEngine {
     async fn handle_input(
         &self,
         _line: String,
-        _tx: UnboundedSender<ReplEvent>,
+        tx: UnboundedSender<ReplEvent>,
     ) -> anyhow::Result<bool> {
         self.handle_input_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(notify) = &self.hold_until {
+            let _ = tx.send(ReplEvent::AssistantOutput {
+                chunk: "partial".to_string(),
+                done: false,
+                is_error: false,
+            });
+            self.chunk_sent.store(true, Ordering::SeqCst);
+            notify.notified().await;
+            self.completed.store(true, Ordering::SeqCst);
+        }
         Ok(!self.handle_input_returns_quit.load(Ordering::SeqCst))
     }
 
@@ -337,6 +373,12 @@ impl TuiEngine for MockEngine {
         self.cancel_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+/// Shorthand for a fresh generation counter — every dispatch-layer test
+/// starts its own `run()`-equivalent state from scratch.
+fn new_generation() -> Generation {
+    Arc::new(AtomicU64::new(0))
 }
 
 fn ctrl_c() -> ReplEvent {
@@ -367,7 +409,8 @@ async fn dispatch_pending_cancel_reaches_cancel_session() {
 
     let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
     let current_task: CurrentTask = Arc::new(StdMutex::new(None));
-    dispatch_pending(&mut app, &engine, &tx, &current_task);
+    let generation = new_generation();
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
 
     assert!(!app.pending_cancel, "must be drained synchronously");
     assert!(!app.busy, "on_cancelled must clear busy synchronously");
@@ -398,7 +441,8 @@ async fn dispatch_pending_submit_reaches_handle_input() {
 
     let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
     let current_task: CurrentTask = Arc::new(StdMutex::new(None));
-    dispatch_pending(&mut app, &engine, &tx, &current_task);
+    let generation = new_generation();
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
     assert!(
         app.pending_submit.is_none(),
         "must be drained synchronously"
@@ -427,36 +471,79 @@ async fn dispatch_pending_submit_ok_false_relays_quit_event() {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ReplEvent>();
     let current_task: CurrentTask = Arc::new(StdMutex::new(None));
-    dispatch_pending(&mut app, &engine, &tx, &current_task);
+    let generation = new_generation();
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
 
     let ev = rx.recv().await.expect("Quit event must be sent");
     assert_eq!(ev, ReplEvent::Quit);
 }
 
-/// A cancel dispatched while a submit task is already in flight must abort
-/// that task's `JoinHandle` — mirrors tagent's `current_task` abort-on-cancel
-/// precedent (`crates/trusty-agents/src/repl/tui/events.rs`).
+/// A cancel dispatched while a submit task is GENUINELY in flight (parked
+/// mid-`.await`, proven via `MockEngine::chunk_sent` — not merely spawned
+/// and never polled, the gap a code-review pass on PR #3477 caught in an
+/// earlier revision of this test) must abort that task's `JoinHandle`.
+/// Proof of genuine interruption: `chunk_sent` becoming `true` shows the
+/// task reached its await point; `completed` staying `false` — even after
+/// further scheduling opportunities and WITHOUT ever releasing `notify` —
+/// shows it never resumed past that point, i.e. it was truly cancelled, not
+/// merely "replaced in the slot" while still running to completion
+/// unobserved. Mirrors tagent's `current_task` abort-on-cancel precedent
+/// (`crates/trusty-agents/src/repl/tui/events.rs`).
 #[tokio::test]
-async fn dispatch_pending_cancel_aborts_in_flight_submit_task() {
-    let engine = Arc::new(MockEngine::default());
+async fn dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task() {
+    let notify = Arc::new(Notify::new());
+    let engine = Arc::new(MockEngine {
+        hold_until: Some(Arc::clone(&notify)),
+        ..Default::default()
+    });
     let mut app = ReplApp::new("demo", "u");
     let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
     let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
 
     app_apply(&mut app, ReplEvent::Submit("long task".to_string()));
-    dispatch_pending(&mut app, &engine, &tx, &current_task);
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
     assert!(
         current_task.lock().unwrap().is_some(),
         "submit must stash a JoinHandle in current_task"
     );
 
+    // Wait for genuine proof the task is parked at its await point (sent its
+    // chunk, now blocked on `notify`) — not a fixed sleep, and not merely
+    // "spawned".
+    for _ in 0..500 {
+        if engine.chunk_sent.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        engine.chunk_sent.load(Ordering::SeqCst),
+        "task must reach its await point before we cancel it, or this test proves nothing"
+    );
+
     app.busy = true;
     app_apply(&mut app, ctrl_c());
-    dispatch_pending(&mut app, &engine, &tx, &current_task);
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
 
     assert!(
         current_task.lock().unwrap().is_none(),
         "cancel must take (and abort) the stashed handle"
+    );
+    assert!(!app.busy, "on_cancelled must clear busy synchronously");
+
+    // The decisive check: release the gate the (supposedly aborted) task
+    // was parked on. If `abort()` genuinely worked, the task is already gone
+    // and this is a no-op — `completed` can never become `true`. If abort
+    // were silently ineffective (the bug this test guards against), the
+    // task would still be alive, wake up, and complete.
+    notify.notify_one();
+    for _ in 0..500 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !engine.completed.load(Ordering::SeqCst),
+        "an aborted task must never resume past its await point, even when its wait condition is satisfied afterward"
     );
 }
 
@@ -478,10 +565,133 @@ async fn dispatch_pending_noop_when_nothing_pending() {
 
     let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
     let current_task: CurrentTask = Arc::new(StdMutex::new(None));
-    dispatch_pending(&mut app, &engine, &tx, &current_task);
+    let generation = new_generation();
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
 
     // Give any wrongly-spawned task a chance to run before asserting.
     tokio::task::yield_now().await;
     assert_eq!(engine.cancel_calls.load(Ordering::SeqCst), 0);
     assert_eq!(engine.handle_input_calls.load(Ordering::SeqCst), 0);
+}
+
+/// FIX 2 (generation tagging, PR #3477 review): a message already sitting in
+/// a turn's private channel — sent before a cancel bumped the live
+/// generation past that turn's own number, exactly the race `abort()` only
+/// taking effect at the next `.await` creates (an already-queued chunk
+/// survives the abort itself) — must be dropped by
+/// [`forward_while_current_generation`], never relayed onto the real
+/// channel where it would render as a fresh reply to a request the user
+/// already cancelled.
+///
+/// Deliberately tests [`forward_while_current_generation`] directly rather
+/// than through `dispatch_pending`'s spawned tasks: whether a real spawned
+/// forwarder drains a message before or after a concurrent generation bump
+/// is itself a scheduling race (forwarding it BEFORE the bump is correct —
+/// the chunk was legitimately live when sent), so asserting "never forwarded"
+/// against the full spawned pipeline is nondeterministic by construction. The
+/// actual invariant this crate guarantees is narrower and fully
+/// deterministic: ANY message the forwarder has not yet drained by the time
+/// `generation` no longer matches its turn gets dropped when the forwarder
+/// finally gets to it — which is exactly what direct, un-raced construction
+/// below proves.
+#[tokio::test]
+async fn forward_while_current_generation_drops_stale_generation_message() {
+    let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let (real_tx, mut real_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let generation: Generation = Arc::new(AtomicU64::new(5));
+
+    // A message sent while generation 5 was still live...
+    turn_tx
+        .send(ReplEvent::AssistantOutput {
+            chunk: "partial".to_string(),
+            done: false,
+            is_error: false,
+        })
+        .unwrap();
+    // ...but by the time anyone drains it, a cancel has already bumped the
+    // live generation to 6 — turn 5 is now stale, exactly what
+    // `dispatch_pending`'s cancel branch does before `abort()` runs.
+    generation.store(6, Ordering::SeqCst);
+    drop(turn_tx); // no more messages; the forwarder runs to completion
+
+    forward_while_current_generation(turn_rx, real_tx, generation, 5).await;
+
+    assert!(
+        real_rx.try_recv().is_err(),
+        "a message tagged for a superseded generation must never reach the real channel"
+    );
+}
+
+/// Symmetric companion to the drop test above: a message whose generation
+/// still matches the live one must be forwarded normally — the mechanism
+/// must not become a black hole for ordinary, un-cancelled turns.
+#[tokio::test]
+async fn forward_while_current_generation_forwards_matching_generation_message() {
+    let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let (real_tx, mut real_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let generation: Generation = Arc::new(AtomicU64::new(1));
+
+    turn_tx
+        .send(ReplEvent::AssistantOutput {
+            chunk: "hello".to_string(),
+            done: true,
+            is_error: false,
+        })
+        .unwrap();
+    drop(turn_tx);
+
+    forward_while_current_generation(turn_rx, real_tx, generation, 1).await;
+
+    let ev = real_rx
+        .try_recv()
+        .expect("matching-generation message must forward");
+    assert_eq!(
+        ev,
+        ReplEvent::AssistantOutput {
+            chunk: "hello".to_string(),
+            done: true,
+            is_error: false,
+        }
+    );
+}
+
+/// FIX 1 (busy-gating) at the dispatch layer: while a turn is in flight, a
+/// second `Submit` must never reach `TuiEngine::handle_input` a second time.
+/// `ReplApp::submit_line`'s own busy guard means `pending_submit` never gets
+/// staged for the second attempt, so `dispatch_pending` has nothing to
+/// dispatch — this is the direct fix for the double-submit corruption
+/// (task B's chunks splicing into task A's orphaned `streaming_idx` entry)
+/// a code-review pass caught on PR #3477.
+#[tokio::test]
+async fn dispatch_pending_second_submit_while_busy_does_not_start_second_task() {
+    let engine = Arc::new(MockEngine::default());
+    let mut app = ReplApp::new("demo", "u");
+    let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    app_apply(&mut app, ReplEvent::Submit("explain X".to_string()));
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+    for _ in 0..200 {
+        if engine.handle_input_calls.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(engine.handle_input_calls.load(Ordering::SeqCst), 1);
+    assert!(app.busy, "first submit must leave the app busy");
+
+    // Second submit attempt while still busy: the reducer refuses to stage
+    // it at all (`ReplApp::submit_line`'s guard), so there is nothing for
+    // `dispatch_pending` to dispatch.
+    app_apply(&mut app, ReplEvent::Submit("explain Y".to_string()));
+    assert!(app.pending_submit.is_none(), "must not stage a second turn");
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+
+    tokio::task::yield_now().await;
+    assert_eq!(
+        engine.handle_input_calls.load(Ordering::SeqCst),
+        1,
+        "a second submit while busy must never reach handle_input"
+    );
 }

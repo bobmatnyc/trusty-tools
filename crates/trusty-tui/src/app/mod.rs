@@ -91,6 +91,18 @@
 //!   generalized to [`Self::status_prefix`] (defaulted from `label`) and a
 //!   generic [`crate::widgets::input_composer`] hint string respectively.
 //!
+//! Deliberately **DIVERGES** from tagent (Slice 5, DOC-50 §5 — an intentional
+//! improvement per spec, not an oversight or a parity gap):
+//! - **Ctrl-C cancels the in-flight request** (see [`reduce::apply_key`]'s
+//!   `'c'` arm, staging [`Self::pending_cancel`] for `crate::run::run`'s
+//!   dispatch step to relay as a real `TuiEngine::cancel_session` RPC).
+//!   Tagent's actual Ctrl-c (`crates/trusty-agents/src/repl/tui/keys.rs`)
+//!   only clears the input buffer — tagent's cancel trigger is Up-arrow
+//!   while `thinking`. DOC-50 §5 Slice 5 specifies Ctrl-C as the cancel key
+//!   (the conventional terminal interrupt), which this crate implements as
+//!   written; Up-arrow-while-busy ALSO still signals cancel here (ported
+//!   faithfully from tagent, see above), so both triggers work.
+//!
 //! # Spec References
 //! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer.
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): `ReplApp` state.
@@ -429,6 +441,22 @@ impl ReplApp {
     /// `busy` before any streamed chunk arrives (not on the first
     /// `AssistantOutput` chunk) closes the pre-first-token latency window —
     /// see the module doc comment's disclosure list.
+    ///
+    /// **A second turn cannot start while one is in flight**: if
+    /// [`Self::busy`] is already `true`, this whole function (routing
+    /// included) is a no-op — DOC-50 §5 Slice 5's "blocks user input until
+    /// cancel completes" requirement, made literal rather than reasoned
+    /// away. This is the authoritative guard (not just a UI nicety at the
+    /// call site): without it, a second `handle_input` task starts while the
+    /// first is still streaming, and with `streaming_idx` shared per-app
+    /// rather than per-task, the second task's chunks splice into the first
+    /// task's (now orphaned) chat entry — a real corruption bug this guard
+    /// closes at the source. Callers that want to preserve the user's typed
+    /// text when busy (the Enter-key path, [`reduce::apply_key`]) must check
+    /// `!app.busy` themselves BEFORE consuming the input buffer, since by
+    /// the time this function is reached the line is already taken out of
+    /// `input_buf` and would otherwise be silently lost, not just silently
+    /// ignored.
     /// What: [`crate::commands::BuiltIn::Clear`] reuses
     /// [`Self::clear_scrollback`] (the same effect
     /// `ReplEvent::ClearScrollback` produces); [`crate::commands::BuiltIn::Quit`]
@@ -438,8 +466,13 @@ impl ReplApp {
     /// Test: [`crate::commands::tests::submit_line_builtin_clear_clears_scrollback`],
     /// [`crate::commands::tests::submit_line_builtin_quit_sets_quit`],
     /// [`crate::commands::tests::submit_line_builtin_help_lists_commands`],
-    /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`].
+    /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`],
+    /// [`reduce::tests::apply_enter_is_noop_while_busy_and_preserves_buffer`],
+    /// [`reduce::tests::apply_submit_event_is_noop_while_busy`].
     pub(crate) fn submit_line(&mut self, line: String) {
+        if self.busy {
+            return;
+        }
         self.remember_input(&line);
         self.last_prompt = line.clone();
         self.push_user(line.clone());

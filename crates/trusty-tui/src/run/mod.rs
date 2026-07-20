@@ -143,10 +143,17 @@ pub trait TuiModel {
     /// parity with tagent's real cancel path
     /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`), which
     /// resets `thinking`/`busy_since` synchronously, before `h.abort()` even
-    /// runs. Nothing in this crate's widgets gate keystrokes on `busy`
-    /// either, so "block user input until cancel completes" (DOC-50 §5
-    /// Slice 5's prose) is satisfied by the RPC still firing for real
-    /// server-side cancellation, not by literally freezing the input box.
+    /// runs. DOC-50 §5 Slice 5's "blocks user input until cancel completes"
+    /// is implemented literally, not reasoned away: `crate::app::ReplApp`'s
+    /// `submit_line` refuses a second turn while `busy` is `true`
+    /// ([`crate::app::ReplApp::submit_line`]'s doc comment), so this method
+    /// clearing `busy` is exactly the moment new input becomes acceptable
+    /// again — before that, Enter/Submit is a genuine no-op, not merely
+    /// cosmetically blocked. [`dispatch_pending`] separately bumps the
+    /// generation counter in the SAME cancel branch this method is called
+    /// from, so any output still in flight from the just-cancelled turn is
+    /// dropped rather than rendered once it eventually arrives (see that
+    /// function's doc comment for the generation mechanism).
     /// What: default no-op — a model with no busy/streaming state to reset
     /// needs no override.
     fn on_cancelled(&mut self) {}
@@ -364,6 +371,58 @@ where
 /// accidental `.await` inside the lock.
 type CurrentTask = Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>;
 
+/// The current turn's generation number.
+///
+/// Why: `JoinHandle::abort()` only takes effect at the aborted task's NEXT
+/// `.await` point — a chunk the engine already pushed onto its `tx` clone
+/// BEFORE the abort request lands is already sitting in a channel buffer,
+/// unaffected by the abort. Without a way to mark that chunk "stale", it
+/// still gets forwarded to the render loop and rendered — a real bug a
+/// code-review pass on PR #3477 caught: cancelling turn N doesn't stop turn
+/// N's already-in-flight output from being drawn as a fresh reply once it
+/// eventually arrives. This counter is the fix: every NEW submitted turn
+/// gets the next generation number, cancelling bumps it too (invalidating
+/// whatever generation was in flight even if nothing is found to abort), and
+/// [`dispatch_pending`]'s per-turn forwarder (see that function) drops any
+/// event whose turn's generation no longer matches the live one before it
+/// ever reaches `tx` / the reducer.
+/// What: a plain `Arc<AtomicU64>` — `SeqCst` throughout since this is a
+/// low-frequency, cross-task correctness flag, not a hot path worth a
+/// weaker ordering.
+type Generation = Arc<std::sync::atomic::AtomicU64>;
+
+/// Drain `turn_rx` and forward each event onto `real_tx`, but ONLY while
+/// `generation` still equals `my_gen` — the per-turn forwarder [`Generation`]'s
+/// doc comment describes. Pulled out of [`dispatch_pending`] as its own
+/// function specifically so it is unit-testable in complete isolation from
+/// real task scheduling: a test can pre-populate `turn_rx` with a message,
+/// bump `generation` past `my_gen` (simulating "a cancel already happened"),
+/// then run this function to completion and assert nothing reached
+/// `real_tx` — deterministic, no race against when a spawned task happens to
+/// get polled relative to another.
+/// Why: exits on its own once every `turn_tx` clone (held by the
+/// `handle_input` task in [`dispatch_pending`]) drops and `turn_rx.recv()`
+/// returns `None` — normal completion or `abort()` both drop that clone, so
+/// nothing leaks this task.
+/// What: no special handling needed for the mismatched-generation branch
+/// beyond "don't forward" — silently dropping is the correct, documented
+/// behavior (rendering stale output from an already-cancelled turn would be
+/// the bug, not the silence).
+/// Test: [`tests::forward_while_current_generation_drops_stale_generation_message`],
+/// [`tests::forward_while_current_generation_forwards_matching_generation_message`].
+async fn forward_while_current_generation(
+    mut turn_rx: UnboundedReceiver<ReplEvent>,
+    real_tx: UnboundedSender<ReplEvent>,
+    generation: Generation,
+    my_gen: u64,
+) {
+    while let Some(ev) = turn_rx.recv().await {
+        if generation.load(Ordering::SeqCst) == my_gen {
+            let _ = real_tx.send(ev);
+        }
+    }
+}
+
 /// Drain whatever [`TuiModel::take_pending_submit`]/
 /// [`TuiModel::take_pending_cancel`] report on `model` (staged by the
 /// caller's `apply` immediately before this runs) and dispatch each to
@@ -382,32 +441,69 @@ type CurrentTask = Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>;
 /// can abort it — same `current_task: Arc<Mutex<Option<JoinHandle<()>>>>`
 /// shape tagent uses, adapted to `std::sync::Mutex` since nothing here holds
 /// the lock across an `.await`.
-/// What: cancel is drained and dispatched FIRST (aborts any in-flight
-/// `handle_input` task, calls [`TuiModel::on_cancelled`] synchronously so
-/// the UI's busy state clears immediately — see that method's doc comment
-/// for why — then relays `engine.cancel_session()` on its own task so a slow
-/// backend never blocks the render loop). Submit is drained second: any
-/// previous task in `current_task` is aborted (defensive — busy-gating
-/// should prevent overlapping submits, same caveat as tagent's precedent)
-/// and replaced. `Ok(false)` from `handle_input` is relayed back as
-/// `ReplEvent::Quit` (the spawned task can't reach `&mut M` directly — see
-/// that variant's doc comment); an `Err` is relayed as an error-flavored
-/// `ReplEvent::AssistantOutput` chunk, the closest existing vocabulary to
-/// tagent's `LlmResponse { text: format!("error: {e:#}"), is_error: true }`.
+///
+/// **Generation tagging (see [`Generation`]):** every submit is assigned the
+/// next generation number and gets its OWN private `mpsc` channel
+/// (`turn_tx`/`turn_rx`) instead of the shared `tx` directly — `engine.
+/// handle_input` is handed `turn_tx`, and a second, small forwarder task
+/// drains `turn_rx` and re-sends each event onto the real `tx` ONLY while
+/// `generation` still equals the turn's own number; once superseded
+/// (cancelled), the forwarder silently drops everything still queued for
+/// that turn instead of relaying it. This works without changing
+/// `TuiEngine::handle_input`'s signature at all (it still receives a plain
+/// `UnboundedSender<ReplEvent>`) and without adding a generation field to
+/// `ReplEvent` itself (irrelevant to `event.rs`'s public shape, so Slice 6/7
+/// engines never need to know this mechanism exists). The forwarder task
+/// exits on its own once every `turn_tx` clone drops (the `handle_input`
+/// task finishing OR being aborted both drop their clone), so nothing leaks.
+///
+/// **Why FIX 1 (busy-gating in `ReplApp::submit_line`) doesn't make this
+/// redundant:** with submits gated, at most one turn is EVER in flight, so
+/// generation mismatches can only happen via cancel (Ctrl-C), never via a
+/// second overlapping submit — but that one case is real and common enough
+/// (any Ctrl-C during a streaming response) that dropping it silently is
+/// still required.
+///
+/// What: cancel is drained and dispatched FIRST — bumps `generation`
+/// (invalidating the in-flight turn's forwarder before anything else
+/// happens), calls [`TuiModel::on_cancelled`] synchronously so the UI's busy
+/// state clears immediately (see that method's doc comment for why), aborts
+/// the stashed `JoinHandle`, then relays `engine.cancel_session()` on its
+/// own task so a slow backend never blocks the render loop. Submit is
+/// drained second: assigned the next generation, any previous task in
+/// `current_task` is aborted (defensive — busy-gating should prevent
+/// overlapping submits, same caveat as tagent's precedent) and replaced.
+/// `Ok(false)` from `handle_input` is relayed back as `ReplEvent::Quit` (the
+/// spawned task can't reach `&mut M` directly — see that variant's doc
+/// comment); an `Err` is relayed as an error-flavored `ReplEvent::
+/// AssistantOutput` chunk, the closest existing vocabulary to tagent's
+/// `LlmResponse { text: format!("error: {e:#}"), is_error: true }`. Both
+/// relays go through the SAME generation-tagged `turn_tx`, so a stale
+/// `Quit`/error from an already-cancelled turn is dropped exactly like a
+/// stale `AssistantOutput` chunk would be.
 /// Test: [`tests::dispatch_pending_submit_reaches_handle_input`],
 /// [`tests::dispatch_pending_cancel_reaches_cancel_session`],
-/// [`tests::dispatch_pending_cancel_aborts_in_flight_submit_task`],
-/// [`tests::dispatch_pending_noop_when_nothing_pending`].
+/// [`tests::dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task`],
+/// [`tests::dispatch_pending_noop_when_nothing_pending`],
+/// [`tests::forward_while_current_generation_drops_stale_generation_message`],
+/// [`tests::dispatch_pending_second_submit_while_busy_does_not_start_second_task`].
 fn dispatch_pending<E, M>(
     model: &mut M,
     engine: &Arc<E>,
     tx: &UnboundedSender<ReplEvent>,
     current_task: &CurrentTask,
+    generation: &Generation,
 ) where
     E: TuiEngine + 'static,
     M: TuiModel,
 {
     if model.take_pending_cancel() {
+        // Bump FIRST: invalidates the in-flight turn's forwarder before the
+        // abort even runs, so a chunk already sitting in `turn_rx`'s buffer
+        // (pushed before `abort()` takes effect at the task's next
+        // `.await`) is dropped rather than relayed once the forwarder next
+        // polls it.
+        generation.fetch_add(1, Ordering::SeqCst);
         model.on_cancelled();
         if let Some(handle) = current_task.lock().unwrap().take() {
             handle.abort();
@@ -422,16 +518,31 @@ fn dispatch_pending<E, M>(
     }
 
     if let Some(line) = model.take_pending_submit() {
+        let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // Private per-turn channel: `engine.handle_input` only ever sees
+        // `turn_tx`, never the real `tx` — see the doc comment above for why
+        // this is the seam that makes stale output droppable without
+        // touching `TuiEngine`'s signature or `ReplEvent`'s shape.
+        let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
+        let real_tx = tx.clone();
+        let forwarder_generation = Arc::clone(generation);
+        tokio::spawn(forward_while_current_generation(
+            turn_rx,
+            real_tx,
+            forwarder_generation,
+            my_gen,
+        ));
+
         let engine = Arc::clone(engine);
-        let dtx = tx.clone();
         let handle = tokio::spawn(async move {
-            match engine.handle_input(line, dtx.clone()).await {
+            match engine.handle_input(line, turn_tx.clone()).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    let _ = dtx.send(ReplEvent::Quit);
+                    let _ = turn_tx.send(ReplEvent::Quit);
                 }
                 Err(e) => {
-                    let _ = dtx.send(ReplEvent::AssistantOutput {
+                    let _ = turn_tx.send(ReplEvent::AssistantOutput {
                         chunk: format!("error: {e:#}"),
                         done: true,
                         is_error: true,
@@ -461,6 +572,7 @@ where
     let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
     let key_guard = spawn_key_reader(tx.clone());
     let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation: Generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let result: anyhow::Result<M> = async {
         engine.setup(tx.clone()).await?;
@@ -477,7 +589,13 @@ where
         let dispatch_tx = tx.clone();
         let dispatching_apply = move |model: &mut M, ev: ReplEvent| {
             apply(model, ev);
-            dispatch_pending(model, &dispatch_engine, &dispatch_tx, &current_task);
+            dispatch_pending(
+                model,
+                &dispatch_engine,
+                &dispatch_tx,
+                &current_task,
+                &generation,
+            );
         };
 
         event_loop(&mut terminal, model, rx, dispatching_apply, render).await

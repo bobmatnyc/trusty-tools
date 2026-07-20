@@ -77,6 +77,46 @@ fn apply_submit_event_mirrors_enter() {
     assert_eq!(app.chat[0].text, "/model opus-4");
 }
 
+/// DOC-50 §5 Slice 5's "blocks user input until cancel completes", made
+/// literal: while a turn is in flight (`busy == true`), Enter must not start
+/// a second turn — and must leave the typed text sitting in `input_buf`
+/// rather than consuming it and dropping it via `submit_line`'s own guard.
+/// This is the direct fix for the double-submit corruption a code-review
+/// pass caught on PR #3477 (task B's chunks splicing into task A's orphaned
+/// `streaming_idx` entry).
+#[test]
+fn apply_enter_is_noop_while_busy_and_preserves_buffer() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    for c in "explain Y".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    let chat_len_before = app.chat.len();
+    apply(&mut app, key(KeyCode::Enter));
+    assert_eq!(
+        app.input_buf, "explain Y",
+        "typed text must survive a blocked Enter, not be discarded"
+    );
+    assert!(app.pending_submit.is_none(), "must not stage a second turn");
+    assert_eq!(
+        app.chat.len(),
+        chat_len_before,
+        "must not echo a second user line while busy"
+    );
+}
+
+/// Same guard, exercised via the synthesized `ReplEvent::Submit` path
+/// (e.g. a future picker confirmation) rather than the Enter key — proves
+/// the guard lives in `submit_line` itself, not just the Enter call site.
+#[test]
+fn apply_submit_event_is_noop_while_busy() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    apply(&mut app, ReplEvent::Submit("/model opus-4".to_string()));
+    assert!(app.pending_submit.is_none());
+    assert!(app.chat.is_empty(), "must not echo while busy");
+}
+
 /// Direct port of tagent's `repl_app_up_arrow_recalls_last_prompt`
 /// (`crates/trusty-agents/src/repl/tui/tests_input.rs`).
 #[test]

@@ -191,8 +191,18 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll(-PAGE_SCROLL),
         KeyCode::PageDown => app.scroll(PAGE_SCROLL),
+        // Gated on `!app.busy` BEFORE `take_input()` runs (not just inside
+        // `submit_line`, which also guards): while a turn is in flight, the
+        // typed line stays in `input_buf` untouched rather than being taken
+        // out and then silently dropped by `submit_line`'s own guard — DOC-50
+        // §5 Slice 5's "blocks user input until cancel completes", made
+        // literal so a second turn genuinely cannot start (see
+        // `ReplApp::submit_line`'s doc comment for the corruption bug this
+        // closes).
         KeyCode::Enter => {
-            if let Some(line) = app.take_input() {
+            if !app.busy
+                && let Some(line) = app.take_input()
+            {
                 app.submit_line(line);
             }
         }
