@@ -73,7 +73,7 @@ pub trait VectorStore: Send + Sync {
     /// -> bool` parameter threaded through `async_trait`'s generated
     /// lifetime elision ties the callback's `&str` argument lifetime to the
     /// parameter's own — plain borrowed data sidesteps that entirely, and it
-    /// is all either side actually needs (see [`path_match::matches`]).
+    /// is all either side actually needs (see [`path_match::matches_chunk_id`]).
     /// What: default implementation is a best-effort fallback for backends
     /// that cannot push a predicate into traversal — it over-fetches
     /// (`top_k * 50`, capped) via plain [`Self::search`] and filters
@@ -95,7 +95,7 @@ pub trait VectorStore: Send + Sync {
         let hits = self.search(query, overfetch).await?;
         let mut out = Vec::with_capacity(top_k.min(hits.len()));
         for hit in hits {
-            if super::path_match::matches(hit.chunk_id.as_str(), path_prefix, repos) {
+            if super::path_match::matches_chunk_id(hit.chunk_id.as_str(), path_prefix, repos) {
                 out.push(hit);
                 if out.len() >= top_k {
                     break;

@@ -1,27 +1,71 @@
-//! Shared path/repo predicate for `VectorStore::search_filtered` (issue #3401).
+//! Shared path/repo predicates for `VectorStore::search_filtered` (issue #3401).
 //!
-//! Why: both [`super::types::VectorStore`]'s default over-fetch fallback and
-//! [`super::usearch_impl`]'s predicate-pushed `UsearchStore` override need
-//! the exact same "does this chunk id/file path satisfy the filter?" check.
-//! Living here (rather than in `core::indexer::search::path_filter`, which
-//! wraps this for its `SearchQuery`-shaped call site) keeps `core::store`
-//! free of any dependency on the indexer module — it takes the filter as
-//! plain `Option<&str>` / `&[String]` data instead of a `SearchQuery`.
-//! What: `matches` — AND-composed `path_prefix` + `repos` check, identical
-//! semantics to `core::indexer::search::path_filter::matches`.
-//! Test: `test_prefix_and_repos_compose_with_and`,
-//! `test_empty_filter_matches_everything` below;
-//! `core::indexer::search::path_filter`'s tests cover the `SearchQuery`-facing
-//! wrapper.
+//! Why: [`super::types::VectorStore`]'s default over-fetch fallback,
+//! [`super::usearch_impl`]'s predicate-pushed `UsearchStore` override, and
+//! `core::indexer::search::path_filter` (which wraps these for its
+//! `SearchQuery`-shaped call site) all need "does this candidate satisfy the
+//! filter?" checks. Living here (rather than in the indexer module) keeps
+//! `core::store` free of any dependency on the indexer — it takes the
+//! filter as plain `Option<&str>` / `&[String]` data instead of a
+//! `SearchQuery`.
+//!
+//! **Two functions, not one** (code review finding, issue #3401): a chunk id
+//! (`"{file}:{start}:{end}"` or `"{file}::{type}::{name}::{start}"`, see
+//! `chunker::walk::make_chunk_id`) and a bare file path (`RawChunk::file` /
+//! `CodeChunk::file`) are different candidate SHAPES. `:` is both the
+//! chunk-id start/end separator AND a legal POSIX filename/directory
+//! character (ISO-8601 timestamp dirs, versioned artifact names) — a single
+//! shared boundary rule that accepts `:` unconditionally to satisfy chunk-id
+//! matching would then also let `path_prefix: "vendor/foo"` match a real
+//! directory named `vendor/foo:evil/`, which is exactly the sibling-prefix
+//! leak this module exists to close. So: [`matches_file`] (boundary is only
+//! end-of-string or `/` — used wherever the candidate is a bare file path)
+//! and [`matches_chunk_id`] (also accepts the literal chunk-id suffix
+//! grammar — used wherever the candidate is a chunk id).
+//!
+//! What: `matches_file` and `matches_chunk_id` each AND-compose `path_prefix`
+//! with `repos`; `is_chunk_id_suffix` validates the suffix shape
+//! `make_chunk_id` actually emits, rather than accepting any `:`.
+//!
+//! Test: `test_file_prefix_rejects_sibling_directory`,
+//! `test_chunk_id_prefix_rejects_colon_in_real_path_segment`,
+//! `test_exact_file_prefix_matches_its_own_chunk_ids`, and others below.
 
-/// Test whether `candidate` (a chunk id or file path — both begin with the
-/// literal file path, see `chunker::walk::make_chunk_id`) satisfies
-/// `path_prefix` (if set) AND every name in `repos` matching as a path
-/// segment (if non-empty). An empty filter (`path_prefix: None`,
-/// `repos: []`) always matches.
-pub(crate) fn matches(candidate: &str, path_prefix: Option<&str>, repos: &[String]) -> bool {
+/// Test whether `candidate` — a bare file path (`RawChunk::file` /
+/// `CodeChunk::file`) — satisfies `path_prefix` (if set) AND every name in
+/// `repos` matching as a path segment (if non-empty). An empty filter
+/// (`path_prefix: None`, `repos: []`) always matches.
+///
+/// Use this at any site whose candidate is a real file path, never a chunk
+/// id — the authoritative retain in `apply_score_adjustments` is the
+/// canonical caller.
+pub(crate) fn matches_file(candidate: &str, path_prefix: Option<&str>, repos: &[String]) -> bool {
+    matches_with(candidate, path_prefix, repos, file_prefix_boundary_ok)
+}
+
+/// Test whether `candidate` — a chunk id — satisfies `path_prefix` (if set)
+/// AND `repos` (if non-empty). Same composition as [`matches_file`], but the
+/// prefix boundary check also accepts a landing right at the start of the
+/// chunk-id suffix `make_chunk_id` appends after the file path.
+///
+/// Use this at any site whose candidate is a chunk id (BM25/grep/HNSW
+/// admission predicates), never a bare file path.
+pub(crate) fn matches_chunk_id(
+    candidate: &str,
+    path_prefix: Option<&str>,
+    repos: &[String],
+) -> bool {
+    matches_with(candidate, path_prefix, repos, chunk_id_prefix_boundary_ok)
+}
+
+fn matches_with(
+    candidate: &str,
+    path_prefix: Option<&str>,
+    repos: &[String],
+    prefix_boundary_ok: impl Fn(&str, &str) -> bool,
+) -> bool {
     if let Some(prefix) = path_prefix {
-        if !prefix.is_empty() && !prefix_matches_at_boundary(candidate, prefix) {
+        if !prefix.is_empty() && !prefix_boundary_ok(candidate, prefix) {
             return false;
         }
     }
@@ -39,35 +83,64 @@ pub(crate) fn matches(candidate: &str, path_prefix: Option<&str>, repos: &[Strin
     true
 }
 
-/// `true` when `candidate` starts with `prefix` at a genuine path-segment
-/// boundary — code review finding on issue #3401: a bare
-/// `candidate.starts_with(prefix)` lets `path_prefix: "/repos/foo"` also
-/// match `/repos/foobar/secret.rs`, silently leaking a sibling repo/dir into
-/// the "scoped" result set.
-///
-/// A boundary holds when `prefix` already ends in `/` (the caller opted in
-/// explicitly), `candidate` is exactly `prefix` (scoping to one exact file —
-/// no trailing content to bound), the byte immediately after `prefix` in
-/// `candidate` is `/` (the natural "next path segment" case, e.g.
-/// `prefix = "/repos/foo"`, `candidate = "/repos/foo/src/lib.rs"`), or that
-/// byte is `:` — `candidate` may be a chunk id rather than a bare file path
-/// (`"{file}:{start}:{end}"` / `"{file}::{type}::{name}::{start}"`, see
-/// `chunker::walk::make_chunk_id`), and `prefix` naming that file exactly
-/// (no trailing separator) must still match its own chunks. Falls through
-/// to `false` for anything else, including the `foo`/`foobar` collision and
-/// a prefix that lands mid-segment for any other reason (e.g.
-/// `candidate = "/repos/foo_backup/x.rs"` against `prefix = "/repos/foo"`).
-fn prefix_matches_at_boundary(candidate: &str, prefix: &str) -> bool {
+/// Boundary rule for a bare file path: `prefix` must be the whole of
+/// `candidate`, or `candidate` must continue with `/` right after it (or
+/// `prefix` was already `/`-terminated by the caller). No other byte is
+/// ever a valid boundary — in particular NOT `:`, which is a legal POSIX
+/// path character, so accepting it here would let `path_prefix: "vendor/foo"`
+/// match a real directory `vendor/foo:evil/...`.
+fn file_prefix_boundary_ok(candidate: &str, prefix: &str) -> bool {
     if !candidate.starts_with(prefix) {
         return false;
     }
     if prefix.ends_with('/') {
         return true;
     }
-    matches!(
-        candidate.as_bytes().get(prefix.len()),
-        None | Some(b'/') | Some(b':')
-    )
+    matches!(candidate.as_bytes().get(prefix.len()), None | Some(b'/'))
+}
+
+/// Boundary rule for a chunk id: everything [`file_prefix_boundary_ok`]
+/// accepts, PLUS landing exactly at the start of a genuine chunk-id suffix
+/// (validated against the shape `chunker::walk::make_chunk_id` actually
+/// emits — not "any `:`", which is what let a real `vendor/foo:evil/...`
+/// directory leak through in the prior version of this check).
+fn chunk_id_prefix_boundary_ok(candidate: &str, prefix: &str) -> bool {
+    if file_prefix_boundary_ok(candidate, prefix) {
+        return true;
+    }
+    if !candidate.starts_with(prefix) {
+        return false;
+    }
+    is_chunk_id_suffix(&candidate[prefix.len()..])
+}
+
+/// `true` when `suffix` (everything in a chunk id after a matched file-path
+/// prefix) is a syntactically valid chunk-id suffix — i.e. `suffix` starts
+/// with the literal grammar `make_chunk_id` emits, not merely a colon.
+///
+/// `make_chunk_id` emits exactly two shapes after `file`:
+///
+///   - `:{start_line}:{end_line}` — a SINGLE `:` immediately followed by an
+///     ASCII digit (line numbers are `usize`, so always `\d+`).
+///   - `::{chunk_type}::{name}::{start_line}` — a DOUBLE `::`.
+///
+/// Requiring a digit after a single `:` (rather than accepting any byte) is
+/// what distinguishes the real suffix `:10:20` from a real path segment
+/// that merely starts with a colon, e.g. `:evil/secret.rs` (`e` is not a
+/// digit → rejected) or `:bar.rs` (`b` is not a digit → rejected).
+fn is_chunk_id_suffix(suffix: &str) -> bool {
+    let bytes = suffix.as_bytes();
+    let Some(&first) = bytes.first() else {
+        return false; // no suffix at all — file_prefix_boundary_ok already covers this case
+    };
+    if first != b':' {
+        return false;
+    }
+    match bytes.get(1) {
+        Some(b':') => true,            // "::type::name::start" shape
+        Some(b) => b.is_ascii_digit(), // "start:end" shape
+        None => false,                 // bare trailing ":" — not a real suffix
+    }
 }
 
 #[cfg(test)]
@@ -76,23 +149,24 @@ mod tests {
 
     #[test]
     fn test_empty_filter_matches_everything() {
-        assert!(matches("/any/path.rs:1:2", None, &[]));
+        assert!(matches_file("/any/path.rs", None, &[]));
+        assert!(matches_chunk_id("/any/path.rs:1:2", None, &[]));
     }
 
     #[test]
     fn test_prefix_and_repos_compose_with_and() {
         let repos = vec!["foo".to_string()];
-        assert!(matches(
+        assert!(matches_chunk_id(
             "/repos/foo/src/lib.rs:1:2",
             Some("/repos/foo"),
             &repos
         ));
-        assert!(!matches(
+        assert!(!matches_chunk_id(
             "/repos/bar/src/lib.rs:1:2",
             Some("/repos/foo"),
             &repos
         ));
-        assert!(!matches(
+        assert!(!matches_chunk_id(
             "/repos/foo/tests/lib.rs:1:2",
             Some("/repos/foo/src"),
             &repos
@@ -101,49 +175,106 @@ mod tests {
 
     /// Code review finding (issue #3401): `path_prefix: "/repos/foo"` must
     /// NOT match a sibling directory that merely shares the prefix as a
-    /// string, e.g. `/repos/foobar/...`.
+    /// string, e.g. `/repos/foobar/...`. Pinned against BOTH functions.
     #[test]
-    fn test_prefix_does_not_match_sibling_directory() {
-        assert!(!matches(
-            "/repos/foobar/secret.rs:1:2",
+    fn test_file_prefix_rejects_sibling_directory() {
+        assert!(!matches_file(
+            "/repos/foobar/secret.rs",
             Some("/repos/foo"),
             &[]
         ));
-        // The true subtree entry (boundary at '/') still matches.
-        assert!(matches(
-            "/repos/foo/src/lib.rs:1:2",
+        assert!(matches_file(
+            "/repos/foo/src/lib.rs",
             Some("/repos/foo"),
             &[]
         ));
-        // A prefix the caller already terminated with '/' behaves the same
-        // (explicit opt-in boundary).
-        assert!(matches(
-            "/repos/foo/src/lib.rs:1:2",
+        assert!(matches_file(
+            "/repos/foo/src/lib.rs",
             Some("/repos/foo/"),
             &[]
         ));
-        assert!(!matches(
-            "/repos/foobar/secret.rs:1:2",
+        assert!(!matches_file(
+            "/repos/foobar/secret.rs",
             Some("/repos/foo/"),
             &[]
         ));
-        // Exact-file scoping: candidate equals prefix exactly.
-        assert!(matches("/repos/foo", Some("/repos/foo"), &[]));
+        assert!(matches_file("/repos/foo", Some("/repos/foo"), &[]));
     }
 
-    /// A `path_prefix` naming one exact file (no trailing separator) must
-    /// still match that file's own chunk ids, which carry a `:start:end` (or
-    /// `::type::name::start`) suffix rather than ending at the file path —
-    /// this is why the boundary check also accepts `:` as a valid next byte.
+    #[test]
+    fn test_chunk_id_prefix_rejects_sibling_directory() {
+        assert!(!matches_chunk_id(
+            "/repos/foobar/secret.rs:1:2",
+            Some("/repos/foo"),
+            &[]
+        ));
+        assert!(matches_chunk_id(
+            "/repos/foo/src/lib.rs:1:2",
+            Some("/repos/foo"),
+            &[]
+        ));
+    }
+
+    /// The exact regression the second code-review pass caught: the OLD
+    /// single-function boundary check accepted any `:` as a valid boundary
+    /// byte, so `path_prefix: "vendor/foo"` matched the real directory
+    /// `vendor/foo:evil/secret.rs` — a colon is a legal POSIX path
+    /// character, not just the chunk-id separator. `matches_file` must
+    /// reject this (candidate here is a bare file path, so the `:` boundary
+    /// allowance never applies at all), and `matches_chunk_id` must ALSO
+    /// reject it even though `:` is allowed there in principle, because the
+    /// byte after `:` is `e` (not a digit, not a second `:`) — it doesn't
+    /// match the real chunk-id suffix grammar.
+    #[test]
+    fn test_chunk_id_prefix_rejects_colon_in_real_path_segment() {
+        assert!(!matches_file(
+            "vendor/foo:evil/secret.rs",
+            Some("vendor/foo"),
+            &[]
+        ));
+        assert!(!matches_chunk_id(
+            "vendor/foo:evil/secret.rs:1:2",
+            Some("vendor/foo"),
+            &[]
+        ));
+        // Same shape, single-segment version (no trailing chunk suffix at
+        // all) — still must not match.
+        assert!(!matches_chunk_id(
+            "vendor/foo:evil/secret.rs",
+            Some("vendor/foo"),
+            &[]
+        ));
+        // And the extracted repro from the code-review comment.
+        assert!(!matches_chunk_id("src/foo:bar.rs", Some("src/foo"), &[]));
+    }
+
+    /// Canary: a `path_prefix` naming one exact file (no trailing
+    /// separator) must still match that file's own chunk ids, which carry a
+    /// `:start:end` (or `::type::name::start`) suffix rather than ending at
+    /// the file path — this is why `matches_chunk_id` accepts a validated
+    /// colon-led suffix as a boundary at all. Must NOT regress when the
+    /// boundary check is tightened against the colon-leak above.
     #[test]
     fn test_exact_file_prefix_matches_its_own_chunk_ids() {
-        assert!(matches("src/auth.rs:10:20", Some("src/auth.rs"), &[]));
-        assert!(matches(
+        assert!(matches_chunk_id(
+            "src/auth.rs:10:20",
+            Some("src/auth.rs"),
+            &[]
+        ));
+        assert!(matches_chunk_id(
             "src/auth.rs::function::login::10",
             Some("src/auth.rs"),
             &[]
         ));
-        // Still rejects a same-string-prefixed sibling file.
-        assert!(!matches("src/auth.rs.bak:1:2", Some("src/auth.rs"), &[]));
+        // Still rejects a same-string-prefixed sibling file (non-digit,
+        // non-double-colon after the single ':').
+        assert!(!matches_chunk_id(
+            "src/auth.rs.bak:1:2",
+            Some("src/auth.rs"),
+            &[]
+        ));
+        // A bare file path (no chunk suffix at all) for the SAME exact-file
+        // prefix must also match via matches_file (end-of-string boundary).
+        assert!(matches_file("src/auth.rs", Some("src/auth.rs"), &[]));
     }
 }

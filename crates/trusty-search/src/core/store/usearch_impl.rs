@@ -114,7 +114,7 @@ impl VectorStore for UsearchStore {
     /// unfiltered search over the subgraph the predicate admits. The closure
     /// only has the `u64` HNSW key, so it resolves each candidate key back to
     /// its chunk id via `key_to_id` and checks it against `path_prefix` /
-    /// `repos` via [`super::path_match::matches`].
+    /// `repos` via [`super::path_match::matches_chunk_id`].
     /// What: holds `index` and `key_to_id` under READ locks for the duration
     /// of the (synchronous) `filtered_search` FFI call — safe to hold both
     /// simultaneously because no code path in this store acquires them as
@@ -143,10 +143,14 @@ impl VectorStore for UsearchStore {
 
         let index = self.index.read().await;
         let key_to_id = self.key_to_id.read().await;
+        // `key_to_id` resolves to chunk ids, not bare file paths — use
+        // `matches_chunk_id` (see `path_match` module docs for why the
+        // colon-suffix allowance it has must not leak into a bare-file-path
+        // check).
         let filter = |key: usearch::Key| {
-            key_to_id
-                .get(&key)
-                .is_some_and(|id| super::path_match::matches(id.as_str(), path_prefix, repos))
+            key_to_id.get(&key).is_some_and(|id| {
+                super::path_match::matches_chunk_id(id.as_str(), path_prefix, repos)
+            })
         };
         let matches = index
             .filtered_search(query, top_k, filter)

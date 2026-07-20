@@ -211,8 +211,12 @@ impl CodeIndexer {
         // absolute (issue #402) — normalize once so a caller-supplied
         // absolute prefix (the form callers actually see) still matches.
         let normalized_prefix = path_filter::normalized_path_prefix(query, &self.root_path);
+        // BM25/grep candidates are chunk ids, not bare file paths — use
+        // `matches_id` (accepts the chunk-id suffix grammar), never
+        // `matches_file` (see `path_filter` module docs for why the two are
+        // not interchangeable).
         let path_pred =
-            |id: &str| path_filter::matches(id, normalized_prefix.as_deref(), &query.repos);
+            |id: &str| path_filter::matches_id(id, normalized_prefix.as_deref(), &query.repos);
         let filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)> = if path_filter::is_active(query)
         {
             Some(&path_pred)
@@ -442,14 +446,21 @@ impl CodeIndexer {
         // kept — the existing materialize step would have skipped it anyway.
         // `path_prefix` is normalized against `root_path` here too (code
         // review HIGH finding) so this authoritative check applies the exact
-        // same scope as the per-lane admission predicates above.
+        // same scope as the per-lane admission predicates above. This
+        // candidate is `raw.file` — a bare file path, not a chunk id — so it
+        // MUST go through `matches_file`, never `matches_id` (see
+        // `path_filter` module docs: the two are not interchangeable).
         let candidates: Vec<(String, f32)> = if path_filter::is_active(query) {
             let normalized_prefix = path_filter::normalized_path_prefix(query, &self.root_path);
             candidates
                 .into_iter()
                 .filter(|(id, _)| {
                     chunks.get(id).is_some_and(|raw| {
-                        path_filter::matches(&raw.file, normalized_prefix.as_deref(), &query.repos)
+                        path_filter::matches_file(
+                            &raw.file,
+                            normalized_prefix.as_deref(),
+                            &query.repos,
+                        )
                     })
                 })
                 .collect()
