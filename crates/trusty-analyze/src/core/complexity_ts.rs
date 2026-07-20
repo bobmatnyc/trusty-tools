@@ -302,14 +302,30 @@ fn has_child_kind(node: Node, kind: &str) -> bool {
     false
 }
 
+/// True if a Rust `function_item` is `pub` (including restricted forms like
+/// `pub(crate)`/`pub(super)`) — i.e. carries a `visibility_modifier` child.
+///
+/// Why: only public API items reasonably need doc comments; the previous
+/// unconditional `MissingDocstring` check fired on every private helper
+/// function, which dominates a typical Rust codebase and made the smell
+/// count useless (#see issue for the `.enumerate()`/false-positive report).
+/// What: a private-by-default language (no `visibility_modifier` child)
+/// returns `false`; any `pub` variant returns `true`.
+/// Test: `missing_docstring_skips_private_rust_fn`,
+/// `missing_docstring_smell_for_undocumented_pub_rust_fn`.
+fn is_pub_rust(fn_node: Node) -> bool {
+    has_child_kind(fn_node, "visibility_modifier")
+}
+
 /// AST-driven smell detection for Rust.
 ///
 /// Why: uses AST node positions for accurate line counts and parameter counting
 /// rather than text heuristics.
 /// What: checks `LongFunction`, `DeepNesting`, `TooManyParams`, and
-/// `MissingDocstring` against the caller-supplied `thresholds`.
+/// `MissingDocstring` against the caller-supplied `thresholds`. `MissingDocstring`
+/// only fires for `pub` items — see `is_pub_rust`.
 /// Test: `long_function_smell_fires_for_long_fn` and
-/// `missing_docstring_smell_for_undocumented_rust_fn` in the tests module.
+/// `missing_docstring_smell_for_undocumented_pub_rust_fn` in the tests module.
 fn detect_smells_rust(
     root: Node,
     src: &[u8],
@@ -342,7 +358,7 @@ fn detect_smells_rust(
         if params > thresholds.too_many_params {
             smells.push(CodeSmell::TooManyParams { count: params });
         }
-        if !has_rust_doc(fn_n, src) {
+        if is_pub_rust(fn_n) && !has_rust_doc(fn_n, src) {
             smells.push(CodeSmell::MissingDocstring);
         }
     } else if !contains_doc_marker(src) {
@@ -352,11 +368,69 @@ fn detect_smells_rust(
     smells
 }
 
+/// True if `node` (or an ancestor, within a few hops) is an `export_statement`.
+///
+/// Why: a top-level `function`/arrow function is only part of the module's
+/// public surface if it is exported; TypeScript/JS has no `pub` keyword, so
+/// `export` is the closest equivalent signal.
+/// What: walks up to 4 parents looking for `export_statement`. The hop limit
+/// keeps this a cheap, local check — `export` always wraps its declaration
+/// directly (`export_statement -> function_declaration`) or through one
+/// intermediate `lexical_declaration`/`variable_declarator` for arrow
+/// functions (`export_statement -> lexical_declaration -> variable_declarator
+/// -> arrow_function`), so 4 hops comfortably covers both shapes.
+fn is_exported_ts(node: Node) -> bool {
+    let mut cur = node.parent();
+    let mut hops = 0u8;
+    while let Some(p) = cur {
+        if p.kind() == "export_statement" {
+            return true;
+        }
+        hops += 1;
+        if hops > 4 {
+            break;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+/// True if a class `method_definition` has an explicit `private`/`protected`
+/// `accessibility_modifier` child.
+fn has_private_or_protected_modifier(node: Node, src: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "accessibility_modifier" {
+            let txt = child.utf8_text(src).unwrap_or("");
+            return txt == "private" || txt == "protected";
+        }
+    }
+    false
+}
+
+/// True if `fn_node` is part of the TS/JS public API surface.
+///
+/// Why: only public API items reasonably need doc comments; see `is_pub_rust`
+/// for the Rust equivalent and the rationale.
+/// What: class methods are public unless explicitly marked
+/// `private`/`protected` (TypeScript's default member visibility is public);
+/// top-level functions/arrow functions are public only when `export`ed.
+/// Test: `missing_docstring_skips_non_exported_ts_function`,
+/// `missing_docstring_fires_for_undocumented_exported_ts_function`,
+/// `missing_docstring_skips_private_ts_method`.
+fn is_public_ts(fn_node: Node, src: &[u8]) -> bool {
+    if fn_node.kind() == "method_definition" {
+        return !has_private_or_protected_modifier(fn_node, src);
+    }
+    is_exported_ts(fn_node)
+}
+
 /// AST-driven smell detection for TypeScript / JavaScript.
 ///
 /// Why: uses AST node positions for accurate line and parameter counts.
 /// What: checks `LongFunction`, `DeepNesting`, `TooManyParams`, and
-/// `MissingDocstring` against the caller-supplied `thresholds`.
+/// `MissingDocstring` against the caller-supplied `thresholds`. `MissingDocstring`
+/// only fires for public items — see `is_public_ts`.
 /// Test: `compute_complexity_typescript_single_branch` and related tests.
 fn detect_smells_ts(
     root: Node,
@@ -392,7 +466,7 @@ fn detect_smells_ts(
         if params > thresholds.too_many_params {
             smells.push(CodeSmell::TooManyParams { count: params });
         }
-        if !has_jsdoc(fn_n, src) {
+        if is_public_ts(fn_n, src) && !has_jsdoc(fn_n, src) {
             smells.push(CodeSmell::MissingDocstring);
         }
     } else if !contains_doc_marker(src) {
@@ -907,8 +981,10 @@ fn classify(n: i32) -> &'static str {
     }
 
     #[test]
-    fn missing_docstring_smell_for_undocumented_rust_fn() {
-        let m = compute_complexity_rust("fn f() {}").expect("parse should succeed");
+    fn missing_docstring_smell_for_undocumented_pub_rust_fn() {
+        // Only `pub` items are part of the public API surface, so
+        // `MissingDocstring` requires `pub` — see `is_pub_rust`.
+        let m = compute_complexity_rust("pub fn f() {}").expect("parse should succeed");
         assert!(m
             .smells
             .iter()
@@ -916,9 +992,118 @@ fn classify(n: i32) -> &'static str {
     }
 
     #[test]
-    fn doc_comment_suppresses_missing_docstring() {
-        let m = compute_complexity_rust("/// hi\nfn f() {}").expect("parse should succeed");
+    fn doc_comment_suppresses_missing_docstring_on_pub_fn() {
+        let m = compute_complexity_rust("/// hi\npub fn f() {}").expect("parse should succeed");
         assert!(!m
+            .smells
+            .iter()
+            .any(|s| matches!(s, CodeSmell::MissingDocstring)));
+    }
+
+    #[test]
+    fn missing_docstring_skips_private_rust_fn() {
+        // Private (non-`pub`) functions are internal implementation detail —
+        // requiring doc comments on every one of them is what made the
+        // whole-codebase smell count useless (most functions in a typical
+        // Rust codebase are private helpers).
+        let m = compute_complexity_rust("fn helper() {}").expect("parse should succeed");
+        assert!(
+            !m.smells
+                .iter()
+                .any(|s| matches!(s, CodeSmell::MissingDocstring)),
+            "private fn must not be flagged MissingDocstring, got {:?}",
+            m.smells
+        );
+    }
+
+    #[test]
+    fn missing_docstring_skips_private_rust_fn_using_enumerate() {
+        // Regression test for the reported false positive: idiomatic
+        // `.iter().enumerate()` usage inside an ordinary private helper must
+        // not inflate the smell count. `.enumerate()` itself was never a
+        // distinct smell rule; the over-reporting came from `MissingDocstring`
+        // firing on every undocumented (i.e. almost every private) function.
+        let src = r#"fn process(items: &[i32]) -> i32 {
+    let mut total = 0;
+    for (i, item) in items.iter().enumerate() {
+        total += i as i32 + item;
+    }
+    total
+}
+"#;
+        let m = compute_complexity_rust(src).expect("parse should succeed");
+        assert!(
+            m.smells.is_empty(),
+            "idiomatic private fn using .enumerate() must have zero smells, got {:?}",
+            m.smells
+        );
+    }
+
+    #[test]
+    fn missing_docstring_fires_for_pub_rust_fn_using_enumerate_without_doc() {
+        // A `pub` fn still reasonably needs docs even if it uses `.enumerate()`
+        // — the fix must not silence real signal, only the false positive.
+        let src = r#"pub fn process(items: &[i32]) -> i32 {
+    let mut total = 0;
+    for (i, item) in items.iter().enumerate() {
+        total += i as i32 + item;
+    }
+    total
+}
+"#;
+        let m = compute_complexity_rust(src).expect("parse should succeed");
+        assert!(
+            m.smells
+                .iter()
+                .any(|s| matches!(s, CodeSmell::MissingDocstring)),
+            "undocumented pub fn should still be flagged, got {:?}",
+            m.smells
+        );
+    }
+
+    #[test]
+    fn missing_docstring_skips_non_exported_ts_function() {
+        let m = compute_complexity_typescript("function helper(a: number) { return a; }")
+            .expect("parse should succeed");
+        assert!(
+            !m.smells
+                .iter()
+                .any(|s| matches!(s, CodeSmell::MissingDocstring)),
+            "non-exported TS function must not be flagged, got {:?}",
+            m.smells
+        );
+    }
+
+    #[test]
+    fn missing_docstring_fires_for_undocumented_exported_ts_function() {
+        let m = compute_complexity_typescript("export function helper(a: number) { return a; }")
+            .expect("parse should succeed");
+        assert!(m
+            .smells
+            .iter()
+            .any(|s| matches!(s, CodeSmell::MissingDocstring)));
+    }
+
+    #[test]
+    fn missing_docstring_skips_private_ts_method() {
+        let src = "class C {\n  private helper(a: number) { return a; }\n}\n";
+        let m = compute_complexity_typescript(src).expect("parse should succeed");
+        assert!(
+            !m.smells
+                .iter()
+                .any(|s| matches!(s, CodeSmell::MissingDocstring)),
+            "private class method must not be flagged, got {:?}",
+            m.smells
+        );
+    }
+
+    #[test]
+    fn missing_docstring_fires_for_undocumented_public_ts_method() {
+        // Class methods are public by default in TS unless marked
+        // `private`/`protected`.
+        let src = "class C {\n  helper(a: number) { return a; }\n}\n";
+        let m = compute_complexity_typescript(src).expect("parse should succeed");
+        assert!(m
             .smells
             .iter()
             .any(|s| matches!(s, CodeSmell::MissingDocstring)));
