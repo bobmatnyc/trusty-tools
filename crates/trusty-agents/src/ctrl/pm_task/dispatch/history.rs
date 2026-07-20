@@ -366,6 +366,22 @@ pub async fn run_pm_task_with_history(
         crate::tools::tm_tools::register_tm_tools_for_state_dir(&mut registry, &state_dir);
     }
 
+    // system_status epic (#3052): ctrl (the default coordination persona)
+    // gets the same on-demand subsystem-health tool as the `assistant`
+    // persona (`ctrl/pm_task/dispatch/persona.rs`). Unlike the persona path,
+    // ctrl's registry here is not gated by a `[tools].allow` list, so
+    // registering it is sufficient to make it callable. `with_resolved_endpoint`
+    // (not `new`) so a `/model` override applied above is reflected instead
+    // of silently re-derived from the on-disk TOML — see
+    // `tools::system_status` module docs.
+    registry.register(Arc::new(
+        crate::tools::system_status::SystemStatusTool::with_resolved_endpoint(
+            pm_cfg.agent.name.clone(),
+            pm_cfg.agent.model.clone(),
+            pm_cfg.agent.runner,
+        ),
+    ));
+
     let adapter = llm::adapter::adapter_for_model(&pm_cfg.agent.model);
     let registry_arc = Arc::new(registry);
     let llm_t0 = std::time::Instant::now();

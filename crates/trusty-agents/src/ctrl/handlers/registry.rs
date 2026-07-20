@@ -71,6 +71,14 @@ pub(crate) async fn build_ctrl_registry(
     }));
     // #187: docs search tool — backed by the lazily-built TF-IDF index.
     registry.register(Arc::new(SearchDocsTool { index: docs_index }));
+    // Self-inspection (system_status epic #3052): `ctrl` has no session-scoped
+    // `/model` override machinery of its own, so the plain `new` constructor
+    // (on-disk re-derivation via `ctrl.toml`) is correct here — contrast with
+    // `run_pm_task_with_persona`'s `with_resolved_endpoint`, which is
+    // REQUIRED there because personas DO carry `/model` overrides.
+    registry.register(Arc::new(
+        crate::tools::system_status::SystemStatusTool::new("ctrl"),
+    ));
     // #202: project-management + active-project tools.
     registry.register(Arc::new(AddProjectTool));
     registry.register(Arc::new(RemoveProjectTool));

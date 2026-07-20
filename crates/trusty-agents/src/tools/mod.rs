@@ -34,6 +34,7 @@ pub mod run_bash;
 pub mod shell;
 pub mod shell_exec;
 pub mod skill_loader;
+pub mod system_status;
 pub mod timer;
 pub mod tm_tools;
 pub mod traits;
