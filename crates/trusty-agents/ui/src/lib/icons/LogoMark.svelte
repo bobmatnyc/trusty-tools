@@ -1,5 +1,14 @@
 <script lang="ts">
   /**
+   * Canonical source: docs/design/UI/design-system/icons/LogoMark.svelte
+   * (refs #3486). This is a vendored copy — the canonical version is styled
+   * with plain CSS custom properties; this copy intentionally re-expresses
+   * the same lockup against this crate's own Tailwind token layer
+   * (`text-foundry-text`, `font-display`) instead. Keep the visual result
+   * (spacing, weights, wordmark text) in sync with the canonical file until
+   * #3492 (`@trusty/foundry` package) replaces copy-paste vendoring with a
+   * real import.
+   *
    * Why: The logo mark (robot + "Trusty Assistant" wordmark) is the canonical
    * product lockup used in the sidebar header. Bundling icon + wordmark
    * together guarantees consistent spacing and weight across the app.
