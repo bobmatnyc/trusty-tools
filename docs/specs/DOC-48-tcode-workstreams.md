@@ -19,7 +19,7 @@ spec_refs:
 **Status:** Draft (Rev 2)
 **Subsystem:** trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces
 **Owner:** Engineering (trusty-code)
-**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths)
+**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365)
 **Spec ID:** `SPEC-WS-01~draft` … `SPEC-WS-09~draft` (DOC-48)
 **Builds on:**
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-08~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-08~draft) §4B defines the Workstream domain object as a NEW prerequisite: "an infinite thread with state `active · idle · closed`… resumable across daemon restarts." This spec is the Phase 2+ implementation of that domain object and its persistence layer.
@@ -495,8 +495,13 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
 
 ### Phase 1B (follow-up, not in this spec) — Session binding UI + ambient default
 
-- Session-creation UI wiring to bind to workstream (§4.1)
-- Ambient default-target logic: new work targets the active workstream (§4.2)
+- [x] Session-creation UI wiring to bind to workstream (§4.1) — shipped as the
+      workstream-first creation flow (issue #3365, Phase C+ below), explicit
+      `workstream_id` binding rather than relying on ambient targeting.
+- [ ] Ambient default-target logic: new work targets the active workstream
+      (§4.2) — RPC layer supports it (§4.2); no UI caller relies on it yet.
+      Issue #3365's creation flow binds explicitly instead (see below), by
+      design — see that section's own rationale.
 
 ### Phase C (issue #3300) — GUI workstream switcher
 
@@ -507,6 +512,43 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
 - [x] `workstream.rename` RPC/REST verb (previously deferred, now shipped
       alongside its first caller)
 
+### Phase C+ (issue #3365) — Workstream-first creation flow
+
+- [x] **NEW WORKSTREAM replaces the session-first entry.** The GUI's create
+      flow (`NewWorkstreamForm.svelte`, `crates/trusty-code-gui/ui/`) now
+      mints a workstream (`workstream.create`), runs the first task
+      **explicitly bound** to it (`task.run{workstream_id}` — not via §4.2's
+      ambient default, see the Phase 1B note above), and only THEN activates
+      it (`workstream.activate{force: true}` — an explicit user action, so
+      forcing is correct per §6.1's "explicit switch, never silent"
+      principle being already satisfied by the create action itself).
+      **Activation is deliberately the LAST step, not the second one**
+      (code-critic PR #3375 review, HIGH): `force: true` unconditionally
+      deactivates whatever was previously active, so firing it before the
+      task-run is known to succeed could strand an empty, now-active
+      workstream with no restore path if the run then failed. A task-run
+      failure after a successful `workstream.create` keeps that workstream
+      id client-side for reuse on retry, rather than minting (and
+      abandoning) another on every retry.
+- [x] **Project-picker modal** (`ProjectPickerModal.svelte`) replaces the
+      prior inline folder-browse picker for this flow. Backed by a new,
+      NARROW roster endpoint (`fs.list_projects` / `GET /projects`,
+      `crates/trusty-code/src/fs_browse/roster.rs`) — a flat, best-effort
+      scan of `~/trusty-mpm-projects/<owner>/<repo>` (falling back to a
+      flat `~` scan), filtered to git repos, capped at 200 entries. This is
+      NOT a project/config registry this crate now owns going forward — it
+      is a "quick pick" shortlist for the modal only; §2.3's "workstreams
+      are daemon-scoped, project implicit via `ProjectBinding`" model is
+      unchanged.
+- [x] **Projectless mapping.** The modal's "start chatting without a
+      project" option maps onto the workstream's first session carrying no
+      `project` binding — §4.1's existing optional-binding rule, unchanged.
+      The GUI never surfaces "session"/"unbound" wording for this path.
+- [ ] Q1 (§9, workstream name inference from first-turn prompt text) remains
+      OPEN — issue #3365 ships only the interim default the issue itself
+      specified ("project name + date" / "new chat + date"), not real
+      prompt-derived inference.
+
 ---
 
 ## 9. Open questions for Bob {#SPEC-WS-09~draft}
@@ -514,7 +556,7 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
 **ID:** SPEC-WS-09~draft
 **Status:** Draft
 
-1. **Q1 — Workstream name inference:** When a session binds to a workstream, should we infer the workstream name from the first turn's prompt text (like DOC-39 suggests), or require the operator to name it at creation? Phase 1A can defer this to Phase 1B (name remains empty or "Untitled" until first session).
+1. **Q1 — Workstream name inference (PARTIALLY RESOLVED, interim default shipped, issue #3365):** When a session binds to a workstream, should we infer the workstream name from the first turn's prompt text (like DOC-39 suggests), or require the operator to name it at creation? Phase 1A deferred this; issue #3365's GUI creation flow now ships an **interim, non-prompt-derived default** — `"<project display name> — <YYYY-MM-DD>"` when a project is bound, `"new chat — <YYYY-MM-DD>"` when projectless (`inferWorkstreamName`, `crates/trusty-code-gui/ui/src/lib/new-workstream.ts`) — rather than leaving the name empty/"Untitled" until first session, or real prompt-text inference. Real prompt-derived inference (the question this Q1 originally asked) **remains open**.
 
 2. **Q2 — Project-ID storage namespace (PARTIALLY RESOLVED):** The storage filename `workstreams-{project_slug}-{hash}.json` is derived from the daemon's `ProjectBinding` (the project path or URL the daemon was launched for). The spec now states this explicitly (§3.1 notes "This naming scheme mirrors precedent"). Any remaining ambiguity: should the `project_slug` be derived from the path's basename (e.g., `acme-api` from `/path/to/acme-api`), or from a user-friendly project name if one is registered? Current spec assumes basename; implementation may refine.
 

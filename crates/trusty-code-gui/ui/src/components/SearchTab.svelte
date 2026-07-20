@@ -25,7 +25,7 @@
   // of its own chained fetches. A non-200 or top-level-malformed body
   // degrades to an `audit unavailable` row rather than throwing — the
   // fetched body's shape is verified with `parseSearchAuditResponse`
-  // (`lib/search-audit.ts`, mirroring `create-session.ts::isDirListing`)
+  // (`lib/search-audit.ts`, mirroring `project-roster.ts::isProjectRoster`)
   // before it becomes reactive state; no bare `as` assertion on
   // network-derived data. A single malformed RECORD (or a future
   // `SearchAuditRecord` variant this build doesn't recognize) does NOT take

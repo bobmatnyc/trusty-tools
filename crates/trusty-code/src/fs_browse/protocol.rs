@@ -41,12 +41,15 @@ struct ListDirParams {
 /// Why: mirrors `session::protocol::register` / `task::protocol::register` —
 /// the one place listing this namespace's full surface, so `serve::build_router`
 /// stays a one-line call per group.
-/// What: registers `"fs.list_dir"`. Unlike the `session.*`/`task.*` groups this
-/// takes no shared state: a directory listing is a pure function of the
-/// filesystem at call time, with no registry to close over.
-/// Test: `tests::register_wires_fs_list_dir`.
+/// What: registers `"fs.list_dir"` and `"fs.list_projects"` (issue #3365's
+/// project-picker roster). Unlike the `session.*`/`task.*` groups this takes
+/// no shared state: both are pure functions of the filesystem at call time,
+/// with no registry to close over.
+/// Test: `tests::register_wires_fs_list_dir`,
+/// `tests::register_wires_fs_list_projects`.
 pub fn register(router: &mut Router) {
     router.register("fs.list_dir", list_dir);
+    router.register("fs.list_projects", list_projects);
 }
 
 /// Map a typed [`ListDirError`] onto the vision spec's §13.2 error taxonomy.
@@ -102,6 +105,27 @@ async fn list_dir(params: Value, _ctx: ConnectionContext) -> Result<Value, RpcEr
 
     serde_json::to_value(listing)
         .map_err(|e| RpcError::internal(format!("fs.list_dir: serializing listing: {e}")))
+}
+
+/// `fs.list_projects() -> ProjectRoster` — the known-project roster for the
+/// GUI's workstream-first project-picker modal (issue #3365).
+///
+/// Why: the modal's supported roster data source (see
+/// `crate::fs_browse::roster` module docs for the discovery heuristic and
+/// why this exists alongside, not instead of, `fs.list_dir`).
+/// What: no params — `params` is ignored entirely (a caller passing `{}` or
+/// omitting params behaves identically, matching `fs.list_dir`'s tolerance
+/// for a no-argument call). Never returns a caller-facing error: an
+/// unreadable/missing scan root degrades to an empty roster (see
+/// `roster::list_projects`'s best-effort docs), so the only failure mode
+/// here is JSON serialization, which cannot fail for this struct shape in
+/// practice — kept as a `Result` only for symmetry with every other
+/// registered method and to surface a genuine bug rather than `unwrap`.
+/// Test: `tests::list_projects_returns_entries_array`,
+/// `tests::register_wires_fs_list_projects`.
+async fn list_projects(_params: Value, _ctx: ConnectionContext) -> Result<Value, RpcError> {
+    serde_json::to_value(super::roster::list_projects())
+        .map_err(|e| RpcError::internal(format!("fs.list_projects: serializing roster: {e}")))
 }
 
 #[cfg(test)]
@@ -277,6 +301,42 @@ mod tests {
         assert!(
             resp.error.is_none(),
             "fs.list_dir must be registered, got {:?}",
+            resp.error
+        );
+    }
+
+    /// `fs.list_projects` must never error and must return an `entries`
+    /// array — the response shape the picker modal dereferences. This runs
+    /// against the REAL developer/CI-runner home directory (the handler has
+    /// no injectable seam, unlike `roster::list_projects_in`, which carries
+    /// the real scan-behaviour coverage), so this only pins the wire shape,
+    /// not any particular content.
+    #[tokio::test]
+    async fn list_projects_returns_entries_array() {
+        let result = list_projects(Value::Null, test_ctx())
+            .await
+            .expect("fs.list_projects must not error");
+        assert!(result["entries"].is_array());
+    }
+
+    /// `register` must wire `fs.list_projects` so the router recognises it.
+    #[tokio::test]
+    async fn register_wires_fs_list_projects() {
+        use trusty_common::mcp::Request;
+
+        let mut router = Router::new();
+        register(&mut router);
+
+        let req = Request {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "fs.list_projects".to_string(),
+            params: None,
+        };
+        let resp = router.dispatch(req, &test_ctx()).await;
+        assert!(
+            resp.error.is_none(),
+            "fs.list_projects must be registered, got {:?}",
             resp.error
         );
     }

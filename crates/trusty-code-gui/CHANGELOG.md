@@ -27,6 +27,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workstream-first creation flow (closes #3365, DOC-48 §8 Phase C+,
+  DOC-39 §7A amendment).** Replaces the session-first `CreateSessionForm`
+  with `NewWorkstreamForm`: the primary entry control now reads "new
+  workstream". Project selection moves into a new `ProjectPickerModal`
+  (fed by the daemon's `GET /projects` roster) offering either a known
+  project or "start chatting without a project" (maps onto the existing
+  projectless/unbound-session state — UI copy stays workstream-neutral
+  throughout). Submitting mints a workstream (`POST /workstreams`, named
+  from the project + date, or "new chat" + date when projectless), runs the
+  first task explicitly bound to it (`POST /tasks` with `workstream_id`),
+  and only THEN force-activates it (`POST /workstreams/{id}/activate
+  {force:true}` — an explicit user action). Activation is deliberately the
+  LAST step, not the second one: a task-run failure after a successful
+  create keeps the minted workstream id for the next retry to reuse
+  (instead of minting another), and its error message names the workstream
+  so the operator knows it already exists. A failed activation after a
+  successful run is non-fatal and folded into the success message rather
+  than blocking anything.
+  `crates/trusty-code-gui/ui/src/components/NewWorkstreamForm.svelte`,
+  `ProjectPickerModal.svelte`, `lib/new-workstream.ts` (renamed from
+  `lib/create-session.ts`), `lib/project-roster.ts`.
 - **GUI workstream switcher in the header (closes #3300, DOC-48 §8 Phase C,
   DOC-39 §2/§8).** New `WorkstreamSwitcher.svelte` fills the reserved header
   slot `AppHeader.svelte`/PR #3301 left as a disabled placeholder: a trigger

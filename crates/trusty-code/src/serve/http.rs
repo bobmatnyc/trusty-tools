@@ -116,7 +116,8 @@ struct HttpState {
 /// `http_rest_get_session_budget_route_is_merged_in`,
 /// `http_rest_get_session_search_audit_route_is_merged_in`,
 /// `http_rest_get_workstreams_route_is_merged_in` (also pins the
-/// `GET /workstreams/{id}/events` merge).
+/// `GET /workstreams/{id}/events` merge),
+/// `http_rest_get_projects_route_is_merged_in`.
 pub fn build_axum_router(
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
@@ -136,6 +137,7 @@ pub fn build_axum_router(
         .merge(rest::sessions_write::routes(router.clone()))
         .merge(rest::tasks::routes(router.clone()))
         .merge(rest::fs::routes(router.clone()))
+        .merge(rest::projects::routes(router.clone()))
         .merge(rest::agents::routes(router.clone()))
         .merge(rest::search_audit::routes(router.clone()))
         .merge(rest::workstreams::routes(router))

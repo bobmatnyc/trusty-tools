@@ -326,6 +326,44 @@ async fn http_rest_get_fs_route_is_merged_in() {
     assert!(v["entries"].is_array());
 }
 
+/// `GET /projects` (issue #3365's REST route group, merged in by
+/// `build_axum_router` via `rest::projects::routes`) must be reachable on
+/// the SAME router `POST /rpc` is — proving the merge actually wires
+/// `rest::projects::routes` rather than silently dropping it. Per-route
+/// behaviour (the `entries` array shape) is already covered by
+/// `rest::projects::tests`; this test only pins the merge itself.
+#[tokio::test]
+async fn http_rest_get_projects_route_is_merged_in() {
+    // `router_and_sessions()` does not register `fs.list_projects` (it is
+    // not needed by any other test in this file) — build a router that
+    // also has it wired, mirroring `http_rest_get_fs_route_is_merged_in`.
+    let sessions = Arc::new(SessionRegistry::new());
+    let mut router = Router::new();
+    crate::serve::methods::register(&mut router);
+    crate::session::protocol::register(
+        &mut router,
+        sessions.clone(),
+        test_workstreams_store().await,
+    );
+    crate::fs_browse::protocol::register(&mut router);
+    let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert!(v["entries"].is_array());
+}
+
 /// `GET /sessions/{id}/agents` (the #2983 Slice 6 REST route group,
 /// merged in by `build_axum_router` via `rest::agents::routes`) must be
 /// reachable on the SAME router `GET /sessions/{id}/events` is —

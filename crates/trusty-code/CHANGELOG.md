@@ -24,6 +24,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`fs.list_projects` RPC + `GET /projects` REST route (issue #3365).** A
+  small, read-only, loopback-only project roster for the GUI's
+  workstream-first project-picker modal — best-effort scans
+  `~/trusty-mpm-projects/<owner>/<repo>` two levels deep (falling back to a
+  flat `~` scan), filtered to git repos, capped at 200 entries, never a
+  caller-facing error. `crates/trusty-code/src/fs_browse/roster.rs`,
+  `crates/trusty-code/src/serve/rest/projects.rs`.
 - **`workstream.rename` RPC + REST verb (issue #3300, DOC-48 §5.1, Phase C).**
   `workstream.rename{id, name} -> Workstream` overwrites a workstream's name
   and refreshes `updated_at`; `-32002 not_found` for an unknown `id`. REST

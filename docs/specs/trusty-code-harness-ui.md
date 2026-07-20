@@ -942,6 +942,63 @@ settle is **where it lands when it lands**: cloning a repo is filesystem-and-pro
 so it is `project.clone_from_url` on the daemon (§5.1 #11) — **never** a UI-side git
 operation, and never Tauri-native. Deferring it therefore costs nothing architecturally.
 
+### 5.8.1 Project roster — `GET /projects` (NEW, Phase C, issue #3365)
+
+The `ProjectPickerModal` (§7A's Phase C update above) needs a **flat, pre-resolved
+shortlist** to render directly — a browse-and-descend tree (§4.2.1/§5.8) is the wrong
+shape for a modal the operator expects to click through in one step, not navigate. This
+is the "supported roster data source" the modal's own predecessor (`CreateSessionForm`)
+recorded as a gap ("no pre-session roster endpoint exists yet").
+
+**Naming divergence from §5.8 (documented, deliberate, consistent with an existing
+gap):** §5.8 specifies `project.list_dir` as a `project.*`-namespaced `POST /rpc` method;
+the shipped implementation (predating this section) instead registered it as
+`fs.list_dir`, namespaced `fs.*` (`crate::fs_browse::protocol`) with a REST twin at
+`GET /fs` (`crate::serve::rest::fs`) — a pre-existing spec/implementation naming gap this
+ticket does not retroactively fix. The roster endpoint follows the **shipped** convention
+for consistency with its sibling: `fs.list_projects` (RPC) / `GET /projects` (REST,
+`crate::serve::rest::projects`), unprefixed like every other REST resource group in this
+crate (`/sessions`, `/tasks`, `/fs`, `/workstreams`) — see `crate::serve::rest` module
+docs for why no `/api/v1` prefix exists anywhere in this gateway.
+
+```rust
+// Request — no params.
+fs.list_projects()
+
+// Response
+{
+    entries: [
+        {
+            name: String,           // "trusty-tools"
+            path: String,           // "/Users/bob/trusty-mpm-projects/bobmatnyc/trusty-tools"
+            owner: Option<String>,  // "bobmatnyc" under the owner-scoped layout; None otherwise
+        }
+    ]
+}
+```
+
+**Discovery heuristic (best-effort, never a caller-facing error):** when
+`~/trusty-mpm-projects` exists, scans it two levels deep — owner dirs, then their repo
+dirs — keeping only repo dirs that are git repos (`crate::fs_browse::is_git_repo`, the
+same discriminator §4.2.1's picker badge already uses). When it does not exist, falls
+back to a one-level scan of the home directory itself, git repos only. Capped at 200
+entries (a "quick pick" shortlist, not a paginated browser). An unreadable/missing scan
+root degrades to an empty (or partial) roster, mirroring §5.8's own best-effort
+per-entry philosophy — never a `500`.
+
+**Relationship to §5.8's `list_dir`/`GET /fs`:** additive, not a replacement. `GET /fs`
+still exists and is unchanged; a future manual "browse for another folder" affordance
+inside the modal (not built in this ticket — see the non-goals list on issue #3365) would
+layer on top of it. The roster is the DEFAULT, fast path; arbitrary-directory browse
+remains available as an API for whenever a UI surface needs it again.
+
+**AC-20.4** `fs.list_projects` returns `entries` with `name`/`path`/`owner` for every
+discovered candidate — the minimum the modal renders.
+**AC-20.5** The endpoint never returns a caller-facing error; an unreadable or missing
+scan root yields an empty roster.
+**AC-20.6** `GET /projects` is loopback-only, matching every other route this daemon
+serves (ADR-0011) — no new bind surface.
+
 ---
 
 ## 6. Phased delivery
@@ -1119,16 +1176,18 @@ indicator (§4.5) need a per-agent story once fan-out is routine? **Owner: engin
 
 > **Epic #3174 feedback (Bob).** The create-session ceremony (screen 7a, the form) is the wrong entry point. Instead: **pick a project from recents/registered list → prompt box is live immediately → typing + Enter creates session and sends first task in one gesture**. Principle 4 (cold start is the empty state of the same shell) stands; the empty state is now "no project picked", not "create ceremony".
 
+> **Phase C update — workstreams are the entry concept, not sessions (issue #3365, Bob's product direction, 2026-07-19).** *"Let's call it a new workstream, and users pick a project or just start chatting. Use a modal for project selection. Let's focus on 'workstreams' as the primary connection path, not sessions — since we have infinite sessions, we shouldn't need them."* DOC-48 (epic #3292) landed the workstream domain object after this section was written; **item 3 below is superseded**: the entry action is **NEW WORKSTREAM**, not an inferred session. Concretely: (a) the primary GUI entry control reads **NEW WORKSTREAM**, replacing any session-labeled affordance; (b) project selection happens in a **modal** (`ProjectPickerModal`) opened from that entry control, not an inline recents/registered list embedded in the empty-state screen as originally sketched — the modal lists a **roster** of known project directories (`GET /projects`, `crate::fs_browse::roster`) rather than `trusty-mpm GET /projects/discover` (7A.1 below is accordingly the *aspirational* recents/registered vision; the shipped Phase C roster is the interim, daemon-local source — see §5.8.1); (c) picking a project OR choosing **"start chatting without a project"** creates a workstream (`POST /workstreams`, optionally named from the project + date), runs the first task **bound to that workstream** (`POST /tasks` with `workstream_id` — DOC-48 §5.1, issue #3298/PR #3354's binding support), and only THEN activates it (`POST /workstreams/{id}/activate{force:true}`) — **activation is deliberately the LAST step, not the second one** (code-critic PR #3375 review, HIGH): `force:true` unconditionally deactivates whatever was previously active, so firing it before the task-run is known to succeed can strand an empty, now-active workstream with no restore path if the run then fails. A task-run failure after a successful create keeps that workstream id for the client to reuse on retry, rather than minting another. **Sessions remain the internal execution unit** (§3.1, §4B) — "infinite sessions" ride under the workstream, per Bob's framing; they are never again the thing the operator is asked to name or pick. **Projectless <-> unbound-session mapping (design call, recorded here as the issue instructed):** "start chatting without a project" in the modal maps 1:1 onto §4.2's existing **Projectless** binding state — the workstream's first session simply carries no `project` binding. The UI never surfaces the words "session" or "unbound" for this path; it stays workstream-neutral throughout, exactly as it does for the bound-project path.
+
 **Requirement — project selection drives immediate task creation:**
 
-1. **Project picker** — a curated list of recent/registered projects (from `trusty-mpm GET /projects/discover`), not raw filesystem browse. Selection is fast and repeatable.
+1. **Project picker** — a curated list of recent/registered projects (from `trusty-mpm GET /projects/discover`), not raw filesystem browse. Selection is fast and repeatable. *(Aspirational; Phase C ships the narrower `GET /projects` roster instead — see the Phase C update above and §5.8.1.)*
 2. **Live prompt box on selection** — once a project is picked, a **single text input + Enter** is the entry point. No separate form step.
-3. **One-shot create+prompt** — typing the prompt text and pressing Enter calls `POST /tasks` with the prompt as the first `task_run`, binding the project per-call (§5.5 / §7). The session is created (or resumed into an existing workstream) as a side effect; the prompt is the primary action.
+3. ~~**One-shot create+prompt** — typing the prompt text and pressing Enter calls `POST /tasks` with the prompt as the first `task_run`, binding the project per-call (§5.5 / §7). The session is created (or resumed into an existing workstream) as a side effect; the prompt is the primary action.~~ **Superseded by the Phase C update above:** the workstream is what gets created (and activated) as the primary action; the session is the under-the-hood side effect, not the other way around.
 
-**AC-21.1** The project picker shows recent projects (cached from prior selections) alongside registered projects from `trusty-mpm`.
+**AC-21.1** The project picker shows recent projects (cached from prior selections) alongside registered projects from `trusty-mpm`. *(Aspirational — not yet built; Phase C's roster, §5.8.1, has no recents cache.)*
 **AC-21.2** Selecting a project populates the session shell with that project's context (§7B); the prompt box becomes the only input.
 **AC-21.3** `POST /tasks` wired to accept per-call `project` binding (§5.5, issue #3178) so the prompt-box entry is possible at all.
-**AC-21.4** Session creation is now inferred from the first task, not a separate step (issue #3177).
+**AC-21.4** ~~Session creation is now inferred from the first task, not a separate step (issue #3177).~~ **Superseded (issue #3365):** WORKSTREAM creation is the explicit primary step (NEW WORKSTREAM); session creation remains inferred from the first task, but as a consequence of the workstream step, not a replacement for it.
 
 ### 7A.1 Recents and project discovery
 
@@ -1387,6 +1446,22 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 ## Changelog
 
+- **2026-07-19** — **Workstream-first entry amendment** (issue #3365, Phase C). Amends §7A
+  (`SPEC-TCUI-10~draft`) to record Bob's product direction: workstreams, not sessions, are
+  the GUI's primary entry/connection concept — the entry control is **NEW WORKSTREAM**,
+  project selection moves into a modal (`ProjectPickerModal`) fed by a new roster
+  endpoint rather than the section's original inline recents/registered-list sketch, and
+  submitting mints a workstream, runs the first task bound to it, and only THEN activates
+  it (code-critic PR #3375 review, HIGH — activation deliberately LAST, not second, so a
+  task-run failure can never strand an empty workstream as the new active one; a
+  create-succeeded-but-run-failed retry reuses the same workstream id rather than minting
+  another) (superseding item 3/AC-21.4's "session is created… as a side effect" framing).
+  Sessions remain the internal execution unit (§3.1, §4B), never renamed or re-scoped by
+  this amendment. Documents the projectless↔unbound-session mapping the modal's "start
+  chatting without a project" option resolves to. Adds **§5.8.1** (`fs.list_projects` /
+  `GET /projects`) specifying the roster endpoint's shape, discovery heuristic, and
+  relationship to §5.8's existing `list_dir`/`GET /fs`. No change to §2's header framing
+  (already workstream-first: "the header: branding + the workstream switcher").
 - **2026-07-19** — **DOC-39 addendum pass** (epic #3174, PR #3170 Foundry design system). Adds **§7A–§7E** (`SPEC-TCUI-10~draft` … `-16~draft`) covering the **project-first session flow** (pick project → live prompt → one-shot create+prompt; issue #3177–#3178), **service hydration on selection** (search + memory + analyze status aggregation; issue #3181), **project-context panel** with instruction summaries and edit affordance (issues #3183–#3184), **git status** (branch, dirty, ahead/behind; issue #3185), and **project creation** (mkdir + git init; issue #3186). Amends **§8 Visual system** to make **Foundry design system (v1)** (`docs/design/UI/design-system/`) the **normative visual reference**, replacing the missing handoff PDF citations; documents token sourcing, dark theme ("Night Shift") OS integration (§8.2, AC-27), and Foundry component guardrails (§8.3); retains **§8.1 nesting invariant** (AC-18.1) unchanged. Adds **§7C.1** (`SPEC-TCUI-15~draft`) specifying the **daemon-served instruction-file edit route** (read + write CLAUDE.md / AGENTS.md, path-guarded, issue #3188) with AC-24 guards against traversal and symlink escapes. Adds optional §7D.1 for live git-status polling. Amends §5.0 to clarify that POST /tasks and POST /sessions REST endpoints exist (#2983 Slice 4). Updates Follow-ups to reflect addendum dependencies and Foundry merge (F8–F9). Spec IDs: `SPEC-TCUI-10~draft` … `-17~draft`.
 - **2026-07-16** — Initial draft (DOC-39, `SPEC-TCUI-01~draft` … `SPEC-TCUI-09~draft`).
 - **2026-07-16** — **Daemon-is-everything amendment** (owner directive, Bob). Adds §2.1
