@@ -5,6 +5,27 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **Performance:** `FastEmbedder`'s ORT intra-op thread default is now
+  platform/execution-provider-conditional instead of an unconditional `1`.
+  The `1` pin was introduced by PR #1668 to fix a real CUDA deferred-embed
+  deadlock (AL2023 Linux + CUDA EP + dynamically-loaded ORT,
+  code-intelligence #1542) but applied to every build, including the
+  CoreML/CPU-EP path used on Apple Silicon where no such deadlock exists —
+  throttling macOS embedding throughput ~3.5× for no safety benefit (issue
+  #3493 P0). `default_ort_intra_threads()` now resolves to `1` only when the
+  `embedder-cuda` feature is compiled in (the only build that can register
+  the CUDA EP); every other build resolves to
+  `std::thread::available_parallelism()`, matching fastembed's own
+  per-session default. `TRUSTY_ORT_INTRA_THREADS` remains the operator
+  override for either default. `DEFAULT_ORT_INTRA_THREADS` (a constant) is
+  replaced by the `default_ort_intra_threads()` function — the only
+  consumer was this crate's own resolver, so no downstream crate references
+  it.
+
 ## [0.23.5] — 2026-07-20
 
 ### Added

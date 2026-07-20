@@ -43,8 +43,8 @@ mod mock;
 pub use fast_embedder::FastEmbedder;
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
-    DEFAULT_ORT_INTER_THREADS, DEFAULT_ORT_INTRA_THREADS, EMBED_DIM, Embedder, ExecutionProvider,
-    OrtThreadingOptions, embed_one, resolve_cuda_options, resolve_expected_provider,
+    DEFAULT_ORT_INTER_THREADS, EMBED_DIM, Embedder, ExecutionProvider, OrtThreadingOptions,
+    default_ort_intra_threads, embed_one, resolve_cuda_options, resolve_expected_provider,
     resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
 
@@ -248,13 +248,20 @@ mod tests {
         }
     }
 
-    /// Why: #1542 — the CUDA deferred-embed deadlock is fixed by pinning ORT's
-    /// intra-/inter-op threads to 1 and disabling intra-op spinning. With no
-    /// operator override the resolver must default to that safe single-threaded,
-    /// no-spin profile so the daemon never reproduces the 8-ORT-thread barrier
-    /// deadlock out of the box.
-    /// What: clears all three knobs and asserts the defaults.
-    /// Test: this test.
+    /// Why: PR #1668 — the CUDA deferred-embed deadlock is fixed by pinning
+    /// ORT's intra-/inter-op threads to 1 and disabling intra-op spinning
+    /// under the `embedder-cuda` feature (the only build that can register
+    /// the CUDA EP). With no operator override the resolver must default to
+    /// [`default_ort_intra_threads`]'s platform/EP-conditional value and to
+    /// `1` inter-op / no-spin, so CUDA builds never reproduce the
+    /// 8-ORT-thread barrier deadlock out of the box, while CoreML/CPU-EP
+    /// builds (e.g. macOS) are not throttled by a pin that does not apply to
+    /// them (issue #3493 P0).
+    /// What: clears all three knobs and asserts the defaults match
+    /// `default_ort_intra_threads()` / `DEFAULT_ORT_INTER_THREADS`.
+    /// Test: this test; see also `ort_intra_threads_default_pinned_under_cuda_feature`
+    /// and `ort_intra_threads_default_uses_available_parallelism` below for
+    /// the two build-variant assertions.
     #[test]
     fn ort_threading_defaults() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -264,16 +271,56 @@ mod tests {
 
         let opts = resolve_ort_threading_options();
         assert_eq!(
-            opts.intra_threads, DEFAULT_ORT_INTRA_THREADS,
-            "default intra-op threads must be 1 to avoid the #1542 barrier deadlock"
+            opts.intra_threads,
+            default_ort_intra_threads(),
+            "default intra-op threads must match the platform/EP-conditional resolver"
         );
         assert_eq!(opts.inter_threads, DEFAULT_ORT_INTER_THREADS);
         assert!(
             !opts.allow_spinning,
             "spinning must default to off — it is the busy-wait half of the deadlock"
         );
-        assert_eq!(DEFAULT_ORT_INTRA_THREADS, 1);
         assert_eq!(DEFAULT_ORT_INTER_THREADS, 1);
+    }
+
+    /// Why: PR #1668's CUDA barrier deadlock only exists when the CUDA EP can
+    /// be registered — i.e. the `embedder-cuda` feature — so that is the only
+    /// build variant where `default_ort_intra_threads()` must stay pinned to
+    /// `1` (issue #3493 P0: an earlier unconditional pin throttled macOS
+    /// CoreML/CPU-EP throughput ~3.5× with no corresponding safety benefit).
+    /// What: asserts the CUDA-feature default is exactly `1`.
+    /// Test: this test (only compiled into `--features embedder-cuda` builds).
+    #[cfg(feature = "embedder-cuda")]
+    #[test]
+    fn ort_intra_threads_default_pinned_under_cuda_feature() {
+        assert_eq!(
+            default_ort_intra_threads(),
+            1,
+            "CUDA-EP builds must keep the PR #1668 single-intra-op-thread pin"
+        );
+    }
+
+    /// Why: outside the `embedder-cuda` feature (CoreML on Apple Silicon, or
+    /// any other CPU-only build) there is no CUDA barrier to deadlock on, so
+    /// the intra-op default should recover fastembed's own
+    /// `available_parallelism()` behaviour instead of the CUDA-only `1` pin
+    /// (issue #3493 P0).
+    /// What: asserts the non-CUDA default equals
+    /// `std::thread::available_parallelism()` (falling back to `1` only if
+    /// the host cannot report a count) — on any real multi-core CI/dev
+    /// machine (including macOS) this is `> 1`.
+    /// Test: this test (only compiled into non-`embedder-cuda` builds).
+    #[cfg(not(feature = "embedder-cuda"))]
+    #[test]
+    fn ort_intra_threads_default_uses_available_parallelism() {
+        let expected = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        assert_eq!(
+            default_ort_intra_threads(),
+            expected,
+            "non-CUDA builds must use available_parallelism(), not the CUDA-only pin of 1"
+        );
     }
 
     /// Why: operators on hosts proven free of the ORT barrier bug may want to
@@ -314,7 +361,8 @@ mod tests {
 
         let opts = resolve_ort_threading_options();
         assert_eq!(
-            opts.intra_threads, DEFAULT_ORT_INTRA_THREADS,
+            opts.intra_threads,
+            default_ort_intra_threads(),
             "malformed intra-op count must fall back to the safe default"
         );
         assert_eq!(
