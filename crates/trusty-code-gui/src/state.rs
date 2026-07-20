@@ -12,11 +12,18 @@
 
 /// Default daemon REST endpoint when `TRUSTY_CODE_URL` is not set.
 ///
-/// Why: `trusty-code serve --http` binds `serve::DEFAULT_HTTP_PORT` (7881,
+/// Why: `trusty-code serve --http` binds `serve::DEFAULT_HTTP_PORT` (7882,
 /// `crates/trusty-code/src/serve/mod.rs`) when `--port` is omitted; the GUI
 /// mirrors that default so a freshly started daemon and a freshly launched
-/// GUI agree without any configuration.
-pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7881";
+/// GUI agree without any configuration. Previously `7881`, which collided
+/// with `trusty-mpm`'s supervisor metrics listener — see
+/// `crate::serve::DEFAULT_HTTP_PORT`'s docs and
+/// `docs/architecture/port-assignments.md` (#3364). This literal and
+/// `trusty-code::serve::DEFAULT_HTTP_PORT` must move in lockstep; there is no
+/// shared crate between the GUI and the daemon binary to enforce it at
+/// compile time, so `default_daemon_url_matches_tcode_default_http_port`
+/// pins both values in the same assertion.
+pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7882";
 
 /// Managed Tauri state — just the daemon base URL.
 ///
@@ -82,5 +89,29 @@ mod tests {
         unsafe {
             std::env::remove_var("TRUSTY_CODE_URL");
         }
+    }
+
+    /// Cross-crate default-port pinning contract (#3364).
+    ///
+    /// Why: `DEFAULT_DAEMON_URL` is a hardcoded literal — nothing at compile
+    /// time ties it to `trusty_code::serve::DEFAULT_HTTP_PORT`, the value it
+    /// must mirror. The two were picked independently once already (both
+    /// landed on `7881`, which then collided with `trusty-mpm`'s supervisor
+    /// metrics listener); a future edit to one without the other would
+    /// silently reintroduce a "DAEMON UNREACHABLE" GUI regression. This test
+    /// parses the port back out of `DEFAULT_DAEMON_URL` and asserts it
+    /// equals the daemon crate's own constant, so drift fails CI instead of
+    /// shipping.
+    /// What: asserts `DEFAULT_DAEMON_URL` embeds
+    /// `trusty_code::serve::DEFAULT_HTTP_PORT` exactly.
+    /// Test: this is the test.
+    #[test]
+    fn default_daemon_url_matches_tcode_default_http_port() {
+        let expected = format!("http://127.0.0.1:{}", trusty_code::serve::DEFAULT_HTTP_PORT);
+        assert_eq!(
+            DEFAULT_DAEMON_URL, expected,
+            "trusty-code-gui::DEFAULT_DAEMON_URL must mirror \
+             trusty_code::serve::DEFAULT_HTTP_PORT exactly"
+        );
     }
 }

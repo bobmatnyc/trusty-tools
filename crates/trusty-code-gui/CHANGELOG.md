@@ -8,6 +8,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DEFAULT_DAEMON_URL` moved from `http://127.0.0.1:7881` to
+  `http://127.0.0.1:7882`, in lockstep with `trusty-code`'s
+  `serve::DEFAULT_HTTP_PORT` (closes #3364).** The old port collided with
+  `trusty-mpm`'s supervisor metrics listener, producing "DAEMON UNREACHABLE
+  — LOAD FAILED" on a fresh install when both processes were running. A new
+  test, `default_daemon_url_matches_tcode_default_http_port`, pins this
+  constant against `trusty_code::serve::DEFAULT_HTTP_PORT` directly (new
+  dev-dependency on `trusty-code`) so the two cannot drift apart silently
+  again.
+
 ### Added
 
 - **GUI workstream switcher in the header (closes #3300, DOC-48 §8 Phase C,
