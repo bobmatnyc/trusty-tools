@@ -45,9 +45,9 @@ spec_refs:
 
 ### 1.1 The goal — Claude Code clone: interactive terminal UI over tcode daemon
 
-**trusty-code has no TUI today, by design.** The one-shot `tcode run-task` CLI (in `crates/trusty-code/src/cli_client/`) is the current entry point. The vision-and-architecture spec reserves the TUI layer as a future interactive surface; this spec is that implementation.
+**trusty-code has no TUI today, by design.** The one-shot `tcode run-task` CLI (in `crates/trusty-code/src/cli_client/`) is the current entry point. The vision-and-architecture spec reserves the TUI layer as a future interactive surface; this spec is that implementation. **Authorization:** DOC-39 §1.4 (amended in this PR) formally acknowledges the TUI as a **sanctioned secondary/alternative entry point** — the primary Platform remains the SPA ("Not a TUI" refers to the primary platform). The TUI is an additional thin client over the same daemon API, not a competing platform.
 
-**The goal:** Build an **interactive terminal UI that mimics Claude Code's core UX** — streaming assistant output, tool-call rendering, an input composer, slash commands, scrollback, status line, and workstream awareness — while strictly adhering to DOC-39's **thin-client axiom** (§2.1): the TUI communicates with the daemon over a long-lived transport (see §9 Q7 for the transport fork: --stdio vs --http); all agent logic stays server-side in the daemon.
+**The goal:** Build an **interactive terminal UI that mimics Claude Code's core UX** — streaming assistant output, tool-call rendering, an input composer, slash commands, scrollback, status line, and workstream awareness — while strictly adhering to DOC-39's **thin-client axiom** (§2.1): the TUI communicates with the daemon over HTTP (long-lived, SSE-enabled); all agent logic stays server-side in the daemon.
 
 **What "Claude Code clone" means here:**
 - **Streaming input/output:** Assistant responses stream to the TUI; the user sees partial output in real time.
@@ -177,14 +177,14 @@ trusty-tui does **not** depend on `trusty-code` or `trusty-agents`. Both product
 
 ### 2.4 Design for resilience and testability
 
-**Connection loss:** When the daemon connection is lost (e.g., daemon restart, network issue):
-- The TUI remains live. The input loop continues; new input attempts to reconnect.
-- A status message appears: "Connection lost — attempting reconnect…"
-- Once reconnected, the TUI resumes normal operation (the daemon may have lost state, so the TUI may need to refetch the active workstream, etc.).
+**Connection loss (HTTP/SSE semantics):** CodeEngine communicates with the daemon over HTTP (req/resp for RPC calls) and SSE subscriptions (workstream events). When the daemon connection is lost:
+- **HTTP req/resp:** new input triggers a POST /rpc call; if daemon is unreachable (502/503 or timeout), CodeEngine returns error; TUI shows "Connection lost — attempting reconnect…"
+- **SSE subscription (workstream events):** long-lived stream closes on daemon restart (HTTP 503 or connection drop); CodeEngine re-subscribes to the same /workstreams/{ws_id}/events endpoint (automatic reconnect per tokio/reqwest behavior).
+- **User-facing:** TUI input loop remains live; user can continue typing; next RPC call or SSE resubscription succeeds once daemon restarts. On daemon restart, TUI may need to refetch workstream state (fresh RPC call to `workstream.get`).
 
-**Panic safety:** The `setup_terminal`/`restore_terminal` RAII guard ensures that even if the TUI panics, the terminal is restored to cooked mode (not corrupted with alt-screen left on).
+**Panic safety:** The `setup_terminal`/`restore_terminal` RAII guard (Drop impl) ensures that even if the TUI or event loop panics, the terminal is restored to cooked mode (not corrupted with alt-screen left on).
 
-**Testability:** The `TuiEngine` trait allows tests to mock the daemon. A test engine can return fixed responses without spawning a real daemon.
+**Testability:** The `TuiEngine` trait allows tests to mock the daemon. A test engine can return fixed responses without spawning a real HTTP daemon (simple mock responder).
 
 ---
 
@@ -267,12 +267,46 @@ pub use {run_tui, ReplStartup};
 
 **Phase 1A.3:** New file: `crates/trusty-code/src/tui_client/engine.rs`
 
-**Note (BLOCKING for Slices 3/6):** The daemon transport is unsettled (see §9 Q7 below). The CodeEngine sketch assumes a choice between `tcode serve --stdio` (JSON-RPC stdin/stdout, no SSE) and `tcode serve --http` (daemon URL-based, SSE-enabled). Since workstream activation (MVP Slice 6) requires `WorkstreamActivationChanged` SSE events (DOC-48 §5.3), the transport choice is a blocker:
+**RESOLVED (Q7): HTTP Long-lived Daemon Transport**
 
-- **Option (a):** Long-lived `--stdio` child for the session; workstream awareness polls instead of subscribes (move to Phase 2).
-- **Option (b):** Require/spawn a discoverable long-lived `--http` daemon; SSE works, but discovery pattern is undefined today.
+The CodeEngine communicates with a long-lived `tcode serve --http` daemon (default port 7881, per serve/mod.rs:70). Workstream awareness uses DOC-48 §5.3 SSE `WorkstreamActivationChanged` events.
 
-**This must be resolved before Slice 3 is finalized.** See §9 Q7 for the open question and recommended path.
+**Daemon Discovery Pattern (matching trusty-search/trusty-memory precedent):**
+
+1. **Discovery file location:** `~/.trusty-code/daemon.json` (or environment var `TCODE_DAEMON_URL`)
+   - File format: `{"daemon_url": "http://localhost:7881", "pid": 12345, "started_at": "2026-07-20T..."}`
+   - Purpose: allows `tcode tui` and `tcode run-task` to find the running daemon without port scanning.
+
+2. **Daemon lookup sequence:**
+   - Check env var `TCODE_DAEMON_URL` (highest priority).
+   - Read `~/.trusty-code/daemon.json`; validate daemon is alive (http GET /?ping or HEAD / → 200).
+   - If not alive or missing, skip (Phase 2: auto-spawn or fallback).
+   - For MVP: bail with "No daemon found; start one with `tcode daemon --project <path>`" (documented limitation).
+
+3. **CodeEngine struct:**
+   ```rust
+   pub struct CodeEngine {
+       project_path: PathBuf,
+       daemon_url: String,        // e.g., "http://localhost:7881"
+       http_client: HttpClient,   // reqwest or similar
+       session_id: Option<String>,
+   }
+   ```
+
+4. **Methods:**
+   - `new(project_path: PathBuf) -> Result<Self>` — discover daemon, return CodeEngine or error.
+   - `handle_input(line: String, tx: UnboundedSender<ReplEvent>) -> Result<bool>` — parse slash cmd vs. chat; call daemon; stream responses as ReplEvent.
+   - `setup(tx: UnboundedSender<ReplEvent>) -> Result<()>` — POST /rpc `session.create`, fetch initial workstream, emit ReplEvent::WorkstreamUpdated.
+   - `cancel_session() -> Result<()>` — POST /rpc `session.cancel` (for Ctrl-c in Slice 5).
+   - `subscribe_workstream_events(ws_id: UUID) -> Result<EventStream>` — GET /workstreams/{ws_id}/events (SSE), spawn listen task, emit ReplEvent on changes.
+
+5. **Transport semantics:**
+   - HTTP requests use pooled client (keep-alive).
+   - SSE subscriptions are long-lived (single reconnect per workstream activation change).
+   - Reconnect on 502/503 (daemon restart) or timeout; user sees "Connection lost" status.
+   - No local `--stdio` child spawned (daemon is independent).
+
+**MVP Known Limitation:** "tcode tui assumes a running `tcode serve --http` daemon on localhost:7881; see `tcode daemon --project <path>` to start one." Discovery/auto-spawn is Phase 2.
 
 ### 3.5 Step 5: Add widgets and render layer (trusty-tui)
 
@@ -564,127 +598,64 @@ Each slice is independently shippable and critic-gateable.
 
 ---
 
-## 6. Risks and open questions for Bob {#SPEC-TTUI-06~draft}
+## 6. Open Questions for Bob — All Resolved (2026-07-20) {#SPEC-TTUI-06~resolved}
 
-**ID:** SPEC-TTUI-06~draft
-**Status:** Draft
+**ID:** SPEC-TTUI-06~resolved
+**Status:** Resolved (Bob sign-off 2026-07-20)
 
-### Q1 — Shared crate naming: trusty-tui vs trusty-common::tui feature?
+### Q1 — Shared crate naming
 
-**Context:** The extracted TUI layer could be a standalone crate (`crates/trusty-tui/`) or a feature-gated module in `trusty-common` (e.g., `crates/trusty-common/src/tui/`).
+**RESOLVED (Bob, 2026-07-20):** New standalone `crates/trusty-tui/` crate (not a trusty-common feature).
 
-**Pros (standalone crate):**
-- Clear isolation; no TUI deps leaking into trusty-common.
-- Independent versioning and release.
-- Larger consumers (future harnesses) can depend on it cleanly.
+Clear isolation; ratatui + crossterm are heavy deps unrelated to trusty-common's core. Independent versioning supports future harnesses.
 
-**Pros (trusty-common feature):**
-- Fewer top-level crates; `trusty-common` is already a hub.
-- Simpler CI config (one fewer crate to test).
-- Mirrors other optional features (search, memory).
+### Q2 — Ratatui 0.30 adoption timing
 
-**Decision needed:** What is your preference?
+**RESOLVED (Bob, 2026-07-20):** Adopt ratatui 0.30 now. Slice 2 includes 0.30 compatibility spike.
 
-**Recommendation:** Standalone `crates/trusty-tui/`. The TUI has ratatui + crossterm as hard deps, which are heavy and unrelated to trusty-common's core (types, logging, monitoring). Isolation is cleaner.
+Removes vulnerable `lru` transitive (#2886). Spike de-risks incompatibilities before widget migration (Slice 4).
 
-### Q2 — Ratatui 0.30 adoption timing?
+### Q3 — SSH/narrow-terminal fallback timing
 
-**Context:** Tagent REPL currently uses ratatui 0.29. Ratatui 0.30 is available and removes a vulnerable transitive `lru` dep (#2886). The shared crate must pick a version.
+**RESOLVED (Bob, 2026-07-20):** Phase 2 (not MVP).
 
-**Options:**
-1. Start with 0.29 (matches tagent today), upgrade later. Risk: delay fixing the vulnerability.
-2. Start with 0.30 (latest stable), bump tagent during Slice 10. Risk: if 0.30 has incompatibilities, tagent refactoring becomes harder.
-3. Decouple: shared crate uses 0.30, tagent stays on 0.29 (with a shim adapter). Risk: maintenance burden; two versions of similar code.
+Known limitation: "tcode tui requires full-size terminal with alt-screen support; SSH/narrow terminals use `tcode run-task` CLI."
 
-**Decision needed:** Which path?
+### Q4 — Engine adapter flexibility (slash command routing)
 
-**Recommendation:** Start with 0.30. It is stable and the vulnerability fix is important. Tagent's bump during Slice 10 is a clean refactoring; any incompatibilities will be caught by testing.
+**RESOLVED (Bob, 2026-07-20):** Mixed routing (Option 2).
 
-### Q3 — SSH/narrow-terminal fallback in MVP or Phase 2?
+Built-in commands (`/help`, `/clear`, `/quit`) are client-side (trusty-tui). Domain-specific commands (`/model`, `/agent`, `/workstream`) route to engine. Keeps MVP simple.
 
-**Context:** Issue #3405 asks for a plain-line mode (no alt-screen, no ratatui) for SSH and narrow terminals. The TUI currently assumes a full-size terminal with alt-screen support.
+### Q5 — Workstream activation in MVP
 
-**Options:**
-1. MVP includes plain-line fallback: detect narrow term, fall back gracefully. Risk: more complex MVP; both code paths must work.
-2. MVP ignores SSH (known issue); Phase 2 adds fallback. Risk: TUI is not usable over SSH until Phase 2.
-3. Deferred: out of scope for this spec (leave for future TUI work).
+**RESOLVED (Bob, 2026-07-20):** Text command (`/workstream activate <id>`) in MVP; visual switcher Phase 2.
 
-**Decision needed:** When?
+Text command sufficient for MVP scope. Visual switcher (header dropdown) is Phase 2 UX refinement.
 
-**Recommendation:** Phase 2. MVP focus is the core streaming loop. Plain-line fallback is a nice-to-have that can wait. Document the known limitation: "tcode tui requires a full-size terminal with alt-screen support; SSH/narrow terminals fall back to `tcode run-task` CLI."
+### Q6 — Model/agent pickers: inline or modal?
 
-### Q4 — Engine adapter flexibility: abstract task.run or allow engine to customize slash commands?
+**RESOLVED (Bob, 2026-07-20):** Inline list (below input), not modal.
 
-**Context:** The engine adapter is thin by design. But there's a question of **how thin**. Should every slash command be routable through the engine, or should some be handled client-side (e.g., `/help` is always the same, no engine call needed)?
+Matches tagent's familiar picker style; simpler to implement. Modal is a future visual-design change if needed.
 
-**Options:**
-1. All slash commands are routed to the engine: `engine.handle_input("/help")`. The engine decides what to do (emit help text or call the daemon).
-2. Built-in commands (`/help`, `/clear`, `/quit`) are client-side; domain-specific commands (`/model`, `/agent`, `/workstream`) are routed to the engine.
-3. Engines can define custom slash commands (e.g., AgentEngine defines `/update`, CodeEngine defines `/workstream`). The TUI's dispatch table is engine-populated.
+### Q7 — Daemon transport: --stdio vs --http
 
-**Decision needed:** How much flexibility do we need?
+**RESOLVED (Bob, 2026-07-20):** `tcode serve --http` long-lived daemon (port 7881). UNBLOCKS Slices 3 and 6.
 
-**Recommendation:** Option 2 (built-in commands are client-side, domain-specific are routed to the engine). It keeps the MVP simple and the engine lightweight. If engines need custom commands later, we can add Option 3.
-
-### Q5 — Workstream activation in MVP: explicit `/workstream activate` or implicit switcher?
-
-**Context:** MVP includes slash commands (e.g., `/workstream list`, `/workstream activate <id>`). Later phases add a visual switcher (e.g., header with a dropdown). Should both coexist, or is one enough for MVP?
-
-**Decision needed:** For MVP, is text-command activation sufficient?
-
-**Recommendation:** Yes. Text command is sufficient for MVP. The visual switcher is a Phase 2 UX refinement. This keeps MVP scope tight and shippable.
-
-### Q6 — Model/agent pickers: inline list or modal?
-
-**Context:** Phase 2 adds model/agent pickers (when the user runs `/model` or `/agent`). Should the picker be a modal (full-screen) or inline (a pop-up list below the input)?
-
-**Pros (modal):** Matches Claude Code UX; clear focus; avoids scrollback interference.
-**Pros (inline):** Less disruptive; faster context-switch; matches tagent's current picker style.
-
-**Decision needed:** Which UX do you prefer for tcode?
-
-**Recommendation:** Inline list (below input). Tagent's picker is familiar, and it's simpler to implement. If the visual design later calls for a modal, we can change it.
-
-### Q7 — Daemon transport: --stdio vs --http (BLOCKING for Slices 3, 6)
-
-**Context:** The spec's goal (§1.1) says "the TUI communicates with the daemon," but the daemon has two mutually-exclusive modes (serve/mod.rs:28-29):
-- `tcode serve --stdio`: stdin/stdout JSON-RPC, no SSE, useful for piping.
-- `tcode serve --http`: daemon URL-based, SSE-enabled, default port 7881.
-
-MVP Slice 6 (workstream awareness) requires `WorkstreamActivationChanged` SSE events (DOC-48 §5.3). **SSE is HTTP-only; `--stdio` cannot support it.** The transport choice is a hard fork:
-
-**Option (a) — Keep --stdio, poll instead of subscribe:**
-- CodeEngine spawns/manages a long-lived `tcode serve --stdio` child.
-- Workstream awareness polls `workstream.list` instead of subscribing to SSE (slower feedback, higher daemon load).
-- Workstream switcher (Slice 6) moves to Phase 2 (pending faster poll strategy or Phase 2 async refresh).
-- **Pro:** Simpler launch (no daemon discovery).
-- **Con:** No SSE; slackens real-time feel; code_engine owns daemon child lifecycle.
-
-**Option (b) — Require/spawn --http daemon:**
-- CodeEngine discovers or spawns a `tcode serve --http` daemon on a known port (or find one).
-- Workstream awareness uses SSE subscriptions (real-time, lower daemon load).
-- **Pro:** SSE works; clean real-time semantics; session isolation is cleaner.
-- **Con:** Daemon discovery/spawning is undefined today; port contention risk.
-
-**Decision needed:** (a) or (b)?
-
-**Recommendation:** **(b) with deferred discovery.** Slice 3 assumes --http; Slice 6 uses SSE subscriptions. For MVP, assume a locally-running `tcode serve --http` (documented limitation: "tcode tui assumes a running tcode daemon on localhost:7881; see `tcode daemon --help` to start one"). Discovery/auto-spawn is Phase 2. **Blocking note:** Slices 3 and 6 cannot proceed without this decision.
+Workstream awareness (MVP Slice 6) uses DOC-48 §5.3 SSE `WorkstreamActivationChanged` events over HTTP. CodeEngine sketch (§3.3) now concrete: defines HTTP transport with daemon discovery pattern (see below).
 
 ### Q8 — DOC-39 amendment needed?
 
-**Context:** DOC-39 §1.2 explicitly states the Platform is "an SPA (web/Tauri)… Not a TUI, not a terminal renderer." DOC-50 positions the TUI as a secondary/alternative entry point (§1.2 non-goal 1), not the primary platform. This is architecturally sound but may warrant an amendment to DOC-39 to acknowledge the secondary entry point.
+**RESOLVED (Bob, 2026-07-20):** Yes. Amend DOC-39 to acknowledge the TUI as a sanctioned SECONDARY / alternative entry point.
 
-**Decision needed:** Should DOC-39 be amended to mention the TUI as a deferred alternative layer, or does the current "future layers" language suffice?
+**Action taken in this branch:** Added subsection to DOC-39 (same PR #3409) with proper {#SPEC-...} anchor, acknowledging DOC-50 as SECONDARY thin client. Primary Platform remains SPA ("Not a TUI" still holds). Cross-references updated; DOC-39 sld-lint remains clean.
 
-**Recommendation:** Defer to Bob; note it here for visibility. If amending, a one-liner in DOC-39 §1.3 (Non-goals) suffices: "The TUI is a deferred alternative terminal entry point, not part of the primary platform (SPA)."
+### Q9 — Daily cost display: MISSING daemon API or drop?
 
-### Q9 — Daily cost display: daemon API gap or out-of-scope for MVP?
+**RESOLVED (Bob, 2026-07-20):** Flag as MISSING daemon-API gap (per DOC-39 C-2); deferred to Phase 2.
 
-**Context:** §1.1 mentions "daily cost (loaded from the daemon)" in the status line. DOC-48 has no `cost` field or RPC to fetch it. Either:
-- (a) Flag as a MISSING daemon-API gap (per DOC-39 C-2); remove from MVP ACs; defer to Phase 2 pending daemon support.
-- (b) Remove the cost mention entirely; feature falls out of scope.
-
-**Recommendation:** (a) — Flag as MISSING API. MVP ACs do not include cost display; statusline shows session ID, model, project, workstream only. Cost is Phase 2 pending a daemon API (e.g., `session.get_cost()` or async cost tracking).
+Removed from MVP status line (shows session/model/project/workstream only). Cost display pending daemon RPC support (e.g., `session.get_cost()`).
 
 ---
 
