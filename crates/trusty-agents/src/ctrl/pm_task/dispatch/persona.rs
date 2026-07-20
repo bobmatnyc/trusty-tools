@@ -19,7 +19,7 @@ use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
-    SessionOverrides, apply_credential_routing, build_user_context_prefix,
+    AgentIdentity, SessionOverrides, apply_credential_routing, build_user_context_prefix,
     resolve_overridden_credentials,
 };
 use super::super::super::handlers::{
@@ -301,7 +301,13 @@ pub async fn run_pm_task_with_persona(
             crate::agents::RunnerKind::ClaudeCode => "claude-code",
             crate::agents::RunnerKind::InProcess => "in-process",
         };
-        let base = build_user_context_prefix(&persona_cfg.system_prompt.content);
+        let identity = AgentIdentity {
+            agent_name: &persona_cfg.agent.name,
+            model: &persona_cfg.agent.model,
+            runner: &format!("{:?}", persona_cfg.agent.runner),
+            provider: creds.label(),
+        };
+        let base = build_user_context_prefix(&persona_cfg.system_prompt.content, &identity);
         let base = crate::agents::prompt_builder::SystemPromptBuilder::new(base)
             .with_agent_context(persona_cfg.agent.model.as_str(), runner_label)
             .build();
