@@ -7,9 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.23.6] — 2026-07-20
+
+Release cut of the two embedding-performance fixes below
+([#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500),
+[#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511); refs #3486 / #3493)
+so the shared embedder-inference path (`trusty-embedderd`, `trusty-search`)
+picks them up on rebuild.
+
 ### Fixed
 
-- **Performance:** `FastEmbedder`'s ORT intra-op thread default is now
+- **Performance (PR [#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500)):** `FastEmbedder`'s ORT intra-op thread default is now
   platform/execution-provider-conditional instead of an unconditional `1`.
   The `1` pin was introduced by PR #1668 to fix a real CUDA deferred-embed
   deadlock (AL2023 Linux + CUDA EP + dynamically-loaded ORT,
@@ -25,7 +33,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   replaced by the `default_ort_intra_threads()` function — the only
   consumer was this crate's own resolver, so no downstream crate references
   it.
-- **Performance / accuracy:** `FastEmbedder`'s default embedding model is now
+- **Performance / accuracy (PR [#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511)):** `FastEmbedder`'s default embedding model is now
   `EmbeddingModel::AllMiniLML6V2` (fp32, fastembed's own natively-shipped
   non-quantized variant), replacing the previous default,
   `AllMiniLML6V2Q` (INT8, dynamically quantised). INT8 was measured to be

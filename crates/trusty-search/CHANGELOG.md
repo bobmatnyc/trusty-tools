@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.36.1] — 2026-07-20
+
+### Changed
+
+- Rebuild against `trusty-common` 0.23.6 / `trusty-embedderd` 0.3.9 to pick up the
+  two embedding-performance fixes ([#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500),
+  [#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511); refs #3486 / #3493):
+  platform-conditional ORT intra-op thread default and a non-quantized (fp32)
+  default embedding model. `trusty-search` bundles the `trusty-embedderd` binary,
+  so this republish is what carries the faster/more-accurate embedder into the
+  single-install `cargo install trusty-search`. `TRUSTY_ORT_INTRA_THREADS` and
+  `TRUSTY_EMBEDDER_MODEL=int8` remain available to restore prior behaviour.
+
 ### Changed
 
 - **Migrated the admin UI to Foundry v2 design tokens** ([#3487](https://github.com/bobmatnyc/trusty-tools/issues/3487)):
