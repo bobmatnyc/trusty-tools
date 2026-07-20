@@ -1,8 +1,9 @@
 <script lang="ts">
   /**
    * Why (brand identity wiring): the app previously hand-built its brand
-   * lockup out of a generic `RobotIcon` + literal "TRUSTY AGENTS" text
-   * (Header.svelte), independent of the actual Trusty Agents identity suite
+   * lockup out of a generic mono robot glyph component + literal
+   * "TRUSTY AGENTS" text (Header.svelte), independent of the actual
+   * Trusty Agents identity suite
    * delivered in `docs/design/UI/icons/`. That suite is the source of truth
    * for the mark, wordmark, and "UNIT-04 · MPM ORCHESTRATION" descriptor —
    * this component wires the real lockup in so the brand is consistent and

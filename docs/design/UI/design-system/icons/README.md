@@ -77,17 +77,24 @@ hand-edit a vendored crate copy and let it diverge — fix the bug or add the
 glyph here first, then propagate:
 
 - `crates/trusty-agents/ui/src/lib/icons/ActionIcon.svelte`
-- `crates/trusty-agents/ui/src/lib/icons/RobotIcon.svelte`
-- `crates/trusty-agents/ui/src/lib/icons/LogoMark.svelte`
-- `crates/trusty-agents/ui/public/favicon.svg` (hand-derived from
-  `RobotIcon.svelte`'s `full` variant markup, since favicons must be static
-  SVG with no Svelte props/reactivity — see that file's own header comment)
 
 `crates/trusty-agents/ui/src/lib/icons/LogoMark.svelte` still uses that
 crate's own Tailwind token layer (`text-foundry-text`, `font-display`)
 rather than this directory's plain-CSS approach — that's an intentional,
 crate-local re-expression of the same visual result, not drift; see its
 header comment.
+
+**trusty-agents is exempt from vendoring `RobotIcon.svelte`/generic
+`LogoMark.svelte`/`favicon.svg` (owner-approved).** It carries its own
+Trusty Agents product identity, delivered in `docs/design/UI/icons/` (the
+logo lockup, standalone mark, app icon, and favicon), rather than this
+directory's placeholder robot glyph. `crates/trusty-agents/ui/src/lib/icons/
+{Logo,Mark}.svelte`, its `LogoMark.svelte` (re-pointed at `Mark`), and its
+`public/favicon.svg` are intentionally brand-specific and diverge from this
+set by design — see `docs/design/UI/icons/README.md` and each file's own
+header comment. `RobotIcon.svelte` was removed from that crate entirely
+(no longer vendored, no longer present) since its only two call sites were
+replaced by the brand-specific components.
 
 `docs/design/UI/design-system-svelte/src/lib/RobotMark.svelte` is a
 **separate**, CSS/div-drawn robot mark from the Foundry Svelte-edition mockup

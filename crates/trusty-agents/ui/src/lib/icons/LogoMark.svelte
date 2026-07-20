@@ -6,9 +6,9 @@
    * lockup (`Logo.svelte`, used in `Header.svelte`) doesn't fit. Bundling
    * mark + wordmark together guarantees consistent spacing and weight across
    * the app. Previously this rendered the generic, pre-identity-suite
-   * `RobotIcon`; it now uses the actual Trusty Agents brand mark asset
+   * mono robot glyph; it now uses the actual Trusty Agents brand mark asset
    * (`docs/design/UI/icons/trusty-agents-mark.svg`). This crate intentionally
-   * diverges from the generic Foundry `LogoMark`/`RobotIcon` glyph vendored
+   * diverges from the generic Foundry `LogoMark` glyph vendored
    * at `docs/design/UI/design-system/icons/` (#3486/#3495) — trusty-agents
    * carries its own product identity rather than the placeholder glyph, so
    * it is exempt from that file's "must stay in sync" vendoring convention.

@@ -4,14 +4,14 @@
    * badges) need the standalone Foundry UNIT robot mark rather than the full
    * horizontal lockup (see `docs/design/UI/icons/README.md` — the mark is
    * "for constrained spaces"). Previously these spots used the generic,
-   * pre-identity-suite `RobotIcon` component; this wires in the actual
+   * pre-identity-suite mono robot glyph component; this wires in the actual
    * brand mark asset instead.
    * What: Inlines `docs/design/UI/icons/trusty-agents-mark.svg` verbatim
    * (fixed rust-orange fill, `viewBox="0 0 64 64"`) at the requested `size`.
    * Unlike the full lockup (`Logo.svelte`), the mark ships a single
    * treatment — no reversed variant — because its rust-orange-on-transparent
    * rendering already reads correctly on both paper and Night Shift oxide
-   * fields (the same reasoning the prior `RobotIcon` "mono" variant relied
+   * fields (the same reasoning the prior glyph's "mono" variant relied
    * on). Per the identity README: do not recolor, add shadows, or place the
    * mark in a circle.
    * Test: Mount `<Mark size={20} />` in both light and dark theme and

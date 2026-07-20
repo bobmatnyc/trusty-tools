@@ -39,6 +39,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   #3492 (`@trusty/foundry` package) replaces copy-paste vendoring with a real
   import.
 
+- **Trusty Agents brand identity (#3479):** wires the new Trusty Agents brand
+  identity suite (`docs/design/UI/icons/`) into the Assistant UI. Adds
+  `Logo.svelte` (full horizontal lockup — mark + "TRUSTY AGENTS" wordmark +
+  "UNIT-04 · MPM ORCHESTRATION" descriptor, theme-aware light/Night-Shift-
+  reversed via the app's existing `dark:` convention), used in `Header.svelte`
+  in place of the old generic robot glyph + literal text block, and
+  `Mark.svelte` (standalone UNIT mark for constrained spots), used in
+  `LogoMark.svelte`/`Sidebar.svelte`. Regenerates the Tauri app/launcher icon
+  set from `trusty-agents-app-icon.png` and installs
+  `trusty-agents-favicon.svg` as `public/favicon.svg`. `LogoMark.svelte`'s
+  wordmark now reads "Trusty Agents" (was "Trusty Assistant"), matching the
+  header lockup. The now-unused generic `RobotIcon.svelte` was removed (its
+  two call sites were both replaced). This is an **intentional divergence**
+  from the generic Foundry glyph set canonicalized in #3486/#3495 —
+  trusty-agents carries its own product identity rather than vendoring the
+  placeholder robot glyph verbatim; see
+  `docs/design/UI/design-system/icons/README.md`'s "Canonical source,
+  vendored copies" section for the documented exemption.
+
 - **CI token drift-check (refs #3486):** a new `scripts/check_token_drift.mjs`
   pins this crate's `app.css` Foundry `--color-*` RGB-triple values to
   `docs/design/UI/design-system/tokens.css` (the canonical hex source),
