@@ -5,7 +5,13 @@
    * choosing a different palette than their OS preference. A three-way pill
    * toggle is more discoverable than a single icon button that cycles modes.
    * What: Renders three buttons (Light / System / Dark) with inline SVG
-   * icons. Highlights the active mode and calls setTheme() on click.
+   * icons. Highlights the active mode and calls setTheme() on click. The
+   * outer container's border/radius (`rounded-md border
+   * border-foundry-light-border`) matches every other bordered control in
+   * `Header.svelte` (tabs container, `AgentSwitcher`, `ModelSwitcher`,
+   * status badges) per owner visual feedback on #3479 that borders read as
+   * inconsistent — this previously had no border at all and a larger
+   * `rounded-lg` radius.
    * Test: Click each button — page palette flips and selection persists
    * across reloads.
    */
@@ -19,7 +25,7 @@
 </script>
 
 <div
-  class="flex items-center gap-1 rounded-lg bg-foundry-light-border dark:bg-foundry-border p-1"
+  class="flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface p-1"
   role="group"
   aria-label="Theme"
 >

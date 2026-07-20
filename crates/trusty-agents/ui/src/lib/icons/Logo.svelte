@@ -17,13 +17,24 @@
    * other themed element in this app already uses). Both lockups share the
    * source SVG's `viewBox="0 0 600 112"`; only `height` is exposed as a prop
    * so the aspect ratio (and the identity suite's fixed clear-space) is
-   * never distorted. Per `docs/design/UI/icons/README.md`: do not recolor,
-   * add shadows, or drop the `UNIT-04` descriptor — both lockups below are
-   * reproduced byte-for-byte from the source assets, colors included.
+   * never distorted. Per `docs/design/UI/icons/README.md`: do not recolor
+   * the mark, add shadows, or drop the `UNIT-04` descriptor.
+   *
+   * Legibility fix (owner visual feedback on #3479): the source asset's
+   * "UNIT-04 · MPM ORCHESTRATION" descriptor (`font-size="11"`,
+   * `font-weight="600"`) rendered at ~4-5 physical px at header scale —
+   * illegible in both themes despite acceptable color contrast (computed
+   * ~6.6:1 light / ~5.1:1 dark against the header surface). The mark and
+   * "TRUSTY AGENTS" wordmark are reproduced byte-for-byte from the source
+   * SVGs; only the descriptor's `font-size` (11→20), `font-weight`
+   * (600→700), and fill color (darkened light / lightened dark, for extra
+   * contrast margin at the larger size) are intentionally adjusted here for
+   * legibility — text is explicitly exempted from the "no recolor" rule,
+   * which applies to the robot mark.
    * Test: Mount `<Logo />`, toggle `ThemeToggle` through light/dark, and
    * confirm the rust-on-paper lockup shows in light mode and the
    * light-text-on-oxide reversed lockup shows in dark mode, with the
-   * "UNIT-04 · MPM ORCHESTRATION" descriptor visible in both.
+   * "UNIT-04 · MPM ORCHESTRATION" descriptor clearly readable in both.
    */
   export let height: number = 28;
 </script>
@@ -48,7 +59,7 @@
     <path d="M24 66h32" fill="none" stroke="#FFFDF9" stroke-width="4" stroke-linecap="square" />
   </g>
   <text x="104" y="51" fill="#2B1C12" font-family="'Chakra Petch', 'Arial Narrow', sans-serif" font-size="30" font-weight="700" letter-spacing="1.4">TRUSTY AGENTS</text>
-  <text x="106" y="76" fill="#6E5843" font-family="'IBM Plex Mono', monospace" font-size="11" font-weight="600" letter-spacing="2">UNIT-04 · MPM ORCHESTRATION</text>
+  <text x="106" y="80" fill="#5C4630" font-family="'IBM Plex Mono', monospace" font-size="20" font-weight="700" letter-spacing="1.6">UNIT-04 · MPM ORCHESTRATION</text>
 </svg>
 
 <svg
@@ -71,5 +82,5 @@
     <path d="M24 66h32" fill="none" stroke="#201612" stroke-width="4" stroke-linecap="square" />
   </g>
   <text x="104" y="51" fill="#F0E7D8" font-family="'Chakra Petch', 'Arial Narrow', sans-serif" font-size="30" font-weight="700" letter-spacing="1.4">TRUSTY AGENTS</text>
-  <text x="106" y="76" fill="#A58A6B" font-family="'IBM Plex Mono', monospace" font-size="11" font-weight="600" letter-spacing="2">UNIT-04 · MPM ORCHESTRATION</text>
+  <text x="106" y="80" fill="#C7A886" font-family="'IBM Plex Mono', monospace" font-size="20" font-weight="700" letter-spacing="1.6">UNIT-04 · MPM ORCHESTRATION</text>
 </svg>
