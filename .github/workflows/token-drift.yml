@@ -1,0 +1,54 @@
+# Design-token drift gate for the trusty-tools workspace (epic #3486).
+#
+# Foundry v2 design tokens (docs/design/UI/design-system/tokens.css) are the
+# canonical hex source. Adopted UIs hand-transcribe that hex into Tailwind's
+# `--color-*: R G B` RGB-triple convention in their own `src/app.css`, so
+# nothing previously stopped the two from silently drifting apart. This job
+# re-derives each enforced crate's expected values from the canonical source
+# and fails with a per-token diff on any mismatch.
+#
+# Only trusty-agents and trusty-code-gui are enforced right now; the 5
+# pre-Foundry crates (trusty-search, trusty-memory, trusty-mpm-gui,
+# trusty-console, trusty-analyze) are allowlisted pending their own migration
+# issues (#3487/#3488/#3489/#3490) — see scripts/check_token_drift.mjs.
+#
+# Pure Node script, zero dependencies — no pnpm install / lockfile needed, so
+# this runs as its own lightweight job (matches line-cap.yml / test-pointers.yml's
+# checkout style).
+#
+# scripts/check_token_drift.test.mjs is a `node:test` regression suite for
+# the checker itself (drift detection, missing-block/missing-token parse
+# failures, and the zero-comparison guard — see that file's header for why).
+# It runs BEFORE the real check: if the checker's own logic is broken, its
+# verdict on the real crates isn't trustworthy either.
+name: Token drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches
+# line-cap.yml).
+concurrency:
+  group: token-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  token-drift:
+    name: Foundry token drift check (trusty-agents, trusty-code-gui)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run check_token_drift.mjs regression tests
+        run: node --test scripts/check_token_drift.test.mjs
+
+      - name: Check adopted-UI tokens against canonical Foundry source
+        run: node scripts/check_token_drift.mjs
