@@ -288,6 +288,40 @@ pub(super) struct Cli {
     pub(super) rest: Vec<String>,
 }
 
+/// Whether at least one of the three credential providers ctrl/PM's own LLM
+/// calls route through (`openrouter`, `anthropic`, `claude-code`) resolves
+/// via ANY tier (process env, `.env.local`, or the secure store).
+///
+/// Why: `check_credentials_and_warn` couples this decision to printing a
+/// stderr banner, which makes the decision itself impossible to unit test
+/// without capturing/parsing stderr output. Extracting the pure predicate
+/// (issue #3429 code-critic follow-up on PR #3431 — the doc-pointer lint
+/// caught that this logic had NO real test coverage, only a dangling
+/// `Test:` citation) lets tests assert the resolve / no-resolve outcome
+/// directly. Hermeticity: rather than injecting a resolver closure, this
+/// reuses the SAME `$HOME`-sandboxed `FileKeyStore` convention
+/// `llm::credentials::tests::pick_consults_store_when_env_absent` already
+/// established for testing this exact production `resolve_key` call
+/// (`resolve_key`'s store tier resolves via `dirs::home_dir()`, so
+/// redirecting `$HOME` to a tempdir makes the real function hermetic
+/// without needing a seam) — the tests below (`banner_suppressed_when_
+/// store_configures_a_key`, `banner_fires_when_nothing_resolves`) never
+/// touch the real developer machine's env or store.
+/// What: `true` when `trusty_common::inference::credentials::resolve_key`
+/// finds `claude-code`, `anthropic`, OR `openrouter` — the exact same three
+/// providers `llm::credentials::pick_credentials` checks (this predicate
+/// does NOT gate `claude-code` on an agent's `runner` the way
+/// `pick_credentials` does, since the banner's question is simply "is ANY
+/// of these three configured at all," not "which one would THIS agent
+/// use").
+/// Test: `banner_suppressed_when_store_configures_a_key`,
+/// `banner_fires_when_nothing_resolves`.
+fn any_credential_resolves() -> bool {
+    trusty_common::inference::credentials::resolve_key("claude-code").is_some()
+        || trusty_common::inference::credentials::resolve_key("anthropic").is_some()
+        || trusty_common::inference::credentials::resolve_key("openrouter").is_some()
+}
+
 /// Print a prominent onboarding banner when no API credential resolves via
 /// ANY tier (env, project `.env.local`, user `$HOME/.env.local`, or the
 /// secure store).
@@ -318,22 +352,17 @@ pub(super) struct Cli {
 /// `.env.local` line AND `tagent config keys set <provider>` (the durable,
 /// works-from-any-directory option `.env.local` alone cannot offer from
 /// `$HOME`). Non-fatal — the REPL still opens so CLI-only subcommands
-/// (memory search, skills list) keep working.
+/// (memory search, skills list) keep working. Delegates the actual
+/// resolve-or-not DECISION to `any_credential_resolves` — a pure,
+/// independently-testable predicate — rather than inlining it here, since
+/// this function's own stderr side effects make ITS behavior awkward to
+/// assert directly.
 /// Test: `banner_suppressed_when_store_configures_a_key`,
-/// `banner_fires_when_nothing_resolves` (tests module below) exercise the
-/// resolve-tier gate via `pick_credentials`'s own store-backed tests, since
-/// this function's stderr output itself is not asserted (manual/live-verify
-/// per the module docs above).
+/// `banner_fires_when_nothing_resolves` (both in the `tests` module below)
+/// exercise `any_credential_resolves` directly — the gate this function
+/// wraps.
 pub(super) fn check_credentials_and_warn() {
-    // #3406 follow-up: match the SAME resolver real dispatch uses instead of
-    // a raw env-var read, so a store- or `.env.local`-only credential is
-    // correctly recognized.
-    let has_claude_code =
-        trusty_common::inference::credentials::resolve_key("claude-code").is_some();
-    let has_anthropic = trusty_common::inference::credentials::resolve_key("anthropic").is_some();
-    let has_openrouter = trusty_common::inference::credentials::resolve_key("openrouter").is_some();
-
-    if has_claude_code || has_anthropic || has_openrouter {
+    if any_credential_resolves() {
         return;
     }
 
@@ -454,5 +483,126 @@ mod tests {
         // is_tty()-vs-piped-loop dispatch branch is unchanged (no regression
         // for desktop TUI users).
         assert!(!should_force_plain_cli(false, None));
+    }
+
+    /// Coverage for `any_credential_resolves` — the pure decision
+    /// `check_credentials_and_warn`'s banner gate wraps (issue #3429
+    /// code-critic follow-up on PR #3431: the doc-comment pointer lint
+    /// caught that this logic had zero real test coverage).
+    mod credential_banner {
+        use super::super::any_credential_resolves;
+        use serial_test::serial;
+
+        /// Clears every env var `any_credential_resolves` (transitively, via
+        /// `resolve_key`) consults. Callers must hold both
+        /// `crate::test_env::ENV_LOCK` and `crate::test_env::HOME_LOCK` for
+        /// the whole test body — mirrors
+        /// `llm::credentials::tests::clear_all` in the sibling module that
+        /// tests the same underlying `resolve_key` calls.
+        fn clear_all() {
+            unsafe {
+                std::env::remove_var("OPENROUTER_API_KEY");
+                std::env::remove_var("ANTHROPIC_API_KEY");
+                std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+            }
+        }
+
+        /// Why: this is the exact bug the owner's live clean-shell repro
+        /// hit — `openrouter` configured ONLY via the secure store (never
+        /// exported to the shell), with all three credential env vars
+        /// absent. The pre-fix banner (a raw `std::env::var` check) would
+        /// have fired here even though real dispatch resolves the key fine;
+        /// `any_credential_resolves` must say "resolved" so
+        /// `check_credentials_and_warn` suppresses the banner.
+        /// What: sandboxes `$HOME` to a tempdir (mirrors
+        /// `llm::credentials::tests::pick_consults_store_when_env_absent`,
+        /// which tests the identical `resolve_key` call), seeds `openrouter`
+        /// directly into a `FileKeyStore` rooted there, clears every
+        /// credential env var, and asserts `any_credential_resolves()` is
+        /// `true`. Never touches the real developer machine's store — the
+        /// sandboxed `$HOME` is a fresh tempdir for the duration of the
+        /// test only.
+        /// Test: itself.
+        #[test]
+        #[serial]
+        fn banner_suppressed_when_store_configures_a_key() {
+            let _env_guard = crate::test_env::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _home_guard = crate::test_env::HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            clear_all();
+
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let prev_home = std::env::var_os("HOME");
+            // SAFETY: HOME_LOCK held for the entire test body.
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+            }
+
+            let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+            trusty_common::inference::credentials::KeyStore::set(
+                &store,
+                "openrouter",
+                "sk-or-from-store", // pragma: allowlist secret
+            )
+            .expect("seed store");
+
+            assert!(
+                any_credential_resolves(),
+                "a store-only openrouter key must resolve and suppress the banner"
+            );
+
+            // SAFETY: HOME_LOCK still held.
+            unsafe {
+                match prev_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+
+        /// Why: the banner's legitimate-fire case — nothing configured
+        /// anywhere (no env var, no `.env.local` loaded into this test's
+        /// process env, no store entry). Sandboxing `$HOME` to a FRESH,
+        /// never-written-to tempdir guarantees the store tier is genuinely
+        /// empty rather than accidentally reading the real developer
+        /// machine's `~/.trusty-agents`/keychain state.
+        /// What: clears every credential env var, sandboxes `$HOME` to an
+        /// empty tempdir (no `FileKeyStore` entries seeded), and asserts
+        /// `any_credential_resolves()` is `false`.
+        /// Test: itself.
+        #[test]
+        #[serial]
+        fn banner_fires_when_nothing_resolves() {
+            let _env_guard = crate::test_env::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _home_guard = crate::test_env::HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            clear_all();
+
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let prev_home = std::env::var_os("HOME");
+            // SAFETY: HOME_LOCK held for the entire test body.
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+            }
+
+            assert!(
+                !any_credential_resolves(),
+                "with nothing configured anywhere, the banner must fire"
+            );
+
+            // SAFETY: HOME_LOCK still held.
+            unsafe {
+                match prev_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
     }
 }
